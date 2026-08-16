@@ -103,6 +103,16 @@ def _literal(value: object) -> str:
     raise EmitError(f"unsupported literal: {value!r}")
 
 
+def _json(value: object) -> str:
+    """Serialize an IR metadata object as a TS object/array literal.
+
+    The IR guarantees that realm/intercept metadata is plain JSON (static
+    literals per docs/design-v2-realms.md), so ``json.dumps`` emits a valid
+    TypeScript literal expression.
+    """
+    return json.dumps(value)
+
+
 def _template_text(text: str) -> str:
     """Escape literal text for inclusion in a template literal."""
     return text.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
@@ -369,6 +379,9 @@ def _component(component: dict, services: dict) -> list[str]:
     requires = component.get("requires") or {}
     provides = component.get("provides") or {}
     fields = component.get("config") or []
+    # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
+    isolate = component.get("isolate") or {}
+    intercept = component.get("intercept") or {}
 
     for local, service in requires.items():
         _ident(local, "requirement")
@@ -378,12 +391,25 @@ def _component(component: dict, services: dict) -> list[str]:
         _ident(key, "provision key")
         if service not in services:
             raise EmitError(f"provision {key!r} names unknown service {service!r}")
+    for key in isolate:
+        if key not in requires and key not in provides:
+            raise EmitError(f"{name}: isolate key {key!r} is not declared")
+    for key in intercept:
+        if key not in requires:
+            raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
 
     lines = _config_interface(component)
     lines.append(f"export const {name} = {{")
     lines.append(f"  name: {_string(name)},")
-    inject = ", ".join(_string(k) for k in requires)
-    lines.append(f"  inject: [{inject}],")
+    if intercept:
+        # v2: dict-form inject — non-null values are copied into the fiber
+        # context's intercept chain (the consumer-declared d(k)); null marks a
+        # required-but-not-intercepted key.
+        inject = {key: intercept.get(key) for key in requires}
+        lines.append(f"  inject: {_json(inject)},")
+    else:
+        inject = ", ".join(_string(k) for k in requires)
+        lines.append(f"  inject: [{inject}],")
     if provides:
         keys = ", ".join(_string(k) for k in provides)
         lines.append(f"  provide: [{keys}],")
@@ -419,6 +445,10 @@ def _component(component: dict, services: dict) -> list[str]:
     lines.extend(_component_body(component, services, "      "))
     lines.append(f"    }}, {_string(name + '.body')})")
     lines.append("  },")
+    if isolate:
+        # v2: realm placements, applied by runtime.plug() BEFORE ctx.plugin —
+        # the fiber's context chain is fixed at plugin time.
+        lines.append(f"  isolate: {_json(isolate)},")
     lines.append("}")
     return lines
 
@@ -427,12 +457,7 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
-    if ir.get("ir_version") == 2:
-        raise EmitError(
-            "ir_version 2 (realms/interception) is not lowerable on this backend "
-            "yet — cordis-py only for now; see docs/design-v2-realms.md"
-        )
-    if ir.get("ir_version") != 1:
+    if ir.get("ir_version") not in (1, 2):
         raise EmitError(f"unsupported ir_version: {ir.get('ir_version')!r}")
 
     services = ir.get("services") or {}

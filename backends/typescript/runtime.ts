@@ -9,6 +9,50 @@
 import type { Context } from 'cordis'
 
 // ---------------------------------------------------------------------------
+// v2: realm placement (docs/design-v2-realms.md)
+//
+// cordis v4 compares isolate labels with `===`, and its public type for the
+// label is `symbol`.  We therefore keep a process-wide string -> symbol
+// registry: equal realm strings must resolve to one shared symbol, never to
+// separately allocated `Symbol(name)` values (which would compare as distinct
+// identities even though the strings match).
+
+const realmLabels = new Map<string, symbol>()
+
+/** Process-wide string -> label-symbol registry (equal strings share a realm). */
+export function realmLabel(name: string): symbol {
+  let label = realmLabels.get(name)
+  if (!label) {
+    label = Symbol(name)
+    realmLabels.set(name, label)
+  }
+  return label
+}
+
+/** An emitted component, including the v2 `isolate` placement field. */
+export interface RealmComponent {
+  name?: string
+  inject?: any
+  provide?: string | string[]
+  isolate?: Record<string, string>
+  apply(ctx: Context, config?: any): any
+}
+
+/**
+ * Load an emitted component honoring its realm placements: apply
+ * `ctx.isolate(key, realmLabel(label))` per entry BEFORE `ctx.plugin` — the
+ * fiber's context chain is fixed at plugin time, so isolation cannot happen
+ * inside `apply`.
+ */
+export function plug(ctx: Context, component: RealmComponent, config?: any) {
+  let scoped: Context = ctx
+  for (const [key, realm] of Object.entries(component.isolate ?? {})) {
+    scoped = scoped.isolate(key, realmLabel(realm))
+  }
+  return scoped.plugin(component, config)
+}
+
+// ---------------------------------------------------------------------------
 // Observability
 
 export const hostLog: string[] = []

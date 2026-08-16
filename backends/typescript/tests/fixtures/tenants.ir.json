@@ -1,0 +1,443 @@
+{
+  "ir_version": 2,
+  "services": {
+    "Kv": {
+      "methods": {
+        "get": {
+          "params": [
+            {
+              "name": "k",
+              "type": "Str"
+            }
+          ],
+          "returns": "Opt[Str]",
+          "emission": false
+        },
+        "set": {
+          "params": [
+            {
+              "name": "k",
+              "type": "Str"
+            },
+            {
+              "name": "v",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "TenantAStore",
+      "source": "examples/tenants.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "kv": "Kv"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "kv",
+          "service": "Kv",
+          "methods": [
+            {
+              "name": "get",
+              "params": [
+                "k"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "get",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "set",
+              "params": [
+                "k",
+                "v"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "v"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "isolate": {
+        "kv": "tenant_a"
+      }
+    },
+    {
+      "name": "TenantBStore",
+      "source": "examples/tenants.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "kv": "Kv"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "kv",
+          "service": "Kv",
+          "methods": [
+            {
+              "name": "get",
+              "params": [
+                "k"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "get",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "set",
+              "params": [
+                "k",
+                "v"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "v"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "isolate": {
+        "kv": "tenant_b"
+      }
+    },
+    {
+      "name": "TenantAApp",
+      "source": "examples/tenants.rvl",
+      "config": [],
+      "requires": {
+        "kv": "Kv"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "kv"
+            },
+            "method": "set",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "who"
+              },
+              {
+                "kind": "lit",
+                "value": "alice"
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "kv"
+            },
+            "method": "set",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "who"
+              },
+              {
+                "kind": "lit",
+                "value": ""
+              }
+            ]
+          }
+        }
+      ],
+      "isolate": {
+        "kv": "tenant_a"
+      },
+      "intercept": {
+        "kv": {
+          "quota": 5,
+          "tags": [
+            "tenant_a"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TenantBApp",
+      "source": "examples/tenants.rvl",
+      "config": [],
+      "requires": {
+        "kv": "Kv"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "kv"
+            },
+            "method": "set",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "who"
+              },
+              {
+                "kind": "lit",
+                "value": "bob"
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "kv"
+            },
+            "method": "set",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "who"
+              },
+              {
+                "kind": "lit",
+                "value": ""
+              }
+            ]
+          }
+        }
+      ],
+      "isolate": {
+        "kv": "tenant_b"
+      },
+      "intercept": {
+        "kv": {
+          "quota": 9,
+          "tags": [
+            "tenant_b"
+          ]
+        }
+      }
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "TenantAStore",
+        "file": "examples/tenants.rvl",
+        "inject": [],
+        "provides": [
+          "kv"
+        ],
+        "isolate": {
+          "kv": "tenant_a"
+        }
+      },
+      {
+        "name": "TenantBStore",
+        "file": "examples/tenants.rvl",
+        "inject": [],
+        "provides": [
+          "kv"
+        ],
+        "isolate": {
+          "kv": "tenant_b"
+        }
+      },
+      {
+        "name": "TenantAApp",
+        "file": "examples/tenants.rvl",
+        "inject": [
+          "kv"
+        ],
+        "provides": [],
+        "isolate": {
+          "kv": "tenant_a"
+        },
+        "intercept": {
+          "kv": {
+            "quota": 5,
+            "tags": [
+              "tenant_a"
+            ]
+          }
+        }
+      },
+      {
+        "name": "TenantBApp",
+        "file": "examples/tenants.rvl",
+        "inject": [
+          "kv"
+        ],
+        "provides": [],
+        "isolate": {
+          "kv": "tenant_b"
+        },
+        "intercept": {
+          "kv": {
+            "quota": 9,
+            "tags": [
+              "tenant_b"
+            ]
+          }
+        }
+      }
+    ],
+    "loadOrder": [
+      "TenantAStore",
+      "TenantBStore",
+      "TenantAApp",
+      "TenantBApp"
+    ]
+  }
+}
