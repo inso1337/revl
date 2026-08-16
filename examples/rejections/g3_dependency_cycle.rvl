@@ -1,0 +1,18 @@
+// REJECTED — G3: dependency cycle.
+// Alpha requires what Beta provides and vice versa; neither satisfaction
+// predicate can ever hold, and the linker says so at compile time instead
+// of leaving both components permanently inactive (paper §6.5).
+//
+// expected error:
+//   dependency cycle: Alpha -> Beta -> Alpha (G3)
+
+service A { fn ping(tag: Str) -> Str }
+service B { fn pong(tag: Str) -> Str }
+
+component Alpha requires b: B provides a: A {
+  provide a { fn ping(tag) = b.pong(tag) }
+}
+
+component Beta requires a: A provides b: B {
+  provide b { fn pong(tag) = a.ping(tag) }
+}

@@ -127,7 +127,7 @@ component UserCache requires db: Database provides cache: Cache {
     fn put(key, value) {
       effect store.insert(key, value)
       undo   store.remove(key)
-      db.execute("INSERT INTO cache_log VALUES ($key)")   // emission, §3.5
+      emit db.execute("INSERT INTO cache_log VALUES ($key)")   // emission, §3.5
     }
   }
 }

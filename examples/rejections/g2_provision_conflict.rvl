@@ -1,0 +1,18 @@
+// REJECTED — G2: provision disjointness.
+// Two components in one composition provide the key `db`; a key has at
+// most one possible provider (paper Def. 43).
+//
+// expected error:
+//   provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)
+
+service Database { fn query(sql: Str) -> List[Row] }
+
+component PgDatabase provides db: Database {
+  let pool = effect Pool.open("pg://") undo pool.close()
+  provide db { fn query(sql) = pool.query(sql) }
+}
+
+component SqliteDatabase provides db: Database {
+  let pool = effect Pool.open("sqlite://") undo pool.close()
+  provide db { fn query(sql) = pool.query(sql) }
+}
