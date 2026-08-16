@@ -44,6 +44,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                                 f"duplicate component `{comp.name}` (also declared in {seen_components[comp.name]})")
             seen_components[comp.name] = path
             merged.components.append(comp)
+        # v2.0: type & function declarations are part of the merged program too
+        # (duplicate names across files are caught in _lower_type_decls/_lower_fns)
+        merged.type_decls.extend(program.type_decls)
+        merged.fn_decls.extend(program.fn_decls)
         merged.filename = path  # diagnostics from lowering name the declaring file
 
     ambient = None

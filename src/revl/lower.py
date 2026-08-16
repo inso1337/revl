@@ -17,24 +17,42 @@ import keyword
 
 from .errors import RevlError
 from .parser import (
+    AssignStmt,
     AwaitStmt,
     ComponentDecl,
     EffectStmt,
     EmitStmt,
+    ExprArrow,
+    ExprBin,
+    ExprCall,
+    ExprField,
+    ExprIf,
+    ExprIndex,
+    ExprList,
+    ExprLit,
+    ExprRecord,
+    ExprStmt,
+    ExprUn,
+    ExprVar,
+    FnDecl,
+    IfStmt,
     Interp,
     InterceptStmt,
     IsolateStmt,
     LetEffect,
+    LetStmt,
     Lit,
     Postfix,
     Program,
     ProvideStmt,
     ReturnStmt,
     ServiceDecl,
+    TypeDecl,
 )
 
 IR_VERSION = 1
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
+IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
 
 # the default shared realm (paper Def. 28: an unisolated key resolves to
 # its own realm); rendered as "shared" in diagnostics
@@ -101,6 +119,153 @@ class Env:
         return params
 
 
+# ---------------------------------------------------------------------------
+# v2.0: type declarations & pure functions (docs/syntax-2.0.md §2–§3)
+# ---------------------------------------------------------------------------
+
+# host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
+_HOST_CALLABLES = {"Map", "Pool", "Job"}
+# Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
+_BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
+
+
+def _lower_type_decls(program: Program, filename: str) -> dict:
+    types: dict[str, dict] = {}
+    for decl in program.type_decls:
+        if decl.name in types:
+            raise RevlError(filename, decl.line, f"duplicate type `{decl.name}`")
+        if decl.fields:
+            fields: dict[str, str] = {}
+            for field in decl.fields:
+                if field.name in fields:
+                    raise RevlError(filename, field.line,
+                                    f"duplicate field `{field.name}` in record `{decl.name}`")
+                fields[field.name] = field.type
+            types[decl.name] = {"params": decl.params, "kind": "record", "fields": fields}
+        else:
+            cases: list[dict] = []
+            seen: set[str] = set()
+            for case in decl.cases:
+                if case.name in seen:
+                    raise RevlError(filename, case.line,
+                                    f"duplicate case `{case.name}` in type `{decl.name}`")
+                seen.add(case.name)
+                cases.append({"name": case.name, "payload": case.payload})
+            types[decl.name] = {"params": decl.params, "kind": "variant", "cases": cases}
+    return types
+
+
+def _lower_fns(program: Program, filename: str) -> list:
+    callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
+    fns: list[dict] = []
+    seen: set[str] = set()
+    for decl in program.fn_decls:
+        if decl.name in seen:
+            raise RevlError(filename, decl.line, f"duplicate function `{decl.name}`")
+        seen.add(decl.name)
+        scope: dict[str, bool] = {}
+        for param in decl.params:
+            if param.name in scope:
+                raise RevlError(filename, param.line,
+                                f"duplicate parameter `{param.name}` in fn {decl.name}")
+            scope[param.name] = False
+        body: list[dict] = []
+        for stmt in decl.body:
+            _lower_pure_stmt(stmt, scope, callables, body, filename)
+        fns.append({
+            "name": decl.name,
+            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "returns": decl.returns,
+            "public": decl.public,
+            "body": body,
+        })
+    return fns
+
+
+def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: str) -> None:
+    if isinstance(stmt, LetStmt):
+        if stmt.name in scope:
+            raise RevlError(filename, stmt.line, f"`{stmt.name}` is already declared in this function")
+        scope[stmt.name] = stmt.mutable
+        body.append({"step": "let", "name": stmt.name,
+                     "value": _lower_pure_expr(stmt.value, scope, callables, filename),
+                     "mutable": stmt.mutable})
+    elif isinstance(stmt, AssignStmt):
+        if stmt.name not in scope:
+            raise RevlError(filename, stmt.line, f"`{stmt.name}` is not declared in this function",
+                            hint="declare it with `let` (single-assignment) or `var` (mutable)")
+        if not scope[stmt.name]:
+            raise RevlError(filename, stmt.line,
+                            f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
+                            hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
+        body.append({"step": "assign", "name": stmt.name,
+                     "value": _lower_pure_expr(stmt.value, scope, callables, filename)})
+    elif isinstance(stmt, ReturnStmt):
+        body.append({"step": "return",
+                     "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, filename)})
+    elif isinstance(stmt, IfStmt):
+        then: list[dict] = []
+        for s in stmt.then:
+            _lower_pure_stmt(s, scope, callables, then, filename)
+        otherwise = None
+        if stmt.otherwise is not None:
+            otherwise = []
+            for s in stmt.otherwise:
+                _lower_pure_stmt(s, scope, callables, otherwise, filename)
+        body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, filename),
+                     "then": then, "else": otherwise})
+    elif isinstance(stmt, ExprStmt):
+        body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, filename)})
+    else:  # pragma: no cover — grammar prevents it
+        raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
+
+
+def _lower_pure_expr(expr, scope: dict, callables: set, filename: str) -> dict:
+    if isinstance(expr, ExprLit):
+        return {"kind": "lit", "value": expr.value}
+    if isinstance(expr, ExprVar):
+        if expr.name not in scope and expr.name not in callables:
+            raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
+                            hint="declare it with `let`/`var` or add it as a parameter (G1)")
+        return {"kind": "var", "name": expr.name}
+    if isinstance(expr, ExprBin):
+        return {"kind": "bin", "op": expr.op,
+                "left": _lower_pure_expr(expr.left, scope, callables, filename),
+                "right": _lower_pure_expr(expr.right, scope, callables, filename)}
+    if isinstance(expr, ExprUn):
+        return {"kind": "un", "op": expr.op,
+                "operand": _lower_pure_expr(expr.operand, scope, callables, filename)}
+    if isinstance(expr, ExprCall):
+        return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, filename),
+                "args": [_lower_pure_expr(a, scope, callables, filename) for a in expr.args]}
+    if isinstance(expr, ExprField):
+        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, filename),
+                "name": expr.name}
+    if isinstance(expr, ExprIndex):
+        return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, filename),
+                "index": _lower_pure_expr(expr.index, scope, callables, filename)}
+    if isinstance(expr, ExprIf):
+        return {"kind": "if", "cond": _lower_pure_expr(expr.cond, scope, callables, filename),
+                "then": _lower_pure_expr(expr.then, scope, callables, filename),
+                "else": _lower_pure_expr(expr.otherwise, scope, callables, filename)}
+    if isinstance(expr, ExprRecord):
+        return {"kind": "record",
+                "fields": [[name, _lower_pure_expr(e, scope, callables, filename)]
+                           for name, e in expr.fields]}
+    if isinstance(expr, ExprList):
+        return {"kind": "list",
+                "items": [_lower_pure_expr(e, scope, callables, filename) for e in expr.items]}
+    if isinstance(expr, ExprArrow):
+        inner = dict(scope)
+        for param in expr.params:
+            inner[param] = False
+        return {"kind": "arrow", "params": expr.params,
+                "body": _lower_pure_expr(expr.body, inner, callables, filename)}
+    if isinstance(expr, Interp):
+        return {"kind": "interp", "parts": expr.parts}
+    raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
+
+
 def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
@@ -142,10 +307,14 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     manifest = _link(program, components, ambient.get("components") or [])
 
-    uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
+    types = _lower_type_decls(program, program.filename)
+    fns = _lower_fns(program, program.filename)
 
-    return {
-        "ir_version": IR_VERSION_V2 if uses_v2 else IR_VERSION,
+    uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
+    uses_v3 = bool(types) or bool(fns)
+
+    result = {
+        "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
         "services": {
             name: {
                 "methods": {
@@ -162,6 +331,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         "components": components,
         "manifest": manifest,
     }
+    if types:
+        result["types"] = types
+    if fns:
+        result["functions"] = fns
+    return result
 
 
 def _service_from_ir(name: str, spec: dict) -> ServiceDecl:

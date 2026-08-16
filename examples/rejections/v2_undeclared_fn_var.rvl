@@ -1,0 +1,10 @@
+// REJECTED — undeclared name in a pure function (G1 analogue, syntax-2.0 §3).
+// Pure functions resolve names against their parameters and `let`/`var`
+// bindings; anything else is undeclared access.
+//
+// expected error:
+//   `missing` is not declared in this function
+
+fn f() -> Int {
+  return missing
+}

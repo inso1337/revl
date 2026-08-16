@@ -309,17 +309,186 @@ class _ComponentEmitter:
         return out
 
 
+# ---------------------------------------------------------------------------
+# v2.0 (ir_version 3): types & pure functions (docs/syntax-2.0.md §2–§3)
+# ---------------------------------------------------------------------------
+
+_PY_TYPE = {"Int": "int", "Float": "float", "Bool": "bool", "Str": "str", "Bytes": "bytes", "Unit": "None"}
+
+_PY_BIN_OPS = {
+    "==": "==", "===": "==", "!=": "!=", "!==": "!=",
+    "<": "<", ">": ">", "<=": "<=", ">=": ">=",
+    "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
+    "&&": "and", "||": "or",
+}
+
+
+def _split_types(inner: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
+def _py_type(type_name: str) -> str:
+    type_name = type_name.strip()
+    if "[" in type_name:
+        base = type_name[: type_name.index("[")]
+        inner = type_name[type_name.index("[") + 1: type_name.rindex("]")]
+        args = _split_types(inner)
+        if base == "Opt":
+            return f"Optional[{_py_type(args[0])}]"
+        if base == "List":
+            return f"list[{_py_type(args[0])}]"
+        if base == "Map":
+            return f"dict[{_py_type(args[0])}, {_py_type(args[1])}]"
+        if base == "Result":
+            return f"Union[{_py_type(args[0])}, {_py_type(args[1])}]"
+        return base + "[" + ", ".join("Any" for _ in args) + "]"
+    if type_name in _PY_TYPE:
+        return _PY_TYPE[type_name]
+    return type_name  # named record/variant type or generic param
+
+
+def _emit_types(types: dict) -> "_Lines":
+    out = _Lines()
+    for name, spec in types.items():
+        name = _ident(name, "type name")
+        if spec["kind"] == "record":
+            out.add(0, "@dataclass")
+            out.add(0, f"class {name}:")
+            if not spec["fields"]:
+                out.add(1, "pass")
+            for field, ftype in spec["fields"].items():
+                out.add(1, f"{field}: {_py_type(ftype)}")
+        else:
+            out.add(0, f"class {name}:")
+            out.add(1, "__slots__ = ()")
+            out.add(0)
+            for case in spec["cases"]:
+                cname = _ident(case["name"], "case name")
+                if case["payload"] is None:
+                    out.add(0, f"class {cname}({name}):")
+                    out.add(1, "__slots__ = ()")
+                else:
+                    out.add(0, f"class {cname}({name}):")
+                    out.add(1, '__slots__ = ("value",)')
+                    out.add(1, "def __init__(self, value):")
+                    out.add(2, "self.value = value")
+                out.add(0)
+        out.add(0)
+    return out
+
+
+def _interp_fstring(parts) -> str:
+    segs = ['f"']
+    for kind, text in parts:
+        if kind == "text":
+            segs.append(text.replace("\\", "\\\\").replace('"', '\\"').replace("{", "{{").replace("}", "}}"))
+        else:
+            segs.append("{" + text + "}")
+    segs.append('"')
+    return "".join(segs)
+
+
+def _expr(node: dict) -> str:
+    kind = node["kind"]
+    if kind == "lit":
+        return repr(node["value"])
+    if kind == "var":
+        return node["name"]
+    if kind == "bin":
+        op = _PY_BIN_OPS.get(node["op"])
+        if op is None:
+            raise EmitError(f"unsupported binary operator {node['op']!r}")
+        return f"({_expr(node['left'])} {op} {_expr(node['right'])})"
+    if kind == "un":
+        if node["op"] == "!":
+            return f"(not {_expr(node['operand'])})"
+        if node["op"] == "-":
+            return f"(-{_expr(node['operand'])})"
+        raise EmitError(f"unsupported unary operator {node['op']!r}")
+    if kind == "call":
+        return f"{_expr(node['callee'])}({', '.join(_expr(a) for a in node['args'])})"
+    if kind == "field":
+        return f"{_expr(node['target'])}.{node['name']}"
+    if kind == "index":
+        return f"{_expr(node['target'])}[{_expr(node['index'])}]"
+    if kind == "if":
+        return f"({_expr(node['then'])} if {_expr(node['cond'])} else {_expr(node['else'])})"
+    if kind == "record":
+        return "{" + ", ".join(f"{k!r}: {_expr(v)}" for k, v in node["fields"]) + "}"
+    if kind == "list":
+        return "[" + ", ".join(_expr(e) for e in node["items"]) + "]"
+    if kind == "arrow":
+        return f"lambda {', '.join(node['params'])}: {_expr(node['body'])}"
+    if kind == "interp":
+        return _interp_fstring(node["parts"])
+    raise EmitError(f"unsupported expression kind {kind!r}")
+
+
+def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
+    step = node["step"]
+    if step in ("let", "assign"):
+        out.add(indent, f"{node['name']} = {_expr(node['value'])}")
+    elif step == "return":
+        if node["expr"] is None:
+            out.add(indent, "return")
+        else:
+            out.add(indent, f"return {_expr(node['expr'])}")
+    elif step == "if":
+        out.add(indent, f"if {_expr(node['cond'])}:")
+        for s in node["then"]:
+            _fn_stmt(s, out, indent + 1)
+        if node["else"]:
+            out.add(indent, "else:")
+            for s in node["else"]:
+                _fn_stmt(s, out, indent + 1)
+    elif step == "expr":
+        out.add(indent, _expr(node["expr"]))
+    else:
+        raise EmitError(f"unsupported fn statement step {step!r}")
+
+
+def _emit_functions(functions: list) -> "_Lines":
+    out = _Lines()
+    for fn in functions:
+        name = _ident(fn["name"], "function name")
+        params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
+        out.add(0, f"def {name}({params}):")
+        if not fn.get("body"):
+            out.add(1, "pass")
+        for stmt in fn.get("body") or []:
+            _fn_stmt(stmt, out, 1)
+        out.add(0)
+    return out
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
-    if ir.get("ir_version") not in (IR_VERSION, 2):
-        raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION} or 2)")
+    if ir.get("ir_version") not in (IR_VERSION, 2, 3):
+        raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 
     services = ir.get("services") or {}
     components = ir.get("components") or []
-    if not components:
-        raise EmitError("IR document has no components")
+    types = ir.get("types") or {}
+    functions = ir.get("functions") or []
+    if not components and not types and not functions:
+        raise EmitError("IR document has no components, types, or functions")
 
     emitters = [_ComponentEmitter(component, services) for component in components]
     bodies = [emitter.emit() for emitter in emitters]
@@ -331,13 +500,21 @@ def emit(ir: dict) -> str:
     uses = sorted(set().union(*(emitter.uses for emitter in emitters)))
 
     out = _Lines()
-    out.add(0, '"""Generated by the revl cordis-py backend (ir_version 1) — do not edit.')
+    out.add(0, f'"""Generated by the revl cordis-py backend (ir_version {ir.get("ir_version", IR_VERSION)}) — do not edit.')
     out.add(0)
     out.add(0, f"Components: {', '.join(names)}")
     out.add(0, '"""')
     out.add(0)
-    out.add(0, f"from runtime import {', '.join(uses)}")
-    out.add(0)
+    if uses:
+        out.add(0, f"from runtime import {', '.join(uses)}")
+        out.add(0)
+    if types:
+        out.add(0, "from dataclasses import dataclass")
+        out.add(0, "from typing import Any, Optional, Union")
+        out.add(0)
+        out.extend(_emit_types(types))
+    if functions:
+        out.extend(_emit_functions(functions))
     out.add(0, "SERVICES = {")
     for service_name, service in services.items():
         out.add(1, f"{service_name!r}: {{")
