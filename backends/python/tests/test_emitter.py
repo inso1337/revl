@@ -36,7 +36,7 @@ def test_emit_is_deterministic(reference_ir):
 
 def test_rejects_wrong_ir_version(reference_ir):
     bad = copy.deepcopy(reference_ir)
-    bad["ir_version"] = 1
+    bad["ir_version"] = 0
     with pytest.raises(emit.EmitError, match="ir_version"):
         emit.emit(bad)
 

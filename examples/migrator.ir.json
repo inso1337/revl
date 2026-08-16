@@ -1,0 +1,117 @@
+{
+  "ir_version": 1,
+  "services": {
+    "Database": {
+      "methods": {
+        "query": {
+          "params": [
+            {
+              "name": "sql",
+              "type": "Str"
+            }
+          ],
+          "returns": "List[Row]",
+          "emission": false
+        },
+        "execute": {
+          "params": [
+            {
+              "name": "sql",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Migrator",
+      "config": [],
+      "requires": {
+        "db": "Database"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "lock",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "query",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "SELECT pg_advisory_lock(42)"
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "query",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "SELECT pg_advisory_unlock(42)"
+              }
+            ]
+          }
+        },
+        {
+          "step": "await",
+          "expr": {
+            "kind": "host",
+            "fn": "Job.run",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "migrations"
+              }
+            ]
+          }
+        },
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "execute",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "INSERT INTO migration_log VALUES (42)"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "db"
+            },
+            "method": "execute",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "DELETE FROM migration_log WHERE id = 42"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

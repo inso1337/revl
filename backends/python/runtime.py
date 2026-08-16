@@ -20,9 +20,10 @@ This module is everything an emitted component imports.  It has two halves:
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any, Callable, Optional
 
-__all__ = ["ConfigError", "ConfigSchema", "Frame", "Map", "Pool", "fmt", "set_trace"]
+__all__ = ["ConfigError", "ConfigSchema", "Frame", "Job", "Map", "Pool", "fmt", "set_trace"]
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +167,18 @@ class ConfigSchema:
 
 
 def fmt(template: str, *args: Any) -> str:
-    """Substitute ``$0``, ``$1``… placeholders (highest index first, so
-    ``$10`` is never clobbered by ``$1``)."""
-    out = template
-    for index in range(len(args) - 1, -1, -1):
-        out = out.replace(f"${index}", str(args[index]))
-    return out
+    """Substitute ``$0``, ``$1``… placeholders; ``$$`` is a literal dollar
+    (IR v1/A4: split on placeholders first, then unescape)."""
+    parts = re.split(r"(\$\$|\$\d+)", template)
+    out = []
+    for part in parts:
+        if part == "$$":
+            out.append("$")
+        elif part.startswith("$") and part[1:].isdigit():
+            out.append(str(args[int(part[1:])]))
+        else:
+            out.append(part)
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +218,11 @@ class Pool(_Closable):
 
     @classmethod
     def open(cls, url: str, size: int) -> "Pool":
+        if isinstance(url, str) and url.startswith("boom://"):
+            # deliberate test hook: a refusing acquisition, so suites can
+            # exercise mid-body failure semantics (IR v1/A8, paper L-Raise)
+            _record(f"pool.open refused {url}")
+            raise RuntimeError(f"refused to open {url}")
         pool = cls(url, size)
         _record(f"{pool._tag}.open {url}")
         return pool
@@ -231,6 +243,24 @@ class Pool(_Closable):
         self.executed.append(sql)
         _record(f"{self._tag}.execute {sql}")
         return 1
+
+
+class Job:
+    """Async host builtin (IR v1): `await Job.run(name)` resolves on a later
+    tick and records the call, so `await` steps have something real to await."""
+
+    runs: list = []
+
+    @classmethod
+    async def run(cls, name: str) -> str:
+        _record(f"job.run {name} start")
+        import asyncio
+
+        for _ in range(5):
+            await asyncio.sleep(0)
+        cls.runs.append(name)
+        _record(f"job.run {name} done")
+        return name
 
 
 class Map(_Closable):

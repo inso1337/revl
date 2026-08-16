@@ -162,12 +162,27 @@ function applyConfigDefaults(
 export const host = {
   Pool: {
     open(url: any, size: any): PoolHandle {
+      if (String(url).startsWith('boom://')) {
+        // deliberate test hook: a refusing acquisition (IR v1/A8, L-Raise)
+        record(`pool.open refused ${url}`)
+        throw new Error(`refused to open ${url}`)
+      }
       return new PoolHandle(String(url), Number(size))
     },
   },
   Map: {
     new(): MapHandle {
       return new MapHandle()
+    },
+  },
+  Job: {
+    // async host builtin (IR v1/A1): resolves on later ticks so `await`
+    // steps have a real in-flight window for divert tests
+    async run(name: any): Promise<string> {
+      record(`job.run ${name} start`)
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      record(`job.run ${name} done`)
+      return String(name)
     },
   },
   applyConfigDefaults,

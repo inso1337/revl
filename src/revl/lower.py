@@ -13,8 +13,11 @@ Guarantee enforcement map (DESIGN.md §4):
 
 from __future__ import annotations
 
+import keyword
+
 from .errors import RevlError
 from .parser import (
+    AwaitStmt,
     ComponentDecl,
     EffectStmt,
     EmitStmt,
@@ -28,7 +31,30 @@ from .parser import (
     ServiceDecl,
 )
 
-IR_VERSION = 0
+IR_VERSION = 1
+
+# A3: identifiers that must never appear verbatim in emitted code on either
+# host. Python keywords come from the keyword module; the rest is a curated
+# union of TS reserved words and backend-adapter names.
+_HOST_RESERVED = {
+    "ctx", "config", "frame", "fiber", "self",
+    "function", "var", "let", "const", "new", "class", "this", "typeof",
+    "delete", "in", "of", "instanceof", "void", "export", "default",
+    "require", "module", "exports", "import", "yield", "async", "await",
+    "true", "false", "null", "undefined", "NaN",
+}
+
+
+def _safe_name(name: str, taken: set[str]) -> str:
+    candidate = name
+    while (
+        candidate in _HOST_RESERVED
+        or keyword.iskeyword(candidate)
+        or keyword.issoftkeyword(candidate)
+        or candidate in taken
+    ):
+        candidate += "_"
+    return candidate
 
 
 class Env:
@@ -44,13 +70,28 @@ class Env:
             if local in self.requires:
                 raise RevlError(filename, line, f"duplicate requirement name `{local}` in {component.name}")
             self.requires[local] = svc
-        self.locals: set[str] = set()
-        self.params: list[str] = []
+        self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
+        self.params: dict[str, str] = {}
+        self._taken: set[str] = set()
 
-    def bind_local(self, name: str, line: int):
+    def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
             raise RevlError(self.filename, line, f"name `{name}` is already bound in {self.component.name}")
-        self.locals.add(name)
+        safe = _safe_name(name, self._taken)
+        self._taken.add(safe)
+        self.locals[name] = safe
+        return safe
+
+    def bind_params(self, names: list[str], line: int) -> dict[str, str]:
+        params: dict[str, str] = {}
+        taken = set(self._taken)
+        for name in names:
+            if name in params:
+                raise RevlError(self.filename, line, f"duplicate parameter `{name}`")
+            safe = _safe_name(name, taken)
+            taken.add(safe)
+            params[name] = safe
+        return params
 
 
 def check_and_lower(program: Program) -> dict:
@@ -75,7 +116,11 @@ def check_and_lower(program: Program) -> dict:
         "services": {
             name: {
                 "methods": {
-                    m.name: {"params": list(m.params), "emission": m.emission}
+                    m.name: {
+                        "params": [{"name": p, "type": t} for p, t in m.params],
+                        "returns": m.returns,
+                        "emission": m.emission,
+                    }
                     for m in svc.methods.values()
                 }
             }
@@ -111,9 +156,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             )
         if isinstance(stmt, LetEffect):
             acquire = _lower_expr(stmt.acquire, env, mode="setup")
-            env.bind_local(stmt.bind, stmt.line)
+            safe = env.bind_local(stmt.bind, stmt.line)
             undo = _lower_expr(stmt.undo, env, mode="undo")
-            body.append({"step": "let-effect", "bind": stmt.bind, "acquire": acquire, "undo": undo})
+            body.append({"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo})
         elif isinstance(stmt, EffectStmt):
             body.append({
                 "step": "effect",
@@ -121,7 +166,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 "undo": _lower_expr(stmt.undo, env, mode="undo"),
             })
         elif isinstance(stmt, EmitStmt):
-            body.append({"step": "emit", "expr": _lower_emit(stmt, env)})
+            body.append(_lower_emit_step(stmt, env))
+        elif isinstance(stmt, AwaitStmt):
+            body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
         elif isinstance(stmt, ProvideStmt):
             provide_seen_line = stmt.line
             body.append(_lower_provide(stmt, provides, provided_keys, env))
@@ -165,7 +212,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         implemented.add(method.name)
 
         saved = env.params
-        env.params = list(method.params)
+        env.params = env.bind_params(method.params, method.line)
         mbody = []
         returned = False
         for mstmt in method.body:
@@ -178,14 +225,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     "undo": _lower_expr(mstmt.undo, env, mode="undo"),
                 })
             elif isinstance(mstmt, EmitStmt):
-                mbody.append({"step": "emit", "expr": _lower_emit(mstmt, env)})
+                mbody.append(_lower_emit_step(mstmt, env))
             elif isinstance(mstmt, ReturnStmt):
                 mbody.append({"step": "return", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
                 returned = True
             else:  # pragma: no cover
                 raise RevlError(filename, mstmt.line, "unexpected statement in method body")
+        safe_params = [env.params[p] for p in method.params]
         env.params = saved
-        methods.append({"name": method.name, "params": list(method.params), "body": mbody})
+        methods.append({"name": method.name, "params": safe_params, "body": mbody})
 
     missing = set(svc.methods) - implemented
     if missing:
@@ -198,7 +246,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
 
 # ---------------------------------------------------------------- expressions
 
-def _lower_emit(stmt: EmitStmt, env: Env) -> dict:
+def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     node = _lower_expr(stmt.expr, env, mode="emit")
     if not _is_emission_call(node, env):
         desc = _node_desc(node)
@@ -206,7 +254,11 @@ def _lower_emit(stmt: EmitStmt, env: Env) -> dict:
                         f"`emit` on {desc}, which is not declared `emission`",
                         hint="only calls to `emission` service operations cross the boundary; "
                              "drop the `emit` marker (G4)")
-    return node
+    step = {"step": "emit", "expr": node}
+    if stmt.compensate is not None:
+        # compensation is teardown-position: emissions are permitted bare (A5)
+        step["compensate"] = _lower_expr(stmt.compensate, env, mode="undo")
+    return step
 
 
 def _is_emission_call(node: dict, env: Env) -> bool:
@@ -236,7 +288,7 @@ def _lower_expr(expr, env: Env, mode: str):
         args = []
         for kind, value in expr.parts:
             if kind == "text":
-                template.append(value)
+                template.append(value.replace("$", "$$"))  # A4: literal dollars
             else:
                 template.append(f"${len(args)}")
                 args.append(_lower_expr(Postfix(value, [], expr.line), env, mode))
@@ -260,7 +312,7 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                             f"`{field.name}` is not a config field of {comp.name}")
         node = {"kind": "config", "field": field.name}
     elif head in env.params or head in env.locals:
-        node = {"kind": "name", "id": head}
+        node = {"kind": "name", "id": env.params.get(head) or env.locals[head]}
     elif head in env.requires:
         if not ops or ops[0].args is None:
             raise RevlError(env.filename, expr.line,

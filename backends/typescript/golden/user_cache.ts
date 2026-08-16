@@ -4,14 +4,14 @@ import type { Context } from 'cordis'
 import { host } from '../runtime.ts'
 
 export interface Database {
-  query(sql: any): any
+  query(sql: string): unknown[]
   /** emission — crosses the system boundary (DESIGN.md §3.5) */
-  execute(sql: any): any
+  execute(sql: string): number
 }
 
 export interface Cache {
-  get(key: any): any
-  put(key: any, value: any): any
+  get(key: string): string | undefined
+  put(key: string, value: string): void
 }
 
 declare module 'cordis' {
@@ -36,10 +36,10 @@ export const PgDatabase = {
       const pool = host.Pool.open(config.url, config.pool_size)
       yield () => pool.close()
       yield ctx.provide("db", {
-        query(sql: any) {
+        query(sql: string) {
           return pool.query(sql)
         },
-        execute(sql: any) {
+        execute(sql: string) {
           return pool.execute(sql)
         },
       } satisfies Database)
@@ -56,10 +56,10 @@ export const UserCache = {
       const store = host.Map.new()
       yield () => store.drop()
       yield ctx.provide("cache", {
-        get(key: any) {
+        get(key: string) {
           return store.get(key)
         },
-        put(key: any, value: any) {
+        put(key: string, value: string) {
           ctx.effect(() => {
             store.insert(key, value)
             return () => store.remove(key)

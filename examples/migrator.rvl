@@ -1,0 +1,18 @@
+// v1 feature exercise: `await` (an iteration boundary — the runtime may
+// divert here, reverting the advisory lock without running what follows)
+// and `emit ... compensate ...` (saga-style compensation for an emission).
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Migrator requires db: Database {
+  let lock = effect db.query("SELECT pg_advisory_lock(42)")
+             undo   db.query("SELECT pg_advisory_unlock(42)")
+
+  await Job.run("migrations")
+
+  emit db.execute("INSERT INTO migration_log VALUES (42)")
+       compensate db.execute("DELETE FROM migration_log WHERE id = 42")
+}
