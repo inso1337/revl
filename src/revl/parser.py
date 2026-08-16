@@ -116,6 +116,20 @@ class ReturnStmt:
 
 
 @dataclass
+class IsolateStmt:
+    key: str
+    realm: str
+    line: int
+
+
+@dataclass
+class InterceptStmt:
+    key: str
+    metadata: dict
+    line: int
+
+
+@dataclass
 class ProvideMethod:
     name: str
     params: list[str]
@@ -338,6 +352,20 @@ class Parser:
                 raise self.err(tok.line, "`return` is only allowed inside a provide method body")
             self.next()
             return ReturnStmt(self.expr(), tok.line)
+        if tok.kind == "kw" and tok.value == "isolate":
+            if in_method:
+                raise self.err(tok.line, "`isolate` is not allowed inside a method body")
+            self.next()
+            key = self.expect("ident").value
+            self.expect("kw", "in")
+            return IsolateStmt(key, self.realm_label(), tok.line)
+        if tok.kind == "kw" and tok.value == "intercept":
+            if in_method:
+                raise self.err(tok.line, "`intercept` is not allowed inside a method body")
+            self.next()
+            key = self.expect("ident").value
+            self.expect("kw", "with")
+            return InterceptStmt(key, self.record_literal(), tok.line)
         if tok.kind == "kw" and tok.value == "provide":
             if in_method:
                 raise self.err(tok.line, "`provide` is not allowed inside a method body")
@@ -361,6 +389,53 @@ class Parser:
         self.next()
         undo = self.expr()
         return acquire, undo, line
+
+    def realm_label(self) -> str:
+        """`realm("<label>")` — static string literals only (v2)."""
+        line = self.expect("kw", "realm").line
+        self.expect("(")
+        tok = self.peek()
+        if tok.kind != "string" or any(kind == "var" for kind, _ in tok.value):
+            raise self.err(
+                line,
+                "dynamic realm labels are not supported — a realm is a static string literal",
+                hint="config is unknown at link and admission time, so the linker could "
+                     "neither prove nor refute a collision between config-derived realms "
+                     "(G2 would be unsound); dynamic realms await instance-parametric "
+                     "components (docs/design-v2-realms.md)",
+            )
+        self.next()
+        label = "".join(text for _, text in tok.value)
+        if not label:
+            raise self.err(line, "a realm label cannot be empty")
+        self.expect(")")
+        return label
+
+    def record_literal(self) -> dict:
+        """`{ field: literal | [literal, ...], ... }` — static metadata (v2)."""
+        self.expect("{")
+        record: dict = {}
+        while not self.at("}"):
+            fline = self.peek().line
+            field_name = self.expect("ident").value
+            if field_name in record:
+                raise self.err(fline, f"duplicate metadata field `{field_name}`")
+            self.expect(":")
+            if self.at("["):
+                self.next()
+                values = []
+                while not self.at("]"):
+                    values.append(self.literal())
+                    if self.at(","):
+                        self.next()
+                self.expect("]")
+                record[field_name] = values
+            else:
+                record[field_name] = self.literal()
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return record
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line

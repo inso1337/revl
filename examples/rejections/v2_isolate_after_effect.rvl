@@ -1,0 +1,17 @@
+// REJECTED — the prelude rule: `isolate`/`intercept` derive the
+// resolution context (Def. 27/29) and must precede every dependency
+// access. An isolate after an effect would change which provider the
+// component is already talking to.
+//
+// expected error:
+//   `isolate` must precede every effect, emit, await, and provide statement
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component LateIsolate requires kv: Kv {
+  effect kv.set("boot", "1") undo kv.set("boot", "")
+  isolate kv in realm("tenant_a")
+}
