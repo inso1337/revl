@@ -70,6 +70,7 @@ class _ComponentEmitter:
         self.provides = component.get("provides") or {}
         self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
         self.globals: list[str] = []
+        self.uses_job = False
 
     # -- service lookup ------------------------------------------------------
 
@@ -185,11 +186,22 @@ class _ComponentEmitter:
                     inverses.append((index, self._statement(step["compensate"], scope, where)))
                 segments.append("\n      ".join(seg))
             elif kind == "await":
-                raise EmitError(
-                    f"{where}: `await` is not lowerable yet — the cordis-wasm "
-                    f"prototype implements the synchronous base calculus (its "
-                    f"README, Status); use a hosted backend or extend the runtime"
-                )
+                # A1 on the substrate: the segment launches an async host op;
+                # the runtime awaits the fiber's pending futures before the
+                # next boundary check, so the iteration lands (inertia) and a
+                # divert during the wait skips every later step
+                expr = step.get("expr") or {}
+                if expr.get("kind") != "host" or expr.get("fn") != "Job.run" or len(expr.get("args") or []) != 1:
+                    raise EmitError(
+                        f"{where}: `await` on this tier supports only `Job.run(Int)` "
+                        f"(the runtime's async host op); other awaitables live on "
+                        f"the hosted backends"
+                    )
+                arg_wat, has_result = self._expr(expr["args"][0], scope, where)
+                if not has_result:
+                    raise EmitError(f"{where}: Job.run needs an Int argument")
+                self.uses_job = True
+                segments.append(f"(call $host_job_run {arg_wat})")
             elif kind == "provide":
                 provide_funcs.extend(self._provide(step, scope, where))
             else:
@@ -269,6 +281,8 @@ class _ComponentEmitter:
             result = " (result i32)" if has_result else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "coeffect:{key}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+        if self.uses_job:
+            lines.append('  (import "host" "job_run" (func $host_job_run (param i32)))')
         lines.append("  (global $__step (mut i32) (i32.const 0))")
         for glob in self.globals:
             lines.append(f"  (global {glob} (mut i32) (i32.const 0))")

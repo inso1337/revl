@@ -1,0 +1,17 @@
+// Wasm-tier A1 example: an `await` between two effects. On the substrate
+// the await becomes an async host op the runtime waits on mid-activation —
+// the iteration lands (inertia is physical), and a divert during the wait
+// reverts exactly the completed steps' inverses and skips the rest.
+
+service Kv {
+  fn get(k: Int) -> Int
+  fn set(k: Int, v: Int)
+}
+
+component Pulse requires kv: Kv {
+  effect kv.set(1, 11) undo kv.set(1, 0)
+
+  await Job.run(42)
+
+  effect kv.set(2, 22) undo kv.set(2, 0)
+}

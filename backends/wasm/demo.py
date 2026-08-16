@@ -115,8 +115,67 @@ def main() -> None:
     print("\n-- full trace --")
     for line in rt.log:
         print("  " + line)
+
+
+async def async_main() -> None:
+    """A1 on the substrate: divert during an in-flight await (examples/pulse.rvl)."""
+    import asyncio
+
+    ir = compile_files([str(ROOT / "examples" / "pulse.rvl")])
+    pulse_wat = emit.emit(ir)["Pulse"]
+
+    print("\n== 6. A1: an await that completes normally ==")
+    rt = Runtime()
+    kv = rt.plug("kv", KV_PROVIDER)
+    rt.plug("Pulse", pulse_wat)
+    await rt.quiesce()
+    check(rt.call(kv, "provide:kv.get", 1) == 11 and rt.call(kv, "provide:kv.get", 2) == 22,
+          "both effects landed across the await")
+    check(any("job Pulse: done 42" in line for line in rt.log), "the job ran to completion")
+
+    print("== 7. A1: divert during the in-flight await skips later steps ==")
+    rt = Runtime()
+    kv = rt.plug("kv", KV_PROVIDER)
+    pulse = rt.plug("Pulse", pulse_wat)
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if any("job Pulse: start" in line for line in rt.log):
+            break
+    else:
+        raise AssertionError("Pulse never reached its await")
+    rt.unplug(pulse)  # the world turns while the job is in flight
+    await rt.quiesce()
+    check(any(line.startswith("divert Pulse") for line in rt.log),
+          "the divert fell at the boundary after the await landed")
+    check(rt.call(kv, "provide:kv.get", 2) == 0, "the step after the await never executed")
+    check(rt.call(kv, "provide:kv.get", 1) == 0, "the completed step's inverse ran")
+
+    print("== 8. A1/A8: the async op refuses -> L-Raise, withheld ==")
+    ir_bad = compile_source(BAD_PULSE, "bad-pulse.rvl")
+    rt = Runtime()
+    kv = rt.plug("kv", KV_PROVIDER)
+    bad = rt.plug("BadPulse", emit.emit(ir_bad)["BadPulse"])
+    await rt.quiesce()
+    check(bad.failed, "the fiber landed Inactive(ξ) — withheld until explicit retry")
+    check(rt.call(kv, "provide:kv.get", 1) == 0, "effects before the refusal reverted")
+
     print("\nall checks passed")
 
 
+BAD_PULSE = """
+service Kv {
+  fn get(k: Int) -> Int
+  fn set(k: Int, v: Int)
+}
+component BadPulse requires kv: Kv {
+  effect kv.set(1, 11) undo kv.set(1, 0)
+  await Job.run(13)
+}
+"""
+
+
 if __name__ == "__main__":
+    import asyncio
+
     main()
+    asyncio.run(async_main())
