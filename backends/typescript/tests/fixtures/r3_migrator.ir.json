@@ -1,0 +1,103 @@
+{
+  "ir_version": 0,
+  "services": {
+    "Database": {
+      "methods": {
+        "query": { "params": ["sql"], "emission": false },
+        "execute": { "params": ["sql"], "emission": true }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "PgDatabase",
+      "config": [
+        { "name": "url", "type": "Str", "default": null },
+        { "name": "pool_size", "type": "Int", "default": 10 }
+      ],
+      "requires": {},
+      "provides": { "db": "Database" },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "pool",
+          "acquire": {
+            "kind": "host",
+            "fn": "Pool.open",
+            "args": [
+              { "kind": "config", "field": "url" },
+              { "kind": "config", "field": "pool_size" }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": { "kind": "name", "id": "pool" },
+            "method": "close",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "db",
+          "service": "Database",
+          "methods": [
+            {
+              "name": "query",
+              "params": ["sql"],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": { "kind": "name", "id": "pool" },
+                    "method": "query",
+                    "args": [{ "kind": "name", "id": "sql" }]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "execute",
+              "params": ["sql"],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": { "kind": "name", "id": "pool" },
+                    "method": "execute",
+                    "args": [{ "kind": "name", "id": "sql" }]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Migrator",
+      "config": [],
+      "requires": { "db": "Database" },
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "lock",
+          "acquire": {
+            "kind": "call",
+            "target": { "kind": "req", "name": "db" },
+            "method": "execute",
+            "args": [{ "kind": "lit", "value": "SELECT pg_advisory_lock(42)" }]
+          },
+          "undo": {
+            "kind": "call",
+            "target": { "kind": "req", "name": "db" },
+            "method": "execute",
+            "args": [{ "kind": "lit", "value": "SELECT pg_advisory_unlock(42)" }]
+          }
+        }
+      ]
+    }
+  ]
+}

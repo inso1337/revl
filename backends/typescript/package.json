@@ -1,0 +1,21 @@
+{
+  "name": "revl-backend-typescript",
+  "private": true,
+  "version": "0.0.1",
+  "description": "revl v0 backend targeting cordis v4 (TypeScript)",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "demo": "node demo.ts",
+    "golden": "python3 scripts/regen-golden.py",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cordis": "4.0.0-rc.8"
+  },
+  "devDependencies": {
+    "@types/node": "26.2.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
