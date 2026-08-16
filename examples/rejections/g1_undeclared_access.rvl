@@ -1,0 +1,13 @@
+// REJECTED — G1: undeclared access.
+// `db` is not in this component's requires row; the reference does not
+// type-check. (The library equivalent is a runtime proxy error at best.)
+//
+// expected error:
+//   g1_undeclared_access.rvl:10: `db` is not a declared requirement of Logger
+//     component Logger requires <nothing> — add `requires db: Database`?
+
+service Database { fn query(sql: Str) -> List[Row] }
+
+component Logger {
+  let rows = db.query("SELECT 1")
+}

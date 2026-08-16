@@ -1,0 +1,14 @@
+// REJECTED — G4: a mutation without an inverse or an `emit` marker.
+// `effect` without `undo` is only legal when the operation is declared
+// `pure` or the callee derives the inverse; a bare acquisition must say
+// how it is reverted, or be marked `emit` to admit irreversibility.
+//
+// expected error:
+//   g4_missing_undo.rvl:8: effect has no `undo` and `Pool.open` is not pure
+//     write `effect Pool.open(...) undo <expr>`, or mark the call `emit`
+//     if it deliberately crosses the system boundary
+
+component Leaky {
+  config { url: Str }
+  let pool = effect Pool.open(config.url)
+}
