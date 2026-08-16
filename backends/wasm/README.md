@@ -1,8 +1,8 @@
 # revl → cordis-wasm backend (substrate tier)
 
 Compiles revl components to **WAT modules** for the
-[cordis-wasm](https://github.com/inso1337) runtime prototype
-(`~/Projects/cordis-wasm`), where the paradigm is enforced by the sandbox:
+[cordis-wasm](https://github.com/inso1337/cordis-wasm) runtime prototype
+, where the paradigm is enforced by the sandbox:
 
 - the coeffect specification **is** the emitted import section
   (`coeffect:<key>` per required service op) — G1/G6 stop being checker
