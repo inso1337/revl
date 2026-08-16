@@ -32,6 +32,19 @@ def test_beacon_emits_goldens():
         assert modules[name] == golden
 
 
+def test_pulse_await_lowering():
+    """A1 on the substrate: the await segment launches the async host op and
+    the boundary yield structure survives in the golden."""
+    ir = compile_files([str(ROOT / "examples" / "pulse.rvl")])
+    pulse = _emitter().emit(ir)["Pulse"]
+    golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text()
+    assert pulse == golden
+    assert '(import "host" "job_run"' in pulse
+    assert "(call $host_job_run (i32.const 42))" in pulse
+    # the effect after the await is a separate segment: divert can skip it
+    assert pulse.index("job_run (i32.const 42)") < pulse.index("(i32.const 2) (i32.const 22)")
+
+
 def test_import_section_is_the_coeffect_specification():
     ir = compile_files([str(ROOT / "examples" / "beacon.rvl")])
     beacon = _emitter().emit(ir)["Beacon"]
