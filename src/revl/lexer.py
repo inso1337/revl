@@ -12,11 +12,20 @@ KEYWORDS = {
     "true", "false", "null",
     # v2: realms & interception
     "isolate", "intercept", "realm", "in", "with",
+    # v2.0 full-language (docs/syntax-2.0.md)
+    "type", "use", "pub", "var", "while", "for", "of", "if", "else",
+    "match", "test", "assert", "async", "as",
     # reserved for later tiers
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
 }
 
 SYMBOLS = {"{", "}", "(", ")", "[", "]", ",", ":", "=", "."}
+
+# Multi-character operators, longest first so `===` lexes before `==`.
+OPERATORS = ("===", "!==", "=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->")
+
+# Single-character operator tokens (checked after OPERATORS).
+SINGLE_OPERATORS = "+-*/%<>!?;|@"
 
 
 @dataclass
@@ -39,9 +48,12 @@ def lex(source: str, filename: str) -> list[Token]:
         elif source.startswith("//", i):
             while i < n and source[i] != "\n":
                 i += 1
-        elif source.startswith("->", i):
-            tokens.append(Token("arrow", "->", line))
-            i += 2
+        elif any(source.startswith(op, i) for op in OPERATORS):
+            for op in OPERATORS:
+                if source.startswith(op, i):
+                    tokens.append(Token("arrow" if op == "->" else op, op, line))
+                    i += len(op)
+                    break
         elif c == '"':
             i, parts = _lex_string(source, i + 1, line, filename)
             tokens.append(Token("string", parts, line))
@@ -58,7 +70,7 @@ def lex(source: str, filename: str) -> list[Token]:
                 j += 1
             tokens.append(Token("int", int(source[i:j]), line))
             i = j
-        elif c in SYMBOLS:
+        elif c in SYMBOLS or c in SINGLE_OPERATORS:
             tokens.append(Token(c, c, line))
             i += 1
         else:
