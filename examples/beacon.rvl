@@ -1,0 +1,28 @@
+// Wasm-tier example (backends/wasm): i32-only services, no host builtins.
+// Beacon writes its presence into a kv coeffect (with inverses) and provides
+// a status service; Auditor snapshots the status into kv when it activates.
+// The kv provider itself is not written in revl — in the demo it is a
+// hand-written WAT component (a polyglot mesh: the runtime neither knows
+// nor cares which language produced which component).
+
+service Kv {
+  fn get(k: Int) -> Int
+  fn set(k: Int, v: Int)
+}
+
+service Status {
+  fn shared() -> Int
+}
+
+component Beacon requires kv: Kv provides status: Status {
+  effect kv.set(7, 100) undo kv.set(7, 0)
+  effect kv.set(8, 200) undo kv.set(8, 0)
+
+  provide status {
+    fn shared() = kv.get(7)
+  }
+}
+
+component Auditor requires status: Status, kv: Kv {
+  effect kv.set(9, status.shared()) undo kv.set(9, 0)
+}
