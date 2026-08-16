@@ -1,0 +1,11 @@
+// REJECTED — `let` is single-assignment (syntax-2.0 §3.3).
+// Reassigning a `let` binding is an error with a fix-hint pointing at `var`.
+//
+// expected error:
+//   cannot reassign `n` — it is `let` (single-assignment)
+
+fn bump() -> Int {
+  let n = 1
+  n = 2
+  return n
+}
