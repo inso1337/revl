@@ -217,6 +217,7 @@ class Composition:
         self.root = Context()
         self.fibers: dict[str, object] = {}  # component name -> fiber
         self.origin: dict[str, pathlib.Path] = {}  # component name -> source file
+        self.running_ir: dict | None = None  # the admitted composition (manifest + services)
         self.generation = 0
 
         runtime_mod.set_trace(log.on_host_event)
@@ -250,15 +251,33 @@ class Composition:
         return [changed]
 
     def compile_and_emit(self, sources: list[pathlib.Path], why: str) -> tuple[dict, types.ModuleType]:
-        files = [SERVICES_FILE] + [p for p in sources if p != SERVICES_FILE]
-        for path in files:
-            self.log.line("compile", path.name, f"parse -> check -> link   ({why})")
+        # the runtime-admission gate (DESIGN §4): once a composition is
+        # running, a changed file is compiled *alone* against the running
+        # manifest — ambient services come from the manifest, same-name
+        # components are implicit replacements, and G2/G3 span both
+        admission = (
+            self.running_ir is not None
+            and SERVICES_FILE not in sources
+        )
+        if admission:
+            files = list(sources)
+            for path in files:
+                self.log.line("compile", path.name,
+                              f"admission against the running manifest   ({why})")
+        else:
+            files = [SERVICES_FILE] + [p for p in sources if p != SERVICES_FILE]
+            for path in files:
+                self.log.line("compile", path.name, f"parse -> check -> link   ({why})")
         try:
-            ir = compile_files([str(p) for p in files])
+            if admission:
+                ir = compile_files([str(p) for p in files], manifest=self.running_ir)
+            else:
+                ir = compile_files([str(p) for p in files])
         except RevlError as exc:
             for i, line in enumerate(str(exc).splitlines()):
                 self.log.line("reject", "REJECTED" if i == 0 else "", line)
             raise CompileError(str(exc)) from exc
+        self.running_ir = ir
 
         names = [component["name"] for component in ir["components"]]
         provided = {
@@ -428,12 +447,10 @@ async def bootstrap(comp: Composition) -> dict:
     ir, module = comp.compile_and_emit(sources, why="cold start")
     log.rule("load, consumers first — so you can see the reactive resolution")
     await comp.load(ir, module)
-    # attribute each component to the file that declares it, so a later edit
-    # (or deletion) knows which fibers it owns
-    for path in sources:
-        single = compile_files([str(SERVICES_FILE), str(path)])
-        for component in single["components"]:
-            comp.origin[component["name"]] = path
+    # provenance is in the IR: each component names the file that declares
+    # it, so a later edit (or deletion) knows which fibers it owns
+    for component in ir["components"]:
+        comp.origin[component["name"]] = pathlib.Path(component["source"]).resolve()
     return ir
 
 
