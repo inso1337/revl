@@ -23,7 +23,48 @@ import inspect
 import re
 from typing import Any, Callable, Optional
 
-__all__ = ["ConfigError", "ConfigSchema", "Frame", "Job", "Map", "Pool", "fmt", "set_trace"]
+__all__ = ["ConfigError", "ConfigSchema", "Frame", "Job", "Map", "Pool", "fmt", "plug", "realm_label", "set_trace"]
+
+
+# ---------------------------------------------------------------------------
+# v2: realm placement (docs/design-v2-realms.md)
+# ---------------------------------------------------------------------------
+
+class _RealmLabel:
+    """A realm identity. cordis compares isolate labels by object identity,
+    so same-string sharing must go through one object — never rely on
+    string interning."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return f"<realm {self.name}>"
+
+
+_REALM_LABELS: dict = {}
+
+
+def realm_label(name: str) -> "_RealmLabel":
+    """Process-wide string -> label-object registry: equal strings share a
+    realm (the paper §5.2.1 global-realm convention)."""
+    label = _REALM_LABELS.get(name)
+    if label is None:
+        label = _REALM_LABELS[name] = _RealmLabel(name)
+    return label
+
+
+def plug(ctx, component: dict, config=None):
+    """Load an emitted component honoring its realm placements: apply
+    ctx.isolate(key, label) per entry BEFORE ctx.plugin — the fiber's
+    context chain is fixed at plugin time, so isolation cannot happen
+    inside apply."""
+    scoped = ctx
+    for key, realm in (component.get("isolate") or {}).items():
+        scoped = scoped.isolate(key, realm_label(realm))
+    return scoped.plugin(component, config)
 
 
 # ---------------------------------------------------------------------------

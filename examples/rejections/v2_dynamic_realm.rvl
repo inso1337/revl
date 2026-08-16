@@ -1,0 +1,17 @@
+// REJECTED — dynamic realm labels are unsound at link time.
+// Config is unknown at link AND admission time, so the linker could
+// neither prove nor refute a collision between two config-derived realms:
+// declaring them fresh lets equal tenant values collide at runtime (G2
+// broken); declaring them conflicting kills multi-tenancy. Lifting this
+// requires instance-parametric components (docs/design-v2-realms.md).
+//
+// expected error:
+//   dynamic realm labels are not supported — a realm is a static string literal
+
+service Kv { fn get(k: Str) -> Opt[Str] }
+
+component TenantApp requires kv: Kv {
+  config { tenant: Str }
+  isolate kv in realm(config.tenant)
+  let probe = effect kv.get("boot") undo probe.drop()
+}

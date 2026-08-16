@@ -10,6 +10,8 @@ KEYWORDS = {
     "service", "component", "requires", "provides", "config", "let",
     "effect", "undo", "emit", "emission", "provide", "fn", "return",
     "true", "false", "null",
+    # v2: realms & interception
+    "isolate", "intercept", "realm", "in", "with",
     # reserved for later tiers
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
 }

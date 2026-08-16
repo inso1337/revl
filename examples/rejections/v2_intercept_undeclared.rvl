@@ -1,0 +1,11 @@
+// REJECTED — `intercept` on a key that is not declared at all.
+//
+// expected error:
+//   `db` is not a declared requirement of Watcher
+
+service Kv { fn get(k: Str) -> Opt[Str] }
+
+component Watcher requires kv: Kv {
+  intercept db with { quota: 5 }
+  let probe = effect kv.get("boot") undo probe.drop()
+}

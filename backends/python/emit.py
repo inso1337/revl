@@ -84,6 +84,15 @@ class _ComponentEmitter:
         self.snake = _snake(self.name)
         self.uses: set[str] = set()
         self._counter = 0
+        # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
+        self.isolate = component.get("isolate") or {}
+        self.intercept = component.get("intercept") or {}
+        for key in self.isolate:
+            if key not in self.requires and key not in self.provides:
+                raise EmitError(f"{self.name}: isolate key {key!r} is not declared")
+        for key in self.intercept:
+            if key not in self.requires:
+                raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
 
     # -- expressions --------------------------------------------------------
 
@@ -284,8 +293,18 @@ class _ComponentEmitter:
         out.add(0)
         out.add(0, f"{self.name} = {{")
         out.add(1, f"'name': {self.name!r},")
-        out.add(1, f"'inject': {list(self.requires.keys())!r},")
+        if self.intercept:
+            # v2: dict-form inject — non-null values land in the fiber
+            # context's intercept chain (the consumer-declared d(k))
+            inject = {key: self.intercept.get(key) for key in self.requires}
+            out.add(1, f"'inject': {inject!r},")
+        else:
+            out.add(1, f"'inject': {list(self.requires.keys())!r},")
         out.add(1, f"'apply': _{self.snake}_apply,")
+        if self.isolate:
+            # v2: realm placements, applied by runtime.plug() BEFORE
+            # ctx.plugin — the fiber's context chain is fixed at plugin time
+            out.add(1, f"'isolate': {dict(self.isolate)!r},")
         out.add(0, "}")
         return out
 
@@ -294,8 +313,8 @@ def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
-    if ir.get("ir_version") != IR_VERSION:
-        raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION})")
+    if ir.get("ir_version") not in (IR_VERSION, 2):
+        raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION} or 2)")
 
     services = ir.get("services") or {}
     components = ir.get("components") or []

@@ -427,6 +427,11 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
+    if ir.get("ir_version") == 2:
+        raise EmitError(
+            "ir_version 2 (realms/interception) is not lowerable on this backend "
+            "yet — cordis-py only for now; see docs/design-v2-realms.md"
+        )
     if ir.get("ir_version") != 1:
         raise EmitError(f"unsupported ir_version: {ir.get('ir_version')!r}")
 
