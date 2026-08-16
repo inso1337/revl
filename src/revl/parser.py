@@ -155,11 +155,163 @@ class ComponentDecl:
     source: str = ""  # provenance: the file this component was parsed from
 
 
+# --- v2.0: types & pure functions (docs/syntax-2.0.md §2–§3) ----------------
+
+@dataclass
+class RecordField:
+    name: str
+    type: str
+    line: int
+
+
+@dataclass
+class VariantCase:
+    name: str
+    payload: str | None
+    line: int
+
+
+@dataclass
+class TypeDecl:
+    name: str
+    params: list[str]
+    fields: list[RecordField]
+    cases: list[VariantCase]
+    line: int
+
+
+@dataclass
+class FnParam:
+    name: str
+    type: str
+    line: int
+
+
+@dataclass
+class FnDecl:
+    name: str
+    params: list[FnParam]
+    returns: str | None
+    body: list
+    public: bool
+    line: int
+
+
+# pure-expression AST (§3.2 — the TS-subset stratum)
+
+@dataclass
+class ExprLit:
+    value: object
+    line: int
+
+
+@dataclass
+class ExprVar:
+    name: str
+    line: int
+
+
+@dataclass
+class ExprBin:
+    op: str
+    left: object
+    right: object
+    line: int
+
+
+@dataclass
+class ExprUn:
+    op: str
+    operand: object
+    line: int
+
+
+@dataclass
+class ExprCall:
+    callee: object
+    args: list
+    line: int
+
+
+@dataclass
+class ExprField:
+    target: object
+    name: str
+    line: int
+
+
+@dataclass
+class ExprIndex:
+    target: object
+    index: object
+    line: int
+
+
+@dataclass
+class ExprIf:
+    cond: object
+    then: object
+    otherwise: object
+    line: int
+
+
+@dataclass
+class ExprRecord:
+    fields: list
+    line: int
+
+
+@dataclass
+class ExprList:
+    items: list
+    line: int
+
+
+@dataclass
+class ExprArrow:
+    params: list[str]
+    body: object
+    line: int
+
+
+# fn-body statements
+
+@dataclass
+class LetStmt:
+    name: str
+    value: object
+    mutable: bool
+    line: int
+
+
+@dataclass
+class AssignStmt:
+    name: str
+    value: object
+    line: int
+
+
+@dataclass
+class IfStmt:
+    cond: object
+    then: list
+    otherwise: list | None
+    line: int
+
+
+@dataclass
+class ExprStmt:
+    expr: object
+    line: int
+
+
 @dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
     components: list[ComponentDecl] = field(default_factory=list)
+    type_decls: list[TypeDecl] = field(default_factory=list)
+    fn_decls: list[FnDecl] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- parser
@@ -204,9 +356,20 @@ class Parser:
                 program.services.append(self.service())
             elif self.at("kw", "component"):
                 program.components.append(self.component())
+            elif self.at("kw", "type"):
+                program.type_decls.append(self.type_decl())
+            elif self.at("kw", "pub"):
+                self.next()
+                if self.at("kw", "fn"):
+                    program.fn_decls.append(self.fn_decl(True))
+                else:
+                    tok = self.peek()
+                    raise self.err(tok.line, f"expected `fn` after `pub`, found {tok.value!r}")
+            elif self.at("kw", "fn"):
+                program.fn_decls.append(self.fn_decl(False))
             else:
                 tok = self.peek()
-                raise self.err(tok.line, f"expected `service` or `component`, found {tok.value!r}")
+                raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
         return program
 
     def service(self) -> ServiceDecl:
@@ -250,8 +413,13 @@ class Parser:
                 self.next()
                 inner.append(self.type_())
             self.expect("]")
-            return f"{base}[{', '.join(inner)}]"
-        return base
+            rendered = f"{base}[{', '.join(inner)}]"
+        else:
+            rendered = base
+        if self.at("?"):
+            self.next()
+            rendered = f"Opt[{rendered}]"  # T? sugar (syntax-2.0 §2)
+        return rendered
 
     def component(self) -> ComponentDecl:
         line = self.expect("kw", "component").line
@@ -436,6 +604,279 @@ class Parser:
                 self.next()
         self.expect("}")
         return record
+
+    # -- v2.0: type & function declarations (syntax-2.0 §2–§3) ----------------
+
+    def type_decl(self) -> TypeDecl:
+        line = self.expect("kw", "type").line
+        name = self.expect("ident").value
+        params: list[str] = []
+        if self.at("["):
+            self.next()
+            while not self.at("]"):
+                params.append(self.expect("ident").value)
+                if self.at(","):
+                    self.next()
+            self.expect("]")
+        self.expect("=")
+        if self.at("{"):
+            self.next()
+            fields: list[RecordField] = []
+            while not self.at("}"):
+                fline = self.peek().line
+                fname = self.expect("ident").value
+                self.expect(":")
+                ftype = self.type_()
+                fields.append(RecordField(fname, ftype, fline))
+                if self.at(","):
+                    self.next()
+            self.expect("}")
+            return TypeDecl(name, params, fields, [], line)
+        cases: list[VariantCase] = []
+        while True:
+            cline = self.peek().line
+            cname = self.expect("ident").value
+            payload = None
+            if self.at("("):
+                self.next()
+                payload = self.type_()
+                self.expect(")")
+            cases.append(VariantCase(cname, payload, cline))
+            if self.at("|"):
+                self.next()
+            else:
+                break
+        return TypeDecl(name, params, [], cases, line)
+
+    def fn_decl(self, public: bool) -> FnDecl:
+        line = self.expect("kw", "fn").line
+        name = self.expect("ident").value
+        self.expect("(")
+        params: list[FnParam] = []
+        while not self.at(")"):
+            pline = self.peek().line
+            pname = self.expect("ident").value
+            self.expect(":")
+            ptype = self.type_()
+            params.append(FnParam(pname, ptype, pline))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        returns = None
+        if self.at("arrow"):
+            self.next()
+            returns = self.type_()
+        self.expect("{")
+        body = []
+        while not self.at("}"):
+            body.append(self.fn_stmt())
+        self.expect("}")
+        return FnDecl(name, params, returns, body, public, line)
+
+    def fn_stmt(self):
+        tok = self.peek()
+        if tok.kind == "kw" and tok.value == "let":
+            self.next()
+            name = self.expect("ident").value
+            self.expect("=")
+            return LetStmt(name, self.pure_expr(), False, tok.line)
+        if tok.kind == "kw" and tok.value == "var":
+            self.next()
+            name = self.expect("ident").value
+            self.expect("=")
+            return LetStmt(name, self.pure_expr(), True, tok.line)
+        if tok.kind == "kw" and tok.value == "return":
+            self.next()
+            value = None if self.at("}") else self.pure_expr()
+            return ReturnStmt(value, tok.line)
+        if tok.kind == "kw" and tok.value == "if":
+            return self.if_stmt()
+        if tok.kind == "ident" and self.toks[self.pos + 1].kind == "=":
+            self.next()
+            self.next()
+            return AssignStmt(tok.value, self.pure_expr(), tok.line)
+        return ExprStmt(self.pure_expr(), tok.line)
+
+    def if_stmt(self) -> IfStmt:
+        line = self.expect("kw", "if").line
+        self.expect("(")
+        cond = self.pure_expr()
+        self.expect(")")
+        then = self.block() if self.at("{") else [self.fn_stmt()]
+        otherwise = None
+        if self.at("kw", "else"):
+            self.next()
+            if self.at("kw", "if"):
+                otherwise = [self.if_stmt()]
+            else:
+                otherwise = self.block() if self.at("{") else [self.fn_stmt()]
+        return IfStmt(cond, then, otherwise, line)
+
+    def block(self) -> list:
+        self.expect("{")
+        stmts = []
+        while not self.at("}"):
+            stmts.append(self.fn_stmt())
+        self.expect("}")
+        return stmts
+
+    # pure expressions — precedence climbing (§3.2)
+
+    def pure_expr(self):
+        return self._ternary()
+
+    def _ternary(self):
+        cond = self._or()
+        if self.at("?"):
+            self.next()
+            then = self._ternary()
+            self.expect(":")
+            otherwise = self._ternary()
+            return ExprIf(cond, then, otherwise, cond.line)
+        return cond
+
+    def _or(self):
+        return self._bin(self._and, ("||",))
+
+    def _and(self):
+        return self._bin(self._eq, ("&&",))
+
+    def _eq(self):
+        return self._bin(self._cmp, ("==", "===", "!=", "!=="))
+
+    def _cmp(self):
+        return self._bin(self._add, ("<", ">", "<=", ">="))
+
+    def _add(self):
+        return self._bin(self._mul, ("+", "-"))
+
+    def _mul(self):
+        return self._bin(self._unary, ("*", "/", "%"))
+
+    def _bin(self, operand, ops):
+        left = operand()
+        while True:
+            op = None
+            for candidate in ops:
+                if self.at(candidate):
+                    op = candidate
+                    break
+            if op is None:
+                return left
+            self.next()
+            right = operand()
+            left = ExprBin(op, left, right, left.line)
+
+    def _unary(self):
+        tok = self.peek()
+        if tok.kind in ("!", "-"):
+            self.next()
+            return ExprUn(tok.kind, self._unary(), tok.line)
+        return self._postfix()
+
+    def _postfix(self):
+        node = self._primary()
+        while True:
+            if self.at("."):
+                self.next()
+                node = ExprField(node, self.expect("ident").value, node.line)
+            elif self.at("("):
+                self.next()
+                args = []
+                while not self.at(")"):
+                    args.append(self.pure_expr())
+                    if self.at(","):
+                        self.next()
+                self.expect(")")
+                node = ExprCall(node, args, node.line)
+            elif self.at("["):
+                self.next()
+                index = self.pure_expr()
+                self.expect("]")
+                node = ExprIndex(node, index, node.line)
+            else:
+                break
+        return node
+
+    def _primary(self):
+        tok = self.peek()
+        if tok.kind == "int":
+            self.next()
+            return ExprLit(tok.value, tok.line)
+        if tok.kind == "string":
+            self.next()
+            parts = tok.value
+            if any(kind == "var" for kind, _ in parts):
+                return Interp(parts, tok.line)
+            return ExprLit("".join(text for _, text in parts), tok.line)
+        if tok.kind == "kw" and tok.value in ("true", "false", "null"):
+            self.next()
+            return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
+        if tok.kind == "ident":
+            self.next()
+            if self.at("=>"):
+                self.next()
+                return ExprArrow([tok.value], self.pure_expr(), tok.line)
+            return ExprVar(tok.value, tok.line)
+        if tok.kind == "(":
+            if self._arrow_params_ahead():
+                self.next()
+                params = []
+                while not self.at(")"):
+                    params.append(self.expect("ident").value)
+                    if self.at(","):
+                        self.next()
+                self.expect(")")
+                self.expect("=>")
+                return ExprArrow(params, self.pure_expr(), tok.line)
+            self.next()
+            node = self.pure_expr()
+            self.expect(")")
+            return node
+        if tok.kind == "{":
+            self.next()
+            fields = []
+            while not self.at("}"):
+                fname = self.expect("ident").value
+                self.expect(":")
+                fexpr = self.pure_expr()
+                fields.append((fname, fexpr))
+                if self.at(","):
+                    self.next()
+            self.expect("}")
+            return ExprRecord(fields, tok.line)
+        if tok.kind == "[":
+            self.next()
+            items = []
+            while not self.at("]"):
+                items.append(self.pure_expr())
+                if self.at(","):
+                    self.next()
+            self.expect("]")
+            return ExprList(items, tok.line)
+        raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+
+    def _arrow_params_ahead(self) -> bool:
+        # current token is '(' — is this `(a, b) => ...` rather than `(expr)`?
+        i = self.pos
+        if self.toks[i].kind != "(":
+            return False
+        i += 1
+        if self.toks[i].kind == ")":
+            i += 1
+        else:
+            while True:
+                if self.toks[i].kind != "ident":
+                    return False
+                i += 1
+                if self.toks[i].kind == ",":
+                    i += 1
+                    continue
+                break
+            if self.toks[i].kind != ")":
+                return False
+            i += 1
+        return self.toks[i].kind == "=>"
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line
