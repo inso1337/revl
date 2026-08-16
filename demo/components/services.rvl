@@ -1,0 +1,19 @@
+// The coeffect interfaces of this composition.
+//
+// Services are shared vocabulary, not code: they name the keys components
+// provide and require, and they classify each operation as an observation
+// (`fn`, pure with respect to the environment) or an emission
+// (`emission fn`, crosses the system boundary and cannot be inverted).
+//
+// This file is compiled together with whichever component file is being
+// (re)compiled — see demo/README.md, "why services live in their own file".
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}

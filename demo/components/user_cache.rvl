@@ -1,0 +1,19 @@
+// The consumer. Requires the `db` key, provides the `cache` key — so it is
+// both a dependent (it deactivates when PgDatabase leaves) and a provider.
+//
+// `cache.put` installs an effect *while the component is active*: the insert
+// joins the same accumulator as the activation-time effects, so unloading
+// removes every key that was put, newest first, before dropping the store.
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute("INSERT INTO cache_log VALUES ($key)")
+    }
+  }
+}

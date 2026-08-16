@@ -1,0 +1,27 @@
+// The edit `live.py --script` applies to components/pg_database.rvl, and a
+// ready-made paste target for the interactive mode.
+//
+// Two changes over the original:
+//   * a second acquisition (an advisory lock) *above* the provide block —
+//     the derived teardown grows a step, and LIFO puts the unlock before the
+//     pool close without anyone writing teardown code;
+//   * a bigger default pool size, so the config schema visibly changes.
+//
+// Note the acquisition has to sit above `provide`: an effect acquired after
+// a provision would be reverted while dependents can still call the service,
+// and the checker rejects it (rule A2).
+
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 25 }
+
+  let pool = effect Pool.open(config.url, config.pool_size)
+             undo   pool.close()
+
+  let lock = effect pool.query("SELECT pg_advisory_lock(42)")
+             undo   pool.query("SELECT pg_advisory_unlock(42)")
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}

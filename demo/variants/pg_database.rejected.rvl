@@ -1,0 +1,17 @@
+// A deliberately broken edit: the acquisition has no inverse.
+//
+// `live.py --script` writes this over components/pg_database.rvl to prove
+// that a rejected recompile never reaches the runtime — the running
+// composition keeps serving traffic on the previous version. Guarantee G4:
+// every mutation carries an inverse or an `emit` marker.
+
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 10 }
+
+  let pool = effect Pool.open(config.url, config.pool_size)
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
