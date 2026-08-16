@@ -30,6 +30,7 @@ from .parser import (
     ExprIndex,
     ExprList,
     ExprLit,
+    ExprMatch,
     ExprRecord,
     ExprStmt,
     ExprUn,
@@ -155,7 +156,8 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
     return types
 
 
-def _lower_fns(program: Program, filename: str) -> list:
+def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
+    types = types or {}
     callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
     fns: list[dict] = []
     seen: set[str] = set()
@@ -164,14 +166,16 @@ def _lower_fns(program: Program, filename: str) -> list:
             raise RevlError(filename, decl.line, f"duplicate function `{decl.name}`")
         seen.add(decl.name)
         scope: dict[str, bool] = {}
+        type_env: dict[str, str] = {}
         for param in decl.params:
             if param.name in scope:
                 raise RevlError(filename, param.line,
                                 f"duplicate parameter `{param.name}` in fn {decl.name}")
             scope[param.name] = False
+            type_env[param.name] = param.type
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, body, filename)
+            _lower_pure_stmt(stmt, scope, callables, body, filename, type_env, types)
         fns.append({
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
@@ -182,13 +186,77 @@ def _lower_fns(program: Program, filename: str) -> list:
     return fns
 
 
-def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: str) -> None:
+def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
+    """Best-effort static type of a pure expression.
+
+    match exhaustiveness is a best-effort check: when the scrutinee's type is
+    not recoverable from the local type environment, lowering still proceeds
+    (the Python emitter adds a runtime fallback for those cases).
+    """
+    if isinstance(expr, ExprVar):
+        return type_env.get(expr.name)
+    if isinstance(expr, ExprField):
+        target = _expr_static_type(expr.target, type_env, types)
+        spec = types.get(target or "")
+        if spec is not None and spec.get("kind") == "record":
+            return spec.get("fields", {}).get(expr.name)
+        return None
+    if isinstance(expr, ExprLit):
+        if isinstance(expr.value, bool):
+            return "Bool"
+        if isinstance(expr.value, int):
+            return "Int"
+        if isinstance(expr.value, float):
+            return "Float"
+        if isinstance(expr.value, str):
+            return "Str"
+        return None
+    return None
+
+
+def _variant_case_payload(types: dict, type_name: str | None, case_name: str) -> str | None:
+    spec = types.get(type_name or "")
+    if spec is None or spec.get("kind") != "variant":
+        return None
+    for case in spec.get("cases", []):
+        if case["name"] == case_name:
+            return case["payload"]
+    return None
+
+
+def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
+    type_name = _expr_static_type(expr.scrutinee, type_env, types)
+    spec = types.get(type_name or "")
+    if spec is None or spec.get("kind") != "variant":
+        return
+    covered = {pattern for pattern, _, _ in expr.arms if pattern != "_"}
+    if "_" in {pattern for pattern, _, _ in expr.arms}:
+        return
+    missing = [case["name"] for case in spec.get("cases", []) if case["name"] not in covered]
+    if not missing:
+        return
+    if len(missing) == 1:
+        rendered = f"`{missing[0]}`"
+        plural = "case"
+    else:
+        rendered = ", ".join(f"`{name}`" for name in missing)
+        plural = "cases"
+    raise RevlError(filename, expr.line, f"non-exhaustive match: missing {plural} {rendered}")
+
+
+def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: str,
+                     type_env: dict | None = None, types: dict | None = None) -> None:
+    type_env = type_env if type_env is not None else {}
+    types = types if types is not None else {}
     if isinstance(stmt, LetStmt):
         if stmt.name in scope:
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is already declared in this function")
         scope[stmt.name] = stmt.mutable
+        inferred = _expr_static_type(stmt.value, type_env, types)
+        if inferred is not None:
+            type_env[stmt.name] = inferred
         body.append({"step": "let", "name": stmt.name,
-                     "value": _lower_pure_expr(stmt.value, scope, callables, filename),
+                     "value": _lower_pure_expr(stmt.value, scope, callables, filename, type_env, types),
                      "mutable": stmt.mutable})
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
@@ -198,29 +266,35 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: st
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
                             hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
+        inferred = _expr_static_type(stmt.value, type_env, types)
+        if inferred is not None:
+            type_env[stmt.name] = inferred
         body.append({"step": "assign", "name": stmt.name,
-                     "value": _lower_pure_expr(stmt.value, scope, callables, filename)})
+                     "value": _lower_pure_expr(stmt.value, scope, callables, filename, type_env, types)})
     elif isinstance(stmt, ReturnStmt):
         body.append({"step": "return",
-                     "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, filename)})
+                     "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, filename, type_env, types)})
     elif isinstance(stmt, IfStmt):
         then: list[dict] = []
         for s in stmt.then:
-            _lower_pure_stmt(s, scope, callables, then, filename)
+            _lower_pure_stmt(s, scope, callables, then, filename, type_env, types)
         otherwise = None
         if stmt.otherwise is not None:
             otherwise = []
             for s in stmt.otherwise:
-                _lower_pure_stmt(s, scope, callables, otherwise, filename)
-        body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, filename),
+                _lower_pure_stmt(s, scope, callables, otherwise, filename, type_env, types)
+        body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, filename, type_env, types),
                      "then": then, "else": otherwise})
     elif isinstance(stmt, ExprStmt):
-        body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, filename)})
+        body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, filename, type_env, types)})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
 
 
-def _lower_pure_expr(expr, scope: dict, callables: set, filename: str) -> dict:
+def _lower_pure_expr(expr, scope: dict, callables: set, filename: str,
+                     type_env: dict | None = None, types: dict | None = None) -> dict:
+    type_env = type_env if type_env is not None else {}
+    types = types if types is not None else {}
     if isinstance(expr, ExprLit):
         return {"kind": "lit", "value": expr.value}
     if isinstance(expr, ExprVar):
@@ -230,37 +304,59 @@ def _lower_pure_expr(expr, scope: dict, callables: set, filename: str) -> dict:
         return {"kind": "var", "name": expr.name}
     if isinstance(expr, ExprBin):
         return {"kind": "bin", "op": expr.op,
-                "left": _lower_pure_expr(expr.left, scope, callables, filename),
-                "right": _lower_pure_expr(expr.right, scope, callables, filename)}
+                "left": _lower_pure_expr(expr.left, scope, callables, filename, type_env, types),
+                "right": _lower_pure_expr(expr.right, scope, callables, filename, type_env, types)}
     if isinstance(expr, ExprUn):
         return {"kind": "un", "op": expr.op,
-                "operand": _lower_pure_expr(expr.operand, scope, callables, filename)}
+                "operand": _lower_pure_expr(expr.operand, scope, callables, filename, type_env, types)}
     if isinstance(expr, ExprCall):
-        return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, filename),
-                "args": [_lower_pure_expr(a, scope, callables, filename) for a in expr.args]}
+        return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, filename, type_env, types),
+                "args": [_lower_pure_expr(a, scope, callables, filename, type_env, types) for a in expr.args]}
     if isinstance(expr, ExprField):
-        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, filename),
+        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, filename, type_env, types),
                 "name": expr.name}
     if isinstance(expr, ExprIndex):
-        return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, filename),
-                "index": _lower_pure_expr(expr.index, scope, callables, filename)}
+        return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, filename, type_env, types),
+                "index": _lower_pure_expr(expr.index, scope, callables, filename, type_env, types)}
     if isinstance(expr, ExprIf):
-        return {"kind": "if", "cond": _lower_pure_expr(expr.cond, scope, callables, filename),
-                "then": _lower_pure_expr(expr.then, scope, callables, filename),
-                "else": _lower_pure_expr(expr.otherwise, scope, callables, filename)}
+        return {"kind": "if", "cond": _lower_pure_expr(expr.cond, scope, callables, filename, type_env, types),
+                "then": _lower_pure_expr(expr.then, scope, callables, filename, type_env, types),
+                "else": _lower_pure_expr(expr.otherwise, scope, callables, filename, type_env, types)}
     if isinstance(expr, ExprRecord):
         return {"kind": "record",
-                "fields": [[name, _lower_pure_expr(e, scope, callables, filename)]
+                "fields": [[name, _lower_pure_expr(e, scope, callables, filename, type_env, types)]
                            for name, e in expr.fields]}
     if isinstance(expr, ExprList):
         return {"kind": "list",
-                "items": [_lower_pure_expr(e, scope, callables, filename) for e in expr.items]}
+                "items": [_lower_pure_expr(e, scope, callables, filename, type_env, types) for e in expr.items]}
     if isinstance(expr, ExprArrow):
         inner = dict(scope)
+        inner_type_env = dict(type_env)
         for param in expr.params:
             inner[param] = False
+            inner_type_env.pop(param, None)
         return {"kind": "arrow", "params": expr.params,
-                "body": _lower_pure_expr(expr.body, inner, callables, filename)}
+                "body": _lower_pure_expr(expr.body, inner, callables, filename, inner_type_env, types)}
+    if isinstance(expr, ExprMatch):
+        scrutinee_type = _expr_static_type(expr.scrutinee, type_env, types)
+        _check_match_exhaustiveness(expr, type_env, types, filename)
+        scrutinee = _lower_pure_expr(expr.scrutinee, scope, callables, filename, type_env, types)
+        arms = []
+        for pattern, bind, body in expr.arms:
+            inner_scope = dict(scope)
+            inner_type_env = dict(type_env)
+            if bind is not None:
+                inner_scope[bind] = False
+                inner_type_env.pop(bind, None)
+                payload_type = _variant_case_payload(types, scrutinee_type, pattern)
+                if payload_type is not None:
+                    inner_type_env[bind] = payload_type
+            arms.append({
+                "pattern": pattern,
+                "bind": bind,
+                "body": _lower_pure_expr(body, inner_scope, callables, filename, inner_type_env, types),
+            })
+        return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, Interp):
         return {"kind": "interp", "parts": expr.parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
@@ -308,7 +404,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     manifest = _link(program, components, ambient.get("components") or [])
 
     types = _lower_type_decls(program, program.filename)
-    fns = _lower_fns(program, program.filename)
+    fns = _lower_fns(program, program.filename, types)
 
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
     uses_v3 = bool(types) or bool(fns)

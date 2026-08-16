@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl.parser import ExprBin, Parser  # noqa: E402
+from revl.parser import ExprBin, ExprMatch, ExprVar, Parser  # noqa: E402
 
 
 def _parse(source):
@@ -86,3 +86,41 @@ def test_arrow_literal():
     prog = _parse("fn f() -> Int { let g = x => x + 1 return g(2) }")
     (fn,) = prog.fn_decls
     assert fn.body[0].value.__class__.__name__ == "ExprArrow"
+
+
+def test_match_expression_parses_arms_and_binds():
+    prog = _parse(
+        """
+        fn describe(outcome: Outcome) -> Str {
+          return match outcome {
+            Ok(row) => row.name,
+            NotFound => "-",
+            Invalid(why) => why,
+          }
+        }
+        """
+    )
+    (fn,) = prog.fn_decls
+    match_expr = fn.body[0].expr
+    assert isinstance(match_expr, ExprMatch)
+    assert isinstance(match_expr.scrutinee, ExprVar)
+    assert match_expr.scrutinee.name == "outcome"
+    assert [(p, b) for p, b, _ in match_expr.arms] == [
+        ("Ok", "row"),
+        ("NotFound", None),
+        ("Invalid", "why"),
+    ]
+    assert match_expr.arms[0][2].__class__.__name__ == "ExprField"
+
+
+def test_match_expression_accepts_wildcard_and_trailing_comma():
+    prog = _parse(
+        'fn f(o: Outcome) -> Str { return match o { Ok(row) => row.name, _ => "other", } }'
+    )
+    (fn,) = prog.fn_decls
+    match_expr = fn.body[0].expr
+    assert isinstance(match_expr, ExprMatch)
+    assert [(p, b) for p, b, _ in match_expr.arms] == [
+        ("Ok", "row"),
+        ("_", None),
+    ]

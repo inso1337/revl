@@ -69,6 +69,51 @@ def test_emit_executes_types_and_functions():
     assert ns["Invalid"]("bad").value == "bad"
 
 
+def test_match_expression_emits_and_executes():
+    _, ns = _compile_emit(
+        """
+        type Row = { id: Int, name: Str }
+        type Outcome = Ok(Row) | NotFound | Invalid(Str)
+
+        fn describe(outcome: Outcome) -> Str {
+          return match outcome {
+            Ok(row) => row.name,
+            NotFound => "not found",
+            Invalid(why) => why,
+          }
+        }
+        fn label(outcome: Outcome) -> Str {
+          return match outcome {
+            Ok(row) => row.name,
+            _ => "other",
+          }
+        }
+        """
+    )
+    row = ns["Row"](id=1, name="ada")
+    assert ns["describe"](ns["Ok"](row)) == "ada"
+    assert ns["describe"](ns["NotFound"]()) == "not found"
+    assert ns["describe"](ns["Invalid"]("bad")) == "bad"
+    assert ns["label"](ns["NotFound"]()) == "other"
+    assert ns["label"](ns["Ok"](ns["Row"](id=2, name="bob"))) == "bob"
+
+
+def test_match_nonexhaustive_over_known_variant_rejected():
+    with pytest.raises(RevlError, match=r"non-exhaustive match: missing case `Invalid`"):
+        compile_source(
+            """
+            type Row = { id: Int, name: Str }
+            type Outcome = Ok(Row) | NotFound | Invalid(Str)
+            fn describe(outcome: Outcome) -> Str {
+              return match outcome {
+                Ok(row) => row.name,
+                NotFound => "-",
+              }
+            }
+            """
+        )
+
+
 def test_let_reassignment_rejected():
     with pytest.raises(RevlError, match="cannot reassign `n`"):
         compile_source("fn f() -> Int { let n = 1 n = 2 return n }")

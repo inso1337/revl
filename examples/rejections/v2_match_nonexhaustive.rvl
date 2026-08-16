@@ -1,0 +1,17 @@
+// REJECTED — a `match` over a known variant must cover every case
+// (syntax-2.0 §3.3). The checker knows `outcome` is an `Outcome` from the
+// function parameter type, so a missing case is a compile error rather than
+// a silent runtime fallback.
+//
+// expected error:
+//   non-exhaustive match: missing case `Invalid`
+
+type Row = { id: Int, name: Str }
+type Outcome = Ok(Row) | NotFound | Invalid(Str)
+
+fn describe(outcome: Outcome) -> Str {
+  return match outcome {
+    Ok(row) => row.name,
+    NotFound => "-",
+  }
+}

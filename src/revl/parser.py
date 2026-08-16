@@ -274,6 +274,13 @@ class ExprArrow:
     line: int
 
 
+@dataclass
+class ExprMatch:
+    scrutinee: object
+    arms: list  # [(pattern_name | "_", bind_name | None, body_expr)]
+    line: int
+
+
 # fn-body statements
 
 @dataclass
@@ -798,6 +805,38 @@ class Parser:
                 break
         return node
 
+    def _match_expr(self) -> ExprMatch:
+        """`match <expr> { arm ("," arm)* [","] "}"` — syntax-2.0 §3.3."""
+        line = self.expect("kw", "match").line
+        scrutinee = self.pure_expr()
+        self.expect("{")
+        arms: list = []
+        while not self.at("}"):
+            pattern, bind = self._match_pattern()
+            self.expect("=>")
+            body = self.pure_expr()
+            arms.append((pattern, bind, body))
+            if self.at(","):
+                self.next()
+            else:
+                break
+        self.expect("}")
+        return ExprMatch(scrutinee, arms, line)
+
+    def _match_pattern(self):
+        tok = self.peek()
+        if tok.kind != "ident":
+            raise self.err(tok.line, f"expected a match pattern (case name or `_`), found {tok.value!r}")
+        self.next()
+        if tok.value == "_":
+            return "_", None
+        if not self.at("("):
+            return tok.value, None
+        self.next()
+        bind = self.expect("ident").value
+        self.expect(")")
+        return tok.value, bind
+
     def _primary(self):
         tok = self.peek()
         if tok.kind == "int":
@@ -854,6 +893,8 @@ class Parser:
                     self.next()
             self.expect("]")
             return ExprList(items, tok.line)
+        if tok.kind == "kw" and tok.value == "match":
+            return self._match_expr()
         raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
 
     def _arrow_params_ahead(self) -> bool:

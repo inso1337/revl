@@ -403,6 +403,41 @@ def _interp_fstring(parts) -> str:
     return "".join(segs)
 
 
+def _match_expr(scrutinee: str, arms: list) -> str:
+    """Emit a match expression as a nested `isinstance` chain.
+
+    Python has no expression-level `elif`, so the chain is built from nested
+    conditional expressions inside a one-shot lambda. The scrutinee is
+    evaluated exactly once into `match`; payload arms bind the case's
+    `.value` by immediately invoking another lambda whose parameter is the
+    revl bind name. A wildcard arm becomes the chain's final `else`.
+    """
+    # `match` is a revl keyword, so it can never be a user binding in the
+    # revl source. Python 3.10+ treats it as a soft keyword, which is still
+    # legal as a lambda parameter.
+    tmp = "match"
+
+    def branch(arm: dict, rest: str | None) -> str:
+        pattern = arm.get("pattern")
+        body = _expr(arm.get("body"))
+        if pattern == "_":
+            return body
+        bind = arm.get("bind")
+        if bind:
+            body = f"(lambda {bind}: {body})({tmp}.value)"
+        cond = f"isinstance({tmp}, {pattern})"
+        if rest is None:
+            return f"({body} if {cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))"
+        return f"({body} if {cond} else {rest})"
+
+    result = None
+    for arm in reversed(arms):
+        result = branch(arm, result)
+    if result is None:
+        result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
+    return f"(lambda {tmp}: {result})({scrutinee})"
+
+
 def _expr(node: dict) -> str:
     kind = node["kind"]
     if kind == "lit":
@@ -434,6 +469,8 @@ def _expr(node: dict) -> str:
         return "[" + ", ".join(_expr(e) for e in node["items"]) + "]"
     if kind == "arrow":
         return f"lambda {', '.join(node['params'])}: {_expr(node['body'])}"
+    if kind == "match":
+        return _match_expr(_expr(node["scrutinee"]), node["arms"])
     if kind == "interp":
         return _interp_fstring(node["parts"])
     raise EmitError(f"unsupported expression kind {kind!r}")
