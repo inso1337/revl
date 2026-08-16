@@ -61,7 +61,7 @@ component TenantAApp requires kv: Kv {
 - **G2 becomes per-(key, realm)**: two providers of `db` in *different*
   realms is the feature; the same realm is the conflict, and the error
   names the realm (Def. 43's discussion: "disjointness within a realm").
-  `v2_cross_realm_ok.rvl` must compile; `v2_same_realm_conflict.rvl`
+  `examples/tenants.rvl` must compile; `v2_same_realm_conflict.rvl`
   must not — the non-conflict is as load-bearing as the conflict.
 - **G3/loadOrder are realm-aware**: an edge exists only where the
   consumer's realm for a key matches the provider's — realm separation

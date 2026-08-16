@@ -216,9 +216,11 @@ let conn = effect {
   `if (config.replicas < 1) fail "at least one replica required"` —
   lowering to the A8 semantics (revert accumulated, land FAILED).
 
-- **Reserved for 2.x, syntax sketched, not committed**: realms and
-  interception (paper §3.2.3):
-  `isolate db in realm(config.tenant)` · `intercept db with { paths: [...] }`.
+- **Realms and interception (paper §3.2.3) are implemented** (merged in the
+  v2.0 branch; see docs/design-v2-realms.md): `isolate db in realm("tenant")`
+  · `intercept db with { paths: [...] }` — with **static** string labels only;
+  the dynamic `realm(config.tenant)` form remains reserved (instance-parametric
+  components).
 
 ## 5. Services 2.0
 
@@ -316,9 +318,10 @@ Mechanical, one release:
 - `"$name"` interpolation → `` `${name}` `` templates (`$$` escape retired);
   `revl fmt --migrate` rewrites sources.
 - 1.x expression-form `effect E undo U` unchanged; everything else additive.
-- IR v2 carries: `fn` declarations (lowered bodies), `match`, ADT layouts,
+- IR v3 carries: `fn` declarations (lowered bodies), `match`, ADT layouts,
   extern host bodies keyed by backend, `test` units. Backends that predate
-  v2 reject it by version, as v1 established.
+  v3 reject it by version, as v1 established. (`ir_version: 2` is already
+  taken by realms/interception — see docs/design-v2-realms.md.)
 
 ## 10. Why this serves the AI-author goal (and how we'll know)
 
