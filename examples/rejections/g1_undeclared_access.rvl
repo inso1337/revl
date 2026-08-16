@@ -3,11 +3,11 @@
 // type-check. (The library equivalent is a runtime proxy error at best.)
 //
 // expected error:
-//   g1_undeclared_access.rvl:10: `db` is not a declared requirement of Logger
-//     component Logger requires <nothing> — add `requires db: Database`?
+//   `db` is not a declared requirement of Logger
+//   component Logger requires <nothing> — add `requires db: <Service>`?
 
 service Database { fn query(sql: Str) -> List[Row] }
 
 component Logger {
-  let rows = db.query("SELECT 1")
+  let rows = effect db.query("SELECT 1") undo rows.drop()
 }

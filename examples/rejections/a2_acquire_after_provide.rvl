@@ -1,0 +1,16 @@
+// REJECTED — A2 (contract errata): acquisition after `provide`.
+// An effect acquired after a provision would be reverted (LIFO) while
+// dependents can still call the service through the withdrawal guard,
+// leaving provide-methods running against a torn-down acquisition.
+//
+// expected error:
+//   acquisition after `provide` — an effect acquired after a provision
+//   would be reverted while dependents can still call the service
+
+service Cache { fn get(key: Str) -> Opt[Str] }
+
+component BadOrder provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache { fn get(key) = store.get(key) }
+  let extra = effect Map.new() undo extra.drop()
+}

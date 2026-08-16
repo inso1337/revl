@@ -35,5 +35,16 @@ component UserCache requires db: Database provides cache: Cache {
   for the full design, the checked-guarantees table, and why native codegen
   is deliberately not the first target.
 
-**Status:** design phase. [DESIGN.md](DESIGN.md) is the current deliverable;
-the compiler (parser → checker → linker → cordis-py codegen) is next.
+**Status:** the v0 pipeline works end-to-end. `python -m revl compile`
+takes `.rvl` sources through parse → check → link → IR; both backends
+(cordis-py and cordis-ts, built in parallel against the frozen IR contract
+in [docs/backend-ir.md](docs/backend-ir.md)) emit runnable components that
+pass their R1–R5 semantics suites. The rejection suite in
+[examples/rejections/](examples/rejections/) is the checker's executable
+spec — one program per guarantee, each failing with the promised message.
+Decisions and IR v1 amendments live in
+[docs/contract-errata.md](docs/contract-errata.md).
+
+```bash
+uv venv && uv pip install -e ".[test]" && .venv/bin/pytest tests/
+```

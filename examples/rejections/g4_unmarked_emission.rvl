@@ -1,0 +1,16 @@
+// REJECTED — G4: an emission call without the `emit` marker.
+// `db.execute` is declared `emission`: it crosses the system boundary and
+// cannot be reverted. The call site must say so.
+//
+// expected error:
+//   call to emission `db.execute` must be marked `emit` (G4)
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Auditor requires db: Database {
+  effect db.execute("CREATE TABLE audit (id INT)")
+  undo   db.execute("DROP TABLE audit")
+}
