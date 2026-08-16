@@ -1,16 +1,56 @@
 {
-  "ir_version": 0,
+  "ir_version": 1,
   "services": {
     "Database": {
       "methods": {
-        "query": { "params": ["sql"], "emission": false },
-        "execute": { "params": ["sql"], "emission": true }
+        "query": {
+          "params": [
+            {
+              "name": "sql",
+              "type": "Str"
+            }
+          ],
+          "returns": "List[Row]",
+          "emission": false
+        },
+        "execute": {
+          "params": [
+            {
+              "name": "sql",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        }
       }
     },
     "Cache": {
       "methods": {
-        "get": { "params": ["key"], "emission": false },
-        "put": { "params": ["key", "value"], "emission": false }
+        "get": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            }
+          ],
+          "returns": "Opt[Str]",
+          "emission": false
+        },
+        "put": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            },
+            {
+              "name": "value",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": false
+        }
       }
     }
   },
@@ -18,11 +58,21 @@
     {
       "name": "PgDatabase",
       "config": [
-        { "name": "url", "type": "Str", "default": null },
-        { "name": "pool_size", "type": "Int", "default": 10 }
+        {
+          "name": "url",
+          "type": "Str",
+          "default": null
+        },
+        {
+          "name": "pool_size",
+          "type": "Int",
+          "default": 10
+        }
       ],
       "requires": {},
-      "provides": { "db": "Database" },
+      "provides": {
+        "db": "Database"
+      },
       "body": [
         {
           "step": "let-effect",
@@ -31,13 +81,22 @@
             "kind": "host",
             "fn": "Pool.open",
             "args": [
-              { "kind": "config", "field": "url" },
-              { "kind": "config", "field": "pool_size" }
+              {
+                "kind": "config",
+                "field": "url"
+              },
+              {
+                "kind": "config",
+                "field": "pool_size"
+              }
             ]
           },
           "undo": {
             "kind": "call",
-            "target": { "kind": "name", "id": "pool" },
+            "target": {
+              "kind": "name",
+              "id": "pool"
+            },
             "method": "close",
             "args": []
           }
@@ -49,30 +108,50 @@
           "methods": [
             {
               "name": "query",
-              "params": ["sql"],
+              "params": [
+                "sql"
+              ],
               "body": [
                 {
                   "step": "return",
                   "expr": {
                     "kind": "call",
-                    "target": { "kind": "name", "id": "pool" },
+                    "target": {
+                      "kind": "name",
+                      "id": "pool"
+                    },
                     "method": "query",
-                    "args": [{ "kind": "name", "id": "sql" }]
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "sql"
+                      }
+                    ]
                   }
                 }
               ]
             },
             {
               "name": "execute",
-              "params": ["sql"],
+              "params": [
+                "sql"
+              ],
               "body": [
                 {
                   "step": "return",
                   "expr": {
                     "kind": "call",
-                    "target": { "kind": "name", "id": "pool" },
+                    "target": {
+                      "kind": "name",
+                      "id": "pool"
+                    },
                     "method": "execute",
-                    "args": [{ "kind": "name", "id": "sql" }]
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "sql"
+                      }
+                    ]
                   }
                 }
               ]
@@ -84,16 +163,27 @@
     {
       "name": "UserCache",
       "config": [],
-      "requires": { "db": "Database" },
-      "provides": { "cache": "Cache" },
+      "requires": {
+        "db": "Database"
+      },
+      "provides": {
+        "cache": "Cache"
+      },
       "body": [
         {
           "step": "let-effect",
           "bind": "store",
-          "acquire": { "kind": "host", "fn": "Map.new", "args": [] },
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
           "undo": {
             "kind": "call",
-            "target": { "kind": "name", "id": "store" },
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
             "method": "drop",
             "args": []
           }
@@ -105,52 +195,90 @@
           "methods": [
             {
               "name": "get",
-              "params": ["key"],
+              "params": [
+                "key"
+              ],
               "body": [
                 {
                   "step": "return",
                   "expr": {
                     "kind": "call",
-                    "target": { "kind": "name", "id": "store" },
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
                     "method": "get",
-                    "args": [{ "kind": "name", "id": "key" }]
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      }
+                    ]
                   }
                 }
               ]
             },
             {
               "name": "put",
-              "params": ["key", "value"],
+              "params": [
+                "key",
+                "value"
+              ],
               "body": [
                 {
                   "step": "effect",
                   "acquire": {
                     "kind": "call",
-                    "target": { "kind": "name", "id": "store" },
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
                     "method": "insert",
                     "args": [
-                      { "kind": "name", "id": "key" },
-                      { "kind": "name", "id": "value" }
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "value"
+                      }
                     ]
                   },
                   "undo": {
                     "kind": "call",
-                    "target": { "kind": "name", "id": "store" },
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
                     "method": "remove",
-                    "args": [{ "kind": "name", "id": "key" }]
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      }
+                    ]
                   }
                 },
                 {
                   "step": "emit",
                   "expr": {
                     "kind": "call",
-                    "target": { "kind": "req", "name": "db" },
+                    "target": {
+                      "kind": "req",
+                      "name": "db"
+                    },
                     "method": "execute",
                     "args": [
                       {
                         "kind": "format",
                         "template": "INSERT INTO cache_log VALUES ($0)",
-                        "args": [{ "kind": "name", "id": "key" }]
+                        "args": [
+                          {
+                            "kind": "name",
+                            "id": "key"
+                          }
+                        ]
                       }
                     ]
                   }

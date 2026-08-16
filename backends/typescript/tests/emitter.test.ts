@@ -40,8 +40,8 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
   it('rejects references to undeclared requirements (G1 analogue)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
     const bad = {
-      ir_version: 0,
-      services: { Database: { methods: { query: { params: ['sql'], emission: false } } } },
+      ir_version: 1,
+      services: { Database: { methods: { query: { params: [{ name: 'sql', type: 'Str' }], returns: null, emission: false } } } },
       components: [
         {
           name: 'Bad',
@@ -71,8 +71,8 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
 
   it('rejects unsupported ir_version', () => {
     const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
-    const path = join(dir, 'v1.json')
-    writeFileSync(path, JSON.stringify({ ir_version: 1, services: {}, components: [] }))
+    const path = join(dir, 'v0.json')
+    writeFileSync(path, JSON.stringify({ ir_version: 0, services: {}, components: [] }))
     const result = runEmit(path)
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('ir_version')
@@ -81,7 +81,7 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
   it('rejects binding names that would shadow emitter scaffolding', () => {
     const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
     const bad = {
-      ir_version: 0,
+      ir_version: 1,
       services: {},
       components: [
         {

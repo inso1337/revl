@@ -56,6 +56,7 @@ def test_end_to_end_typescript_golden():
 # ---------------------------------------------------------------- rejections
 
 REJECTIONS = {
+    "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
     "g2_provision_conflict.rvl": "provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)",
     "g3_dependency_cycle.rvl": "dependency cycle: Alpha -> Beta -> Alpha (G3)",
@@ -75,6 +76,65 @@ def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
     assert expected in str(excinfo.value)
+
+
+# ---------------------------------------------------------------- v1 features
+
+def test_migrator_compiles_to_reference_ir():
+    """await + compensate lowering matches the frozen v1 reference."""
+    ir = compile_files([str(EXAMPLES / "migrator.rvl")])
+    reference = json.loads((EXAMPLES / "migrator.ir.json").read_text())
+    assert ir == reference
+
+
+def test_a3_host_colliding_names_are_renamed():
+    from revl import compile_source
+
+    ir = compile_source(
+        """
+        component Renamer {
+          let frame = effect Map.new() undo frame.drop()
+          let class = effect Map.new() undo class.drop()
+        }
+        """
+    )
+    body = ir["components"][0]["body"]
+    binds = [step["bind"] for step in body]
+    assert binds == ["frame_", "class_"], "host-reserved names must be renamed (A3)"
+    assert body[0]["undo"]["target"]["id"] == "frame_"
+
+
+def test_a4_literal_dollars_are_escaped():
+    from revl import compile_source
+
+    ir = compile_source(
+        """
+        service Bus { emission fn send(msg: Str) }
+        component Pricer requires bus: Bus {
+          let item = effect Map.new() undo item.drop()
+          emit bus.send("cost: $$9.99 for $item")
+        }
+        """
+    )
+    fmt = ir["components"][0]["body"][1]["expr"]["args"][0]
+    assert fmt["template"] == "cost: $$9.99 for $0"
+    assert fmt["args"] == [{"kind": "name", "id": "item"}]
+
+
+def test_a5_compensate_lowering():
+    from revl import compile_source
+
+    ir = compile_source(
+        """
+        service Bus { emission fn send(msg: Str) }
+        component Notifier requires bus: Bus {
+          emit bus.send("hello") compensate bus.send("goodbye")
+        }
+        """
+    )
+    step = ir["components"][0]["body"][0]
+    assert step["step"] == "emit"
+    assert step["compensate"]["method"] == "send"
 
 
 # ---------------------------------------------------------------- diagnostics

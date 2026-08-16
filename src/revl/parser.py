@@ -34,7 +34,8 @@ from .lexer import Token, lex
 @dataclass
 class MethodDecl:
     name: str
-    params: list[str]
+    params: list[tuple[str, str]]  # (name, type)
+    returns: str | None
     emission: bool
     line: int
 
@@ -97,6 +98,13 @@ class EffectStmt:
 
 @dataclass
 class EmitStmt:
+    expr: object
+    line: int
+    compensate: object | None = None
+
+
+@dataclass
+class AwaitStmt:
     expr: object
     line: int
 
@@ -200,20 +208,21 @@ class Parser:
             self.expect("kw", "fn")
             mname = self.expect("ident").value
             self.expect("(")
-            params: list[str] = []
+            params: list[tuple[str, str]] = []
             while not self.at(")"):
-                params.append(self.expect("ident").value)
+                pname = self.expect("ident").value
                 self.expect(":")
-                self.type_()
+                params.append((pname, self.type_()))
                 if self.at(","):
                     self.next()
             self.expect(")")
+            returns = None
             if self.at("arrow"):
                 self.next()
-                self.type_()
+                returns = self.type_()
             if mname in methods:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
-            methods[mname] = MethodDecl(mname, params, emission, mline)
+            methods[mname] = MethodDecl(mname, params, returns, emission, mline)
         self.expect("}")
         return ServiceDecl(name, methods, line)
 
@@ -307,7 +316,22 @@ class Parser:
             return EffectStmt(acquire, undo, line)
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
-            return EmitStmt(self.expr(), tok.line)
+            expr = self.expr()
+            compensate = None
+            if self.at("kw", "compensate"):
+                self.next()
+                compensate = self.expr()
+            return EmitStmt(expr, tok.line, compensate)
+        if tok.kind == "kw" and tok.value == "await":
+            if in_method:
+                raise self.err(
+                    tok.line,
+                    "`await` is only allowed in a component body",
+                    hint="a provide method runs while the component is ACTIVE; iteration "
+                         "boundaries (paper §4.3.2) exist only during activation (A1)",
+                )
+            self.next()
+            return AwaitStmt(self.expr(), tok.line)
         if tok.kind == "kw" and tok.value == "return":
             if not in_method:
                 raise self.err(tok.line, "`return` is only allowed inside a provide method body")

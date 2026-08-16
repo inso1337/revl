@@ -52,6 +52,22 @@ JS_RESERVED = {
 TYPE_MAP = {"Str": "string", "Int": "number", "Bool": "boolean", "Float": "number"}
 
 
+def _ts_type(name: object) -> str:
+    """Surface type -> TS type (IR v1/A6). Unknown names map to `unknown`."""
+    if not isinstance(name, str) or not name:
+        return "unknown"
+    if name in TYPE_MAP:
+        return TYPE_MAP[name]
+    generic = re.match(r"^(\w+)\[(.+)\]$", name)
+    if generic:
+        head, inner = generic.group(1), generic.group(2)
+        if head == "List":
+            return f"{_ts_type(inner)}[]"
+        if head == "Opt":
+            return f"{_ts_type(inner)} | undefined"
+    return "unknown"
+
+
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
@@ -181,14 +197,18 @@ def _expr(node: object, scope: _Scope) -> str:
         args = [_expr(arg, scope) for arg in node.get("args") or []]
         out = []
         pos = 0
-        for match in re.finditer(r"\$(\d+)", template):
+        # v1/A4: split on placeholders and `$$` escapes first, then render
+        for match in re.finditer(r"\$\$|\$(\d+)", template):
             out.append(_template_text(template[pos : match.start()]))
-            index = int(match.group(1))
-            if index >= len(args):
-                raise EmitError(
-                    f"format placeholder ${index} out of range in {template!r}"
-                )
-            out.append("${" + args[index] + "}")
+            if match.group(0) == "$$":
+                out.append("$")
+            else:
+                index = int(match.group(1))
+                if index >= len(args):
+                    raise EmitError(
+                        f"format placeholder ${index} out of range in {template!r}"
+                    )
+                out.append("${" + args[index] + "}")
             pos = match.end()
         out.append(_template_text(template[pos:]))
         return "`" + "".join(out) + "`"
@@ -222,7 +242,16 @@ def _method_body(steps: list, scope: _Scope, indent: str) -> list[str]:
             lines.append(f"{indent}  return () => {undo}")
             lines.append(f"{indent}}})")
         elif kind == "emit":
-            lines.append(f"{indent}{_expr(step['expr'], scope)}")
+            if step.get("compensate") is not None:
+                # v1/A5: the compensation joins the fiber's accumulator
+                lines.append(f"{indent}ctx.effect(() => {{")
+                lines.append(f"{indent}  {_expr(step['expr'], scope)}")
+                lines.append(f"{indent}  return () => {_expr(step['compensate'], scope)}")
+                lines.append(f"{indent}}})")
+            else:
+                lines.append(f"{indent}{_expr(step['expr'], scope)}")
+        elif kind == "await":
+            raise EmitError("await steps are not allowed inside method bodies (A1)")
         elif kind == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:
@@ -245,15 +274,20 @@ def _provide_impl(step: dict, scope: _Scope, services: dict, indent: str) -> lis
                 f"method {name!r} is not declared by service {service_name!r}"
             )
         params = [ _ident(p, "parameter") for p in method.get("params") or [] ]
-        if params != list(declared[name].get("params") or []):
+        spec_params = declared[name].get("params") or []
+        # v1/A6: method params are the surface names binding the body; the
+        # *types* come from the service declaration (arity must agree)
+        if len(params) != len(spec_params):
             raise EmitError(
-                f"method {name!r} parameter list does not match service "
-                f"{service_name!r}"
+                f"method {name!r} arity does not match service {service_name!r}"
             )
         body_scope = scope.child()
         for param in params:
             body_scope.locals.add(param)
-        sig = ", ".join(f"{p}: any" for p in params)
+        sig = ", ".join(
+            f"{p}: {_ts_type(spec.get('type'))}"
+            for p, spec in zip(params, spec_params)
+        )
         lines.append(f"{indent}{name}({sig}) {{")
         lines.extend(_method_body(method.get("body") or [], body_scope, indent + "  "))
         lines.append(f"{indent}}},")
@@ -280,6 +314,14 @@ def _component_body(component: dict, services: dict, indent: str) -> list[str]:
             lines.append(f"{indent}yield () => {undo}")
         elif kind == "emit":
             lines.append(f"{indent}{_expr(step['expr'], scope)}")
+            if step.get("compensate") is not None:
+                # v1/A5: compensation accumulates LIFO like an inverse
+                lines.append(f"{indent}yield () => {_expr(step['compensate'], scope)}")
+        elif kind == "await":
+            # v1/A1: the await lands (inertia), then the yield closes the
+            # iteration so a divert during the await skips every later step
+            lines.append(f"{indent}await {_expr(step['expr'], scope)}")
+            lines.append(f"{indent}yield null  // iteration boundary (A1)")
         elif kind == "provide":
             name = step.get("name")
             if name not in provides:
@@ -367,8 +409,13 @@ def _component(component: dict, services: dict) -> list[str]:
 
     # One generator per body: cordis runs disposers of a single effect
     # strictly sequentially (LIFO); top-level fiber effects would be
-    # disposed concurrently (see REPORT.md, finding 1).
-    lines.append("    ctx.effect(function* () {")
+    # disposed concurrently (see REPORT.md, finding 1). A body containing
+    # an `await` step compiles to an async generator (v1/A1).
+    is_async = any(
+        step.get("step") == "await" for step in component.get("body") or []
+    )
+    generator = "async function*" if is_async else "function*"
+    lines.append(f"    ctx.effect({generator} () {{")
     lines.extend(_component_body(component, services, "      "))
     lines.append(f"    }}, {_string(name + '.body')})")
     lines.append("  },")
@@ -380,7 +427,7 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
-    if ir.get("ir_version") != 0:
+    if ir.get("ir_version") != 1:
         raise EmitError(f"unsupported ir_version: {ir.get('ir_version')!r}")
 
     services = ir.get("services") or {}
@@ -400,12 +447,15 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
         out.append(f"export interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
             _ident(mname, "method")
+            # v1/A6: typed signatures derived from the service declaration
             params = ", ".join(
-                f"{_ident(p, 'parameter')}: any" for p in method.get("params") or []
+                f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'))}"
+                for p in method.get("params") or []
             )
+            returns = _ts_type(method["returns"]) if method.get("returns") else "void"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
-            out.append(f"  {mname}({params}): any")
+            out.append(f"  {mname}({params}): {returns}")
         out.append("}")
         out.append("")
 

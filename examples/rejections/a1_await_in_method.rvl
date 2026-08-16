@@ -1,0 +1,19 @@
+// REJECTED — A1: `await` outside a component body.
+// Iteration boundaries exist only during activation (paper §4.3.2); a
+// provide method runs while the component is ACTIVE, where there is no
+// transition to divert.
+//
+// expected error:
+//   `await` is only allowed in a component body
+
+service Cache { fn get(key: Str) -> Opt[Str] }
+
+component BadAwait provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) {
+      await Job.run("lookup")
+      return store.get(key)
+    }
+  }
+}
