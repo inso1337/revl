@@ -82,9 +82,16 @@ def main(argv: list[str] | None = None) -> int:
         print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
         for entry in manifest.get("components") or []:
             name = entry["name"]
+            isolate = entry.get("isolate") or {}
+
+            def _decorate(key: str) -> str:
+                return f"{key}@{isolate[key]}" if key in isolate else key
+
             print(f"\ncomponent {name}  ({entry.get('file') or '?'})")
-            print(f"  requires: {', '.join(entry.get('inject') or []) or '—'}")
-            print(f"  provides: {', '.join(entry.get('provides') or []) or '—'}")
+            print(f"  requires: {', '.join(_decorate(k) for k in entry.get('inject') or []) or '—'}")
+            print(f"  provides: {', '.join(_decorate(k) for k in entry.get('provides') or []) or '—'}")
+            for key, metadata in (entry.get("intercept") or {}).items():
+                print(f"  intercept: {key} {metadata}")
             stats = boundary.get(name)
             if stats is None:
                 continue

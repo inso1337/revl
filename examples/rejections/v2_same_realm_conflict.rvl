@@ -1,0 +1,21 @@
+// REJECTED — G2 under realms: same key, SAME realm.
+// Cross-realm same-key provision is the multi-tenancy feature
+// (examples/tenants.rvl compiles); the same realm is still a conflict,
+// and the error names the realm.
+//
+// expected error:
+//   provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)
+
+service Kv { fn get(k: Str) -> Opt[Str] }
+
+component StoreOne provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(k) }
+}
+
+component StoreTwo provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(k) }
+}
