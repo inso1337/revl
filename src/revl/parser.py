@@ -138,6 +138,7 @@ class ComponentDecl:
     provides: list[tuple[str, str, int]]  # (key, service, line)
     body: list
     line: int
+    source: str = ""  # provenance: the file this component was parsed from
 
 
 @dataclass
@@ -440,5 +441,13 @@ def _describe_expr(expr) -> str:
 
 
 def parse_file(path: str) -> Program:
+    import os
+
     with open(path, encoding="utf-8") as handle:
-        return Parser(handle.read(), path).parse()
+        program = Parser(handle.read(), path).parse()
+    # provenance is recorded relative to the invocation cwd so IR documents
+    # stay machine-independent when compiled from the project root
+    source = os.path.relpath(path)
+    for component in program.components:
+        component.source = source
+    return program

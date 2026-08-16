@@ -29,6 +29,7 @@
   "components": [
     {
       "name": "Migrator",
+      "source": "examples/migrator.rvl",
       "config": [],
       "requires": {
         "db": "Database"
@@ -113,5 +114,20 @@
         }
       ]
     }
-  ]
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Migrator",
+        "file": "examples/migrator.rvl",
+        "inject": [
+          "db"
+        ],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "Migrator"
+    ]
+  }
 }
