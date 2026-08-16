@@ -94,12 +94,36 @@ class Env:
         return params
 
 
-def check_and_lower(program: Program) -> dict:
-    services = {}
+def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
+    """Check and lower a program, optionally against an *ambient* composition
+    (a running manifest, DESIGN §4's runtime-admission gate): ambient services
+    are in scope without redeclaration, and G2/G3 are checked over the union
+    of ambient and newly compiled components.
+
+    `ambient`: {"services": <v1 services table>, "components": [<manifest
+    component entries>]} — see compile_files for how it is derived.
+    """
+    ambient = ambient or {}
+    ambient_services = {
+        name: _service_from_ir(name, spec)
+        for name, spec in (ambient.get("services") or {}).items()
+    }
+
+    services: dict[str, ServiceDecl] = {}
     for svc in program.services:
         if svc.name in services:
             raise RevlError(program.filename, svc.line, f"duplicate service `{svc.name}`")
+        prior = ambient_services.get(svc.name)
+        if prior is not None and not _service_equal(svc, prior):
+            raise RevlError(
+                program.filename, svc.line,
+                f"service `{svc.name}` differs from the running manifest",
+                hint="an admitted component must agree with the composition's "
+                     "interface for the key it touches (interface drift, DESIGN §6.6)",
+            )
         services[svc.name] = svc
+    for name, svc in ambient_services.items():
+        services.setdefault(name, svc)
 
     components = []
     seen = set()
@@ -109,7 +133,7 @@ def check_and_lower(program: Program) -> dict:
         seen.add(comp.name)
         components.append(_lower_component(comp, services, program.filename))
 
-    _link(program, components)
+    manifest = _link(program, components, ambient.get("components") or [])
 
     return {
         "ir_version": IR_VERSION,
@@ -127,7 +151,29 @@ def check_and_lower(program: Program) -> dict:
             for name, svc in services.items()
         },
         "components": components,
+        "manifest": manifest,
     }
+
+
+def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
+    """Rebuild a checkable ServiceDecl from a v1 IR services entry."""
+    from .parser import MethodDecl
+
+    methods = {}
+    for mname, mspec in (spec.get("methods") or {}).items():
+        params = [(p.get("name"), p.get("type")) for p in mspec.get("params") or []]
+        methods[mname] = MethodDecl(mname, params, mspec.get("returns"), bool(mspec.get("emission")), 0)
+    return ServiceDecl(name, methods, 0)
+
+
+def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
+    def shape(svc: ServiceDecl):
+        return {
+            m.name: (tuple(m.params), m.returns, m.emission)
+            for m in svc.methods.values()
+        }
+
+    return shape(a) == shape(b)
 
 
 # ---------------------------------------------------------------- components
@@ -177,6 +223,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
 
     return {
         "name": comp.name,
+        "source": comp.source or filename,
         "config": [{"name": f.name, "type": f.type, "default": f.default} for f in comp.config],
         "requires": dict(env.requires),
         "provides": provides,
@@ -374,29 +421,54 @@ def _node_desc(node: dict) -> str:
 
 # ---------------------------------------------------------------- linker
 
-def _link(program: Program, components: list[dict]) -> None:
-    provider_of: dict[str, str] = {}
+def _link(program: Program, components: list[dict], ambient_components: list[dict]) -> dict:
+    """G2/G3 over the union of ambient (running) and new components, and the
+    composition manifest (cordisc-compatible schema: components with
+    name/file/inject/provides, plus loadOrder)."""
     lines = {comp["name"]: decl.line for comp, decl in zip(components, program.components)}
+
+    entries: list[dict] = []
+    for amb in ambient_components:
+        entries.append({
+            "name": amb.get("name"),
+            "file": amb.get("file", ""),
+            "inject": list(amb.get("inject") or []),
+            "provides": list(amb.get("provides") or []),
+        })
     for comp in components:
-        for key in comp["provides"]:
+        entries.append({
+            "name": comp["name"],
+            "file": comp.get("source", ""),
+            "inject": sorted(comp["requires"]),
+            "provides": sorted(comp["provides"]),
+        })
+
+    def _line(name: str) -> int:
+        return lines.get(name, 1)
+
+    provider_of: dict[str, str] = {}
+    for entry in entries:
+        for key in entry["provides"]:
             if key in provider_of:
                 raise RevlError(
-                    program.filename, lines[comp["name"]],
+                    program.filename, _line(entry["name"]),
                     f"provision conflict: key `{key}` is provided by both "
-                    f"{provider_of[key]} and {comp['name']} (G2)",
+                    f"{provider_of[key]} and {entry['name']} (G2)",
                 )
-            provider_of[key] = comp["name"]
+            provider_of[key] = entry["name"]
 
     # edges: provider -> consumer along each resolvable key
-    graph: dict[str, list[str]] = {comp["name"]: [] for comp in components}
-    for comp in components:
-        for key in comp["requires"]:
+    graph: dict[str, list[str]] = {entry["name"]: [] for entry in entries}
+    indegree: dict[str, int] = {entry["name"]: 0 for entry in entries}
+    for entry in entries:
+        for key in entry["inject"]:
             provider = provider_of.get(key)
-            if provider is not None and provider != comp["name"]:
-                graph[provider].append(comp["name"])
-            elif provider == comp["name"]:
-                raise RevlError(program.filename, lines[comp["name"]],
-                                f"component {comp['name']} requires a key it provides itself (`{key}`) (G3)")
+            if provider == entry["name"]:
+                raise RevlError(program.filename, _line(entry["name"]),
+                                f"component {entry['name']} requires a key it provides itself (`{key}`) (G3)")
+            if provider is not None:
+                graph[provider].append(entry["name"])
+                indegree[entry["name"]] += 1
 
     state: dict[str, int] = {}
     stack: list[str] = []
@@ -407,13 +479,26 @@ def _link(program: Program, components: list[dict]) -> None:
         for succ in graph[name]:
             if state.get(succ) == 1:
                 cycle = stack[stack.index(succ):] + [succ]
-                raise RevlError(program.filename, lines[succ],
+                raise RevlError(program.filename, _line(succ),
                                 "dependency cycle: " + " -> ".join(cycle) + " (G3)")
             if state.get(succ, 0) == 0:
                 visit(succ)
         stack.pop()
         state[name] = 2
 
-    for comp in components:
-        if state.get(comp["name"], 0) == 0:
-            visit(comp["name"])
+    for entry in entries:
+        if state.get(entry["name"], 0) == 0:
+            visit(entry["name"])
+
+    # providers-first load order (Kahn, stable in entry order)
+    order: list[str] = []
+    ready = [e["name"] for e in entries if indegree[e["name"]] == 0]
+    while ready:
+        name = ready.pop(0)
+        order.append(name)
+        for succ in graph[name]:
+            indegree[succ] -= 1
+            if indegree[succ] == 0:
+                ready.append(succ)
+
+    return {"components": entries, "loadOrder": order}

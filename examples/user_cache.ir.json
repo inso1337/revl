@@ -57,6 +57,7 @@
   "components": [
     {
       "name": "PgDatabase",
+      "source": "examples/user_cache.rvl",
       "config": [
         {
           "name": "url",
@@ -162,6 +163,7 @@
     },
     {
       "name": "UserCache",
+      "source": "examples/user_cache.rvl",
       "config": [],
       "requires": {
         "db": "Database"
@@ -289,5 +291,31 @@
         }
       ]
     }
-  ]
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "PgDatabase",
+        "file": "examples/user_cache.rvl",
+        "inject": [],
+        "provides": [
+          "db"
+        ]
+      },
+      {
+        "name": "UserCache",
+        "file": "examples/user_cache.rvl",
+        "inject": [
+          "db"
+        ],
+        "provides": [
+          "cache"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "PgDatabase",
+      "UserCache"
+    ]
+  }
 }

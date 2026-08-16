@@ -11,9 +11,22 @@ def compile_source(source: str, filename: str = "<string>") -> dict:
     return check_and_lower(Parser(source, filename).parse())
 
 
-def compile_files(paths: list[str]) -> dict:
+def compile_files(paths: list[str], manifest: dict | None = None,
+                  replacing: tuple[str, ...] = ()) -> dict:
     """Compile a composition: all services and components across the files
-    are checked and linked together (the composition manifest, DESIGN §4)."""
+    are checked and linked together (the composition manifest, DESIGN §4).
+
+    `manifest` — the runtime-admission gate: pass a previously compiled IR
+    document (or its `manifest` plus `services`) and the new files are
+    linked *against the running composition*: ambient services are in scope
+    without redeclaration, and G2/G3 span both. A compiled component whose
+    name matches a running one implicitly replaces it (the hot-swap case);
+    `replacing` names additional components being withdrawn in the same
+    admission (renames).
+
+    The returned document's `components` are only the newly compiled ones;
+    its `manifest` describes the whole resulting composition.
+    """
     merged = Program(filename=paths[0] if paths else "<none>")
     seen_services: dict[str, str] = {}
     seen_components: dict[str, str] = {}
@@ -32,4 +45,16 @@ def compile_files(paths: list[str]) -> dict:
             seen_components[comp.name] = path
             merged.components.append(comp)
         merged.filename = path  # diagnostics from lowering name the declaring file
-    return check_and_lower(merged)
+
+    ambient = None
+    if manifest is not None:
+        running = manifest.get("manifest", manifest)
+        dropped = set(replacing) | {comp.name for comp in merged.components}
+        ambient = {
+            "services": manifest.get("services") or {},
+            "components": [
+                entry for entry in (running.get("components") or [])
+                if entry.get("name") not in dropped
+            ],
+        }
+    return check_and_lower(merged, ambient)
