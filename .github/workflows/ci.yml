@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[test]"
+      # the frontend suite includes the pure-Python halves of all three
+      # backends (emitter goldens, IR contract, manifest/admission, audit);
+      # runtime-integration tests skip cleanly when their host runtime is
+      # absent (cordis-py fork, node/cordis, wasmtime, cordisc)
+      - run: pytest tests/ -q
+
+  backend-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v4
+      - run: sh backends/python/setup.sh
+      - run: cd backends/python && .venv/bin/pytest -q
+      - run: cd backends/python && .venv/bin/python demo.py
+
+  backend-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cd backends/typescript && npm ci
+      - run: cd backends/typescript && npx vitest run
+      - run: cd backends/typescript && npx tsc --noEmit

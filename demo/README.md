@@ -111,16 +111,19 @@ The four moments worth pausing on:
 | `variants/pg_database.hotswap.rvl` | the good edit `--script` applies (extra acquisition, bigger pool) |
 | `variants/pg_database.rejected.rvl` | the bad edit `--script` applies (acquisition with no inverse, G4) |
 
-### Why services live in their own file
+### How a swap compiles: the runtime-admission gate
 
 The linker rejects two providers of one key inside a single composition
 (G2) — which is exactly right, and exactly what makes "compile the old and
-new version together" impossible. So a swap compiles the changed file **as
-its own composition**: `compile_files([services.rvl, changed.rvl])`. Service
-declarations therefore have to be shareable, which is why they sit in a file
-of their own rather than being repeated per component (`compile_files`
-rejects a service declared twice). Editing `services.rvl` recompiles every
-component, because the vocabulary itself moved.
+new version together" impossible. So a swap compiles the changed file
+**alone, against the running composition**:
+`compile_files([changed.rvl], manifest=running_ir)` — the DESIGN §4
+admission gate. Ambient service declarations come from the running
+manifest (the changed file redeclares nothing), a component with a running
+name is an implicit replacement, and G2/G3 span the running and the new
+components together. `services.rvl` holds the shared vocabulary for the
+*initial* composition; editing it recompiles everything from scratch,
+because the vocabulary itself moved.
 
 ## What this demo proves
 

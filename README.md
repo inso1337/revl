@@ -30,20 +30,26 @@ component UserCache requires db: Database provides cache: Cache {
   explicit `emit` admission of irreversibility) won't compile. Dependency
   cycles and provision conflicts are rejected at link time. Teardown cannot
   register effects, by construction.
-- v0 compiles to [cordis-py](https://github.com/geohotstan/cordis-py); the
-  v1 backend target is the Wasm component model. See [DESIGN.md](DESIGN.md)
-  for the full design, the checked-guarantees table, and why native codegen
-  is deliberately not the first target.
+- Backends: [cordis-py](https://github.com/geohotstan/cordis-py),
+  [cordis](https://github.com/cordiverse/cordis) (TypeScript), and the
+  cordis-wasm substrate. See [DESIGN.md](DESIGN.md) for the full design,
+  the checked-guarantees table, and why raw native codegen is deliberately
+  a non-goal.
 
-**Status:** the v0 pipeline works end-to-end. `python -m revl compile`
-takes `.rvl` sources through parse → check → link → IR; both backends
-(cordis-py and cordis-ts, built in parallel against the frozen IR contract
-in [docs/backend-ir.md](docs/backend-ir.md)) emit runnable components that
-pass their R1–R5 semantics suites. The rejection suite in
+**Status: v1.** The pipeline runs end-to-end on **three backends**:
+`python -m revl compile` takes `.rvl` sources through parse → check →
+link → IR ([docs/backend-ir-v1.md](docs/backend-ir-v1.md)), and the
+emitters produce runnable components for **cordis-py**, **cordis** (TS),
+and the **cordis-wasm substrate** ([backends/wasm/](backends/wasm/)) —
+where confinement is enforced by the sandbox and `effect/undo` compiles
+to a state machine with physical partial rollback. Divert-during-`await`
+semantics (A1) are verified on all three. `python -m revl audit` prints a
+composition's manifest and G8 boundary surface; `compile_files(...,
+manifest=running)` is the runtime-admission gate. The rejection suite in
 [examples/rejections/](examples/rejections/) is the checker's executable
-spec — one program per guarantee, each failing with the promised message.
-Decisions and IR v1 amendments live in
-[docs/contract-errata.md](docs/contract-errata.md).
+spec, and [demo/](demo/) is a live file-watching hot-swap loop — edit a
+`.rvl`, watch the running system recompile and swap it. The
+[2.0 full-language proposal](docs/syntax-2.0.md) is the next frontier.
 
 ```bash
 uv venv && uv pip install -e ".[test]" && .venv/bin/pytest tests/
