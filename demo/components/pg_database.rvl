@@ -1,0 +1,22 @@
+// The provider. Owns one host resource (a connection pool) and publishes the
+// `db` key. Edit this file while `live.py` is running: the runtime unloads
+// this component, every dependent deactivates first (LIFO, dependents before
+// providers), the pool closes, and the new version loads in its place.
+//
+// Things worth trying while the demo runs:
+//   * change the `pool_size` default
+//   * add an acquisition above `provide` (see demo/variants/)
+//   * delete the `undo pool.close()` clause — the swap is *rejected* at
+//     compile time and the running system keeps serving
+
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 10 }
+
+  let pool = effect Pool.open(config.url, config.pool_size)
+             undo   pool.close()
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
