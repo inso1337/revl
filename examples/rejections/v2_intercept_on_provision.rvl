@@ -1,0 +1,16 @@
+// REJECTED — `intercept` on a provided key.
+// Interception is the component-declared metadata d(k) of Def. 30, whose
+// domain is the dependency set: it shapes how THIS component's accesses
+// are mediated. A provider has nothing to intercept — it receives
+// metadata from its consumers' declarations.
+//
+// expected error:
+//   `intercept` applies to required keys only — `kv` is a provision
+
+service Kv { fn get(k: Str) -> Opt[Str] }
+
+component Store provides kv: Kv {
+  intercept kv with { quota: 5 }
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(k) }
+}

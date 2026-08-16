@@ -22,6 +22,8 @@ from .parser import (
     EffectStmt,
     EmitStmt,
     Interp,
+    InterceptStmt,
+    IsolateStmt,
     LetEffect,
     Lit,
     Postfix,
@@ -32,6 +34,11 @@ from .parser import (
 )
 
 IR_VERSION = 1
+IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
+
+# the default shared realm (paper Def. 28: an unisolated key resolves to
+# its own realm); rendered as "shared" in diagnostics
+SHARED_REALM = ""
 
 # A3: identifiers that must never appear verbatim in emitted code on either
 # host. Python keywords come from the keyword module; the rest is a curated
@@ -135,8 +142,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     manifest = _link(program, components, ambient.get("components") or [])
 
+    uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
+
     return {
-        "ir_version": IR_VERSION,
+        "ir_version": IR_VERSION_V2 if uses_v2 else IR_VERSION,
         "services": {
             name: {
                 "methods": {
@@ -192,7 +201,53 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     body = []
     provided_keys: set[str] = set()
     provide_seen_line: int | None = None
+    isolate: dict[str, str] = {}
+    intercept: dict[str, dict] = {}
+    action_seen = False
     for stmt in comp.body:
+        if isinstance(stmt, (IsolateStmt, InterceptStmt)):
+            # prelude rule: realm/metadata declarations derive the resolution
+            # context (Def. 27/29) and must precede every dependency access
+            if action_seen:
+                kw = "isolate" if isinstance(stmt, IsolateStmt) else "intercept"
+                raise RevlError(
+                    filename, stmt.line,
+                    f"`{kw}` must precede every effect, emit, await, and provide statement",
+                    hint="realm and metadata declarations derive the resolution context "
+                         "before any dependency access (prelude rule, docs/design-v2-realms.md)",
+                )
+            if isinstance(stmt, IsolateStmt):
+                if stmt.key not in env.requires and stmt.key not in provides:
+                    raise RevlError(
+                        filename, stmt.line,
+                        f"`{stmt.key}` is not a declared requirement or provision of {comp.name}",
+                        hint="`isolate` targets a key from the component header (G1)",
+                    )
+                if stmt.key in isolate:
+                    raise RevlError(filename, stmt.line,
+                                    f"key `{stmt.key}` is isolated twice in {comp.name}")
+                isolate[stmt.key] = stmt.realm
+            else:
+                if stmt.key in provides and stmt.key not in env.requires:
+                    raise RevlError(
+                        filename, stmt.line,
+                        f"`intercept` applies to required keys only — `{stmt.key}` is a provision",
+                        hint="interception is the component-declared metadata d(k) of Def. 30, "
+                             "whose domain is the dependency set; providers receive metadata "
+                             "from their consumers' declarations",
+                    )
+                if stmt.key not in env.requires:
+                    raise RevlError(
+                        filename, stmt.line,
+                        f"`{stmt.key}` is not a declared requirement of {comp.name}",
+                        hint="`intercept` targets a key from the `requires` clause (G1)",
+                    )
+                if stmt.key in intercept:
+                    raise RevlError(filename, stmt.line,
+                                    f"key `{stmt.key}` is intercepted twice in {comp.name}")
+                intercept[stmt.key] = stmt.metadata
+            continue
+        action_seen = True
         if isinstance(stmt, (LetEffect, EffectStmt)) and provide_seen_line is not None:
             raise RevlError(
                 filename, stmt.line,
@@ -221,7 +276,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         else:  # pragma: no cover — grammar prevents it
             raise RevlError(filename, stmt.line, "unexpected statement in component body")
 
-    return {
+    lowered = {
         "name": comp.name,
         "source": comp.source or filename,
         "config": [{"name": f.name, "type": f.type, "default": f.default} for f in comp.config],
@@ -229,6 +284,12 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         "provides": provides,
         "body": body,
     }
+    # v2 fields appear only when used, so v1 documents stay byte-identical
+    if isolate:
+        lowered["isolate"] = isolate
+    if intercept:
+        lowered["intercept"] = intercept
+    return lowered
 
 
 def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: set[str], env: Env) -> dict:
@@ -429,40 +490,60 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
 
     entries: list[dict] = []
     for amb in ambient_components:
-        entries.append({
+        entry = {
             "name": amb.get("name"),
             "file": amb.get("file", ""),
             "inject": list(amb.get("inject") or []),
             "provides": list(amb.get("provides") or []),
-        })
+        }
+        if amb.get("isolate"):
+            entry["isolate"] = dict(amb["isolate"])
+        if amb.get("intercept"):
+            entry["intercept"] = dict(amb["intercept"])
+        entries.append(entry)
     for comp in components:
-        entries.append({
+        entry = {
             "name": comp["name"],
             "file": comp.get("source", ""),
             "inject": sorted(comp["requires"]),
             "provides": sorted(comp["provides"]),
-        })
+        }
+        if comp.get("isolate"):
+            entry["isolate"] = dict(comp["isolate"])
+        if comp.get("intercept"):
+            entry["intercept"] = dict(comp["intercept"])
+        entries.append(entry)
 
     def _line(name: str) -> int:
         return lines.get(name, 1)
 
-    provider_of: dict[str, str] = {}
+    def _realm(entry: dict, key: str) -> str:
+        return (entry.get("isolate") or {}).get(key, SHARED_REALM)
+
+    # v2: provision disjointness is per-(key, realm) — same key in different
+    # realms is the multi-tenancy feature, same realm is the conflict. The
+    # realm is named only when it isn't the shared one, so v1 diagnostics
+    # are unchanged.
+    provider_of: dict[tuple[str, str], str] = {}
     for entry in entries:
         for key in entry["provides"]:
-            if key in provider_of:
+            realm = _realm(entry, key)
+            where = "" if realm == SHARED_REALM else f" in realm `{realm}`"
+            if (key, realm) in provider_of:
                 raise RevlError(
                     program.filename, _line(entry["name"]),
-                    f"provision conflict: key `{key}` is provided by both "
-                    f"{provider_of[key]} and {entry['name']} (G2)",
+                    f"provision conflict: key `{key}`{where} is provided "
+                    f"by both {provider_of[(key, realm)]} and {entry['name']} (G2)",
                 )
-            provider_of[key] = entry["name"]
+            provider_of[(key, realm)] = entry["name"]
 
-    # edges: provider -> consumer along each resolvable key
+    # edges: provider -> consumer where the consumer's realm for a key
+    # matches the provider's — realm separation legitimately breaks cycles
     graph: dict[str, list[str]] = {entry["name"]: [] for entry in entries}
     indegree: dict[str, int] = {entry["name"]: 0 for entry in entries}
     for entry in entries:
         for key in entry["inject"]:
-            provider = provider_of.get(key)
+            provider = provider_of.get((key, _realm(entry, key)))
             if provider == entry["name"]:
                 raise RevlError(program.filename, _line(entry["name"]),
                                 f"component {entry['name']} requires a key it provides itself (`{key}`) (G3)")

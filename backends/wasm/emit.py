@@ -319,6 +319,11 @@ def emit(ir: dict) -> dict[str, str]:
     """Lower one IR document to WAT modules, one per component."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    if ir.get("ir_version") == 2:
+        raise EmitError(
+            "ir_version 2 (realms/interception) is not lowerable on this tier yet — "
+            "realm-qualified import namespaces are future work; see docs/design-v2-realms.md"
+        )
     if ir.get("ir_version") != IR_VERSION:
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION})")
     services = ir.get("services") or {}

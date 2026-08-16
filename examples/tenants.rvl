@@ -1,0 +1,46 @@
+// v2 realms: two tenants, one key. Both stores provide `kv`; both apps
+// require it — and the composition links because provision disjointness
+// is per-(key, realm) (G2, paper Def. 43's "disjointness within a realm").
+// Each app also declares intercept metadata for its access (Def. 30),
+// consumed by the harness without touching provider or consumer.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantBStore provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantAApp requires kv: Kv {
+  isolate kv in realm("tenant_a")
+  intercept kv with { quota: 5, tags: ["tenant_a"] }
+  effect kv.set("who", "alice") undo kv.set("who", "")
+}
+
+component TenantBApp requires kv: Kv {
+  isolate kv in realm("tenant_b")
+  intercept kv with { quota: 9, tags: ["tenant_b"] }
+  effect kv.set("who", "bob") undo kv.set("who", "")
+}
