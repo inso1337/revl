@@ -23,4 +23,5 @@ function emitFixture(fixture: string, outName: string): void {
 export default function setup(): void {
   emitFixture('user_cache.ir.json', 'user_cache.ts')
   emitFixture('r3_migrator.ir.json', 'r3_migrator.ts')
+  emitFixture('tenants.ir.json', 'tenants.ts')
 }
