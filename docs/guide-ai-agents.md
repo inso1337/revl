@@ -136,7 +136,7 @@ Rules that will reject you if you forget them:
 ## The guarantees are your safety net
 
 The checker enforces, at compile time, the invariants a runtime can't
-([DESIGN.md](DESIGN.md) §4): G1 declared-only access · G2 provision
+([DESIGN.md](../DESIGN.md) §4): G1 declared-only access · G2 provision
 disjointness · G3 no dependency cycles · G4 inverse-or-emit · G5 no teardown
 effects · G6 purity outside `effect` · G7 LIFO-complete teardown · G8
 enumerable boundary. A program that compiles satisfies them — that is the
