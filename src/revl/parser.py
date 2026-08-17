@@ -90,12 +90,20 @@ class LetEffect:
     acquire: object
     undo: object
     line: int
+    setup: list = field(default_factory=list)
 
 
 @dataclass
 class EffectStmt:
     acquire: object
     undo: object
+    line: int
+    setup: list = field(default_factory=list)
+
+
+@dataclass
+class FailStmt:
+    message: object
     line: int
 
 
@@ -723,11 +731,30 @@ class Parser:
             self.next()
             bind = self.expect("ident").value
             self.expect("=")
-            acquire, undo, line = self.effect_form(tok.line)
-            return LetEffect(bind, acquire, undo, line)
+            acquire, undo, line, setup = self.effect_form(tok.line)
+            return LetEffect(bind, acquire, undo, line, setup)
         if tok.kind == "kw" and tok.value == "effect":
-            acquire, undo, line = self.effect_form(tok.line)
-            return EffectStmt(acquire, undo, line)
+            acquire, undo, line, setup = self.effect_form(tok.line)
+            return EffectStmt(acquire, undo, line, setup)
+        if tok.kind == "kw" and tok.value == "fail":
+            if in_method:
+                raise self.err(
+                    tok.line,
+                    "`fail` is only allowed in a component activation body (A8)",
+                    hint="provide-method bodies run while the component is ACTIVE; "
+                         "deliberate L-Raise is an activation-time transition",
+                )
+            self.next()
+            return FailStmt(self.pure_expr(), tok.line)
+        if tok.kind == "kw" and tok.value == "if":
+            if in_method:
+                raise self.err(
+                    tok.line,
+                    "`if` guards are only allowed in a component activation body",
+                    hint="provide-method bodies run while the component is ACTIVE; "
+                         "use a pure `if` expression in the method value instead (G6)",
+                )
+            return self.component_if()
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
             expr = self.expr()
@@ -773,13 +800,36 @@ class Parser:
             return self.provide()
         raise self.err(
             tok.line,
-            f"expected a statement (`let`, `effect`, `emit`{', `return`' if in_method else ', `provide`'}), found {tok.value!r}",
+            f"expected a statement (`let`, `effect`, `emit`, `fail`, `if`{', `return`' if in_method else ', `provide`'}), found {tok.value!r}",
             hint="revl bodies contain only effect forms — plain expressions have no effect to record (G6)",
         )
 
     def effect_form(self, line: int):
         self.expect("kw", "effect")
-        acquire = self.expr()
+        setup: list = []
+        if self.at("{"):
+            self.next()
+            stmts = []
+            while not self.at("}"):
+                if self.at("kw", "fail"):
+                    raise self.err(
+                        self.peek().line,
+                        "`fail` is not allowed in an effect block setup (G6)",
+                        hint="effect block bodies are stratum-1 pure code plus a final acquisition; "
+                             "deliberate L-Raise is a component activation statement",
+                    )
+                stmts.append(self.fn_stmt())
+            self.expect("}")
+            if not stmts or not isinstance(stmts[-1], ExprStmt):
+                raise self.err(
+                    line,
+                    "an effect block must end with the acquisition expression",
+                    hint="the final expression is the acquired value; earlier statements are pure setup (G6)",
+                )
+            acquire = stmts[-1].expr
+            setup = stmts[:-1]
+        else:
+            acquire = self.expr()
         if not self.at("kw", "undo"):
             head = _describe_expr(acquire)
             raise self.err(
@@ -789,7 +839,41 @@ class Parser:
             )
         self.next()
         undo = self.expr()
-        return acquire, undo, line
+        return acquire, undo, line, setup
+
+    def component_if(self) -> IfStmt:
+        line = self.expect("kw", "if").line
+        self.expect("(")
+        cond = self.pure_expr()
+        self.expect(")")
+        if self.at("{"):
+            then = self.component_guard_block()
+        else:
+            then = [self.stmt(in_method=False)]
+        if not then:
+            raise self.err(line, "component `if` guard cannot be empty",
+                           hint="a guard exists to decide a deliberate L-Raise (A8)")
+        otherwise = None
+        if self.at("kw", "else"):
+            self.next()
+            if self.at("kw", "if"):
+                otherwise = [self.component_if()]
+            elif self.at("{"):
+                otherwise = self.component_guard_block()
+            else:
+                otherwise = [self.stmt(in_method=False)]
+            if not otherwise:
+                raise self.err(line, "component `else` guard cannot be empty",
+                               hint="a guard exists to decide a deliberate L-Raise (A8)")
+        return IfStmt(cond, then, otherwise, line)
+
+    def component_guard_block(self) -> list:
+        self.expect("{")
+        stmts = []
+        while not self.at("}"):
+            stmts.append(self.stmt(in_method=False))
+        self.expect("}")
+        return stmts
 
     def realm_label(self) -> str:
         """`realm("<label>")` — static string literals only (v2)."""
@@ -923,6 +1007,13 @@ class Parser:
 
     def fn_stmt(self):
         tok = self.peek()
+        if tok.kind == "kw" and tok.value == "fail":
+            raise self.err(
+                tok.line,
+                "`fail` is only allowed in a component activation body (A8)",
+                hint="pure functions and tests return `Result` values; deliberate L-Raise "
+                     "is a component activation transition",
+            )
         if tok.kind == "kw" and tok.value in ("let", "var"):
             mutable = tok.value == "var"
             self.next()
@@ -1175,6 +1266,12 @@ class Parser:
             if self.at("=>"):
                 self.next()
                 return ExprArrow([tok.value], self.pure_expr(), tok.line)
+            return ExprVar(tok.value, tok.line)
+        if tok.kind == "kw" and tok.value == "config":
+            # `config` is a keyword for the declaration block, but in pure
+            # expression position it heads `config.<field>` access (component
+            # effect blocks and guard conditions).
+            self.next()
             return ExprVar(tok.value, tok.line)
         if tok.kind == "(":
             if self._arrow_params_ahead():

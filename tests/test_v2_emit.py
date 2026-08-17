@@ -1,6 +1,8 @@
 """v2.0: type/fn lowering to IR v3 and cordis-py emission (syntax-2.0 §2–§3)."""
 
+import asyncio
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -373,3 +375,92 @@ def test_var_in_record_literal_rejected():
 def test_compound_assignment_on_let_rejected():
     with pytest.raises(RevlError, match="cannot reassign `n`"):
         compile_source("fn bump() -> Int { let n = 1 n += 1 return n }")
+def test_components_2_block_effect_and_fail_ir_shape():
+    ir = compile_source(
+        """
+        component Failing {
+          config { replicas: Int = 0 }
+          let scratch = effect Map.new() undo scratch.drop()
+          if (config.replicas < 1) fail "at least one replica required"
+          let pool = effect {
+            let url = "postgres://db"
+            Pool.open(url, config.replicas)
+          } undo pool.close()
+        }
+        """
+    )
+    assert ir["ir_version"] == 3
+    (body,) = [c["body"] for c in ir["components"]]
+    assert body[0]["step"] == "let-effect"
+    assert body[1] == {
+        "step": "if",
+        "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {"kind": "config", "field": "replicas"},
+            "right": {"kind": "lit", "value": 1},
+        },
+        "then": [{"step": "fail", "message": {"kind": "lit", "value": "at least one replica required"}}],
+    }
+    assert body[2]["step"] == "let-effect"
+    assert body[2]["setup"] == [
+        {"step": "let", "name": "url", "value": {"kind": "lit", "value": "postgres://db"}}
+    ]
+    assert body[2]["acquire"] == {
+        "kind": "host",
+        "fn": "Pool.open",
+        "args": [{"kind": "name", "id": "url"}, {"kind": "config", "field": "replicas"}],
+    }
+    assert body[2]["undo"]["method"] == "close"
+
+
+def test_components_2_emits_fail_as_runtime_l_raise():
+    ir = compile_source(
+        """
+        component Failing {
+          config { replicas: Int = 0 }
+          let scratch = effect Map.new() undo scratch.drop()
+          if (config.replicas < 1) fail "at least one replica required"
+        }
+        """
+    )
+    generated = emit.emit(ir)
+    assert "raise RuntimeError('at least one replica required')" in generated
+    assert "scratch = Map.new()" in generated
+    assert "yield lambda: scratch.drop()" in generated
+
+
+def test_components_2_fail_exec_reverts_accumulated_effects():
+    pytest.importorskip("cordis")
+    import runtime  # noqa: E402
+    from cordis import Context  # noqa: E402
+    from cordis.fiber import FiberState  # noqa: E402
+
+    ir = compile_source(
+        """
+        component Failing {
+          config { replicas: Int = 0 }
+          let scratch = effect Map.new() undo scratch.drop()
+          if (config.replicas < 1) fail "at least one replica required"
+        }
+        """
+    )
+    ns = {}
+    exec(compile(emit.emit(ir), "emitted_components2_fail.py", "exec"), ns)
+    events = []
+    runtime.set_trace(events.append)
+
+    async def run():
+        root = Context()
+        fiber = root.plugin(ns["Failing"])
+        for _ in range(20):
+            await asyncio.sleep(0)
+        return root, fiber
+
+    try:
+        root, fiber = asyncio.run(run())
+        assert fiber.state is FiberState.FAILED
+        normalized = [re.sub(r"#\d+", "", event) for event in events]
+        assert "map.drop" in normalized, "effects before deliberate L-Raise must revert"
+    finally:
+        runtime.set_trace(None)
