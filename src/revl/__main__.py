@@ -145,8 +145,17 @@ def _run_tests(ir: dict) -> int:
     import emit  # noqa: PLC0415 — backend import happens after path setup
 
     module = types.ModuleType("revl_test_module")
+    # Register the module before exec: the emitter renders record types as
+    # @dataclass, and dataclasses._process_class resolves each field via
+    # sys.modules[cls.__module__]. cls.__module__ is this module's name, so an
+    # unregistered module makes that lookup return None and raises
+    # AttributeError on any file that declares a record type (CPython 3.12+).
+    sys.modules[module.__name__] = module
     source = emit.emit(ir)
-    exec(compile(source, "<revl-test>", "exec"), module.__dict__)
+    try:
+        exec(compile(source, "<revl-test>", "exec"), module.__dict__)
+    finally:
+        sys.modules.pop(module.__name__, None)
     entries = getattr(module, "REVL_TESTS", None) or []
     if not entries:
         print("no tests emitted by the backend")
