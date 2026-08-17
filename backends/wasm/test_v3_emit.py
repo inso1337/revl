@@ -54,16 +54,73 @@ def test_v3_types_and_int_functions_emit():
     assert "(i32.eqz)" in wat
 
 
-def test_v3_non_i32_function_is_rejected_clearly():
+def test_v3_str_list_record_functions_emit():
     emit = _emitter()
     ir = compile_source(
         """
         type Row = { id: Int, name: Str }
+
         fn name(row: Row) -> Str { return row.name }
+        fn first(xs: List[Int]) -> Int { return xs[0] }
+        fn greet() -> Str { return "hi" }
+        fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
         """
     )
-    with pytest.raises(emit.EmitError, match="i32-only"):
-        emit.emit(ir)
+    modules = emit.emit(ir)
+    assert set(modules) == {"functions"}
+    wat = modules["functions"]
+    assert '(func (export "name")' in wat
+    assert '(func (export "first")' in wat
+    assert '(func (export "greet")' in wat
+    assert '(func (export "make_row")' in wat
+    assert "(i32.load (i32.add (local.get $p_row) (i32.const 4)))" in wat
+    assert "(i32.load (i32.add (local.get $p_xs) (i32.const 4)))" in wat
+    assert '  (data (i32.const 0) "\\02\\00\\00\\00hi")' in wat
+
+
+def test_v3_functions_golden_is_byte_identical():
+    emit = _emitter()
+    ir = compile_source(
+        """
+        type Row = { id: Int, name: Str }
+        type Outcome = Ok(Row) | NotFound | Invalid(Str)
+
+        fn add(a: Int, b: Int) -> Int { return a + b }
+        fn negate(b: Bool) -> Bool { return !b }
+        fn name(row: Row) -> Str { return row.name }
+        fn first(xs: List[Int]) -> Int { return xs[0] }
+        fn greet() -> Str { return "hi" }
+        fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
+        fn classify(n: Int) -> Str {
+          if (n < 0) return "neg"
+          return "pos"
+        }
+        """
+    )
+    wat = emit.emit(ir)["functions"]
+    golden = (BACKEND / "golden" / "functions.wat").read_text()
+    assert wat == golden
+
+
+def test_version_gate_accepts_1_2_3_and_rejects_4():
+    emit = _emitter()
+    base = {
+        "services": {"Svc": {"methods": {"ping": {"params": [], "returns": None, "emission": False}}}},
+        "components": [
+            {
+                "name": "C",
+                "config": [],
+                "requires": {},
+                "provides": {},
+                "body": [],
+            }
+        ],
+    }
+    emit.emit({**base, "ir_version": 1})
+    emit.emit({**base, "ir_version": 2})
+    emit.emit({**base, "ir_version": 3, "types": {}, "functions": [], "externs": [], "tests": []})
+    with pytest.raises(emit.EmitError, match="ir_version"):
+        emit.emit({**base, "ir_version": 4})
 
 
 def test_v3_externs_and_tests_are_documented_not_rejected():

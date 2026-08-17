@@ -34,10 +34,25 @@ withholding. See demo.py scenarios 6-8.
 
 | not lowerable | why | where it lives instead |
 |---|---|---|
-| strings / `format` | i32-only op signatures | hosted backends |
 | `config` blocks | no instantiation-config channel yet | hosted backends |
 | host builtins (`Pool`, `Map`; `Job` outside `await`) | different host namespace | express state through coeffects |
 | method-time effects | the accumulator is fixed at activation | hosted backends |
+| non-Int component services | component tier is i32-only | hosted backends / WIT tier |
+| variant values + `match` in v3 fns | no tagged unions in core Wasm | documented layout comments |
+| `indexOf` builtin | not lowered yet | hosted backends |
+
+## Now supported (v2 + typed v3)
+
+- **ir v2 realms/intercept**: `isolate` becomes the import/export namespace
+  (`coeffect:tenant_a/kv` / `provide:tenant_a/kv.<op>`), and metadata is
+  carried in `revl:isolate` / `revl:intercept` custom sections. Intercept
+  enforcement remains host-side (advisory on this tier).
+- **ir v3 Str/List/record values**: emitted in a linear-memory
+  canonical-ABI-shaped representation (`u32` length/count prefix); the
+  module exports `memory` so a host can read results. `Int`/`Bool` remain
+  plain i32. Supported builtins: `length`, `push`, `concat`, `slice`,
+  `charAt`, `charCodeAt`.
+- **`await Job.run(Int)`** continues to lower to the runtime's async host op.
 
 ## Notable semantics on this tier
 
