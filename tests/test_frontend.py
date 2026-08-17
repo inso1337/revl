@@ -129,13 +129,45 @@ def test_a4_literal_dollars_are_escaped():
         service Bus { emission fn send(msg: Str) }
         component Pricer requires bus: Bus {
           let item = effect Map.new() undo item.drop()
-          emit bus.send("cost: $$9.99 for $item")
+          emit bus.send(`cost: $9.99 for ${item}`)
         }
         """
     )
     fmt = ir["components"][0]["body"][1]["expr"]["args"][0]
     assert fmt["template"] == "cost: $$9.99 for $0"
     assert fmt["args"] == [{"kind": "name", "id": "item"}]
+
+
+def test_template_literal_parses_to_interp():
+    from revl import compile_source
+
+    ir = compile_source(
+        """
+        service Bus { emission fn send(msg: Str) }
+        component Pricer requires bus: Bus {
+          let item = effect Map.new() undo item.drop()
+          emit bus.send(`hello ${item}`)
+        }
+        """
+    )
+    fmt = ir["components"][0]["body"][1]["expr"]["args"][0]
+    assert fmt["template"] == "hello $0"
+    assert fmt["args"] == [{"kind": "name", "id": "item"}]
+
+
+def test_plain_string_dollar_is_literal():
+    from revl import compile_source
+
+    ir = compile_source(
+        """
+        service Bus { emission fn send(msg: Str) }
+        component Pricer requires bus: Bus {
+          emit bus.send("cost: $9.99")
+        }
+        """
+    )
+    arg = ir["components"][0]["body"][0]["expr"]["args"][0]
+    assert arg == {"kind": "lit", "value": "cost: $9.99"}
 
 
 def test_a5_compensate_lowering():

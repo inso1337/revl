@@ -50,3 +50,20 @@ def test_new_keywords_are_recognized():
 def test_adts_and_ternary_use_single_pipe_and_question():
     assert _kinds("A | B") == ["ident", "|", "ident", "eof"]
     assert _kinds("c ? a : b") == ["ident", "?", "ident", ":", "ident", "eof"]
+
+
+def test_backtick_template_token_carries_parts():
+    tokens = lex("`hello ${name}`", "<test>")
+    assert tokens[0].kind == "template"
+    assert tokens[0].value == [("text", "hello "), ("var", "name")]
+
+
+def test_backtick_template_bare_dollar_is_literal_text():
+    tokens = lex("`cost: $9.99 for ${item}`", "<test>")
+    assert tokens[0].value == [("text", "cost: $9.99 for "), ("var", "item")]
+
+
+def test_plain_double_quoted_string_dollar_is_literal():
+    tokens = lex('"cost: $9.99"', "<test>")
+    assert tokens[0].kind == "string"
+    assert tokens[0].value == "cost: $9.99"
