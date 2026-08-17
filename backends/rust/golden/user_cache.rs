@@ -13,7 +13,7 @@ pub trait Database: Send + Sync {
 
 pub trait Cache: Send + Sync {
     fn get(&self, key: String) -> Option<String>;
-    /// emission — crosses the system boundary (DESIGN.md §3.5)
+    /// emission: crosses the system boundary (DESIGN.md §3.5)
     fn put(&self, key: String, value: String) -> ();
 }
 
