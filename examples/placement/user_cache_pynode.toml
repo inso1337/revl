@@ -1,0 +1,19 @@
+# Cross-language placement: PgDatabase in a Python process, UserCache in a
+# Node (cordis-ts) process, one .rvl, the `db` seam wired over a Unix socket.
+#
+#   revl run examples/user_cache.rvl --placement examples/placement/user_cache_pynode.toml --once
+#
+# `backend` defaults to "py"; set it to "node" to place a process on cordis-ts
+# (its components are emitted to TypeScript and run under Node). Needs the TS
+# backend prepared: `npm install` in backends/typescript.
+
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+components = ["PgDatabase"]
+
+[processes.consumer]
+backend = "node"
+components = ["UserCache"]
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]

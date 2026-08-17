@@ -1,3 +1,4 @@
 node_modules/
 tests/generated/
+_gen/
 __pycache__/
