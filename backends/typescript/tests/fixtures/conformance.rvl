@@ -1,0 +1,60 @@
+// Source of conformance.ir.json — the constructs the TypeScript backend used
+// to refuse in a component/method body (see docs/conformance.md).
+//
+// Regenerate with:
+//   python3 -c "import json,sys; sys.path.insert(0,'src'); from revl import compile_source; \
+//     print(json.dumps(compile_source(open('backends/typescript/tests/fixtures/conformance.rvl').read()), indent=2))" \
+//     > backends/typescript/tests/fixtures/conformance.ir.json
+
+type Outcome = Found(Int) | Missing
+
+fn double(n: Int) -> Int { return n * 2 }
+
+fn pick(n: Int) -> Outcome {
+  if (n > 0) { return Found(n) }
+  return Missing
+}
+
+fn halfOrNothing(k: Int) -> Opt[Int] {
+  if (k > 1) { return Some(k / 2) }
+  return None
+}
+
+extern pure fn shout(s: Str) -> Str
+  = @py { return s.upper() }
+  = @ts { return s.toUpperCase() }
+
+service Store {
+  fn lookup(k: Int) -> Opt[Int]
+}
+
+service Calc {
+  fn twice(x: Int) -> Int
+  fn orZero(k: Int) -> Int
+  fn classify(x: Int) -> Int
+  fn loud(s: Str) -> Str
+  fn touch(x: Int)
+}
+
+component Memory provides store: Store {
+  provide store {
+    fn lookup(k) = halfOrNothing(k)
+  }
+}
+
+component Guarded requires store: Store provides calc: Calc {
+  config { limit: Int = 10 }
+  if (config.limit < 1) { fail "limit must be positive" }
+  provide calc {
+    // a call to a top-level `fn` from a method body
+    fn twice(x) = double(x)
+    // `??` whose left operand is a component-dialect `req` call
+    fn orZero(k) = store.lookup(k) ?? 0
+    // `match` in a method body, binding the payload
+    fn classify(x) { let o = pick(x)  return match o { Found(v) => v, Missing => 0 } }
+    // a call to an extern from a method body
+    fn loud(s) = shout(s)
+    // a void operation: bare `return`
+    fn touch(x) { return }
+  }
+}

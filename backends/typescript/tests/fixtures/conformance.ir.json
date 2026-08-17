@@ -1,0 +1,507 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Store": {
+      "methods": {
+        "lookup": {
+          "params": [
+            {
+              "name": "k",
+              "type": "Int"
+            }
+          ],
+          "returns": "Opt[Int]",
+          "emission": false
+        }
+      }
+    },
+    "Calc": {
+      "methods": {
+        "twice": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "orZero": {
+          "params": [
+            {
+              "name": "k",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "classify": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "loud": {
+          "params": [
+            {
+              "name": "s",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": false
+        },
+        "touch": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": null,
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Memory",
+      "source": "<string>",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "store": "Store"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "store",
+          "service": "Store",
+          "methods": [
+            {
+              "name": "lookup",
+              "params": [
+                "k"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "halfOrNothing",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Guarded",
+      "source": "<string>",
+      "config": [
+        {
+          "name": "limit",
+          "type": "Int",
+          "default": 10
+        }
+      ],
+      "requires": {
+        "store": "Store"
+      },
+      "provides": {
+        "calc": "Calc"
+      },
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "config",
+              "field": "limit"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            }
+          },
+          "then": [
+            {
+              "step": "fail",
+              "message": {
+                "kind": "lit",
+                "value": "limit must be positive"
+              }
+            }
+          ]
+        },
+        {
+          "step": "provide",
+          "name": "calc",
+          "service": "Calc",
+          "methods": [
+            {
+              "name": "twice",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "double",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "orZero",
+              "params": [
+                "k"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "??",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "store"
+                      },
+                      "method": "lookup",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "k"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 0
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "classify",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "o",
+                  "value": {
+                    "kind": "fn",
+                    "name": "pick",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "match",
+                    "scrutinee": {
+                      "kind": "name",
+                      "id": "o"
+                    },
+                    "arms": [
+                      {
+                        "pattern": "Found",
+                        "bind": "v",
+                        "body": {
+                          "kind": "name",
+                          "id": "v"
+                        }
+                      },
+                      {
+                        "pattern": "Missing",
+                        "bind": null,
+                        "body": {
+                          "kind": "lit",
+                          "value": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "loud",
+              "params": [
+                "s"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "shout",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "s"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "touch",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Memory",
+        "file": "<string>",
+        "inject": [],
+        "provides": [
+          "store"
+        ]
+      },
+      {
+        "name": "Guarded",
+        "file": "<string>",
+        "inject": [
+          "store"
+        ],
+        "provides": [
+          "calc"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Memory",
+      "Guarded"
+    ]
+  },
+  "types": {
+    "Outcome": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Found",
+          "payload": "Int"
+        },
+        {
+          "name": "Missing",
+          "payload": null
+        }
+      ]
+    }
+  },
+  "functions": [
+    {
+      "name": "double",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "*",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "pick",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Outcome",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": ">",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Outcome",
+                "case": "Found",
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "n"
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "adt",
+            "type": "Outcome",
+            "case": "Missing",
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "halfOrNothing",
+      "params": [
+        {
+          "name": "k",
+          "type": "Int"
+        }
+      ],
+      "returns": "Opt[Int]",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": ">",
+            "left": {
+              "kind": "var",
+              "name": "k"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "call",
+                "callee": {
+                  "kind": "var",
+                  "name": "Some"
+                },
+                "args": [
+                  {
+                    "kind": "bin",
+                    "op": "/",
+                    "left": {
+                      "kind": "var",
+                      "name": "k"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 2
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "None"
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "shout",
+      "class": "pure",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "py": " return s.upper() ",
+        "ts": " return s.toUpperCase() "
+      }
+    }
+  ]
+}
