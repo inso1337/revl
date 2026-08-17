@@ -596,6 +596,8 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
         return _v3_var(node, ctx)
 
     if kind == "bin":
+        if node.get("op") == "??":
+            return f"({_v3_expr(node['left'], ctx)} ?? {_v3_expr(node['right'], ctx)})"
         op = _TS_V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
@@ -668,9 +670,28 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
             if part_kind == "text":
                 segs.append(_template_text(text))
             else:
-                segs.append("${" + _ident(text, "interpolation") + "}")
+                # `${a.b.c}` — validate head-of-chain as an identifier, tail
+                # is JS field access so the same shape emits verbatim
+                head, _dot, _rest = text.partition(".")
+                _ident(head, "interpolation")
+                segs.append("${" + text + "}")
         segs.append("`")
         return "".join(segs)
+
+    if kind == "optfield":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}?.{_ident(node.get('name'), 'optional field')}"
+
+    if kind == "optcall":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        args = ", ".join(_v3_expr(a, ctx) for a in node.get("args") or [])
+        return f"{target}?.{_ident(node.get('method'), 'optional method')}({args})"
 
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 

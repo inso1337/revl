@@ -1,0 +1,10 @@
+// REJECTED — `use` of a missing module raises a clean compiler error (was
+// an uncaught FileNotFoundError traceback before the crash-guard fix).
+//
+// expected error:
+//   cannot find imported module `./does_not_exist.rvl`
+//   `use` resolves paths relative to the importing file
+
+use "./does_not_exist.rvl" { Foo }
+
+fn f() -> Int { return 1 }

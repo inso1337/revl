@@ -88,8 +88,9 @@ claim is checked by running the emitted code, not by argument: the test
 suite compiles revl sources for `fib` (loop form) and the Collatz
 step-counter, executes the **emitted Python**, and asserts `fib(10) = 55`
 and `collatz(27) = 111`; the same sources lower through the TypeScript
-emitter. Suites at this commit: 164 frontend tests (incl. the 17-test
-sound-typing group, 7-test strata-composition and 6-test stdlib groups),
+emitter. Suites at this commit: 181 passing frontend tests (incl. the
+17-test sound-typing group, 7-test strata-composition, 6-test stdlib
+groups, and the new §3.2 group covering `??` / `?.` / `${a.b}`),
 21 python-backend, 24 ts-backend, plus the wasm demo, live hot-swap demo,
 and the cordisc cross-check.
 

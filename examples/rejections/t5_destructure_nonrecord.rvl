@@ -1,0 +1,12 @@
+// REJECTED — record destructuring on a non-record value.
+// The receiver's static type is a builtin (List/Int/Str/Bool/…), so
+// destructuring it with a record pattern is a type error, not a host
+// pass-through.
+//
+// expected error:
+//   record destructuring requires a record, but `List[Int]` is not a record
+
+fn f(xs: List[Int]) -> Int {
+  let { a, b } = xs
+  return a
+}

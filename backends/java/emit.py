@@ -646,10 +646,21 @@ def _v3_expr(
             if part_kind == "text":
                 segs.append(_string(text))
             else:
-                segs.append(f"String.valueOf({_ident(text, 'interpolation')})")
+                # a "var" part may carry a dotted chain (`u.name`); the head
+                # must be a valid identifier, the tail is Java field access.
+                head, _dot, rest = text.partition(".")
+                _ident(head, "interpolation")
+                access = head if not rest else f"{head}.{rest}"
+                segs.append(f"String.valueOf({access})")
         if not segs:
             return '""'
         return " + ".join(segs)
+
+    if kind in ("optfield", "optcall"):
+        raise EmitError(
+            f"optional chaining (`?.`) is not yet lowerable on the Java tier "
+            f"({kind!r}); unwrap with `match` or `??` for now"
+        )
 
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 

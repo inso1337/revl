@@ -1161,7 +1161,12 @@ class _V3Emitter:
             if kind == "text":
                 rendered.append(self._str_ptr(str(value)))
             elif kind == "var":
-                rendered.append(self._expr({"kind": "var", "name": value}, scope, where, "Str").wat)
+                # a dotted chain (`u.name`) is head + nested field access
+                head, _dot, rest = value.partition(".")
+                sub: dict = {"kind": "var", "name": head}
+                for field in rest.split(".") if rest else []:
+                    sub = {"kind": "field", "target": sub, "name": field}
+                rendered.append(self._expr(sub, scope, where, "Str").wat)
             else:
                 raise EmitError(f"{where}: unsupported interpolation part {kind!r}")
 

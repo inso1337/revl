@@ -45,6 +45,8 @@ from .parser import (
     ExprList,
     ExprLit,
     ExprMatch,
+    ExprOptCall,
+    ExprOptField,
     ExprRecord,
     ExprStmt,
     ExprUn,
@@ -176,10 +178,44 @@ class Env:
 # v2.0: type declarations & pure functions (docs/syntax-2.0.md §2–§3)
 # ---------------------------------------------------------------------------
 
+# builtin (non-record) type heads: destructuring a value of one of these with
+# a record/list pattern is a type error, not a host pass-through
+_BUILTIN_NONRECORD = {"Str", "Int", "Bool", "Float", "Bytes", "Unit",
+                      "List", "Map", "Opt", "Result"}
+
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
 _HOST_CALLABLES = {"Map", "Pool", "Job"}
 # Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
+
+
+def _validate_declared_types(program: Program, filename: str) -> None:
+    """Reject malformed type annotations (bare builtin generics like `Opt`,
+    `List[]`) at every declaration site before checking begins — otherwise a
+    zero-arg generic reaches the type algebra and crashes it."""
+    from .typecheck import check_type_wellformed
+
+    for fn in program.fn_decls:
+        for p in fn.params:
+            check_type_wellformed(filename, p.line, p.type)
+        check_type_wellformed(filename, fn.line, fn.returns)
+    for ext in program.externs:
+        for p in ext.params:
+            check_type_wellformed(filename, p.line, p.type)
+        check_type_wellformed(filename, ext.line, ext.returns)
+    for svc in program.services:
+        for m in svc.methods.values():
+            for _, ptype in m.params:
+                check_type_wellformed(filename, m.line, ptype)
+            check_type_wellformed(filename, m.line, m.returns)
+    for decl in program.type_decls:
+        for field in decl.fields:
+            check_type_wellformed(filename, field.line, field.type)
+        for case in decl.cases:
+            check_type_wellformed(filename, case.line, case.payload)
+    for comp in program.components:
+        for cfg in comp.config:
+            check_type_wellformed(filename, cfg.line, cfg.type)
 
 
 def _lower_type_decls(program: Program, filename: str) -> dict:
@@ -710,6 +746,11 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{value_type}` is not a record",
                 )
+        elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
+            raise RevlError(
+                filename, stmt.line,
+                f"record destructuring requires a record, but `{value_type}` is not a record",
+            )
             fields = spec.get("fields", {})
             for name in names:
                 if name not in fields:
@@ -742,6 +783,14 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             if name in scope:
                 raise RevlError(filename, stmt.line, f"`{name}` is already declared in this function")
         value_type = _expr_static_type(stmt.value, type_env, types)
+        if value_type is not None and parse_type(value_type)[0] != "List" and (
+            types.get(value_type) is not None
+            or parse_type(value_type)[0] in _BUILTIN_NONRECORD
+        ):
+            raise RevlError(
+                filename, stmt.line,
+                f"list destructuring requires a `List[...]`, but `{value_type}` is not a list",
+            )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         element_type = _type_arg(value_type, "List")
         for name in pattern.binds:
@@ -896,7 +945,32 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 "body": _lower_pure_expr(body, inner_scope, callables, alias_fns, filename, inner_type_env, types),
             })
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
+    if isinstance(expr, ExprOptField):
+        return {
+            "kind": "optfield",
+            "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+            "name": expr.name,
+        }
+    if isinstance(expr, ExprOptCall):
+        return {
+            "kind": "optcall",
+            "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+            "method": expr.method,
+            "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args],
+        }
     if isinstance(expr, Interp):
+        # G1: names interpolated in `${name}` (or `${a.b.c}`) are real
+        # references and must resolve, exactly like a bare ExprVar (the
+        # component-body path already checks these via _lower_postfix).
+        # Only the head of a dotted chain is a scope name; the tail is
+        # field access, which the backend f-string emits verbatim.
+        for kind, value in expr.parts:
+            if kind == "var":
+                head = value.split(".", 1)[0]
+                if head not in scope and head not in callables:
+                    raise RevlError(filename, getattr(expr, "line", 1),
+                                    f"`{head}` is not declared in this function",
+                                    hint="declare it with `let`/`var` or add it as a parameter (G1)")
         return {"kind": "interp", "parts": expr.parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
 
@@ -941,6 +1015,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     # types and signatures are built first so component lowering can
     # type-check service/fn call sites (the sound-typing milestone)
+    _validate_declared_types(program, program.filename)
     types = _lower_type_decls(program, program.filename)
     types[FNS_KEY] = _signature_table(program)
     types[CASES_KEY] = _case_table(types)
@@ -1214,6 +1289,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         return {"kind": "arrow", "params": expr.params,
                 "body": _lower_component_pure_expr(expr.body, env, scope, callables,
                                                    pure_only)}
+    if isinstance(expr, ExprOptField):
+        return {
+            "kind": "optfield",
+            "target": _lower_component_pure_expr(expr.target, env, scope, callables, pure_only),
+            "name": expr.name,
+        }
+    if isinstance(expr, ExprOptCall):
+        return {
+            "kind": "optcall",
+            "target": _lower_component_pure_expr(expr.target, env, scope, callables, pure_only),
+            "method": expr.method,
+            "args": [_lower_component_pure_expr(a, env, scope, callables, pure_only) for a in expr.args],
+        }
     raise RevlError(filename, line, "unsupported expression in component effect block",
                     hint="block-effect setup is stratum-1 pure code (G6)")
 
@@ -1317,10 +1405,34 @@ def _lower_component_if(stmt: IfStmt, env: Env, callables: set) -> dict:
     return step
 
 
+def _config_default_type(value) -> str | None:
+    """Surface type of a config-default literal (bool before int: bool is an
+    int subclass)."""
+    if isinstance(value, bool):
+        return "Bool"
+    if isinstance(value, int):
+        return "Int"
+    if isinstance(value, float):
+        return "Float"
+    if isinstance(value, str):
+        return "Str"
+    return None
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
+
+    # a config default must fit its declared field type (config typing);
+    # a `null` default is the documented optional exception and is allowed
+    for cfg in comp.config:
+        if cfg.default is None:
+            continue
+        lit_type = _config_default_type(cfg.default)
+        if lit_type is not None and not compatible(cfg.type, lit_type):
+            raise mismatch(filename, cfg.line,
+                           f"config field `{cfg.name}` default", cfg.type, lit_type)
 
     provides = {}
     for key, svc, line in comp.provides:
