@@ -182,6 +182,35 @@ _HOST_CALLABLES = {"Map", "Pool", "Job"}
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 
 
+def _validate_declared_types(program: Program, filename: str) -> None:
+    """Reject malformed type annotations (bare builtin generics like `Opt`,
+    `List[]`) at every declaration site before checking begins — otherwise a
+    zero-arg generic reaches the type algebra and crashes it."""
+    from .typecheck import check_type_wellformed
+
+    for fn in program.fn_decls:
+        for p in fn.params:
+            check_type_wellformed(filename, p.line, p.type)
+        check_type_wellformed(filename, fn.line, fn.returns)
+    for ext in program.externs:
+        for p in ext.params:
+            check_type_wellformed(filename, p.line, p.type)
+        check_type_wellformed(filename, ext.line, ext.returns)
+    for svc in program.services:
+        for m in svc.methods.values():
+            for _, ptype in m.params:
+                check_type_wellformed(filename, m.line, ptype)
+            check_type_wellformed(filename, m.line, m.returns)
+    for decl in program.type_decls:
+        for field in decl.fields:
+            check_type_wellformed(filename, field.line, field.type)
+        for case in decl.cases:
+            check_type_wellformed(filename, case.line, case.payload)
+    for comp in program.components:
+        for cfg in comp.config:
+            check_type_wellformed(filename, cfg.line, cfg.type)
+
+
 def _lower_type_decls(program: Program, filename: str) -> dict:
     types: dict[str, dict] = {}
     for decl in program.type_decls:
@@ -941,6 +970,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     # types and signatures are built first so component lowering can
     # type-check service/fn call sites (the sound-typing milestone)
+    _validate_declared_types(program, program.filename)
     types = _lower_type_decls(program, program.filename)
     types[FNS_KEY] = _signature_table(program)
     types[CASES_KEY] = _case_table(types)

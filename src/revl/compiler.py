@@ -68,7 +68,14 @@ class _ModuleLoader:
 
             self._cache[abs_path] = module
             for use in program.uses:
-                used = self.load(os.path.join(module.dir, use.path))
+                dep_path = os.path.join(module.dir, use.path)
+                if not os.path.exists(dep_path):
+                    raise RevlError(
+                        abs_path, use.line,
+                        f"cannot find imported module `{use.path}`",
+                        hint="`use` resolves paths relative to the importing file",
+                    )
+                used = self.load(dep_path)
                 if use.names is not None:
                     for name in use.names:
                         self._import_named(module, used, name, use.line)
