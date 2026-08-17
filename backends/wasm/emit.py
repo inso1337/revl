@@ -583,6 +583,11 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
+                if node.get("kind") == "interp":
+                    # template text segments are string literals too
+                    for part_kind, part in node.get("parts") or []:
+                        if part_kind == "text":
+                            seen.setdefault(part, None)
                 for child in node.values():
                     walk(child)
             elif isinstance(node, list):
@@ -613,6 +618,7 @@ class _V3Emitter:
         return [
             self._helper_alloc(),
             self._helper_alloc_str(),
+            self._helper_int_to_str(),
             self._helper_str_concat(),
             self._helper_str_eq(),
             self._helper_str_slice(),
@@ -640,6 +646,44 @@ class _V3Emitter:
     (local $p i32)
     (local.set $p (call $alloc (i32.add (local.get $len) (i32.const 4))))
     (i32.store (local.get $p) (local.get $len))
+    (local.get $p))"""
+
+    def _helper_int_to_str(self) -> str:
+        return """  (func $int_to_str (param $n i32) (result i32)
+    (local $neg i32)
+    (local $x i32)
+    (local $len i32)
+    (local $p i32)
+    (local $i i32)
+    (if (i32.eqz (local.get $n))
+      (then
+        (local.set $p (call $alloc_str (i32.const 1)))
+        (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 48))
+        (return (local.get $p))))
+    (local.set $neg (i32.lt_s (local.get $n) (i32.const 0)))
+    (local.set $x (select
+      (i32.sub (i32.const 0) (local.get $n))
+      (local.get $n)
+      (local.get $neg)))
+    (local.set $len (i32.const 0))
+    (local.set $i (local.get $x))
+    (block (loop
+      (br_if 1 (i32.eqz (local.get $i)))
+      (local.set $len (i32.add (local.get $len) (i32.const 1)))
+      (local.set $i (i32.div_u (local.get $i) (i32.const 10)))
+      (br 0)))
+    (local.set $p (call $alloc_str (i32.add (local.get $len) (local.get $neg))))
+    (if (local.get $neg)
+      (then (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))))
+    (local.set $i (i32.add (local.get $len) (local.get $neg)))
+    (block (loop
+      (br_if 1 (i32.eqz (local.get $x)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (i32.store8
+        (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $i))
+        (i32.add (i32.rem_u (local.get $x) (i32.const 10)) (i32.const 48)))
+      (local.set $x (i32.div_u (local.get $x) (i32.const 10)))
+      (br 0)))
     (local.get $p))"""
 
     def _helper_str_concat(self) -> str:
@@ -862,8 +906,23 @@ class _V3Emitter:
             raise EmitError("arrow values are not lowerable on this tier — the wasm module has no closures")
         raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
+    def _arrow_callee(self, callee: dict):
+        """The arrow node being called, if this callee is an arrow value:
+        a local `let f = x => …` (inlined) or an inline `(x => …)(…)`."""
+        if callee.get("kind") == "arrow":
+            return callee
+        if callee.get("kind") == "var":
+            return self._arrows.get(callee.get("name"))
+        return None
+
     def _call_type(self, node: dict, scope: _Scope) -> str | None:
         callee = node.get("callee") or {}
+        arrow = self._arrow_callee(callee)
+        if arrow is not None:
+            inner = _Scope(dict(scope.slots), dict(scope.types))
+            for p, a in zip(arrow.get("params") or [], node.get("args") or []):
+                inner.types[p] = self._infer_type(a, scope)
+            return self._infer_type(arrow.get("body"), inner)
         if callee.get("kind") != "var":
             raise EmitError("only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), "callee")
@@ -1043,8 +1102,33 @@ class _V3Emitter:
             return _E(f"(i32.const 0)\n      {operand.wat}\n      (i32.sub)", "Int")
         raise EmitError(f"{where}: unsupported unary operator {op!r}")
 
+    def _inline_arrow(self, arrow: dict, args: list, scope: _Scope, where: str) -> _E:
+        """Inline a local arrow call. Arrows can't escape this tier (no
+        lowerable function type), so `let f = x => …; f(a)` is beta-reduced:
+        bind args to per-arrow param locals, read mutable captures from their
+        bind-time snapshot, then emit the body."""
+        aid = arrow.get("_aid")
+        params = arrow.get("params") or []
+        if len(args) != len(params):
+            raise EmitError(f"{where}: arrow expects {len(params)} argument(s), got {len(args)}")
+        sets: list[str] = []
+        inner = _Scope(dict(scope.slots), dict(scope.types))
+        for p, a in zip(params, args):
+            av = self._expr(a, scope, where)
+            sets.append(f"{av.wat}\n      (local.set $ap_{p}_{aid})")
+            inner.slots[p] = f"(local.get $ap_{p}_{aid})"
+            inner.types[p] = av.ty
+        for c in arrow.get("captures") or []:
+            inner.slots[c] = f"(local.get $cap_{c}_{aid})"  # bind-time snapshot
+        body = self._expr(arrow.get("body"), inner, where)
+        wat = "\n      ".join(sets + [body.wat]) if sets else body.wat
+        return _E(wat, body.ty)
+
     def _call_expr(self, node: dict, scope: _Scope, where: str, expected: str | None = None) -> _E:
         callee = node.get("callee") or {}
+        arrow = self._arrow_callee(callee)
+        if arrow is not None:
+            return self._inline_arrow(arrow, node.get("args") or [], scope, where)
         if callee.get("kind") != "var":
             raise EmitError(f"{where}: only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), f"{where}: callee")
@@ -1316,26 +1400,68 @@ class _V3Emitter:
         for kind, value in parts:
             if kind == "text":
                 rendered.append(self._str_ptr(str(value)))
-            elif kind == "var":
-                # a dotted chain (`u.name`) is head + nested field access
-                head, _dot, rest = value.partition(".")
-                sub: dict = {"kind": "var", "name": head}
-                for field in rest.split(".") if rest else []:
-                    sub = {"kind": "field", "target": sub, "name": field}
-                rendered.append(self._expr(sub, scope, where, "Str").wat)
-            else:
-                raise EmitError(f"{where}: unsupported interpolation part {kind!r}")
+            else:  # ["expr", ir_node]
+                piece = self._expr(value, scope, where)
+                if piece.ty == "Str":
+                    rendered.append(piece.wat)
+                elif piece.ty == "Int":
+                    rendered.append(f"{piece.wat}\n      (call $int_to_str)")
+                else:
+                    raise EmitError(
+                        f"{where}: a `${{…}}` template interpolates Str or Int on this "
+                        f"tier, got {piece.ty!r}"
+                    )
+        if not rendered:
+            return _E(self._str_ptr(""), "Str")
+        wat = rendered[0]
+        for piece in rendered[1:]:
+            wat = f"{wat}\n      {piece}\n      (call $str_concat)"
+        return _E(wat, "Str")
 
     # -- statements + function emission --------------------------------------
+
+    def _collect_arrow_locals(self, node: Any, acc: set[str]) -> None:
+        """Assign each arrow a stable id and reserve its per-call param locals
+        and per-capture snapshot locals (arrows sit in expression position, so
+        _collect_locals doesn't reach them)."""
+        if isinstance(node, dict):
+            if node.get("kind") == "arrow":
+                self._arrow_counter += 1
+                node["_aid"] = self._arrow_counter
+                aid = node["_aid"]
+                for p in node.get("params") or []:
+                    acc.add(f"ap_{_ident(p, 'arrow param')}_{aid}")
+                for c in node.get("captures") or []:
+                    acc.add(f"cap_{_ident(c, 'arrow capture')}_{aid}")
+            for value in node.values():
+                self._collect_arrow_locals(value, acc)
+        elif isinstance(node, list):
+            for value in node:
+                self._collect_arrow_locals(value, acc)
 
     def _collect_locals(self, stmts: list, acc: set[str]) -> None:
         for stmt in stmts or []:
             step = stmt.get("step")
             if step in ("let", "assign"):
+                value = stmt.get("value")
+                # `let f = <arrow>` binds no runtime value (inlined at calls)
+                if step == "let" and isinstance(value, dict) and value.get("kind") == "arrow":
+                    continue
                 acc.add(_ident(stmt.get("name"), "local"))
             elif step == "if":
                 self._collect_locals(stmt.get("then") or [], acc)
                 self._collect_locals(stmt.get("else") or [], acc)
+            elif step == "while":
+                self._collect_locals(stmt.get("body") or [], acc)
+            elif step == "for":
+                acc.add(_ident(stmt.get("bind"), "loop bind"))
+                self._loop_counter += 1
+                stmt["_lid"] = self._loop_counter
+                # ptr / count / index scratch locals for this loop
+                self._for_temps += [f"for_ptr_{self._loop_counter}",
+                                    f"for_cnt_{self._loop_counter}",
+                                    f"for_idx_{self._loop_counter}"]
+                self._collect_locals(stmt.get("body") or [], acc)
 
     def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
@@ -1343,6 +1469,16 @@ class _V3Emitter:
             step = stmt.get("step")
             if step in ("let", "assign"):
                 name = _ident(stmt.get("name"), f"{where}: binding")
+                value_node = stmt.get("value")
+                # `let f = <arrow>`: not a runtime value on this tier — register
+                # it for inlining and snapshot its mutable captures by value.
+                if step == "let" and isinstance(value_node, dict) and value_node.get("kind") == "arrow":
+                    self._arrows[name] = value_node
+                    aid = value_node.get("_aid")
+                    for c in value_node.get("captures") or []:
+                        out.append(f"(local.get $l_{_ident(c, 'capture')})")
+                        out.append(f"(local.set $cap_{c}_{aid})")
+                    continue
                 if step == "let":
                     value_ty = self._infer_type(stmt.get("value"), scope)
                 else:
@@ -1392,8 +1528,58 @@ class _V3Emitter:
                 out.append(value.wat)
                 out.append("(i32.eqz)")
                 out.append("(if (then unreachable))")
+            elif step == "while":
+                cond = self._expr(stmt.get("cond"), scope, where, "Bool")
+                body_scope = _Scope(dict(scope.slots), dict(scope.types))
+                body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
+                out.append("(block")
+                out.append("  (loop")
+                out.append("    " + cond.wat)
+                out.append("    (i32.eqz)")
+                out.append("    (br_if 1)")
+                out.extend("    " + line for line in body_lines)
+                out.append("    (br 0)")
+                out.append("  )")
+                out.append(")")
+            elif step == "for":
+                out.extend(self._emit_for(stmt, scope, where, expected_return))
             else:
                 raise EmitError(f"{where}: unsupported v3 statement step {step!r}")
+        return out
+
+    def _emit_for(self, stmt: dict, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
+        """`for (x of xs)` over a list `[i32 count][elem0]…` in linear memory."""
+        n = stmt.get("_lid")
+        iter_ty = self._infer_type(stmt.get("iterable"), scope)
+        if not _is_list_type(iter_ty):
+            raise EmitError(f"{where}: `for … of` iterates a List, got {iter_ty!r}")
+        elem_ty = _list_elem(iter_ty)
+        bind = _ident(stmt.get("bind"), f"{where}: loop bind")
+        it = self._expr(stmt.get("iterable"), scope, where, iter_ty)
+        body_scope = _Scope(dict(scope.slots), dict(scope.types))
+        body_scope.slots[stmt.get("bind")] = f"(local.get $l_{bind})"
+        body_scope.types[stmt.get("bind")] = elem_ty
+        body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
+        ptr, cnt, idx = f"$for_ptr_{n}", f"$for_cnt_{n}", f"$for_idx_{n}"
+        out = [
+            it.wat, f"(local.set {ptr})",
+            f"(i32.load (local.get {ptr}))", f"(local.set {cnt})",
+            "(i32.const 0)", f"(local.set {idx})",
+            "(block",
+            "  (loop",
+            f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
+            "    (br_if 1)",
+            f"    (i32.load (i32.add (local.get {ptr}) "
+            f"(i32.add (i32.const 4) (i32.mul (local.get {idx}) (i32.const 4)))))",
+            f"    (local.set $l_{bind})",
+        ]
+        out.extend("    " + line for line in body_lines)
+        out.extend([
+            f"    (local.set {idx} (i32.add (local.get {idx}) (i32.const 1)))",
+            "    (br 0)",
+            "  )",
+            ")",
+        ])
         return out
 
     def _fresh_tmp(self, taken: set[str]) -> str:
@@ -1424,6 +1610,10 @@ class _V3Emitter:
             decls.append("(result i32)")
 
         local_names: set[str] = set()
+        self._loop_counter = 0
+        self._for_temps: list[str] = []
+        self._arrows: dict = {}
+        self._arrow_counter = 0
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
             if lname not in scope.types:
@@ -1441,7 +1631,15 @@ class _V3Emitter:
                 decls.append(f"(local $l_{bname} i32)")
         for sname in sorted(match_scruts):
             decls.append(f"(local ${sname} i32)")
-        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts)
+        for tname in self._for_temps:
+            decls.append(f"(local ${tname} i32)")
+        # arrow param + capture-snapshot locals (arrows are inlined at calls)
+        arrow_locals: set[str] = set()
+        self._collect_arrow_locals(fn.get("body") or [], arrow_locals)
+        for aname in sorted(arrow_locals):
+            decls.append(f"(local ${aname} i32)")
+        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts
+                              | set(self._for_temps) | arrow_locals)
         self._tmp = tmp
         decls.append(f"(local ${tmp} i32)")
 
@@ -1452,7 +1650,9 @@ class _V3Emitter:
             body = "unreachable"
         else:
             body = "nop"
-        header = f'(func (export "{name}") {" ".join(decls)}'.rstrip()
+        # the `$name` identifier lets one v3 function call another
+        # (`call $name`); without it intra-module calls fail to resolve
+        header = f'(func ${name} (export "{name}") {" ".join(decls)}'.rstrip()
         return f"  {header}\n    {body})"
 
     def emit(self) -> str:

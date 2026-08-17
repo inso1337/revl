@@ -1016,19 +1016,16 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args],
         }
     if isinstance(expr, Interp):
-        # G1: names interpolated in `${name}` (or `${a.b.c}`) are real
-        # references and must resolve, exactly like a bare ExprVar (the
-        # component-body path already checks these via _lower_postfix).
-        # Only the head of a dotted chain is a scope name; the tail is
-        # field access, which the backend f-string emits verbatim.
+        # each `${...}` segment is a full expression, lowered (and G1/type-
+        # checked) like any other; text segments pass through
+        parts: list = []
         for kind, value in expr.parts:
-            if kind == "var":
-                head = value.split(".", 1)[0]
-                if head not in scope and head not in callables:
-                    raise RevlError(filename, getattr(expr, "line", 1),
-                                    f"`{head}` is not declared in this function",
-                                    hint="declare it with `let`/`var` or add it as a parameter (G1)")
-        return {"kind": "interp", "parts": expr.parts}
+            if kind == "text":
+                parts.append(["text", value])
+            else:
+                parts.append(["expr", _lower_pure_expr(
+                    value, scope, callables, alias_fns, filename, type_env, types)])
+        return {"kind": "interp", "parts": parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
 
 
@@ -1705,6 +1702,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     filename, method.line,
                     f"parameter `{surface}` of `{method.name}` (from service `{svc.name}`)",
                     svc_ptype, annotation)
+        # optional `-> T` return annotation, checked against the service
+        if method.returns is not None:
+            check_type_wellformed(filename, method.line, method.returns)
+            if decl.returns and not (compatible(decl.returns, method.returns)
+                                     and compatible(method.returns, decl.returns)):
+                raise mismatch(
+                    filename, method.line,
+                    f"return type of `{method.name}` (from service `{svc.name}`)",
+                    decl.returns, method.returns)
 
         saved = env.params
         env.params = env.bind_params(method.params, method.line)
@@ -1809,7 +1815,8 @@ def _lower_expr(expr, env: Env, mode: str):
                 template.append(value.replace("$", "$$"))  # A4: literal dollars
             else:
                 template.append(f"${len(args)}")
-                args.append(_lower_expr(Postfix(value, [], expr.line), env, mode))
+                # `value` is a full expression AST; lower it in this context
+                args.append(_lower_expr(value, env, mode))
         return {"kind": "format", "template": "".join(template), "args": args}
     if isinstance(expr, Postfix):
         return _lower_postfix(expr, env, mode)

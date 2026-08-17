@@ -151,6 +151,7 @@ class ProvideMethod:
     # omitted): `fn query(sql: Str) = ...`. The service is the source of
     # truth (A6); an annotation, if present, is checked against it.
     param_types: list = field(default_factory=list)
+    returns: str | None = None  # optional `-> T` annotation, checked vs service
 
 
 @dataclass
@@ -1162,6 +1163,24 @@ class Parser:
 
     # pure expressions — precedence climbing (§3.2)
 
+    def _parse_template_parts(self, raw_parts, line: int):
+        """Turn lexer template parts into ("text", str) / ("expr", ast): each
+        `${...}` body is re-parsed as a full pure expression (§3.2)."""
+        parts = []
+        for kind, value in raw_parts:
+            if kind == "text":
+                parts.append(("text", value))
+                continue
+            sub = Parser(value, self.filename)
+            expr = sub.pure_expr()
+            if not sub.at("eof"):
+                extra = sub.peek()
+                raise self.err(line,
+                               f"unexpected {extra.value!r} in `${{...}}` interpolation",
+                               hint="an interpolation holds one expression")
+            parts.append(("expr", expr))
+        return parts
+
     def pure_expr(self):
         return self._ternary()
 
@@ -1364,7 +1383,7 @@ class Parser:
             return ExprLit(tok.value, tok.line)
         if tok.kind == "template":
             self.next()
-            return Interp(tok.value, tok.line)
+            return Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -1477,6 +1496,12 @@ class Parser:
                 if self.at(","):
                     self.next()
             self.expect(")")
+            # optional `-> T` return annotation — models write the full `fn`
+            # signature; accept and check it against the service (A6)
+            returns = None
+            if self.at("arrow"):
+                self.next()
+                returns = self.type_()
             if self.at("="):
                 self.next()
                 body = [ReturnStmt(self.pure_expr(), mline)]
@@ -1487,7 +1512,7 @@ class Parser:
                     body.append(self.stmt(in_method=True, in_async_method=async_))
                 self.expect("}")
             methods.append(ProvideMethod(mname, params, body, mline, async_=async_,
-                                         param_types=param_types))
+                                         param_types=param_types, returns=returns))
         self.expect("}")
         return ProvideStmt(key, methods, line)
 
@@ -1501,7 +1526,7 @@ class Parser:
             base = Lit(tok.value, tok.line)
         elif tok.kind == "template":
             self.next()
-            base = Interp(tok.value, tok.line)
+            base = Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
         elif tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             base = Lit({"true": True, "false": False, "null": None}[tok.value], tok.line)

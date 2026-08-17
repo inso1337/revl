@@ -152,12 +152,12 @@ def _lex_string(source: str, i: int, line: int, filename: str):
 
 
 def _lex_template(source: str, i: int, line: int, filename: str):
-    """Backtick template with `${name}` interpolation; bare `$` is literal.
+    """Backtick template with `${expr}` interpolation; bare `$` is literal.
 
-    Returns (index-after-closing-backtick, parts, line) where parts is a
-    list of ("text", str) and ("var", name) segments.  The template keeps
-    the same parts shape as v1 `$ident` interpolation so lowering is
-    unchanged.
+    Returns (index-after-closing-backtick, parts, line) where parts is a list
+    of ("text", str) and ("expr", raw_source) segments. The `${...}` body is
+    captured as raw source with balanced braces; the parser re-parses it into
+    a full expression (§3.2).
     """
     parts: list[tuple[str, str]] = []
     buf: list[str] = []
@@ -175,31 +175,31 @@ def _lex_template(source: str, i: int, line: int, filename: str):
             i += 1
             continue
         if c == "$" and i + 1 < n and source[i + 1] == "{":
+            # capture the interpolated expression as raw source, balancing
+            # nested braces (record literals, etc.)
+            depth = 1
             j = i + 2
-            if j < n and (source[j].isalpha() or source[j] == "_"):
-                name_start = j
+            while j < n and depth > 0:
+                if source[j] == "{":
+                    depth += 1
+                elif source[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif source[j] == "\n":
+                    line += 1
                 j += 1
-                while j < n and (source[j].isalnum() or source[j] == "_"):
-                    j += 1
-                # accept a dotted access chain: `${user.name}`, `${a.b.c}`
-                while j + 1 < n and source[j] == "." and (source[j + 1].isalpha() or source[j + 1] == "_"):
-                    j += 1
-                    while j < n and (source[j].isalnum() or source[j] == "_"):
-                        j += 1
-                if j < n and source[j] == "}":
-                    if buf:
-                        parts.append(("text", "".join(buf)))
-                        buf = []
-                    parts.append(("var", source[name_start:j]))
-                    i = j + 1
-                    continue
-            raise RevlError(
-                filename,
-                line,
-                "template interpolation must be `${name}` or `${a.b.c}` — "
-                "an identifier or dotted access chain",
-                hint="write `${ident}` (or `${x.y}`) and close the brace before continuing",
-            )
+            if depth != 0:
+                raise RevlError(filename, line, "unterminated `${` interpolation")
+            inner = source[i + 2:j].strip()
+            if not inner:
+                raise RevlError(filename, line, "empty `${}` interpolation")
+            if buf:
+                parts.append(("text", "".join(buf)))
+                buf = []
+            parts.append(("expr", inner))
+            i = j + 1
+            continue
         buf.append(c)
         i += 1
     raise RevlError(filename, start_line, "unterminated template literal")

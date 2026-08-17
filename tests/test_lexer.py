@@ -55,12 +55,18 @@ def test_adts_and_ternary_use_single_pipe_and_question():
 def test_backtick_template_token_carries_parts():
     tokens = lex("`hello ${name}`", "<test>")
     assert tokens[0].kind == "template"
-    assert tokens[0].value == [("text", "hello "), ("var", "name")]
+    # interpolations are captured as raw source and re-parsed by the parser
+    assert tokens[0].value == [("text", "hello "), ("expr", "name")]
+
+
+def test_backtick_template_expression_interpolation():
+    tokens = lex("`x-${f(a).b + 1}`", "<test>")
+    assert tokens[0].value == [("text", "x-"), ("expr", "f(a).b + 1")]
 
 
 def test_backtick_template_bare_dollar_is_literal_text():
     tokens = lex("`cost: $9.99 for ${item}`", "<test>")
-    assert tokens[0].value == [("text", "cost: $9.99 for "), ("var", "item")]
+    assert tokens[0].value == [("text", "cost: $9.99 for "), ("expr", "item")]
 
 
 def test_plain_double_quoted_string_dollar_is_literal():

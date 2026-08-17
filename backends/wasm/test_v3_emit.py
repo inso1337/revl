@@ -48,9 +48,9 @@ def test_v3_types_and_int_functions_emit():
     assert "case Ok: Row" in wat
     assert 'case NotFound: unit' in wat
     assert 'case Invalid: Str' in wat
-    assert '(func (export "add")' in wat
-    assert '(func (export "classify")' in wat
-    assert '(func (export "negate")' in wat
+    assert '(export "add")' in wat
+    assert '(export "classify")' in wat
+    assert '(export "negate")' in wat
     assert "(i32.eqz)" in wat
 
 
@@ -69,10 +69,10 @@ def test_v3_str_list_record_functions_emit():
     modules = emit.emit(ir)
     assert set(modules) == {"functions"}
     wat = modules["functions"]
-    assert '(func (export "name")' in wat
-    assert '(func (export "first")' in wat
-    assert '(func (export "greet")' in wat
-    assert '(func (export "make_row")' in wat
+    assert '(export "name")' in wat
+    assert '(export "first")' in wat
+    assert '(export "greet")' in wat
+    assert '(export "make_row")' in wat
     assert "(i32.load (i32.add (local.get $p_row) (i32.const 4)))" in wat
     assert "(i32.load (i32.add (local.get $p_xs) (i32.const 4)))" in wat
     assert '  (data (i32.const 0) "\\02\\00\\00\\00hi")' in wat
@@ -179,3 +179,134 @@ def test_v3_variant_result_opt_run_on_wasmtime(tmp_path):
     assert invoke("mk_u", "1") == 9 and invoke("mk_u", "0") == 0
     assert invoke("r_d", "1") == 7 and invoke("r_d", "0") == -1   # Ok vs Err
     assert invoke("opt_or", "1") == 5 and invoke("opt_or", "0") == 0
+
+
+# `while` / `for` lower to native wasm loops — the functions tier is now
+# Turing-complete on wasm (fib loop-form + Collatz, the README's examples).
+_LOOP_SRC = """
+fn fib(n: Int) -> Int { var a = 0  var b = 1  var i = 0  while (i < n) { let t = a + b  a = b  b = t  i += 1 }  return a }
+fn collatz(n: Int) -> Int { var c = 0  var m = n  while (m != 1) { if (m % 2 == 0) { m = m / 2 } else { m = 3 * m + 1 }  c += 1 }  return c }
+fn sum_demo() -> Int { let xs = [3, 5, 8, 1]  var s = 0  for (x of xs) { s += x }  return s }
+fn nested() -> Int { let rows = [2, 3]  var total = 0  for (r of rows) { var k = 0  while (k < r) { total += 1  k += 1 } }  return total }
+"""
+
+
+def test_v3_loops_emit():
+    emit = _emitter()
+    wat = emit.emit(compile_source(_LOOP_SRC))["functions"]
+    assert "(loop" in wat and "(br_if 1)" in wat and "(br 0)" in wat
+
+
+@pytest.mark.skipif(__import__("shutil").which("wasmtime") is None, reason="wasmtime not installed")
+def test_v3_loops_run_on_wasmtime(tmp_path):
+    """fib/Collatz (while) and for-of execute on the real substrate — the
+    Turing-completeness the README demonstrates, now on wasm too."""
+    import subprocess
+
+    emit = _emitter()
+    wat_path = tmp_path / "loops.wat"
+    wat_path.write_text(emit.emit(compile_source(_LOOP_SRC))["functions"], encoding="utf-8")
+
+    def invoke(fn: str, *args: str) -> int:
+        out = subprocess.run(
+            ["wasmtime", "--invoke", fn, str(wat_path), *args],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert invoke("fib", "10") == 55 and invoke("fib", "20") == 6765
+    assert invoke("collatz", "27") == 111
+    assert invoke("sum_demo") == 17
+    assert invoke("nested") == 5
+
+
+# `${expr}` templates (Str-typed on this tier) + one v3 function calling
+# another (`call $name`).
+_STR_TPL_SRC = """
+fn greet(s: Str) -> Str { return `hi ${s}` }
+fn greet_len() -> Int { let s = "bob"  return greet(s).length() }
+"""
+
+
+def test_v3_str_template_and_intra_call_run_on_wasmtime(tmp_path):
+    import shutil, subprocess
+    if shutil.which("wasmtime") is None:
+        import pytest as _pt
+        _pt.skip("wasmtime not installed")
+    emit = _emitter()
+    wat = tmp_path / "t.wat"
+    wat.write_text(emit.emit(compile_source(_STR_TPL_SRC))["functions"], encoding="utf-8")
+    out = subprocess.run(["wasmtime", "--invoke", "greet_len", str(wat)],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().splitlines()[-1]) == 6   # "hi bob"
+
+
+def test_v3_int_interpolation_runs_on_wasmtime(tmp_path):
+    """`${intExpr}` stringifies via an itoa helper (`$int_to_str`)."""
+    import shutil, subprocess
+    if shutil.which("wasmtime") is None:
+        import pytest as _pt
+        _pt.skip("wasmtime not installed")
+    emit = _emitter()
+    wat = tmp_path / "i.wat"
+    # return each char code of `${n}` so we can assert the exact digits
+    wat.write_text(
+        emit.emit(compile_source(
+            "fn ch(n: Int, i: Int) -> Int { return `${n}`.charCodeAt(i) }\n"
+            "fn width(n: Int) -> Int { return `${n}`.length() }\n"
+        ))["functions"], encoding="utf-8")
+
+    def inv(fn, *a):
+        out = subprocess.run(["wasmtime", "--invoke", fn, str(wat), *a],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert [inv("ch", "12345", str(i)) for i in range(5)] == [ord(c) for c in "12345"]
+    assert [inv("ch", "-70", str(i)) for i in range(3)] == [ord(c) for c in "-70"]
+    assert inv("width", "0") == 1 and inv("width", "-100") == 4
+
+
+def test_v3_compound_interpolation_rejected_by_tier():
+    emit = _emitter()
+    with pytest.raises(emit.EmitError, match="Str or Int on this tier"):
+        emit.emit(compile_source("fn f(xs: List[Int]) -> Str { return `xs=${xs}` }"))
+
+
+# local arrows (`let f = x => …; f(a)`) are inlined — they can't escape this
+# tier (no lowerable function type), so no funcref/call_indirect is needed.
+_ARROW_SRC = """
+fn add_n(n: Int) -> Int { let f = x => x + n  return f(1) }
+fn twice() -> Int { let g = x => x * 2  return g(3) + g(10) }
+fn capture_by_value() -> Int { var n = 1  let f = y => y + n  n = 100  return f(5) }
+"""
+
+
+def test_v3_local_arrows_run_on_wasmtime(tmp_path):
+    import shutil, subprocess
+    if shutil.which("wasmtime") is None:
+        import pytest as _pt
+        _pt.skip("wasmtime not installed")
+    emit = _emitter()
+    wat = tmp_path / "a.wat"
+    wat.write_text(emit.emit(compile_source(_ARROW_SRC))["functions"], encoding="utf-8")
+
+    def invoke(fn: str, *args: str) -> int:
+        out = subprocess.run(["wasmtime", "--invoke", fn, str(wat), *args],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert invoke("add_n", "5") == 6
+    assert invoke("twice") == 26                 # inlined at two call sites
+    assert invoke("capture_by_value") == 6       # snapshots n=1, ignores n=100
+
+
+def test_v3_escaping_arrow_still_rejected():
+    # an arrow can only be inlined if it can't escape; a function-typed param
+    # is not lowerable on this tier, so passing an arrow stays rejected
+    emit = _emitter()
+    with pytest.raises(emit.EmitError, match="not lowerable"):
+        emit.emit(compile_source("fn apply(f: Fn[Int, Int], x: Int) -> Int { return f(x) }"))
