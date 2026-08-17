@@ -1,0 +1,12 @@
+# Python provider, Java (cordis4j) consumer. `revl run --placement` emits +
+# compiles the Java module and wires the `db` seam over a Unix socket.
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+components = ["PgDatabase"]
+
+[processes.consumer]
+backend = "java"
+components = ["UserCache"]
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]
