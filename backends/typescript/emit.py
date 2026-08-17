@@ -558,6 +558,26 @@ def _v3_var(node: dict, ctx: _TsV3Context) -> str:
     return name
 
 
+def _ts_builtin(method, target: str, args: list) -> str:
+    """The stdlib surface (docs/stdlib-2.0.md) as idiomatic TS; `push` and
+    `concat` are persistent (value semantics), matching the py backend."""
+    if method == "length":
+        return f"{target}.length"
+    if method == "push":
+        return f"[...{target}, {args[0]}]"
+    if method == "slice":
+        return f"{target}.slice({args[0]}, {args[1]})"
+    if method == "charAt":
+        return f"{target}.charAt({args[0]})"
+    if method == "charCodeAt":
+        return f"{target}.charCodeAt({args[0]})"
+    if method == "concat":
+        return f"{target}.concat({args[0]})"
+    if method == "indexOf":
+        return f"{target}.indexOf({args[0]})"
+    raise EmitError(f"unknown builtin method {method!r}")
+
+
 def _v3_expr(node: object, ctx: _TsV3Context) -> str:
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed v3 expression: {node!r}")
@@ -604,6 +624,13 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
         return f"{target}[{_v3_expr(node['index'], ctx)}]"
+
+    if kind == "builtin":
+        target = _v3_expr(node.get("target"), ctx)
+        if not (isinstance(node.get("target"), dict) and node["target"].get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        args = [_v3_expr(a, ctx) for a in node.get("args") or []]
+        return _ts_builtin(node.get("method"), target, args)
 
     if kind == "if":
         return (
@@ -697,6 +724,26 @@ def _v3_stmt(node: dict, ctx: _TsV3Context, out: list[str], indent: int, *, test
             for child in node["else"]:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
+    elif step == "while":
+        out.append(f"{'  ' * indent}while ({_v3_expr(node['cond'], ctx)}) {{")
+        for child in node.get("body") or []:
+            _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        out.append(f"{'  ' * indent}}}")
+    elif step == "for":
+        bind = _ident(node.get("bind"), "loop binding")
+        out.append(f"{'  ' * indent}for (const {bind} of {_v3_expr(node['iterable'], ctx)}) {{")
+        for child in node.get("body") or []:
+            _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        out.append(f"{'  ' * indent}}}")
+    elif step == "let_pattern":
+        value = _v3_expr(node.get("value"), ctx)
+        names = [_ident(n, "binding") for n in node.get("names") or []]
+        if node.get("pattern") == "record":
+            out.append(f"{'  ' * indent}const {{ {', '.join(names)} }} = {value}")
+        else:
+            rest = node.get("rest")
+            parts = ", ".join(names + ([f"...{_ident(rest, 'binding')}"] if rest else []))
+            out.append(f"{'  ' * indent}const [{parts}] = {value}")
     elif step == "expr":
         out.append(f"{'  ' * indent}{_v3_expr(node['expr'], ctx)}")
     elif step == "assert":
