@@ -36,6 +36,20 @@ _HOST_ROOTS = {"Pool", "Map", "Job"}
 # contract defines no identifier lexicon — see REPORT.md)
 _RESERVED = {"ctx", "config", "frame", "self", "fmt", "Pool", "Map", "ConfigSchema", "Frame"}
 
+# Members cordis-py's Context already owns. A provision key colliding with one
+# used to compile and then die at activation with `property "runtime" is
+# already declared as accessor`; the host knows its own surface, so the
+# rejection belongs here rather than in the (host-agnostic) frontend.
+# Derived from `dir(Context())` plus the mixin-provided members that resolve
+# through __getattr__ (fiber/registry/events/reflect mixins).
+_CONTEXT_MEMBERS = {
+    "baseUrl", "events", "extend", "fiber", "intercept", "is_", "isolate",
+    "logger", "reflect", "registry", "root",
+    "runtime", "effect", "inject", "plugin",
+    "on", "once", "emit", "parallel", "serial", "bail", "waterfall",
+    "get", "set", "provide", "accessor", "mixin",
+}
+
 
 class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
@@ -328,6 +342,12 @@ class _ComponentEmitter:
 
     def _provide(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         name = _ident(step.get("name"), f"{where}: provide key")
+        if name in _CONTEXT_MEMBERS:
+            raise EmitError(
+                f"{where}: provision key {name!r} collides with a cordis-py "
+                f"Context member — `ctx.{name}` already exists, so the "
+                f"provision would fail at activation. Rename the key."
+            )
         service = step.get("service")
         if service not in self.services:
             raise EmitError(f"{where}: provide {name!r} names unknown service {service!r}")
@@ -388,6 +408,15 @@ class _ComponentEmitter:
         steps must join the component's accumulator (via the Frame)."""
         kind = step.get("step")
         label = f"{provide_name}.{method_name}"
+        if kind == "let":
+            # a plain value binding inside a method body
+            name = _ident(step.get("name"), f"{where}: let")
+            out.add(indent, f"{name} = {self._expr(step.get('value'), where)}")
+            return
+        if kind == "assign":
+            name = _ident(step.get("name"), f"{where}: assign")
+            out.add(indent, f"{name} = {self._expr(step.get('value'), where)}")
+            return
         if kind == "effect":
             fn = f"_effect_{self._counter}"
             out.add(indent, f"def {fn}():")

@@ -51,6 +51,16 @@ JS_RESERVED = {
 
 TYPE_MAP = {"Str": "string", "Int": "number", "Bool": "boolean", "Float": "number"}
 
+# Members cordis's Context already owns; a provision key colliding with one
+# would shadow framework API (or be refused by the runtime). The host knows
+# its own surface, so this rejection lives in the backend, not the frontend.
+CONTEXT_MEMBERS = {
+    "root", "fiber", "registry", "reflect", "events", "logger", "runtime",
+    "effect", "extend", "isolate", "intercept", "inject", "plugin",
+    "on", "once", "emit", "parallel", "serial", "bail", "waterfall",
+    "get", "set", "provide", "accessor", "mixin", "baseUrl",
+}
+
 
 def _ts_type(name: object) -> str:
     """Surface type -> TS type (IR v1/A6). Unknown names map to `unknown`."""
@@ -235,7 +245,14 @@ def _method_body(steps: list, scope: _Scope, indent: str) -> list[str]:
     lines: list[str] = []
     for step in steps:
         kind = step.get("step")
-        if kind == "return":
+        if kind == "let":
+            name = scope.bind(step["name"])
+            keyword = "let" if step.get("mutable") else "const"
+            lines.append(f"{indent}{keyword} {name} = {_expr(step['value'], scope)}")
+        elif kind == "assign":
+            lines.append(f"{indent}{_ident(step['name'], 'binding')} = "
+                         f"{_expr(step['value'], scope)}")
+        elif kind == "return":
             lines.append(f"{indent}return {_expr(step['expr'], scope)}")
         elif kind in ("effect", "let-effect"):
             bind = None
@@ -342,6 +359,11 @@ def _component_body(component: dict, services: dict, indent: str) -> list[str]:
             if provides[name] != step.get("service"):
                 raise EmitError(
                     f"provide step {name!r} service does not match the header"
+                )
+            if name in CONTEXT_MEMBERS:
+                raise EmitError(
+                    f"provision key {name!r} collides with a cordis Context "
+                    f"member — `ctx.{name}` already exists. Rename the key."
                 )
             # R5: the withdrawal inverse is the runtime's own (ctx.provide is
             # revertible); yielding the wrapper slots it into this body

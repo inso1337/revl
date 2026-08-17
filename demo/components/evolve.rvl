@@ -46,10 +46,9 @@ extern emission fn host_propose(source: Str) -> Str
 extern emission fn host_complete(prompt: Str) -> Str
   = @py { from evolve_bridge import complete; return complete(prompt) }
 
-// NOTE: the key is `compiler`, not `runtime` — cordis-py's Context
-// already exposes `ctx.runtime`, and a provision key that collides with
-// a host context member fails at activation instead of at compile time
-// (a gap recorded in the roadmap).
+// NOTE: the key is `compiler`, not `runtime` — cordis-py's Context already
+// exposes `ctx.runtime`. Choosing it here is what surfaced that collision;
+// the backends now reject such a key at compile time.
 component HostRuntime provides compiler: Runtime {
   provide compiler {
     fn check(source) = host_check(source)

@@ -764,12 +764,32 @@ class Parser:
 
     def stmt(self, in_method: bool, in_async_method: bool = False):
         tok = self.peek()
-        if tok.kind == "kw" and tok.value == "let":
+        # `y = expr` — assignment to a `var` bound earlier in this method
+        if in_method and tok.kind == "ident" and self.toks[self.pos + 1].kind == "=":
+            self.next()
+            self.next()
+            return AssignStmt(tok.value, self.pure_expr(), tok.line)
+        if tok.kind == "kw" and tok.value in ("let", "var"):
+            mutable = tok.value == "var"
             self.next()
             bind = self.expect("ident").value
             self.expect("=")
-            acquire, undo, line, setup = self.effect_form(tok.line)
-            return LetEffect(bind, acquire, undo, line, setup)
+            # `let x = effect … undo …` binds an acquisition; anything else
+            # binds a plain value, so a method can name an intermediate
+            # result instead of nesting every call into one expression
+            if not mutable and self.at("kw", "effect"):
+                acquire, undo, line, setup = self.effect_form(tok.line)
+                return LetEffect(bind, acquire, undo, line, setup)
+            if not in_method:
+                raise self.err(
+                    tok.line,
+                    f"`{'var' if mutable else 'let'} {bind} = …` binds a plain value, "
+                    "which a component activation body has no use for",
+                    hint="an activation body records effects: write "
+                         f"`let {bind} = effect … undo …`, or move the computation "
+                         "into a `fn` (G6)",
+                )
+            return LetStmt(bind, self.pure_expr(), mutable, tok.line)
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup)
