@@ -173,6 +173,9 @@ _BUILTIN_SIG = {
     "charCodeAt": ("Str", ["Int"], "Int"),
     "concat": ("sized", ["@self"], "@self"),
     "indexOf": ("sized", ["@member"], "Int"),
+    "split": ("Str", ["Str"], "List[Str]"),
+    "join": ("List", ["Str"], "Str"),
+    "repeat": ("Str", ["Int"], "Str"),
 }
 
 

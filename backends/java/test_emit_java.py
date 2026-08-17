@@ -295,6 +295,9 @@ pub fn find(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
 pub fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
 pub fn cat(a: Str, b: Str) -> Str { return a.concat(b) }
 pub fn catL(xs: List[Int], ys: List[Int]) -> List[Int] { return xs.concat(ys) }
+pub fn pieces(s: Str, sep: Str) -> List[Str] { return s.split(sep) }
+pub fn glue(xs: List[Str], sep: Str) -> Str { return xs.join(sep) }
+pub fn times(s: Str, n: Int) -> Str { return s.repeat(n) }
 test "stdlib parity with the python backend" {
   assert seq(5).length() == 5
   assert seq(5)[4] == 4
@@ -305,6 +308,12 @@ test "stdlib parity with the python backend" {
   assert findL([4, 5, 6], 6) == 2
   assert cat("re", "vl") == "revl"
   assert catL([1], [2, 3]).length() == 3
+  assert pieces("a,,b", ",").length() == 3
+  assert pieces("a,", ",").length() == 2
+  assert pieces("abc", "").length() == 3
+  assert pieces("a-b", "-")[0] == "a"
+  assert glue(pieces("a-b", "-"), "+") == "a+b"
+  assert times("ab", 3) == "ababab"
 }
 """
 

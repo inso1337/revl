@@ -90,6 +90,14 @@ def _render_builtin(method, target: str, args: list) -> str:
     if method == "indexOf":
         return (f"(lambda _v, _n: _v.find(_n) if isinstance(_v, str) "
                 f"else (_v.index(_n) if _n in _v else -1))({target}, {args[0]})")
+    if method == "split":
+        # JS-shape split: "" -> 1-char strings (py str.split("") raises).
+        return (f"(lambda _v, _s: list(_v) if _s == \"\" "
+                f"else _v.split(_s))({target}, {args[0]})")
+    if method == "join":
+        return f"{args[0]}.join({target})"
+    if method == "repeat":
+        return f"({target} * {args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 

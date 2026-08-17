@@ -575,6 +575,12 @@ def _ts_builtin(method, target: str, args: list) -> str:
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
         return f"{target}.indexOf({args[0]})"
+    if method == "split":
+        return f"{target}.split({args[0]})"
+    if method == "join":
+        return f"{target}.join({args[0]})"
+    if method == "repeat":
+        return f"{target}.repeat({args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 

@@ -380,6 +380,12 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
         return f"revlConcat({target}, {args[0]})"
     if method == "indexOf":
         return f"revlIndexOf({target}, {args[0]})"
+    if method == "split":
+        return f"revlSplit({target}, {args[0]})"
+    if method == "join":
+        return f"revlJoin({target}, {args[0]})"
+    if method == "repeat":
+        return f"revlRepeat({target}, {args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -407,6 +413,20 @@ def _emit_stdlib_helpers() -> list[str]:
         "}",
         "private static <T> java.util.List<T> revlPush(java.util.List<T> xs, T v) {",
         "    return java.util.stream.Stream.concat(xs.stream(), java.util.stream.Stream.of(v)).toList();",
+        "}",
+        "// split is pinned to the JS shape: Pattern.quote (literal sep, not",
+        "// regex), limit -1 (trailing empties kept), \"\" -> 1-char strings.",
+        "private static java.util.List<String> revlSplit(String s, String sep) {",
+        "    if (sep.isEmpty()) {",
+        "        return s.chars().mapToObj(c -> String.valueOf((char) c)).toList();",
+        "    }",
+        "    return java.util.List.of(s.split(java.util.regex.Pattern.quote(sep), -1));",
+        "}",
+        "private static String revlJoin(java.util.List<String> xs, String sep) {",
+        "    return String.join(sep, xs);",
+        "}",
+        "private static String revlRepeat(String s, long n) {",
+        "    return s.repeat((int) Math.max(0L, n));",
         "}",
         "",
     ]
