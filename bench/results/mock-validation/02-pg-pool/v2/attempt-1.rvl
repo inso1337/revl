@@ -1,0 +1,8 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Broken {
+  effect ghost.poke() undo ghost.unpoke()
+}

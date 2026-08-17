@@ -133,7 +133,9 @@ def mismatch(filename: str, line: int, where: str,
         hint = ("unwrap the optional first: `match` on it, or use `??` "
                 "to supply a fallback (syntax-2.0 §2)")
     return RevlError(filename, line,
-                     f"{where} expects `{expected}`, got `{actual}`", hint)
+                     f"{where} expects `{expected}`, got `{actual}`", hint,
+                     code="T1", category="type-mismatch",
+                     expected=expected, actual=actual)
 
 
 def null_error(filename: str, line: int) -> RevlError:
@@ -142,6 +144,7 @@ def null_error(filename: str, line: int) -> RevlError:
         "`null` has no type in revl — absence is `Opt[T]`",
         hint="use `None` for an absent optional, or restructure with `match`/`??` "
              "(syntax-2.0 §2; `null` remains legal only as a config default)",
+        code="T2", category="null-safety",
     )
 
 

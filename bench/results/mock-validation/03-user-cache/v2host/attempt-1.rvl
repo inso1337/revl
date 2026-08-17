@@ -1,0 +1,13 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component Broken {
+  effect ghost.poke() undo ghost.unpoke()
+}

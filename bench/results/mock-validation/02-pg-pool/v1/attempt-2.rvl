@@ -1,0 +1,8 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Probe {
+  let m = effect Map.new() undo m.drop()
+}
