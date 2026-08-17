@@ -2,13 +2,131 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass, field
+
 from .errors import RevlError
 from .lower import check_and_lower
-from .parser import Parser, Program, parse_file
+from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
+
+
+@dataclass
+class _LoadedModule:
+    path: str
+    dir: str
+    program: Program
+    public_fns: dict[str, FnDecl] = field(default_factory=dict)
+    public_types: dict[str, TypeDecl] = field(default_factory=dict)
+    public_externs: dict[str, ExternDecl] = field(default_factory=dict)
+    services: dict[str, ServiceDecl] = field(default_factory=dict)
+    named_fns: set[str] = field(default_factory=set)
+    named_types: set[str] = field(default_factory=set)
+    named_externs: set[str] = field(default_factory=set)
+    named_services: set[str] = field(default_factory=set)
+    aliases: dict[str, "_LoadedModule"] = field(default_factory=dict)
+    pure_dependencies: set[int] = field(default_factory=set)
+
+
+class _ModuleLoader:
+    """Loads modules and resolves `use` with cycle detection."""
+
+    def __init__(self) -> None:
+        self._cache: dict[str, _LoadedModule] = {}
+        self._stack: list[str] = []
+
+    def load(self, path: str) -> _LoadedModule:
+        abs_path = os.path.abspath(path)
+        if abs_path in self._stack:
+            start = self._stack.index(abs_path)
+            cycle = self._stack[start:] + [abs_path]
+            rendered = " -> ".join(os.path.relpath(p) for p in cycle)
+            raise RevlError(
+                abs_path,
+                1,
+                f"import cycle: {rendered}",
+                hint="module imports form a compile-time DAG; component dependencies are the "
+                     "runtime graph checked separately by G3",
+            )
+        if abs_path in self._cache:
+            return self._cache[abs_path]
+
+        self._stack.append(abs_path)
+        try:
+            program = parse_file(abs_path)
+            module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
+            for fn in program.fn_decls:
+                if fn.public:
+                    module.public_fns[fn.name] = fn
+            for type_decl in program.type_decls:
+                if type_decl.public:
+                    module.public_types[type_decl.name] = type_decl
+            for extern in program.externs:
+                if extern.public:
+                    module.public_externs[extern.name] = extern
+            for svc in program.services:
+                module.services[svc.name] = svc
+
+            self._cache[abs_path] = module
+            for use in program.uses:
+                used = self.load(os.path.join(module.dir, use.path))
+                if use.names is not None:
+                    for name in use.names:
+                        self._import_named(module, used, name, use.line)
+                else:
+                    if use.alias in module.aliases:
+                        raise RevlError(abs_path, use.line,
+                                        f"duplicate module alias `{use.alias}`")
+                    module.aliases[use.alias] = used
+                    module.pure_dependencies.add(id(used))
+            self._stack.pop()
+            return module
+        except Exception:
+            self._stack.pop()
+            raise
+
+    def _import_named(self, importer: _LoadedModule, used: _LoadedModule,
+                      name: str, line: int) -> None:
+        if name in used.public_fns:
+            importer.named_fns.add(name)
+            importer.pure_dependencies.add(id(used))
+            return
+        if name in used.public_types:
+            importer.named_types.add(name)
+            importer.pure_dependencies.add(id(used))
+            return
+        if name in used.public_externs:
+            importer.named_externs.add(name)
+            importer.pure_dependencies.add(id(used))
+            return
+        if name in used.services:
+            importer.named_services.add(name)
+            return
+
+        where = os.path.relpath(used.path)
+        if any(fn.name == name and not fn.public for fn in used.program.fn_decls):
+            raise RevlError(importer.path, line,
+                            f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
+                            hint=f"mark `fn {name}` as `pub fn {name}` in {where}")
+        if any(td.name == name and not td.public for td in used.program.type_decls):
+            raise RevlError(importer.path, line,
+                            f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
+                            hint=f"mark `type {name}` as `pub type {name}` in {where}")
+        if any(ext.name == name and not ext.public for ext in used.program.externs):
+            raise RevlError(importer.path, line,
+                            f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
+                            hint=f"mark `extern {name}` as `pub extern` in {where}")
+        raise RevlError(importer.path, line,
+                        f"`{name}` is not a public declaration in `{where}`")
 
 
 def compile_source(source: str, filename: str = "<string>") -> dict:
-    return check_and_lower(Parser(source, filename).parse())
+    program = Parser(source, filename).parse()
+    if program.uses:
+        use = program.uses[0]
+        raise RevlError(filename, use.line,
+                        "`use` declarations require compile_files with a real source path",
+                        hint="a source string has no module directory from which to resolve the import")
+    return check_and_lower(program)
 
 
 def compile_files(paths: list[str], manifest: dict | None = None,
@@ -27,28 +145,91 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     The returned document's `components` are only the newly compiled ones;
     its `manifest` describes the whole resulting composition.
     """
+    loader = _ModuleLoader()
+    root_modules = [_load_root(loader, path) for path in paths]
+
     merged = Program(filename=paths[0] if paths else "<none>")
     seen_services: dict[str, str] = {}
     seen_components: dict[str, str] = {}
-    for path in paths:
-        program = parse_file(path)
-        for svc in program.services:
+    emitted_ids: set[int] = set()
+
+    # Components and services from the root modules are the composition.
+    # Components are never imported; services are pub by default.
+    for module in root_modules:
+        for svc in module.program.services:
             if svc.name in seen_services:
-                raise RevlError(path, svc.line,
+                raise RevlError(module.path, svc.line,
                                 f"duplicate service `{svc.name}` (also declared in {seen_services[svc.name]})")
-            seen_services[svc.name] = path
+            seen_services[svc.name] = module.path
             merged.services.append(svc)
-        for comp in program.components:
+            emitted_ids.add(id(svc))
+        for comp in module.program.components:
             if comp.name in seen_components:
-                raise RevlError(path, comp.line,
+                raise RevlError(module.path, comp.line,
                                 f"duplicate component `{comp.name}` (also declared in {seen_components[comp.name]})")
-            seen_components[comp.name] = path
+            seen_components[comp.name] = module.path
             merged.components.append(comp)
-        # v2.0: type & function declarations are part of the merged program too
-        # (duplicate names across files are caught in _lower_type_decls/_lower_fns)
-        merged.type_decls.extend(program.type_decls)
-        merged.fn_decls.extend(program.fn_decls)
-        merged.filename = path  # diagnostics from lowering name the declaring file
+            emitted_ids.add(id(comp))
+
+    # Directly imported services enter the composition service table. Alias
+    # imports do not: a service is referred to by its interface name, not a
+    # module-qualified path.
+    for module in root_modules:
+        for use in module.program.uses:
+            used = loader.load(os.path.join(module.dir, use.path))
+            if use.names is not None:
+                for name in use.names:
+                    svc = used.services.get(name)
+                    if svc is not None and id(svc) not in emitted_ids:
+                        if svc.name in seen_services:
+                            raise RevlError(module.path, use.line,
+                                            f"duplicate service `{svc.name}` (also declared in {seen_services[svc.name]})")
+                        seen_services[svc.name] = used.path
+                        merged.services.append(svc)
+                        emitted_ids.add(id(svc))
+
+    # Pure declarations emitted into the IR: every root module plus the
+    # transitive closure of modules whose pure declarations are imported.
+    # Private helpers of an imported module are emitted too (its functions
+    # may call them), but fn_scopes below keeps them module-private.
+    by_id = {id(module): module for module in loader._cache.values()}
+    included: list[_LoadedModule] = list(root_modules)
+    included_ids: set[int] = {id(m) for m in root_modules}
+    queue = list(root_modules)
+    while queue:
+        module = queue.pop(0)
+        for dep_id in module.pure_dependencies:
+            if dep_id not in included_ids:
+                included.append(by_id[dep_id])
+                included_ids.add(dep_id)
+                queue.append(by_id[dep_id])
+
+    for module in included:
+        for decl in module.program.type_decls:
+            if id(decl) not in emitted_ids:
+                merged.type_decls.append(decl)
+                emitted_ids.add(id(decl))
+        for decl in module.program.fn_decls:
+            if id(decl) not in emitted_ids:
+                merged.fn_decls.append(decl)
+                emitted_ids.add(id(decl))
+        for decl in module.program.externs:
+            if id(decl) not in emitted_ids:
+                merged.externs.append(decl)
+                emitted_ids.add(id(decl))
+
+    # Build checker scopes for every emitted function so a module-private
+    # declaration from another module is not accidentally callable.
+    for module in included:
+        own_fns = {fn.name for fn in module.program.fn_decls}
+        callables = own_fns | set(module.named_fns)
+        alias_fns = {
+            alias: set(used.public_fns)
+            for alias, used in module.aliases.items()
+        }
+        for fn in module.program.fn_decls:
+            merged.fn_scopes[id(fn)] = callables
+            merged.fn_alias_scopes[id(fn)] = alias_fns
 
     ambient = None
     if manifest is not None:
@@ -62,3 +243,9 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             ],
         }
     return check_and_lower(merged, ambient)
+
+
+def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:
+    if not os.path.exists(path):
+        raise RevlError(path, 1, f"file not found: {path}")
+    return loader.load(path)

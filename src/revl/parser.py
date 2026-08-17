@@ -178,6 +178,35 @@ class TypeDecl:
     fields: list[RecordField]
     cases: list[VariantCase]
     line: int
+    public: bool = False
+
+
+@dataclass
+class UseDecl:
+    path: str
+    names: list[str] | None  # None = module namespace import
+    alias: str | None
+    line: int
+
+
+@dataclass
+class HostBody:
+    backend: str
+    text: str
+    line: int
+
+
+@dataclass
+class ExternDecl:
+    name: str
+    classification: str  # 'pure' | 'acquire' | 'emission'
+    params: list[FnParam]
+    returns: str | None
+    undo: object | None
+    compensate: object | None
+    bodies: list[HostBody]
+    public: bool
+    line: int
 
 
 @dataclass
@@ -319,6 +348,12 @@ class Program:
     components: list[ComponentDecl] = field(default_factory=list)
     type_decls: list[TypeDecl] = field(default_factory=list)
     fn_decls: list[FnDecl] = field(default_factory=list)
+    uses: list[UseDecl] = field(default_factory=list)
+    externs: list[ExternDecl] = field(default_factory=list)
+    # Set by compile_files so the checker can resolve module-private vs
+    # imported names without merging all files into one global namespace.
+    fn_scopes: dict[int, set[str]] = field(default_factory=dict)
+    fn_alias_scopes: dict[int, dict[str, set[str]]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------- parser
@@ -359,25 +394,115 @@ class Parser:
     def parse(self) -> Program:
         program = Program(self.filename)
         while not self.at("eof"):
-            if self.at("kw", "service"):
+            if self.at("kw", "use"):
+                program.uses.append(self.use_decl())
+            elif self.at("kw", "service"):
                 program.services.append(self.service())
             elif self.at("kw", "component"):
                 program.components.append(self.component())
             elif self.at("kw", "type"):
-                program.type_decls.append(self.type_decl())
+                program.type_decls.append(self.type_decl(False))
             elif self.at("kw", "pub"):
                 self.next()
                 if self.at("kw", "fn"):
                     program.fn_decls.append(self.fn_decl(True))
+                elif self.at("kw", "type"):
+                    program.type_decls.append(self.type_decl(True))
+                elif self.at("kw", "service"):
+                    # services are interfaces and are pub by default; a `pub`
+                    # prefix is accepted as documentation but adds nothing
+                    program.services.append(self.service())
+                elif self.at("kw", "extern"):
+                    program.externs.append(self.extern_decl(True))
+                elif self.at("kw", "component"):
+                    tok = self.peek()
+                    raise self.err(
+                        tok.line,
+                        "components are never `pub` — they are composed through the manifest, not imported",
+                    )
                 else:
                     tok = self.peek()
-                    raise self.err(tok.line, f"expected `fn` after `pub`, found {tok.value!r}")
+                    raise self.err(tok.line, f"expected `fn`, `type`, `service`, or `extern` after `pub`, found {tok.value!r}")
+            elif self.at("kw", "extern"):
+                program.externs.append(self.extern_decl(False))
             elif self.at("kw", "fn"):
                 program.fn_decls.append(self.fn_decl(False))
             else:
                 tok = self.peek()
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
         return program
+
+    def use_decl(self) -> UseDecl:
+        line = self.expect("kw", "use").line
+        path_tok = self.expect("string", what="a module path string")
+        if any(kind == "var" for kind, _ in path_tok.value):
+            raise self.err(line, "`use` paths must be static string literals")
+        path = "".join(text for _, text in path_tok.value)
+        if not path:
+            raise self.err(line, "`use` path cannot be empty")
+        names = None
+        alias = None
+        if self.at("{"):
+            self.next()
+            names = []
+            while not self.at("}"):
+                names.append(self.expect("ident").value)
+                if self.at(","):
+                    self.next()
+            self.expect("}")
+        elif self.at("kw", "as"):
+            self.next()
+            alias = self.expect("ident").value
+        else:
+            tok = self.peek()
+            raise self.err(tok.line, f"expected `{{` or `as` after `use` path, found {tok.value!r}")
+        return UseDecl(path, names, alias, line)
+
+    def extern_decl(self, public: bool) -> ExternDecl:
+        line = self.expect("kw", "extern").line
+        if not self.at("kw") or self.peek().value not in ("pure", "acquire", "emission"):
+            tok = self.peek()
+            raise self.err(
+                line,
+                "unclassified extern — expected `pure`, `acquire`, or `emission` after `extern`",
+                hint="classification is mandatory: `pure` has no observable effect, "
+                     "`acquire` must declare `undo`, and `emission` may declare `compensate`",
+            )
+        classification = self.next().value
+        self.expect("kw", "fn")
+        name = self.expect("ident").value
+        self.expect("(")
+        params: list[FnParam] = []
+        while not self.at(")"):
+            pline = self.peek().line
+            pname = self.expect("ident").value
+            self.expect(":")
+            ptype = self.type_()
+            params.append(FnParam(pname, ptype, pline))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        returns = None
+        if self.at("arrow"):
+            self.next()
+            returns = self.type_()
+        undo = None
+        compensate = None
+        if self.at("kw", "undo"):
+            self.next()
+            undo = self.pure_expr()
+        if self.at("kw", "compensate"):
+            self.next()
+            compensate = self.pure_expr()
+        bodies: list[HostBody] = []
+        while self.at("="):
+            self.next()
+            host_tok = self.expect("hostbody", what="`@backend { ... }` host body")
+            backend, text = host_tok.value
+            bodies.append(HostBody(backend, text, host_tok.line))
+        if not bodies:
+            raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
+        return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line)
 
     def service(self) -> ServiceDecl:
         line = self.expect("kw", "service").line
@@ -614,7 +739,7 @@ class Parser:
 
     # -- v2.0: type & function declarations (syntax-2.0 §2–§3) ----------------
 
-    def type_decl(self) -> TypeDecl:
+    def type_decl(self, public: bool = False) -> TypeDecl:
         line = self.expect("kw", "type").line
         name = self.expect("ident").value
         params: list[str] = []
@@ -638,7 +763,7 @@ class Parser:
                 if self.at(","):
                     self.next()
             self.expect("}")
-            return TypeDecl(name, params, fields, [], line)
+            return TypeDecl(name, params, fields, [], line, public)
         cases: list[VariantCase] = []
         while True:
             cline = self.peek().line
@@ -653,7 +778,7 @@ class Parser:
                 self.next()
             else:
                 break
-        return TypeDecl(name, params, [], cases, line)
+        return TypeDecl(name, params, [], cases, line, public)
 
     def fn_decl(self, public: bool) -> FnDecl:
         line = self.expect("kw", "fn").line
