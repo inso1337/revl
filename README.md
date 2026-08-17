@@ -120,14 +120,29 @@ Pre-typing control: v1 93% / v2 57% / v2host 43% first-pass — i.e. **sound
 typing costs models nothing** (typed first-pass is equal-or-better, within
 run-to-run variance on n=30).
 
-What the gap was: one grammar friction dominated these runs. Models
-annotate provide-method parameters (`fn query(sql: Str) = ...`) exactly as
+What the gap was: one grammar friction dominated these runs. Models write the
+full provide-method signature (`fn query(sql: Str) -> Int = ...`) exactly as
 the 2.0 `fn` stratum teaches them to, and the component grammar rejected the
-annotation — 7–10 of each run's v2/v2host first-pass failures were this
-single parse error. **That friction is now fixed:** optional provide-method
-parameter annotations are accepted and checked against the service signature
-(A6), so a re-run should put 2.0 first-pass near parity with 1.x. Diagnostics
-did their job meanwhile: 176/180 cells compiled within 3 iterations, mean
+parameter and return-type annotations — most of each run's v2/v2host
+first-pass failures were this single parse error. **That friction is now
+fixed:** optional provide-method parameter *and* return-type annotations are
+accepted and checked against the service signature (A6). Re-compiling the
+committed first-pass generations against the fixed compiler (same
+generations, new compiler — not a fresh model run) measures the effect:
+
+| variant | first-pass, as-run | first-pass, fixed compiler |
+|---|---|---|
+| v1 | 27/30 | 28/30 |
+| v2 | 20/30 | 27/30 |
+| v2host | 18/30 | 28/30 |
+
+v2host reaches parity with v1; v2 is one behind. The residual failures are
+*not* syntax friction: `26-log-rotator` (a `config` field typo) and
+`29-mesh` (a malformed statement) are genuine model errors present in v1 too,
+and the one v2-only case uses a function call inside a `${}` template — the
+documented dotted-chain-only interpolation limit. A fresh model run (which
+would also benefit from the new diagnostics) is future work. Diagnostics did
+their job meanwhile: 176/180 cells compiled within 3 iterations, mean
 iterations-to-green ≤ 1.4 everywhere.
 <!-- BENCH-RESULTS:END -->
 

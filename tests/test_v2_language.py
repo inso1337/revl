@@ -516,6 +516,19 @@ def test_provide_method_param_annotation_accepted_and_checked():
             "component C provides d: Db { provide d { fn query(sql: Int) = 1 } }\n"
         )
 
+    # the full `fn foo(p: T) -> R = ...` signature is accepted; a wrong return
+    # annotation is rejected against the service
+    compile_source(
+        "service S { fn holder(name: Str) -> Opt[Str] }\n"
+        "component C provides s: S { let m = effect Map.new() undo m.drop()\n"
+        "  provide s { fn holder(name: Str) -> Opt[Str] = m.get(name) } }\n"
+    )
+    with pytest.raises(RevlError, match=r"return type of `q`.*expects `Int`, got `Str`"):
+        compile_source(
+            "service S { fn q(x: Str) -> Int }\n"
+            "component C provides s: S { provide s { fn q(x: Str) -> Str = 1 } }\n"
+        )
+
 
 def test_optional_chain_rejects_nonoptional_continuation():
     from revl.compiler import compile_source

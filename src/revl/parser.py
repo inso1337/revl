@@ -151,6 +151,7 @@ class ProvideMethod:
     # omitted): `fn query(sql: Str) = ...`. The service is the source of
     # truth (A6); an annotation, if present, is checked against it.
     param_types: list = field(default_factory=list)
+    returns: str | None = None  # optional `-> T` annotation, checked vs service
 
 
 @dataclass
@@ -1477,6 +1478,12 @@ class Parser:
                 if self.at(","):
                     self.next()
             self.expect(")")
+            # optional `-> T` return annotation — models write the full `fn`
+            # signature; accept and check it against the service (A6)
+            returns = None
+            if self.at("arrow"):
+                self.next()
+                returns = self.type_()
             if self.at("="):
                 self.next()
                 body = [ReturnStmt(self.pure_expr(), mline)]
@@ -1487,7 +1494,7 @@ class Parser:
                     body.append(self.stmt(in_method=True, in_async_method=async_))
                 self.expect("}")
             methods.append(ProvideMethod(mname, params, body, mline, async_=async_,
-                                         param_types=param_types))
+                                         param_types=param_types, returns=returns))
         self.expect("}")
         return ProvideStmt(key, methods, line)
 
