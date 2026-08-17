@@ -33,11 +33,37 @@ def test_user_cache_emits_rust_structure():
     # Rust `Drop::drop` is a destructor (E0040) — revl `drop` must be renamed.
     assert "drop_" in src
     assert ".drop()" not in src
+    # Host objects are a real runtime now, not `todo!()` stubs.
+    assert "todo!()" not in src
 
 
 def test_rejects_unsupported_ir_version():
     with pytest.raises(emit.EmitError, match="ir_version"):
         emit.emit({"ir_version": 4, "components": [{"name": "X", "body": []}]})
+
+
+def test_accepts_ir_versions_1_2_3_and_rejects_4():
+    base = {"services": {}, "components": [{"name": "C", "requires": {}, "provides": {}, "body": []}]}
+    emit.emit({**base, "ir_version": 1})
+    emit.emit({**base, "ir_version": 2})
+    emit.emit({**base, "ir_version": 3, "types": {}, "functions": [], "externs": [], "tests": []})
+    with pytest.raises(emit.EmitError, match="ir_version"):
+        emit.emit({**base, "ir_version": 4})
+
+
+def test_user_cache_golden_byte_equality():
+    src = emit.emit(_ir("user_cache"))
+    golden = (Path(__file__).parent / "golden" / "user_cache.rs").read_text(encoding="utf-8")
+    assert src == golden
+
+
+def test_config_defaults_are_emitted():
+    src = emit.emit(_ir("user_cache"))
+    assert "impl Default for PgDatabaseConfig" in src
+    assert "url: String::new()" in src
+    assert "pool_size: 10i64" in src
+    assert "let config = PgDatabaseConfig" in src
+    assert "..Default::default()" in src
 
 
 def test_v2_realms_emit_isolate_and_intercept():
@@ -95,13 +121,15 @@ def test_extern_requires_rs_body():
         )
 
 
-def test_migrator_await_is_rejected():
-    # A1 `await` steps are not yet supported by the spike.
+def test_component_await_uses_plugin_async():
     ir = {"ir_version": 1, "services": {}, "components": [
         {"name": "C", "requires": {}, "provides": {}, "body": [
-            {"step": "await", "expr": {"kind": "name", "id": "x"}}]}]}
-    with pytest.raises(emit.EmitError, match="unsupported component step"):
-        emit.emit(ir)
+            {"step": "await", "expr": {"kind": "host", "fn": "Job.run",
+                                      "args": [{"kind": "lit", "value": "x"}]}}]}]}
+    src = emit.emit(ir)
+    assert "cordis::plugin_async::<(), _, _>" in src
+    assert "|ctx, config| async move {" in src
+    assert 'Job::run(String::from("x")).await;' in src
 
 
 def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
@@ -145,4 +173,64 @@ def test_cargo_check_compiles_v3_types_functions_match(tmp_path):
         """
     )
     result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_v3_host_await_fail_block_effect(tmp_path):
+    ir = {
+        "ir_version": 3,
+        "services": {},
+        "components": [
+            {
+                "name": "Demo",
+                "config": [],
+                "requires": {},
+                "provides": {},
+                "body": [
+                    {
+                        "step": "let-effect",
+                        "bind": "store",
+                        "setup": [
+                            {"step": "let", "name": "key", "value": {"kind": "lit", "value": "k"}}
+                        ],
+                        "acquire": {"kind": "host", "fn": "Map.new", "args": []},
+                        "undo": {
+                            "kind": "call",
+                            "target": {"kind": "name", "id": "store"},
+                            "method": "drop",
+                            "args": [],
+                        },
+                    },
+                    {
+                        "step": "if",
+                        "cond": {"kind": "lit", "value": True},
+                        "then": [
+                            {"step": "fail", "message": {"kind": "lit", "value": "boom"}}
+                        ],
+                        "else": [
+                            {"step": "fail", "message": {"kind": "lit", "value": "unexpected"}}
+                        ],
+                    },
+                    {
+                        "step": "await",
+                        "expr": {
+                            "kind": "host",
+                            "fn": "Job.run",
+                            "args": [{"kind": "lit", "value": "job"}],
+                        },
+                    },
+                ],
+            }
+        ],
+        "types": {},
+        "functions": [],
+        "externs": [],
+        "tests": [],
+    }
+    src = emit.emit(ir)
+    assert "pub struct Map" in src
+    assert "pub async fn run" in src
+    assert "return Err(cordis::CordisError::with_message" in src
+    result = _cargo_check(tmp_path, src)
     assert result.returncode == 0, result.stderr

@@ -18,15 +18,15 @@ Mapping (DESIGN.md §7 — the backend contract is small):
                  concern; at runtime it is just a call).
 - format      -> `format!(...)`.
 
-Documented spike limits (tracked in docs/v2.0-roadmap.md):
+Documented limits (tracked in docs/v2.0-roadmap.md):
 
-- Host objects (`Pool`/`Map`/`Job`) are emitted as opaque stubs — their real
-  Rust forms are host-runtime work, like the wasm tier's "host builtins".
-- Provide-method bodies containing `effect`/`emit` statements are stubbed
-  `todo!()` (effectful methods need a ctx-carrying design — follow-up). Pure
-  delegation bodies are emitted for real.
-- Config `default` values are not applied (that belongs in
-  `Plugin::validate_config`, which `plugin_sync` does not expose).
+- Host objects (`Pool`/`Map`/`Job`) are a minimal real runtime: `Map` is a
+  thread-safe `HashMap<String, String>`, `Pool` is a deterministic in-memory
+  fake, and `Job::run` is an async no-op.
+- Component `await` steps lower to `plugin_async` + `.await`; cordis-rs drives
+  the activation future for the fiber (A1).
+- Config `default` values are emitted on `impl Default for <Comp>Config`, and
+  the plugin body reconstructs its local config through `..Default::default()`.
 
 CLI: `python3 emit.py <ir.json> [> out.rs]`.
 """
@@ -193,6 +193,40 @@ def _rust_v3_lit(node: dict) -> str:
     raise EmitError(f"unsupported literal node: {node!r}")
 
 
+def _default_for_rust_type(ftype: str) -> str:
+    """Return a conservative Rust default expression for a config field type."""
+    if ftype == "String":
+        return "String::new()"
+    if ftype == "i64":
+        return "0i64"
+    if ftype == "f64":
+        return "0f64"
+    if ftype == "bool":
+        return "false"
+    if ftype == "Vec<u8>":
+        return "Vec::new()"
+    if ftype == "()":
+        return "()"
+    return "Default::default()"
+
+
+def _config_default_lit(value: object, ftype: str) -> str:
+    """Render an IR config default (or a type fallback) as a Rust expression."""
+    if value is None:
+        return _default_for_rust_type(ftype)
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return f"String::from({_string(value)})"
+    if isinstance(value, int):
+        return f"{value}i64"
+    if isinstance(value, float):
+        return f"{value}f64"
+    raise EmitError(f"unsupported config default value: {value!r}")
+
+
 def _intercept_json_type(value, base: str, defs: list[str], type_names: dict, counter: list[int]) -> str:
     """Return a concrete Rust type for an intercept metadata value.
 
@@ -265,12 +299,28 @@ def _intercept_json_lit(value, base: str, defs: list[str], type_names: dict, cou
 class _Env:
     """Per-component lowering context."""
 
-    def __init__(self, component: dict, services: dict):
+    def __init__(
+        self,
+        component: dict,
+        services: dict,
+        types: dict | None = None,
+        functions: list | None = None,
+        externs: list | None = None,
+    ):
         self.component = component
         self.services = services
         self.name = component["name"]
         self.reqs: dict[str, str] = dict(component.get("requires") or {})
         self.provides: dict[str, str] = dict(component.get("provides") or {})
+        self.types: dict = types or {}
+        self.functions: list = functions or []
+        self.externs: list = externs or []
+        self._v3_ctx: _V3Ctx | None = None
+
+    def v3_ctx(self) -> _V3Ctx:
+        if self._v3_ctx is None:
+            self._v3_ctx = _V3Ctx(self.types, self.functions, self.externs)
+        return self._v3_ctx
 
 
 def _expr_arg(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
@@ -306,6 +356,10 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
             return rename[original]
         return _ident(original, "requirement")
     if kind == "call":
+        if "callee" in node and "target" not in node:
+            callee = _expr(node.get("callee"), env, rename)
+            args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
+            return f"({callee})({args})"
         target = node.get("target") or {}
         method = _ident(_mname(node.get("method")), "method")
         args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
@@ -320,6 +374,15 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
         template = node.get("template") or ""
         args = [_expr(a, env, rename) for a in node.get("args") or []]
         return _format(template, args)
+    if kind == "fn":
+        name = _ident(node.get("name"), "function")
+        args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
+        return f"{name}({args})"
+    if kind in {
+        "var", "bin", "un", "field", "index", "if",
+        "record", "list", "arrow", "builtin",
+    }:
+        return _v3_expr(node, env.v3_ctx())
     raise EmitError(f"unsupported expression node in Rust backend: {kind!r}")
 
 
@@ -369,6 +432,13 @@ def _emit_service_traits(services: dict) -> list[str]:
 
 
 def _emit_host_stubs(ir: dict) -> list[str]:
+    """Emit the minimal revl host runtime for objects used by this document.
+
+    The objects are intentionally small and dependency-free: ``Map`` is a real
+    ``String -> String`` map, ``Pool`` is a deterministic in-memory fake, and
+    ``Job`` is an async no-op so component ``await`` steps have a future to
+    await.  None of them panic with ``todo!()``.
+    """
     used: set[str] = set()
 
     def walk(node) -> None:
@@ -385,19 +455,71 @@ def _emit_host_stubs(ir: dict) -> list[str]:
     walk(ir.get("functions"))
     walk(ir.get("tests"))
     walk(ir.get("types"))
+
     out: list[str] = []
-    for host in sorted(used & _HOST_STUBS.keys()):
-        out.append(f"// host object stub ({host}) — real Rust host objects are a follow-up")
-        out.append(f"struct {host} {{}}")
-        out.append(f"impl {host} {{")
-        for mname, (ret, argtypes) in _HOST_STUBS[host].items():
-            params = ", ".join(f"_a{i}: {t}" for i, t in enumerate(argtypes))
-            is_ctor = ret == "Self"
-            ret = host if is_ctor else ret
-            recv = "" if is_ctor else "&self, "
-            out.append(f"    fn {_mname(mname)}({recv}{params}) -> {ret} {{ todo!() }}")
-        out.append("}")
-        out.append("")
+    if "Map" in used:
+        out.extend(
+            [
+                "/// revl host object: a small thread-safe string map.",
+                "pub struct Map {",
+                "    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,",
+                "}",
+                "impl Map {",
+                "    pub fn new() -> Self {",
+                "        Self {",
+                "            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),",
+                "        }",
+                "    }",
+                "    pub fn drop_(&self) {",
+                "        self.inner.lock().unwrap().clear();",
+                "    }",
+                "    pub fn insert(&self, key: String, value: String) {",
+                "        self.inner.lock().unwrap().insert(key, value);",
+                "    }",
+                "    pub fn remove(&self, key: String) {",
+                "        self.inner.lock().unwrap().remove(&key);",
+                "    }",
+                "    pub fn get(&self, key: String) -> Option<String> {",
+                "        self.inner.lock().unwrap().get(&key).cloned()",
+                "    }",
+                "}",
+                "",
+            ]
+        )
+    if "Pool" in used:
+        out.extend(
+            [
+                "/// revl host object: a deterministic in-memory database fake.",
+                "pub struct Pool {",
+                "    _url: String,",
+                "    _size: i64,",
+                "}",
+                "impl Pool {",
+                "    pub fn open(url: String, size: i64) -> Self {",
+                "        Self { _url: url, _size: size }",
+                "    }",
+                "    pub fn close(&self) {}",
+                "    pub fn query(&self, _sql: String) -> Vec<Value> {",
+                "        vec![Value::new(String::from(\"fake-row\"))]",
+                "    }",
+                "    pub fn execute(&self, _sql: String) -> i64 {",
+                "        1i64",
+                "    }",
+                "}",
+                "",
+            ]
+        )
+    if "Job" in used:
+        out.extend(
+            [
+                "/// revl host object: an asynchronous no-op job.",
+                "pub struct Job;",
+                "impl Job {",
+                "    pub async fn run(_job: String) {}",
+                "}",
+                "",
+            ]
+        )
     return out
 
 
@@ -451,6 +573,69 @@ def _component_has_effectful_methods(component: dict) -> bool:
                 if body_step.get("step") in ("effect", "emit"):
                     return True
     return False
+
+
+def _component_uses_await(component: dict) -> bool:
+    return any(
+        step.get("step") == "await"
+        for step in component.get("body") or []
+    )
+
+
+def _emit_config_struct(component: dict, out: list[str]) -> str:
+    """Emit `<Comp>Config` plus its `Default` implementation.
+
+    Returns the Rust type to pass to `plugin_sync`/`plugin_async` (or `()` when
+    the component has no config). The `Default` impl carries IR default values;
+    required fields fall back to the zero value for their Rust type.
+    """
+    fields = component.get("config") or []
+    if not fields:
+        return "()"
+    cname = _ident(component.get("name"), "component")
+    out.append("#[derive(Clone)]")
+    out.append(f"struct {cname}Config {{")
+    for field in fields:
+        fname = _ident(field.get("name"), "config field")
+        out.append(f"    {fname}: {_rust_type(field.get('type'))},")
+    out.append("}")
+    out.append("")
+    out.append(f"impl Default for {cname}Config {{")
+    out.append("    fn default() -> Self {")
+    out.append("        Self {")
+    for field in fields:
+        fname = _ident(field.get("name"), "config field")
+        ftype = _rust_type(field.get("type"))
+        out.append(
+            f"            {fname}: {_config_default_lit(field.get('default'), ftype)},"
+        )
+    out.append("        }")
+    out.append("    }")
+    out.append("}")
+    out.append("")
+    return f"{cname}Config"
+
+
+def _emit_config_application(component: dict, config_ty: str, indent: int) -> list[str]:
+    """Reconstruct the plugin config locally using `..Default::default()`.
+
+    `plugin_sync`/`plugin_async` hand the component a fully-populated
+    `Arc<CompConfig>`. Rust struct fields are not optional, so the runtime
+    cannot observe "missing" fields; emitting the local construction keeps the
+    generated component the single place where `<Comp>Config` is built and
+    makes `Default` part of that construction.
+    """
+    if config_ty == "()":
+        return []
+    fields = component.get("config") or []
+    pad = "    " * indent
+    lines = [f"{pad}let config = {config_ty} {{"]
+    for field in fields:
+        fname = _ident(field.get("name"), "config field")
+        lines.append(f"{pad}    {fname}: config.{fname}.clone(),")
+    lines.append(f"{pad}    ..Default::default()")
+    lines.append(f"{pad}}};")
+    return lines
 
 
 def _method_has_effectful_steps(method: dict) -> bool:
@@ -531,13 +716,20 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
 
 
 
-def _emit_component_new(component: dict, services: dict) -> list[str]:
+def _emit_component_new(component: dict, services: dict, ir: dict | None = None) -> list[str]:
     """v2 components + effectful provide-method bodies.
 
     This is used for any component that needs more than the original v1 spike:
     `isolate`, `intercept`, or a provide method containing `effect`/`emit`.
     """
-    env = _Env(component, services)
+    ir = ir or {}
+    env = _Env(
+        component,
+        services,
+        types=ir.get("types"),
+        functions=ir.get("functions"),
+        externs=ir.get("externs"),
+    )
     name = component["name"]
     cname = _ident(name, "component")
     snake = _snake(name)
@@ -562,16 +754,7 @@ def _emit_component_new(component: dict, services: dict) -> list[str]:
 
     out: list[str] = []
 
-    config_fields = component.get("config") or []
-    config_ty = "()" if not config_fields else f"{cname}Config"
-    if config_fields:
-        out.append("#[derive(Clone)]")
-        out.append(f"struct {cname}Config {{")
-        for field in config_fields:
-            fname = _ident(field.get("name"), "config field")
-            out.append(f"    {fname}: {_rust_type(field.get('type'))},")
-        out.append("}")
-        out.append("")
+    config_ty = _emit_config_struct(component, out)
 
     for key, service in env.provides.items():
         _ident(key, "provision")
@@ -628,11 +811,15 @@ def _emit_component_new(component: dict, services: dict) -> list[str]:
     else:
         inject = "Inject::none()" if not env.reqs else f"Inject::new({_string(list(env.reqs.keys()))})"
 
+    uses_await = _component_uses_await(component)
+    plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
+    closure = "        |ctx, config| async move {" if uses_await else "        |ctx, config| {"
     out.append(f"pub fn {snake}() -> cordis::PluginHandle {{")
-    out.append(f"    cordis::plugin_sync::<{config_ty}, _>(")
+    out.append(f"    {plugin_fn.format(config_ty)}(")
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
-    out.append("        |ctx, config| {")
+    out.append(closure)
+    out.extend(_emit_config_application(component, config_ty, indent=3))
     if isolate:
         for key, realm in isolate.items():
             out.append(
@@ -663,13 +850,13 @@ def _emit_component_new(component: dict, services: dict) -> list[str]:
     return out
 
 
-def _emit_component_auto(component: dict, services: dict) -> list[str]:
+def _emit_component_auto(component: dict, services: dict, ir: dict | None = None) -> list[str]:
     if (
         not (component.get("isolate") or component.get("intercept"))
         and not _component_has_effectful_methods(component)
     ):
-        return _emit_component(component, services)
-    return _emit_component_new(component, services)
+        return _emit_component(component, services, ir)
+    return _emit_component_new(component, services, ir)
 
 
 def _revl_realm_helper() -> list[str]:
@@ -686,23 +873,21 @@ def _revl_realm_helper() -> list[str]:
 
 
 
-def _emit_component(component: dict, services: dict) -> list[str]:
-    env = _Env(component, services)
+def _emit_component(component: dict, services: dict, ir: dict | None = None) -> list[str]:
+    ir = ir or {}
+    env = _Env(
+        component,
+        services,
+        types=ir.get("types"),
+        functions=ir.get("functions"),
+        externs=ir.get("externs"),
+    )
     name = component["name"]
     cname = _ident(name, "component")
     snake = _snake(name)
     out: list[str] = []
 
-    config_fields = component.get("config") or []
-    config_ty = "()" if not config_fields else f"{cname}Config"
-    if config_fields:
-        out.append("#[derive(Clone)]")
-        out.append(f"struct {cname}Config {{")
-        for field in config_fields:
-            fname = _ident(field.get("name"), "config field")
-            out.append(f"    {fname}: {_rust_type(field.get('type'))},")
-        out.append("}")
-        out.append("")
+    config_ty = _emit_config_struct(component, out)
 
     for key, service in env.provides.items():
         _ident(key, "provision")
@@ -730,11 +915,15 @@ def _emit_component(component: dict, services: dict) -> list[str]:
         out.append("")
 
     inject = "Inject::none()" if not env.reqs else f"Inject::new({_string(list(env.reqs.keys()))})"
+    uses_await = _component_uses_await(component)
+    plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
+    closure = "        |ctx, config| async move {" if uses_await else "        |ctx, config| {"
     out.append(f"pub fn {snake}() -> cordis::PluginHandle {{")
-    out.append(f"    cordis::plugin_sync::<{config_ty}, _>(")
+    out.append(f"    {plugin_fn.format(config_ty)}(")
     out.append(f"        {_string(name)},")
     out.append(f"        cordis::{inject},")
-    out.append("        |ctx, config| {")
+    out.append(closure)
+    out.extend(_emit_config_application(component, config_ty, indent=3))
     for local, service in env.reqs.items():
         out.append(f"            let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
     for step in component.get("body") or []:
@@ -747,26 +936,95 @@ def _emit_component(component: dict, services: dict) -> list[str]:
     return out
 
 
+def _emit_setup_value(node: dict, env: _Env) -> str:
+    """Lower a setup value, coercing string literals to owned `String`.
+
+    revl `Str` is emitted as `String`; a setup `let` is the first time a
+    literal can become a named local, so it must not be inferred as `&str`.
+    """
+    if isinstance(node, dict) and node.get("kind") == "lit" and isinstance(node.get("value"), str):
+        return f"String::from({_expr(node, env)})"
+    return _expr(node, env)
+
+
+def _emit_setup_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
+    """Lower a pure block-effect setup step (stratum-1)."""
+    pad = "    " * indent
+    kind = step.get("step")
+    if kind == "let":
+        name = _ident(step.get("name"), "setup binding")
+        out.append(f"{pad}let mut {name} = {_emit_setup_value(step.get('value'), env)};")
+    elif kind == "assign":
+        name = _ident(step.get("name"), "setup assign")
+        out.append(f"{pad}{name} = {_emit_setup_value(step.get('value'), env)};")
+    elif kind == "expr":
+        out.append(f"{pad}let _ = {_expr(step.get('expr'), env)};")
+    elif kind == "if":
+        out.append(f"{pad}if {_expr(step.get('cond'), env)} {{")
+        for nested in step.get("then") or []:
+            _emit_setup_step(nested, env, out, indent + 1)
+        if step.get("else"):
+            out.append(f"{pad}}} else {{")
+            for nested in step.get("else") or []:
+                _emit_setup_step(nested, env, out, indent + 1)
+        out.append(f"{pad}}}")
+    elif kind == "assert":
+        out.append(f"{pad}assert!({_expr(step.get('expr'), env)});")
+    else:
+        raise EmitError(f"unsupported setup step in Rust backend: {kind!r}")
+
+
 def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
     pad = "    " * indent
     kind = step.get("step")
     if kind == "let-effect":
+        for setup in step.get("setup") or []:
+            _emit_setup_step(setup, env, out, indent)
         bind = _ident(step["bind"], "binding")
         acquire = _expr(step["acquire"], env)
         out.append(f"{pad}let {bind} = Arc::new({acquire});")
         undo_name = f"{bind}_undo"
         out.append(f"{pad}let {undo_name} = {bind}.clone();")
-        undo = _expr(step["undo"], env, rename={step["bind"]: undo_name})
+        undo_rename = {step["bind"]: undo_name}
+        for req in env.reqs:
+            req_undo = f"{req}_undo"
+            out.append(f"{pad}let {req_undo} = {req}.clone();")
+            undo_rename[req] = req_undo
+        undo = _expr(step["undo"], env, rename=undo_rename)
         label = _string(env.name + "." + step["bind"] + ".undo")
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "effect":
+        for setup in step.get("setup") or []:
+            _emit_setup_step(setup, env, out, indent)
         acquire = _expr(step["acquire"], env)
-        undo = _expr(step["undo"], env)
+        undo_rename: dict[str, str] = {}
+        for req in env.reqs:
+            req_undo = f"{req}_undo"
+            out.append(f"{pad}let {req_undo} = {req}.clone();")
+            undo_rename[req] = req_undo
+        undo = _expr(step["undo"], env, rename=undo_rename)
         out.append(f"{pad}let _ = {acquire};")
         label = _string(env.name + ".effect")
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
+    elif kind == "fail":
+        message = _expr(step.get("message"), env)
+        out.append(
+            f"{pad}return Err(cordis::CordisError::with_message("
+            f"cordis::ErrorCode::Plugin, {message}));"
+        )
+    elif kind == "if":
+        out.append(f"{pad}if {_expr(step.get('cond'), env)} {{")
+        for nested in step.get("then") or []:
+            _emit_step(nested, env, out, indent + 1)
+        if step.get("else"):
+            out.append(f"{pad}}} else {{")
+            for nested in step.get("else") or []:
+                _emit_step(nested, env, out, indent + 1)
+        out.append(f"{pad}}}")
+    elif kind == "await":
+        out.append(f"{pad}{_expr(step['expr'], env)}.await;")
     elif kind == "provide":
         key = step.get("name")
         service = step.get("service")
@@ -796,7 +1054,7 @@ _V3_BIN_OPS = {
     "||": "||",
 }
 
-_V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
+_V3_ATOMIC_KINDS = {"var", "name", "field", "index", "call", "lit"}
 _V3_HOST_ROOTS = set(_HOST_STUBS)
 _V3_BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 
@@ -911,6 +1169,9 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
         if name in _V3_BUILTIN_CONSTRUCTORS:
             return name
         return name
+
+    if kind == "name":
+        return _ident(node.get("id"), "name")
 
     if kind == "bin":
         op = _V3_BIN_OPS.get(node.get("op"))
@@ -1255,7 +1516,7 @@ def _emit_components(ir: dict, components: list) -> list[str]:
     if _needs_realm_helper(components):
         out.extend(_revl_realm_helper())
     for component in components:
-        out.extend(_emit_component_auto(component, ir.get("services") or {}))
+        out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     return out
 
 

@@ -21,19 +21,20 @@ Services are `Box<dyn Trait>` because cordis-rs `require`/`provide` take a
 `Sized` `T`; `Box<dyn Trait>` is the sized, dynamically-dispatched equivalent of
 the TS runtime's object-valued services.
 
-## Spike limits (tracked in docs/v2.0-roadmap.md)
+## Limits (tracked in docs/v2.0-roadmap.md)
 
 - **ir_version 2** realms are emitted as `Context::isolate_with` +
   `Inject::require_with`; **ir_version 3** records/variants/functions/match/
   externs/tests are emitted as Rust items.
-- **Host objects** (`Pool`/`Map`/`Job`) are emitted as opaque stubs whose bodies
-  `todo!()` — their real Rust forms are host-runtime work (like the wasm tier's
-  "host builtins").
+- **Host objects** (`Pool`/`Map`/`Job`) are a minimal real runtime. `Map` is a
+  thread-safe `HashMap<String, String>`; `Pool` is a deterministic in-memory
+  fake; `Job::run` is an async no-op.
 - **Effectful provide-method bodies** compile to real `self.ctx.effect(...)`
   calls; the impl struct carries `Arc<Context>` and cloned requirement handles.
-- Config **`default` values** are not applied (`Plugin::validate_config`
-  territory, not exposed by `plugin_sync`).
-- `await` steps inside provide methods are still rejected (A1).
+- Config **`default` values** are emitted as `impl Default for <Comp>Config`;
+  the plugin body reconstructs its local config through `..Default::default()`.
+- Component **`await`** steps use `plugin_async` and lower to `.await`.
+  `await` steps inside provide methods are still rejected (A1).
 
 ## Verify
 
