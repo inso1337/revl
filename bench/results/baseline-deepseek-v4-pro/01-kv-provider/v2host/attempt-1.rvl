@@ -1,0 +1,16 @@
+service Kv {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component MemKv provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn get(key: Str) -> Opt[Str] = store.get(key)
+    fn put(key: Str, value: Str) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}

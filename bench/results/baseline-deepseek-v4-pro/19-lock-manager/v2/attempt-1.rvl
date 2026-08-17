@@ -1,0 +1,17 @@
+service Locks {
+  fn acquire_lock(name: Str)
+  fn holder(name: Str) -> Opt[Str]
+}
+
+component LockManager provides locks: Locks {
+  let store = effect Map.new() undo store.drop()
+
+  provide locks {
+    fn acquire_lock(name: Str) {
+      effect store.insert(name, "held")
+      undo   store.remove(name)
+    }
+
+    fn holder(name: Str) = store.get(name)
+  }
+}

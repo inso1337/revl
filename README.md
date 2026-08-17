@@ -10,6 +10,8 @@ revl is the language-level realization of the paradigm formalized in
 and implemented as a library by [Cordis](https://github.com/cordiverse/cordis).
 The one-line pitch: **Cordis has revertible effects as a discipline; revl makes
 them a type system** — the same jump C++ RAII made to become Rust's ownership.
+What this is *for* — and the honest scope of the "future of programming" claim
+— is [docs/vision.md](docs/vision.md).
 
 ```revl
 component UserCache requires db: Database provides cache: Cache {
@@ -38,20 +40,24 @@ component UserCache requires db: Database provides cache: Cache {
   back out, and the diagnostic says to unwrap with `match` or `??`. The
   unchecked remainder is enumerated, not implied: host-valued objects and
   the extern boundary, both on the G8 audit surface.
-- Backends: [cordis-py](https://github.com/geohotstan/cordis-py),
-  [cordis](https://github.com/cordiverse/cordis) (TypeScript), and the
-  cordis-wasm substrate. See [DESIGN.md](DESIGN.md) for the full design,
-  the checked-guarantees table, and why raw native codegen is deliberately
-  a non-goal.
+- Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
+  [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
+  cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)
+  (Rust) and [cordis4j](https://github.com/1na-ko/cordis4j) (Java) spikes —
+  one language, five tiers ([docs/vision.md](docs/vision.md)). See
+  [DESIGN.md](DESIGN.md) for the full design, the checked-guarantees table,
+  and why raw native codegen is deliberately a non-goal.
 
-**Status: v1.** The pipeline runs end-to-end on **three backends**:
+**Status: v1.** The pipeline runs end-to-end on **five backends** — three
+runnable (**cordis-py**, **cordis** (TS), and the **cordis-wasm substrate**,
+[backends/wasm/](backends/wasm/)) plus first **cordis-rs** (Rust) and
+**cordis4j** (Java) spikes ([docs/v2.0-roadmap.md](docs/v2.0-roadmap.md)) —
 `python -m revl compile` takes `.rvl` sources through parse → check →
 link → IR ([docs/backend-ir-v1.md](docs/backend-ir-v1.md)), and the
-emitters produce runnable components for **cordis-py**, **cordis** (TS),
-and the **cordis-wasm substrate** ([backends/wasm/](backends/wasm/)) —
-where confinement is enforced by the sandbox and `effect/undo` compiles
-to a state machine with physical partial rollback. Divert-during-`await`
-semantics (A1) are verified on all three. `python -m revl audit` prints a
+emitters produce runnable components. On the wasm substrate, confinement is
+enforced by the sandbox and `effect/undo` compiles to a state machine with
+physical partial rollback. Divert-during-`await` semantics (A1) are verified
+on all three runnable backends. `python -m revl audit` prints a
 composition's manifest and G8 boundary surface; `compile_files(...,
 manifest=running)` is the runtime-admission gate. The rejection suite in
 [examples/rejections/](examples/rejections/) is the checker's executable
@@ -96,7 +102,31 @@ checker. The harness lives in [bench/](bench/) (`python3 bench/run.py`),
 generations and summaries are committed under `bench/results/`.
 
 <!-- BENCH-RESULTS:BEGIN -->
-Baseline run: pending.
+Two full 30×3 runs with DeepSeek V4 Pro (3-iteration error-feedback loop,
+~$0.25 total): one scored against the **typing-enforced** checker
+(`37bed37`, the shipping compiler), one against the pre-typing checker
+(`9a8c670`) as a control.
+
+Typed checker (`bench/results/typed-deepseek-v4-pro`):
+
+| variant | first-pass compile | green ≤ 3 iters | mean iters-to-green |
+|---|---|---|---|
+| v1 (1.x syntax) | 27/30 (90%) | 29/30 | 1.07 |
+| v2 (2.0 syntax) | 20/30 (67%) | 29/30 | 1.31 |
+| v2host (2.0 + host blocks) | 18/30 (60%) | 30/30 | 1.40 |
+
+Pre-typing control: v1 93% / v2 57% / v2host 43% first-pass — i.e. **sound
+typing costs models nothing** (typed first-pass is equal-or-better, within
+run-to-run variance on n=30).
+
+What the gap actually is: one grammar friction dominates. Models
+annotate provide-method parameters (`fn query(sql: Str) = ...`) exactly as
+the 2.0 `fn` stratum teaches them to, and the component grammar rejects the
+annotation — 7–10 of each run's v2/v2host first-pass failures are this
+single parse error. Accepting (and checking) optional annotations there
+would put 2.0 first-pass at parity with 1.x. Diagnostics do their job
+meanwhile: 176/180 cells compile within 3 iterations, mean
+iterations-to-green ≤ 1.4 everywhere.
 <!-- BENCH-RESULTS:END -->
 
 ```bash

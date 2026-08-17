@@ -1,0 +1,46 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+service Api {
+  fn fetch(user: Str) -> Opt[Str]
+}
+
+component PgDatabase provides db: Database {
+  config { url: Str = "postgres://localhost:5432/app", poolSize: Int = 4 }
+
+  let pool = effect Pool.open(config.url, config.poolSize) undo pool.close()
+
+  provide db {
+    fn query(sql: Str) = pool.query(sql)
+    fn execute(sql: Str) = pool.execute(sql)
+  }
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key: Str) = store.get(key)
+    fn put(key: Str, value: Str) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO cache_log (k, v) VALUES ('${key}', '${value}')`)
+           compensate db.execute(`DELETE FROM cache_log WHERE k = '${key}'`)
+    }
+  }
+}
+
+component ApiFront requires cache: Cache provides api: Api {
+  provide api {
+    fn fetch(user: Str) = cache.get(user)
+  }
+}

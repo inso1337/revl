@@ -1,0 +1,16 @@
+service Queue {
+  fn enqueue(id: Str, payload: Str)
+  fn peek(id: Str) -> Opt[Str]
+}
+
+component WorkQueue provides queue: Queue {
+  let store = effect Map.new() undo store.drop()
+
+  provide queue {
+    fn enqueue(id: Str, payload: Str) {
+      effect store.insert(id, payload)
+      undo   store.remove(id)
+    }
+    fn peek(id: Str) = store.get(id)
+  }
+}

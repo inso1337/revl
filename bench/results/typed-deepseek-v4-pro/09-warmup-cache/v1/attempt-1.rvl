@@ -1,0 +1,25 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component WarmCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  await Job.run("warmup")
+
+  emit db.execute("INSERT INTO cache_status VALUES ('cache online')")
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}

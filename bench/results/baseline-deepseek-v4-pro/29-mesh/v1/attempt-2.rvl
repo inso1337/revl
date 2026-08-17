@@ -1,0 +1,34 @@
+service Kv {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+service Audited {
+  fn put_audited(key: Str, value: Str)
+}
+
+service Mailer {
+  emission fn send(to: Str, body: Str)
+}
+
+component MemKv provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+
+component Auditor requires kv: Kv, mail: Mailer provides audited: Audited {
+  provide audited {
+    fn put_audited(key, value) {
+      effect kv.put(key, value)
+      undo   kv.put(key, "")
+      emit mail.send("audit", `wrote key ${key}`)
+    }
+  }
+}

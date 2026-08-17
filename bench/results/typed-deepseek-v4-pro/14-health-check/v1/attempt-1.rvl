@@ -1,0 +1,10 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component HealthCheck requires db: Database {
+  effect db.query("SELECT 1") undo db.query("SELECT 0")
+  await Job.run("healthcheck")
+  emit db.execute("INSERT INTO health_log VALUES ('up')")
+}

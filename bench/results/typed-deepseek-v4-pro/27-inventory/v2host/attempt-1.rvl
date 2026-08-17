@@ -1,0 +1,25 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Inventory {
+  fn reserve(sku: Str, n: Str)
+  fn reserved(sku: Str) -> Opt[Str]
+}
+
+component InventoryKeeper requires db: Database provides inv: Inventory {
+  let store = effect Map.new() undo store.drop()
+
+  provide inv {
+    fn reserve(sku, n) {
+      effect store.insert(sku, n)
+      undo   store.remove(sku)
+      emit db.execute(`INSERT INTO reservation_journal (sku, quantity) VALUES ('${sku}', '${n}')`)
+           compensate db.execute(`DELETE FROM reservation_journal WHERE sku = '${sku}' AND quantity = '${n}'`)
+    }
+    fn reserved(sku) = store.get(sku)
+  }
+}

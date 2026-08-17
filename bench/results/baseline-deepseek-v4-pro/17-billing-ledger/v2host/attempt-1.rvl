@@ -1,0 +1,24 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Billing {
+  fn charge(acct: Str, cents: Str)
+}
+
+fn negate(cents: Str) -> Str {
+  if (cents.length() > 0 && cents.charAt(0) == "-") {
+    return cents.slice(1, cents.length())
+  }
+  return `-${cents}`
+}
+
+component BillingLedger requires db: Database provides billing: Billing {
+  provide billing {
+    fn charge(acct, cents) {
+      emit db.execute(`INSERT INTO ledger (acct, cents) VALUES ('${acct}', '${cents}')`)
+           compensate db.execute(`INSERT INTO ledger (acct, cents) VALUES ('${acct}', '${negate(cents)}')`)
+    }
+  }
+}

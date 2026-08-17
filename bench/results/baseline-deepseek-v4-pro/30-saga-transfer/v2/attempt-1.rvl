@@ -1,0 +1,19 @@
+type Row = { id: Int }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component TransferSaga requires ledger: Database {
+  effect ledger.query("SELECT GET_LOCK('transfer_saga', 10)")
+    undo ledger.query("SELECT RELEASE_LOCK('transfer_saga')")
+
+  emit ledger.execute("INSERT INTO entries (account, amount) VALUES ('A', -100)")
+       compensate ledger.execute("INSERT INTO entries (account, amount) VALUES ('A', 100)")
+
+  emit ledger.execute("INSERT INTO entries (account, amount) VALUES ('B', 100)")
+       compensate ledger.execute("INSERT INTO entries (account, amount) VALUES ('B', -100)")
+
+  await Job.run("settle")
+}

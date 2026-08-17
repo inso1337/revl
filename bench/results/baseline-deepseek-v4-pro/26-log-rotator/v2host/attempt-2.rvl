@@ -1,0 +1,21 @@
+type Row = { id: Int }
+
+fn rotationInsertSql(keep: Int) -> Str {
+  return `INSERT INTO rotation_log (marker) VALUES (${keep})`
+}
+
+fn rotationDeleteSql(keep: Int) -> Str {
+  return `DELETE FROM rotation_log WHERE marker = ${keep}`
+}
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component LogRotator requires db: Database {
+  config { keep: Int = 7 }
+
+  emit db.execute(rotationInsertSql(config.keep))
+       compensate db.execute(rotationDeleteSql(config.keep))
+}

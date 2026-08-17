@@ -1,0 +1,217 @@
+{"spec": "01-kv-provider", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 5.49, "cost": 0.000291421}
+{"spec": "01-kv-provider", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000291}
+{"spec": "01-kv-provider", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 18.16, "cost": 0.001131087}
+{"spec": "01-kv-provider", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001131}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "01-kv-provider.rvl:10: expected ident, found ':'", "duration_s": 11.41, "cost": 0.0007888289999999999}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 6.56, "cost": 0.000476934}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.001266}
+{"spec": "02-pg-pool", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 19.57, "cost": 0.0015172510000000003}
+{"spec": "02-pg-pool", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001517}
+{"spec": "02-pg-pool", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:14: expected ident, found ':'", "duration_s": 57.06, "cost": 0.005874385}
+{"spec": "02-pg-pool", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 73.98, "cost": 0.0051038839999999995}
+{"spec": "02-pg-pool", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.010978}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:11: `url` is not a declared requirement of PgDatabase\n  component PgDatabase requires <nothing> \u2014 add `requires url: <Service>`?", "duration_s": 65.28, "cost": 0.006793249999999999}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": false, "error": "02-pg-pool.rvl:16: `emit` on a call to `execute`, which is not declared `emission`\n  only calls to `emission` service operations cross the boundary; drop the `emit` marker (G4)", "duration_s": 9.01, "cost": 0.0007418489999999999}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 3, "ok": true, "error": null, "duration_s": 19.92, "cost": 0.0014060939999999999}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 3, "cost_total": 0.008941}
+{"spec": "03-user-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 8.25, "cost": 0.000661606}
+{"spec": "03-user-cache", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000662}
+{"spec": "03-user-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 21.78, "cost": 0.0015547480000000001}
+{"spec": "03-user-cache", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001555}
+{"spec": "03-user-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "03-user-cache.rvl:17: expected ident, found ':'", "duration_s": 12.43, "cost": 0.0008279499999999999}
+{"spec": "03-user-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 31.51, "cost": 0.0023448239999999997}
+{"spec": "03-user-cache", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.003173}
+{"spec": "04-migrator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 18.9, "cost": 0.001319326}
+{"spec": "04-migrator", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001319}
+{"spec": "04-migrator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 28.22, "cost": 0.001723528}
+{"spec": "04-migrator", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001724}
+{"spec": "04-migrator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 37.52, "cost": 0.0021738400000000002}
+{"spec": "04-migrator", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002174}
+{"spec": "05-rate-limiter", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 8.8, "cost": 0.000552856}
+{"spec": "05-rate-limiter", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000553}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "05-rate-limiter.rvl:1: unknown service `Limiter` in `provides` of RateLimiter", "duration_s": 7.62, "cost": 0.00044549799999999996}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 3.63, "cost": 0.000188007}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.000634}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "05-rate-limiter.rvl:10: expected ident, found ':'", "duration_s": 13.43, "cost": 0.00076879}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 6.7, "cost": 0.00040254900000000004}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.001171}
+{"spec": "06-audit-logger", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.53, "cost": 0.00038103099999999994}
+{"spec": "06-audit-logger", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000381}
+{"spec": "06-audit-logger", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "06-audit-logger.rvl:14: expected ident, found ':'", "duration_s": 43.56, "cost": 0.002639232}
+{"spec": "06-audit-logger", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 21.03, "cost": 0.0014103569999999999}
+{"spec": "06-audit-logger", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.00405}
+{"spec": "06-audit-logger", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 59.5, "cost": 0.0039947210000000006}
+{"spec": "06-audit-logger", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003995}
+{"spec": "07-session-store", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 14.37, "cost": 0.000918691}
+{"spec": "07-session-store", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000919}
+{"spec": "07-session-store", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 41.69, "cost": 0.002807983}
+{"spec": "07-session-store", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002808}
+{"spec": "07-session-store", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 39.82, "cost": 0.002362195}
+{"spec": "07-session-store", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002362}
+{"spec": "08-feature-flags", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 7.88, "cost": 0.00047325099999999995}
+{"spec": "08-feature-flags", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000473}
+{"spec": "08-feature-flags", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "08-feature-flags.rvl:10: expected ident, found ':'", "duration_s": 15.65, "cost": 0.0009105130000000001}
+{"spec": "08-feature-flags", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 8.64, "cost": 0.0005399220000000001}
+{"spec": "08-feature-flags", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.00145}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "08-feature-flags.rvl:10: expected ident, found ':'", "duration_s": 9.1, "cost": 0.000543025}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 10.24, "cost": 0.0006413640000000001}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.001184}
+{"spec": "09-warmup-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 21.85, "cost": 0.0013423810000000001}
+{"spec": "09-warmup-cache", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001342}
+{"spec": "09-warmup-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 34.49, "cost": 0.002044123}
+{"spec": "09-warmup-cache", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002044}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "09-warmup-cache.rvl:21: expected ident, found ':'", "duration_s": 29.76, "cost": 0.0018958749999999998}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 16.83, "cost": 0.001132479}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.003028}
+{"spec": "10-metrics", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 9.61, "cost": 0.000585046}
+{"spec": "10-metrics", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000585}
+{"spec": "10-metrics", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 10.31, "cost": 0.0006029680000000001}
+{"spec": "10-metrics", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000603}
+{"spec": "10-metrics", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 15.28, "cost": 0.00106633}
+{"spec": "10-metrics", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001066}
+{"spec": "11-outbox", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 29.8, "cost": 0.0019448560000000002}
+{"spec": "11-outbox", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001945}
+{"spec": "11-outbox", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 51.94, "cost": 0.003242519}
+{"spec": "11-outbox", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003243}
+{"spec": "11-outbox", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 18.04, "cost": 0.0011977}
+{"spec": "11-outbox", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001198}
+{"spec": "12-replicator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 13.11, "cost": 0.0007925409999999999}
+{"spec": "12-replicator", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000793}
+{"spec": "12-replicator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "12-replicator.rvl:18: expected ident, found ':'", "duration_s": 83.83, "cost": 0.005170613}
+{"spec": "12-replicator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 22.28, "cost": 0.001556517}
+{"spec": "12-replicator", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.006727}
+{"spec": "12-replicator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "12-replicator.rvl:18: expected ident, found ':'", "duration_s": 38.51, "cost": 0.002205595}
+{"spec": "12-replicator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 14.19, "cost": 0.001072014}
+{"spec": "12-replicator", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.003278}
+{"spec": "13-provider-consumer-pair", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 15.92, "cost": 0.000913036}
+{"spec": "13-provider-consumer-pair", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000913}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "13-provider-consumer-pair.rvl:26: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'kv'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 48.06, "cost": 0.0030633279999999997}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 241.48, "cost": 0.0019836869999999996}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.005047}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "13-provider-consumer-pair.rvl:26: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'kv'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 40.29, "cost": 0.0023744039999999997}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 63.66, "cost": 0.004222284}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.006597}
+{"spec": "14-health-check", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 25.91, "cost": 0.001637775}
+{"spec": "14-health-check", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001638}
+{"spec": "14-health-check", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 30.95, "cost": 0.001849707}
+{"spec": "14-health-check", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.00185}
+{"spec": "14-health-check", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 51.71, "cost": 0.0032570190000000003}
+{"spec": "14-health-check", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003257}
+{"spec": "15-search-index", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 14.89, "cost": 0.0008321550000000001}
+{"spec": "15-search-index", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000832}
+{"spec": "15-search-index", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 30.8, "cost": 0.0017357370000000002}
+{"spec": "15-search-index", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001736}
+{"spec": "15-search-index", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "15-search-index.rvl:17: expected ident, found ':'", "duration_s": 22.34, "cost": 0.001355199}
+{"spec": "15-search-index", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 10.75, "cost": 0.000664854}
+{"spec": "15-search-index", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.00202}
+{"spec": "16-notifier", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 7.07, "cost": 0.000407131}
+{"spec": "16-notifier", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000407}
+{"spec": "16-notifier", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "16-notifier.rvl:11: expected ident, found ':'", "duration_s": 7.16, "cost": 0.000383757}
+{"spec": "16-notifier", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 5.21, "cost": 0.000285012}
+{"spec": "16-notifier", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.000669}
+{"spec": "16-notifier", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "16-notifier.rvl:11: expected ident, found ':'", "duration_s": 16.13, "cost": 0.000901929}
+{"spec": "16-notifier", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 5.01, "cost": 0.000217268}
+{"spec": "16-notifier", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.001119}
+{"spec": "17-billing-ledger", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 24.52, "cost": 0.0016838850000000002}
+{"spec": "17-billing-ledger", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001684}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "17-billing-ledger.rvl:14: expected ident, found ':'", "duration_s": 70.0, "cost": 0.004256997}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 8.95, "cost": 0.000652152}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.004909}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "17-billing-ledger.rvl:21: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 51.29, "cost": 0.003159579}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 42.99, "cost": 0.002839419}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.005999}
+{"spec": "18-config-echo", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 8.36, "cost": 0.00043282499999999996}
+{"spec": "18-config-echo", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000433}
+{"spec": "18-config-echo", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.89, "cost": 0.00037592699999999997}
+{"spec": "18-config-echo", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000376}
+{"spec": "18-config-echo", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.93, "cost": 0.00039297900000000006}
+{"spec": "18-config-echo", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000393}
+{"spec": "19-lock-manager", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 7.63, "cost": 0.00041191599999999996}
+{"spec": "19-lock-manager", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000412}
+{"spec": "19-lock-manager", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "19-lock-manager.rvl:10: expected ident, found ':'", "duration_s": 13.14, "cost": 0.000615612}
+{"spec": "19-lock-manager", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 6.33, "cost": 0.000359832}
+{"spec": "19-lock-manager", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.000975}
+{"spec": "19-lock-manager", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 16.31, "cost": 0.0009223739999999999}
+{"spec": "19-lock-manager", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000922}
+{"spec": "20-work-queue", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 11.54, "cost": 0.0007203309999999999}
+{"spec": "20-work-queue", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.00072}
+{"spec": "20-work-queue", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "20-work-queue.rvl:10: expected ident, found ':'", "duration_s": 9.4, "cost": 0.0005325270000000001}
+{"spec": "20-work-queue", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 6.89, "cost": 0.00044204699999999994}
+{"spec": "20-work-queue", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.000975}
+{"spec": "20-work-queue", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 12.32, "cost": 0.000690519}
+{"spec": "20-work-queue", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000691}
+{"spec": "21-two-stage-boot", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 10.7, "cost": 0.00060813}
+{"spec": "21-two-stage-boot", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000608}
+{"spec": "21-two-stage-boot", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 36.97, "cost": 0.002078778}
+{"spec": "21-two-stage-boot", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002079}
+{"spec": "21-two-stage-boot", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 30.59, "cost": 0.0019054740000000003}
+{"spec": "21-two-stage-boot", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001905}
+{"spec": "22-cascade", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 21.34, "cost": 0.001398525}
+{"spec": "22-cascade", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001399}
+{"spec": "22-cascade", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 196.22, "cost": 0.011836436999999998}
+{"spec": "22-cascade", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.011836}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "22-cascade.rvl:40: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 138.88, "cost": 0.008622541000000001}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": false, "error": "22-cascade.rvl:38: expected effect, found 'sqlStr'", "duration_s": 35.18, "cost": 0.002607999}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 3, "ok": false, "error": "22-cascade.rvl:40: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 24.15, "cost": 0.001794549}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": null, "cost_total": 0.013025}
+{"spec": "23-dedupe-store", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 17.48, "cost": 0.001043536}
+{"spec": "23-dedupe-store", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001044}
+{"spec": "23-dedupe-store", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 18.84, "cost": 0.001048872}
+{"spec": "23-dedupe-store", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001049}
+{"spec": "23-dedupe-store", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 13.5, "cost": 0.0008057939999999999}
+{"spec": "23-dedupe-store", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000806}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 18.1, "cost": 0.0010753200000000003}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001075}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 15.77, "cost": 0.0008687820000000001}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000869}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "24-normalizing-cache.rvl:17: expected effect, found 'normalize'", "duration_s": 19.61, "cost": 0.001159884}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 13.01, "cost": 0.0009432539999999999}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.002103}
+{"spec": "25-checksum-log", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 92.83, "cost": 0.005568783}
+{"spec": "25-checksum-log", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.005569}
+{"spec": "25-checksum-log", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "25-checksum-log.rvl:34: expected ident, found ':'", "duration_s": 74.4, "cost": 0.004701132}
+{"spec": "25-checksum-log", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 16.03, "cost": 0.0013851269999999999}
+{"spec": "25-checksum-log", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.006086}
+{"spec": "25-checksum-log", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "25-checksum-log.rvl:20: expected ident, found ':'", "duration_s": 34.03, "cost": 0.0023735339999999996}
+{"spec": "25-checksum-log", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 6.42, "cost": 0.000457794}
+{"spec": "25-checksum-log", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.002831}
+{"spec": "26-log-rotator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "26-log-rotator.rvl:9: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 19.39, "cost": 0.001352386}
+{"spec": "26-log-rotator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 2, "ok": false, "error": "26-log-rotator.rvl:9: `keep` is not a declared requirement of LogRotator\n  component LogRotator requires `db` \u2014 add `requires keep: <Service>`?", "duration_s": 41.01, "cost": 0.002478398}
+{"spec": "26-log-rotator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 3, "ok": false, "error": "26-log-rotator.rvl:9: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 4.53, "cost": 0.00024099000000000004}
+{"spec": "26-log-rotator", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": null, "cost_total": 0.004072}
+{"spec": "26-log-rotator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "26-log-rotator.rvl:11: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 16.04, "cost": 0.0009444720000000001}
+{"spec": "26-log-rotator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 23.01, "cost": 0.001450812}
+{"spec": "26-log-rotator", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.002395}
+{"spec": "26-log-rotator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "26-log-rotator.rvl:11: template interpolation must be `${name}` with an identifier\n  write `${ident}` and close the brace before continuing", "duration_s": 17.62, "cost": 0.0011111639999999998}
+{"spec": "26-log-rotator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 13.09, "cost": 0.0009723989999999999}
+{"spec": "26-log-rotator", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.002084}
+{"spec": "27-inventory", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 14.49, "cost": 0.001004415}
+{"spec": "27-inventory", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001004}
+{"spec": "27-inventory", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 54.12, "cost": 0.0038855070000000003}
+{"spec": "27-inventory", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003886}
+{"spec": "27-inventory", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 63.47, "cost": 0.004326307}
+{"spec": "27-inventory", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.004326}
+{"spec": "28-greeter", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.48, "cost": 0.0003045}
+{"spec": "28-greeter", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000304}
+{"spec": "28-greeter", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.35, "cost": 0.000312852}
+{"spec": "28-greeter", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000313}
+{"spec": "28-greeter", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "28-greeter.rvl:9: expected ident, found ':'", "duration_s": 8.39, "cost": 0.000469974}
+{"spec": "28-greeter", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 5.84, "cost": 0.00037818899999999997}
+{"spec": "28-greeter", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.000848}
+{"spec": "29-mesh", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "29-mesh.rvl:29: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'kv'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 14.76, "cost": 0.000970485}
+{"spec": "29-mesh", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 199.15, "cost": 0.013471978999999999}
+{"spec": "29-mesh", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.014442}
+{"spec": "29-mesh", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "29-mesh.rvl:29: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'kv'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 20.44, "cost": 0.0013920870000000002}
+{"spec": "29-mesh", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": false, "error": "29-mesh.rvl:29: effect has no `undo` and `kv.put` is not pure\n  write `effect `kv.put`(...) undo <expr>`, or mark the call `emit` if it deliberately crosses the system boundary (G4)", "duration_s": 155.09, "cost": 0.011230104999999999}
+{"spec": "29-mesh", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 3, "ok": false, "error": "29-mesh.rvl:29: expected effect, found 'kv'", "duration_s": 124.66, "cost": 0.008440856000000002}
+{"spec": "29-mesh", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": null, "cost_total": 0.021063}
+{"spec": "29-mesh", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "29-mesh.rvl:29: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'kv'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 18.26, "cost": 0.0011707590000000002}
+{"spec": "29-mesh", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": false, "error": "29-mesh.rvl:29: effect has no `undo` and `kv.put` is not pure\n  write `effect `kv.put`(...) undo <expr>`, or mark the call `emit` if it deliberately crosses the system boundary (G4)", "duration_s": 126.44, "cost": 0.008899491}
+{"spec": "29-mesh", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 3, "ok": false, "error": "29-mesh.rvl:29: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'kv'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 94.05, "cost": 0.0059840629999999995}
+{"spec": "29-mesh", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": null, "cost_total": 0.016054}
+{"spec": "30-saga-transfer", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 19.07, "cost": 0.00129717}
+{"spec": "30-saga-transfer", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001297}
+{"spec": "30-saga-transfer", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 55.15, "cost": 0.0037228750000000005}
+{"spec": "30-saga-transfer", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003723}
+{"spec": "30-saga-transfer", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 55.16, "cost": 0.003706113}
+{"spec": "30-saga-transfer", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003706}

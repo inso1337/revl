@@ -1,0 +1,15 @@
+service Info {
+  fn whoami() -> Str
+  fn retries() -> Int
+}
+
+component ConfigEcho provides info: Info {
+  config { name: Str, retries: Int = 3 }
+
+  let store = effect Map.new() undo store.drop()
+
+  provide info {
+    fn whoami() = config.name
+    fn retries() = config.retries
+  }
+}

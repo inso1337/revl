@@ -1,0 +1,19 @@
+type Row = { id: Int }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component TransferSaga requires ledger: Database {
+  let lock = effect ledger.query("SELECT pg_advisory_lock(7001)")
+             undo   ledger.query("SELECT pg_advisory_unlock(7001)")
+
+  emit ledger.execute("INSERT INTO ledger (side, amount) VALUES ('debit', 100)")
+       compensate ledger.execute("INSERT INTO ledger (side, amount) VALUES ('credit', 100)")
+
+  emit ledger.execute("INSERT INTO ledger (side, amount) VALUES ('credit', 100)")
+       compensate ledger.execute("INSERT INTO ledger (side, amount) VALUES ('debit', 100)")
+
+  await Job.run("settle")
+}
