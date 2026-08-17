@@ -89,6 +89,13 @@ one.
 - **py↔node** (`backends/typescript/bridge.ts`, `backends/typescript/bridge_node.ts`):
   the headline seam. PgDatabase in Python, UserCache on cordis-ts in Node, one
   service contract, JSON on the wire.
+- **py↔rust** (`backends/rust/bridge_client/`, `demo/bridge_pyrust.py`): a Rust
+  process consuming a Python-provided service over the wire, values marshalled
+  back into typed Rust. This is the transport proof only: cordis-rs services
+  are static traits (`Arc<dyn Database>`), so a Rust proxy that lets a cordis-rs
+  *component* consume the seam has to be emitter-generated per service (unlike
+  the dynamic py/node proxies). That codegen, plus a Rust placement runner, is
+  the follow-up.
 
 Both show value-copy marshalling and peer-death-as-withdrawal (R2/R3): killing
 the provider deactivates the consumer reactively and replays its inverses LIFO,
