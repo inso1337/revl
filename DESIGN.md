@@ -1,6 +1,9 @@
 # revl — a language for spatiotemporal composability
 
-**Status:** design draft v0.1 (2026-08-16) · pre-implementation
+**Status:** v1 design (2026-08-16) — implemented and frozen; the 2.0
+language grows from it (docs/syntax-2.0.md · docs/v2.0-roadmap.md). Kept
+as written for the guarantees table (§4) and the tiering rationale (§8),
+which remain normative.
 
 revl is a research language that makes *dynamic composition* — loading, unloading,
 and hot-swapping components in a running system — a checked property instead of a

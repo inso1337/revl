@@ -1,6 +1,9 @@
 # revl 2.0 — full-language syntax proposal
 
-**Status:** proposal (2026-08-16) · successor to DESIGN.md §3 · not yet implemented
+**Status:** implemented on branch `v2.0` (2026-08-17) — see
+docs/v2.0-roadmap.md for per-item status; the §10 acceptance benchmark is
+running post-hoc and its findings may still revise stratum 1. Originally a
+proposal (2026-08-16), successor to DESIGN.md §3.
 
 revl 1.x is a component-composition language with a deliberately tiny pure
 expression layer. revl 2.0 grows it into a full-powered language — able to
