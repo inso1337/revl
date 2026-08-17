@@ -224,6 +224,7 @@ class FnDecl:
     body: list
     public: bool
     line: int
+    verified: bool = False
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -342,6 +343,19 @@ class ExprStmt:
 
 
 @dataclass
+class AssertStmt:
+    expr: object
+    line: int
+
+
+@dataclass
+class TestDecl:
+    name: str
+    body: list
+    line: int
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -350,6 +364,7 @@ class Program:
     fn_decls: list[FnDecl] = field(default_factory=list)
     uses: list[UseDecl] = field(default_factory=list)
     externs: list[ExternDecl] = field(default_factory=list)
+    tests: list[TestDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -404,8 +419,12 @@ class Parser:
                 program.type_decls.append(self.type_decl(False))
             elif self.at("kw", "pub"):
                 self.next()
+                verified = False
+                if self.at("kw", "verified"):
+                    self.next()
+                    verified = True
                 if self.at("kw", "fn"):
-                    program.fn_decls.append(self.fn_decl(True))
+                    program.fn_decls.append(self.fn_decl(True, verified))
                 elif self.at("kw", "type"):
                     program.type_decls.append(self.type_decl(True))
                 elif self.at("kw", "service"):
@@ -423,10 +442,19 @@ class Parser:
                 else:
                     tok = self.peek()
                     raise self.err(tok.line, f"expected `fn`, `type`, `service`, or `extern` after `pub`, found {tok.value!r}")
+            elif self.at("kw", "verified"):
+                self.next()
+                if self.at("kw", "fn"):
+                    program.fn_decls.append(self.fn_decl(False, True))
+                else:
+                    tok = self.peek()
+                    raise self.err(tok.line, f"expected `fn` after `verified`, found {tok.value!r}")
             elif self.at("kw", "extern"):
                 program.externs.append(self.extern_decl(False))
             elif self.at("kw", "fn"):
                 program.fn_decls.append(self.fn_decl(False))
+            elif self.at("kw", "test"):
+                program.tests.append(self.test_decl())
             else:
                 tok = self.peek()
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
@@ -780,7 +808,7 @@ class Parser:
                 break
         return TypeDecl(name, params, [], cases, line, public)
 
-    def fn_decl(self, public: bool) -> FnDecl:
+    def fn_decl(self, public: bool, verified: bool = False) -> FnDecl:
         line = self.expect("kw", "fn").line
         name = self.expect("ident").value
         self.expect("(")
@@ -803,7 +831,22 @@ class Parser:
         while not self.at("}"):
             body.append(self.fn_stmt())
         self.expect("}")
-        return FnDecl(name, params, returns, body, public, line)
+        return FnDecl(name, params, returns, body, public, line, verified)
+
+    def test_decl(self) -> TestDecl:
+        line = self.expect("kw", "test").line
+        tok = self.expect("string")
+        if any(kind == "var" for kind, _ in tok.value):
+            raise self.err(tok.line, "test names must be static string literals")
+        name = "".join(text for _, text in tok.value)
+        if not name:
+            raise self.err(tok.line, "a test name cannot be empty")
+        self.expect("{")
+        body = []
+        while not self.at("}"):
+            body.append(self.fn_stmt())
+        self.expect("}")
+        return TestDecl(name, body, line)
 
     def fn_stmt(self):
         tok = self.peek()
@@ -823,6 +866,9 @@ class Parser:
             return ReturnStmt(value, tok.line)
         if tok.kind == "kw" and tok.value == "if":
             return self.if_stmt()
+        if tok.kind == "kw" and tok.value == "assert":
+            self.next()
+            return AssertStmt(self.pure_expr(), tok.line)
         if tok.kind == "ident" and self.toks[self.pos + 1].kind == "=":
             self.next()
             self.next()

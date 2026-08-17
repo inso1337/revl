@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import types
+from pathlib import Path
 
 from .compiler import compile_files
 from .errors import RevlError
@@ -53,6 +55,47 @@ def _boundary(ir: dict) -> dict:
     return report
 
 
+def _run_tests(ir: dict) -> int:
+    """Emit the IR to cordis-py and run its `test` units in-process."""
+    tests = ir.get("tests") or []
+    if not tests:
+        print("no tests to run")
+        return 0
+
+    backend_dir = str(Path(__file__).resolve().parents[2] / "backends" / "python")
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    import emit  # noqa: PLC0415 — backend import happens after path setup
+
+    module = types.ModuleType("revl_test_module")
+    source = emit.emit(ir)
+    exec(compile(source, "<revl-test>", "exec"), module.__dict__)
+    entries = getattr(module, "REVL_TESTS", None) or []
+    if not entries:
+        print("no tests emitted by the backend")
+        return 0
+
+    failures = 0
+    for name, test_fn in entries:
+        try:
+            test_fn()
+        except AssertionError as error:
+            failures += 1
+            message = str(error).strip() or "assertion failed"
+            print(f"FAIL {name}: {message}")
+        except Exception as error:  # noqa: BLE001 — test runner reports every failure
+            failures += 1
+            print(f"FAIL {name}: {type(error).__name__}: {error}")
+        else:
+            print(f"PASS {name}")
+
+    if failures:
+        print(f"{failures} of {len(entries)} test(s) failed", file=sys.stderr)
+        return 1
+    print(f"{len(entries)} test(s) passed")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -65,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
 
+    test = sub.add_parser("test", help="compile and run `test` blocks")
+    test.add_argument("files", nargs="+")
+
     args = parser.parse_args(argv)
 
     try:
@@ -72,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+
+    if args.command == "test":
+        return _run_tests(ir)
 
     if args.command == "audit":
         boundary = _boundary(ir)

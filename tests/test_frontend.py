@@ -69,6 +69,7 @@ REJECTIONS = {
     "v2_use_private.rvl": "`helper` is module-private",
     "v2_extern_unclassified.rvl": "unclassified extern",
     "v2_extern_acquire_no_undo.rvl": "acquire extern `listen` must declare `undo` (G4)",
+    "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
     "g2_provision_conflict.rvl": "provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)",
     "g3_dependency_cycle.rvl": "dependency cycle: Alpha -> Beta -> Alpha (G3)",

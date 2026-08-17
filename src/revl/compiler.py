@@ -217,6 +217,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if id(decl) not in emitted_ids:
                 merged.externs.append(decl)
                 emitted_ids.add(id(decl))
+        for decl in module.program.tests:
+            if id(decl) not in emitted_ids:
+                merged.tests.append(decl)
+                emitted_ids.add(id(decl))
 
     # Build checker scopes for every emitted function so a module-private
     # declaration from another module is not accidentally callable.
