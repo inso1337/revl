@@ -149,7 +149,7 @@ Import cycles between modules are a compile error.
 
 ### Components & effects (§4)
 
-The core from [DESIGN.md](DESIGN.md) §3, plus 2.0's two additions:
+The core from [DESIGN.md](../DESIGN.md) §3, plus 2.0's two additions:
 
 - **Block effect form** — acquisitions with several pure setup steps:
 ```revl
@@ -216,11 +216,14 @@ compile error, never a host pass-through ([docs/stdlib-2.0.md](stdlib-2.0.md)):
 | `charAt(i)` / `charCodeAt(i)` | Str | 1-char string / code point |
 | `indexOf(v)` | Str, List | first index, `-1` if absent |
 | `concat(y)` | Str, List | joined copy |
+| `split(sep)` | Str | pieces between separators (JS shape) |
+| `join(sep)` | List[Str] | elements joined by `sep` |
+| `repeat(n)` | Str | `n` copies concatenated |
 
 ## What won't compile
 
 This is the point of the language — each rejection names the guarantee and
-the fix ([DESIGN.md](DESIGN.md) §4):
+the fix ([DESIGN.md](../DESIGN.md) §4):
 
 | # | Guarantee |
 |---|---|
@@ -254,7 +257,7 @@ python -m revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
 
 ## Further reading
 
-- [DESIGN.md](DESIGN.md) — the design, the guarantees table, the tiering rationale.
+- [DESIGN.md](../DESIGN.md) — the design, the guarantees table, the tiering rationale.
 - [docs/syntax-2.0.md](syntax-2.0.md) — the full-language spec.
 - [docs/stdlib-2.0.md](stdlib-2.0.md) — the stdlib surface.
 - [docs/v2.0-roadmap.md](v2.0-roadmap.md) — status and remaining frontier.
