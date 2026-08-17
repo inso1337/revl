@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from .errors import RevlError
 from .lower import check_and_lower
-from .parser import FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
+from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 
 
 @dataclass
@@ -17,9 +17,11 @@ class _LoadedModule:
     program: Program
     public_fns: dict[str, FnDecl] = field(default_factory=dict)
     public_types: dict[str, TypeDecl] = field(default_factory=dict)
+    public_externs: dict[str, ExternDecl] = field(default_factory=dict)
     services: dict[str, ServiceDecl] = field(default_factory=dict)
     named_fns: set[str] = field(default_factory=set)
     named_types: set[str] = field(default_factory=set)
+    named_externs: set[str] = field(default_factory=set)
     named_services: set[str] = field(default_factory=set)
     aliases: dict[str, "_LoadedModule"] = field(default_factory=dict)
     pure_dependencies: set[int] = field(default_factory=set)
@@ -58,6 +60,9 @@ class _ModuleLoader:
             for type_decl in program.type_decls:
                 if type_decl.public:
                     module.public_types[type_decl.name] = type_decl
+            for extern in program.externs:
+                if extern.public:
+                    module.public_externs[extern.name] = extern
             for svc in program.services:
                 module.services[svc.name] = svc
 
@@ -89,6 +94,10 @@ class _ModuleLoader:
             importer.named_types.add(name)
             importer.pure_dependencies.add(id(used))
             return
+        if name in used.public_externs:
+            importer.named_externs.add(name)
+            importer.pure_dependencies.add(id(used))
+            return
         if name in used.services:
             importer.named_services.add(name)
             return
@@ -102,6 +111,10 @@ class _ModuleLoader:
             raise RevlError(importer.path, line,
                             f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
                             hint=f"mark `type {name}` as `pub type {name}` in {where}")
+        if any(ext.name == name and not ext.public for ext in used.program.externs):
+            raise RevlError(importer.path, line,
+                            f"`{name}` is module-private in `{where}` and cannot be imported (G1)",
+                            hint=f"mark `extern {name}` as `pub extern` in {where}")
         raise RevlError(importer.path, line,
                         f"`{name}` is not a public declaration in `{where}`")
 
@@ -199,6 +212,10 @@ def compile_files(paths: list[str], manifest: dict | None = None,
         for decl in module.program.fn_decls:
             if id(decl) not in emitted_ids:
                 merged.fn_decls.append(decl)
+                emitted_ids.add(id(decl))
+        for decl in module.program.externs:
+            if id(decl) not in emitted_ids:
+                merged.externs.append(decl)
                 emitted_ids.add(id(decl))
 
     # Build checker scopes for every emitted function so a module-private

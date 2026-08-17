@@ -22,6 +22,7 @@ from .parser import (
     ComponentDecl,
     EffectStmt,
     EmitStmt,
+    ExternDecl,
     ExprArrow,
     ExprBin,
     ExprCall,
@@ -160,6 +161,7 @@ def _lower_fns(program: Program, filename: str) -> list:
         _HOST_CALLABLES
         | _BUILTIN_CONSTRUCTORS
         | {fn.name for fn in program.fn_decls}
+        | {ext.name for ext in program.externs}
     )
     fns: list[dict] = []
     seen: set[str] = set()
@@ -174,7 +176,7 @@ def _lower_fns(program: Program, filename: str) -> list:
                                 f"duplicate parameter `{param.name}` in fn {decl.name}")
             scope[param.name] = False
         module_callables = program.fn_scopes.get(id(decl), default_callables)
-        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | set(module_callables)
+        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | set(module_callables) | {ext.name for ext in program.externs}
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
@@ -187,6 +189,68 @@ def _lower_fns(program: Program, filename: str) -> list:
             "body": body,
         })
     return fns
+
+
+class _LaxScope(dict):
+    """Permissive scope for extern undo/compensate refs.
+
+    Host blocks are verbatim text; their undo/compensate expressions are
+    host-level names (e.g. `close(socket)`) and are not checked against revl
+    function scope.
+    """
+
+    def __contains__(self, key) -> bool:
+        return True
+
+
+def _lower_extern_expr(expr, filename: str) -> dict:
+    return _lower_pure_expr(expr, _LaxScope(), set(), {}, filename)
+
+
+def _lower_externs(program: Program, filename: str) -> list:
+    externs: list[dict] = []
+    seen: set[str] = set()
+    for decl in program.externs:
+        if decl.name in seen:
+            raise RevlError(filename, decl.line, f"duplicate extern `{decl.name}`")
+        seen.add(decl.name)
+        if decl.classification == "acquire" and decl.undo is None:
+            raise RevlError(
+                filename, decl.line,
+                f"acquire extern `{decl.name}` must declare `undo` (G4)",
+                hint="an `acquire` crosses into an observable effect and needs a teardown inverse",
+            )
+        if decl.classification == "pure" and (decl.undo is not None or decl.compensate is not None):
+            raise RevlError(
+                filename, decl.line,
+                f"pure extern `{decl.name}` cannot declare `undo` or `compensate`",
+                hint="`pure` means no observable effect, so there is nothing to invert or compensate",
+            )
+        if decl.classification == "emission" and decl.undo is not None:
+            raise RevlError(
+                filename, decl.line,
+                f"emission extern `{decl.name}` cannot declare `undo`",
+                hint="emissions are one-way boundary crossings; use `compensate` for a best-effort cleanup",
+            )
+        bodies: dict[str, str] = {}
+        for body in decl.bodies:
+            if body.backend in bodies:
+                raise RevlError(filename, body.line,
+                                f"duplicate @{body.backend} body for extern `{decl.name}`")
+            bodies[body.backend] = body.text
+        entry: dict = {
+            "name": decl.name,
+            "class": decl.classification,
+            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "returns": decl.returns,
+            "bodies": bodies,
+        }
+        if decl.undo is not None:
+            entry["undo"] = _lower_extern_expr(decl.undo, filename)
+        if decl.compensate is not None:
+            entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
+        externs.append(entry)
+    return externs
 
 
 def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str) -> None:
@@ -339,9 +403,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     types = _lower_type_decls(program, program.filename)
     fns = _lower_fns(program, program.filename)
+    externs = _lower_externs(program, program.filename)
 
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
-    uses_v3 = bool(types) or bool(fns)
+    uses_v3 = bool(types) or bool(fns) or bool(externs)
 
     result = {
         "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
@@ -365,6 +430,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["types"] = types
     if fns:
         result["functions"] = fns
+    if externs:
+        result["externs"] = externs
     return result
 
 

@@ -70,6 +70,37 @@ def lex(source: str, filename: str) -> list[Token]:
                 j += 1
             tokens.append(Token("int", int(source[i:j]), line))
             i = j
+        elif c == "@" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
+            # Host block: `@backend { <verbatim, brace-balanced> }`.
+            # The body is host text, not revl, so it is consumed here by
+            # scanning balanced braces rather than tokenizing the contents.
+            j = i + 1
+            while j < n and (source[j].isalnum() or source[j] == "_"):
+                j += 1
+            backend = source[i + 1:j]
+            k = j
+            while k < n and source[k].isspace():
+                k += 1
+            if k < n and source[k] == "{":
+                depth = 0
+                p = k
+                while p < n:
+                    if source[p] == "{":
+                        depth += 1
+                    elif source[p] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            body = source[k + 1:p]
+                            tokens.append(Token("hostbody", (backend, body), line))
+                            line += source[i:p + 1].count("\n")
+                            i = p + 1
+                            break
+                    p += 1
+                else:
+                    raise RevlError(filename, line, f"unterminated @{backend} host body")
+            else:
+                tokens.append(Token("@", "@", line))
+                i += 1
         elif c in SYMBOLS or c in SINGLE_OPERATORS:
             tokens.append(Token(c, c, line))
             i += 1

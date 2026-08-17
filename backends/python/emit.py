@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import keyword
 import re
+import textwrap
 from typing import Any
 
 IR_VERSION = 1
@@ -476,6 +477,28 @@ def _emit_functions(functions: list) -> "_Lines":
     return out
 
 
+def _emit_externs(externs: list) -> "_Lines":
+    out = _Lines()
+    for ext in externs:
+        name = _ident(ext["name"], "extern name")
+        params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
+        bodies = ext.get("bodies") or {}
+        if "py" not in bodies:
+            raise EmitError(
+                f"extern `{name}` has no @py body — not portable to this backend "
+                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+            )
+        out.add(0, f"def {name}({params}):")
+        body = bodies["py"].strip()
+        if body:
+            for line in body.splitlines() or [""]:
+                out.add(1, line)
+        else:
+            out.add(1, "pass")
+        out.add(0)
+    return out
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -487,8 +510,9 @@ def emit(ir: dict) -> str:
     components = ir.get("components") or []
     types = ir.get("types") or {}
     functions = ir.get("functions") or []
-    if not components and not types and not functions:
-        raise EmitError("IR document has no components, types, or functions")
+    externs = ir.get("externs") or []
+    if not components and not types and not functions and not externs:
+        raise EmitError("IR document has no components, types, functions, or externs")
 
     emitters = [_ComponentEmitter(component, services) for component in components]
     bodies = [emitter.emit() for emitter in emitters]
@@ -515,6 +539,8 @@ def emit(ir: dict) -> str:
         out.extend(_emit_types(types))
     if functions:
         out.extend(_emit_functions(functions))
+    if externs:
+        out.extend(_emit_externs(externs))
     out.add(0, "SERVICES = {")
     for service_name, service in services.items():
         out.add(1, f"{service_name!r}: {{")
