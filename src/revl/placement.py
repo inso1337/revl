@@ -131,14 +131,71 @@ def _build_java(ir: dict, tmp: Path) -> str:
     return str(out)
 
 
-def _cargo_build_rust() -> str:
-    result = subprocess.run(
-        ["cargo", "build", "--manifest-path", str(_RUST_RUNNER / "Cargo.toml")],
+def _build_rust(ir: dict, tmp: Path) -> str:
+    """Regenerate the runner's components.rs (proxies/stub/plugin table) from the
+    running IR, then cargo build. Regenerating per composition is what makes the
+    rust runner general; for user_cache it reproduces the committed module."""
+    ir_json = tmp / "rust_ir.json"
+    ir_json.write_text(json.dumps(ir), encoding="utf-8")
+    emitted = subprocess.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
+                             capture_output=True, text=True)
+    if emitted.returncode:
+        raise RuntimeError(f"rust emit failed:\n{emitted.stderr.strip()}")
+    (_RUST_RUNNER / "src" / "components.rs").write_text(emitted.stdout, encoding="utf-8")
+    build = subprocess.run(["cargo", "build", "--manifest-path", str(_RUST_RUNNER / "Cargo.toml")],
+                           capture_output=True, text=True)
+    if build.returncode:
+        raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
+    return str(_RUST_RUNNER / "target" / "debug" / "revl_placement_runner")
+
+
+def _find_jdk21() -> str | None:
+    """bin dir of a JDK 21 (real cordis4j needs 21), or None."""
+    import shutil  # noqa: PLC0415
+    home = os.environ.get("JAVA21_HOME")
+    if home and (Path(home) / "bin" / "java").exists():
+        return str(Path(home) / "bin")
+    for candidate in ("/opt/homebrew/opt/openjdk@21/bin", "/usr/lib/jvm/temurin-21-jdk/bin"):
+        if (Path(candidate) / "java").exists():
+            return candidate
+    java = shutil.which("java")
+    if java:
+        version = subprocess.run([java, "-version"], capture_output=True, text=True).stderr
+        if 'version "21' in version or "version 21" in version:
+            return str(Path(java).resolve().parent)
+    return None
+
+
+def _find_cordis4j_classes() -> str | None:
+    """A compiled cordis4j-core classes dir (REVL_CORDIS4J_CLASSES or the cached
+    checkout the java verifier builds), or None to fall back to the stub runtime."""
+    env = os.environ.get("REVL_CORDIS4J_CLASSES")
+    if env and Path(env).is_dir():
+        return env
+    cached = _JAVA_DIR / ".cordis4j-classes"
+    return str(cached) if cached.is_dir() else None
+
+
+def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> str:
+    """Compile RealPlacementRunner + the emitted module against the real cordis4j
+    (JDK 21); return the classes dir. The reactive runtime gives peer-death-as-
+    withdrawal, unlike the stub path."""
+    out = tmp / "java_real_out"
+    out.mkdir()
+    gen = tmp / "java_real_gen" / "revl"
+    gen.mkdir(parents=True)
+    spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
+    emit_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit_module)
+    (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
+    compile_result = subprocess.run(
+        [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
+         str(_JAVA_DIR / "placement" / "RealPlacementRunner.java"), str(gen / "Components.java")],
         capture_output=True, text=True,
     )
-    if result.returncode:
-        raise RuntimeError(f"cargo build (rust runner) failed:\n{result.stderr.strip()}")
-    return str(_RUST_RUNNER / "target" / "debug" / "revl_placement_runner")
+    if compile_result.returncode:
+        raise RuntimeError(f"javac (real cordis4j) failed:\n{compile_result.stderr.strip()}")
+    return str(out)
 
 
 # --------------------------------------------------------------------------
@@ -237,10 +294,6 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 return 1
             proxies[key] = {"socket": sockets[host], "methods": methods.get(service, []), "service": service}
         serve_keys = [k for k in provides[pname] if any(k in requires[q] and q != pname for q in processes)]
-        if backend == "rust" and serve_keys:
-            print(f"error: process {pname!r} (rust) must provide {serve_keys} across a seam, but the rust "
-                  f"runner has no stub yet; place that provider on py/node/java", file=sys.stderr)
-            return 1
         spec = {
             "name": pname,
             "backend": backend,
@@ -257,6 +310,8 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     # per-backend build steps (once)
     cleanup: list[str] = []
+    java_mode = "stub"
+    java_out = java21_bin = cordis_classes = rust_bin = None
     try:
         if any(b == "node" for b in backends.values()):
             ts_module = _emit_ts_module(ir, tmp)
@@ -264,8 +319,16 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             for pname, spec in specs.items():
                 if backends[pname] == "node":
                     spec["module"] = ts_module
-        java_out = _build_java(ir, tmp) if any(b == "java" for b in backends.values()) else None
-        rust_bin = _cargo_build_rust() if any(b == "rust" for b in backends.values()) else None
+        if any(b == "java" for b in backends.values()):
+            java21_bin = _find_jdk21()
+            cordis_classes = _find_cordis4j_classes()
+            if java21_bin and cordis_classes:
+                java_mode = "real"
+                java_out = _build_java_real(ir, tmp, java21_bin, cordis_classes)
+            else:
+                java_out = _build_java(ir, tmp)
+        if any(b == "rust" for b in backends.values()):
+            rust_bin = _build_rust(ir, tmp)
     except (RevlError, RuntimeError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -278,6 +341,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         if backend == "rust":
             return [rust_bin, str(spec_file)], None, "stdin"
         if backend == "java":
+            if java_mode == "real":
+                cp = f"{cordis_classes}{os.pathsep}{java_out}"
+                return [str(Path(java21_bin) / "java"), "-cp", cp, "RealPlacementRunner", str(spec_file)], None, "term"
             return ["java", "-cp", java_out, "PlacementRunner", str(spec_file)], None, "term"
         return [sys.executable, "-m", "revl._process_runner", str(spec_file)], env, "term"
 
@@ -297,6 +363,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     summary = "  ".join(f"{p}[{backends[p]}]=[{','.join(processes[p].get('components') or [])}]" for p in processes)
     print(f"placement: {summary}", flush=True)
+    if any(b == "java" for b in backends.values()):
+        note = ("real cordis4j (reactive)" if java_mode == "real"
+                else "stub (non-reactive; set REVL_CORDIS4J_CLASSES + a JDK 21 for reactive withdrawal)")
+        print(f"  java runtime: {note}", flush=True)
 
     children: dict[str, tuple] = {}
     for pname, spec in specs.items():
