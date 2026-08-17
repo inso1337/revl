@@ -1,0 +1,7 @@
+# Cross-language ADT/Result: Python provider (DirSvc), Java (cordis4j) consumer.
+[processes.provider]
+components = ["DirSvc"]
+[processes.consumer]
+backend = "java"
+components = ["DirUser"]
+probe = ["dir.lookup('ada')", "dir.check('ada')"]

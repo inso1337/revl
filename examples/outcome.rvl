@@ -1,0 +1,22 @@
+// Cross-language ADT/Result fixture: a provider returns a user ADT (Found) and
+// a Result across the seam; a consumer requires the service so the probe can
+// call it through the proxy (the probe rides a driver that requires `dir`).
+type Row = { id: Int, name: Str }
+type Found = Hit(Row) | Missing
+
+service Directory {
+  fn lookup(key: Str) -> Found
+  fn check(key: Str) -> Result[Row, Str]
+}
+
+component DirSvc provides dir: Directory {
+  let store = effect Map.new() undo store.drop()
+  provide dir {
+    fn lookup(key) = Hit({ id: 1, name: key })
+    fn check(key) = Ok({ id: 1, name: key })
+  }
+}
+
+component DirUser requires dir: Directory {
+  let scratch = effect Map.new() undo scratch.drop()
+}

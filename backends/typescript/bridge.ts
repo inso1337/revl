@@ -39,6 +39,49 @@ function attempt() {
 attempt()
 `
 
+// Canonical ADT/Result wire codec (docs/interop-bridge.md "Canonical value
+// encoding"). The TS runtime ADT form is `{ kind, value? }` (records are plain
+// objects, Opt is bare value | undefined). On the wire a tagged value is
+// `{ "$kind": Case, "$value"?: payload }`; the `$kind` marker is what separates
+// it from a record. So encode renames kind/value -> $kind/$value, decode the
+// reverse, both recursively; records/arrays/scalars/null pass through.
+
+function isNativeAdt(o: Record<string, unknown>): boolean {
+  return typeof o.kind === 'string' && Object.keys(o).every((k) => k === 'kind' || k === 'value')
+}
+
+export function encodeValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(encodeValue)
+  if (v && typeof v === 'object' && !(v instanceof Map)) {
+    const o = v as Record<string, unknown>
+    if (isNativeAdt(o)) {
+      const out: Record<string, unknown> = { $kind: o.kind }
+      if ('value' in o) out.$value = encodeValue(o.value)
+      return out
+    }
+    const rec: Record<string, unknown> = {}
+    for (const k of Object.keys(o)) rec[k] = encodeValue(o[k])
+    return rec
+  }
+  return v
+}
+
+export function decodeValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(decodeValue)
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    if (typeof o.$kind === 'string') {
+      const out: Record<string, unknown> = { kind: o.$kind }
+      if ('$value' in o) out.value = decodeValue(o.$value)
+      return out
+    }
+    const rec: Record<string, unknown> = {}
+    for (const k of Object.keys(o)) rec[k] = decodeValue(o[k])
+    return rec
+  }
+  return v
+}
+
 function syncCall(socketPath: string, key: string, method: string, args: unknown[]): unknown {
   const request = JSON.stringify({ key, method, args })
   const out = execFileSync(process.execPath, ['-e', CLIENT_SRC], {
@@ -47,7 +90,7 @@ function syncCall(socketPath: string, key: string, method: string, args: unknown
   })
   const reply = JSON.parse(out)
   if (!reply.ok) throw new Error(reply.error)
-  return reply.value
+  return decodeValue(reply.value)
 }
 
 /** A cordis component that provides `key` via a proxy forwarding to `socketPath`,
@@ -117,7 +160,7 @@ export async function serve(ctx: Context, keys: string[], socketPath: string): P
             const service = (ctx as any)[req.key]
             let result = service[req.method](...(req.args ?? []))
             if (result && typeof result.then === 'function') result = await result
-            reply = { ok: true, value: result ?? null }
+            reply = { ok: true, value: encodeValue(result ?? null) }
           }
         } catch (error) {
           reply = { ok: false, error: String(error) }

@@ -1040,7 +1040,7 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
         return f"{fn_name}({args})"
     if kind in {
         "var", "bin", "un", "field", "index", "if", "record", "list",
-        "arrow", "match", "interp", "len", "builtin",
+        "arrow", "match", "interp", "len", "builtin", "adt",
     }:
         return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename, env)
     raise EmitError(f"unsupported expression node in Java backend: {kind!r}")
