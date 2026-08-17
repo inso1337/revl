@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 
 from .compiler import compile_files
+from .distribute import distributability
 from .errors import RevlError
 from .fmt import migrate_source
 from .run import KNOWN_BACKENDS, run_command
@@ -277,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "audit":
         boundary = _boundary(ir)
+        distribution = distributability(ir)
         manifest = ir.get("manifest") or {}
         declared_externs = [
             {"name": ext["name"], "class": ext.get("class"),
@@ -285,7 +287,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.json:
             print(json.dumps({"manifest": manifest, "boundary": boundary,
-                              "externs": declared_externs}, indent=2))
+                              "externs": declared_externs,
+                              "distributability": distribution}, indent=2))
             return 0
         print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
         for entry in manifest.get("components") or []:
@@ -324,6 +327,13 @@ def main(argv: list[str] | None = None) -> int:
             for ext in declared_externs:
                 print(f"  {ext['name']}  [{ext['class']}]  backends: "
                       f"{', '.join(ext['backends']) or '—'}")
+        if distribution:
+            print("\ndistributability (interop-bridge §4: which services may cross a process seam):")
+            width = max(len(name) for name in distribution)
+            for name in sorted(distribution):
+                verdict = distribution[name]
+                print(f"  {name:<{width}}  {verdict['verdict']:<20} "
+                      f"{'; '.join(verdict['reasons'])}")
         return 0
 
     rendered = json.dumps(ir, indent=2)

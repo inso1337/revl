@@ -1,6 +1,8 @@
 # revl interop bridge — cross-host services without shared memory
 
-**Status:** proposal (2026-08-16) · companion to docs/syntax-2.0.md · not implemented
+**Status:** proposal (2026-08-16) · companion to docs/syntax-2.0.md · §4
+(distributability audit) implemented in `revl audit`; the transport tier (§3)
+is not yet built
 
 A translation layer between the host languages (TypeScript and Python) was
 raised as a follow-up to the [2.0 syntax proposal](syntax-2.0.md): since a
@@ -122,6 +124,10 @@ Three decisions make it honest:
   exception.
 
 ## 4. Distributability as a checked property
+
+**Implemented.** `revl audit` emits this verdict per service in both text and
+`--json` (`src/revl/distribute.py`, `tests/test_distribute.py`); the block
+below is live output, not a sketch.
 
 Leak 2 (latency) cannot be removed, but it can be *named*. The natural home
 is the `revl audit` command that already reports the G8 boundary surface. Add
