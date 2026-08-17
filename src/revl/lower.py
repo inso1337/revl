@@ -630,19 +630,26 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
     uses_v3 = bool(types) or bool(fns) or bool(externs) or bool(tests)
+    uses_v3 = uses_v3 or any(
+        svc.commutative or any(m.async_ or m.commutative for m in svc.methods.values())
+        for svc in services.values()
+    )
 
     result = {
         "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
         "services": {
             name: {
+                **({"commutative": True} if svc.commutative else {}),
                 "methods": {
                     m.name: {
                         "params": [{"name": p, "type": t} for p, t in m.params],
                         "returns": m.returns,
                         "emission": m.emission,
+                        **({"async": True} if m.async_ else {}),
+                        **({"commutative": True} if m.commutative else {}),
                     }
                     for m in svc.methods.values()
-                }
+                },
             }
             for name, svc in services.items()
         },
@@ -667,16 +674,27 @@ def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
     methods = {}
     for mname, mspec in (spec.get("methods") or {}).items():
         params = [(p.get("name"), p.get("type")) for p in mspec.get("params") or []]
-        methods[mname] = MethodDecl(mname, params, mspec.get("returns"), bool(mspec.get("emission")), 0)
-    return ServiceDecl(name, methods, 0)
+        methods[mname] = MethodDecl(
+            mname,
+            params,
+            mspec.get("returns"),
+            bool(mspec.get("emission")),
+            0,
+            async_=bool(mspec.get("async")),
+            commutative=bool(mspec.get("commutative")),
+        )
+    return ServiceDecl(name, methods, 0, commutative=bool(spec.get("commutative")))
 
 
 def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
     def shape(svc: ServiceDecl):
-        return {
-            m.name: (tuple(m.params), m.returns, m.emission)
-            for m in svc.methods.values()
-        }
+        return (
+            svc.commutative,
+            {
+                m.name: (tuple(m.params), m.returns, m.emission, m.async_, m.commutative)
+                for m in svc.methods.values()
+            },
+        )
 
     return shape(a) == shape(b)
 
@@ -811,6 +829,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 f"method `{method.name}` of provision `{stmt.key}` takes {len(method.params)} "
                 f"params but service {svc.name} declares {len(decl.params)}",
             )
+        if method.async_ != decl.async_:
+            raise RevlError(
+                filename, method.line,
+                f"method `{method.name}` of provision `{stmt.key}` is "
+                f"{'async' if method.async_ else 'not async'} but service {svc.name} "
+                f"declares it {'async' if decl.async_ else 'not async'}",
+            )
         if method.name in implemented:
             raise RevlError(filename, method.line, f"duplicate method `{method.name}` in provision `{stmt.key}`")
         implemented.add(method.name)
@@ -830,6 +855,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 })
             elif isinstance(mstmt, EmitStmt):
                 mbody.append(_lower_emit_step(mstmt, env))
+            elif isinstance(mstmt, AwaitStmt):
+                if not decl.async_:
+                    raise RevlError(
+                        filename, mstmt.line,
+                        "`await` is only allowed in a component body",
+                        hint="a provide method runs while the component is ACTIVE; iteration "
+                             "boundaries (paper §4.3.2) exist only during activation (A1)",
+                    )
+                mbody.append({"step": "await", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
             elif isinstance(mstmt, ReturnStmt):
                 mbody.append({"step": "return", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
                 returned = True

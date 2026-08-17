@@ -211,15 +211,30 @@ class _ComponentEmitter:
         if len(params) != len(spec.get("params") or []):
             raise EmitError(f"{where}: method {name!r} arity does not match the service")
         mwhere = f"{where}.{name}"
-        out.add(indent, f"def {name}(self{''.join(', ' + p for p in params)}):")
+        # services 2.0 (§5): async operations lower to Python async methods,
+        # whose bodies may `await` host async values (no divert boundary)
+        method_is_async = bool(spec.get("async"))
+        out.add(
+            indent,
+            f"{'async ' if method_is_async else ''}def {name}(self{''.join(', ' + p for p in params)}):",
+        )
         body = method.get("body") or []
         if not body:
             out.add(indent + 1, "pass")
             return
         for step in body:
-            self._method_step(out, indent + 1, provide_name, name, step, mwhere)
+            self._method_step(out, indent + 1, provide_name, name, step, mwhere, method_is_async)
 
-    def _method_step(self, out: _Lines, indent: int, provide_name: str, method_name: str, step: dict, where: str) -> None:
+    def _method_step(
+        self,
+        out: _Lines,
+        indent: int,
+        provide_name: str,
+        method_name: str,
+        step: dict,
+        where: str,
+        method_is_async: bool,
+    ) -> None:
         """A step inside a provide-method body — runs while ACTIVE; effect
         steps must join the component's accumulator (via the Frame)."""
         kind = step.get("step")
@@ -251,7 +266,9 @@ class _ComponentEmitter:
         elif kind == "return":
             out.add(indent, f"return {self._expr(step.get('expr'), where)}")
         elif kind == "await":
-            raise EmitError(f"{where}: 'await' is not allowed inside provide-method bodies (A1)")
+            if not method_is_async:
+                raise EmitError(f"{where}: 'await' is not allowed inside sync provide-method bodies (A1)")
+            out.add(indent, f"await {self._expr(step.get('expr'), where)}")
         elif kind == "provide":
             raise EmitError(f"{where}: nested 'provide' inside a method body is not lowerable")
         else:
@@ -632,14 +649,20 @@ def emit(ir: dict) -> str:
     out.add(0, "SERVICES = {")
     for service_name, service in services.items():
         out.add(1, f"{service_name!r}: {{")
+        if service.get("commutative"):
+            out.add(2, "'commutative': True,")
         for method_name, spec in (service.get("methods") or {}).items():
             # v1/A6: params are typed in the IR; the runtime table keeps names
             param_names = [param.get("name") for param in spec.get("params") or []]
-            out.add(
-                2,
-                f"{method_name!r}: {{'params': {param_names!r}, "
-                f"'emission': {bool(spec.get('emission'))!r}}},",
-            )
+            metadata = [
+                f"'params': {param_names!r}",
+                f"'emission': {bool(spec.get('emission'))!r}",
+            ]
+            if spec.get("async"):
+                metadata.append("'async': True")
+            if spec.get("commutative"):
+                metadata.append("'commutative': True")
+            out.add(2, f"{method_name!r}: {{{', '.join(metadata)}}},")
         out.add(1, "},")
     out.add(0, "}")
     out.add(0)

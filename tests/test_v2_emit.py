@@ -43,6 +43,48 @@ def test_v1_documents_stay_at_version_1():
     assert "types" not in ir and "functions" not in ir
 
 
+def test_services_20_async_and_commutative_lower_and_emit():
+    ir, ns = _compile_emit(
+        """
+        commutative service Database {
+          commutative fn query(sql: Str) -> List[Row]
+          async fn stats() -> Stats
+          emission fn execute(sql: Str) -> Int
+        }
+
+        component Db provides db: Database {
+          provide db {
+            fn query(sql) { return null }
+            async fn stats() {
+              await Job.run("stats")
+              return null
+            }
+            fn execute(sql) { return 1 }
+          }
+        }
+        """
+    )
+    assert ir["ir_version"] == 3
+    service = ir["services"]["Database"]
+    assert service["commutative"] is True
+    assert service["methods"]["query"]["commutative"] is True
+    assert "async" not in service["methods"]["query"]
+    assert service["methods"]["stats"]["async"] is True
+    assert "commutative" not in service["methods"]["stats"]
+    assert service["methods"]["execute"]["emission"] is True
+
+    emitted_service = ns["SERVICES"]["Database"]
+    assert emitted_service["commutative"] is True
+    assert emitted_service["query"]["commutative"] is True
+    assert emitted_service["stats"]["async"] is True
+
+    source = emit.emit(ir)
+    assert "async def stats(self):" in source
+    assert "await Job.run('stats')" in source
+    assert "'async': True" in source
+    assert "'commutative': True" in source
+
+
 def test_emit_executes_types_and_functions():
     _, ns = _compile_emit(
         """

@@ -38,6 +38,8 @@ class MethodDecl:
     returns: str | None
     emission: bool
     line: int
+    async_: bool = False       # `async fn` service operation (§5)
+    commutative: bool = False  # Def. 39 order-independence opt-in
 
 
 @dataclass
@@ -45,6 +47,7 @@ class ServiceDecl:
     name: str
     methods: dict[str, MethodDecl]
     line: int
+    commutative: bool = False  # service-wide order-independence opt-in
 
 
 @dataclass
@@ -135,6 +138,7 @@ class ProvideMethod:
     params: list[str]
     body: list
     line: int
+    async_: bool = False  # `async fn` provide-method declaration (§5)
 
 
 @dataclass
@@ -412,7 +416,13 @@ class Parser:
             if self.at("kw", "use"):
                 program.uses.append(self.use_decl())
             elif self.at("kw", "service"):
-                program.services.append(self.service())
+                program.services.append(self.service(commutative=False))
+            elif self.at("kw", "commutative"):
+                self.next()
+                if not self.at("kw", "service"):
+                    tok = self.peek()
+                    raise self.err(tok.line, f"expected `service` after `commutative`, found {tok.value!r}")
+                program.services.append(self.service(commutative=True))
             elif self.at("kw", "component"):
                 program.components.append(self.component())
             elif self.at("kw", "type"):
@@ -423,15 +433,28 @@ class Parser:
                 if self.at("kw", "verified"):
                     self.next()
                     verified = True
+                commutative = False
+                if self.at("kw", "commutative"):
+                    self.next()
+                    commutative = True
                 if self.at("kw", "fn"):
+                    if commutative:
+                        tok = self.peek()
+                        raise self.err(tok.line, f"expected `service` after `commutative`, found {tok.value!r}")
                     program.fn_decls.append(self.fn_decl(True, verified))
                 elif self.at("kw", "type"):
+                    if commutative:
+                        tok = self.peek()
+                        raise self.err(tok.line, f"expected `service` after `commutative`, found {tok.value!r}")
                     program.type_decls.append(self.type_decl(True))
                 elif self.at("kw", "service"):
                     # services are interfaces and are pub by default; a `pub`
                     # prefix is accepted as documentation but adds nothing
-                    program.services.append(self.service())
+                    program.services.append(self.service(commutative=commutative))
                 elif self.at("kw", "extern"):
+                    if commutative:
+                        tok = self.peek()
+                        raise self.err(tok.line, f"expected `service` after `commutative`, found {tok.value!r}")
                     program.externs.append(self.extern_decl(True))
                 elif self.at("kw", "component"):
                     tok = self.peek()
@@ -441,6 +464,8 @@ class Parser:
                     )
                 else:
                     tok = self.peek()
+                    if commutative:
+                        raise self.err(tok.line, f"expected `service` after `commutative`, found {tok.value!r}")
                     raise self.err(tok.line, f"expected `fn`, `type`, `service`, or `extern` after `pub`, found {tok.value!r}")
             elif self.at("kw", "verified"):
                 self.next()
@@ -532,17 +557,24 @@ class Parser:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line)
 
-    def service(self) -> ServiceDecl:
+    def service(self, commutative: bool = False) -> ServiceDecl:
         line = self.expect("kw", "service").line
         name = self.expect("ident").value
         self.expect("{")
         methods: dict[str, MethodDecl] = {}
         while not self.at("}"):
             emission = False
+            async_ = False
+            method_commutative = False
             mline = self.peek().line
-            if self.at("kw", "emission"):
-                self.next()
-                emission = True
+            while self.at("kw") and self.peek().value in ("emission", "async", "commutative"):
+                modifier = self.next().value
+                if modifier == "emission":
+                    emission = True
+                elif modifier == "async":
+                    async_ = True
+                else:
+                    method_commutative = True
             self.expect("kw", "fn")
             mname = self.expect("ident").value
             self.expect("(")
@@ -560,9 +592,11 @@ class Parser:
                 returns = self.type_()
             if mname in methods:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
-            methods[mname] = MethodDecl(mname, params, returns, emission, mline)
+            methods[mname] = MethodDecl(
+                mname, params, returns, emission, mline, async_=async_, commutative=method_commutative,
+            )
         self.expect("}")
-        return ServiceDecl(name, methods, line)
+        return ServiceDecl(name, methods, line, commutative=commutative)
 
     def type_(self) -> str:
         base = self.expect("ident", what="a type").value
@@ -646,7 +680,7 @@ class Parser:
             return {"true": True, "false": False, "null": None}[tok.value]
         raise self.err(tok.line, f"expected a literal, found {tok.value!r}")
 
-    def stmt(self, in_method: bool):
+    def stmt(self, in_method: bool, in_async_method: bool = False):
         tok = self.peek()
         if tok.kind == "kw" and tok.value == "let":
             self.next()
@@ -666,12 +700,14 @@ class Parser:
                 compensate = self.expr()
             return EmitStmt(expr, tok.line, compensate)
         if tok.kind == "kw" and tok.value == "await":
-            if in_method:
+            if in_method and not in_async_method:
                 raise self.err(
                     tok.line,
                     "`await` is only allowed in a component body",
                     hint="a provide method runs while the component is ACTIVE; iteration "
-                         "boundaries (paper §4.3.2) exist only during activation (A1)",
+                         "boundaries (paper §4.3.2) exist only during activation (A1). "
+                         "Declare the operation `async fn` to `await` a host async value in "
+                         "a provide method (services 2.0, §5)",
                 )
             self.next()
             return AwaitStmt(self.expr(), tok.line)
@@ -1097,6 +1133,10 @@ class Parser:
         methods: list[ProvideMethod] = []
         while not self.at("}"):
             mline = self.peek().line
+            async_ = False
+            if self.at("kw", "async"):
+                self.next()
+                async_ = True
             self.expect("kw", "fn")
             mname = self.expect("ident").value
             self.expect("(")
@@ -1113,9 +1153,9 @@ class Parser:
                 self.expect("{")
                 body = []
                 while not self.at("}"):
-                    body.append(self.stmt(in_method=True))
+                    body.append(self.stmt(in_method=True, in_async_method=async_))
                 self.expect("}")
-            methods.append(ProvideMethod(mname, params, body, mline))
+            methods.append(ProvideMethod(mname, params, body, mline, async_=async_))
         self.expect("}")
         return ProvideStmt(key, methods, line)
 
