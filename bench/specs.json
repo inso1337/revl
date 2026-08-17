@@ -1,0 +1,185 @@
+{
+  "_comment": "30 component specs for the syntax-2.0 acceptance benchmark (docs/syntax-2.0.md §10). Each spec is expressible in all three variants {v1, v2, v2host}; the model receives brief + services verbatim. Scoring is compile-rate against the current checker, so briefs pin interfaces, not implementations.",
+  "specs": [
+    {
+      "id": "01-kv-provider",
+      "name": "In-memory KV provider",
+      "services": "service Kv {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}",
+      "brief": "Write a component MemKv that provides kv: Kv backed by a host Map (acquire it with Map.new(), release with drop()). get reads from the map; put inserts with a matching undo that removes the key."
+    },
+    {
+      "id": "02-pg-pool",
+      "name": "Postgres pool provider",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}",
+      "brief": "Write a component PgDatabase that provides db: Database. It takes config { url: Str, pool_size: Int = 10 }, acquires a connection pool with Pool.open(url, pool_size) (undone by closing it), and passes query and execute through to the pool."
+    },
+    {
+      "id": "03-user-cache",
+      "name": "Write-through cache with audit log",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}",
+      "brief": "Write a component UserCache that requires db: Database and provides cache: Cache. It keeps entries in a host Map. put must (a) insert into the map with a matching removal undo, and (b) emit an INSERT into cache_log on the database, interpolating the key into the SQL."
+    },
+    {
+      "id": "04-migrator",
+      "name": "Migration runner with advisory lock",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}",
+      "brief": "Write a component Migrator that requires db: Database. Activation: take a Postgres advisory lock via a query effect (undone by the unlock query), then await Job.run(\"migrations\"), then emit an INSERT into migration_log compensated by the matching DELETE."
+    },
+    {
+      "id": "05-rate-limiter",
+      "name": "Rate limiter",
+      "services": "service Limiter {\n  fn allow(key: Str) -> Opt[Str]\n  fn record(key: Str)\n}",
+      "brief": "Write a component RateLimiter that provides limiter: Limiter, backed by a host Map acquired on activation. allow reads the key's entry; record inserts a marker for the key with a matching removal undo."
+    },
+    {
+      "id": "06-audit-logger",
+      "name": "Audit logger facade",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Audit {\n  emission fn log(event: Str)\n}",
+      "brief": "Write a component AuditLogger that requires db: Database and provides audit: Audit. Its log operation emits an INSERT of the event into audit_log on the database (interpolate the event into the SQL)."
+    },
+    {
+      "id": "07-session-store",
+      "name": "Session store with TTL config",
+      "services": "service Sessions {\n  fn get(sid: Str) -> Opt[Str]\n  fn put(sid: Str, user: Str)\n  fn drop_session(sid: Str)\n}",
+      "brief": "Write a component SessionStore that provides sessions: Sessions with config { ttl: Int = 300 }. Back it with a host Map. put inserts (undo removes); drop_session removes the entry as an effect whose undo re-inserts a tombstone value of your choice."
+    },
+    {
+      "id": "08-feature-flags",
+      "name": "Feature flag service",
+      "services": "service Flags {\n  fn enabled(name: Str) -> Opt[Str]\n  fn set_flag(name: Str, on: Str)\n}",
+      "brief": "Write a component FeatureFlags that provides flags: Flags backed by a host Map. enabled reads the flag; set_flag inserts the value with a matching removal undo."
+    },
+    {
+      "id": "09-warmup-cache",
+      "name": "Cache with warmup boundary",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}",
+      "brief": "Write a component WarmCache that requires db: Database and provides cache: Cache. Activation: acquire a host Map, then await Job.run(\"warmup\") so the runtime may divert before the cache goes live, then emit a 'cache online' marker row into the database. Methods as in a write-through cache (map insert with undo; no audit emission needed)."
+    },
+    {
+      "id": "10-metrics",
+      "name": "Metrics counters",
+      "services": "service Metrics {\n  fn read(name: Str) -> Opt[Str]\n  fn bump(name: Str, v: Str)\n}",
+      "brief": "Write a component Metrics that provides metrics: Metrics backed by a host Map. bump inserts the given value under the metric name with a matching removal undo; read returns the current entry."
+    },
+    {
+      "id": "11-outbox",
+      "name": "Transactional outbox activation",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}",
+      "brief": "Write a component Outbox that requires db: Database. Activation is an ordered saga: emit an INSERT of a 'pending' row into outbox compensated by its DELETE, then emit an INSERT of a 'dispatched' marker compensated by its DELETE. No provides."
+    },
+    {
+      "id": "12-replicator",
+      "name": "Dual-write replicator",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Sync {\n  emission fn write(sql: Str)\n}",
+      "brief": "Write a component Replicator that requires primary: Database and replica: Database, and provides sync: Sync. Its write operation emits the SQL on the primary and then emits it on the replica, the second compensated by a DELETE-style counteraction of your choice on the replica."
+    },
+    {
+      "id": "13-provider-consumer-pair",
+      "name": "Provider + consumer in one file",
+      "services": "service Kv {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}\n\nservice Names {\n  fn remember(name: Str)\n  fn recall(name: Str) -> Opt[Str]\n}",
+      "brief": "Write two components: MemKv provides kv: Kv (Map-backed as usual), and NameBook requires kv: Kv and provides names: Names, where remember stores the name under itself via kv.put and recall reads it back via kv.get."
+    },
+    {
+      "id": "14-health-check",
+      "name": "Health check probe",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}",
+      "brief": "Write a component HealthCheck that requires db: Database. Activation: run a SELECT 1 probe as an effect (undo can re-run a no-op query such as SELECT 0), then await Job.run(\"healthcheck\"), then emit an INSERT of an 'up' marker into health_log."
+    },
+    {
+      "id": "15-search-index",
+      "name": "Search index with journal",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Index {\n  fn lookup(q: Str) -> Opt[Str]\n  fn add(id: Str)\n}",
+      "brief": "Write a component SearchIndex that requires db: Database and provides index: Index. Back it with a host Map. add inserts the id into the map (undo removes) and emits an INSERT into index_journal with the id interpolated; lookup reads from the map."
+    },
+    {
+      "id": "16-notifier",
+      "name": "Notifier with compensation",
+      "services": "service Mailer {\n  emission fn send(to: Str, body: Str)\n}\n\nservice Notify {\n  fn ping(user: Str)\n}",
+      "brief": "Write a component Notifier that requires mail: Mailer and provides notify: Notify. ping emits a send to the user (body of your choice, interpolate the user) compensated by a send to \"ops\" describing the retraction."
+    },
+    {
+      "id": "17-billing-ledger",
+      "name": "Billing ledger with reversal entries",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Billing {\n  fn charge(acct: Str, cents: Str)\n}",
+      "brief": "Write a component BillingLedger that requires db: Database and provides billing: Billing. charge emits an INSERT of the charge into ledger, compensated by an INSERT of the matching reversal entry (never a DELETE — ledgers are append-only)."
+    },
+    {
+      "id": "18-config-echo",
+      "name": "Config-driven identity service",
+      "services": "service Info {\n  fn whoami() -> Str\n  fn retries() -> Int\n}",
+      "brief": "Write a component ConfigEcho that provides info: Info with config { name: Str, retries: Int = 3 }. whoami returns the configured name; retries returns the configured retry count. It still needs at least one revertible acquisition: acquire a host Map as scratch state (undo drops it)."
+    },
+    {
+      "id": "19-lock-manager",
+      "name": "Lock manager",
+      "services": "service Locks {\n  fn acquire_lock(name: Str)\n  fn holder(name: Str) -> Opt[Str]\n}",
+      "brief": "Write a component LockManager that provides locks: Locks backed by a host Map. acquire_lock inserts a holder marker under the lock name with a matching removal undo; holder reads the entry."
+    },
+    {
+      "id": "20-work-queue",
+      "name": "Work queue",
+      "services": "service Queue {\n  fn enqueue(id: Str, payload: Str)\n  fn peek(id: Str) -> Opt[Str]\n}",
+      "brief": "Write a component WorkQueue that provides queue: Queue backed by a host Map. enqueue inserts the payload under the id with a matching removal undo; peek reads it."
+    },
+    {
+      "id": "21-two-stage-boot",
+      "name": "Two-stage boot with divert window",
+      "services": "service Kv {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}",
+      "brief": "Write a component TwoStageBoot that requires kv: Kv. Activation: effect a kv.put of stage=one (undo puts stage=none), then await Job.run(\"stage-two\"), then effect a kv.put of stage=two (undo puts stage=one). A divert during the await must leave only stage one to revert — which your undo ordering already guarantees; just write the two effects around the boundary."
+    },
+    {
+      "id": "22-cascade",
+      "name": "Three-layer cascade",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}\n\nservice Api {\n  fn fetch(user: Str) -> Opt[Str]\n}",
+      "brief": "Write three components in one file: PgDatabase provides db: Database (Pool-backed, config url with a default pool size); UserCache requires db and provides cache: Cache (Map-backed write-through with an audit emission on put); ApiFront requires cache and provides api: Api, where fetch reads the user's entry from the cache."
+    },
+    {
+      "id": "23-dedupe-store",
+      "name": "Dedupe store",
+      "services": "service Dedupe {\n  fn seen(id: Str) -> Opt[Str]\n  fn mark(id: Str)\n}",
+      "brief": "Write a component DedupeStore that provides dedupe: Dedupe backed by a host Map. mark inserts a marker under the id with a matching removal undo; seen reads the entry."
+    },
+    {
+      "id": "24-normalizing-cache",
+      "name": "Normalizing cache",
+      "services": "service Cache {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}",
+      "brief": "Write a component NormCache that provides cache: Cache backed by a host Map, where keys are normalized before use: a key is trimmed to its first 8 characters. Express the normalization however your syntax variant makes natural (inline method calls on the key, a pure helper function, or a host block); put stores under the normalized key with a matching removal undo, get reads under the normalized key."
+    },
+    {
+      "id": "25-checksum-log",
+      "name": "Checksum service with journal",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Sum {\n  fn digest(s: Str) -> Str\n}",
+      "brief": "Write a component ChecksumLog that requires db: Database and provides sum: Sum. digest returns a digest string for the input — compute it however your syntax variant makes natural (delegate to a host object or host block, or derive a simple code from the string's characters). The component's activation emits an INSERT of a 'digest service online' marker into service_log."
+    },
+    {
+      "id": "26-log-rotator",
+      "name": "Log rotator",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}",
+      "brief": "Write a component LogRotator that requires db: Database with config { keep: Int = 7 }. Activation: emit an INSERT of a rotation marker into rotation_log (interpolating the keep count), compensated by the matching DELETE of that marker."
+    },
+    {
+      "id": "27-inventory",
+      "name": "Inventory reservations",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Inventory {\n  fn reserve(sku: Str, n: Str)\n  fn reserved(sku: Str) -> Opt[Str]\n}",
+      "brief": "Write a component InventoryKeeper that requires db: Database and provides inv: Inventory. Back reservations with a host Map: reserve inserts the quantity under the sku (undo removes) and emits an INSERT into reservation_journal; reserved reads the map."
+    },
+    {
+      "id": "28-greeter",
+      "name": "Greeting formatter",
+      "services": "service Greeter {\n  fn greet(name: Str) -> Str\n}",
+      "brief": "Write a component GreeterSvc that provides greeter: Greeter. greet returns a greeting string that includes the caller's name — build it however your syntax variant makes natural (template interpolation, string concat helpers, or a pure function). Acquire a host Map as scratch state so the component has a revertible acquisition."
+    },
+    {
+      "id": "29-mesh",
+      "name": "KV + auditor mesh",
+      "services": "service Kv {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}\n\nservice Audited {\n  fn put_audited(key: Str, value: Str)\n}\n\nservice Mailer {\n  emission fn send(to: Str, body: Str)\n}",
+      "brief": "Write two components: MemKv provides kv: Kv (Map-backed), and Auditor requires kv: Kv and mail: Mailer, provides audited: Audited. put_audited writes through to kv.put and emits a mail.send to \"audit\" describing the write (interpolate the key)."
+    },
+    {
+      "id": "30-saga-transfer",
+      "name": "Transfer saga with settlement boundary",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}",
+      "brief": "Write a component TransferSaga that requires ledger: Database. Activation, in order: take an advisory lock via a query effect (undone by the unlock query); emit the debit INSERT compensated by its reversing credit INSERT; emit the credit INSERT compensated by its reversing debit INSERT; then await Job.run(\"settle\") as the settlement boundary."
+    }
+  ]
+}
