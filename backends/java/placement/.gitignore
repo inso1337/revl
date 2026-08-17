@@ -2,3 +2,6 @@ out/
 gen/
 spec.json
 *.class
+real_out/
+real_gen/
+real_spec.json
