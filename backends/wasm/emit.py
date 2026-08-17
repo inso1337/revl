@@ -618,6 +618,7 @@ class _V3Emitter:
         return [
             self._helper_alloc(),
             self._helper_alloc_str(),
+            self._helper_int_to_str(),
             self._helper_str_concat(),
             self._helper_str_eq(),
             self._helper_str_slice(),
@@ -645,6 +646,44 @@ class _V3Emitter:
     (local $p i32)
     (local.set $p (call $alloc (i32.add (local.get $len) (i32.const 4))))
     (i32.store (local.get $p) (local.get $len))
+    (local.get $p))"""
+
+    def _helper_int_to_str(self) -> str:
+        return """  (func $int_to_str (param $n i32) (result i32)
+    (local $neg i32)
+    (local $x i32)
+    (local $len i32)
+    (local $p i32)
+    (local $i i32)
+    (if (i32.eqz (local.get $n))
+      (then
+        (local.set $p (call $alloc_str (i32.const 1)))
+        (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 48))
+        (return (local.get $p))))
+    (local.set $neg (i32.lt_s (local.get $n) (i32.const 0)))
+    (local.set $x (select
+      (i32.sub (i32.const 0) (local.get $n))
+      (local.get $n)
+      (local.get $neg)))
+    (local.set $len (i32.const 0))
+    (local.set $i (local.get $x))
+    (block (loop
+      (br_if 1 (i32.eqz (local.get $i)))
+      (local.set $len (i32.add (local.get $len) (i32.const 1)))
+      (local.set $i (i32.div_u (local.get $i) (i32.const 10)))
+      (br 0)))
+    (local.set $p (call $alloc_str (i32.add (local.get $len) (local.get $neg))))
+    (if (local.get $neg)
+      (then (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))))
+    (local.set $i (i32.add (local.get $len) (local.get $neg)))
+    (block (loop
+      (br_if 1 (i32.eqz (local.get $x)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (i32.store8
+        (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $i))
+        (i32.add (i32.rem_u (local.get $x) (i32.const 10)) (i32.const 48)))
+      (local.set $x (i32.div_u (local.get $x) (i32.const 10)))
+      (br 0)))
     (local.get $p))"""
 
     def _helper_str_concat(self) -> str:
@@ -1361,14 +1400,17 @@ class _V3Emitter:
         for kind, value in parts:
             if kind == "text":
                 rendered.append(self._str_ptr(str(value)))
-            else:  # ["expr", ir_node] — must be Str (i32 tier has no int->str)
-                piece = self._expr(value, scope, where, "Str")
-                if piece.ty != "Str":
+            else:  # ["expr", ir_node]
+                piece = self._expr(value, scope, where)
+                if piece.ty == "Str":
+                    rendered.append(piece.wat)
+                elif piece.ty == "Int":
+                    rendered.append(f"{piece.wat}\n      (call $int_to_str)")
+                else:
                     raise EmitError(
-                        f"{where}: a `${{…}}` template interpolates Str only on this "
-                        f"tier, got {piece.ty!r} (no int→string)"
+                        f"{where}: a `${{…}}` template interpolates Str or Int on this "
+                        f"tier, got {piece.ty!r}"
                     )
-                rendered.append(piece.wat)
         if not rendered:
             return _E(self._str_ptr(""), "Str")
         wat = rendered[0]
