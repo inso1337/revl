@@ -422,10 +422,21 @@ def _case_table(types: dict) -> dict:
             continue
         for case in spec.get("cases", []):
             name = case["name"]
+            # `Some`/`None` are reserved for `Opt` (host-null representation);
+            # a user ADT reusing them is ambiguous and dropped.
+            if name in ("Some", "None"):
+                ambiguous.add(name)
+                cases.pop(name, None)
+                continue
+            # a user ADT may reuse `Ok`/`Err`: the user's declaration shadows
+            # the built-in `Result` (the docs' own `type Outcome = Ok(Row) | …`
+            # does exactly this).
+            if name in ("Ok", "Err") and cases.get(name, {}).get("adt", "").startswith("Result"):
+                cases[name] = {"adt": type_name, "payload": case["payload"]}
+                continue
             if name in cases or name in ambiguous:
-                if name not in ("Some", "None", "Ok", "Err"):
-                    ambiguous.add(name)
-                    cases.pop(name, None)
+                ambiguous.add(name)
+                cases.pop(name, None)
                 continue
             cases[name] = {"adt": type_name, "payload": case["payload"]}
     return cases
@@ -813,10 +824,34 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
     raise RevlError(filename, stmt.line, "unexpected destructuring pattern")
 
 
+def _tagged_case(name: str, types: dict) -> dict | None:
+    """If `name` is a *tagged* ADT constructor — the built-in `Result`
+    (`Ok`/`Err`) or any user variant case — return its case-table entry.
+    `Opt` (`Some`/`None`) is not tagged: it stays host-null/value, so it is
+    excluded here and handled as identity/null."""
+    if name in ("Some", "None"):
+        return None
+    return (types.get(CASES_KEY) or {}).get(name)
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
+    # ADT construction (Result / user variants) lowers to a tagged `adt` node
+    # (Opt's Some/None are not tagged — handled as identity/null downstream).
+    _cases = types.get(CASES_KEY) or {}
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and _tagged_case(expr.callee.name, types) is not None:
+        info = _cases[expr.callee.name]
+        return {"kind": "adt", "type": info["adt"], "case": expr.callee.name,
+                "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types)
+                         for a in expr.args]}
+    if isinstance(expr, ExprVar):
+        info = _tagged_case(expr.name, types)
+        if info is not None and info.get("payload") is None \
+                and not str(info.get("adt", "")).startswith(("Result", "Opt")):
+            return {"kind": "adt", "type": info["adt"], "case": expr.name, "args": []}
     # Module-namespace call: `alias.fn(args)` desugars to the imported public
     # function by its original name (IR functions are top-level, not nested
     # in namespace objects).
@@ -1049,7 +1084,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     def _has_builtin(node) -> bool:
         if isinstance(node, dict):
-            return node.get("kind") == "builtin" or any(_has_builtin(v) for v in node.values())
+            # a tagged ADT construction is a v3 feature too (`adt` node)
+            if node.get("kind") in ("builtin", "adt"):
+                return True
+            return any(_has_builtin(v) for v in node.values())
         if isinstance(node, list):
             return any(_has_builtin(v) for v in node)
         return False
@@ -1162,6 +1200,21 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                pure_only: bool = False) -> dict:
     filename = env.filename
     line = getattr(expr, "line", 0)
+
+    # ADT construction (Result / user variants) — same tagged `adt` node as
+    # the pure-fn path; Opt's Some/None stay untagged.
+    cases = env.types.get(CASES_KEY) or {}
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and _tagged_case(expr.callee.name, env.types) is not None:
+        info = cases[expr.callee.name]
+        return {"kind": "adt", "type": info["adt"], "case": expr.callee.name,
+                "args": [_lower_component_pure_expr(a, env, scope, callables, pure_only)
+                         for a in expr.args]}
+    if isinstance(expr, ExprVar):
+        info = _tagged_case(expr.name, env.types)
+        if info is not None and info.get("payload") is None \
+                and not str(info.get("adt", "")).startswith(("Result", "Opt")):
+            return {"kind": "adt", "type": info["adt"], "case": expr.name, "args": []}
 
     if isinstance(expr, ExprLit):
         if expr.value is None:
