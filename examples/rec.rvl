@@ -1,0 +1,13 @@
+type Row = { id: Int, name: Str }
+
+service Store {
+  fn snapshot() -> Row
+  fn all() -> List[Row]
+}
+
+component RecStore provides store: Store {
+  provide store {
+    fn snapshot() = { id: 1, name: "ada" }
+    fn all() = [{ id: 1, name: "ada" }, { id: 2, name: "bob" }]
+  }
+}

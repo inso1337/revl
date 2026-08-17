@@ -415,7 +415,8 @@ def _format(template: str, args: list[str]) -> str:
     return f"format!({_string(''.join(pieces))}, {', '.join(args)})"
 
 
-def _emit_service_traits(services: dict) -> list[str]:
+def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]:
+    types = types or {}
     out: list[str] = []
     for sname, service in services.items():
         _ident(sname, "service")
@@ -423,10 +424,10 @@ def _emit_service_traits(services: dict) -> list[str]:
         for mname, method in (service.get("methods") or {}).items():
             _ident(mname, "method")
             params = ", ".join(
-                f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'))}"
+                f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'), types)}"
                 for p in method.get("params") or []
             )
-            ret = _rust_type(method.get("returns")) if method.get("returns") else "()"
+            ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             if method.get("emission"):
                 out.append("    /// emission: crosses the system boundary (DESIGN.md §3.5)")
             out.append(f"    fn {mname}(&self, {params}) -> {ret};")
@@ -792,10 +793,10 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             original_mname = method.get("name")
             mname = _ident(_mname(original_mname), "method")
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, original_mname, p))}"
+                f"{p}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
                 for p in method.get("params") or []
             )
-            ret = (_rust_type(_method_return(env, key, original_mname))
+            ret = (_rust_type(_method_return(env, key, original_mname), env.types)
                    if _method_return(env, key, original_mname) else "()")
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
@@ -919,10 +920,10 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         for method in provide.get("methods") or []:
             mname = _ident(method.get("name"), "method")
             params = ", ".join(
-                f"{p}: {_rust_type(_param_type(env, key, mname, p))}"
+                f"{p}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
                 for p in method.get("params") or []
             )
-            ret = (_rust_type(_method_return(env, key, mname))
+            ret = (_rust_type(_method_return(env, key, mname), env.types)
                    if _method_return(env, key, mname) else "()")
             out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {_method_body(env, method)} }}")
         out.append("}")
@@ -1507,13 +1508,13 @@ def _emit_v3_types(types: dict) -> list[str]:
     for name, spec in types.items():
         name = _ident(name, "type name")
         if spec.get("kind") == "record":
-            out.append("#[derive(Clone, Debug)]")
+            out.append("#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
                 out.append(f"    {_ident(field, 'record field')}: {_rust_type(ftype, types)},")
             out.append("}")
         elif spec.get("kind") == "variant":
-            out.append("#[derive(Clone, Debug)]")
+            out.append("#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]")
             out.append(f"pub enum {name} {{")
             for case in spec.get("cases") or []:
                 cname = _ident(case.get("name"), "case name")
@@ -1658,11 +1659,26 @@ def _uses_stdlib(ir: dict) -> bool:
 # impossible in Rust, unlike py attribute access or node's `Proxy`).
 # --------------------------------------------------------------------------
 
+# Scalar returns get lenient, hand-written JSON conversions (byte-identical to
+# the first cut, so the golden holds). Anything else that is not the opaque
+# cordis `Value` is marshalled generically through serde (records, ADTs, Map,
+# Result, and their Vec/Option nestings, once the emitted types derive
+# Serialize/Deserialize). `Value` alone stays unmarshallable: it is opaque.
+_SCALAR_OPTION = ("Option<String>", "Option<i64>", "Option<bool>", "Option<f64>")
+
+
+def _bridge_serde_ok(rtype: str) -> bool:
+    """True when `rtype` can cross via serde: not the opaque cordis `Value`."""
+    return not re.search(r"\bValue\b", rtype)
+
+
 def _bridge_arg_ser(name: str, rtype: str) -> str:
     """Serialize a proxy method argument to a serde_json::Value."""
     if rtype in ("String", "i64", "f64", "bool"):
         return f"serde_json::json!({name})"
-    return "serde_json::Value::Null"  # non-primitive params are not marshalled
+    if _bridge_serde_ok(rtype):
+        return f"serde_json::to_value(&{name}).unwrap_or(serde_json::Value::Null)"
+    return "serde_json::Value::Null"  # opaque Value param: not marshalled
 
 
 def _bridge_arg_extract(index: int, rtype: str) -> str | None:
@@ -1675,7 +1691,9 @@ def _bridge_arg_extract(index: int, rtype: str) -> str | None:
         return f"args[{index}].as_f64().unwrap_or(0.0)"
     if rtype == "bool":
         return f"args[{index}].as_bool().unwrap_or(false)"
-    return None  # non-primitive param: this method is not served
+    if _bridge_serde_ok(rtype):
+        return f'serde_json::from_value::<{rtype}>(args[{index}].clone()).expect("bridge: decode arg")'
+    return None  # opaque Value param: this method is not served
 
 
 def _bridge_ret_deser(value: str, rtype: str) -> str | None:
@@ -1692,12 +1710,16 @@ def _bridge_ret_deser(value: str, rtype: str) -> str | None:
         "Vec<Value>": (f"{value}.as_array().map(|a| a.iter().map(|x| "
                        f"Value::new(x.to_string())).collect()).unwrap_or_default()"),
     }
-    return table.get(rtype)
+    if rtype in table:
+        return table[rtype]
+    if _bridge_serde_ok(rtype):
+        return f'serde_json::from_value::<{rtype}>({value}.clone()).expect("bridge: decode return")'
+    return None  # opaque cordis Value: not marshallable
 
 
 def _bridge_ret_ser(call: str, rtype: str) -> str:
     """Serialize a stub method's return value to a serde_json::Value."""
-    if rtype in ("i64", "String", "bool", "f64") or rtype.startswith("Option<"):
+    if rtype in ("i64", "String", "bool", "f64") or rtype in _SCALAR_OPTION:
         return f"serde_json::json!({call})"
     if rtype == "()":
         return f"{{ {call}; serde_json::Value::Null }}"
@@ -1705,12 +1727,15 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
         return (f"{{ let _r = {call}; serde_json::json!(_r.iter().map(|v| "
                 f"v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default())"
                 f".collect::<Vec<_>>()) }}")
-    return f"{{ let _ = {call}; serde_json::Value::Null }}"  # unsupported return
+    if _bridge_serde_ok(rtype):
+        return f"{{ let _r = {call}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }}"
+    return f"{{ let _ = {call}; serde_json::Value::Null }}"  # opaque Value return
 
 
 def _emit_bridge(ir: dict) -> list[str]:
     services = ir.get("services") or {}
     components = ir.get("components") or []
+    types = ir.get("types") or {}
     if not services:
         return []
     provided: dict[str, str] = {}
@@ -1756,9 +1781,9 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append(f"impl {sname} for {sname}Proxy {{")
         for mname, method in methods.items():
             params = method.get("params") or []
-            plist = ", ".join(f"{p['name']}: {_rust_type(p.get('type'))}" for p in params)
-            ret = _rust_type(method.get("returns")) if method.get("returns") else "()"
-            argvec = ", ".join(_bridge_arg_ser(p["name"], _rust_type(p.get("type"))) for p in params)
+            plist = ", ".join(f"{p['name']}: {_rust_type(p.get('type'), types)}" for p in params)
+            ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
+            argvec = ", ".join(_bridge_arg_ser(p["name"], _rust_type(p.get("type"), types)) for p in params)
             deser = _bridge_ret_deser("_v", ret)
             out.append(f"    fn {_mname(mname)}(&self, {plist}) -> {ret} {{")
             if deser is None:
@@ -1774,8 +1799,8 @@ def _emit_bridge(ir: dict) -> list[str]:
         out.append("    match method {")
         for mname, method in methods.items():
             params = method.get("params") or []
-            ret = _rust_type(method.get("returns")) if method.get("returns") else "()"
-            extracts = [_bridge_arg_extract(i, _rust_type(p.get("type"))) for i, p in enumerate(params)]
+            ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
+            extracts = [_bridge_arg_extract(i, _rust_type(p.get("type"), types)) for i, p in enumerate(params)]
             if any(e is None for e in extracts):
                 out.append(f'        "{mname}" => serde_json::Value::Null, // unmarshalled param type')
                 continue
@@ -1886,7 +1911,7 @@ def _emit_bridge(ir: dict) -> list[str]:
 
 def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
-    out.extend(_emit_service_traits(ir.get("services") or {}))
+    out.extend(_emit_service_traits(ir.get("services") or {}, ir.get("types") or {}))
     out.extend(_emit_host_stubs(ir))
     if _uses_stdlib(ir):
         out.extend(_stdlib_helper_traits())
@@ -1964,6 +1989,7 @@ def cargo_toml(name: str = "revl_components") -> str:
         "\n"
         "[dependencies]\n"
         'cordis = { package = "cordis-rs", version = "0.3" }\n'
+        'serde = { version = "1", features = ["derive"] }\n'
         'serde_json = "1"\n'
     )
 
