@@ -18,6 +18,9 @@ revl refuses.)
 | `charCodeAt(i)` | 1 | Str | code point at i | `ord(x[i])` | `x.charCodeAt(i)` |
 | `indexOf(v)` | 1 | Str, List | first index, `-1` if absent | inline dispatch helper | `x.indexOf(v)` |
 | `concat(y)` | 1 | Str, List | joined copy | `x + y` | `x.concat(y)` |
+| `split(sep)` | 1 | Str | pieces between separators; `""` → 1-char strings; trailing empties kept | inline dispatch | `x.split(sep)` |
+| `join(sep)` | 1 | List[Str] | elements joined by sep | `sep.join(x)` | `x.join(sep)` |
+| `repeat(n)` | 1 | Str | n copies concatenated | `x * n` | `x.repeat(n)` |
 
 - `push`/`concat` are **persistent** (value semantics) — consistent with
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:
@@ -28,6 +31,13 @@ revl refuses.)
   type-dispatch (misuse is a host runtime error) — full typing tightens this.
 - Type dispatch for `indexOf` is a Python-side inline helper because
   `str.find`/`list.index` disagree about absence; both backends return `-1`.
+- `split` is pinned to the JS shape on every backend: `"a,,b".split(",")`
+  has 3 elements, `"a,".split(",")` keeps the trailing empty (Java's
+  regex-split drops it — its lowering passes `Pattern.quote(sep), -1`), and
+  `"abc".split("")` is the 1-char strings (Python's `str.split("")` raises
+  — its lowering dispatches on empty sep).
+- `join` is declared on `List[Str]` (TS orientation: `xs.join(sep)`); the
+  Python lowering swaps receiver and argument (`sep.join(xs)`).
 
 ## Host objects are exempt, by provenance
 
@@ -47,6 +57,6 @@ usual named tier error (i32-only — no strings or lists there yet).
 ## Planned (needed for self-hosting, not yet specified)
 
 `Map` as a *value* type (persistent set/get/has) — symbol tables for the
-self-hosted checker; `split`, `join`, `repeat` on Str as the lexer/emitter
-demand them. Extend the table here first, per the house rule: spec, then
-checker, then both emitters, then tests.
+self-hosted checker. Extend the table here first, per the house rule:
+spec, then checker, then all emitters, then tests. (`split`/`join`/
+`repeat` graduated to the table above for the self-hosted lexer.)

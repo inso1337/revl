@@ -81,6 +81,7 @@ IR_VERSION = 1
 _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
     "charCodeAt": 1, "indexOf": 1, "concat": 1,
+    "split": 1, "join": 1, "repeat": 1,
 }
 
 

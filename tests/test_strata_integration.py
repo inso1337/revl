@@ -128,6 +128,9 @@ pub fn seq(n: Int) -> List[Int] { var out = [] var i = 0 while (i < n) { out = o
 pub fn head(s: Str) -> Str { return s.slice(0, 1) }
 pub fn find(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
 pub fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
+pub fn pieces(s: Str, sep: Str) -> List[Str] { return s.split(sep) }
+pub fn glue(xs: List[Str], sep: Str) -> Str { return xs.join(sep) }
+pub fn times(s: Str, n: Int) -> Str { return s.repeat(n) }
 ''', "std.rvl")
     namespace = {}
     exec(compile(_emit_py(ir), "std.py", "exec"), namespace)
@@ -135,6 +138,11 @@ pub fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
     assert namespace["head"]("revl") == "r"
     assert namespace["find"]("revl", "zz") == -1, "-1 when absent, both hosts"
     assert namespace["findL"]([4, 5, 6], 9) == -1
+    assert namespace["pieces"]("a,,b", ",") == ["a", "", "b"], "JS-shape split"
+    assert namespace["pieces"]("a,", ",") == ["a", ""], "trailing empty kept"
+    assert namespace["pieces"]("abc", "") == ["a", "b", "c"], "empty sep = chars"
+    assert namespace["glue"](["a", "b"], "+") == "a+b"
+    assert namespace["times"]("ab", 3) == "ababab"
 
 
 def test_push_is_persistent():

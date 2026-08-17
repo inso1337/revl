@@ -1301,6 +1301,12 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
         return f"{target}.revl_index_of(&{args[0]})"
+    if method == "split":
+        return f"{target}.revl_split(&{args[0]})"
+    if method == "join":
+        return f"{target}.revl_join(&{args[0]})"
+    if method == "repeat":
+        return f"{target}.revl_repeat({args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -1318,6 +1324,8 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_slice(&self, a: i64, b: i64) -> String;",
         "    fn revl_index_of(&self, needle: &String) -> i64;",
         "    fn revl_concat(&self, other: &String) -> String;",
+        "    fn revl_split(&self, sep: &String) -> Vec<String>;",
+        "    fn revl_repeat(&self, n: i64) -> String;",
         "}",
         "impl RevlStrOps for String {",
         "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }",
@@ -1335,6 +1343,20 @@ def _stdlib_helper_traits() -> list[str]:
         "        -1",
         "    }",
         "    fn revl_concat(&self, other: &String) -> String { format!(\"{}{}\", self, other) }",
+        "    fn revl_split(&self, sep: &String) -> Vec<String> {",
+        "        if sep.is_empty() {",
+        "            self.chars().map(|c| c.to_string()).collect()",
+        "        } else {",
+        "            self.split(sep.as_str()).map(|s| s.to_string()).collect()",
+        "        }",
+        "    }",
+        "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }",
+        "}",
+        "trait RevlStrListOps {",
+        "    fn revl_join(&self, sep: &String) -> String;",
+        "}",
+        "impl RevlStrListOps for Vec<String> {",
+        "    fn revl_join(&self, sep: &String) -> String { self.join(sep.as_str()) }",
         "}",
         "trait RevlListOps<T> {",
         "    fn revl_length(&self) -> i64;",
