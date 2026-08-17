@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .compiler import compile_files
 from .errors import RevlError
+from .fmt import migrate_source
 
 
 def _boundary(ir: dict) -> dict:
@@ -96,6 +97,40 @@ def _run_tests(ir: dict) -> int:
     return 0
 
 
+def _run_fmt(args: argparse.Namespace) -> int:
+    """`revl fmt --migrate`: rewrite 1.x `$` interpolation to 2.0 templates."""
+    if args.output and len(args.files) != 1:
+        print("error: `fmt --migrate -o` expects exactly one input file", file=sys.stderr)
+        return 1
+
+    for path_str in args.files:
+        path = Path(path_str)
+        try:
+            original = path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            print(f"error: cannot read {path_str}: {error}", file=sys.stderr)
+            return 1
+
+        migrated, warnings = migrate_source(original, str(path))
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+
+        if args.output:
+            try:
+                Path(args.output).write_bytes(migrated.encode("utf-8"))
+            except OSError as error:
+                print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+                return 1
+        elif migrated != original:
+            try:
+                path.write_bytes(migrated.encode("utf-8"))
+            except OSError as error:
+                print(f"error: cannot write {path_str}: {error}", file=sys.stderr)
+                return 1
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -108,10 +143,28 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
 
+    fmt = sub.add_parser("fmt", help="format .rvl sources (migration §9)")
+    fmt.add_argument(
+        "--migrate",
+        action="store_true",
+        required=True,
+        help="rewrite 1.x `$` interpolation to backtick templates",
+    )
+    fmt.add_argument("files", nargs="+")
+    fmt.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="write migrated source to this path instead of in place (single input)",
+    )
+
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
 
     args = parser.parse_args(argv)
+
+    if args.command == "fmt":
+        return _run_fmt(args)
 
     try:
         ir = compile_files(args.files)

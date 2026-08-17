@@ -533,9 +533,7 @@ class Parser:
     def use_decl(self) -> UseDecl:
         line = self.expect("kw", "use").line
         path_tok = self.expect("string", what="a module path string")
-        if any(kind == "var" for kind, _ in path_tok.value):
-            raise self.err(line, "`use` paths must be static string literals")
-        path = "".join(text for _, text in path_tok.value)
+        path = path_tok.value
         if not path:
             raise self.err(line, "`use` path cannot be empty")
         names = None
@@ -716,10 +714,9 @@ class Parser:
         if tok.kind == "int":
             return self.next().value
         if tok.kind == "string":
-            parts = self.next().value
-            if any(kind == "var" for kind, _ in parts):
-                raise self.err(tok.line, "config defaults cannot interpolate")
-            return "".join(text for _, text in parts)
+            return self.next().value
+        if tok.kind == "template":
+            raise self.err(tok.line, "config defaults cannot interpolate")
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return {"true": True, "false": False, "null": None}[tok.value]
@@ -880,7 +877,7 @@ class Parser:
         line = self.expect("kw", "realm").line
         self.expect("(")
         tok = self.peek()
-        if tok.kind != "string" or any(kind == "var" for kind, _ in tok.value):
+        if tok.kind != "string":
             raise self.err(
                 line,
                 "dynamic realm labels are not supported — a realm is a static string literal",
@@ -890,7 +887,7 @@ class Parser:
                      "components (docs/design-v2-realms.md)",
             )
         self.next()
-        label = "".join(text for _, text in tok.value)
+        label = tok.value
         if not label:
             raise self.err(line, "a realm label cannot be empty")
         self.expect(")")
@@ -993,9 +990,7 @@ class Parser:
     def test_decl(self) -> TestDecl:
         line = self.expect("kw", "test").line
         tok = self.expect("string")
-        if any(kind == "var" for kind, _ in tok.value):
-            raise self.err(tok.line, "test names must be static string literals")
-        name = "".join(text for _, text in tok.value)
+        name = tok.value
         if not name:
             raise self.err(tok.line, "a test name cannot be empty")
         self.expect("{")
@@ -1254,10 +1249,10 @@ class Parser:
             return ExprLit(tok.value, tok.line)
         if tok.kind == "string":
             self.next()
-            parts = tok.value
-            if any(kind == "var" for kind, _ in parts):
-                return Interp(parts, tok.line)
-            return ExprLit("".join(text for _, text in parts), tok.line)
+            return ExprLit(tok.value, tok.line)
+        if tok.kind == "template":
+            self.next()
+            return Interp(tok.value, tok.line)
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -1375,11 +1370,10 @@ class Parser:
             base = Lit(tok.value, tok.line)
         elif tok.kind == "string":
             self.next()
-            parts = tok.value
-            if any(kind == "var" for kind, _ in parts):
-                base = Interp(parts, tok.line)
-            else:
-                base = Lit("".join(text for _, text in parts), tok.line)
+            base = Lit(tok.value, tok.line)
+        elif tok.kind == "template":
+            self.next()
+            base = Interp(tok.value, tok.line)
         elif tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             base = Lit({"true": True, "false": False, "null": None}[tok.value], tok.line)
