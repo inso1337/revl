@@ -179,3 +179,43 @@ def test_v3_variant_result_opt_run_on_wasmtime(tmp_path):
     assert invoke("mk_u", "1") == 9 and invoke("mk_u", "0") == 0
     assert invoke("r_d", "1") == 7 and invoke("r_d", "0") == -1   # Ok vs Err
     assert invoke("opt_or", "1") == 5 and invoke("opt_or", "0") == 0
+
+
+# `while` / `for` lower to native wasm loops — the functions tier is now
+# Turing-complete on wasm (fib loop-form + Collatz, the README's examples).
+_LOOP_SRC = """
+fn fib(n: Int) -> Int { var a = 0  var b = 1  var i = 0  while (i < n) { let t = a + b  a = b  b = t  i += 1 }  return a }
+fn collatz(n: Int) -> Int { var c = 0  var m = n  while (m != 1) { if (m % 2 == 0) { m = m / 2 } else { m = 3 * m + 1 }  c += 1 }  return c }
+fn sum_demo() -> Int { let xs = [3, 5, 8, 1]  var s = 0  for (x of xs) { s += x }  return s }
+fn nested() -> Int { let rows = [2, 3]  var total = 0  for (r of rows) { var k = 0  while (k < r) { total += 1  k += 1 } }  return total }
+"""
+
+
+def test_v3_loops_emit():
+    emit = _emitter()
+    wat = emit.emit(compile_source(_LOOP_SRC))["functions"]
+    assert "(loop" in wat and "(br_if 1)" in wat and "(br 0)" in wat
+
+
+@pytest.mark.skipif(__import__("shutil").which("wasmtime") is None, reason="wasmtime not installed")
+def test_v3_loops_run_on_wasmtime(tmp_path):
+    """fib/Collatz (while) and for-of execute on the real substrate — the
+    Turing-completeness the README demonstrates, now on wasm too."""
+    import subprocess
+
+    emit = _emitter()
+    wat_path = tmp_path / "loops.wat"
+    wat_path.write_text(emit.emit(compile_source(_LOOP_SRC))["functions"], encoding="utf-8")
+
+    def invoke(fn: str, *args: str) -> int:
+        out = subprocess.run(
+            ["wasmtime", "--invoke", fn, str(wat_path), *args],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert invoke("fib", "10") == 55 and invoke("fib", "20") == 6765
+    assert invoke("collatz", "27") == 111
+    assert invoke("sum_demo") == 17
+    assert invoke("nested") == 5

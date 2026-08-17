@@ -1336,6 +1336,17 @@ class _V3Emitter:
             elif step == "if":
                 self._collect_locals(stmt.get("then") or [], acc)
                 self._collect_locals(stmt.get("else") or [], acc)
+            elif step == "while":
+                self._collect_locals(stmt.get("body") or [], acc)
+            elif step == "for":
+                acc.add(_ident(stmt.get("bind"), "loop bind"))
+                self._loop_counter += 1
+                stmt["_lid"] = self._loop_counter
+                # ptr / count / index scratch locals for this loop
+                self._for_temps += [f"for_ptr_{self._loop_counter}",
+                                    f"for_cnt_{self._loop_counter}",
+                                    f"for_idx_{self._loop_counter}"]
+                self._collect_locals(stmt.get("body") or [], acc)
 
     def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
@@ -1392,8 +1403,58 @@ class _V3Emitter:
                 out.append(value.wat)
                 out.append("(i32.eqz)")
                 out.append("(if (then unreachable))")
+            elif step == "while":
+                cond = self._expr(stmt.get("cond"), scope, where, "Bool")
+                body_scope = _Scope(dict(scope.slots), dict(scope.types))
+                body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
+                out.append("(block")
+                out.append("  (loop")
+                out.append("    " + cond.wat)
+                out.append("    (i32.eqz)")
+                out.append("    (br_if 1)")
+                out.extend("    " + line for line in body_lines)
+                out.append("    (br 0)")
+                out.append("  )")
+                out.append(")")
+            elif step == "for":
+                out.extend(self._emit_for(stmt, scope, where, expected_return))
             else:
                 raise EmitError(f"{where}: unsupported v3 statement step {step!r}")
+        return out
+
+    def _emit_for(self, stmt: dict, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
+        """`for (x of xs)` over a list `[i32 count][elem0]…` in linear memory."""
+        n = stmt.get("_lid")
+        iter_ty = self._infer_type(stmt.get("iterable"), scope)
+        if not _is_list_type(iter_ty):
+            raise EmitError(f"{where}: `for … of` iterates a List, got {iter_ty!r}")
+        elem_ty = _list_elem(iter_ty)
+        bind = _ident(stmt.get("bind"), f"{where}: loop bind")
+        it = self._expr(stmt.get("iterable"), scope, where, iter_ty)
+        body_scope = _Scope(dict(scope.slots), dict(scope.types))
+        body_scope.slots[stmt.get("bind")] = f"(local.get $l_{bind})"
+        body_scope.types[stmt.get("bind")] = elem_ty
+        body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
+        ptr, cnt, idx = f"$for_ptr_{n}", f"$for_cnt_{n}", f"$for_idx_{n}"
+        out = [
+            it.wat, f"(local.set {ptr})",
+            f"(i32.load (local.get {ptr}))", f"(local.set {cnt})",
+            "(i32.const 0)", f"(local.set {idx})",
+            "(block",
+            "  (loop",
+            f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
+            "    (br_if 1)",
+            f"    (i32.load (i32.add (local.get {ptr}) "
+            f"(i32.add (i32.const 4) (i32.mul (local.get {idx}) (i32.const 4)))))",
+            f"    (local.set $l_{bind})",
+        ]
+        out.extend("    " + line for line in body_lines)
+        out.extend([
+            f"    (local.set {idx} (i32.add (local.get {idx}) (i32.const 1)))",
+            "    (br 0)",
+            "  )",
+            ")",
+        ])
         return out
 
     def _fresh_tmp(self, taken: set[str]) -> str:
@@ -1424,6 +1485,8 @@ class _V3Emitter:
             decls.append("(result i32)")
 
         local_names: set[str] = set()
+        self._loop_counter = 0
+        self._for_temps: list[str] = []
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
             if lname not in scope.types:
@@ -1441,7 +1504,9 @@ class _V3Emitter:
                 decls.append(f"(local $l_{bname} i32)")
         for sname in sorted(match_scruts):
             decls.append(f"(local ${sname} i32)")
-        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts)
+        for tname in self._for_temps:
+            decls.append(f"(local ${tname} i32)")
+        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts | set(self._for_temps))
         self._tmp = tmp
         decls.append(f"(local ${tmp} i32)")
 
