@@ -314,6 +314,27 @@ class ExprMatch:
 # fn-body statements
 
 @dataclass
+class RecordPattern:
+    fields: list[str]
+    line: int
+
+
+@dataclass
+class ListPattern:
+    binds: list[str]
+    rest: str | None
+    line: int
+
+
+@dataclass
+class LetPatternStmt:
+    pattern: RecordPattern | ListPattern
+    value: object
+    mutable: bool
+    line: int
+
+
+@dataclass
 class LetStmt:
     name: str
     value: object
@@ -325,6 +346,22 @@ class LetStmt:
 class AssignStmt:
     name: str
     value: object
+    line: int
+    op: str = "="
+
+
+@dataclass
+class WhileStmt:
+    cond: object
+    body: list
+    line: int
+
+
+@dataclass
+class ForStmt:
+    bind: str
+    iterable: object
+    body: list
     line: int
 
 
@@ -850,30 +887,105 @@ class Parser:
 
     def fn_stmt(self):
         tok = self.peek()
-        if tok.kind == "kw" and tok.value == "let":
+        if tok.kind == "kw" and tok.value in ("let", "var"):
+            mutable = tok.value == "var"
             self.next()
+            if self.at("{"):
+                pattern = self._record_pattern()
+                self.expect("=")
+                return LetPatternStmt(pattern, self.pure_expr(), mutable, tok.line)
+            if self.at("["):
+                pattern = self._list_pattern()
+                self.expect("=")
+                return LetPatternStmt(pattern, self.pure_expr(), mutable, tok.line)
             name = self.expect("ident").value
             self.expect("=")
-            return LetStmt(name, self.pure_expr(), False, tok.line)
-        if tok.kind == "kw" and tok.value == "var":
-            self.next()
-            name = self.expect("ident").value
-            self.expect("=")
-            return LetStmt(name, self.pure_expr(), True, tok.line)
+            return LetStmt(name, self.pure_expr(), mutable, tok.line)
         if tok.kind == "kw" and tok.value == "return":
             self.next()
             value = None if self.at("}") else self.pure_expr()
             return ReturnStmt(value, tok.line)
         if tok.kind == "kw" and tok.value == "if":
             return self.if_stmt()
+        if tok.kind == "kw" and tok.value == "while":
+            return self.while_stmt()
+        if tok.kind == "kw" and tok.value == "for":
+            return self.for_stmt()
         if tok.kind == "kw" and tok.value == "assert":
             self.next()
             return AssertStmt(self.pure_expr(), tok.line)
-        if tok.kind == "ident" and self.toks[self.pos + 1].kind == "=":
+        if tok.kind == "ident" and self._assign_ahead():
             self.next()
-            self.next()
-            return AssignStmt(tok.value, self.pure_expr(), tok.line)
+            op = "="
+            if self.at("="):
+                self.next()
+            else:
+                op = self.next().value + "="
+                self.next()
+            return AssignStmt(tok.value, self.pure_expr(), tok.line, op)
         return ExprStmt(self.pure_expr(), tok.line)
+
+    def _assign_ahead(self) -> bool:
+        """True when the token after the current identifier starts `=` or a
+        compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`)."""
+        nxt = self.toks[self.pos + 1]
+        if nxt.kind == "=":
+            return True
+        if nxt.kind in ("+", "-", "*", "/", "%"):
+            return self.toks[self.pos + 2].kind == "="
+        return False
+
+    def _record_pattern(self) -> RecordPattern:
+        line = self.expect("{").line
+        fields: list[str] = []
+        while not self.at("}"):
+            fields.append(self.expect("ident").value)
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return RecordPattern(fields, line)
+
+    def _list_pattern(self) -> ListPattern:
+        line = self.expect("[").line
+        binds: list[str] = []
+        rest: str | None = None
+        while not self.at("]"):
+            if self._rest_pattern_ahead():
+                self.next()
+                self.next()
+                self.next()
+                rest = self.expect("ident").value
+                break
+            binds.append(self.expect("ident").value)
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return ListPattern(binds, rest, line)
+
+    def _rest_pattern_ahead(self) -> bool:
+        return (
+            self.at(".")
+            and self.toks[self.pos + 1].kind == "."
+            and self.toks[self.pos + 2].kind == "."
+        )
+
+    def while_stmt(self) -> WhileStmt:
+        line = self.expect("kw", "while").line
+        self.expect("(")
+        cond = self.pure_expr()
+        self.expect(")")
+        body = self.block() if self.at("{") else [self.fn_stmt()]
+        return WhileStmt(cond, body, line)
+
+    def for_stmt(self) -> ForStmt:
+        line = self.expect("kw", "for").line
+        self.expect("(")
+        bind = self.expect("ident").value
+        self.expect("kw", "of")
+        iterable = self.pure_expr()
+        self.expect(")")
+        body = self.block() if self.at("{") else [self.fn_stmt()]
+        return ForStmt(bind, iterable, body, line)
 
     def if_stmt(self) -> IfStmt:
         line = self.expect("kw", "if").line

@@ -1,0 +1,12 @@
+// REJECTED — compound assignment is mutation, so it is `var`-only
+// (syntax-2.0 §3.5). `let` is single-assignment; `n += 1` is a reassignment
+// and points at `var` in the fix hint.
+//
+// expected error:
+//   cannot reassign `n` — it is `let` (single-assignment)
+
+fn bump() -> Int {
+  let n = 1
+  n += 1
+  return n
+}

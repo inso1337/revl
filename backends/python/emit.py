@@ -468,8 +468,13 @@ def _expr(node: dict) -> str:
         return "{" + ", ".join(f"{k!r}: {_expr(v)}" for k, v in node["fields"]) + "}"
     if kind == "list":
         return "[" + ", ".join(_expr(e) for e in node["items"]) + "]"
+    if kind == "len":
+        return f"len({_expr(node['target'])})"
     if kind == "arrow":
-        return f"lambda {', '.join(node['params'])}: {_expr(node['body'])}"
+        params = list(node["params"])
+        captures = node.get("captures") or []
+        lambda_params = ", ".join(params + [f"{name}={name}" for name in captures])
+        return f"lambda {lambda_params}: {_expr(node['body'])}"
     if kind == "match":
         return _match_expr(_expr(node["scrutinee"]), node["arms"])
     if kind == "interp":
@@ -477,10 +482,33 @@ def _expr(node: dict) -> str:
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
+def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
+    """Emit a ``let_pattern`` step by evaluating the RHS once into a temp."""
+    tmp = f"__revl_destructure_{id(node)}"
+    out.add(indent, f"{tmp} = {_expr(node['value'])}")
+    if node["pattern"] == "record":
+        for name in node["names"]:
+            out.add(indent, f"{name} = {tmp}.{name}")
+    elif node["pattern"] == "list":
+        names = node["names"]
+        rest = node.get("rest")
+        if rest is None:
+            if len(names) == 1:
+                out.add(indent, f"{names[0]} = {tmp}[0]")
+            else:
+                out.add(indent, f"{', '.join(names)} = {tmp}")
+        else:
+            out.add(indent, f"{', '.join(names)}, *{rest} = {tmp}")
+    else:
+        raise EmitError(f"unsupported let_pattern kind {node['pattern']!r}")
+
+
 def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
         out.add(indent, f"{node['name']} = {_expr(node['value'])}")
+    elif step == "let_pattern":
+        _let_pattern_stmt(node, out, indent)
     elif step == "return":
         if node["expr"] is None:
             out.add(indent, "return")
@@ -493,6 +521,20 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
         if node["else"]:
             out.add(indent, "else:")
             for s in node["else"]:
+                _fn_stmt(s, out, indent + 1)
+    elif step == "while":
+        out.add(indent, f"while {_expr(node['cond'])}:")
+        if not node["body"]:
+            out.add(indent + 1, "pass")
+        else:
+            for s in node["body"]:
+                _fn_stmt(s, out, indent + 1)
+    elif step == "for":
+        out.add(indent, f"for {node['bind']} in {_expr(node['iterable'])}:")
+        if not node["body"]:
+            out.add(indent + 1, "pass")
+        else:
+            for s in node["body"]:
                 _fn_stmt(s, out, indent + 1)
     elif step == "expr":
         out.add(indent, _expr(node["expr"]))

@@ -263,3 +263,71 @@ def test_revl_test_cli_exit_codes(tmp_path):
     )
     assert result.returncode == 1
     assert "FAIL fails" in result.stdout
+
+
+def test_loops_mutation_and_destructuring_emit_and_execute():
+    _, ns = _compile_emit(
+        """
+        type Row = { id: Int, name: Str }
+
+        fn count_idents(kinds: List[Str]) -> Int {
+          var n = 0
+          for (kind of kinds) {
+            if (kind == "Ident") n += 1
+          }
+          return n
+        }
+
+        fn skip_spaces(source: Str, start: Int) -> Int {
+          var i = start
+          while (i < source.length && source[i] == " ") i += 1
+          return i
+        }
+
+        fn destructure(row: Row) -> Int {
+          let {id, name} = row
+          return id + name.length
+        }
+
+        fn list_destructure(xs: List[Int]) -> Int {
+          let [head, ...rest] = xs
+          return head + rest.length
+        }
+        """
+    )
+    assert ns["count_idents"](["Ident", "Str", "Ident"]) == 2
+    assert ns["skip_spaces"]("   x", 0) == 3
+    assert ns["destructure"](ns["Row"](id=4, name="ab")) == 6
+    assert ns["list_destructure"]([3, 4, 5]) == 5
+
+
+def test_arrow_captures_var_by_value_at_creation_time():
+    _, ns = _compile_emit(
+        """
+        fn captured() -> Int {
+          var n = 1
+          let f = x => x + n
+          n += 10
+          return f(5)
+        }
+        """
+    )
+    assert ns["captured"]() == 6  # f saw n == 1, not the final 11
+
+
+def test_var_in_record_literal_rejected():
+    with pytest.raises(RevlError, match="`var` `n` cannot be used in a record literal"):
+        compile_source(
+            """
+            fn leak() -> Int {
+              var n = 1
+              let row = { value: n }
+              return row.value
+            }
+            """
+        )
+
+
+def test_compound_assignment_on_let_rejected():
+    with pytest.raises(RevlError, match="cannot reassign `n`"):
+        compile_source("fn bump() -> Int { let n = 1 n += 1 return n }")

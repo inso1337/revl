@@ -190,3 +190,70 @@ def test_test_block_decl():
     assert len(test.body) == 2
     assert test.body[0].__class__.__name__ == "LetStmt"
     assert test.body[1].__class__.__name__ == "AssertStmt"
+
+
+def test_while_for_and_compound_assignment_parse():
+    prog = _parse(
+        """
+        fn count_idents(tokens: List[Token]) -> Int {
+          var n = 0
+          for (tok of tokens) {
+            if (tok.kind == Ident) n += 1
+          }
+          while (n < 3) n += 1
+          return n
+        }
+        """
+    )
+    (fn,) = prog.fn_decls
+    assert [s.__class__.__name__ for s in fn.body] == ["LetStmt", "ForStmt", "WhileStmt", "ReturnStmt"]
+    assert fn.body[0].mutable is True
+    for_stmt = fn.body[1]
+    assert for_stmt.bind == "tok"
+    assert isinstance(for_stmt.iterable, ExprVar)
+    if_stmt = for_stmt.body[0]
+    assert if_stmt.cond.left.__class__.__name__ == "ExprField"
+    assert if_stmt.cond.left.name == "kind"
+    assert if_stmt.then[0].op == "+="
+    while_stmt = fn.body[2]
+    assert while_stmt.body[0].op == "+="
+
+
+def test_unbraced_while_and_for_bodies_parse():
+    prog = _parse(
+        """
+        fn skip(source: Str, start: Int) -> Int {
+          var i = start
+          while (i < source.length) i += 1
+          for (ch of source) i += 1
+          return i
+        }
+        """
+    )
+    (fn,) = prog.fn_decls
+    while_stmt, for_stmt = fn.body[1:3]
+    assert while_stmt.__class__.__name__ == "WhileStmt"
+    assert len(while_stmt.body) == 1
+    assert for_stmt.__class__.__name__ == "ForStmt"
+    assert len(for_stmt.body) == 1
+
+
+def test_record_and_list_destructuring_parse():
+    prog = _parse(
+        """
+        fn f(row: Row, xs: List[Int]) -> Int {
+          let {id, name} = row
+          var [head, ...rest] = xs
+          return head
+        }
+        """
+    )
+    (fn,) = prog.fn_decls
+    let_pattern, var_pattern = fn.body[:2]
+    assert let_pattern.__class__.__name__ == "LetPatternStmt"
+    assert let_pattern.mutable is False
+    assert let_pattern.pattern.fields == ["id", "name"]
+    assert var_pattern.__class__.__name__ == "LetPatternStmt"
+    assert var_pattern.mutable is True
+    assert var_pattern.pattern.binds == ["head"]
+    assert var_pattern.pattern.rest == "rest"
