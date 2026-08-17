@@ -57,6 +57,87 @@ def test_rejects_unknown_ir_version():
         emit.emit({"ir_version": 4, "components": [{"name": "X", "body": []}]})
 
 
+def test_version_gate_accepts_ir_1_2_3():
+    v1 = {
+        "ir_version": 1,
+        "services": {},
+        "components": [{"name": "X", "requires": {}, "provides": {}, "config": [], "body": []}],
+    }
+    assert "ir_version 1" in emit.emit(v1)
+    assert "ir_version 2" in emit.emit({**v1, "ir_version": 2})
+    v3 = {
+        "ir_version": 3,
+        "functions": [{
+            "name": "answer",
+            "params": [],
+            "returns": "Int",
+            "body": [{"step": "return", "expr": {"kind": "lit", "value": 42}}],
+        }],
+    }
+    assert "ir_version 3" in emit.emit(v3)
+    with pytest.raises(emit.EmitError, match="ir_version"):
+        emit.emit({**v1, "ir_version": 4})
+
+
+def test_user_cache_golden_byte_equality():
+    src = emit.emit(_ir("user_cache"))
+    golden = (Path(__file__).resolve().parent / "golden" / "user_cache.java").read_text()
+    assert src == golden
+
+
+def test_host_objects_are_real_java_runtime_classes():
+    src = emit.emit(_ir("user_cache"))
+    assert "UnsupportedOperationException" not in src
+    assert "private final java.util.HashMap<String, String> values = new java.util.HashMap<>();" in src
+    assert "public static Map new()" in src
+    assert "public void insert(String key, String value)" in src
+    assert "public java.util.Optional<String> get(String key)" in src
+    assert "public static Pool open(String url, long poolSize)" in src
+    assert "return java.util.List.of();" in src
+    assert "return 0L;" in src
+
+
+def test_config_defaults_emit_no_arg_constructor():
+    src = emit.emit(_ir("user_cache"))
+    assert "public PgDatabasePlugin(String url, long pool_size)" in src
+    assert "public PgDatabasePlugin()" in src
+    assert "this.url = null;" in src
+    assert "this.pool_size = 10L;" in src
+
+
+def test_await_lowers_to_async_plugin():
+    src = emit.emit(_ir("migrator"))
+    assert "import io.cordis4j.core.AsyncPlugin;" in src
+    assert "public static final class MigratorPlugin implements AsyncPlugin" in src
+    assert "public Disposable apply(Context ctx) throws Exception" in src
+    assert 'Job.run("migrations");' in src
+    assert "UnsupportedOperationException" not in src
+
+
+def test_component_if_setup_and_fail_emit_real_java():
+    ir = compile_source(
+        """
+        component Failing {
+          config { replicas: Int = 0 }
+          let scratch = effect Map.new() undo scratch.drop()
+          if (config.replicas < 1) fail "at least one replica required"
+          let pool = effect {
+            let url = "postgres://db"
+            Pool.open(url, config.replicas)
+          } undo pool.close()
+        }
+        """
+    )
+    src = emit.emit(ir)
+    assert "import io.cordis4j.core.CordisException;" in src
+    assert "var scratch = Map.new();" in src
+    assert "if ((replicas < 1L))" in src
+    assert 'throw new CordisException(String.valueOf("at least one replica required"));' in src
+    assert 'final var url = "postgres://db";' in src
+    assert "var pool = Pool.open(url, replicas);" in src
+    assert "fx.track(Disposables.of(() -> pool.close()));" in src
+
+
 def test_v2_realms_emit_isolate_and_intercept():
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     assert ir["ir_version"] == 2

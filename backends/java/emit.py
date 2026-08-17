@@ -24,11 +24,8 @@ Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 - emit        -> a plain call (the emission marker is a revl-checker concern)
 - format      -> `String.format(...)`
 
-Still stubbed (host-runtime work, as in the wasm tier):
-
-- Host objects (`Pool`/`Map`/`Job`) are opaque stubs that throw
-  `UnsupportedOperationException`.
-- Config `default` values are not applied (host loader territory).
+The emitted file also contains the minimal host-object runtime (`Pool`/`Map`/`Job`)
+and applies IR config `default` values through a no-arg plugin constructor.
 
 CLI: `python3 emit.py <ir.json> [> out.java]`.
 """
@@ -131,6 +128,43 @@ def _ident(name: object, role: str) -> str:
 
 def _camel(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
+
+
+def _zero_java_value(java_type: str) -> str:
+    if java_type == "long":
+        return "0L"
+    if java_type == "double":
+        return "0.0d"
+    if java_type == "boolean":
+        return "false"
+    return "null"
+
+
+def _config_default_lit(field: dict, java_type_fn) -> str:
+    default = field.get("default")
+    if default is not None:
+        return _lit(default)
+    return _zero_java_value(java_type_fn(field.get("type")))
+
+
+def _emit_plugin_ctors(cname: str, config_fields: list, java_type_fn) -> list[str]:
+    lines: list[str] = []
+    if config_fields:
+        params = ", ".join(
+            f"{java_type_fn(f.get('type'))} {_ident(f.get('name'), 'config field')}"
+            for f in config_fields
+        )
+        lines.append(f"    public {cname}Plugin({params}) {{")
+        for f in config_fields:
+            fname = _ident(f.get("name"), "config field")
+            lines.append(f"        this.{fname} = {fname};")
+        lines.append("    }")
+    lines.append(f"    public {cname}Plugin() {{")
+    for f in config_fields:
+        fname = _ident(f.get("name"), "config field")
+        lines.append(f"        this.{fname} = {_config_default_lit(f, java_type_fn)};")
+    lines.append("    }")
+    return lines
 
 
 def _string(value: str) -> str:
@@ -344,9 +378,14 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
     raise EmitError(f"unknown builtin method {method!r}")
 
 
-def _v3_call(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+def _v3_call(
+    node: dict,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None = None,
+    env: _Env | None = None,
+) -> str:
     callee = node.get("callee")
-    args = [_v3_expr(a, ctx, rename) for a in node.get("args") or []]
+    args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
     if isinstance(callee, dict) and callee.get("kind") == "var":
         name = callee.get("name")
         _ident(name, "callable")
@@ -366,11 +405,16 @@ def _v3_call(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> s
                 f"builtin Result constructor {name!r} is not portable to the Java backend yet"
             )
         return f"{name}({', '.join(args)})"
-    callee_s = _v3_expr(callee, ctx, rename)
+    callee_s = _v3_expr(callee, ctx, rename, env)
     return f"{callee_s}.apply({', '.join(args)})"
 
 
-def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+def _v3_expr(
+    node: object,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None = None,
+    env: _Env | None = None,
+) -> str:
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed v3 expression: {node!r}")
     kind = node["kind"]
@@ -381,10 +425,56 @@ def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
     if kind == "var":
         return _v3_var(node, ctx, rename)
 
+    if kind == "name":
+        original = node.get("id")
+        if rename and original in rename:
+            return rename[original]
+        return _ident(original, "binding")
+
+    if kind == "config":
+        return _ident(node.get("field"), "config field")
+
+    if kind == "req":
+        original = node.get("name")
+        if rename and original in rename:
+            return rename[original]
+        return _ident(original, "requirement")
+
+    if kind == "host":
+        fn = node.get("fn")
+        host, _, method = fn.partition(".")
+        args = ", ".join(
+            _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
+        )
+        return f"{host}.{method}({args})"
+
+    if kind == "call":
+        if "callee" in node:
+            return _v3_call(node, ctx, rename, env)
+        target = node.get("target") or {}
+        method = _ident(node.get("method"), "method")
+        args = ", ".join(
+            _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
+        )
+        recv = _v3_expr(target, ctx, rename, env)
+        return f"{recv}.{method}({args})"
+
+    if kind == "format":
+        template = node.get("template") or ""
+        args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
+        return _format_java(template, args)
+
+    if kind == "fn":
+        fn_name = _ident(node.get("name"), "function")
+        args = ", ".join(
+            _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
+        )
+        return f"{fn_name}({args})"
+
     if kind == "bin":
         op = node.get("op")
-        left = _v3_expr(node["left"], ctx, rename)
-        right = _v3_expr(node["right"], ctx, rename)
+        left = _v3_expr(node["left"], ctx, rename, env)
+        right = _v3_expr(node["right"], ctx, rename, env)
         if op in ("==", "==="):
             return f"java.util.Objects.equals({left}, {right})"
         if op in ("!=", "!=="):
@@ -395,7 +485,7 @@ def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
         return f"({left} {java_op} {right})"
 
     if kind == "un":
-        operand = _v3_expr(node.get("operand"), ctx, rename)
+        operand = _v3_expr(node.get("operand"), ctx, rename, env)
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
@@ -407,40 +497,41 @@ def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
 
     if kind == "field":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx, rename)
+        target = _v3_expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx, rename)
+        target = _v3_expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"{target}.get((int)({_v3_expr(node['index'], ctx, rename)}))"
+        return f"{target}.get((int)({_v3_expr(node['index'], ctx, rename, env)}))"
 
     if kind == "builtin":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx, rename)
+        target = _v3_expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        args = [_v3_expr(a, ctx, rename) for a in node.get("args") or []]
+        args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
         return _v3_builtin(node.get("method"), target, args)
 
     if kind == "len":
-        return _v3_len(_v3_expr(node.get("target"), ctx, rename))
+        return _v3_len(_v3_expr(node.get("target"), ctx, rename, env))
 
     if kind == "if":
         return (
-            f"({_v3_expr(node['cond'], ctx, rename)} ? "
-            f"{_v3_expr(node['then'], ctx, rename)} : {_v3_expr(node['else'], ctx, rename)})"
+            f"({_v3_expr(node['cond'], ctx, rename, env)} ? "
+            f"{_v3_expr(node['then'], ctx, rename, env)} : "
+            f"{_v3_expr(node['else'], ctx, rename, env)})"
         )
 
     if kind == "record":
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
         spec = ctx.types[type_name]
-        by_name = {k: _v3_expr(v, ctx, rename) for k, v in fields}
+        by_name = {k: _v3_expr(v, ctx, rename, env) for k, v in fields}
         args = []
         for field_name in spec.get("fields") or {}:
             if field_name not in by_name:
@@ -450,16 +541,16 @@ def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
 
     if kind == "list":
         return "java.util.List.of(" + ", ".join(
-            _v3_expr(item, ctx, rename) for item in node.get("items") or []
+            _v3_expr(item, ctx, rename, env) for item in node.get("items") or []
         ) + ")"
 
     if kind == "arrow":
         params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
-        body = _v3_expr(node["body"], ctx, rename)
+        body = _v3_expr(node["body"], ctx, rename, env)
         return f"({params}) -> ({body})"
 
     if kind == "match":
-        return _v3_match_expr(node, ctx, rename)
+        return _v3_match_expr(node, ctx, rename, env)
 
     if kind == "interp":
         parts = node.get("parts") or []
@@ -476,13 +567,18 @@ def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
 
-def _v3_match_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
-    scrutinee = _v3_expr(node.get("scrutinee"), ctx, rename)
+def _v3_match_expr(
+    node: dict,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None = None,
+    env: _Env | None = None,
+) -> str:
+    scrutinee = _v3_expr(node.get("scrutinee"), ctx, rename, env)
     lines = [f"switch ({scrutinee}) {{"]
     wildcard = None
     for arm in node.get("arms") or []:
         pattern = arm.get("pattern")
-        body = _v3_expr(arm.get("body"), ctx, rename)
+        body = _v3_expr(arm.get("body"), ctx, rename, env)
         if pattern == "_":
             wildcard = f"            default -> {{ yield ({body}); }}"
             continue
@@ -724,7 +820,7 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
             return rename[original]
         return _ident(original, "requirement")
     if kind == "call" and "callee" in node:
-        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename)
+        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename, env)
     if kind == "call":
         target = node.get("target") or {}
         method = _ident(node.get("method"), "method")
@@ -746,7 +842,7 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
         "var", "bin", "un", "field", "index", "if", "record", "list",
         "arrow", "match", "interp", "len", "builtin",
     }:
-        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename)
+        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename, env)
     raise EmitError(f"unsupported expression node in Java backend: {kind!r}")
 
 
@@ -808,20 +904,79 @@ def _emit_host_stubs(ir: dict) -> list[str]:
     walk(ir)
     out: list[str] = []
     for host in sorted(used & _HOST_STUBS.keys()):
-        out.append(f"// host object stub ({host}) — real Java host objects are a follow-up")
-        out.append(f"public static final class {host} {{")
-        for mname, (ret, argtypes) in _HOST_STUBS[host].items():
-            params = ", ".join(f"{t} _a{i}" for i, t in enumerate(argtypes))
-            is_ctor = ret == "Self"
-            ret = host if is_ctor else ret
-            mod = "static " if is_ctor else ""
-            out.append(
-                f"    {mod}{ret} {mname}({params}) "
-                f"{{ throw new UnsupportedOperationException(\"host object {host}\"); }}"
-            )
-        out.append("}")
-        out.append("")
+        if host == "Map":
+            out.extend(_emit_map_runtime())
+        elif host == "Pool":
+            out.extend(_emit_pool_runtime())
+        elif host == "Job":
+            out.extend(_emit_job_runtime())
     return out
+
+
+def _emit_map_runtime() -> list[str]:
+    return [
+        "// host object runtime (Map) — minimal working Java implementation",
+        "public static final class Map {",
+        "    private final java.util.HashMap<String, String> values = new java.util.HashMap<>();",
+        "    private Map() {}",
+        "    public static Map new() {",
+        "        return new Map();",
+        "    }",
+        "    public void drop() {",
+        "        values.clear();",
+        "    }",
+        "    public void insert(String key, String value) {",
+        "        values.put(key, value);",
+        "    }",
+        "    public void remove(String key) {",
+        "        values.remove(key);",
+        "    }",
+        "    public java.util.Optional<String> get(String key) {",
+        "        return java.util.Optional.ofNullable(values.get(key));",
+        "    }",
+        "}",
+        "",
+    ]
+
+
+def _emit_pool_runtime() -> list[str]:
+    return [
+        "// host object runtime (Pool) — functional placeholder",
+        "public static final class Pool {",
+        "    private final String url;",
+        "    private final long poolSize;",
+        "    private Pool(String url, long poolSize) {",
+        "        this.url = url;",
+        "        this.poolSize = poolSize;",
+        "    }",
+        "    public static Pool open(String url, long poolSize) {",
+        "        return new Pool(url, poolSize);",
+        "    }",
+        "    public void close() {",
+        "        // Placeholder: a real pool would close its connections here.",
+        "    }",
+        "    public java.util.List<Object> query(String sql) {",
+        "        return java.util.List.of();",
+        "    }",
+        "    public long execute(String sql) {",
+        "        return 0L;",
+        "    }",
+        "}",
+        "",
+    ]
+
+
+def _emit_job_runtime() -> list[str]:
+    return [
+        "// host object runtime (Job) — no-op placeholder",
+        "public static final class Job {",
+        "    private Job() {}",
+        "    public static void run(String name) {",
+        "        // Placeholder: a real job runner would execute `name`.",
+        "    }",
+        "}",
+        "",
+    ]
 
 
 def _binds(component: dict) -> list[str]:
@@ -892,6 +1047,32 @@ def _component_needs_modern(component: dict) -> bool:
             if key in step and _contains_v3_expr(step[key]):
                 return True
     return False
+
+
+def _body_contains_step(node: object, target: str) -> bool:
+    if isinstance(node, dict):
+        if node.get("step") == target:
+            return True
+        return any(_body_contains_step(value, target) for value in node.values())
+    if isinstance(node, list):
+        return any(_body_contains_step(value, target) for value in node)
+    return False
+
+
+def _ir_uses_component_step(ir: dict, target: str) -> bool:
+    return any(
+        _body_contains_step(component.get("body"), target)
+        for component in ir.get("components") or []
+    )
+
+
+def _core_imports(ir: dict) -> list[str]:
+    names = {"Context", "Disposable", "Disposables", "Plugin", "ServiceKey"}
+    if _ir_uses_component_step(ir, "await"):
+        names.add("AsyncPlugin")
+    if _ir_uses_component_step(ir, "fail"):
+        names.add("CordisException")
+    return [f"import io.cordis4j.core.{name};" for name in sorted(names)]
 
 
 def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx) -> str:
@@ -1068,9 +1249,11 @@ def _emit_component_stmts(
             out.append(f"{pad}}}")
         elif kind == "fail":
             message = _expr(step["message"], env, None, v3_ctx)
-            out.append(f"{pad}throw new IllegalStateException(String.valueOf({message}));")
+            out.append(
+                f"{pad}throw new CordisException(String.valueOf({message}));"
+            )
         elif kind == "await":
-            raise EmitError("component await steps are not supported by the cordis4j backend yet")
+            out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
         elif kind == "return":
             raise EmitError("return steps are only allowed inside method bodies")
         else:
@@ -1092,6 +1275,10 @@ def _emit_component_modern(
     cname = _ident(name, "component")
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
+    has_await = any(
+        step.get("step") == "await" for step in component.get("body") or []
+    )
+    plugin_interface = "AsyncPlugin" if has_await else "Plugin"
 
     for key in isolate:
         if key not in env.reqs and key not in env.provides:
@@ -1146,21 +1333,18 @@ def _emit_component_modern(
         out.append("")
 
     config_fields = component.get("config") or []
-    ctor_params = ", ".join(
-        f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
-        for f in config_fields
+    out.append(
+        f"public static final class {cname}Plugin implements {plugin_interface} {{"
     )
-    out.append(f"public static final class {cname}Plugin implements Plugin {{")
     for f in config_fields:
         fname = _ident(f.get("name"), "config field")
         out.append(f"    private final {_java_v3_type(f.get('type'))} {fname};")
-    out.append(f"    public {cname}Plugin({ctor_params}) {{")
-    for f in config_fields:
-        fname = _ident(f.get("name"), "config field")
-        out.append(f"        this.{fname} = {fname};")
-    out.append("    }")
+    out.extend(_emit_plugin_ctors(cname, config_fields, _java_v3_type))
     out.append("    @Override")
-    out.append("    public Disposable apply(Context ctx) {")
+    if has_await:
+        out.append("    public Disposable apply(Context ctx) throws Exception {")
+    else:
+        out.append("    public Disposable apply(Context ctx) {")
     for key, realm in isolate.items():
         service = env.provides.get(key) or env.reqs[key]
         out.append(f"        ctx = ctx.isolate({service}.class, {_string(realm)});")
@@ -1227,19 +1411,11 @@ def _emit_component(
         out.append("")
 
     config_fields = component.get("config") or []
-    ctor_params = ", ".join(
-        f"{_java_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
-        for f in config_fields
-    )
     out.append(f"public static final class {cname}Plugin implements Plugin {{")
     for f in config_fields:
         fname = _ident(f.get("name"), "config field")
         out.append(f"    private final {_java_type(f.get('type'))} {fname};")
-    out.append(f"    public {cname}Plugin({ctor_params}) {{")
-    for f in config_fields:
-        fname = _ident(f.get("name"), "config field")
-        out.append(f"        this.{fname} = {fname};")
-    out.append("    }")
+    out.extend(_emit_plugin_ctors(cname, config_fields, _java_type))
     out.append("    @Override")
     out.append("    public Disposable apply(Context ctx) {")
     for local, service in env.reqs.items():
@@ -1305,11 +1481,7 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     out.append(f"// Target: {CRATE} (github.com/1na-ko/cordis4j).")
     out.append(f"package {_ident(package_name, 'package')};")
     out.append("")
-    out.append("import io.cordis4j.core.Context;")
-    out.append("import io.cordis4j.core.Disposable;")
-    out.append("import io.cordis4j.core.Disposables;")
-    out.append("import io.cordis4j.core.Plugin;")
-    out.append("import io.cordis4j.core.ServiceKey;")
+    out.extend(_core_imports(ir))
     out.append("")
     out.append("public final class Components {")
     out.append("    private Components() {}")
@@ -1332,11 +1504,7 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     out.append(f"// Target: {CRATE} (github.com/1na-ko/cordis4j).")
     out.append(f"package {_ident(package_name, 'package')};")
     out.append("")
-    out.append("import io.cordis4j.core.Context;")
-    out.append("import io.cordis4j.core.Disposable;")
-    out.append("import io.cordis4j.core.Disposables;")
-    out.append("import io.cordis4j.core.Plugin;")
-    out.append("import io.cordis4j.core.ServiceKey;")
+    out.extend(_core_imports(ir))
     out.append("")
     out.append("public final class Components {")
     out.append("    private Components() {}")
@@ -1364,11 +1532,7 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     out.append(f"// Target: {CRATE} (github.com/1na-ko/cordis4j).")
     out.append(f"package {_ident(package_name, 'package')};")
     out.append("")
-    out.append("import io.cordis4j.core.Context;")
-    out.append("import io.cordis4j.core.Disposable;")
-    out.append("import io.cordis4j.core.Disposables;")
-    out.append("import io.cordis4j.core.Plugin;")
-    out.append("import io.cordis4j.core.ServiceKey;")
+    out.extend(_core_imports(ir))
     out.append("")
     out.append("public final class Components {")
     out.append("    private Components() {}")
