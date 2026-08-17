@@ -132,6 +132,17 @@ Rejections come back structured, so the agent reacts to a *code*, not prose:
 The same projection is available to humans and CI as
 `revl compile --json-diagnostics`.
 
+### Not yet: acting on an admission
+
+The server can answer *"may this enter?"* but cannot yet **do** it — there is
+no `revl_swap`. The lifecycle machinery exists (`demo/live.py` hot-swaps from
+a file watcher, `run.py::_Driver` loads emitted modules in memory), so the
+missing piece is a stateful server mode holding a live driver. Also note that
+`_compile` currently writes inline source to a temp file, because
+`compile_files` carries the `manifest=` admission path; teaching
+`compile_source` an ambient manifest removes the last filesystem touch. Both
+are tracked as item 1 of the ranked list in docs/v2.0-roadmap.md.
+
 ### Wiring it up
 
 ```jsonc
