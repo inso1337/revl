@@ -190,6 +190,26 @@ class UseDecl:
 
 
 @dataclass
+class HostBody:
+    backend: str
+    text: str
+    line: int
+
+
+@dataclass
+class ExternDecl:
+    name: str
+    classification: str  # 'pure' | 'acquire' | 'emission'
+    params: list[FnParam]
+    returns: str | None
+    undo: object | None
+    compensate: object | None
+    bodies: list[HostBody]
+    public: bool
+    line: int
+
+
+@dataclass
 class FnParam:
     name: str
     type: str
@@ -322,6 +342,7 @@ class Program:
     type_decls: list[TypeDecl] = field(default_factory=list)
     fn_decls: list[FnDecl] = field(default_factory=list)
     uses: list[UseDecl] = field(default_factory=list)
+    externs: list[ExternDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -384,6 +405,8 @@ class Parser:
                     # services are interfaces and are pub by default; a `pub`
                     # prefix is accepted as documentation but adds nothing
                     program.services.append(self.service())
+                elif self.at("kw", "extern"):
+                    program.externs.append(self.extern_decl(True))
                 elif self.at("kw", "component"):
                     tok = self.peek()
                     raise self.err(
@@ -392,7 +415,9 @@ class Parser:
                     )
                 else:
                     tok = self.peek()
-                    raise self.err(tok.line, f"expected `fn`, `type`, or `service` after `pub`, found {tok.value!r}")
+                    raise self.err(tok.line, f"expected `fn`, `type`, `service`, or `extern` after `pub`, found {tok.value!r}")
+            elif self.at("kw", "extern"):
+                program.externs.append(self.extern_decl(False))
             elif self.at("kw", "fn"):
                 program.fn_decls.append(self.fn_decl(False))
             else:
@@ -425,6 +450,52 @@ class Parser:
             tok = self.peek()
             raise self.err(tok.line, f"expected `{{` or `as` after `use` path, found {tok.value!r}")
         return UseDecl(path, names, alias, line)
+
+    def extern_decl(self, public: bool) -> ExternDecl:
+        line = self.expect("kw", "extern").line
+        if not self.at("kw") or self.peek().value not in ("pure", "acquire", "emission"):
+            tok = self.peek()
+            raise self.err(
+                line,
+                "unclassified extern — expected `pure`, `acquire`, or `emission` after `extern`",
+                hint="classification is mandatory: `pure` has no observable effect, "
+                     "`acquire` must declare `undo`, and `emission` may declare `compensate`",
+            )
+        classification = self.next().value
+        self.expect("kw", "fn")
+        name = self.expect("ident").value
+        self.expect("(")
+        params: list[FnParam] = []
+        while not self.at(")"):
+            pline = self.peek().line
+            pname = self.expect("ident").value
+            self.expect(":")
+            ptype = self.type_()
+            params.append(FnParam(pname, ptype, pline))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        returns = None
+        if self.at("arrow"):
+            self.next()
+            returns = self.type_()
+        undo = None
+        compensate = None
+        if self.at("kw", "undo"):
+            self.next()
+            undo = self.pure_expr()
+        if self.at("kw", "compensate"):
+            self.next()
+            compensate = self.pure_expr()
+        bodies: list[HostBody] = []
+        while self.at("="):
+            self.next()
+            host_tok = self.expect("hostbody", what="`@backend { ... }` host body")
+            backend, text = host_tok.value
+            bodies.append(HostBody(backend, text, host_tok.line))
+        if not bodies:
+            raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
+        return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line)
 
     def service(self) -> ServiceDecl:
         line = self.expect("kw", "service").line
