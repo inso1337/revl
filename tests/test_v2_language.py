@@ -124,6 +124,63 @@ def test_match_expression_accepts_wildcard_and_trailing_comma():
         ("Ok", "row"),
         ("_", None),
     ]
+
+
+def test_service_async_fn_parses():
+    prog = _parse(
+        "pub service Database {\n"
+        "  fn query(sql: Str) -> List[Row]\n"
+        "  async fn stats() -> Stats\n"
+        "  emission fn execute(sql: Str) -> Int\n"
+        "}"
+    )
+    (svc,) = prog.services
+    assert svc.name == "Database"
+    assert svc.commutative is False
+    assert svc.methods["query"].async_ is False
+    assert svc.methods["stats"].async_ is True
+    assert svc.methods["execute"].emission is True
+
+
+def test_service_commutative_parses_at_service_and_operation_level():
+    prog = _parse(
+        "commutative service Database {\n"
+        "  commutative fn query(sql: Str) -> List[Row]\n"
+        "  async fn stats() -> Stats\n"
+        "}"
+    )
+    (svc,) = prog.services
+    assert svc.commutative is True
+    assert svc.methods["query"].commutative is True
+    assert svc.methods["query"].async_ is False
+    assert svc.methods["stats"].commutative is False
+    assert svc.methods["stats"].async_ is True
+
+
+def test_pub_commutative_service_parses():
+    prog = _parse("pub commutative service Cache { fn get(key: Str) -> Opt[Str] }")
+    (svc,) = prog.services
+    assert svc.commutative is True
+
+
+def test_async_provide_method_parses():
+    prog = _parse(
+        "service Cache { async fn get(key: Str) -> Opt[Str] }\n"
+        "component C provides cache: Cache {\n"
+        "  provide cache {\n"
+        "    async fn get(key) {\n"
+        "      await Job.run(\"lookup\")\n"
+        "      return null\n"
+        "    }\n"
+        "  }\n"
+        "}"
+    )
+    (_, component) = prog.services, prog.components
+    (provide,) = component[0].body
+    assert provide.methods[0].async_ is True
+    assert provide.methods[0].body[0].__class__.__name__ == "AwaitStmt"
+
+
 def test_extern_parse_with_multiple_backends():
     prog = _parse(
         """
