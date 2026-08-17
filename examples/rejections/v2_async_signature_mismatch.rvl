@@ -1,0 +1,14 @@
+// REJECTED — services 2.0 signature mismatch: an `async fn` operation must
+// be implemented by an `async fn` provide method. The async marker is part
+// of the service interface, not just an implementation detail.
+//
+// expected error:
+//   method `stats` of provision `db` is not async but service Database declares it async
+
+service Database { async fn stats() -> Stats }
+
+component BadDb provides db: Database {
+  provide db {
+    fn stats() { return null }
+  }
+}
