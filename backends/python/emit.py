@@ -188,6 +188,13 @@ class _ComponentEmitter:
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             return f"{name}({args})"
+        if kind == "match":
+            # the ADT eliminator, now legal in component/method bodies; the
+            # module-level renderer already knows the node shape
+            return _match_expr(self._expr(expr.get("scrutinee"), where),
+                               [{**arm, "body": _RenderedBody(
+                                   self._expr(arm.get("body"), where))}
+                                for arm in expr.get("arms") or []])
         if kind == "adt":
             case = _ident(expr.get("case"), f"{where}: adt case")
             args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
@@ -442,7 +449,10 @@ class _ComponentEmitter:
             else:
                 out.add(indent, self._expr(step.get("expr"), where))
         elif kind == "return":
-            out.add(indent, f"return {self._expr(step.get('expr'), where)}")
+            if step.get("expr") is None:
+                out.add(indent, "return")
+            else:
+                out.add(indent, f"return {self._expr(step.get('expr'), where)}")
         elif kind == "await":
             if not method_is_async:
                 raise EmitError(f"{where}: 'await' is not allowed inside sync provide-method bodies (A1)")
@@ -668,6 +678,8 @@ def _match_expr(scrutinee: str, arms: list) -> str:
 
 
 def _expr(node: dict) -> str:
+    if isinstance(node, dict) and node.get("kind") == "__rendered__":
+        return node["text"]
     kind = node["kind"]
     if kind == "lit":
         return repr(node["value"])
@@ -737,6 +749,14 @@ def _expr(node: dict) -> str:
         args = ", ".join(_expr(a) for a in node.get("args") or [])
         return f"(None if ({target}) is None else ({target}).{node['method']}({args}))"
     raise EmitError(f"unsupported expression kind {kind!r}")
+
+
+class _RenderedBody(dict):
+    """An arm body already rendered by the component emitter; `_expr` returns
+    it unchanged so `_match_expr` can be shared by both renderers."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(kind="__rendered__", text=text)
 
 
 def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
