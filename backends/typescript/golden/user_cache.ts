@@ -11,6 +11,7 @@ export interface Database {
 
 export interface Cache {
   get(key: string): string | undefined
+  /** emission — crosses the system boundary (DESIGN.md §3.5) */
   put(key: string, value: string): void
 }
 

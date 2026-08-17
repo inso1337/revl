@@ -1,8 +1,9 @@
 """The MCP bridge: service ⇄ tool projection, and the compiler as a server.
 
 The load-bearing claim under test is that a generated tool description
-*cannot lie about side effects*: annotations are derived from the compiler
-(declaration **and** implementation), not asserted by an author.
+*cannot lie about side effects*: annotations come from the declaration, and
+the checker holds every provider to it as an upper bound (G4 emission
+propagation), so no body can exceed what its tool advertises.
 """
 
 import io
@@ -55,26 +56,40 @@ component B provides bus: Bus {
 """)
     tool = tools["revl.bus.send"]
     assert tool["annotations"]["destructiveHint"] is True
-    assert tool["x-revl"]["effects"]["declaredEmission"] is True
+    assert tool["x-revl"]["classification"] == "emission"
 
 
-def test_implementation_emission_overrides_a_plain_declaration():
-    """The headline: `put` is declared plain but its body emits through a
-    required service. The projection must not claim read-only."""
+def test_a_declaration_that_understates_its_body_does_not_compile():
+    """The rule that makes the projection sound: a service declaration is an
+    upper bound on its providers' effects, so the annotation cannot lie."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("""
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { fn put(key: Str, value: Str) }
+component Lying requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key, value) { emit db.execute(key) }
+  }
+}""")
+    assert "declared plain, but this implementation reaches `db.execute`" in str(excinfo.value)
+
+
+def test_declared_emission_carries_its_provenance():
+    """`put` declares the emission its body performs; the projection reports
+    both the contract and what the body reaches."""
     tools = {t["name"]: t for t in tools_from_ir(
         compile_files([str(EXAMPLES / "user_cache.rvl")]))}
     put = tools["revl.cache.put"]
     assert put["annotations"]["readOnlyHint"] is False
     assert put["annotations"]["destructiveHint"] is True
     effects = put["x-revl"]["effects"]
-    assert effects["declaredEmission"] is False
     assert effects["reachesEmission"] == ["db.execute"]
-    assert effects["declarationUnderstatesBody"] is True
+    assert effects["boundedByDeclaration"] is True
     assert "db.execute" in put["description"]
 
 
 def test_read_only_sibling_stays_read_only():
-    # the override is per operation, not per service
+    # the bound is per operation, not per service
     tools = {t["name"]: t for t in tools_from_ir(
         compile_files([str(EXAMPLES / "user_cache.rvl")]))}
     assert tools["revl.cache.get"]["annotations"]["readOnlyHint"] is True
@@ -85,7 +100,7 @@ def test_open_world_hint_tracks_extern_reachability():
 extern pure fn shape(x: Str) -> Str = @py { return x }
 extern emission fn ship(x: Str) -> Str = @py { return x }
 service S { fn quiet(a: Str) -> Str
-            fn loud(a: Str) -> Str }
+            emission fn loud(a: Str) -> Str }
 component C provides s: S {
   provide s {
     fn quiet(a) = a
@@ -106,7 +121,7 @@ def test_extern_reachability_is_transitive_through_fns():
 extern emission fn ship(x: Str) -> Str = @py { return x }
 fn middle(x: Str) -> Str { return ship(x) }
 fn outer(x: Str) -> Str { return middle(x) }
-service S { fn go(a: Str) -> Str }
+service S { emission fn go(a: Str) -> Str }
 component C provides s: S {
   provide s { fn go(a) = outer(a) }
 }
