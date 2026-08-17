@@ -1,0 +1,12 @@
+// REJECTED — a provide-method parameter annotation is checked against the
+// service signature (A6, the service is the source of truth). The service
+// declares `sql: Str`; the method annotates it `Int`.
+//
+// expected error:
+//   parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`
+
+service Db { fn query(sql: Str) -> Int }
+
+component C provides d: Db {
+  provide d { fn query(sql: Int) = 1 }
+}

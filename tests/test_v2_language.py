@@ -459,3 +459,126 @@ def test_python_backend_runs_nullish_and_template():
         assert module.greet({"name": "world"}) == "hi world"
     finally:
         sys.path.remove(str(backend_dir))
+
+
+# ---------------------------------------------------------------------------
+# re-review fix batch: destructure-bad-field diagnostic (was a KeyError
+# crash), multi-line template (was invalid emitted Python), and provide-
+# method parameter annotations (the README's dominant benchmark friction).
+
+def test_bad_field_destructure_is_a_clean_error_not_a_crash():
+    from revl.compiler import compile_source
+    from revl.errors import RevlError
+    import pytest
+
+    with pytest.raises(RevlError, match=r"`bogus` is not a field of record `Row`"):
+        compile_source(
+            "type Row = { id: Int, name: Str }\n"
+            "fn f(r: Row) -> Int { let { id, bogus } = r return id }\n"
+        )
+
+
+def test_multiline_template_emits_valid_python():
+    import types
+
+    backend_dir = ROOT / "backends" / "python"
+    sys.path.insert(0, str(backend_dir))
+    try:
+        from revl.compiler import compile_source
+        import emit
+
+        module = types.ModuleType("t")
+        # a raw newline inside a `${}` template used to emit an unterminated
+        # f-string literal
+        ir = compile_source('fn demo() -> Str { return `line1\nline2` }\n')
+        exec(compile(emit.emit(ir), "<t>", "exec"), module.__dict__)
+        assert module.demo() == "line1\nline2"
+    finally:
+        sys.path.remove(str(backend_dir))
+
+
+def test_provide_method_param_annotation_accepted_and_checked():
+    from revl.compiler import compile_source
+    from revl.errors import RevlError
+    import pytest
+
+    # accepted (and matches the service): compiles
+    ir = compile_source(
+        "service Db { fn query(sql: Str) -> Int }\n"
+        "component C provides d: Db { provide d { fn query(sql: Str) = 1 } }\n"
+    )
+    assert ir["components"][0]["body"][0]["step"] == "provide"
+
+    # a wrong annotation is rejected against the service signature (A6)
+    with pytest.raises(RevlError, match=r"parameter `sql` of `query`.*expects `Str`, got `Int`"):
+        compile_source(
+            "service Db { fn query(sql: Str) -> Int }\n"
+            "component C provides d: Db { provide d { fn query(sql: Int) = 1 } }\n"
+        )
+
+
+def test_optional_chain_rejects_nonoptional_continuation():
+    from revl.compiler import compile_source
+    from revl.errors import RevlError
+    import pytest
+
+    # a?.b?.c is fine; a?.b.c must be rejected (would not short-circuit)
+    compile_source(
+        "type I = { c: Int }\ntype O = { b: I }\n"
+        "fn ok(o: Opt[O]) -> Opt[Int] { return o?.b?.c }\n"
+    )
+    with pytest.raises(RevlError, match=r"optional access `\?\.` can only be followed by another `\?\.`"):
+        compile_source(
+            "type I = { c: Int }\ntype O = { b: I }\n"
+            "fn bad(o: Opt[O]) -> Opt[Int] { return o?.b.c }\n"
+        )
+
+
+# ---------------------------------------------------------------------------
+# tagged ADTs: user variant + built-in Result construction lowers to an `adt`
+# IR node; `match` discriminates Result (Ok/Err) and Opt (Some/None). Prior
+# to this, constructors were "not declared" and match on built-ins crashed.
+
+def test_adt_construction_lowers_to_adt_node():
+    from revl.compiler import compile_source
+
+    ir = compile_source(
+        "type T = A(Int) | B\n"
+        "fn mkA() -> T { return A(1) }\n"
+        "fn mkB() -> T { return B }\n"
+        "fn mkOk() -> Result[Int, Str] { return Ok(1) }\n"
+    )
+    bodies = {fn["name"]: fn["body"][0]["expr"] for fn in ir["functions"]}
+    assert bodies["mkA"] == {"kind": "adt", "type": "T", "case": "A",
+                             "args": [{"kind": "lit", "value": 1}]}
+    assert bodies["mkB"] == {"kind": "adt", "type": "T", "case": "B", "args": []}
+    assert bodies["mkOk"]["kind"] == "adt" and bodies["mkOk"]["case"] == "Ok"
+
+
+def test_python_backend_runs_adt_result_opt_match():
+    """Construct and match user ADTs, built-in Result (discriminating Ok/Err),
+    and Opt — executed on the reference backend."""
+    import types
+
+    backend_dir = ROOT / "backends" / "python"
+    sys.path.insert(0, str(backend_dir))
+    try:
+        from revl.compiler import compile_source
+        import emit
+
+        src = (
+            "type O = Found(Int) | Missing\n"
+            "fn mk(h: Bool) -> O { if (h) return Found(9) return Missing }\n"
+            "fn u(o: O) -> Int { return match o { Found(v) => v, Missing => 0 } }\n"
+            "fn r(ok: Bool) -> Result[Int, Str] { if (ok) return Ok(7) return Err(\"no\") }\n"
+            "fn rd(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 - 1 } }\n"
+            "fn opt(x: Opt[Int]) -> Int { return match x { Some(v) => v, None => 0 } }\n"
+        )
+        module = types.ModuleType("t")
+        exec(compile(emit.emit(compile_source(src)), "<t>", "exec"), module.__dict__)
+        assert module.u(module.mk(True)) == 9 and module.u(module.mk(False)) == 0
+        assert module.rd(module.r(True)) == 7      # Ok
+        assert module.rd(module.r(False)) == -1    # Err — discriminated, not conflated
+        assert module.opt(5) == 5 and module.opt(None) == 0
+    finally:
+        sys.path.remove(str(backend_dir))

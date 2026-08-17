@@ -253,6 +253,11 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
                 f"java.util.Map<{_java_v3_type(args[0], boxed=True)}, "
                 f"{_java_v3_type(args[1], boxed=True)}>"
             )
+        if base == "Result" and len(args) == 2:
+            return (
+                f"RevlResult<{_java_v3_type(args[0], boxed=True)}, "
+                f"{_java_v3_type(args[1], boxed=True)}>"
+            )
         return base + "<" + ", ".join("Object" for _ in args) + ">"
     return _ident(name, "type name")
 
@@ -512,6 +517,18 @@ def _v3_expr(
     if kind == "var":
         return _v3_var(node, ctx, rename)
 
+    if kind == "adt":
+        case = node.get("case")
+        _ident(case, "adt case")
+        args = ", ".join(_v3_expr(a, ctx, rename, env) for a in node.get("args") or [])
+        if case in ctx.case_owners:
+            variant = _ident(ctx.case_owners[case], "type name")
+            return f"new {variant}.{case}({args})"
+        if case in ("Ok", "Err"):
+            # built-in Result -> the emitted generic sealed RevlResult
+            return f"new RevlResult.{case}<>({args})"
+        raise EmitError(f"unknown ADT constructor {case!r}")
+
     if kind == "name":
         original = node.get("id")
         if rename and original in rename:
@@ -672,9 +689,53 @@ def _v3_match_expr(
     env: _Env | None = None,
 ) -> str:
     scrutinee = _v3_expr(node.get("scrutinee"), ctx, rename, env)
+    arms = node.get("arms") or []
+
+    # `Some`/`None`/`Ok`/`Err` are built-in only when NOT shadowed by a user
+    # variant (the docs' own `type Outcome = Ok(Row) | …` reuses `Ok`).
+    def _builtin(p):
+        return p not in ctx.case_owners
+
+    # Opt is java.util.Optional (not a sealed type): built-in Some/None lower
+    # to map/orElseGet rather than a `switch`.
+    if any(arm.get("pattern") in ("Some", "None") and _builtin(arm.get("pattern")) for arm in arms):
+        some_arm = next((a for a in arms if a.get("pattern") == "Some"), None)
+        none_arm = next((a for a in arms if a.get("pattern") == "None"), None)
+        wild = next((a for a in arms if a.get("pattern") == "_"), None)
+        some_bind = _ident(some_arm.get("bind"), "match bind") if some_arm and some_arm.get("bind") else "__revl_v"
+        some_body = _v3_expr((some_arm or wild).get("body"), ctx, rename, env)
+        none_body = _v3_expr((none_arm or wild).get("body"), ctx, rename, env)
+        return (f"({scrutinee}).map({some_bind} -> ({some_body}))"
+                f".orElseGet(() -> ({none_body}))")
+    if any(arm.get("pattern") in ("Ok", "Err") and _builtin(arm.get("pattern")) for arm in arms):
+        # built-in Result -> switch over the sealed RevlResult. Wildcard
+        # type pattern + a cast of the payload to the arm's declared type
+        # (Result's type args aren't recoverable at the pattern site).
+        lines = [f"switch ({scrutinee}) {{"]
+        wildcard = None
+        for arm in arms:
+            pattern = arm.get("pattern")
+            body = _v3_expr(arm.get("body"), ctx, rename, env)
+            if pattern == "_":
+                wildcard = f"            default -> {{ yield ({body}); }}"
+                continue
+            var = ctx.new_match_ignored()
+            lines.append(f"            case RevlResult.{pattern}<?, ?> {var} -> {{")
+            bind = arm.get("bind")
+            if bind:
+                bind = _ident(bind, "match bind")
+                ptype = _java_v3_type(arm.get("payload_type"), boxed=True)
+                lines.append(f"                final var {bind} = ({ptype}) {var}.value();")
+            lines.append(f"                yield ({body});")
+            lines.append("            }")
+        lines.append(wildcard if wildcard is not None
+                     else '            default -> { throw new IllegalArgumentException("non-exhaustive match"); }')
+        lines.append("        }")
+        return "\n".join(lines)
+
     lines = [f"switch ({scrutinee}) {{"]
     wildcard = None
-    for arm in node.get("arms") or []:
+    for arm in arms:
         pattern = arm.get("pattern")
         body = _v3_expr(arm.get("body"), ctx, rename, env)
         if pattern == "_":
@@ -780,6 +841,39 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         )
     else:
         raise EmitError(f"unsupported fn statement step {step!r}")
+
+
+def _uses_builtin_result(ir: dict) -> bool:
+    """True if the IR constructs or matches the built-in Result (Ok/Err) — an
+    `adt` node typed Result, or a match arm on Ok/Err. Emitted RevlResult is
+    gated on this so non-Result modules and v1 goldens are unaffected."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
+                return True
+            if node.get("kind") == "match" and any(
+                a.get("pattern") in ("Ok", "Err") for a in node.get("arms") or []
+            ):
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
+
+
+def _emit_result_type() -> list[str]:
+    """Built-in Result as a generic sealed interface (Java has no native
+    Result). Ok/Err are records; construction is `new RevlResult.Ok<>(x)`
+    and match is a sealed switch (verified on JDK 21)."""
+    return [
+        "public sealed interface RevlResult<T, E> permits RevlResult.Ok, RevlResult.Err {",
+        "    record Ok<T, E>(T value) implements RevlResult<T, E> {}",
+        "    record Err<T, E>(E value) implements RevlResult<T, E> {}",
+        "}",
+        "",
+    ]
 
 
 def _emit_v3_types(types: dict) -> list[str]:
@@ -1704,6 +1798,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     out.append("public final class Components {")
     out.append("    private Components() {}")
     out.append("")
+    if _uses_builtin_result(ir):
+        out.extend(["    " + line if line else line for line in _emit_result_type()])
     if types:
         out.extend(["    " + line if line else line for line in _emit_v3_types(types)])
     if services:

@@ -20,6 +20,7 @@ from .typecheck import (
     CASES_KEY,
     FNS_KEY,
     check_ast,
+    check_type_wellformed,
     compatible,
     infer_ast,
     infer_ir,
@@ -193,8 +194,6 @@ def _validate_declared_types(program: Program, filename: str) -> None:
     """Reject malformed type annotations (bare builtin generics like `Opt`,
     `List[]`) at every declaration site before checking begins — otherwise a
     zero-arg generic reaches the type algebra and crashes it."""
-    from .typecheck import check_type_wellformed
-
     for fn in program.fn_decls:
         for p in fn.params:
             check_type_wellformed(filename, p.line, p.type)
@@ -423,10 +422,21 @@ def _case_table(types: dict) -> dict:
             continue
         for case in spec.get("cases", []):
             name = case["name"]
+            # `Some`/`None` are reserved for `Opt` (host-null representation);
+            # a user ADT reusing them is ambiguous and dropped.
+            if name in ("Some", "None"):
+                ambiguous.add(name)
+                cases.pop(name, None)
+                continue
+            # a user ADT may reuse `Ok`/`Err`: the user's declaration shadows
+            # the built-in `Result` (the docs' own `type Outcome = Ok(Row) | …`
+            # does exactly this).
+            if name in ("Ok", "Err") and cases.get(name, {}).get("adt", "").startswith("Result"):
+                cases[name] = {"adt": type_name, "payload": case["payload"]}
+                continue
             if name in cases or name in ambiguous:
-                if name not in ("Some", "None", "Ok", "Err"):
-                    ambiguous.add(name)
-                    cases.pop(name, None)
+                ambiguous.add(name)
+                cases.pop(name, None)
                 continue
             cases[name] = {"adt": type_name, "payload": case["payload"]}
     return cases
@@ -461,6 +471,24 @@ def _variant_case_payload(types: dict, type_name: str | None, case_name: str) ->
     for case in spec.get("cases", []):
         if case["name"] == case_name:
             return case["payload"]
+    return None
+
+
+def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> str | None:
+    """The payload type bound by a match arm. User variants come from the case
+    table; built-in Opt/Result payloads come from the scrutinee's type args
+    (`Opt[T]` -> Some binds T; `Result[T, E]` -> Ok binds T, Err binds E)."""
+    user = _variant_case_payload(types, scrutinee_type, pattern)
+    if user is not None:
+        return user
+    head, args = parse_type(scrutinee_type)
+    if head == "Opt" and pattern == "Some" and args:
+        return args[0]
+    if head == "Result" and args and len(args) == 2:
+        if pattern == "Ok":
+            return args[0]
+        if pattern == "Err":
+            return args[1]
     return None
 
 
@@ -746,16 +774,16 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{value_type}` is not a record",
                 )
-        elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
-            raise RevlError(
-                filename, stmt.line,
-                f"record destructuring requires a record, but `{value_type}` is not a record",
-            )
             fields = spec.get("fields", {})
             for name in names:
                 if name not in fields:
                     raise RevlError(filename, pattern.line,
                                     f"`{name}` is not a field of record `{value_type}`")
+        elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
+            raise RevlError(
+                filename, stmt.line,
+                f"record destructuring requires a record, but `{value_type}` is not a record",
+            )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         for name in names:
             scope[name] = stmt.mutable
@@ -814,10 +842,34 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
     raise RevlError(filename, stmt.line, "unexpected destructuring pattern")
 
 
+def _tagged_case(name: str, types: dict) -> dict | None:
+    """If `name` is a *tagged* ADT constructor — the built-in `Result`
+    (`Ok`/`Err`) or any user variant case — return its case-table entry.
+    `Opt` (`Some`/`None`) is not tagged: it stays host-null/value, so it is
+    excluded here and handled as identity/null."""
+    if name in ("Some", "None"):
+        return None
+    return (types.get(CASES_KEY) or {}).get(name)
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
+    # ADT construction (Result / user variants) lowers to a tagged `adt` node
+    # (Opt's Some/None are not tagged — handled as identity/null downstream).
+    _cases = types.get(CASES_KEY) or {}
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and _tagged_case(expr.callee.name, types) is not None:
+        info = _cases[expr.callee.name]
+        return {"kind": "adt", "type": info["adt"], "case": expr.callee.name,
+                "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types)
+                         for a in expr.args]}
+    if isinstance(expr, ExprVar):
+        info = _tagged_case(expr.name, types)
+        if info is not None and info.get("payload") is None \
+                and not str(info.get("adt", "")).startswith(("Result", "Opt")):
+            return {"kind": "adt", "type": info["adt"], "case": expr.name, "args": []}
     # Module-namespace call: `alias.fn(args)` desugars to the imported public
     # function by its original name (IR functions are top-level, not nested
     # in namespace objects).
@@ -933,17 +985,22 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         for pattern, bind, body in expr.arms:
             inner_scope = dict(scope)
             inner_type_env = dict(type_env)
+            payload_type = _arm_payload_type(scrutinee_type, pattern, types)
             if bind is not None:
                 inner_scope[bind] = False
                 inner_type_env.pop(bind, None)
-                payload_type = _variant_case_payload(types, scrutinee_type, pattern)
                 if payload_type is not None:
                     inner_type_env[bind] = payload_type
-            arms.append({
+            arm = {
                 "pattern": pattern,
                 "bind": bind,
                 "body": _lower_pure_expr(body, inner_scope, callables, alias_fns, filename, inner_type_env, types),
-            })
+            }
+            # payload type helps backends that must cast (e.g. Java's tagged
+            # Result); other emitters ignore it
+            if payload_type is not None:
+                arm["payload_type"] = payload_type
+            arms.append(arm)
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, ExprOptField):
         return {
@@ -1050,7 +1107,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     def _has_builtin(node) -> bool:
         if isinstance(node, dict):
-            return node.get("kind") == "builtin" or any(_has_builtin(v) for v in node.values())
+            # a tagged ADT construction is a v3 feature too (`adt` node)
+            if node.get("kind") in ("builtin", "adt"):
+                return True
+            return any(_has_builtin(v) for v in node.values())
         if isinstance(node, list):
             return any(_has_builtin(v) for v in node)
         return False
@@ -1163,6 +1223,21 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                pure_only: bool = False) -> dict:
     filename = env.filename
     line = getattr(expr, "line", 0)
+
+    # ADT construction (Result / user variants) — same tagged `adt` node as
+    # the pure-fn path; Opt's Some/None stay untagged.
+    cases = env.types.get(CASES_KEY) or {}
+    if isinstance(expr, ExprCall) and isinstance(expr.callee, ExprVar) \
+            and _tagged_case(expr.callee.name, env.types) is not None:
+        info = cases[expr.callee.name]
+        return {"kind": "adt", "type": info["adt"], "case": expr.callee.name,
+                "args": [_lower_component_pure_expr(a, env, scope, callables, pure_only)
+                         for a in expr.args]}
+    if isinstance(expr, ExprVar):
+        info = _tagged_case(expr.name, env.types)
+        if info is not None and info.get("payload") is None \
+                and not str(info.get("adt", "")).startswith(("Result", "Opt")):
+            return {"kind": "adt", "type": info["adt"], "case": expr.name, "args": []}
 
     if isinstance(expr, ExprLit):
         if expr.value is None:
@@ -1614,6 +1689,22 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         if method.name in implemented:
             raise RevlError(filename, method.line, f"duplicate method `{method.name}` in provision `{stmt.key}`")
         implemented.add(method.name)
+
+        # optional param annotations (syntax-2.0: models write `fn query(sql:
+        # Str)` on autopilot): well-formed and checked against the service's
+        # declared type (A6 — the service is the source of truth).
+        for surface, annotation, (_, svc_ptype) in zip(
+            method.params, method.param_types or [None] * len(method.params), decl.params
+        ):
+            if annotation is None:
+                continue
+            check_type_wellformed(filename, method.line, annotation)
+            if svc_ptype and not (compatible(svc_ptype, annotation)
+                                  and compatible(annotation, svc_ptype)):
+                raise mismatch(
+                    filename, method.line,
+                    f"parameter `{surface}` of `{method.name}` (from service `{svc.name}`)",
+                    svc_ptype, annotation)
 
         saved = env.params
         env.params = env.bind_params(method.params, method.line)

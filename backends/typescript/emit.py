@@ -519,7 +519,9 @@ def _ts_v3_type(type_name: object) -> str:
         if base == "Map":
             return f"Map<{_ts_v3_type(args[0])}, {_ts_v3_type(args[1])}>"
         if base == "Result":
-            return f"{_ts_v3_type(args[0])} | {_ts_v3_type(args[1])}"
+            # tagged, matching the `adt`-node runtime shape `{ kind, value }`
+            return (f'{{ kind: "Ok"; value: {_ts_v3_type(args[0])} }}'
+                    f' | {{ kind: "Err"; value: {_ts_v3_type(args[1])} }}')
         return base + "<" + ", ".join("unknown" for _ in args) + ">"
     return _ident(name, "type name")
 
@@ -678,6 +680,15 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
         segs.append("`")
         return "".join(segs)
 
+    if kind == "adt":
+        # tagged ADT value (Result / user variant): `{ kind: "Ok", value: x }`
+        # or `{ kind: "Missing" }`. Opt is not tagged (value | undefined).
+        case = _string(node["case"])
+        args = node.get("args") or []
+        if args:
+            return f"{{ kind: {case}, value: {_v3_expr(args[0], ctx)} }}"
+        return f"{{ kind: {case} }}"
+
     if kind == "optfield":
         target_node = node.get("target")
         target = _v3_expr(target_node, ctx)
@@ -699,6 +710,33 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
 def _v3_match_expr(node: dict, ctx: _TsV3Context) -> str:
     tmp = ctx.new_match_tmp()
     scrutinee = _v3_expr(node.get("scrutinee"), ctx)
+    arms = node.get("arms") or []
+
+    # Opt is `value | undefined` (not tagged): Some/None discriminate on
+    # undefined, and Some binds the scrutinee itself.
+    if any(arm.get("pattern") in ("Some", "None") for arm in arms):
+        lines = [f"(({tmp}) => {{"]
+        wildcard = None
+        for arm in arms:
+            pattern = arm.get("pattern")
+            body = _v3_expr(arm.get("body"), ctx)
+            if pattern == "_":
+                wildcard = f"  return ({body})"
+                continue
+            if pattern == "None":
+                lines.append(f"  if ({tmp} === undefined) return ({body})")
+            else:  # Some
+                bind = arm.get("bind")
+                if bind:
+                    b = _ident(bind, "match bind")
+                    lines.append(f"  if ({tmp} !== undefined) return (({b}) => ({body}))({tmp})")
+                else:
+                    lines.append(f"  if ({tmp} !== undefined) return ({body})")
+        lines.append(wildcard if wildcard is not None
+                     else '  throw new TypeError("non-exhaustive match")')
+        lines.append(f"}})({scrutinee})")
+        return "\n".join(lines)
+
     lines = [f"(({tmp}) => {{", f"  switch ({tmp}.kind) {{"]
     wildcard = None
     for arm in node.get("arms") or []:

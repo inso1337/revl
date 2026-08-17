@@ -174,14 +174,17 @@ class _ComponentEmitter:
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             return f"{name}({args})"
+        if kind == "adt":
+            case = _ident(expr.get("case"), f"{where}: adt case")
+            args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
+            return f"{case}({args})"
         if kind == "var":
             name = expr.get("name")
-            # Builtin Opt/Result constructors: `Opt[T]` is represented as
-            # `T | None` at runtime, so `Some(x)`/`Ok(x)`/`Err(x)` are the
-            # identity on their payload and `None` is Python's None.
+            # Opt is host-None/value: `Some(x)` is identity, `None` is Python
+            # None. (Result Ok/Err are tagged now — built via the `adt` node.)
             if name == "None":
                 return "None"
-            if name in ("Some", "Ok", "Err"):
+            if name == "Some":
                 return "(lambda _v: _v)"
             return _ident(name, f"{where}: variable")
         if kind == "field":
@@ -523,7 +526,8 @@ def _py_type(type_name: str) -> str:
         if base == "Map":
             return f"dict[{_py_type(args[0])}, {_py_type(args[1])}]"
         if base == "Result":
-            return f"Union[{_py_type(args[0])}, {_py_type(args[1])}]"
+            # tagged at runtime (Ok/Err classes); the annotation is advisory
+            return "Any"
         return base + "[" + ", ".join("Any" for _ in args) + "]"
     if type_name in _PY_TYPE:
         return _PY_TYPE[type_name]
@@ -550,11 +554,21 @@ def _emit_types(types: dict) -> "_Lines":
                 if case["payload"] is None:
                     out.add(0, f"class {cname}({name}):")
                     out.add(1, "__slots__ = ()")
+                    # value-semantic equality: all instances of a no-payload
+                    # case are equal
+                    out.add(1, "def __eq__(self, other):")
+                    out.add(2, f"return isinstance(other, {cname})")
+                    out.add(1, "def __hash__(self):")
+                    out.add(2, f"return hash({cname!r})")
                 else:
                     out.add(0, f"class {cname}({name}):")
                     out.add(1, '__slots__ = ("value",)')
                     out.add(1, "def __init__(self, value):")
                     out.add(2, "self.value = value")
+                    out.add(1, "def __eq__(self, other):")
+                    out.add(2, f"return isinstance(other, {cname}) and other.value == self.value")
+                    out.add(1, "def __hash__(self):")
+                    out.add(2, f"return hash(({cname!r}, self.value))")
                 out.add(0)
         out.add(0)
     return out
@@ -571,7 +585,14 @@ def _interp_fstring(parts) -> str:
     segs = ['f"']
     for kind, text in parts:
         if kind == "text":
-            segs.append(text.replace("\\", "\\\\").replace('"', '\\"').replace("{", "{{").replace("}", "}}"))
+            # escape for a single-line double-quoted f-string: backslash and
+            # quote, brace-doubling for f-string literals, and control chars
+            # (a raw newline in a template would otherwise be an unterminated
+            # f-string literal)
+            escaped = (text.replace("\\", "\\\\").replace('"', '\\"')
+                       .replace("{", "{{").replace("}", "}}")
+                       .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+            segs.append(escaped)
         else:
             head, _dot, rest = text.partition(".")
             expr = head
@@ -603,9 +624,19 @@ def _match_expr(scrutinee: str, arms: list) -> str:
         if pattern == "_":
             return body
         bind = arm.get("bind")
-        if bind:
-            body = f"(lambda {bind}: {body})({tmp}.value)"
-        cond = f"isinstance({tmp}, {pattern})"
+        # Opt is host-None/value (not a tagged class): Some/None discriminate
+        # on None, and Some binds the scrutinee itself. Result/user ADTs are
+        # tagged (isinstance), binding the payload `.value`.
+        if pattern == "None":
+            cond = f"{tmp} is None"
+        elif pattern == "Some":
+            cond = f"{tmp} is not None"
+            if bind:
+                body = f"(lambda {bind}: {body})({tmp})"
+        else:
+            if bind:
+                body = f"(lambda {bind}: {body})({tmp}.value)"
+            cond = f"isinstance({tmp}, {pattern})"
         if rest is None:
             return f"({body} if {cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))"
         return f"({body} if {cond} else {rest})"
@@ -622,12 +653,19 @@ def _expr(node: dict) -> str:
     kind = node["kind"]
     if kind == "lit":
         return repr(node["value"])
+    if kind == "adt":
+        # tagged ADT value: `Case(payload)` / `Case()`. The case class is
+        # either a user variant (emitted by _emit_types) or the built-in
+        # Result Ok/Err (emitted in the preamble).
+        case = _ident(node["case"], "adt case")
+        args = ", ".join(_expr(a) for a in node.get("args") or [])
+        return f"{case}({args})"
     if kind == "var":
         name = node["name"]
         if name == "None":
             return "None"
-        if name in ("Some", "Ok", "Err"):
-            return "(lambda _v: _v)"
+        if name == "Some":
+            return "(lambda _v: _v)"  # Opt is host-None/value: Some is identity
         return name
     if kind == "bin":
         if node["op"] == "??":
@@ -823,6 +861,25 @@ def _find_host_roots(nodes) -> set[str]:
 
 
 
+def _uses_builtin_result(ir: dict) -> bool:
+    """True if the IR constructs or matches the built-in Result (Ok/Err) —
+    an `adt` node typed Result, or a `match` arm on Ok/Err. Used to decide
+    whether to emit the built-in Result classes (keeps v1 goldens intact)."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
+                return True
+            if node.get("kind") == "match":
+                if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
+                    return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(ir.get("components")) or walk(ir.get("functions")) or walk(ir.get("tests"))
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -865,6 +922,28 @@ def emit(ir: dict) -> str:
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')
     out.add(0, "    return v[name] if isinstance(v, dict) else getattr(v, name)")
     out.add(0)
+    # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
+    # unless a user type shadows the name. Opt stays host-None, so it needs
+    # no class. Emitted only when the IR actually uses Result, so v1 goldens
+    # stay byte-identical.
+    if _uses_builtin_result(ir):
+        user_cases = {
+            case["name"]
+            for spec in types.values() if spec.get("kind") == "variant"
+            for case in spec.get("cases") or []
+        }
+        for builtin in ("Ok", "Err"):
+            if builtin in user_cases:
+                continue
+            out.add(0, f"class {builtin}:")
+            out.add(1, '__slots__ = ("value",)')
+            out.add(1, "def __init__(self, value=None):")
+            out.add(2, "self.value = value")
+            out.add(1, "def __eq__(self, other):")
+            out.add(2, f"return isinstance(other, {builtin}) and other.value == self.value")
+            out.add(1, "def __hash__(self):")
+            out.add(2, f"return hash(({builtin!r}, self.value))")
+            out.add(0)
     if types:
         out.add(0, "from dataclasses import dataclass")
         out.add(0, "from typing import Any, Optional, Union")
