@@ -367,6 +367,30 @@ def test_javac_compiles_method_level_compensate(tmp_path):
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_runs_runtime_scenarios_on_stub_runtime(tmp_path):
+    """G7/lifecycle scenarios: emitted components driven on the JVM by the
+    stub reference runtime (LIFO EffectScope/composite). Shares fixtures
+    with the Rust backend (../rust/scenarios/probe.rvl); the harness is
+    scenarios/RunScenarios.java. A8 and reactive gating need the real
+    cordis4j jar — tracked in docs/v2.0-roadmap.md."""
+    fixture = ROOT / "backends" / "rust" / "scenarios" / "probe.rvl"
+    ir = compile_files([str(fixture)])
+    out = _javac_compile(tmp_path, emit.emit(ir))
+    harness = HERE / "scenarios" / "RunScenarios.java"
+    compile_harness = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_harness.returncode == 0, compile_harness.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "RunScenarios"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "SCENARIOS_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
 def test_java_runs_emitted_stdlib_semantics(tmp_path):
     """Not just compiles: run the emitted test block (REVL_TESTS) on a JVM —
     persistent push, -1 when absent, spec-table semantics."""

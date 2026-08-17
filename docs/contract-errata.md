@@ -55,3 +55,14 @@ This goes in the compiler spec, not the runtimes.
   its docs; the py adapter's drain derives R1 from the *documented* contract
   and covers async undos. Do not remove the drain on the strength of the
   empirical ordering.
+- **cordis-rs A1 divergence** (documented, runtime-verified): cordis-rs 0.3.0
+  drives `plugin_async` activation to completion with `block_on` *under the
+  fiber transition lock* (fiber.rs), so a divert during a component `await`
+  **defers until activation finishes** — post-boundary steps (including
+  emissions) run, then everything reverts LIFO. cordis-py diverts *at* the
+  boundary and skips the remainder; the wasm tier physically rolls back
+  mid-activation. The invariant that holds on every tier — asserted under a
+  concurrent-divert race loop in `backends/rust/scenarios/scenarios.rs` — is
+  torn-state freedom: after disposal, every completed effect has run its
+  inverse, in LIFO order. Authors relying on "emission after boundary never
+  happens once diverted" get that guarantee on py/wasm, not on rs.

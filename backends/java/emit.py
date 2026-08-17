@@ -1081,11 +1081,16 @@ def _method_return(env: _Env, key: str, mname: str):
     return env.services[service]["methods"].get(mname, {}).get("returns")
 
 
-def _method_body(env: _Env, method: dict) -> str:
+def _method_body(env: _Env, key: str, method: dict) -> str:
     steps = method.get("body") or []
     if len(steps) == 1 and steps[0].get("step") == "return":
         rename = {b: f"this.{b}" for b in _binds(env.component)}
-        return f"return {_expr(steps[0]['expr'], env, rename)};"
+        value = _expr(steps[0]["expr"], env, rename)
+        # A `void` service operation cannot `return <expr>;` in Java — run
+        # the expression for its effect instead.
+        if _method_return(env, key, method.get("name")) is None:
+            return f"{value};"
+        return f"return {value};"
     return 'throw new UnsupportedOperationException("effectful method body");'
 
 
@@ -1182,7 +1187,9 @@ def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx) -> str:
     return "Object"
 
 
-def _method_body_lines(env: _Env, method: dict, v3_ctx: _V3Ctx) -> list[str]:
+def _method_body_lines(
+    env: _Env, method: dict, v3_ctx: _V3Ctx, *, returns_void: bool = False
+) -> list[str]:
     lines: list[str] = []
     rename = {b: f"this.{b}" for b in _binds(env.component)}
     rename.update({local: f"this.{local}" for local in env.reqs})
@@ -1190,6 +1197,10 @@ def _method_body_lines(env: _Env, method: dict, v3_ctx: _V3Ctx) -> list[str]:
         step = stmt.get("step")
         if step == "return":
             if stmt.get("expr") is None:
+                lines.append("return;")
+            elif returns_void:
+                # `void` methods run the expression for its effect.
+                lines.append(f"{_expr(stmt['expr'], env, rename, v3_ctx)};")
                 lines.append("return;")
             else:
                 lines.append(f"return {_expr(stmt['expr'], env, rename, v3_ctx)};")
@@ -1402,7 +1413,7 @@ def _emit_component_modern(
             )
             ret = _java_v3_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
             out.append(f"    public {ret} {mname}({params}) {{")
-            for line in _method_body_lines(env, method, v3_ctx):
+            for line in _method_body_lines(env, method, v3_ctx, returns_void=ret == "void"):
                 out.append(("        " + line) if line else line)
             out.append("    }")
         out.append("}")
@@ -1437,7 +1448,11 @@ def _emit_component_modern(
         component, env, v3_ctx, cname, body_lines, component.get("body") or [], "        "
     )
     out.extend(body_lines)
-    out.append("        return fx;")
+    body_steps = component.get("body") or []
+    if not (body_steps and body_steps[-1].get("step") == "fail"):
+        # An unconditional trailing `fail` lowers to a throw; Java treats a
+        # statement after it as a hard "unreachable statement" error.
+        out.append("        return fx;")
     out.append("    }")
     out.append("}")
     out.append("")
@@ -1482,7 +1497,7 @@ def _emit_component(
                 for p in method.get("params") or []
             )
             ret = _java_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
-            out.append(f"    public {ret} {mname}({params}) {{ {_method_body(env, method)} }}")
+            out.append(f"    public {ret} {mname}({params}) {{ {_method_body(env, key, method)} }}")
         out.append("}")
         out.append("")
 
