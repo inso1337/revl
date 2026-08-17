@@ -53,6 +53,27 @@ def test_end_to_end_typescript_golden():
     assert emitter.emit(ir) == golden
 
 
+def test_end_to_end_rust_golden():
+    """source -> frontend IR -> cordis-rs emitter == checked-in golden.
+
+    The emitter is pure Python, so this needs no rust toolchain — and without
+    it the golden drifts silently (it did, through a merge: the emitter's
+    doc-comment wording changed on one branch while the golden was
+    regenerated on another)."""
+    ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
+    emitter = _load_module("revl_rust_emit", ROOT / "backends" / "rust" / "emit.py")
+    golden = (ROOT / "backends" / "rust" / "golden" / "user_cache.rs").read_text()
+    assert emitter.emit(ir) == golden
+
+
+def test_end_to_end_java_golden():
+    """source -> frontend IR -> cordis4j emitter == checked-in golden."""
+    ir = compile_files([str(EXAMPLES / "user_cache.rvl")])
+    emitter = _load_module("revl_java_emit", ROOT / "backends" / "java" / "emit.py")
+    golden = (ROOT / "backends" / "java" / "golden" / "user_cache.java").read_text()
+    assert emitter.emit(ir) == golden
+
+
 # ---------------------------------------------------------------- rejections
 
 REJECTIONS = {
