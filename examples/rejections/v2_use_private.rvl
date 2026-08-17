@@ -1,0 +1,2 @@
+use "../v2_use_private_lib.rvl" { helper }
+pub fn main() -> Int { return helper() }

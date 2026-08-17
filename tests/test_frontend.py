@@ -64,6 +64,8 @@ REJECTIONS = {
     "v2_isolate_after_effect.rvl": "`isolate` must precede every effect, emit, await, and provide statement",
     "v2_let_reassignment.rvl": "cannot reassign `n` — it is `let` (single-assignment)",
     "v2_undeclared_fn_var.rvl": "`missing` is not declared in this function",
+    "v2_use_cycle.rvl": "import cycle:",
+    "v2_use_private.rvl": "`helper` is module-private",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
     "g2_provision_conflict.rvl": "provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)",
     "g3_dependency_cycle.rvl": "dependency cycle: Alpha -> Beta -> Alpha (G3)",

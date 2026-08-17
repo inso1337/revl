@@ -156,7 +156,11 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
 
 
 def _lower_fns(program: Program, filename: str) -> list:
-    callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
+    default_callables = (
+        _HOST_CALLABLES
+        | _BUILTIN_CONSTRUCTORS
+        | {fn.name for fn in program.fn_decls}
+    )
     fns: list[dict] = []
     seen: set[str] = set()
     for decl in program.fn_decls:
@@ -169,9 +173,12 @@ def _lower_fns(program: Program, filename: str) -> list:
                 raise RevlError(filename, param.line,
                                 f"duplicate parameter `{param.name}` in fn {decl.name}")
             scope[param.name] = False
+        module_callables = program.fn_scopes.get(id(decl), default_callables)
+        callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | set(module_callables)
+        alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, body, filename)
+            _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename)
         fns.append({
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
@@ -182,13 +189,13 @@ def _lower_fns(program: Program, filename: str) -> list:
     return fns
 
 
-def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: str) -> None:
+def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str) -> None:
     if isinstance(stmt, LetStmt):
         if stmt.name in scope:
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is already declared in this function")
         scope[stmt.name] = stmt.mutable
         body.append({"step": "let", "name": stmt.name,
-                     "value": _lower_pure_expr(stmt.value, scope, callables, filename),
+                     "value": _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename),
                      "mutable": stmt.mutable})
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
@@ -199,28 +206,51 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: st
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
                             hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
         body.append({"step": "assign", "name": stmt.name,
-                     "value": _lower_pure_expr(stmt.value, scope, callables, filename)})
+                     "value": _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename)})
     elif isinstance(stmt, ReturnStmt):
         body.append({"step": "return",
-                     "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, filename)})
+                     "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename)})
     elif isinstance(stmt, IfStmt):
         then: list[dict] = []
         for s in stmt.then:
-            _lower_pure_stmt(s, scope, callables, then, filename)
+            _lower_pure_stmt(s, scope, callables, alias_fns, then, filename)
         otherwise = None
         if stmt.otherwise is not None:
             otherwise = []
             for s in stmt.otherwise:
-                _lower_pure_stmt(s, scope, callables, otherwise, filename)
-        body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, filename),
+                _lower_pure_stmt(s, scope, callables, alias_fns, otherwise, filename)
+        body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, alias_fns, filename),
                      "then": then, "else": otherwise})
     elif isinstance(stmt, ExprStmt):
-        body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, filename)})
+        body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename)})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
 
 
-def _lower_pure_expr(expr, scope: dict, callables: set, filename: str) -> dict:
+def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str) -> dict:
+    # Module-namespace call: `alias.fn(args)` desugars to the imported public
+    # function by its original name (IR functions are top-level, not nested
+    # in namespace objects).
+    if (
+        isinstance(expr, ExprCall)
+        and isinstance(expr.callee, ExprField)
+        and isinstance(expr.callee.target, ExprVar)
+    ):
+        alias = expr.callee.target.name
+        if alias in alias_fns:
+            name = expr.callee.name
+            if name not in alias_fns[alias]:
+                raise RevlError(
+                    filename,
+                    expr.callee.line,
+                    f"`{alias}.{name}` is not a public function in module `{alias}`",
+                    hint=f"`use ... as {alias}` imports only `pub` declarations (G1)",
+                )
+            return {
+                "kind": "call",
+                "callee": {"kind": "var", "name": name},
+                "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename) for a in expr.args],
+            }
     if isinstance(expr, ExprLit):
         return {"kind": "lit", "value": expr.value}
     if isinstance(expr, ExprVar):
@@ -230,37 +260,37 @@ def _lower_pure_expr(expr, scope: dict, callables: set, filename: str) -> dict:
         return {"kind": "var", "name": expr.name}
     if isinstance(expr, ExprBin):
         return {"kind": "bin", "op": expr.op,
-                "left": _lower_pure_expr(expr.left, scope, callables, filename),
-                "right": _lower_pure_expr(expr.right, scope, callables, filename)}
+                "left": _lower_pure_expr(expr.left, scope, callables, alias_fns, filename),
+                "right": _lower_pure_expr(expr.right, scope, callables, alias_fns, filename)}
     if isinstance(expr, ExprUn):
         return {"kind": "un", "op": expr.op,
-                "operand": _lower_pure_expr(expr.operand, scope, callables, filename)}
+                "operand": _lower_pure_expr(expr.operand, scope, callables, alias_fns, filename)}
     if isinstance(expr, ExprCall):
-        return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, filename),
-                "args": [_lower_pure_expr(a, scope, callables, filename) for a in expr.args]}
+        return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename),
+                "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename) for a in expr.args]}
     if isinstance(expr, ExprField):
-        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, filename),
+        return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename),
                 "name": expr.name}
     if isinstance(expr, ExprIndex):
-        return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, filename),
-                "index": _lower_pure_expr(expr.index, scope, callables, filename)}
+        return {"kind": "index", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename),
+                "index": _lower_pure_expr(expr.index, scope, callables, alias_fns, filename)}
     if isinstance(expr, ExprIf):
-        return {"kind": "if", "cond": _lower_pure_expr(expr.cond, scope, callables, filename),
-                "then": _lower_pure_expr(expr.then, scope, callables, filename),
-                "else": _lower_pure_expr(expr.otherwise, scope, callables, filename)}
+        return {"kind": "if", "cond": _lower_pure_expr(expr.cond, scope, callables, alias_fns, filename),
+                "then": _lower_pure_expr(expr.then, scope, callables, alias_fns, filename),
+                "else": _lower_pure_expr(expr.otherwise, scope, callables, alias_fns, filename)}
     if isinstance(expr, ExprRecord):
         return {"kind": "record",
-                "fields": [[name, _lower_pure_expr(e, scope, callables, filename)]
+                "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename)]
                            for name, e in expr.fields]}
     if isinstance(expr, ExprList):
         return {"kind": "list",
-                "items": [_lower_pure_expr(e, scope, callables, filename) for e in expr.items]}
+                "items": [_lower_pure_expr(e, scope, callables, alias_fns, filename) for e in expr.items]}
     if isinstance(expr, ExprArrow):
         inner = dict(scope)
         for param in expr.params:
             inner[param] = False
         return {"kind": "arrow", "params": expr.params,
-                "body": _lower_pure_expr(expr.body, inner, callables, filename)}
+                "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename)}
     if isinstance(expr, Interp):
         return {"kind": "interp", "parts": expr.parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
