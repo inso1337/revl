@@ -867,8 +867,23 @@ class _V3Emitter:
             raise EmitError("arrow values are not lowerable on this tier — the wasm module has no closures")
         raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
+    def _arrow_callee(self, callee: dict):
+        """The arrow node being called, if this callee is an arrow value:
+        a local `let f = x => …` (inlined) or an inline `(x => …)(…)`."""
+        if callee.get("kind") == "arrow":
+            return callee
+        if callee.get("kind") == "var":
+            return self._arrows.get(callee.get("name"))
+        return None
+
     def _call_type(self, node: dict, scope: _Scope) -> str | None:
         callee = node.get("callee") or {}
+        arrow = self._arrow_callee(callee)
+        if arrow is not None:
+            inner = _Scope(dict(scope.slots), dict(scope.types))
+            for p, a in zip(arrow.get("params") or [], node.get("args") or []):
+                inner.types[p] = self._infer_type(a, scope)
+            return self._infer_type(arrow.get("body"), inner)
         if callee.get("kind") != "var":
             raise EmitError("only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), "callee")
@@ -1048,8 +1063,33 @@ class _V3Emitter:
             return _E(f"(i32.const 0)\n      {operand.wat}\n      (i32.sub)", "Int")
         raise EmitError(f"{where}: unsupported unary operator {op!r}")
 
+    def _inline_arrow(self, arrow: dict, args: list, scope: _Scope, where: str) -> _E:
+        """Inline a local arrow call. Arrows can't escape this tier (no
+        lowerable function type), so `let f = x => …; f(a)` is beta-reduced:
+        bind args to per-arrow param locals, read mutable captures from their
+        bind-time snapshot, then emit the body."""
+        aid = arrow.get("_aid")
+        params = arrow.get("params") or []
+        if len(args) != len(params):
+            raise EmitError(f"{where}: arrow expects {len(params)} argument(s), got {len(args)}")
+        sets: list[str] = []
+        inner = _Scope(dict(scope.slots), dict(scope.types))
+        for p, a in zip(params, args):
+            av = self._expr(a, scope, where)
+            sets.append(f"{av.wat}\n      (local.set $ap_{p}_{aid})")
+            inner.slots[p] = f"(local.get $ap_{p}_{aid})"
+            inner.types[p] = av.ty
+        for c in arrow.get("captures") or []:
+            inner.slots[c] = f"(local.get $cap_{c}_{aid})"  # bind-time snapshot
+        body = self._expr(arrow.get("body"), inner, where)
+        wat = "\n      ".join(sets + [body.wat]) if sets else body.wat
+        return _E(wat, body.ty)
+
     def _call_expr(self, node: dict, scope: _Scope, where: str, expected: str | None = None) -> _E:
         callee = node.get("callee") or {}
+        arrow = self._arrow_callee(callee)
+        if arrow is not None:
+            return self._inline_arrow(arrow, node.get("args") or [], scope, where)
         if callee.get("kind") != "var":
             raise EmitError(f"{where}: only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), f"{where}: callee")
@@ -1338,10 +1378,33 @@ class _V3Emitter:
 
     # -- statements + function emission --------------------------------------
 
+    def _collect_arrow_locals(self, node: Any, acc: set[str]) -> None:
+        """Assign each arrow a stable id and reserve its per-call param locals
+        and per-capture snapshot locals (arrows sit in expression position, so
+        _collect_locals doesn't reach them)."""
+        if isinstance(node, dict):
+            if node.get("kind") == "arrow":
+                self._arrow_counter += 1
+                node["_aid"] = self._arrow_counter
+                aid = node["_aid"]
+                for p in node.get("params") or []:
+                    acc.add(f"ap_{_ident(p, 'arrow param')}_{aid}")
+                for c in node.get("captures") or []:
+                    acc.add(f"cap_{_ident(c, 'arrow capture')}_{aid}")
+            for value in node.values():
+                self._collect_arrow_locals(value, acc)
+        elif isinstance(node, list):
+            for value in node:
+                self._collect_arrow_locals(value, acc)
+
     def _collect_locals(self, stmts: list, acc: set[str]) -> None:
         for stmt in stmts or []:
             step = stmt.get("step")
             if step in ("let", "assign"):
+                value = stmt.get("value")
+                # `let f = <arrow>` binds no runtime value (inlined at calls)
+                if step == "let" and isinstance(value, dict) and value.get("kind") == "arrow":
+                    continue
                 acc.add(_ident(stmt.get("name"), "local"))
             elif step == "if":
                 self._collect_locals(stmt.get("then") or [], acc)
@@ -1364,6 +1427,16 @@ class _V3Emitter:
             step = stmt.get("step")
             if step in ("let", "assign"):
                 name = _ident(stmt.get("name"), f"{where}: binding")
+                value_node = stmt.get("value")
+                # `let f = <arrow>`: not a runtime value on this tier — register
+                # it for inlining and snapshot its mutable captures by value.
+                if step == "let" and isinstance(value_node, dict) and value_node.get("kind") == "arrow":
+                    self._arrows[name] = value_node
+                    aid = value_node.get("_aid")
+                    for c in value_node.get("captures") or []:
+                        out.append(f"(local.get $l_{_ident(c, 'capture')})")
+                        out.append(f"(local.set $cap_{c}_{aid})")
+                    continue
                 if step == "let":
                     value_ty = self._infer_type(stmt.get("value"), scope)
                 else:
@@ -1497,6 +1570,8 @@ class _V3Emitter:
         local_names: set[str] = set()
         self._loop_counter = 0
         self._for_temps: list[str] = []
+        self._arrows: dict = {}
+        self._arrow_counter = 0
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
             if lname not in scope.types:
@@ -1516,7 +1591,13 @@ class _V3Emitter:
             decls.append(f"(local ${sname} i32)")
         for tname in self._for_temps:
             decls.append(f"(local ${tname} i32)")
-        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts | set(self._for_temps))
+        # arrow param + capture-snapshot locals (arrows are inlined at calls)
+        arrow_locals: set[str] = set()
+        self._collect_arrow_locals(fn.get("body") or [], arrow_locals)
+        for aname in sorted(arrow_locals):
+            decls.append(f"(local ${aname} i32)")
+        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts
+                              | set(self._for_temps) | arrow_locals)
         self._tmp = tmp
         decls.append(f"(local ${tmp} i32)")
 

@@ -247,3 +247,40 @@ def test_v3_non_str_interpolation_rejected_by_tier():
     emit = _emitter()
     with pytest.raises(emit.EmitError, match="Str only on this tier"):
         emit.emit(compile_source("fn f(n: Int) -> Str { return `n=${n}` }"))
+
+
+# local arrows (`let f = x => …; f(a)`) are inlined — they can't escape this
+# tier (no lowerable function type), so no funcref/call_indirect is needed.
+_ARROW_SRC = """
+fn add_n(n: Int) -> Int { let f = x => x + n  return f(1) }
+fn twice() -> Int { let g = x => x * 2  return g(3) + g(10) }
+fn capture_by_value() -> Int { var n = 1  let f = y => y + n  n = 100  return f(5) }
+"""
+
+
+def test_v3_local_arrows_run_on_wasmtime(tmp_path):
+    import shutil, subprocess
+    if shutil.which("wasmtime") is None:
+        import pytest as _pt
+        _pt.skip("wasmtime not installed")
+    emit = _emitter()
+    wat = tmp_path / "a.wat"
+    wat.write_text(emit.emit(compile_source(_ARROW_SRC))["functions"], encoding="utf-8")
+
+    def invoke(fn: str, *args: str) -> int:
+        out = subprocess.run(["wasmtime", "--invoke", fn, str(wat), *args],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert invoke("add_n", "5") == 6
+    assert invoke("twice") == 26                 # inlined at two call sites
+    assert invoke("capture_by_value") == 6       # snapshots n=1, ignores n=100
+
+
+def test_v3_escaping_arrow_still_rejected():
+    # an arrow can only be inlined if it can't escape; a function-typed param
+    # is not lowerable on this tier, so passing an arrow stays rejected
+    emit = _emitter()
+    with pytest.raises(emit.EmitError, match="not lowerable"):
+        emit.emit(compile_source("fn apply(f: Fn[Int, Int], x: Int) -> Int { return f(x) }"))
