@@ -28,14 +28,16 @@ revl mcp schema examples/user_cache.rvl
 ```
 
 The point is the annotations. MCP's `readOnlyHint` / `destructiveHint` are
-*assertions by the server author*; nothing checks them. revl derives them:
+*assertions by the server author*; nothing checks them. revl takes them from
+the `emission` classification — which is worth something only because the
+compiler holds every provider to it.
 
-- **Declaration** — an `emission` operation is destructive by definition.
-- **Implementation** — a plain-declared operation whose body reaches an
-  emission (through a required service) or non-`pure` host code is
-  destructive *anyway*. The walk is transitive through `fn` calls.
+That guarantee had a gap when this bridge was first built: emission was
+checked at call sites but not propagated to the enclosing service operation,
+so a projection that trusted the declaration could advertise a write as
+read-only. The bridge briefly compensated by walking bodies; the right fix
+was in the checker, and it shipped.
 
-This second half is now a *language rule* rather than a bridge concern.
 The reference example originally understated itself — `Cache.put` was
 declared plain while its body emitted through `db` — and the checker now
 refuses that:
