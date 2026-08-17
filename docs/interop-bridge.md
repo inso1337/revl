@@ -95,8 +95,15 @@ the provider deactivates the consumer reactively and replays its inverses LIFO,
 no exception. The crossed method (Database.execute) is a *synchronous* emission,
 which §4 flags as address-space-bound; the py↔node proxy pays that literally
 (a blocking round-trip per call), whereas an `async fn` service would proxy
-without blocking. Remaining: `revl run` placement wiring (launch the seam from
-a manifest instead of a hand-written driver).
+without blocking.
+
+Placement wiring is implemented: `revl run app.rvl --placement p.toml` splits
+the components across processes and wires each seam straight from the manifest
+(`src/revl/placement.py`, `src/revl/_process_runner.py`, example
+`examples/placement/user_cache.toml`), the manifest-driven form of
+demo/bridge_pypy.py. `--once` brings the composition up, runs per-process probes
+(which may cross a seam), and tears down. cordis-py only for now; the
+cross-language py↔node seam still uses its hand-written driver.
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a

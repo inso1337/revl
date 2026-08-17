@@ -29,6 +29,24 @@ import inspect
 import json
 import socket
 import threading
+import time
+
+
+def _connect(path: str, attempts: int = 100, delay: float = 0.05) -> socket.socket:
+    """Connect to a Unix socket, retrying while the provider comes up. Under
+    placement the provider and consumer processes start concurrently, so the
+    socket may not exist yet; retrying makes start order irrelevant."""
+    last: OSError | None = None
+    for _ in range(attempts):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(path)
+            return sock
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            last = exc
+            sock.close()
+            time.sleep(delay)
+    raise last if last is not None else ConnectionError(path)
 
 
 # ---------------------------------------------------------------------------
@@ -92,11 +110,9 @@ class _Client:
     the monitor connection exists only to observe the provider's death."""
 
     def __init__(self, path: str) -> None:
-        self.rpc = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.rpc.connect(path)
+        self.rpc = _connect(path)
         self._io = self.rpc.makefile("rwb")
-        self.monitor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.monitor.connect(path)
+        self.monitor = _connect(path)
 
     def call(self, key: str, method: str, args):
         self._io.write((json.dumps({"key": key, "method": method, "args": list(args)}) + "\n").encode())

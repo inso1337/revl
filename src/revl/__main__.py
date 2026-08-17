@@ -257,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--plan", action="store_true",
                      help="print the load plan (order, config, callable keys) and exit, without a runtime")
+    run.add_argument("--placement", default=None,
+                     help="TOML/JSON placement map: split components across processes and wire the seams")
+    run.add_argument("--once", action="store_true",
+                     help="with --placement: bring the composition up, run probes, then tear down and exit")
 
     args = parser.parse_args(argv)
 
