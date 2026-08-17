@@ -223,7 +223,8 @@ public final class PlacementRunner {
         if (v == null) return "null";
         if (v instanceof java.util.Optional<?> o) return o.isPresent() ? render(o.get()) : "None";
         if (v instanceof String) return "\"" + v + "\"";
-        return String.valueOf(v);
+        if (v instanceof Boolean || v instanceof Number) return String.valueOf(v);
+        return Json.write(BridgeCodec.encode(v)); // records/ADTs: show the rebuilt structure
     }
 
     // --- the generic consumer-side proxy ------------------------------------
@@ -245,7 +246,7 @@ public final class PlacementRunner {
             List<Object> callArgs = new ArrayList<>();
             if (args != null) for (Object a : args) callArgs.add(a);
             Object value = client.call(key, method.getName(), callArgs);
-            return coerceReturn(value, method.getReturnType());
+            return BridgeCodec.decode(value, method.getGenericReturnType());
         }
 
         Object coerceReturn(Object value, Class<?> ret) {
@@ -346,7 +347,7 @@ public final class PlacementRunner {
                         Method m = findMethod(iface, (String) req.get("method"), args.size());
                         Object result = m.invoke(service, coerceArgs(m, args));
                         reply.put("ok", true);
-                        reply.put("value", jsonable(result));
+                        reply.put("value", BridgeCodec.encode(result));
                     } catch (Throwable t) {
                         reply.put("ok", false);
                         reply.put("error", t.getClass().getSimpleName() + ": " + t.getMessage());
@@ -501,6 +502,173 @@ public final class PlacementRunner {
                     default: b.append(c);
                 }
             }
+        }
+    }
+
+    // Canonical ADT/Result wire codec (docs/interop-bridge.md "Canonical value
+    // encoding"): scalars/List/records/Map/Opt are plain JSON; a user ADT or
+    // Result value is {"$kind":"<Case>","$value":<payload>} ($value omitted for
+    // a nullary case). Decode is type-directed (rebuilds the native value from
+    // the method's generic return type), so encode stays type-free. Inlined
+    // (not a shared file) so the single-file javac builds pick it up.
+    static final class BridgeCodec {
+        private BridgeCodec() {}
+        private static final Object NO_PAYLOAD = new Object();
+
+        static Object encode(Object v) {
+            if (v == null || v instanceof Boolean || v instanceof Number || v instanceof String) return v;
+            if (v instanceof java.util.Optional<?> o) return o.isPresent() ? encode(o.get()) : null;
+            if (v instanceof java.util.List<?> list) {
+                java.util.List<Object> out = new java.util.ArrayList<>();
+                for (Object e : list) out.add(encode(e));
+                return out;
+            }
+            if (v instanceof java.util.Map<?, ?> m) {
+                java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+                for (java.util.Map.Entry<?, ?> e : m.entrySet()) out.put(String.valueOf(e.getKey()), encode(e.getValue()));
+                return out;
+            }
+            Class<?> cls = v.getClass();
+            if (isAdtVariant(cls)) {
+                java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+                out.put("$kind", cls.getSimpleName());
+                Object payload = singlePayload(v, cls);
+                if (payload != NO_PAYLOAD) out.put("$value", encode(payload));
+                return out;
+            }
+            java.util.Map<String, Object> rec = new java.util.LinkedHashMap<>();
+            try {
+                if (cls.isRecord()) {
+                    for (java.lang.reflect.RecordComponent rc : cls.getRecordComponents())
+                        rec.put(rc.getName(), encode(rc.getAccessor().invoke(v)));
+                } else {
+                    for (java.lang.reflect.Field f : dataFields(cls)) { f.setAccessible(true); rec.put(f.getName(), encode(f.get(v))); }
+                }
+            } catch (ReflectiveOperationException ex) {
+                throw new RuntimeException("encode " + cls.getName() + ": " + ex.getMessage(), ex);
+            }
+            return rec;
+        }
+
+        static boolean isAdtVariant(Class<?> cls) {
+            for (Class<?> i : cls.getInterfaces()) if (i.isSealed()) return true;
+            return false;
+        }
+
+        static Object singlePayload(Object v, Class<?> cls) {
+            try {
+                if (cls.isRecord()) {
+                    java.lang.reflect.RecordComponent[] rc = cls.getRecordComponents();
+                    return rc.length == 0 ? NO_PAYLOAD : rc[0].getAccessor().invoke(v);
+                }
+                java.util.List<java.lang.reflect.Field> fields = dataFields(cls);
+                if (fields.isEmpty()) return NO_PAYLOAD;
+                fields.get(0).setAccessible(true);
+                return fields.get(0).get(v);
+            } catch (ReflectiveOperationException ex) {
+                throw new RuntimeException("payload of " + cls.getName() + ": " + ex.getMessage(), ex);
+            }
+        }
+
+        static java.util.List<java.lang.reflect.Field> dataFields(Class<?> cls) {
+            java.util.List<java.lang.reflect.Field> out = new java.util.ArrayList<>();
+            for (java.lang.reflect.Field f : cls.getDeclaredFields())
+                if (!java.lang.reflect.Modifier.isStatic(f.getModifiers()) && !f.isSynthetic()) out.add(f);
+            return out;
+        }
+
+        static Object decode(Object json, java.lang.reflect.Type target) {
+            Class<?> raw = rawClass(target);
+            if (raw == java.util.Optional.class)
+                return java.util.Optional.ofNullable(json == null ? null : decode(json, typeArg(target, 0)));
+            if (json == null) return null;
+            if (java.util.List.class.isAssignableFrom(raw) && json instanceof java.util.List<?> list) {
+                java.lang.reflect.Type elem = typeArg(target, 0);
+                java.util.List<Object> out = new java.util.ArrayList<>();
+                for (Object e : list) out.add(decode(e, elem));
+                return out;
+            }
+            if (json instanceof java.util.Map<?, ?> jm) {
+                if (jm.containsKey("$kind")) return decodeAdt(jm, raw, target);
+                if (java.util.Map.class.isAssignableFrom(raw)) {
+                    java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+                    for (java.util.Map.Entry<?, ?> e : jm.entrySet()) out.put(String.valueOf(e.getKey()), e.getValue());
+                    return out;
+                }
+                return decodeRecord(jm, raw);
+            }
+            return coerceScalar(json, raw);
+        }
+
+        static Object decodeAdt(java.util.Map<?, ?> jm, Class<?> raw, java.lang.reflect.Type target) {
+            String kind = (String) jm.get("$kind");
+            Object payloadJson = jm.get("$value");
+            try {
+                Class<?> variant = Class.forName(raw.getName() + "$" + kind);
+                java.lang.reflect.Constructor<?> ctor = variant.getDeclaredConstructors()[0];
+                ctor.setAccessible(true);
+                if (ctor.getParameterCount() == 0) return ctor.newInstance();
+                java.lang.reflect.Type payloadType = raw.getSimpleName().equals("RevlResult")
+                        ? typeArg(target, kind.equals("Err") ? 1 : 0)
+                        : ctor.getGenericParameterTypes()[0];
+                return ctor.newInstance(decode(payloadJson, payloadType));
+            } catch (ReflectiveOperationException ex) {
+                throw new RuntimeException("decode ADT " + raw.getName() + "." + kind + ": " + ex.getMessage(), ex);
+            }
+        }
+
+        static Object decodeRecord(java.util.Map<?, ?> jm, Class<?> raw) {
+            try {
+                if (raw.isRecord()) {
+                    java.lang.reflect.RecordComponent[] rc = raw.getRecordComponents();
+                    Class<?>[] types = new Class<?>[rc.length];
+                    Object[] args = new Object[rc.length];
+                    for (int i = 0; i < rc.length; i++) {
+                        types[i] = rc[i].getType();
+                        args[i] = decode(jm.get(rc[i].getName()), rc[i].getGenericType());
+                    }
+                    java.lang.reflect.Constructor<?> ctor = raw.getDeclaredConstructor(types);
+                    ctor.setAccessible(true);
+                    return ctor.newInstance(args);
+                }
+                java.util.List<java.lang.reflect.Field> fields = dataFields(raw);
+                java.lang.reflect.Constructor<?> ctor = raw.getDeclaredConstructors()[0];
+                ctor.setAccessible(true);
+                java.lang.reflect.Type[] pts = ctor.getGenericParameterTypes();
+                Object[] args = new Object[fields.size()];
+                for (int i = 0; i < fields.size(); i++) {
+                    java.lang.reflect.Type t = i < pts.length ? pts[i] : fields.get(i).getGenericType();
+                    args[i] = decode(jm.get(fields.get(i).getName()), t);
+                }
+                return ctor.newInstance(args);
+            } catch (ReflectiveOperationException ex) {
+                throw new RuntimeException("decode record " + raw.getName() + ": " + ex.getMessage(), ex);
+            }
+        }
+
+        static Object coerceScalar(Object v, Class<?> type) {
+            if (type == void.class || type == Void.class) return null;
+            if (v == null) return null;
+            if ((type == long.class || type == Long.class) && v instanceof Number n) return n.longValue();
+            if ((type == int.class || type == Integer.class) && v instanceof Number n) return n.intValue();
+            if ((type == double.class || type == Double.class) && v instanceof Number n) return n.doubleValue();
+            if (type == boolean.class || type == Boolean.class) return Boolean.TRUE.equals(v);
+            if (type == String.class) return v.toString();
+            return v;
+        }
+
+        static Class<?> rawClass(java.lang.reflect.Type t) {
+            if (t instanceof Class<?> c) return c;
+            if (t instanceof java.lang.reflect.ParameterizedType p) return (Class<?>) p.getRawType();
+            return Object.class;
+        }
+
+        static java.lang.reflect.Type typeArg(java.lang.reflect.Type t, int i) {
+            if (t instanceof java.lang.reflect.ParameterizedType p) {
+                java.lang.reflect.Type[] args = p.getActualTypeArguments();
+                if (i < args.length) return args[i];
+            }
+            return Object.class;
         }
     }
 

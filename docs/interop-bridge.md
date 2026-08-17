@@ -152,11 +152,38 @@ Participation levels differ, and the docs are honest about it:
   disposes the proxy on provider EOF, so a dead provider deactivates the rust
   consumer reactively (`Active -> Pending`, verified), like py/node/java. Its
   proxy/stub marshal scalars, `Opt`, `List`, `Map`, records, `Result`, and user
-  ADTs via serde. Records/`Map`/`List`/`Opt`/scalars are plain JSON and so
-  cross-language-consistent; `Result` and ADTs use serde's externally-tagged
-  form, which round-trips rust<->rust but would need the other emitters aligned
-  to the same tagging to cross languages. The only unmarshalled type is the
-  opaque host `Value`.
+  ADTs, all in the canonical wire shape below (serde adjacently-tagged
+  `#[serde(tag = "$kind", content = "$value")]` for enums), so every type
+  crosses to every other backend. The only unmarshalled type is the opaque host
+  `Value`.
+
+### Canonical value encoding (the wire)
+
+Every bridge marshals values to the same JSON so any pair of backends interop:
+- scalars: `Int`/`Float` to number, `Bool` to bool, `Str` to string, `Unit` to null;
+- `List[T]` to array; records and `Map[K, V]` to a JSON object `{field/key: value}`;
+- `Opt[T]`: the bare value for `Some(x)`, `null` for `None` (never tagged);
+- a user ADT or `Result[T, E]` value: a tagged object
+  `{"$kind": "<Case>", "$value": <payload>}`, where `<Case>` is the variant name
+  (`Hit`, `Missing`, `Ok`, `Err`, ...) and `<payload>` is the case's single
+  argument encoded canonically (omitted for a nullary case). The `$kind` key is
+  the marker that separates a tagged value from a record (records never carry a
+  `$kind` field).
+
+The shape is self-describing: the case name travels in `$kind`, so a consumer
+rebuilds the native ADT (map `$kind` to the case constructor) without needing
+the method's return type. Each backend's bridge encodes its native ADT to this
+on serve and rebuilds it on receive; `examples/outcome.rvl` is the cross-language
+fixture (a `Directory` returning `Found` and `Result[Row, Str]`).
+
+Implemented and verified in all four backends. `revl run examples/outcome.rvl
+--placement examples/placement/outcome_{pyts,pyrust,pyjava,rustpy}.toml --once`
+crosses a user ADT and a `Result` between languages and rebuilds them natively:
+py to ts/rust/java, and rust to py (a non-Python provider). The ts/rust/java
+provide-method (`_expr`) emitters also learned the `adt` node so a provide
+method can construct an ADT to return (a one-line fix each; py already handled
+it). Goldens stay byte-equal. Cases are single-payload or nullary (as revl ADTs
+and `Result` are); a multi-argument case would extend `$value` to an array.
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a

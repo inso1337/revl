@@ -233,6 +233,26 @@ def _expr(node: object, scope: _Scope) -> str:
         out.append(_template_text(template[pos:]))
         return "`" + "".join(out) + "`"
 
+    if kind == "adt":
+        # tagged ADT value (Result / user variant): `{ kind: "Ok", value: x }`
+        # or `{ kind: "Missing" }`. Opt is not tagged (value | undefined). Same
+        # runtime shape the v3 fn-body emitter produces.
+        case = _string(node["case"])
+        args = node.get("args") or []
+        if args:
+            return f"{{ kind: {case}, value: {_expr(args[0], scope)} }}"
+        return f"{{ kind: {case} }}"
+
+    if kind == "record":
+        fields = ", ".join(
+            f"{_ident(k, 'record field')}: {_expr(v, scope)}"
+            for k, v in node.get("fields") or []
+        )
+        return "{" + fields + "}"
+
+    if kind == "list":
+        return "[" + ", ".join(_expr(item, scope) for item in node.get("items") or []) + "]"
+
     raise EmitError(f"unknown expression kind: {kind!r}")
 
 

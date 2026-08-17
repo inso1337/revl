@@ -5,3 +5,7 @@ spec.json
 real_out/
 real_gen/
 real_spec.json
+adt_out/
+adt_gen/
+adt_prov.json
+adt_cons.json

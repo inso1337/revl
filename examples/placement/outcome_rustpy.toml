@@ -1,0 +1,7 @@
+# Non-Python provider: Rust (cordis-rs) provider (DirSvc), Python consumer.
+[processes.provider]
+backend = "rust"
+components = ["DirSvc"]
+[processes.consumer]
+components = ["DirUser"]
+probe = ["dir.lookup('ada')", "dir.check('ada')"]
