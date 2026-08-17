@@ -266,6 +266,30 @@ def test_cargo_check_compiles_braces_in_templates(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
+    """The A1/G7 exit criterion: emitted components driven by the real
+    cordis-rs runtime. Fixtures in scenarios/probe.rvl, assertions in
+    scenarios/scenarios.rs — G7 LIFO teardown, A8 fail-revert, reactive
+    provider/consumer lifecycle, the A1 boundary, and a concurrent-divert
+    race loop (no torn state). See the header of scenarios.rs for the
+    documented A1 divergence on this runtime."""
+    here = Path(__file__).resolve().parent
+    ir = compile_files([str(here / "scenarios" / "probe.rvl")])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_scenarios"), encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "scenarios.rs").write_text(
+        (here / "scenarios" / "scenarios.rs").read_text(encoding="utf-8"), encoding="utf-8")
+    result = subprocess.run(
+        ["cargo", "test", "--offline"], cwd=tmp_path, text=True,
+        capture_output=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "5 passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
 def test_cargo_check_compiles_v3_host_await_fail_block_effect(tmp_path):
     ir = {
         "ir_version": 3,

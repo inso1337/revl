@@ -1,0 +1,46 @@
+// Runtime-scenario fixtures: every effect/undo/emission calls the Probe
+// service, which the test harness implements as a recorder — the scenarios
+// assert on the exact call order (backends/rust/scenarios/scenarios.rs).
+
+service Probe {
+  fn mark(m: Str) -> Int
+  emission fn send(m: Str) -> Int
+}
+
+service Kv {
+  fn put(k: Str, v: Str)
+}
+
+// G7: two effects, teardown must run the inverses in reverse order.
+component TwoSteps requires probe: Probe {
+  effect probe.mark("do:a") undo probe.mark("undo:a")
+  effect probe.mark("do:b") undo probe.mark("undo:b")
+}
+
+// A1 probe: an await between effects, an emission after the boundary.
+component Boundary requires probe: Probe {
+  effect probe.mark("do:a") undo probe.mark("undo:a")
+  await Job.run("boundary")
+  effect probe.mark("do:b") undo probe.mark("undo:b")
+  emit probe.send("post")
+}
+
+// A8 / L-Raise: activation fails after one accumulated effect.
+component FailsAfter requires probe: Probe {
+  effect probe.mark("do:a") undo probe.mark("undo:a")
+  fail "boom"
+}
+
+// Reactive lifecycle: provider/consumer pair over a real provision.
+component KvProvider requires probe: Probe provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  effect probe.mark("provider:up") undo probe.mark("provider:down")
+  provide kv {
+    fn put(k, v) = store.insert(k, v)
+  }
+}
+
+component KvConsumer requires kv: Kv, probe: Probe {
+  effect probe.mark("consumer:up") undo probe.mark("consumer:down")
+  effect kv.put("who", "consumer") undo kv.put("who", "")
+}
