@@ -65,7 +65,7 @@ spec, and [demo/](demo/) is a live file-watching hot-swap loop — edit a
 `.rvl`, watch the running system recompile and swap it. The 2.0 language
 below builds on this frozen core.
 
-**Status: 2.0 (this branch).** The full language of
+**Status: 2.0.** The full language of
 [docs/syntax-2.0.md](docs/syntax-2.0.md) is implemented on top of the v1
 core: a TypeScript-subset stratum of pure functions (`fn`, `var`/`while`/
 `for-of` local mutation, arrow lambdas with by-value capture), types and
