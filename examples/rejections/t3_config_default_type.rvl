@@ -1,0 +1,12 @@
+// REJECTED — config-default type check: a default literal must fit the
+// declared field type (config typing).
+//
+// expected error:
+//   config field `n` default expects `Int`, got `Str`
+
+service S { fn ping() -> Int }
+
+component C provides s: S {
+  config { n: Int = "not an int" }
+  provide s { fn ping() = 0 }
+}
