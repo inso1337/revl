@@ -59,6 +59,28 @@ def _stop_all(children: dict) -> None:
             proc.kill()
 
 
+_TS_DIR = Path(__file__).resolve().parents[2] / "backends" / "typescript"
+
+
+def _emit_ts_module(ir: dict, tmp: Path) -> str:
+    """Emit the cordis-ts module for a node-placed process, into
+    backends/typescript/_gen/ so its `../runtime.ts` / `cordis` imports
+    resolve. Returns the module path."""
+    gen = _TS_DIR / "_gen"
+    gen.mkdir(exist_ok=True)
+    ir_json = tmp / "ir.json"
+    ir_json.write_text(json.dumps(ir), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RevlError(f"TS emit failed:\n{result.stderr.strip()}")
+    module = gen / f"mod_{tmp.name}.ts"
+    module.write_text(result.stdout, encoding="utf-8")
+    return str(module)
+
+
 def run_placement(files, placement_path: str, once: bool = False) -> int:
     try:
         ir = compile_files(files)
@@ -109,6 +131,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     specs: dict[str, dict] = {}
     for pname, pconf in processes.items():
+        backend = pconf.get("backend", "py")
+        if backend not in ("py", "node"):
+            print(f"error: process {pname!r} has unsupported backend {backend!r} (py, node)", file=sys.stderr)
+            return 1
         proxies: dict[str, dict] = {}
         for key, service in requires[pname].items():
             if key in provides[pname]:
@@ -123,6 +149,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         local = [c for c in load_order if placed.get(c) == pname]
         spec = {
             "name": pname,
+            "backend": backend,
             "files": [str(f) for f in files],
             "components": local,
             "config": config,
@@ -133,6 +160,13 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         if serve_keys:
             spec["serve"] = {"socket": sockets[pname], "keys": serve_keys}
         specs[pname] = spec
+
+    ts_module = None
+    if any(spec["backend"] == "node" for spec in specs.values()):
+        ts_module = _emit_ts_module(ir, tmp)
+        for spec in specs.values():
+            if spec["backend"] == "node":
+                spec["module"] = ts_module
 
     summary = "  ".join(f"{p}=[{','.join(specs[p]['components'])}]" for p in processes)
     print(f"placement: {summary}", flush=True)
@@ -145,10 +179,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for pname, spec in specs.items():
         spec_file = tmp / f"{pname}.spec.json"
         spec_file.write_text(json.dumps(spec), encoding="utf-8")
+        if spec["backend"] == "node":
+            cmd = ["node", str(_TS_DIR / "placement_runner.ts"), str(spec_file)]
+            proc_env = None  # node ignores PYTHONPATH; inherit the environment
+        else:
+            cmd = [sys.executable, "-m", "revl._process_runner", str(spec_file)]
+            proc_env = env
         children[pname] = subprocess.Popen(
-            [sys.executable, "-m", "revl._process_runner", str(spec_file)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=env, text=True,
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=proc_env, text=True,
         )
 
     up: set[str] = set()
@@ -186,4 +225,6 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         _stop_all(children)
         for thread in threads:
             thread.join(timeout=2)
+        if ts_module and os.path.exists(ts_module):
+            os.unlink(ts_module)
     return rc

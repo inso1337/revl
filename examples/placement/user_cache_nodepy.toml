@@ -1,0 +1,12 @@
+# Reverse of user_cache_pynode: PgDatabase on Node (cordis-ts), UserCache in
+# Python. Exercises the TS-side stub (bridge.ts `serve`) and a Python proxy.
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+backend = "node"
+components = ["PgDatabase"]
+
+[processes.consumer]
+components = ["UserCache"]
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]
