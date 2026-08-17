@@ -1,5 +1,7 @@
 """v2.0: type/fn lowering to IR v3 and cordis-py emission (syntax-2.0 §2–§3)."""
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -87,3 +89,89 @@ def test_duplicate_field_rejected():
 def test_duplicate_case_rejected():
     with pytest.raises(RevlError, match="duplicate case `NotFound`"):
         compile_source("type T = A | NotFound | NotFound")
+
+
+def test_test_block_lowers_and_emits_runnable_python():
+    ir, ns = _compile_emit(
+        """
+        verified fn add(a: Int, b: Int) -> Int { return a + b }
+
+        test "add works" {
+          assert add(1, 2) == 3
+        }
+        """
+    )
+    assert ir["ir_version"] == 3
+    assert ir["functions"][0]["verified"] is True
+    assert ir["tests"] == [
+        {
+            "name": "add works",
+            "body": [
+                {
+                    "step": "assert",
+                    "expr": {
+                        "kind": "bin",
+                        "op": "==",
+                        "left": {
+                            "kind": "call",
+                            "callee": {"kind": "var", "name": "add"},
+                            "args": [{"kind": "lit", "value": 1}, {"kind": "lit", "value": 2}],
+                        },
+                        "right": {"kind": "lit", "value": 3},
+                    },
+                }
+            ],
+        }
+    ]
+    assert ns["REVL_TESTS"][0][0] == "add works"
+    ns["REVL_TESTS"][0][1]()  # passes
+
+
+def test_failing_test_assert_is_reported():
+    _, ns = _compile_emit('test "boom" { assert 1 == 2 }')
+    name, test_fn = ns["REVL_TESTS"][0]
+    assert name == "boom"
+    with pytest.raises(AssertionError):
+        test_fn()
+
+
+def test_test_block_can_use_host_builtins():
+    _, ns = _compile_emit(
+        """
+        test "map roundtrip" {
+          let m = Map.new()
+          m.insert("k", "v")
+          assert m.get("k") == "v"
+        }
+        """
+    )
+    ns["REVL_TESTS"][0][1]()
+
+
+def test_revl_test_cli_exit_codes(tmp_path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+
+    passing = tmp_path / "passing.rvl"
+    passing.write_text('test "passes" { assert true }', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "revl", "test", str(passing)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PASS passes" in result.stdout
+
+    failing = tmp_path / "failing.rvl"
+    failing.write_text('test "fails" { assert 1 == 2 }', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "revl", "test", str(failing)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "FAIL fails" in result.stdout

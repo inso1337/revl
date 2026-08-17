@@ -17,6 +17,7 @@ import keyword
 
 from .errors import RevlError
 from .parser import (
+    AssertStmt,
     AssignStmt,
     AwaitStmt,
     ComponentDecl,
@@ -47,6 +48,7 @@ from .parser import (
     ProvideStmt,
     ReturnStmt,
     ServiceDecl,
+    TestDecl,
     TypeDecl,
 )
 
@@ -155,7 +157,107 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
     return types
 
 
+def _fn_call_graph(program: Program) -> dict[str, set[str]]:
+    """Direct-call graph over the file's functions.
+
+    Host roots and constructors are not function declarations, so they are
+    ignored: only `ExprVar` callees whose name is another `fn` are edges.
+    """
+    fn_names = {fn.name for fn in program.fn_decls}
+    graph = {fn.name: set() for fn in program.fn_decls}
+
+    def collect_expr(expr) -> None:
+        if isinstance(expr, ExprCall):
+            if isinstance(expr.callee, ExprVar) and expr.callee.name in fn_names:
+                graph[decl.name].add(expr.callee.name)
+            collect_expr(expr.callee)
+            for arg in expr.args:
+                collect_expr(arg)
+        elif isinstance(expr, ExprBin):
+            collect_expr(expr.left)
+            collect_expr(expr.right)
+        elif isinstance(expr, ExprUn):
+            collect_expr(expr.operand)
+        elif isinstance(expr, ExprField):
+            collect_expr(expr.target)
+        elif isinstance(expr, ExprIndex):
+            collect_expr(expr.target)
+            collect_expr(expr.index)
+        elif isinstance(expr, ExprIf):
+            collect_expr(expr.cond)
+            collect_expr(expr.then)
+            collect_expr(expr.otherwise)
+        elif isinstance(expr, ExprRecord):
+            for _, value in expr.fields:
+                collect_expr(value)
+        elif isinstance(expr, ExprList):
+            for item in expr.items:
+                collect_expr(item)
+        elif isinstance(expr, ExprArrow):
+            collect_expr(expr.body)
+
+    def collect_stmt(stmt) -> None:
+        if isinstance(stmt, LetStmt):
+            collect_expr(stmt.value)
+        elif isinstance(stmt, AssignStmt):
+            collect_expr(stmt.value)
+        elif isinstance(stmt, ReturnStmt):
+            if stmt.expr is not None:
+                collect_expr(stmt.expr)
+        elif isinstance(stmt, IfStmt):
+            collect_expr(stmt.cond)
+            for branch in (stmt.then, stmt.otherwise or []):
+                for child in branch:
+                    collect_stmt(child)
+        elif isinstance(stmt, (ExprStmt, AssertStmt)):
+            collect_expr(stmt.expr)
+
+    for decl in program.fn_decls:
+        for stmt in decl.body:
+            collect_stmt(stmt)
+    return graph
+
+
+def _reaches_self(start: str, graph: dict[str, set[str]]) -> bool:
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        for succ in graph.get(node, ()):
+            if succ == start:
+                return True
+            if succ not in seen:
+                seen.add(succ)
+                stack.append(succ)
+    return False
+
+
+def _check_verified_totality(program: Program, filename: str) -> None:
+    """Totality gate for `verified fn` (syntax-2.0 §7).
+
+    This first cut is deliberately conservative: a verified function may not
+    participate in any cycle in the direct-call graph, because the checker
+    cannot currently prove structural descent. Unbounded `while`/`for` loops
+    are rejected by the parser until bounded forms land.
+    """
+    verified = [fn for fn in program.fn_decls if fn.verified]
+    if not verified:
+        return
+    graph = _fn_call_graph(program)
+    for decl in verified:
+        if _reaches_self(decl.name, graph):
+            raise RevlError(
+                filename,
+                decl.line,
+                f"verified fn `{decl.name}` is not total: it participates in "
+                "direct or mutual recursion (verified totality, syntax-2.0 §7)",
+                hint="use structural recursion on a structurally smaller value, "
+                     "or a syntactically bounded loop",
+            )
+
+
 def _lower_fns(program: Program, filename: str) -> list:
+    _check_verified_totality(program, filename)
     callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
     fns: list[dict] = []
     seen: set[str] = set()
@@ -172,14 +274,36 @@ def _lower_fns(program: Program, filename: str) -> list:
         body: list[dict] = []
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, body, filename)
-        fns.append({
+        entry = {
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
             "returns": decl.returns,
             "public": decl.public,
             "body": body,
-        })
+        }
+        if decl.verified:
+            entry["verified"] = True
+        fns.append(entry)
     return fns
+
+
+def _lower_tests(program: Program, filename: str) -> list:
+    """Lower `test` blocks to IR v3 test units (syntax-2.0 §7)."""
+    if not program.tests:
+        return []
+    callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
+    tests: list[dict] = []
+    seen: set[str] = set()
+    for decl in program.tests:
+        if decl.name in seen:
+            raise RevlError(filename, decl.line, f"duplicate test `{decl.name}`")
+        seen.add(decl.name)
+        scope: dict[str, bool] = {}
+        body: list[dict] = []
+        for stmt in decl.body:
+            _lower_pure_stmt(stmt, scope, callables, body, filename)
+        tests.append({"name": decl.name, "body": body})
+    return tests
 
 
 def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: str) -> None:
@@ -216,6 +340,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, body: list, filename: st
                      "then": then, "else": otherwise})
     elif isinstance(stmt, ExprStmt):
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, filename)})
+    elif isinstance(stmt, AssertStmt):
+        body.append({"step": "assert", "expr": _lower_pure_expr(stmt.expr, scope, callables, filename)})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
 
@@ -309,9 +435,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     types = _lower_type_decls(program, program.filename)
     fns = _lower_fns(program, program.filename)
+    tests = _lower_tests(program, program.filename)
 
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
-    uses_v3 = bool(types) or bool(fns)
+    uses_v3 = bool(types) or bool(fns) or bool(tests)
 
     result = {
         "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
@@ -335,6 +462,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["types"] = types
     if fns:
         result["functions"] = fns
+    if tests:
+        result["tests"] = tests
     return result
 
 
