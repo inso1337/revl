@@ -380,7 +380,7 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
         return f"{name}({args})"
     if kind in {
         "var", "bin", "un", "field", "index", "if",
-        "record", "list", "arrow", "builtin",
+        "record", "list", "arrow", "builtin", "adt",
     }:
         return _v3_expr(node, env.v3_ctx())
     raise EmitError(f"unsupported expression node in Rust backend: {kind!r}")
@@ -1515,6 +1515,7 @@ def _emit_v3_types(types: dict) -> list[str]:
             out.append("}")
         elif spec.get("kind") == "variant":
             out.append("#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]")
+            out.append('#[serde(tag = "$kind", content = "$value")]')
             out.append(f"pub enum {name} {{")
             for case in spec.get("cases") or []:
                 cname = _ident(case.get("name"), "case name")
@@ -1672,10 +1673,46 @@ def _bridge_serde_ok(rtype: str) -> bool:
     return not re.search(r"\bValue\b", rtype)
 
 
+def _split_result(rtype: str):
+    """`Result<T, E>` -> (T, E), else None. std `Result` serializes
+    externally-tagged, so the bridge encodes it to the canonical
+    `{"$kind","$value"}` by hand rather than via serde."""
+    match = re.match(r"^Result<(.+)>$", rtype.strip())
+    if not match:
+        return None
+    inner, depth = match.group(1), 0
+    for i, ch in enumerate(inner):
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return inner[:i].strip(), inner[i + 1:].strip()
+    return None
+
+
+def _result_ok_err(value: str, ok_ty: str, err_ty: str) -> str:
+    """Rust expr building a std Result from a canonical `{"$kind","$value"}`."""
+    payload = f'_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
+    return (f'{{ let _r = {value}.clone(); '
+            f'if _r.get("$kind").and_then(|k| k.as_str()) == Some("Ok") {{ '
+            f'Ok(serde_json::from_value::<{ok_ty}>({payload}).expect("bridge: decode Ok")) }} '
+            f'else {{ Err(serde_json::from_value::<{err_ty}>({payload}).expect("bridge: decode Err")) }} }}')
+
+
+def _result_to_json(call: str) -> str:
+    """Rust expr encoding a std Result to the canonical `{"$kind","$value"}`."""
+    return (f'{{ match {call} {{ '
+            f'Ok(_v) => serde_json::json!({{"$kind": "Ok", "$value": serde_json::to_value(&_v).unwrap_or(serde_json::Value::Null)}}), '
+            f'Err(_e) => serde_json::json!({{"$kind": "Err", "$value": serde_json::to_value(&_e).unwrap_or(serde_json::Value::Null)}}) }} }}')
+
+
 def _bridge_arg_ser(name: str, rtype: str) -> str:
     """Serialize a proxy method argument to a serde_json::Value."""
     if rtype in ("String", "i64", "f64", "bool"):
         return f"serde_json::json!({name})"
+    if _split_result(rtype):
+        return _result_to_json(name)
     if _bridge_serde_ok(rtype):
         return f"serde_json::to_value(&{name}).unwrap_or(serde_json::Value::Null)"
     return "serde_json::Value::Null"  # opaque Value param: not marshalled
@@ -1691,6 +1728,9 @@ def _bridge_arg_extract(index: int, rtype: str) -> str | None:
         return f"args[{index}].as_f64().unwrap_or(0.0)"
     if rtype == "bool":
         return f"args[{index}].as_bool().unwrap_or(false)"
+    result = _split_result(rtype)
+    if result:
+        return _result_ok_err(f"args[{index}]", result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>(args[{index}].clone()).expect("bridge: decode arg")'
     return None  # opaque Value param: this method is not served
@@ -1712,6 +1752,9 @@ def _bridge_ret_deser(value: str, rtype: str) -> str | None:
     }
     if rtype in table:
         return table[rtype]
+    result = _split_result(rtype)
+    if result:
+        return _result_ok_err(value, result[0], result[1])
     if _bridge_serde_ok(rtype):
         return f'serde_json::from_value::<{rtype}>({value}.clone()).expect("bridge: decode return")'
     return None  # opaque cordis Value: not marshallable
@@ -1727,6 +1770,8 @@ def _bridge_ret_ser(call: str, rtype: str) -> str:
         return (f"{{ let _r = {call}; serde_json::json!(_r.iter().map(|v| "
                 f"v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default())"
                 f".collect::<Vec<_>>()) }}")
+    if _split_result(rtype):
+        return _result_to_json(call)
     if _bridge_serde_ok(rtype):
         return f"{{ let _r = {call}; serde_json::to_value(&_r).unwrap_or(serde_json::Value::Null) }}"
     return f"{{ let _ = {call}; serde_json::Value::Null }}"  # opaque Value return

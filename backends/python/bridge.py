@@ -25,11 +25,53 @@ same reactive path demo/live.py shows for a local swap, now spanning processes.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import socket
 import threading
 import time
+
+
+# ---------------------------------------------------------------------------
+# canonical value codec (docs/interop-bridge.md "Canonical value encoding")
+# ---------------------------------------------------------------------------
+
+
+def _encode_value(value):
+    """Encode a revl value for the wire. ADT / Result case instances become
+    ``{"$kind": Case, "$value": payload}`` (``$value`` omitted for a nullary
+    case); records (dicts), lists, scalars, and Opt (value | None) pass through
+    unchanged. The ``$kind`` marker is what separates a tagged value from a
+    record. Type-free: it introspects the native instance."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_encode_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _encode_value(item) for key, item in value.items()}
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _encode_value(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    # a native ADT / Result case instance (an emitted case class)
+    tagged = {"$kind": type(value).__name__}
+    if hasattr(value, "value"):
+        tagged["$value"] = _encode_value(value.value)
+    return tagged
+
+
+def _decode_value(value, module):
+    """Inverse of `_encode_value`: rebuild native ADT / Result case instances
+    from `{"$kind", "$value"}` using `module`'s case classes; records stay
+    dicts. With no module a tagged value passes through as a plain dict (the
+    caller does not cross ADTs)."""
+    if isinstance(value, list):
+        return [_decode_value(item, module) for item in value]
+    if isinstance(value, dict):
+        if "$kind" in value and module is not None:
+            case = getattr(module, value["$kind"])
+            return case(_decode_value(value["$value"], module)) if "$value" in value else case()
+        return {key: _decode_value(item, module) for key, item in value.items()}
+    return value
 
 
 def _connect(path: str, attempts: int = 100, delay: float = 0.05) -> socket.socket:
@@ -65,7 +107,7 @@ async def _invoke(ctx, keyset, req: dict) -> dict:
         result = getattr(service, method)(*args)
         if inspect.isawaitable(result):
             result = await result
-        return {"ok": True, "value": result}
+        return {"ok": True, "value": _encode_value(result)}
     except Exception as exc:  # marshal the failure across the seam (leak 3)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -109,10 +151,11 @@ class _Client:
     are called synchronously in cordis-py, so the RPC round-trip is blocking;
     the monitor connection exists only to observe the provider's death."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, module=None) -> None:
         self.rpc = _connect(path)
         self._io = self.rpc.makefile("rwb")
         self.monitor = _connect(path)
+        self._module = module  # emitted module: its case classes rebuild ADTs
 
     def call(self, key: str, method: str, args):
         self._io.write((json.dumps({"key": key, "method": method, "args": list(args)}) + "\n").encode())
@@ -123,7 +166,7 @@ class _Client:
         reply = json.loads(line)
         if not reply.get("ok"):
             raise RuntimeError(reply.get("error", "remote error"))
-        return reply.get("value")
+        return _decode_value(reply.get("value"), self._module)
 
     def watch(self, on_lost) -> threading.Thread:
         """Call `on_lost()` once, from a daemon thread, when the provider dies
@@ -166,11 +209,12 @@ class _Proxy:
         raise AttributeError(name)
 
 
-def proxy_component(key: str, methods, path: str) -> dict:
+def proxy_component(key: str, methods, path: str, module=None) -> dict:
     """A cordis component that provides `key` via a proxy forwarding to the
-    stub at `path`. Loads with no requirements of its own; its `_client` is
-    exposed so the driver can `watch()` for peer death and dispose the fiber."""
-    client = _Client(path)
+    stub at `path`. `module` (the emitted module) lets the proxy rebuild ADT /
+    Result returns into native case instances. Its `_client` is exposed so the
+    driver can `watch()` for peer death and dispose the fiber."""
+    client = _Client(path, module)
 
     def apply(ctx, config=None):
         proxy = _Proxy(client, key, methods)
