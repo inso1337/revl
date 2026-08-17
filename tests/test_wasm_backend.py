@@ -3,6 +3,7 @@ against the cordis-wasm runtime (skips when that project/venv is absent)."""
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files, compile_source  # noqa: E402
 
 CORDIS_WASM_PY = Path.home() / "Projects" / "cordis-wasm" / ".venv" / "bin" / "python"
+
+needs_wasmtime = pytest.mark.skipif(
+    shutil.which("wasmtime") is None, reason="wasmtime not installed")
 
 
 def _emitter():
@@ -101,6 +105,165 @@ def test_tier_restrictions_are_hard_errors():
     }
     with pytest.raises(emitter.EmitError, match="await"):
         emitter.emit(ir)
+
+
+# ---------------------------------------------------------------------------
+# the component-path renderer: constructs that used to be "unknown expression
+# kind X". Emitting them is not the claim — executing them is, so every case
+# below is invoked on real wasmtime.
+# ---------------------------------------------------------------------------
+
+_SVC = "service S { fn f(x: Int) -> Int }\n"
+_PROVIDE = "component C provides s: S {{ provide s {{ fn f(x) {} }} }}"
+
+
+def _component(body: str) -> str:
+    return _SVC + _PROVIDE.format(body)
+
+
+#: (label, source, argument, expected result)
+_COMPONENT_CASES = [
+    # `if` (ternary) — i32 select/if is native here
+    ("ternary-then", _component("= x > 0 ? 11 : 22"), 5, 11),
+    ("ternary-else", _component("= x > 0 ? 11 : 22"), -5, 22),
+    # `fn` call nodes: a component body calling a top-level `fn`
+    ("fn-call", "fn double(n: Int) -> Int { return n * 2 }\n"
+     + _component("= double(x)"), 21, 42),
+    ("fn-recursion",
+     "fn fib(n: Int) -> Int { if (n < 2) { return n }  return fib(n - 1) + fib(n - 2) }\n"
+     + _component("= fib(x)"), 10, 55),
+    ("fn-while",
+     "fn count(n: Int) -> Int { var i = 0  while (i < n) { i += 1 }  return i }\n"
+     + _component("= count(x)"), 7, 7),
+    ("fn-arrow", "fn apply(n: Int) -> Int { let g = v => v + 1  return g(n) }\n"
+     + _component("= apply(x)"), 41, 42),
+    ("fn-verified", "verified fn inc(n: Int) -> Int { return n + 1 }\n"
+     + _component("= inc(x)"), 41, 42),
+    ("fn-for-of",
+     "fn total(xs: List[Int]) -> Int { var t = 0  for (v of xs) { t += v }  return t }\n"
+     + _component("{ let xs = [1, 2, 3]  return total(xs) }"), 0, 6),
+    # list / record / index / stdlib methods, on the linear-memory model
+    ("list-index", _component("{ let xs = [10, 20, 30]  return xs[1] }"), 0, 20),
+    ("list-index-dynamic", _component("{ let xs = [10, 20, 30]  return xs[x] }"), 2, 30),
+    ("list-length", _component("{ let xs = [1, 2, 3, 4]  return xs.length() }"), 0, 4),
+    ("record-field", "type R = { a: Int, b: Int }\n"
+     + _component("{ let r = { a: x, b: 5 }  return r.a + r.b }"), 37, 42),
+    ("template-in-module", _component("{ let m = `n=${x}!`  return m.length() }"), 123, 6),
+    # `match` in a method body (legal since ff0d76e)
+    ("match-payload", "type O = Found(Int) | Missing\n"
+     + _component("{ let o = Found(x)  return match o { Found(v) => v * 2, Missing => 0 } }"),
+     21, 42),
+    ("match-unit-case", "type O = Found(Int) | Missing\n"
+     + _component("{ let o = Missing  return match o { Found(v) => v * 2, Missing => 99 } }"),
+     21, 99),
+    # `??` on an Opt that never leaves the module
+    ("nullish-some", _component("{ let o = Some(x)  return o ?? 7 }"), 42, 42),
+    ("nullish-none", _component("{ let o = None  return o ?? 7 }"), 42, 7),
+]
+
+
+def _invoke(tmp_path, label, wat, export, *args):
+    path = tmp_path / f"{label}.wat"
+    path.write_text(wat, encoding="utf-8")
+    out = subprocess.run(
+        ["wasmtime", "--invoke", export, str(path), *[str(a) for a in args]],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, f"{label}: {out.stderr}"
+    return out.stdout.strip().splitlines()
+
+
+@needs_wasmtime
+@pytest.mark.parametrize("label,source,arg,expected", _COMPONENT_CASES,
+                         ids=[case[0] for case in _COMPONENT_CASES])
+def test_component_expressions_run_on_wasmtime(tmp_path, label, source, arg, expected):
+    wat = _emitter().emit(compile_source(source))["C"]
+    output = _invoke(tmp_path, label, wat, "provide:s.f", arg)
+    assert int(output[-1]) == expected
+
+
+@needs_wasmtime
+def test_bare_return_lowers_a_void_operation(tmp_path):
+    """`{"step": "return", "expr": null}` — the natural body of an operation
+    the service declares with no return type."""
+    wat = _emitter().emit(compile_source(
+        "service V { fn f(x: Int) }\n"
+        "component C provides s: V { provide s { fn f(x) { return } } }"
+    ))["C"]
+    assert "(return)" in wat
+    assert _invoke(tmp_path, "bare-return", wat, "provide:s.f", 1) == []
+
+
+@needs_wasmtime
+def test_called_fn_is_emitted_into_the_component_module(tmp_path):
+    """A component is one self-contained artifact: the `fn`s it calls are
+    lowered into its own module so `call $name` resolves, transitively."""
+    wat = _emitter().emit(compile_source(
+        "fn inner(n: Int) -> Int { return n + 1 }\n"
+        "fn outer(n: Int) -> Int { return inner(n) * 2 }\n"
+        "fn unused(n: Int) -> Int { return n }\n"
+        + _component("= outer(x)")
+    ))["C"]
+    assert "(func $outer" in wat and "(func $inner" in wat
+    assert "(func $unused" not in wat        # only the closure, not the corpus
+    assert int(_invoke(tmp_path, "closure", wat, "provide:s.f", 20)[-1]) == 42
+
+
+@needs_wasmtime
+def test_activation_steps_declare_their_own_scratch_locals(tmp_path):
+    """A delegated expression inside a body segment belongs to `activate_step`,
+    not to a method — its scratch slots have to be declared there or the module
+    does not validate."""
+    wat = _emitter().emit(compile_source(
+        "service Kv { fn set(k: Int, v: Int) -> Int }\n" + _SVC
+        + "component C requires kv: Kv provides s: S {\n"
+          "  effect kv.set(1, [7, 8, 9].length()) undo kv.set(1, 0)\n"
+          "  provide s { fn f(x) { let xs = [1, 2]  return xs.length() + x } }\n"
+          "}"
+    ))["C"]
+    assert '(func (export "activate_step") (result i32) (local $__revl_tmp i32)' in wat
+    assert '(func (export "deactivate") (local $__revl_tmp i32)' in wat
+    path = tmp_path / "activation.wat"
+    path.write_text(wat, encoding="utf-8")
+    # it imports coeffects, so validate by compiling rather than invoking
+    out = subprocess.run(["wasmtime", "compile", str(path), "-o", str(tmp_path / "o.cwasm")],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+
+
+def test_plain_i32_components_declare_no_memory():
+    """Linear memory is pulled in only when a value needs it — an arithmetic
+    component emits exactly the module it always did (the goldens depend on
+    this)."""
+    wat = _emitter().emit(compile_source(_component("= x + 1 * 2")))["C"]
+    assert "(memory" not in wat and "$alloc" not in wat
+    wat = _emitter().emit(compile_source(_component("{ let xs = [1]  return xs.length() }")))["C"]
+    assert '(memory (export "memory") 1)' in wat
+
+
+def test_boundary_refusals_say_why_not_unknown_kind():
+    """The distinction that matters: an unhandled node is a bug, a value that
+    cannot cross the i32 service boundary is this tier's design."""
+    emitter = _emitter()
+    for source, expected in [
+        # a compound value returned from a service operation
+        (_component("{ let xs = [1, 2]  return xs }"), "cannot cross this tier's i32 service boundary"),
+        # a compound value passed to a coeffect
+        ("service B { fn g(n: Int) -> Int }\n" + _SVC
+         + "component C requires b: B provides s: S "
+           "{ provide s { fn f(x) { let xs = [1]  return b.g(xs) } } }",
+         "cannot cross this tier's i32 coeffect boundary"),
+        # an extern with no @wasm body is not a missing case either
+        ("extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n }\n"
+         + _component("= h(x)"), "has no @wasm body"),
+    ]:
+        with pytest.raises(emitter.EmitError, match=expected):
+            emitter.emit(compile_source(source))
+        # never the bug-shaped message
+        try:
+            emitter.emit(compile_source(source))
+        except emitter.EmitError as error:
+            assert "unknown expression kind" not in str(error)
 
 
 @pytest.mark.skipif(not CORDIS_WASM_PY.exists(), reason="cordis-wasm venv not available")
