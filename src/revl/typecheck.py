@@ -467,4 +467,27 @@ def infer_ir(node, tenv: dict, types: dict, services: dict) -> str | None:
         lt = infer_ir(node.get("left"), tenv, types, services)
         rt = infer_ir(node.get("right"), tenv, types, services)
         return _binop_type(node.get("op"), lt, rt, None, 0)
+    if kind == "un":
+        if node.get("op") == "!":
+            return "Bool"
+        return infer_ir(node.get("operand"), tenv, types, services)
+    if kind == "len":
+        return "Int"
+    if kind == "field":
+        target = infer_ir(node.get("target"), tenv, types, services)
+        spec = types.get(target or "")
+        if spec is not None and spec.get("kind") == "record":
+            return spec.get("fields", {}).get(node.get("name"))
+        return None
+    if kind == "index":
+        target = infer_ir(node.get("target"), tenv, types, services)
+        thead, targs = parse_type(target)
+        if thead == "List":
+            return targs[0] if targs else None
+        if thead == "Str":
+            return "Str"
+        return None
+    if kind == "if":
+        return join(infer_ir(node.get("then"), tenv, types, services),
+                    infer_ir(node.get("else"), tenv, types, services))
     return None

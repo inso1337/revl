@@ -176,6 +176,11 @@ class Env:
 # v2.0: type declarations & pure functions (docs/syntax-2.0.md §2–§3)
 # ---------------------------------------------------------------------------
 
+# builtin (non-record) type heads: destructuring a value of one of these with
+# a record/list pattern is a type error, not a host pass-through
+_BUILTIN_NONRECORD = {"Str", "Int", "Bool", "Float", "Bytes", "Unit",
+                      "List", "Map", "Opt", "Result"}
+
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
 _HOST_CALLABLES = {"Map", "Pool", "Job"}
 # Opt/Result constructors, recognized so `Some(x)`/`Ok(r)` resolve (syntax-2.0 §2)
@@ -739,6 +744,11 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{value_type}` is not a record",
                 )
+        elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
+            raise RevlError(
+                filename, stmt.line,
+                f"record destructuring requires a record, but `{value_type}` is not a record",
+            )
             fields = spec.get("fields", {})
             for name in names:
                 if name not in fields:
@@ -771,6 +781,14 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             if name in scope:
                 raise RevlError(filename, stmt.line, f"`{name}` is already declared in this function")
         value_type = _expr_static_type(stmt.value, type_env, types)
+        if value_type is not None and parse_type(value_type)[0] != "List" and (
+            types.get(value_type) is not None
+            or parse_type(value_type)[0] in _BUILTIN_NONRECORD
+        ):
+            raise RevlError(
+                filename, stmt.line,
+                f"list destructuring requires a `List[...]`, but `{value_type}` is not a list",
+            )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         element_type = _type_arg(value_type, "List")
         for name in pattern.binds:
@@ -926,6 +944,14 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             })
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, Interp):
+        # G1: names interpolated in `${name}` are real references and must
+        # resolve, exactly like a bare ExprVar (the component-body path
+        # already checks these via _lower_postfix).
+        for kind, value in expr.parts:
+            if kind == "var" and value not in scope and value not in callables:
+                raise RevlError(filename, getattr(expr, "line", 1),
+                                f"`{value}` is not declared in this function",
+                                hint="declare it with `let`/`var` or add it as a parameter (G1)")
         return {"kind": "interp", "parts": expr.parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
 
@@ -1347,10 +1373,34 @@ def _lower_component_if(stmt: IfStmt, env: Env, callables: set) -> dict:
     return step
 
 
+def _config_default_type(value) -> str | None:
+    """Surface type of a config-default literal (bool before int: bool is an
+    int subclass)."""
+    if isinstance(value, bool):
+        return "Bool"
+    if isinstance(value, int):
+        return "Int"
+    if isinstance(value, float):
+        return "Float"
+    if isinstance(value, str):
+        return "Str"
+    return None
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
+
+    # a config default must fit its declared field type (config typing);
+    # a `null` default is the documented optional exception and is allowed
+    for cfg in comp.config:
+        if cfg.default is None:
+            continue
+        lit_type = _config_default_type(cfg.default)
+        if lit_type is not None and not compatible(cfg.type, lit_type):
+            raise mismatch(filename, cfg.line,
+                           f"config field `{cfg.name}` default", cfg.type, lit_type)
 
     provides = {}
     for key, svc, line in comp.provides:
