@@ -19,6 +19,7 @@ from .errors import RevlError
 from .typecheck import (
     CASES_KEY,
     FNS_KEY,
+    _SIZED_HEADS,
     check_ast,
     check_type_wellformed,
     compatible,
@@ -624,8 +625,13 @@ def _lower_externs(program: Program, filename: str) -> list:
     return externs
 
 
-def _lower_tests(program: Program, filename: str) -> list:
-    """Lower `test` blocks to IR v3 test units (syntax-2.0 §7)."""
+def _lower_tests(program: Program, filename: str, types: dict) -> list:
+    """Lower `test` blocks to IR v3 test units (syntax-2.0 §7).
+
+    `types` (the case/signature table) is threaded through so a `test` body is
+    the same expression scope a `fn` body is: nullary user-ADT constructors
+    resolve as values (`let s = FirstTime`) and statements are type-checked.
+    """
     if not program.tests:
         return []
     callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
@@ -636,9 +642,10 @@ def _lower_tests(program: Program, filename: str) -> list:
             raise RevlError(filename, decl.line, f"duplicate test `{decl.name}`")
         seen.add(decl.name)
         scope: dict[str, bool] = {}
+        type_env: dict[str, str] = {}
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, {}, body, filename)
+            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
         tests.append({"name": decl.name, "body": body})
     return tests
 
@@ -1075,7 +1082,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename)
-    tests = _lower_tests(program, program.filename)
+    tests = _lower_tests(program, program.filename, types)
 
     components = []
     seen = set()
@@ -1305,6 +1312,20 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                                              callables, pure_only),
                         "args": args}
             if root in scope:
+                # A method on a local that is a *known* stdlib-bearing value
+                # (Str/List/Bytes) must be a builtin — builtins were already
+                # handled above, so a non-builtin here is a typo/misuse, not a
+                # host method. Receivers of unknown/host type infer to None and
+                # stay lenient (host provenance is exempt — docs/stdlib-2.0.md).
+                recv_t = infer_ir({"kind": "name", "id": scope[root]},
+                                  env.type_env, env.types, env.services)
+                if parse_type(recv_t)[0] in _SIZED_HEADS:
+                    raise RevlError(
+                        filename, line,
+                        f"no builtin method `{method}` on `{recv_t}` — the stdlib surface is "
+                        f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
+                        hint="records carry data, not methods; call functions as `f(x)` (G6)",
+                    )
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
@@ -1381,17 +1402,25 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
 def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables: set,
                                 mutables: set[str], out: list) -> None:
     filename = env.filename
+
+    def _sweep(node, line):
+        # Run the raising type oracle over a lowered setup node (HOLE 3(c) /
+        # HOLE 2): definite operator/builtin misuse in stratum-1 setup code now
+        # raises, exactly as it does in a `fn` body. Unknown/host operands infer
+        # to None and are left alone. Returns the inferred type (or None).
+        return infer_ir(node, env.type_env, env.types, env.services, filename, line)
+
     if isinstance(stmt, LetStmt):
         safe = env.bind_local(stmt.name, stmt.line)
         scope[stmt.name] = safe
         if stmt.mutable:
             mutables.add(stmt.name)
-        out.append({
-            "step": "let",
-            "name": safe,
-            "value": _lower_component_pure_expr(stmt.value, env, scope, callables,
-                                                pure_only=True),
-        })
+        value = _lower_component_pure_expr(stmt.value, env, scope, callables,
+                                           pure_only=True)
+        inferred = _sweep(value, stmt.line)
+        if inferred is not None:
+            env.type_env[safe] = inferred
+        out.append({"step": "let", "name": safe, "value": value})
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
             raise RevlError(filename, stmt.line,
@@ -1401,19 +1430,21 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
                             hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
-        out.append({
-            "step": "assign",
-            "name": scope[stmt.name],
-            "value": _lower_component_pure_expr(stmt.value, env, scope, callables,
-                                                pure_only=True),
-        })
+        value = _lower_component_pure_expr(stmt.value, env, scope, callables,
+                                           pure_only=True)
+        _sweep(value, stmt.line)
+        out.append({"step": "assign", "name": scope[stmt.name], "value": value})
     elif isinstance(stmt, ExprStmt):
-        out.append({
-            "step": "expr",
-            "expr": _lower_component_pure_expr(stmt.expr, env, scope, callables,
-                                               pure_only=True),
-        })
+        expr = _lower_component_pure_expr(stmt.expr, env, scope, callables,
+                                          pure_only=True)
+        _sweep(expr, stmt.line)
+        out.append({"step": "expr", "expr": expr})
     elif isinstance(stmt, IfStmt):
+        cond = _lower_component_pure_expr(stmt.cond, env, scope, callables,
+                                          pure_only=True)
+        cond_t = _sweep(cond, stmt.line)
+        if cond_t is not None and cond_t != "Bool":
+            raise mismatch(filename, stmt.line, "`if` condition", "Bool", cond_t)
         then: list[dict] = []
         for s in stmt.then:
             _lower_component_setup_stmt(s, env, scope, callables, mutables, then)
@@ -1422,20 +1453,16 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             otherwise = []
             for s in stmt.otherwise:
                 _lower_component_setup_stmt(s, env, scope, callables, mutables, otherwise)
-        out.append({
-            "step": "if",
-            "cond": _lower_component_pure_expr(stmt.cond, env, scope, callables,
-                                               pure_only=True),
-            "then": then,
-        })
+        out.append({"step": "if", "cond": cond, "then": then})
         if otherwise is not None:
             out[-1]["else"] = otherwise
     elif isinstance(stmt, AssertStmt):
-        out.append({
-            "step": "assert",
-            "expr": _lower_component_pure_expr(stmt.expr, env, scope, callables,
-                                               pure_only=True),
-        })
+        expr = _lower_component_pure_expr(stmt.expr, env, scope, callables,
+                                          pure_only=True)
+        assert_t = _sweep(expr, stmt.line)
+        if assert_t is not None and assert_t != "Bool":
+            raise mismatch(filename, stmt.line, "`assert`", "Bool", assert_t)
+        out.append({"step": "assert", "expr": expr})
     else:
         raise RevlError(filename, getattr(stmt, "line", 0),
                         "unsupported statement in effect block setup",
@@ -1575,6 +1602,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             if stmt.setup:
                 saved_locals = dict(env.locals)
                 saved_taken = set(env._taken)
+                saved_type_env = dict(env.type_env)
                 setup_steps: list[dict] = []
                 scope = _component_scope(env)
                 mutables: set[str] = set()
@@ -1584,6 +1612,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
                 env.locals = saved_locals
                 env._taken = saved_taken
+                # setup-let types are block-scoped; drop them so a recycled safe
+                # name (env._taken is restored above) can't read a stale type
+                env.type_env = saved_type_env
             else:
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")
@@ -1600,6 +1631,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             if stmt.setup:
                 saved_locals = dict(env.locals)
                 saved_taken = set(env._taken)
+                saved_type_env = dict(env.type_env)
                 setup_steps = []
                 scope = _component_scope(env)
                 mutables = set()
@@ -1609,6 +1641,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
                 env.locals = saved_locals
                 env._taken = saved_taken
+                env.type_env = saved_type_env
             else:
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")

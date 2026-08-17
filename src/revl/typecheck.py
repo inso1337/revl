@@ -410,10 +410,27 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         check_ast(expr.otherwise, expected, tenv, types, filename, where)
         return
     if isinstance(expr, ExprMatch):
-        # arms individually checked against the expectation
-        actual = infer_ast(expr, tenv, types, filename)
-        if actual and not compatible(expected, actual):
-            raise mismatch(filename, line, where, expected, actual)
+        # Each arm body is checked against the expectation individually, with
+        # the arm's payload binding in scope. Inferring the *joined* arm type
+        # and checking that once misses disagreeing arms: when arms conflict
+        # the join is None (unknown), so a single `compatible` check silently
+        # passes. Per-arm check-position closes that hole while staying silent
+        # where an arm's type is genuinely unknown.
+        scrutinee_t = infer_ast(expr.scrutinee, tenv, types, filename)
+        spec = types.get(scrutinee_t or "")
+        for pattern, bind, body in expr.arms:
+            inner = dict(tenv)
+            if bind is not None:
+                payload = None
+                if spec is not None and spec.get("kind") == "variant":
+                    for case in spec.get("cases", []):
+                        if case["name"] == pattern:
+                            payload = case["payload"]
+                if payload is not None:
+                    inner[bind] = payload
+                else:
+                    inner.pop(bind, None)
+            check_ast(body, expected, inner, types, filename, where)
         return
     actual = infer_ast(expr, tenv, types, filename)
     if actual and not compatible(expected, actual):
@@ -422,9 +439,15 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
 
 # ------------------------------------------------------- IR inference (components)
 
-def infer_ir(node, tenv: dict, types: dict, services: dict) -> str | None:
+def infer_ir(node, tenv: dict, types: dict, services: dict,
+             filename: str | None = None, line: int = 0) -> str | None:
     """Best-effort type of a lowered component-body IR node. `services` maps
-    service name -> ServiceDecl; `tenv` maps *safe* names -> types."""
+    service name -> ServiceDecl; `tenv` maps *safe* names -> types.
+
+    With `filename`, definite operator/builtin mismatches raise (the component
+    effect-setup op sweep — HOLE 2 / HOLE 3(c)); without it, it is a pure type
+    oracle that never raises. Unknown/host-valued operands infer to `None` and
+    are left alone in both modes, so the sweep stays silent where unknown."""
     if not isinstance(node, dict):
         return None
     kind = node.get("kind")
@@ -460,27 +483,27 @@ def infer_ir(node, tenv: dict, types: dict, services: dict) -> str | None:
         sig = (types.get(FNS_KEY) or {}).get(node.get("name"))
         return sig["returns"] if sig else None
     if kind == "builtin":
-        target_t = infer_ir(node.get("target"), tenv, types, services)
-        args = [infer_ir(a, tenv, types, services) for a in node.get("args") or []]
-        return builtin_check(node.get("method"), target_t, args, None, 0)
+        target_t = infer_ir(node.get("target"), tenv, types, services, filename, line)
+        args = [infer_ir(a, tenv, types, services, filename, line) for a in node.get("args") or []]
+        return builtin_check(node.get("method"), target_t, args, filename, line)
     if kind == "bin":
-        lt = infer_ir(node.get("left"), tenv, types, services)
-        rt = infer_ir(node.get("right"), tenv, types, services)
-        return _binop_type(node.get("op"), lt, rt, None, 0)
+        lt = infer_ir(node.get("left"), tenv, types, services, filename, line)
+        rt = infer_ir(node.get("right"), tenv, types, services, filename, line)
+        return _binop_type(node.get("op"), lt, rt, filename, line)
     if kind == "un":
         if node.get("op") == "!":
             return "Bool"
-        return infer_ir(node.get("operand"), tenv, types, services)
+        return infer_ir(node.get("operand"), tenv, types, services, filename, line)
     if kind == "len":
         return "Int"
     if kind == "field":
-        target = infer_ir(node.get("target"), tenv, types, services)
+        target = infer_ir(node.get("target"), tenv, types, services, filename, line)
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
             return spec.get("fields", {}).get(node.get("name"))
         return None
     if kind == "index":
-        target = infer_ir(node.get("target"), tenv, types, services)
+        target = infer_ir(node.get("target"), tenv, types, services, filename, line)
         thead, targs = parse_type(target)
         if thead == "List":
             return targs[0] if targs else None
@@ -488,6 +511,6 @@ def infer_ir(node, tenv: dict, types: dict, services: dict) -> str | None:
             return "Str"
         return None
     if kind == "if":
-        return join(infer_ir(node.get("then"), tenv, types, services),
-                    infer_ir(node.get("else"), tenv, types, services))
+        return join(infer_ir(node.get("then"), tenv, types, services, filename, line),
+                    infer_ir(node.get("else"), tenv, types, services, filename, line))
     return None

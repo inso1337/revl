@@ -1,0 +1,15 @@
+// REJECTED — G6: code outside effect forms is pure (confinement).
+// A component body contains only effect forms (`let`, `effect`, `emit`,
+// `fail`, `if`, `provide`). A bare expression statement has no effect to
+// record, so there is no syntactic position for unconfined work — the parser
+// refuses it before it can reach the running system.
+//
+// expected error:
+//   expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `provide`), found 'db'
+//   revl bodies contain only effect forms — plain expressions have no effect to record (G6)
+
+service Database { fn query(sql: Str) -> List[Row] }
+
+component Peek requires db: Database {
+  db.query("SELECT 1")
+}
