@@ -1,0 +1,12 @@
+[package]
+name = "revl_placement_runner"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+cordis = { package = "cordis-rs", version = "0.3" }
+serde_json = "1"
+
+[[bin]]
+name = "revl_placement_runner"
+path = "src/main.rs"

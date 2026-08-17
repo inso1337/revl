@@ -1,0 +1,4 @@
+out/
+gen/
+spec.json
+*.class
