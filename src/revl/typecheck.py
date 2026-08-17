@@ -60,6 +60,31 @@ def parse_type(name: str | None) -> tuple[str | None, list[str]]:
     return head, args
 
 
+# builtin parametric type heads and their exact arity
+_GENERIC_ARITY = {"Opt": 1, "List": 1, "Map": 2, "Result": 2}
+
+
+def check_type_wellformed(filename: str, line: int, type_name: str | None) -> None:
+    """Reject a malformed declared type annotation (a builtin generic head
+    used with the wrong number of arguments, e.g. bare `Opt` or `List`).
+    Recurses into type arguments. User/nominal heads are not arity-checked."""
+    if not type_name:
+        return
+    head, args = parse_type(type_name)
+    arity = _GENERIC_ARITY.get(head or "")
+    if arity is not None and len(args) != arity:
+        example = {"Opt": "Opt[Int]", "List": "List[Int]",
+                   "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
+        raise RevlError(
+            filename, line,
+            f"`{head}` takes {arity} type argument(s), got {len(args)} "
+            f"(`{type_name}`)",
+            hint=f"write e.g. `{example}` — a bare `{head}` is not a type",
+        )
+    for arg in args:
+        check_type_wellformed(filename, line, arg)
+
+
 def _is_wildcard(name: str | None) -> bool:
     return (
         name is None
@@ -79,9 +104,10 @@ def compatible(expected: str | None, actual: str | None) -> bool:
     if ehead == "Float" and ahead == "Int":
         return True  # numeric widening
     if ehead == "Opt":
+        einner = eargs[0] if eargs else None  # bare `Opt` degrades to wildcard
         if ahead == "Opt":
-            return compatible(eargs[0], aargs[0])
-        return compatible(eargs[0], actual)  # T -> Opt[T] injection
+            return compatible(einner, aargs[0] if aargs else None)
+        return compatible(einner, actual)  # T -> Opt[T] injection
     if ehead == ahead and len(eargs) == len(aargs):
         return all(compatible(e, a) for e, a in zip(eargs, aargs))
     return False
@@ -140,7 +166,8 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
     if op == "??":
         lhead, largs = parse_type(lt)
         if lhead == "Opt":
-            return join(largs[0], rt) or largs[0]
+            inner = largs[0] if largs else None
+            return join(inner, rt) or inner or rt
         return lt or rt
     if op == "+":
         if lt == "Str" or rt == "Str":
@@ -270,7 +297,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         if filename and it and thead in ("List", "Str") and it != "Int":
             raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
-            return targs[0]
+            return targs[0] if targs else None
         if thead == "Str":
             return "Str"
         return None

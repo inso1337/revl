@@ -717,6 +717,9 @@ class Parser:
 
     def literal(self):
         tok = self.peek()
+        if tok.kind == "-" and self.toks[self.pos + 1].kind == "int":
+            self.next()
+            return -self.next().value
         if tok.kind == "int":
             return self.next().value
         if tok.kind == "string":
