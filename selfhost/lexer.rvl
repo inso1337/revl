@@ -1,0 +1,271 @@
+// The revl lexer, in revl (syntax-2.0 §11 — the self-hosting exit
+// criterion's first stage). Pure stratum + the stdlib surface only.
+//
+// Token parity is with src/revl/lexer.py, canonicalized as
+// { kind, text, line } records (ints render as their digits; template
+// parts serialize as "t:<text>" / "v:<name>" joined by "|"; the template
+// token's line is the END line, matching the reference lexer). Host
+// bodies (@backend { ... }) are not yet lexed — none of the corpus needs
+// them.
+//
+// revl plain strings carry no escapes, so unprintable characters are
+// matched by code point: 9 tab, 10 newline, 13 CR, 32 space, 34 quote,
+// 36 dollar, 96 backtick. Lookahead uses slice (clamping), never a
+// bare charAt past the end.
+
+type Token = { kind: Str, text: Str, line: Int }
+type Step = { i: Int, line: Int, tok: Token }
+type Scan = { j: Int, out: Str, nl: Int }
+
+service TokenStream {
+  fn lex(source: Str) -> List[Token]
+}
+
+fn code0(c: Str) -> Int {
+  if (c == "") { return 0 - 1 }
+  return c.charCodeAt(0)
+}
+
+fn is_digit(c: Str) -> Bool {
+  let n = code0(c)
+  return n >= 48 && n <= 57
+}
+
+fn is_alpha(c: Str) -> Bool {
+  if (c == "_") { return true }
+  let n = code0(c)
+  if (n >= 65 && n <= 90) { return true }
+  return n >= 97 && n <= 122
+}
+
+fn is_alnum(c: Str) -> Bool {
+  if (is_alpha(c)) { return true }
+  return is_digit(c)
+}
+
+fn is_space(c: Str) -> Bool {
+  let n = code0(c)
+  if (n == 32) { return true }
+  if (n == 9) { return true }
+  return n == 13
+}
+
+fn keywords() -> List[Str] {
+  return ["service", "component", "requires", "provides", "config", "let",
+    "effect", "undo", "emit", "emission", "provide", "fn", "return",
+    "true", "false", "null",
+    "isolate", "intercept", "realm", "in", "with",
+    "type", "use", "pub", "var", "while", "for", "of", "if", "else",
+    "match", "test", "assert", "async", "as", "fail",
+    "extern", "acquire", "pure", "compensate", "await", "verified", "commutative"]
+}
+
+fn ops3() -> List[Str] { return ["===", "!=="] }
+
+fn ops2() -> List[Str] {
+  return ["=>", "?.", "??", "<=", ">=", "==", "!=", "&&", "||", "->"]
+}
+
+fn singles() -> Str { return "{}()[],:=.+-*/%<>!?;|@" }
+
+// Longest-match operator at position i; "" when none.
+fn op_at(source: Str, i: Int) -> Str {
+  let three = source.slice(i, i + 3)
+  if (ops3().indexOf(three) != 0 - 1) { return three }
+  let two = source.slice(i, i + 2)
+  if (ops2().indexOf(two) != 0 - 1) { return two }
+  return ""
+}
+
+// Scan an identifier/keyword tail: chars satisfying is_alnum.
+fn scan_word(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  while (j < n && is_alnum(source.charAt(j))) { j += 1 }
+  let jj = j
+  return { j: jj, out: source.slice(i, jj), nl: 0 }
+}
+
+fn scan_digits(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  while (j < n && is_digit(source.charAt(j))) { j += 1 }
+  let jj = j
+  return { j: jj, out: source.slice(i, jj), nl: 0 }
+}
+
+// Plain string body after the opening quote; out is the text, j is the
+// index AFTER the closing quote. Unterminated / newline -> j = -1.
+fn scan_string(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  var out = ""
+  while (j < n) {
+    let c = source.charAt(j)
+    let cc = code0(c)
+    if (cc == 34) {
+      let jj = j
+      let text = out
+      return { j: jj + 1, out: text, nl: 0 }
+    }
+    if (cc == 10) {
+      let text2 = out
+      return { j: 0 - 1, out: text2, nl: 0 }
+    }
+    if (cc != 34 && cc != 10) {
+      out = out.concat(c)
+      j += 1
+    }
+  }
+  let text3 = out
+  return { j: 0 - 1, out: text3, nl: 0 }
+}
+
+// Template body after the opening backtick. Parts serialize as
+// "t:<text>" / "v:<name>" joined by "|"; nl counts newlines consumed so
+// the caller reports the END line (reference-lexer parity).
+fn scan_template(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  var parts = []
+  var buf = ""
+  var nl = 0
+  while (j < n) {
+    let c = source.charAt(j)
+    let cc = code0(c)
+    if (cc == 96) {
+      if (buf != "") { parts = parts.push("t:".concat(buf)) }
+      let jj = j
+      let done = parts
+      let lines = nl
+      return { j: jj + 1, out: done.join("|"), nl: lines }
+    }
+    if (cc != 96) {
+      var handled = false
+      if (cc == 36 && source.slice(j + 1, j + 2) == "{" && is_alpha(source.slice(j + 2, j + 3))) {
+        let word = scan_word(source, j + 2)
+        if (source.slice(word.j, word.j + 1) == "}") {
+          if (buf != "") { parts = parts.push("t:".concat(buf)) }
+          buf = ""
+          parts = parts.push("v:".concat(word.out))
+          j = word.j + 1
+          handled = true
+        }
+        if (source.slice(word.j, word.j + 1) != "}") {
+          let lines2 = nl
+          return { j: 0 - 1, out: "", nl: lines2 }
+        }
+      }
+      if (!handled) {
+        if (cc == 10) { nl += 1 }
+        buf = buf.concat(c)
+        j += 1
+      }
+    }
+  }
+  let lines = nl
+  return { j: 0 - 1, out: "", nl: lines }
+}
+
+// Skip a // comment: index of the next newline (or n).
+fn scan_comment(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  while (j < n && code0(source.charAt(j)) != 10) { j += 1 }
+  let jj = j
+  return { j: jj, out: "", nl: 0 }
+}
+
+// One lexing step at (i, line): the next state and at most one token
+// (kind "" means this step produced no token).
+fn step(source: Str, i: Int, line: Int) -> Step {
+  let none = { kind: "", text: "", line: line }
+  let c = source.charAt(i)
+  let cc = code0(c)
+  if (cc == 10) { return { i: i + 1, line: line + 1, tok: none } }
+  if (is_space(c)) { return { i: i + 1, line: line, tok: none } }
+  if (source.slice(i, i + 2) == "//") {
+    let sc = scan_comment(source, i)
+    return { i: sc.j, line: line, tok: none }
+  }
+  let op = op_at(source, i)
+  if (op != "") {
+    let kind = op == "->" ? "arrow" : op
+    return { i: i + op.length(), line: line,
+             tok: { kind: kind, text: op, line: line } }
+  }
+  if (cc == 34) {
+    let ss = scan_string(source, i + 1)
+    if (ss.j == 0 - 1) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "unterminated string", line: line } }
+    }
+    return { i: ss.j, line: line, tok: { kind: "string", text: ss.out, line: line } }
+  }
+  if (cc == 96) {
+    let st = scan_template(source, i + 1)
+    if (st.j == 0 - 1) {
+      return { i: source.length(), line: line,
+               tok: { kind: "error", text: "bad template", line: line } }
+    }
+    return { i: st.j, line: line + st.nl,
+             tok: { kind: "template", text: st.out, line: line + st.nl } }
+  }
+  if (is_alpha(c)) {
+    let sw = scan_word(source, i)
+    let kind2 = keywords().indexOf(sw.out) != 0 - 1 ? "kw" : "ident"
+    return { i: sw.j, line: line, tok: { kind: kind2, text: sw.out, line: line } }
+  }
+  if (is_digit(c)) {
+    let sd = scan_digits(source, i)
+    return { i: sd.j, line: line, tok: { kind: "int", text: sd.out, line: line } }
+  }
+  if (singles().indexOf(c) != 0 - 1) {
+    return { i: i + 1, line: line, tok: { kind: c, text: c, line: line } }
+  }
+  return { i: i + 1, line: line,
+           tok: { kind: "error", text: c, line: line } }
+}
+
+pub fn lex_src(source: Str) -> List[Token] {
+  var out = []
+  var i = 0
+  var line = 1
+  let n = source.length()
+  while (i < n) {
+    let s = step(source, i, line)
+    if (s.tok.kind != "") { out = out.push(s.tok) }
+    i = s.i
+    line = s.line
+  }
+  let ll = line
+  out = out.push({ kind: "eof", text: "", line: ll })
+  return out
+}
+
+test "lexes a component header" {
+  let toks = lex_src("component C requires kv: Kv {}")
+  assert toks[0].kind == "kw"
+  assert toks[0].text == "component"
+  assert toks[1].kind == "ident"
+  assert toks[4].kind == ":"
+  assert toks.length() == 9
+}
+
+test "operators lex longest-first" {
+  let toks = lex_src("a === b -> c")
+  assert toks[1].kind == "==="
+  assert toks[3].kind == "arrow"
+}
+
+test "template parts serialize" {
+  let toks = lex_src("`hi ${name}!`")
+  assert toks[0].kind == "template"
+  assert toks[0].text == "t:hi |v:name|t:!"
+}
+
+component Lexer provides tokens: TokenStream {
+  provide tokens {
+    fn lex(source) = lex_src(source)
+  }
+}
