@@ -512,6 +512,20 @@ def _v3_expr(
     if kind == "var":
         return _v3_var(node, ctx, rename)
 
+    if kind == "adt":
+        case = node.get("case")
+        _ident(case, "adt case")
+        args = ", ".join(_v3_expr(a, ctx, rename, env) for a in node.get("args") or [])
+        if case in ctx.case_owners:
+            variant = _ident(ctx.case_owners[case], "type name")
+            return f"new {variant}.{case}({args})"
+        if case in ("Ok", "Err"):
+            raise EmitError(
+                f"built-in Result ({case}) is not lowerable on the Java tier yet — "
+                "construct/match Result on the py/ts/rust tiers"
+            )
+        raise EmitError(f"unknown ADT constructor {case!r}")
+
     if kind == "name":
         original = node.get("id")
         if rename and original in rename:
@@ -672,9 +686,33 @@ def _v3_match_expr(
     env: _Env | None = None,
 ) -> str:
     scrutinee = _v3_expr(node.get("scrutinee"), ctx, rename, env)
+    arms = node.get("arms") or []
+
+    # `Some`/`None`/`Ok`/`Err` are built-in only when NOT shadowed by a user
+    # variant (the docs' own `type Outcome = Ok(Row) | …` reuses `Ok`).
+    def _builtin(p):
+        return p not in ctx.case_owners
+
+    # Opt is java.util.Optional (not a sealed type): built-in Some/None lower
+    # to map/orElseGet rather than a `switch`.
+    if any(arm.get("pattern") in ("Some", "None") and _builtin(arm.get("pattern")) for arm in arms):
+        some_arm = next((a for a in arms if a.get("pattern") == "Some"), None)
+        none_arm = next((a for a in arms if a.get("pattern") == "None"), None)
+        wild = next((a for a in arms if a.get("pattern") == "_"), None)
+        some_bind = _ident(some_arm.get("bind"), "match bind") if some_arm and some_arm.get("bind") else "__revl_v"
+        some_body = _v3_expr((some_arm or wild).get("body"), ctx, rename, env)
+        none_body = _v3_expr((none_arm or wild).get("body"), ctx, rename, env)
+        return (f"({scrutinee}).map({some_bind} -> ({some_body}))"
+                f".orElseGet(() -> ({none_body}))")
+    if any(arm.get("pattern") in ("Ok", "Err") and _builtin(arm.get("pattern")) for arm in arms):
+        raise EmitError(
+            "built-in Result (Ok/Err) match is not lowerable on the Java tier yet — "
+            "match Result on the py/ts/rust tiers"
+        )
+
     lines = [f"switch ({scrutinee}) {{"]
     wildcard = None
-    for arm in node.get("arms") or []:
+    for arm in arms:
         pattern = arm.get("pattern")
         body = _v3_expr(arm.get("body"), ctx, rename, env)
         if pattern == "_":

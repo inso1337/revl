@@ -532,3 +532,53 @@ def test_optional_chain_rejects_nonoptional_continuation():
             "type I = { c: Int }\ntype O = { b: I }\n"
             "fn bad(o: Opt[O]) -> Opt[Int] { return o?.b.c }\n"
         )
+
+
+# ---------------------------------------------------------------------------
+# tagged ADTs: user variant + built-in Result construction lowers to an `adt`
+# IR node; `match` discriminates Result (Ok/Err) and Opt (Some/None). Prior
+# to this, constructors were "not declared" and match on built-ins crashed.
+
+def test_adt_construction_lowers_to_adt_node():
+    from revl.compiler import compile_source
+
+    ir = compile_source(
+        "type T = A(Int) | B\n"
+        "fn mkA() -> T { return A(1) }\n"
+        "fn mkB() -> T { return B }\n"
+        "fn mkOk() -> Result[Int, Str] { return Ok(1) }\n"
+    )
+    bodies = {fn["name"]: fn["body"][0]["expr"] for fn in ir["functions"]}
+    assert bodies["mkA"] == {"kind": "adt", "type": "T", "case": "A",
+                             "args": [{"kind": "lit", "value": 1}]}
+    assert bodies["mkB"] == {"kind": "adt", "type": "T", "case": "B", "args": []}
+    assert bodies["mkOk"]["kind"] == "adt" and bodies["mkOk"]["case"] == "Ok"
+
+
+def test_python_backend_runs_adt_result_opt_match():
+    """Construct and match user ADTs, built-in Result (discriminating Ok/Err),
+    and Opt — executed on the reference backend."""
+    import types
+
+    backend_dir = ROOT / "backends" / "python"
+    sys.path.insert(0, str(backend_dir))
+    try:
+        from revl.compiler import compile_source
+        import emit
+
+        src = (
+            "type O = Found(Int) | Missing\n"
+            "fn mk(h: Bool) -> O { if (h) return Found(9) return Missing }\n"
+            "fn u(o: O) -> Int { return match o { Found(v) => v, Missing => 0 } }\n"
+            "fn r(ok: Bool) -> Result[Int, Str] { if (ok) return Ok(7) return Err(\"no\") }\n"
+            "fn rd(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 - 1 } }\n"
+            "fn opt(x: Opt[Int]) -> Int { return match x { Some(v) => v, None => 0 } }\n"
+        )
+        module = types.ModuleType("t")
+        exec(compile(emit.emit(compile_source(src)), "<t>", "exec"), module.__dict__)
+        assert module.u(module.mk(True)) == 9 and module.u(module.mk(False)) == 0
+        assert module.rd(module.r(True)) == 7      # Ok
+        assert module.rd(module.r(False)) == -1    # Err — discriminated, not conflated
+        assert module.opt(5) == 5 and module.opt(None) == 0
+    finally:
+        sys.path.remove(str(backend_dir))
