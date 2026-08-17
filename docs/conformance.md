@@ -8,74 +8,75 @@ be portable. This walks the *whole* surface and reports what each tier does
 with each construct, so a gap is data rather than something discovered by a
 user targeting a tier by hand.
 
-Counts below are from the run at the commit that added this file. **python is
-the reference tier: 0 gaps.**
+Counts below are from the run at the commit that closed the first sweep.
+**python and typescript are at zero; every remaining refusal on rust, java
+and wasm is a deliberate tier limit.**
 
-| tier | refusals | of which deliberate |
-|---|---|---|
-| python | 0 | — |
-| typescript | 12 | 2 (externs without a `@ts` body) |
-| rust | 5 | 3 (externs without an `@rs` body) |
-| java | 5 | 3 (externs without a `@java` body) |
-| wasm | 32 | ~26 (i32-only tier, no config, no host builtins) |
+| tier | refusals | real gaps | deliberate |
+|---|---|---|---|
+| python | 0 | 0 | — |
+| typescript | 0 | 0 | — |
+| rust | 3 | 0 | 3 externs with no `@rs` body |
+| java | 3 | 0 | 3 externs with no `@java` body |
+| wasm | 19 | 0 | i32-only signatures (10), no config channel (2), no host builtins (3), Opt/Str at the boundary (2), externs (2) |
 
 A refusal is only a *gap* when the tier could reasonably express the
 construct. An extern with no body for that backend, or a `Str` on the
-i32-only wasm tier, is the toolchain working as designed — those are listed
-as deliberate and belong in `EXPECTED_LIMITS` in the cross-tier test.
+i32-only wasm tier, is the toolchain working as designed.
 
-## The real gaps, worst first
+## What the sweep closed
 
-### 1. `??` is unimplemented on three tiers
+Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:
 
-`x ?? 0` — a documented 2.0 operator (syntax-2.0 §3.2) — compiles on python
-and, in `fn` bodies only, TypeScript. **rust, java and wasm reject it
-outright**, in both `fn` and method bodies: `unsupported binary operator
-'??'`. Any program using nullish coalescing is python-only today.
+- **Frontend**: `match` is now usable in component and method bodies, not
+  only in `fn` bodies; a bare `return` parses, which is the natural body of
+  a void service operation. `??` is now type-checked — it requires an
+  optional on the left, which three tiers could not render and python
+  silently accepted.
+- **TypeScript** (14 → 0): `fn` call nodes, `if`/`fail` steps, `match` arm
+  bindings, `??` in component bodies, bare `return`.
+- **rust / java** (7 → 3, 6 → 3): `??` implemented on both — lazily, as
+  `unwrap_or_else(|| b)` on `Option<T>` and `orElseGet(() -> b)` on
+  `Optional<T>`, since the eager forms would evaluate a fallback that is not
+  needed; `match` in component bodies; bare `return` (which had been
+  *crashing* with a raw `AttributeError` rather than refusing); rust
+  `config` inside a guard; java renames a keyword-colliding `fn` instead of
+  rejecting it.
+- **wasm** (34 → 19): the component path now delegates every non-i32-native
+  kind to the v3 value engine rather than duplicating it — `if`, `fn` calls
+  (with the called functions lowered into the component's own module),
+  `list`/`record`/`index`/stdlib, `match` + ADT construction, bare `return`,
+  and `??` on an in-module `Opt`. Every refusal that remains now names the
+  i32 boundary rather than reporting an unknown kind.
 
-The lowering is well-formed (`{"kind": "bin", "op": "??"}`), so this is
-purely three unimplemented operator cases.
+## Sharper root causes found along the way
 
-### 2. Calling a pure `fn` from a component body fails on TypeScript and wasm
+- **`call` is ambiguous by kind across the two dialects.** The component
+  form is `target`/`method`; the 2.0 form is `callee`/`args`. Dispatching on
+  kind alone can silently take the wrong branch and read a missing child —
+  the one place the two-renderer split fails *quietly* instead of loudly.
+  Dispatch must key on shape.
+- **The component IR dialect is not uniform.** `Some(x)` and `None` arrive
+  in *v3* spelling inside component bodies while their neighbours use the
+  component spelling. Backends currently normalize this themselves; the
+  frontend should emit one dialect per position.
+- **Two latent v3-renderer bugs** were invisible from `fn` bodies (which
+  always supply an expected type) and only surfaced under component
+  delegation: match arm payload bindings not being in scope when the arm's
+  type was inferred, and an arm without a payload type not consulting the
+  variant layout.
 
-`provide s { fn f(x) = double(x) }` where `double` is a top-level `fn`
-produces a `fn` call node that neither tier's component-path renderer knows
-(`unsupported v3 expression kind 'fn'`). This is the single largest cluster —
-9 of TypeScript's 12 refusals are this one cause, because every `fn/*` case
-in the corpus calls its function from a component.
+## Known blind spot of this matrix
 
-Same root cause as the divergences already fixed: two expression renderers
-per backend with different kind sets. The `fn` node is simply in neither.
-
-### 3. `match` cannot be used in a component or method body
-
-Frontend-level, so it affects every tier equally: `unsupported expression in
-component effect block`. `match` is the eliminator for ADTs and works in
-`fn` bodies, but a provide-method cannot use it — which pushes any component
-that consumes a `Result` or user variant into calling out to a `fn`.
-
-### 4. A bare `return` does not parse
-
-`fn f(x) { return }` — the natural body for a service operation declared with
-no return type — is a parse error (`expected an expression`). The IR and the
-java/rust emitters already model `{"step": "return", "expr": null}`, so only
-the parser is missing it.
-
-### 5. Smaller, tier-local
-
-- **TypeScript**: `if` steps in a component body are unknown (`unknown step:
-  'if'`), so `fail` guards do not lower; `??` in a *component* body reports
-  `malformed v3 expression: None` (distinct from gap 1 — here the handler
-  exists but reads a child it did not get).
-- **java**: a `fn` whose name collides with a Java reserved word is
-  *rejected* (`function name identifier collides with … 'double'`) rather
-  than renamed. A3 renaming already solves this for bindings; function names
-  need the same treatment.
-- **rust**: `config` access inside a `fail`/`if` guard expression is unknown
-  to its v3 renderer.
-- **wasm**: beyond the deliberate i32 limits, its component-path renderer
-  does not know `if` (ternary), `list`, `record`, or `fn` calls — the same
-  two-renderer split, and the reason its count is high.
+It checks that an emitter **does not raise** — never that its output
+compiles or runs. A tier can therefore report `ok` and still emit broken
+code. One live instance: the **rust backend does not capture `requires`
+bindings into the provider struct**, so a provide-method calling a required
+service emits Rust that references a field that does not exist. Pre-existing
+and unrelated to this sweep, invisible here, and caught only because an
+agent compiled the output by hand. Closing that blind spot means compiling
+or executing emitted code per tier — which the wasm tier already does on
+wasmtime, and the rust tier does under `cargo` when a network is available.
 
 ## What this says about the architecture
 

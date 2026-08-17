@@ -171,6 +171,18 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
         if lhead == "Opt":
             inner = largs[0] if largs else None
             return join(inner, rt) or inner or rt
+        if filename and lt and not _is_wildcard(lt):
+            # `??` supplies a fallback for an absent optional; on a value that
+            # is always present it is meaningless, and the tiers that model
+            # Opt as Option/Optional cannot even render it
+            raise RevlError(
+                filename, line,
+                f"`??` needs an optional on the left, got `{lt}`",
+                hint="`a ?? b` supplies a fallback when `a` is absent — a "
+                     "non-optional is always present, so the fallback is dead "
+                     "(syntax-2.0 §2)",
+                code="T1", category="type-mismatch",
+            )
         return lt or rt
     if op == "+":
         if lt == "Str" or rt == "Str":
