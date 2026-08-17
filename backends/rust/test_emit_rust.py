@@ -245,12 +245,16 @@ def test_cargo_test_runs_emitted_stdlib_semantics(tmp_path):
 @pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
 def test_cargo_check_compiles_method_level_compensate(tmp_path):
     """Review finding: `emit ... compensate` in a provide method referenced
-    `*_undo` clones that were only generated when compensate was absent."""
+    `*_undo` clones that were only generated when compensate was absent.
+
+    `N.ping` must itself be declared `emission`: it reaches `db.ex`, and a
+    service declaration is an upper bound on its providers' effects (G4
+    emission propagation)."""
     ir = compile_source(
         """
         service Db { fn q(s: Str) -> Int
           emission fn ex(s: Str) -> Int }
-        service N { fn ping(u: Str) }
+        service N { emission fn ping(u: Str) }
         component C requires db: Db provides n: N {
           let m = effect Map.new() undo m.drop()
           provide n {

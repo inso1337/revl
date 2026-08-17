@@ -360,11 +360,14 @@ pub fn first(xs: List[Int], i: Int) -> Int { return xs[i] }
 
 @pytest.mark.skipif(JAVAC is None, reason="no working javac")
 def test_javac_compiles_method_level_compensate(tmp_path):
+    """`N.ping` must itself be declared `emission`: it reaches `db.ex`, and a
+    service declaration is an upper bound on its providers' effects (G4
+    emission propagation)."""
     ir = compile_source(
         """
         service Db { fn q(s: Str) -> Int
           emission fn ex(s: Str) -> Int }
-        service N { fn ping(u: Str) }
+        service N { emission fn ping(u: Str) }
         component C requires db: Db provides n: N {
           let m = effect Map.new() undo m.drop()
           provide n {
