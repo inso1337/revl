@@ -138,6 +138,9 @@ class Env:
         self.services = services
         self.filename = filename
         self.types = types or {}
+        # names whose call reaches an irreversible host effect (set by
+        # check_and_lower once externs/fns are lowered)
+        self.emitting_fns: set = set()
         # component-body type environment: safe-name -> type, plus the
         # "config.<field>" and "req.<local>" markers infer_ir resolves
         self.type_env: dict[str, str] = {}
@@ -1083,6 +1086,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename)
     tests = _lower_tests(program, program.filename, types)
+    emitting_fns = _emitting_fns(fns, externs)
 
     components = []
     seen = set()
@@ -1091,7 +1095,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
             raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
         seen.add(comp.name)
         components.append(_lower_component(comp, services, program.filename, component_callables,
-                                           types))
+                                           types, emitting_fns))
 
     manifest = _link(program, components, ambient.get("components") or [])
 
@@ -1518,9 +1522,86 @@ def _config_default_type(value) -> str | None:
     return None
 
 
+def _calls_in(node, found: set) -> None:
+    """Function/extern names a lowered node calls. Component bodies lower a
+    call to `{kind: fn, name}`; pure fn bodies to `{kind: call, callee:
+    {kind: var, name}}`."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+            found.add(node["name"])
+        callee = node.get("callee")
+        if node.get("kind") == "call" and isinstance(callee, dict) \
+                and callee.get("kind") == "var" and isinstance(callee.get("name"), str):
+            found.add(callee["name"])
+        for value in node.values():
+            _calls_in(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _calls_in(value, found)
+
+
+def _emitting_fns(fns: list, externs: list) -> set:
+    """Names whose call reaches an irreversible host effect: `emission`
+    externs, and functions that reach one transitively. An `acquire` extern
+    is *revertible* (it carries an inverse), so it is deliberately not one."""
+    emitting = {ext["name"] for ext in externs if ext.get("class") == "emission"}
+    bodies = {fn["name"]: fn for fn in fns}
+    calls: dict[str, set] = {}
+    for name, fn in bodies.items():
+        called: set = set()
+        _calls_in(fn.get("body") or [], called)
+        calls[name] = called
+
+    changed = True
+    while changed:  # least fixed point over the call graph
+        changed = False
+        for name, called in calls.items():
+            if name not in emitting and called & emitting:
+                emitting.add(name)
+                changed = True
+    return emitting
+
+
+def _method_emissions(body: list, env: "Env") -> list[str]:
+    """What calling a provide-method irreversibly causes: `emit` steps and
+    reachable emitting functions/externs. Teardown-position emissions count
+    — calling the method schedules them."""
+    found: list[str] = []
+    seen: set = set()
+
+    def note(label: str) -> None:
+        if label not in seen:
+            seen.add(label)
+            found.append(label)
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("step") == "emit":
+                expr = node.get("expr") or {}
+                target = expr.get("target") or {}
+                if target.get("kind") == "req":
+                    note(f"{target.get('name')}.{expr.get('method')}")
+                else:
+                    note("a host emission")
+            calls: set = set()
+            _calls_in(node, calls)
+            for name in sorted(calls & env.emitting_fns):
+                note(f"{name}()")
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(body)
+    return found
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
-                     callables: set | None = None, types: dict | None = None) -> dict:
+                     callables: set | None = None, types: dict | None = None,
+                     emitting_fns: set | None = None) -> dict:
     env = Env(comp, services, filename, types)
+    env.emitting_fns = emitting_fns or set()
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
 
     # a config default must fit its declared field type (config typing);
@@ -1788,6 +1869,30 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.type_env = saved_tenv
+
+        # A service declaration is an *upper bound* on its providers' effects:
+        # consumers bind to the service, not to this component, and a provider
+        # may be purer than declared but never less. Without this, a plain
+        # declaration hides an irreversible call from every consumer — and from
+        # the G8 audit, which enumerates a caller's emissions by reading the
+        # declarations of the methods it calls.
+        if not decl.emission:
+            caused = _method_emissions(mbody, env)
+            if caused:
+                evidence = ", ".join(f"`{item}`" for item in caused)
+                raise RevlError(
+                    # the offending body lives in the component's own file,
+                    # which is not the merged program filename
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` is declared plain, but this "
+                    f"implementation reaches {evidence}",
+                    hint=f"a service declaration bounds what its providers may do — "
+                         f"mark it `emission fn {method.name}(...)` in service "
+                         f"`{svc.name}`, or move the irreversible call out of this "
+                         f"method (G4)",
+                    code="G4", category="emission-propagation",
+                )
+
         methods.append({"name": method.name, "params": safe_params, "body": mbody})
 
     missing = set(svc.methods) - implemented

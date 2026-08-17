@@ -15,5 +15,7 @@ service Database {
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
-  fn put(key: Str, value: Str)
+  // an emission: `put` writes the cache log through `db`, and a service
+  // declaration is an upper bound on what its providers may do
+  emission fn put(key: Str, value: Str)
 }

@@ -95,14 +95,12 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
     Only provided keys are exposed: a composition's requirements are its
     own business, its provisions are its surface.
 
-    An annotation is derived from the **declaration and the implementation**
-    together. A service operation may be declared non-`emission` and still
-    reach an emission through a required service or a host extern in its
-    body (revl checks the call site, but does not yet propagate emission to
-    the enclosing service operation). Projecting the declaration alone would
-    let a generated tool claim `readOnlyHint: true` for an operation that
-    writes to the outside world — so the walk below settles it, and the
-    divergence is reported in `x-revl.effects`.
+    The behavioural annotation comes from the declaration, and the checker
+    makes that sound: a service declaration is an *upper bound* on its
+    providers' effects (G4 emission propagation), so an operation declared
+    plain cannot reach an emission in any provider's body. The walk below
+    therefore records *provenance* — which emissions and host code a body
+    actually reaches — rather than correcting the declaration.
     """
     services = ir.get("services") or {}
     types = ir.get("types") or {}
@@ -124,9 +122,9 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
 
 def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
           component: dict, types: dict, observed: dict) -> dict:
-    declared_emission = bool(op.get("emission"))
-    # the implementation is authoritative for the behavioural annotation
-    emission = declared_emission or bool(observed["emissions"]) or observed["writes_host"]
+    # the declaration is authoritative: the checker refuses a provider whose
+    # body exceeds it, so `emission` is exactly the operation's contract
+    emission = bool(op.get("emission"))
     uses_extern = observed["uses_extern"]
     params = op.get("params") or []
     properties, required = {}, []
@@ -139,15 +137,14 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
             required.append(pname)
 
     returns = op.get("returns")
-    if emission and not declared_emission:
-        behaviour = ("Reaches the system boundary through its implementation "
-                     f"({', '.join(observed['emissions']) or 'host code'}): "
-                     "not reversible, though the service declares it plain.")
-    elif emission:
-        behaviour = "Emission: crosses the system boundary and cannot be reverted."
+    if emission:
+        reached = ", ".join(sorted(observed["emissions"])) or "host code"
+        behaviour = ("Emission: crosses the system boundary and cannot be reverted "
+                     f"(reaches {reached}).")
     else:
         behaviour = ("Read-only: the compiler refused any unreverted mutation here, "
-                     "and the implementation reaches no emission or host code.")
+                     "and a service declaration bounds what its providers may do — "
+                     "no provider of this operation can reach an emission.")
     description = (
         f"{service_name}.{op_name} — provided at key `{key}` by component "
         f"`{component.get('name')}`. " + behaviour
@@ -183,11 +180,11 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
             "commutative": bool(op.get("commutative")),
             "annotationsDerivedFrom": "compiler",
             "effects": {
-                "declaredEmission": declared_emission,
+                # provenance under a declaration the checker holds to an
+                # upper bound — a plain operation reaches neither of these
                 "reachesEmission": sorted(observed["emissions"]),
                 "reachesHostCode": sorted(observed["externs"]),
-                # the honest caveat: a declaration that under-states its body
-                "declarationUnderstatesBody": emission and not declared_emission,
+                "boundedByDeclaration": True,
             },
             "guarantee": (
                 "G4 — an emission is the language's admission of irreversibility"

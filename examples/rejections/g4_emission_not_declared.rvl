@@ -1,0 +1,29 @@
+// REJECTED — G4 (emission propagation): a provider exceeds its declaration.
+// A service declaration is an *upper bound* on its providers' effects:
+// consumers bind to the service, not to this component, and providers are
+// hot-swappable, so a plain declaration must mean "no provider of this
+// operation reaches the boundary". Without the rule, a caller of
+// `cache.put` — and the G8 audit that reads declarations — would never see
+// the irreversible write.
+//
+// expected error:
+//   `Cache.put` is declared plain, but this implementation reaches `db.execute`
+
+service Database {
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn put(key: Str, value: Str)
+}
+
+component LyingCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO log VALUES (${key})`)
+    }
+  }
+}

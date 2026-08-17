@@ -35,44 +35,48 @@ The point is the annotations. MCP's `readOnlyHint` / `destructiveHint` are
   emission (through a required service) or non-`pure` host code is
   destructive *anyway*. The walk is transitive through `fn` calls.
 
-This second half matters, and the reference example demonstrates why:
+This second half is now a *language rule* rather than a bridge concern.
+The reference example originally understated itself — `Cache.put` was
+declared plain while its body emitted through `db` — and the checker now
+refuses that:
 
-```revl
-service Cache { fn get(key: Str) -> Opt[Str]
-                fn put(key: Str, value: Str) }   // declared plain
-…
-fn put(key, value) {
-  effect store.insert(key, value) undo store.remove(key)
-  emit db.execute(`INSERT INTO cache_log VALUES (${key})`)   // …but emits
-}
+```
+examples/user_cache.rvl:33: `Cache.put` is declared plain, but this
+implementation reaches `db.execute`
+  a service declaration bounds what its providers may do — mark it
+  `emission fn put(...)` in service `Cache`, or move the irreversible call
+  out of this method (G4)
 ```
 
-`cache.put` projects as `readOnlyHint: false`, `destructiveHint: true`, with
-the provenance recorded:
+**The rule: a service declaration is an upper bound on its providers'
+effects.** A provider may be *purer* than declared (declared `emission`,
+body doesn't emit — the consumer already assumed the worst); it may never
+be less pure. That direction is the sound one because consumers bind to the
+*service*, not to a component, and providers are hot-swappable: a plain
+declaration must mean "no provider of this operation reaches the boundary".
+
+It also repairs a hole in G8 itself. `revl audit` enumerates a caller's
+emissions by reading the declarations of the methods it calls — so an
+under-declared operation made the audit *incomplete for every consumer*,
+not just misleading to an MCP client.
+
+The projection therefore trusts the declaration, and reports what the body
+reaches as provenance:
 
 ```jsonc
 "x-revl": {
   "classification": "emission",
   "annotationsDerivedFrom": "compiler",
   "effects": {
-    "declaredEmission": false,
     "reachesEmission": ["db.execute"],
     "reachesHostCode": [],
-    "declarationUnderstatesBody": true
+    "boundedByDeclaration": true
   }
 }
 ```
 
-`openWorldHint` is likewise derived, from extern reachability, and
-`idempotentHint` from a `commutative` declaration.
-
-> **Language finding.** `declarationUnderstatesBody` exists because revl
-> checks emission *call sites* (G4) but does not propagate emission to the
-> enclosing service operation — a consumer of `cache.put` cannot see from
-> the declaration that calling it writes to the outside world. Inferring (or
-> requiring) emission at the service boundary is the natural next step for
-> the checker; the bridge compensates for now by trusting the body over the
-> declaration. Tracked in docs/v2.0-roadmap.md.
+`openWorldHint` is derived from extern reachability (transitively through
+`fn` calls) and `idempotentHint` from a `commutative` declaration.
 
 ## 2. `revl mcp import` — tools → revl
 

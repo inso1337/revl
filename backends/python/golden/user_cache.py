@@ -16,7 +16,7 @@ SERVICES = {
     },
     'Cache': {
         'get': {'params': ['key'], 'emission': False},
-        'put': {'params': ['key', 'value'], 'emission': False},
+        'put': {'params': ['key', 'value'], 'emission': True},
     },
 }
 

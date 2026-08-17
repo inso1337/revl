@@ -49,7 +49,7 @@
             }
           ],
           "returns": null,
-          "emission": false
+          "emission": true
         }
       }
     }
