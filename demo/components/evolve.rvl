@@ -1,0 +1,85 @@
+// A composition that rewrites itself.
+//
+// `Evolver` asks a model for a new version of a component, hands the answer
+// to the runtime, and the runtime admits it — or refuses it — against the
+// composition that is currently running. Nothing here is privileged: the
+// model is an ordinary coeffect, the compiler is an ordinary coeffect, and
+// every irreversible step carries `emit`.
+//
+// What makes this safe is not that the model is good. It is that
+// `runtime.propose` runs the same admission gate `revl compile` runs, so an
+// unreviewed, machine-written component enters the running system only if
+// the compiler says yes — and the audit surface below says exactly what the
+// evolver is able to touch.
+
+service Assistant {
+  // an LLM call is irreversible and returns data: the canonical emission
+  emission fn complete(prompt: Str) -> Str
+}
+
+service Runtime {
+  // compiling is not a boundary crossing — it answers a question
+  fn check(source: Str) -> Str
+  // proposing changes what will be running: irreversible, so `emission`
+  emission fn propose(source: Str) -> Str
+}
+
+service Evolve {
+  emission fn once(goal: Str) -> Str
+}
+
+service Greeter {
+  fn greet(name: Str) -> Str
+}
+
+// --- the host bridge ------------------------------------------------------
+// Host code is where the compiler and the model actually live. It is opaque
+// to revl and therefore enumerated on the G8 audit surface — which is the
+// honest place for "this component can reach a language model".
+
+extern pure fn host_check(source: Str) -> Str
+  = @py { from evolve_bridge import check; return check(source) }
+
+extern emission fn host_propose(source: Str) -> Str
+  = @py { from evolve_bridge import propose; return propose(source) }
+
+extern emission fn host_complete(prompt: Str) -> Str
+  = @py { from evolve_bridge import complete; return complete(prompt) }
+
+// NOTE: the key is `compiler`, not `runtime` — cordis-py's Context
+// already exposes `ctx.runtime`, and a provision key that collides with
+// a host context member fails at activation instead of at compile time
+// (a gap recorded in the roadmap).
+component HostRuntime provides compiler: Runtime {
+  provide compiler {
+    fn check(source) = host_check(source)
+    fn propose(source) = emit host_propose(source)
+  }
+}
+
+component ModelAssistant provides assistant: Assistant {
+  provide assistant {
+    fn complete(prompt) = emit host_complete(prompt)
+  }
+}
+
+// --- the component under evolution ---------------------------------------
+
+component GreeterV1 provides greeter: Greeter {
+  provide greeter {
+    fn greet(name) = "hello, " + name
+  }
+}
+
+// --- the evolver ----------------------------------------------------------
+// `once` is declared `emission` because its body reaches two of them; the
+// upper-bound rule (G4) forces that admission into the interface, so a
+// consumer of `Evolve` can see from the declaration alone that calling it
+// changes the world.
+
+component Evolver requires assistant: Assistant, compiler: Runtime
+                  provides evolve: Evolve {
+  provide evolve {
+    fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+  }
+}

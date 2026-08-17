@@ -115,6 +115,17 @@ class EmitStmt:
 
 
 @dataclass
+class EmitExpr:
+    """`emit <call>` in value position — the value of an irreversible call.
+
+    The marker still sits at the call site (G4's point); it no longer forces
+    the value to be discarded, which an emission that *returns* data (an LLM
+    completion, an HTTP GET) obviously needs."""
+    expr: object
+    line: int
+
+
+@dataclass
 class AwaitStmt:
     expr: object
     line: int
@@ -1275,6 +1286,9 @@ class Parser:
         if tok.kind in ("!", "-"):
             self.next()
             return ExprUn(tok.kind, self._unary(), tok.line)
+        if tok.kind == "kw" and tok.value == "emit":
+            self.next()
+            return EmitExpr(self._unary(), tok.line)
         return self._postfix()
 
     def _postfix(self):
