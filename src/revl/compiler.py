@@ -48,6 +48,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
         # (duplicate names across files are caught in _lower_type_decls/_lower_fns)
         merged.type_decls.extend(program.type_decls)
         merged.fn_decls.extend(program.fn_decls)
+        merged.tests.extend(program.tests)
         merged.filename = path  # diagnostics from lowering name the declaring file
 
     ambient = None

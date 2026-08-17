@@ -86,3 +86,31 @@ def test_arrow_literal():
     prog = _parse("fn f() -> Int { let g = x => x + 1 return g(2) }")
     (fn,) = prog.fn_decls
     assert fn.body[0].value.__class__.__name__ == "ExprArrow"
+
+
+def test_verified_fn_decl():
+    prog = _parse("verified fn parse_int(s: Str) -> Opt[Int] { return Some(1) }")
+    (fn,) = prog.fn_decls
+    assert fn.verified
+    assert not fn.public
+
+
+def test_pub_verified_fn_decl():
+    prog = _parse("pub verified fn add(a: Int, b: Int) -> Int { return a + b }")
+    (fn,) = prog.fn_decls
+    assert fn.public
+    assert fn.verified
+
+
+def test_test_block_decl():
+    prog = _parse(
+        'test "put then get roundtrips" { '
+        'let m = Map.new() '
+        'assert m.insert("k", "v").get("k") == Some("v") '
+        '}'
+    )
+    (test,) = prog.tests
+    assert test.name == "put then get roundtrips"
+    assert len(test.body) == 2
+    assert test.body[0].__class__.__name__ == "LetStmt"
+    assert test.body[1].__class__.__name__ == "AssertStmt"
