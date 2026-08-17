@@ -132,16 +132,43 @@ Rejections come back structured, so the agent reacts to a *code*, not prose:
 The same projection is available to humans and CI as
 `revl compile --json-diagnostics`.
 
-### Not yet: acting on an admission
+### The live session — check, load, call, swap, prove
 
-The server can answer *"may this enter?"* but cannot yet **do** it — there is
-no `revl_swap`. The lifecycle machinery exists (`demo/live.py` hot-swaps from
-a file watcher, `run.py::_Driver` loads emitted modules in memory), so the
-missing piece is a stateful server mode holding a live driver. Also note that
-`_compile` currently writes inline source to a temp file, because
-`compile_files` carries the `manifest=` admission path; teaching
-`compile_source` an ambient manifest removes the last filesystem touch. Both
-are tracked as item 1 of the ranked list in docs/v2.0-roadmap.md.
+The server holds a composition **in memory** and drives it. Nothing a draft
+component does touches the filesystem, so an agent can iterate on code that
+has no file yet, and only write out what has already proven itself.
+
+| tool | what it does |
+|---|---|
+| `revl_load` | boot a composition in memory; returns fiber states, provided keys, trace |
+| `revl_call` | invoke a provided operation — how you *test* what you just loaded |
+| `revl_swap` | admit a candidate against what is running, then hot-swap it |
+| `revl_rollback` | restore the generation before the last swap |
+| `revl_unload` | tear down and report the residue checks (R4) |
+| `revl_state` | what is loaded, and the trace since the last call |
+
+The loop an agent actually runs:
+
+```
+revl_load   {source}                      -> MemCache ACTIVE, keys ["cache"]
+revl_call   {key: cache, method: size}    -> 0
+revl_swap   {source: <edited>}            -> admitted, swapped
+revl_call   {key: cache, method: size}    -> 42
+revl_swap   {source: <broken>}            -> T1 rejected, swapped: false
+revl_call   {key: cache, method: size}    -> 42   ← still serving
+revl_rollback                             -> back to the previous generation
+revl_unload                               -> noResidue: true
+```
+
+Two properties make this more than convenience. **A rejected candidate cannot
+deploy** — the compile runs before the transition, so the running composition
+is untouched and keeps answering. And **`revl_unload` proves R4 from inside
+the protocol**: registry, provisions, effects and listeners all back to
+baseline, so an agent can demonstrate its component leaves nothing behind
+*before* committing it to disk.
+
+Multi-module candidates work too: `modules` supplies in-memory sources for
+`use` imports, keyed by the path the import names.
 
 ### Wiring it up
 
