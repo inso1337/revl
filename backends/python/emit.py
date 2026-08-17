@@ -175,7 +175,15 @@ class _ComponentEmitter:
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             return f"{name}({args})"
         if kind == "var":
-            return _ident(expr.get("name"), f"{where}: variable")
+            name = expr.get("name")
+            # Builtin Opt/Result constructors: `Opt[T]` is represented as
+            # `T | None` at runtime, so `Some(x)`/`Ok(x)`/`Err(x)` are the
+            # identity on their payload and `None` is Python's None.
+            if name == "None":
+                return "None"
+            if name in ("Some", "Ok", "Err"):
+                return "(lambda _v: _v)"
+            return _ident(name, f"{where}: variable")
         if kind == "field":
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
@@ -186,6 +194,12 @@ class _ComponentEmitter:
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
+            if expr.get("op") == "??":
+                lhs = self._expr(expr.get("left"), where)
+                rhs = self._expr(expr.get("right"), where)
+                # `x ?? d`: `Opt[T]` is represented as `T | None` at runtime
+                # (matching the TS backend's `T | undefined` shape).
+                return f"({rhs} if {lhs} is None else {lhs})"
             op = _PY_BIN_OPS.get(expr.get("op"))
             if op is None:
                 raise EmitError(f"{where}: unsupported binary operator {expr.get('op')!r}")
@@ -217,6 +231,20 @@ class _ComponentEmitter:
                 raise EmitError(f"{where}: format template must be a string")
             args = "".join(", " + self._expr(arg, where) for arg in expr.get("args") or [])
             return f"fmt({template!r}{args})"
+        if kind == "optfield":
+            name = expr.get("name")
+            if not isinstance(name, str) or not name.isidentifier():
+                raise EmitError(f"{where}: bad optional field name {name!r}")
+            target = self._expr(expr.get("target"), where)
+            # `x?.name`: short-circuit on Opt-None.
+            return f"(None if ({target}) is None else _revl_field({target}, {name!r}))"
+        if kind == "optcall":
+            method = expr.get("method")
+            if not isinstance(method, str) or not method.isidentifier():
+                raise EmitError(f"{where}: bad optional method name {method!r}")
+            target = self._expr(expr.get("target"), where)
+            args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
+            return f"(None if ({target}) is None else ({target}).{method}({args}))"
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
     # -- steps --------------------------------------------------------------
@@ -533,12 +561,24 @@ def _emit_types(types: dict) -> "_Lines":
 
 
 def _interp_fstring(parts) -> str:
+    """Emit a Python f-string for a `${…}` template.
+
+    A "var" part carries either an identifier or a dotted access chain
+    (`u.name.first`). Record values are emitted as Python dicts, so we
+    lower the tail as `_revl_field(...)` calls rather than attribute
+    access — the same helper the field IR uses on either shape.
+    """
     segs = ['f"']
     for kind, text in parts:
         if kind == "text":
             segs.append(text.replace("\\", "\\\\").replace('"', '\\"').replace("{", "{{").replace("}", "}}"))
         else:
-            segs.append("{" + text + "}")
+            head, _dot, rest = text.partition(".")
+            expr = head
+            if rest:
+                for name in rest.split("."):
+                    expr = f"_revl_field({expr}, {name!r})"
+            segs.append("{" + expr + "}")
     segs.append('"')
     return "".join(segs)
 
@@ -583,8 +623,17 @@ def _expr(node: dict) -> str:
     if kind == "lit":
         return repr(node["value"])
     if kind == "var":
-        return node["name"]
+        name = node["name"]
+        if name == "None":
+            return "None"
+        if name in ("Some", "Ok", "Err"):
+            return "(lambda _v: _v)"
+        return name
     if kind == "bin":
+        if node["op"] == "??":
+            lhs = _expr(node["left"])
+            rhs = _expr(node["right"])
+            return f"({rhs} if {lhs} is None else {lhs})"
         op = _PY_BIN_OPS.get(node["op"])
         if op is None:
             raise EmitError(f"unsupported binary operator {node['op']!r}")
@@ -624,6 +673,13 @@ def _expr(node: dict) -> str:
         return _match_expr(_expr(node["scrutinee"]), node["arms"])
     if kind == "interp":
         return _interp_fstring(node["parts"])
+    if kind == "optfield":
+        target = _expr(node["target"])
+        return f"(None if ({target}) is None else _revl_field({target}, {node['name']!r}))"
+    if kind == "optcall":
+        target = _expr(node["target"])
+        args = ", ".join(_expr(a) for a in node.get("args") or [])
+        return f"(None if ({target}) is None else ({target}).{node['method']}({args}))"
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
