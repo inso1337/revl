@@ -323,6 +323,11 @@ class _Env:
         return self._v3_ctx
 
 
+# v1-dialect expression kinds that render as a Rust postfix-safe primary, so a
+# `.method()` suffix can be appended without wrapping them in parentheses.
+_V1_ATOMIC_KINDS = {"name", "lit", "call", "req", "config", "host", "var", "field", "index"}
+
+
 def _expr_arg(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
     """Lower a call argument, coercing string literals to `String`."""
     value = _expr(node, env, rename)
@@ -378,9 +383,25 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
         name = _ident(node.get("name"), "function")
         args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
         return f"{name}({args})"
+    if kind == "bin" and node.get("op") == "??":
+        # `??` is handled here as well as in `_v3_expr` because its operands
+        # are in the *v1* dialect in a component body (`req`, v1 `call`, ..),
+        # which the v3 renderer cannot see. Delegating the whole node would
+        # lose the dialect. See `_v3_expr` for the lowering rationale.
+        left = _expr(node["left"], env, rename)
+        if node["left"].get("kind") not in _V1_ATOMIC_KINDS:
+            left = f"({left})"
+        return f"{left}.unwrap_or_else(|| {_expr(node['right'], env, rename)})"
+    # Every remaining v3 expression kind is rendered by the v3 renderer. Listing
+    # the kinds here (rather than delegating unconditionally) is what let
+    # `match` fall through the gap between the two renderers, so this set must
+    # stay in step with `_v3_expr` — including `optfield`/`optcall`, which
+    # delegate purely so that _v3_expr's specific tier-limit message is what
+    # the user sees instead of the generic one below.
     if kind in {
         "var", "bin", "un", "field", "index", "if",
         "record", "list", "arrow", "builtin", "adt",
+        "match", "interp", "len", "optfield", "optcall",
     }:
         return _v3_expr(node, env.v3_ctx())
     raise EmitError(f"unsupported expression node in Rust backend: {kind!r}")
@@ -561,7 +582,14 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
     binding is a `let`, and the trailing `return` step keeps its keyword.
     """
     steps = method.get("body") or []
-    if len(steps) == 1 and steps[0].get("step") == "return":
+    # The expression-body fast path only applies to `return <expr>`. A bare
+    # `return` (void service op, `{"step": "return", "expr": null}`) has no
+    # expression to inline and falls through to the statement path below.
+    if (
+        len(steps) == 1
+        and steps[0].get("step") == "return"
+        and steps[0].get("expr") is not None
+    ):
         return _expr(steps[0]["expr"], env, rename)
 
     parts: list[str] = []
@@ -1218,6 +1246,13 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
     if kind == "name":
         return _ident(node.get("id"), "name")
 
+    if kind == "config":
+        # Component guards (`if (config.n < 1) { fail .. }`) reach this
+        # renderer through the surrounding `bin`/`un` node. `_emit_component_*`
+        # puts a local `let config = <Comp>Config { .. }` in scope, so this is
+        # the same rendering the v1 component renderer uses.
+        return f"config.{_ident(node.get('field'), 'config field')}.clone()"
+
     if kind == "adt":
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
         # Result -> native `Ok(..)`/`Err(..)`. Reuses the constructor logic
@@ -1225,6 +1260,15 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
         return ctx.constructor(node["case"], [_v3_expr(a, ctx) for a in node.get("args") or []])
 
     if kind == "bin":
+        if node.get("op") == "??":
+            # `a ?? b` (docs/syntax-2.0.md §3.2): `Opt[T]` is `Option<T>` on
+            # this tier, so the absent case is `None`. `unwrap_or_else` keeps
+            # `b` lazy — `??` must not evaluate its right operand when `a` is
+            # present, and `unwrap_or` would evaluate it unconditionally.
+            left = _v3_expr(node["left"], ctx)
+            if node["left"].get("kind") not in _V3_ATOMIC_KINDS:
+                left = f"({left})"
+            return f"{left}.unwrap_or_else(|| {_v3_expr(node['right'], ctx)})"
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
