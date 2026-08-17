@@ -99,11 +99,20 @@ without blocking.
 
 Placement wiring is implemented: `revl run app.rvl --placement p.toml` splits
 the components across processes and wires each seam straight from the manifest
-(`src/revl/placement.py`, `src/revl/_process_runner.py`, example
-`examples/placement/user_cache.toml`), the manifest-driven form of
-demo/bridge_pypy.py. `--once` brings the composition up, runs per-process probes
-(which may cross a seam), and tears down. cordis-py only for now; the
-cross-language py↔node seam still uses its hand-written driver.
+(`src/revl/placement.py`), the manifest-driven form of demo/bridge_pypy.py.
+`--once` brings the composition up, runs per-process probes (which may cross a
+seam), and tears down. Each process declares its `backend`:
+
+- `py` (default) runs on cordis-py via `src/revl/_process_runner.py`;
+- `node` runs on cordis-ts via `backends/typescript/placement_runner.ts` (its
+  components are emitted to TypeScript and run under Node).
+
+A `node` process is a full participant: it consumes cross-keys through a TS
+proxy and serves its own via the TS stub (`backends/typescript/bridge.ts`).
+Verified both directions (`examples/placement/user_cache_pynode.toml`,
+`user_cache_nodepy.toml`): a Python provider with a Node consumer and the
+reverse, cross-process `cache.get` returning the value each way. rust and java
+placement backends are the remaining runners (the transport pieces come next).
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a

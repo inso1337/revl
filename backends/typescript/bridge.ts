@@ -20,15 +20,23 @@ import net from 'node:net'
 // Run as `node -e`, fed the socket path and request via the environment.
 const CLIENT_SRC = `
 const net = require('node:net')
-const s = net.connect(process.env.BRIDGE_SOCK)
-let buf = ''
-s.on('connect', () => s.write(process.env.BRIDGE_REQ + '\\n'))
-s.on('data', (d) => {
-  buf += d
-  const i = buf.indexOf('\\n')
-  if (i >= 0) { process.stdout.write(buf.slice(0, i)); s.end(); process.exit(0) }
-})
-s.on('error', (e) => { process.stdout.write(JSON.stringify({ ok: false, error: String(e) })); process.exit(0) })
+let attempts = 0
+function attempt() {
+  const s = net.connect(process.env.BRIDGE_SOCK)
+  let buf = ''
+  s.on('connect', () => s.write(process.env.BRIDGE_REQ + '\\n'))
+  s.on('data', (d) => {
+    buf += d
+    const i = buf.indexOf('\\n')
+    if (i >= 0) { process.stdout.write(buf.slice(0, i)); s.end(); process.exit(0) }
+  })
+  s.on('error', () => {
+    s.destroy()
+    if (++attempts > 100) { process.stdout.write(JSON.stringify({ ok: false, error: 'bridge connect failed' })); process.exit(0) }
+    setTimeout(attempt, 50)  // provider may still be coming up
+  })
+}
+attempt()
 `
 
 function syncCall(socketPath: string, key: string, method: string, args: unknown[]): unknown {
@@ -47,13 +55,23 @@ function syncCall(socketPath: string, key: string, method: string, args: unknown
 export function makeProxy(key: string, methods: string[], socketPath: string) {
   const lostCallbacks: Array<() => void> = []
   let fired = false
-  const monitor = net.connect(socketPath)
-  monitor.on('error', () => {}) // a 'close' event always follows
-  monitor.on('close', () => {
-    if (fired) return
-    fired = true
-    for (const cb of lostCallbacks) cb()
-  })
+  let everConnected = false
+  let monitor: net.Socket
+  const connectMonitor = () => {
+    monitor = net.connect(socketPath)
+    monitor.on('connect', () => { everConnected = true })
+    monitor.on('error', () => {}) // a 'close' event always follows
+    monitor.on('close', () => {
+      if (!everConnected) {
+        setTimeout(connectMonitor, 50) // provider not up yet; keep trying
+        return
+      }
+      if (fired) return
+      fired = true
+      for (const cb of lostCallbacks) cb()
+    })
+  }
+  connectMonitor()
 
   const proxy: Record<string, (...args: unknown[]) => unknown> = {}
   for (const method of methods) {
@@ -73,4 +91,43 @@ export function makeProxy(key: string, methods: string[], socketPath: string) {
   }
 
   return { component, onPeerLost: (cb: () => void) => lostCallbacks.push(cb) }
+}
+
+/** Provider side: export `keys` from `ctx` over a Unix socket, so another
+ *  process can proxy them. Dispatches each JSON call to the committed view
+ *  `ctx[key][method](...args)`; the reply carries the value (or the error). */
+export async function serve(ctx: Context, keys: string[], socketPath: string): Promise<net.Server> {
+  const exported = new Set(keys)
+
+  const server = net.createServer((sock) => {
+    let buf = ''
+    sock.on('data', async (chunk) => {
+      buf += chunk
+      let nl: number
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl)
+        buf = buf.slice(nl + 1)
+        if (!line) continue
+        let reply: unknown
+        try {
+          const req = JSON.parse(line)
+          if (!exported.has(req.key)) {
+            reply = { ok: false, error: `key ${req.key} is not exported by this process` }
+          } else {
+            const service = (ctx as any)[req.key]
+            let result = service[req.method](...(req.args ?? []))
+            if (result && typeof result.then === 'function') result = await result
+            reply = { ok: true, value: result ?? null }
+          }
+        } catch (error) {
+          reply = { ok: false, error: String(error) }
+        }
+        sock.write(JSON.stringify(reply) + '\n')
+      }
+    })
+    sock.on('error', () => {})
+  })
+
+  await new Promise<void>((resolve) => server.listen(socketPath, () => resolve()))
+  return server
 }
