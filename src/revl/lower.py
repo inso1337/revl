@@ -38,20 +38,25 @@ from .parser import (
     ExprUn,
     ExprVar,
     FnDecl,
+    ForStmt,
     IfStmt,
     Interp,
     InterceptStmt,
     IsolateStmt,
     LetEffect,
+    LetPatternStmt,
     LetStmt,
+    ListPattern,
     Lit,
     Postfix,
     Program,
     ProvideStmt,
+    RecordPattern,
     ReturnStmt,
     ServiceDecl,
     TestDecl,
     TypeDecl,
+    WhileStmt,
 )
 
 IR_VERSION = 1
@@ -201,6 +206,8 @@ def _fn_call_graph(program: Program) -> dict[str, set[str]]:
     def collect_stmt(stmt) -> None:
         if isinstance(stmt, LetStmt):
             collect_expr(stmt.value)
+        elif isinstance(stmt, LetPatternStmt):
+            collect_expr(stmt.value)
         elif isinstance(stmt, AssignStmt):
             collect_expr(stmt.value)
         elif isinstance(stmt, ReturnStmt):
@@ -211,6 +218,14 @@ def _fn_call_graph(program: Program) -> dict[str, set[str]]:
             for branch in (stmt.then, stmt.otherwise or []):
                 for child in branch:
                     collect_stmt(child)
+        elif isinstance(stmt, WhileStmt):
+            collect_expr(stmt.cond)
+            for child in stmt.body:
+                collect_stmt(child)
+        elif isinstance(stmt, ForStmt):
+            collect_expr(stmt.iterable)
+            for child in stmt.body:
+                collect_stmt(child)
         elif isinstance(stmt, (ExprStmt, AssertStmt)):
             collect_expr(stmt.expr)
 
@@ -239,8 +254,8 @@ def _check_verified_totality(program: Program, filename: str) -> None:
 
     This first cut is deliberately conservative: a verified function may not
     participate in any cycle in the direct-call graph, because the checker
-    cannot currently prove structural descent. Unbounded `while`/`for` loops
-    are rejected by the parser until bounded forms land.
+    cannot currently prove structural descent. Loop bodies are traversed so
+    recursion through `while`/`for` is still caught.
     """
     verified = [fn for fn in program.fn_decls if fn.verified]
     if not verified:
@@ -325,7 +340,23 @@ def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
         if isinstance(expr.value, str):
             return "Str"
         return None
+    if isinstance(expr, ExprList):
+        if not expr.items:
+            return "List[Never]"
+        item_type = _expr_static_type(expr.items[0], type_env, types)
+        return f"List[{item_type or 'Any'}]"
     return None
+
+
+def _type_arg(type_name: str | None, base: str) -> str | None:
+    """Best-effort inner type of ``base[...]``."""
+    if type_name and type_name.startswith(base + "["):
+        return type_name[len(base) + 1 : -1]
+    return None
+
+
+def _is_sized_type(type_name: str | None) -> bool:
+    return type_name in ("Str", "Bytes") or bool(type_name and type_name.startswith("List["))
 
 
 def _variant_case_payload(types: dict, type_name: str | None, case_name: str) -> str | None:
@@ -356,6 +387,56 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
         rendered = ", ".join(f"`{name}`" for name in missing)
         plural = "cases"
     raise RevlError(filename, expr.line, f"non-exhaustive match: missing {plural} {rendered}")
+
+
+def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[str]:
+    """Mutable `var` names referenced by ``expr`` and not shadowed by a
+    lambda parameter.  Arrow literals snapshot these by value."""
+    bound = set(bound or ())
+    if isinstance(expr, ExprVar):
+        if expr.name not in bound and scope.get(expr.name) is True:
+            return {expr.name}
+        return set()
+    if isinstance(expr, ExprArrow):
+        return _mutable_free_vars(expr.body, scope, bound | set(expr.params))
+    if isinstance(expr, ExprBin):
+        return _mutable_free_vars(expr.left, scope, bound) | _mutable_free_vars(expr.right, scope, bound)
+    if isinstance(expr, ExprUn):
+        return _mutable_free_vars(expr.operand, scope, bound)
+    if isinstance(expr, ExprCall):
+        found = _mutable_free_vars(expr.callee, scope, bound)
+        for arg in expr.args:
+            found |= _mutable_free_vars(arg, scope, bound)
+        return found
+    if isinstance(expr, ExprField):
+        return _mutable_free_vars(expr.target, scope, bound)
+    if isinstance(expr, ExprIndex):
+        return _mutable_free_vars(expr.target, scope, bound) | _mutable_free_vars(expr.index, scope, bound)
+    if isinstance(expr, ExprIf):
+        return (
+            _mutable_free_vars(expr.cond, scope, bound)
+            | _mutable_free_vars(expr.then, scope, bound)
+            | _mutable_free_vars(expr.otherwise, scope, bound)
+        )
+    if isinstance(expr, ExprRecord):
+        found: set[str] = set()
+        for _, value in expr.fields:
+            found |= _mutable_free_vars(value, scope, bound)
+        return found
+    if isinstance(expr, ExprList):
+        found = set()
+        for item in expr.items:
+            found |= _mutable_free_vars(item, scope, bound)
+        return found
+    if isinstance(expr, ExprMatch):
+        found = _mutable_free_vars(expr.scrutinee, scope, bound)
+        for _, bind, body in expr.arms:
+            arm_bound = set(bound)
+            if bind is not None:
+                arm_bound.add(bind)
+            found |= _mutable_free_vars(body, scope, arm_bound)
+        return found
+    return set()
 
 
 class _LaxScope(dict):
@@ -453,6 +534,8 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         body.append({"step": "let", "name": stmt.name,
                      "value": _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types),
                      "mutable": stmt.mutable})
+    elif isinstance(stmt, LetPatternStmt):
+        _lower_let_pattern_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types)
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is not declared in this function",
@@ -461,11 +544,17 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
                             hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
-        inferred = _expr_static_type(stmt.value, type_env, types)
+        if stmt.op == "=":
+            value = stmt.value
+        else:
+            # `x += e` desugars to `x = x + e`; the parser only composes the
+            # operator, so lowering never has to remember it beyond this point.
+            value = ExprBin(stmt.op[:-1], ExprVar(stmt.name, stmt.line), stmt.value, stmt.line)
+        inferred = _expr_static_type(value, type_env, types)
         if inferred is not None:
             type_env[stmt.name] = inferred
         body.append({"step": "assign", "name": stmt.name,
-                     "value": _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)})
+                     "value": _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, ReturnStmt):
         body.append({"step": "return",
                      "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
@@ -480,12 +569,111 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                 _lower_pure_stmt(s, scope, callables, alias_fns, otherwise, filename, type_env, types)
         body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, alias_fns, filename, type_env, types),
                      "then": then, "else": otherwise})
+    elif isinstance(stmt, WhileStmt):
+        cond = _lower_pure_expr(stmt.cond, scope, callables, alias_fns, filename, type_env, types)
+        inner_scope = dict(scope)
+        inner_type_env = dict(type_env)
+        inner_body: list[dict] = []
+        for s in stmt.body:
+            _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types)
+        body.append({"step": "while", "cond": cond, "body": inner_body})
+    elif isinstance(stmt, ForStmt):
+        if stmt.bind in scope:
+            raise RevlError(filename, stmt.line, f"`{stmt.bind}` is already declared in this function")
+        iterable = _lower_pure_expr(stmt.iterable, scope, callables, alias_fns, filename, type_env, types)
+        inner_scope = dict(scope)
+        inner_type_env = dict(type_env)
+        inner_scope[stmt.bind] = False
+        iter_type = _expr_static_type(stmt.iterable, type_env, types)
+        element_type = _type_arg(iter_type, "List")
+        if element_type is not None:
+            inner_type_env[stmt.bind] = element_type
+        inner_body = []
+        for s in stmt.body:
+            _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types)
+        body.append({"step": "for", "bind": stmt.bind, "iterable": iterable, "body": inner_body})
     elif isinstance(stmt, ExprStmt):
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, AssertStmt):
         body.append({"step": "assert", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
+
+
+def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, alias_fns: dict,
+                            body: list, filename: str, type_env: dict, types: dict) -> None:
+    """Lower a `let`/`var` destructuring to one ``let_pattern`` step."""
+    pattern = stmt.pattern
+    if isinstance(pattern, RecordPattern):
+        names = list(pattern.fields)
+        if not names:
+            raise RevlError(filename, pattern.line, "record destructuring needs at least one field")
+        if len(set(names)) != len(names):
+            raise RevlError(filename, pattern.line, "duplicate name in record destructuring")
+        for name in names:
+            if name in scope:
+                raise RevlError(filename, stmt.line, f"`{name}` is already declared in this function")
+        value_type = _expr_static_type(stmt.value, type_env, types)
+        spec = types.get(value_type or "")
+        if spec is not None:
+            if spec.get("kind") != "record":
+                raise RevlError(
+                    filename, stmt.line,
+                    f"record destructuring requires a record, but `{value_type}` is not a record",
+                )
+            fields = spec.get("fields", {})
+            for name in names:
+                if name not in fields:
+                    raise RevlError(filename, pattern.line,
+                                    f"`{name}` is not a field of record `{value_type}`")
+        value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
+        for name in names:
+            scope[name] = stmt.mutable
+            if spec is not None:
+                type_env[name] = spec.get("fields", {})[name]
+        body.append({
+            "step": "let_pattern",
+            "pattern": "record",
+            "names": names,
+            "value": value_ir,
+            "mutable": stmt.mutable,
+        })
+        return
+
+    if isinstance(pattern, ListPattern):
+        if not pattern.binds:
+            raise RevlError(filename, pattern.line,
+                            "list destructuring needs at least one binding before `...rest`")
+        names = list(pattern.binds)
+        if pattern.rest is not None:
+            names.append(pattern.rest)
+        if len(set(names)) != len(names):
+            raise RevlError(filename, pattern.line, "duplicate name in list destructuring")
+        for name in names:
+            if name in scope:
+                raise RevlError(filename, stmt.line, f"`{name}` is already declared in this function")
+        value_type = _expr_static_type(stmt.value, type_env, types)
+        value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
+        element_type = _type_arg(value_type, "List")
+        for name in pattern.binds:
+            scope[name] = stmt.mutable
+            if element_type is not None:
+                type_env[name] = element_type
+        if pattern.rest is not None:
+            scope[pattern.rest] = stmt.mutable
+            if value_type is not None:
+                type_env[pattern.rest] = value_type
+        body.append({
+            "step": "let_pattern",
+            "pattern": "list",
+            "names": pattern.binds,
+            "rest": pattern.rest,
+            "value": value_ir,
+            "mutable": stmt.mutable,
+        })
+        return
+
+    raise RevlError(filename, stmt.line, "unexpected destructuring pattern")
 
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
@@ -533,6 +721,10 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
                 "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
     if isinstance(expr, ExprField):
+        target_type = _expr_static_type(expr.target, type_env, types)
+        if expr.name == "length" and _is_sized_type(target_type):
+            return {"kind": "len",
+                    "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types)}
         return {"kind": "field", "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
                 "name": expr.name}
     if isinstance(expr, ExprIndex):
@@ -543,6 +735,15 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 "then": _lower_pure_expr(expr.then, scope, callables, alias_fns, filename, type_env, types),
                 "else": _lower_pure_expr(expr.otherwise, scope, callables, alias_fns, filename, type_env, types)}
     if isinstance(expr, ExprRecord):
+        for name, field_expr in expr.fields:
+            if isinstance(field_expr, ExprVar) and scope.get(field_expr.name) is True:
+                raise RevlError(
+                    filename,
+                    field_expr.line,
+                    f"`var` `{field_expr.name}` cannot be used in a record literal — "
+                    "a `var` never escapes its function (syntax-2.0 §3.5)",
+                    hint="copy its current value into a `let` first, or use it directly outside a record",
+                )
         return {"kind": "record",
                 "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                            for name, e in expr.fields]}
@@ -555,7 +756,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         for param in expr.params:
             inner[param] = False
             inner_type_env.pop(param, None)
-        return {"kind": "arrow", "params": expr.params,
+        captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        return {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
     if isinstance(expr, ExprMatch):
         scrutinee_type = _expr_static_type(expr.scrutinee, type_env, types)
