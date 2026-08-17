@@ -1,0 +1,18 @@
+# Split examples/user_cache.rvl across two processes; `revl run --placement`
+# wires the `db` seam between them (PgDatabase provides it, UserCache proxies
+# it over a Unix socket). Same .rvl, no source change.
+#
+#   revl run examples/user_cache.rvl --placement examples/placement/user_cache.toml --once
+#   revl run examples/user_cache.rvl --placement examples/placement/user_cache.toml          # hold; Ctrl-C to stop
+
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+components = ["PgDatabase"]
+
+[processes.consumer]
+components = ["UserCache"]
+# probes run against this process's provided services; cache.put's
+# `emit db.execute(...)` crosses the seam into the provider process.
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]
