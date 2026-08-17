@@ -30,6 +30,14 @@ component UserCache requires db: Database provides cache: Cache {
   explicit `emit` admission of irreversibility) won't compile. Dependency
   cycles and provision conflicts are rejected at link time. Teardown cannot
   register effects, by construction.
+- **Type-safe and null-safe.** Bidirectional checking, sound where declared:
+  service and function call sites are checked against their signatures,
+  provide-methods inherit the service's types (surface names, service
+  signature), and returns are verified. There is no `null` in the type
+  system — absence is `Opt[T]`; `T` flows into `Opt[T]` but never silently
+  back out, and the diagnostic says to unwrap with `match` or `??`. The
+  unchecked remainder is enumerated, not implied: host-valued objects and
+  the extern boundary, both on the G8 audit surface.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), and the
   cordis-wasm substrate. See [DESIGN.md](DESIGN.md) for the full design,
@@ -48,8 +56,8 @@ composition's manifest and G8 boundary surface; `compile_files(...,
 manifest=running)` is the runtime-admission gate. The rejection suite in
 [examples/rejections/](examples/rejections/) is the checker's executable
 spec, and [demo/](demo/) is a live file-watching hot-swap loop — edit a
-`.rvl`, watch the running system recompile and swap it. The
-[2.0 full-language proposal](docs/syntax-2.0.md) is the next frontier.
+`.rvl`, watch the running system recompile and swap it. The 2.0 language
+below builds on this frozen core.
 
 **Status: 2.0 (this branch).** The full language of
 [docs/syntax-2.0.md](docs/syntax-2.0.md) is implemented on top of the v1
@@ -63,7 +71,9 @@ the G8 audit surface, in-file `test` blocks, realms & interception
 and a specified [stdlib surface](docs/stdlib-2.0.md) — unknown methods are
 compile errors, never host pass-throughs. The strata compose: components
 call functions at every expression position, and the audit surfaces host
-code transitively.
+code transitively. The expression layer is **type-safe and null-safe**
+(see above); the remaining typing frontier and everything else in flight
+is tracked in the [2.0 roadmap](docs/v2.0-roadmap.md).
 
 ### Turing-complete, demonstrated by execution
 
@@ -72,10 +82,10 @@ claim is checked by running the emitted code, not by argument: the test
 suite compiles revl sources for `fib` (loop form) and the Collatz
 step-counter, executes the **emitted Python**, and asserts `fib(10) = 55`
 and `collatz(27) = 111`; the same sources lower through the TypeScript
-emitter. Suites at this commit: 145 frontend tests (incl. 7-test
-strata-composition and 6-test stdlib groups), 21 python-backend, 24
-ts-backend, plus the wasm demo, live hot-swap demo, and the cordisc
-cross-check.
+emitter. Suites at this commit: 164 frontend tests (incl. the 17-test
+sound-typing group, 7-test strata-composition and 6-test stdlib groups),
+21 python-backend, 24 ts-backend, plus the wasm demo, live hot-swap demo,
+and the cordisc cross-check.
 
 ### The acceptance benchmark (syntax-2.0 §10)
 
