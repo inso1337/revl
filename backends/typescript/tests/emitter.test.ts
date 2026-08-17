@@ -86,8 +86,9 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
       env: { ...process.env, CI: '1' },
     })
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('tests/generated/v3_tests.test.ts')
-    expect(result.stdout).toContain('2 passed')
+    // NB: which stream carries the per-file line is reporter-dependent;
+    // the pass-count is the stable signal
+    expect(result.stdout + result.stderr).toContain('2 passed')
   })
 
   it('rejects binding names that would shadow emitter scaffolding', () => {

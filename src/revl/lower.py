@@ -937,7 +937,7 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
         raise RevlError(env.filename, line,
                         f"`{root}.{method}` takes {len(decl.params)} "
                         f"argument(s), {len(args)} given")
-    if decl.emission:
+    if decl.emission and getattr(env, "_expr_mode", "setup") == "setup":
         raise RevlError(
             env.filename, line,
             f"call to emission `{root}.{method}` must be marked `emit` (G4)",
@@ -956,13 +956,21 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprLit):
         return {"kind": "lit", "value": expr.value}
     if isinstance(expr, Interp):
-        return _lower_expr(expr, env, mode="setup")
+        return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
     if isinstance(expr, ExprVar):
         name = expr.name
         if name in scope:
             return {"kind": "name", "id": scope[name]}
         if name in callables:
             return {"kind": "var", "name": name}
+        if getattr(env, "_plain_body", False):
+            declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
+            raise RevlError(
+                filename, line,
+                f"`{name}` is not a declared requirement of {env.component.name}",
+                hint=f"component {env.component.name} requires {declared} — "
+                     f"add `requires {name}: <Service>`?",
+            )
         raise RevlError(filename, line,
                         f"`{name}` is not declared in this component effect block",
                         hint="declare it with `let` in the effect block, or use a "
@@ -1155,6 +1163,7 @@ def _lower_component_if(stmt: IfStmt, env: Env, callables: set) -> dict:
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None) -> dict:
     env = Env(comp, services, filename)
+    env.callables = callables or set()  # module fns/externs/hosts for unified expressions
 
     provides = {}
     for key, svc, line in comp.provides:
@@ -1427,7 +1436,16 @@ def _lower_expr(expr, env: Env, mode: str):
         return {"kind": "format", "template": "".join(template), "args": args}
     if isinstance(expr, Postfix):
         return _lower_postfix(expr, env, mode)
-    raise RevlError(env.filename, getattr(expr, "line", 0), "unsupported expression")  # pragma: no cover
+    # v2.0 unified grammar: component positions carry the full pure-expression
+    # stratum; the mode/context ride on env so the shared lowering needs no
+    # signature churn (finding 1 — strata compose)
+    saved = getattr(env, "_expr_mode", None), getattr(env, "_plain_body", None)
+    env._expr_mode, env._plain_body = mode, True
+    try:
+        return _lower_component_pure_expr(
+            expr, env, _component_scope(env), getattr(env, "callables", set()))
+    finally:
+        env._expr_mode, env._plain_body = saved
 
 
 def _lower_postfix(expr: Postfix, env: Env, mode: str):

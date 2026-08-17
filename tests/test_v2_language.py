@@ -344,8 +344,11 @@ def test_component_block_effect_parses_setup_and_final_acquisition():
     assert isinstance(stmt.setup[0], LetStmt)
     assert stmt.setup[0].name == "url"
     assert isinstance(stmt.acquire, ExprCall)
-    assert stmt.undo.__class__.__name__ == "Postfix"
-    assert stmt.undo.head == "conn"
+    # since the strata unification, undo parses in the same full
+    # expression grammar as every component position
+    assert stmt.undo.__class__.__name__ == "ExprCall"
+    assert stmt.undo.callee.target.name == "conn"
+    assert stmt.undo.callee.name == "close"
 
 
 def test_bare_component_effect_block_parses():
