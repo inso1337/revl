@@ -99,7 +99,16 @@ one.
   emitter-generated per service. **That codegen has since landed** (`e349487`,
   §"placement backends" below): `backends/rust/emit.py` generates the proxy,
   stub dispatcher and plugin table per composition, so Rust now both consumes
-  and serves across a seam.
+  and serves across a seam, marshalling any non-opaque type through serde
+  (`cab678e`) and withdrawing reactively on peer death.
+
+**Wire encoding, and the one divergence to settle.** Records, `Map`, `List`,
+`Opt` and scalars cross as plain JSON — the same shape the Python side already
+produces, so those seams are cross-language. `Result` and user ADTs, however,
+currently use serde's *externally-tagged* form on the rust side, which makes
+those seams **rust↔rust only** until the py/node/java emitters agree on one
+encoding. The wasm tier's canonical ABI is the other candidate; choosing once,
+deliberately, is cheaper than choosing twice.
 
 Both show value-copy marshalling and peer-death-as-withdrawal (R2/R3): killing
 the provider deactivates the consumer reactively and replays its inverses LIFO,
