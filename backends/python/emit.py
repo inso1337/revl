@@ -575,33 +575,22 @@ def _emit_types(types: dict) -> "_Lines":
 
 
 def _interp_fstring(parts) -> str:
-    """Emit a Python f-string for a `${…}` template.
+    """Emit a `${…}` template as a string concatenation.
 
-    A "var" part carries either an identifier or a dotted access chain
-    (`u.name.first`). Record values are emitted as Python dicts, so we
-    lower the tail as `_revl_field(...)` calls rather than attribute
-    access — the same helper the field IR uses on either shape.
+    Each interpolated segment is a full expression (`["expr", ir_node]`),
+    stringified with `str(...)`; text segments are Python string literals.
+    Concatenation (not an f-string) so an interpolated expression may itself
+    contain quotes or braces.
     """
-    segs = ['f"']
-    for kind, text in parts:
+    pieces: list[str] = []
+    for kind, value in parts:
         if kind == "text":
-            # escape for a single-line double-quoted f-string: backslash and
-            # quote, brace-doubling for f-string literals, and control chars
-            # (a raw newline in a template would otherwise be an unterminated
-            # f-string literal)
-            escaped = (text.replace("\\", "\\\\").replace('"', '\\"')
-                       .replace("{", "{{").replace("}", "}}")
-                       .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
-            segs.append(escaped)
-        else:
-            head, _dot, rest = text.partition(".")
-            expr = head
-            if rest:
-                for name in rest.split("."):
-                    expr = f"_revl_field({expr}, {name!r})"
-            segs.append("{" + expr + "}")
-    segs.append('"')
-    return "".join(segs)
+            pieces.append(repr(value))
+        else:  # ["expr", ir_node]
+            pieces.append(f"str({_expr(value)})")
+    if not pieces:
+        return "''"
+    return "(" + " + ".join(pieces) + ")"
 
 
 def _match_expr(scrutinee: str, arms: list) -> str:

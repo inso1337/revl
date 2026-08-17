@@ -668,15 +668,11 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
     if kind == "interp":
         parts = node.get("parts") or []
         segs = ["`"]
-        for part_kind, text in parts:
+        for part_kind, value in parts:
             if part_kind == "text":
-                segs.append(_template_text(text))
-            else:
-                # `${a.b.c}` — validate head-of-chain as an identifier, tail
-                # is JS field access so the same shape emits verbatim
-                head, _dot, _rest = text.partition(".")
-                _ident(head, "interpolation")
-                segs.append("${" + text + "}")
+                segs.append(_template_text(value))
+            else:  # ["expr", ir_node] — a full expression
+                segs.append("${" + _v3_expr(value, ctx) + "}")
         segs.append("`")
         return "".join(segs)
 

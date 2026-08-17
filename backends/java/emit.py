@@ -659,16 +659,11 @@ def _v3_expr(
     if kind == "interp":
         parts = node.get("parts") or []
         segs: list[str] = []
-        for part_kind, text in parts:
+        for part_kind, value in parts:
             if part_kind == "text":
-                segs.append(_string(text))
-            else:
-                # a "var" part may carry a dotted chain (`u.name`); the head
-                # must be a valid identifier, the tail is Java field access.
-                head, _dot, rest = text.partition(".")
-                _ident(head, "interpolation")
-                access = head if not rest else f"{head}.{rest}"
-                segs.append(f"String.valueOf({access})")
+                segs.append(_string(value))
+            else:  # ["expr", ir_node] — a full expression, stringified
+                segs.append(f"String.valueOf({_v3_expr(value, ctx, rename, env)})")
         if not segs:
             return '""'
         return " + ".join(segs)
