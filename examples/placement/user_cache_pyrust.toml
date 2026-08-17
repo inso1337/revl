@@ -1,0 +1,12 @@
+# Python provider, Rust (cordis-rs) consumer. `revl run --placement` builds the
+# rust runner and wires the `db` seam over a Unix socket.
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+components = ["PgDatabase"]
+
+[processes.consumer]
+backend = "rust"
+components = ["UserCache"]
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]

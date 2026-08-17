@@ -111,15 +111,28 @@ the components across processes and wires each seam straight from the manifest
 seam), and tears down. Each process declares its `backend`:
 
 - `py` (default) runs on cordis-py via `src/revl/_process_runner.py`;
-- `node` runs on cordis-ts via `backends/typescript/placement_runner.ts` (its
-  components are emitted to TypeScript and run under Node).
+- `node` runs on cordis-ts via `backends/typescript/placement_runner.ts`;
+- `rust` runs on cordis-rs via `backends/rust/placement_runner` (the conductor
+  `cargo build`s it);
+- `java` runs on cordis4j via `backends/java/placement/PlacementRunner` (the
+  conductor emits + `javac`s the module).
 
-A `node` process is a full participant: it consumes cross-keys through a TS
-proxy and serves its own via the TS stub (`backends/typescript/bridge.ts`).
-Verified both directions (`examples/placement/user_cache_pynode.toml`,
-`user_cache_nodepy.toml`): a Python provider with a Node consumer and the
-reverse, cross-process `cache.get` returning the value each way. rust and java
-placement backends are the remaining runners (the transport pieces come next).
+All four are verified against a Python provider with `--once`, the emit
+crossing into the provider's pool and `cache.get` returning the value:
+`examples/placement/user_cache{,_pynode,_nodepy,_pyrust,_pyjava}.toml`.
+
+Participation levels differ, and the docs are honest about it:
+- `py`/`node` are full, reactive participants: consume via a dynamic proxy,
+  serve via the stub, and peer death is withdrawal (R2/R3).
+- `java` uses a generic `java.lang.reflect.Proxy` (any interface, no codegen)
+  on the in-repo cordis4j stubs (JDK 17); the crossing and teardown are
+  verified, but the stub `Context` is non-reactive, so reactive withdrawal
+  needs the real cordis4j runtime (follow-up).
+- `rust` is a consumer-first-cut for the `user_cache` composition: a
+  hand-written `Database` proxy (cordis-rs services are static traits, so a
+  general proxy/stub is emitter codegen, per the note above). It cannot serve
+  a cross-key yet, and has no monitor for peer death. Generalizing it is the
+  remaining emitter work.
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a
