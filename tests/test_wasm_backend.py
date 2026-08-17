@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import compile_files  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 CORDIS_WASM_PY = Path.home() / "Projects" / "cordis-wasm" / ".venv" / "bin" / "python"
 
@@ -53,6 +53,34 @@ def test_import_section_is_the_coeffect_specification():
     assert '(export "provide:status.shared")' in beacon
     # the accumulator: inverses guarded by completed-step count, LIFO
     assert beacon.index("i32.const 8) (i32.const 0)") < beacon.index("i32.const 7) (i32.const 0)")
+
+
+def test_v2_realms_lower_to_realm_namespaces():
+    ir = compile_source(
+        """
+        service Kv {
+          fn get(k: Int) -> Int
+          fn set(k: Int, v: Int)
+        }
+        component StoreA provides kv: Kv {
+          isolate kv in realm("tenant_a")
+          provide kv {
+            fn get(k) { return k }
+            fn set(k, v) { }
+          }
+        }
+        component AppA requires kv: Kv {
+          isolate kv in realm("tenant_a")
+          intercept kv with { quota: 5 }
+          effect kv.set(1, 10) undo kv.set(1, 0)
+        }
+        """
+    )
+    modules = _emitter().emit(ir)
+    assert '(import "coeffect:tenant_a/kv" "set"' in modules["AppA"]
+    assert '(export "provide:tenant_a/kv.get")' in modules["StoreA"]
+    assert '(@custom "revl:isolate" "{\\"kv\\": \\"tenant_a\\"}")' in modules["AppA"]
+    assert '(@custom "revl:intercept" "{\\"kv\\": {\\"quota\\": 5}}")' in modules["AppA"]
 
 
 def test_tier_restrictions_are_hard_errors():
