@@ -836,6 +836,9 @@ class Parser:
             if not in_method:
                 raise self.err(tok.line, "`return` is only allowed inside a provide method body")
             self.next()
+            # a void operation returns nothing: `fn f(x) { return }`
+            if self.at("}"):
+                return ReturnStmt(None, tok.line)
             return ReturnStmt(self.pure_expr(), tok.line)
         if tok.kind == "kw" and tok.value == "isolate":
             if in_method:

@@ -1265,6 +1265,24 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 code="G4", category="emission",
             )
         return node
+    if isinstance(expr, ExprMatch):
+        # the ADT eliminator, available in component and method bodies too:
+        # a component consuming a Result should not have to call out to a fn
+        scrutinee = _lower_component_pure_expr(expr.scrutinee, env, scope,
+                                               callables, pure_only)
+        _check_match_exhaustiveness(expr, env.type_env, env.types, filename)
+        arms = []
+        for pattern, bind, body in expr.arms:
+            inner = dict(scope)
+            if bind is not None:
+                safe = _safe_name(bind, set(scope.values()))
+                inner[bind] = safe
+            arms.append({
+                "pattern": pattern,
+                "bind": inner.get(bind) if bind is not None else None,
+                "body": _lower_component_pure_expr(body, env, inner, callables, pure_only),
+            })
+        return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, line)
@@ -1920,6 +1938,16 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 mbody.append({"step": "assign", "name": method_locals[mstmt.name],
                               "value": _lower_expr(mstmt.value, env, mode="setup")})
             elif isinstance(mstmt, ReturnStmt):
+                if mstmt.expr is None:
+                    # a void operation: `fn f(x) { return }`
+                    if decl.returns:
+                        raise RevlError(
+                            filename, mstmt.line,
+                            f"`{method.name}` returns `{decl.returns}` but this "
+                            "`return` carries no value")
+                    mbody.append({"step": "return", "expr": None})
+                    returned = True
+                    continue
                 lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
                 if decl.returns:
                     actual = infer_ir(lowered_return, env.type_env, env.types, env.services)
