@@ -43,7 +43,7 @@ def test_optional_chaining_and_coalescing():
 
 def test_new_keywords_are_recognized():
     for word in ("type", "use", "pub", "var", "while", "for", "of", "if", "else",
-                 "match", "test", "assert", "async", "as"):
+                 "match", "test", "assert", "async", "as", "fail"):
         assert lex(word, "<test>")[0].kind == "kw", word
 
 

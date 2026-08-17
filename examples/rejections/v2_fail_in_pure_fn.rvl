@@ -1,0 +1,12 @@
+// REJECTED — Components 2.0 (§4): `fail` is an activation-body transition.
+// Pure functions return `Result` values; deliberate L-Raise only makes sense
+// while a component activation is loading, where the runtime can revert the
+// accumulated effects and land the fiber FAILED (A8).
+//
+// expected error:
+//   `fail` is only allowed in a component activation body (A8)
+
+fn f() -> Int {
+  fail "not a component activation"
+  return 0
+}

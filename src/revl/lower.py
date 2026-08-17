@@ -24,6 +24,7 @@ from .parser import (
     EffectStmt,
     EmitStmt,
     ExternDecl,
+    FailStmt,
     ExprArrow,
     ExprBin,
     ExprCall,
@@ -613,13 +614,20 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     for name, svc in ambient_services.items():
         services.setdefault(name, svc)
 
+    component_callables = (
+        _HOST_CALLABLES
+        | _BUILTIN_CONSTRUCTORS
+        | {fn.name for fn in program.fn_decls}
+        | {ext.name for ext in program.externs}
+    )
+
     components = []
     seen = set()
     for comp in program.components:
         if comp.name in seen:
             raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
         seen.add(comp.name)
-        components.append(_lower_component(comp, services, program.filename))
+        components.append(_lower_component(comp, services, program.filename, component_callables))
 
     manifest = _link(program, components, ambient.get("components") or [])
 
@@ -628,8 +636,14 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     externs = _lower_externs(program, program.filename)
     tests = _lower_tests(program, program.filename)
 
+    uses_components_2 = any(
+        isinstance(stmt, (FailStmt, IfStmt))
+        or (isinstance(stmt, (LetEffect, EffectStmt)) and stmt.setup)
+        for comp in program.components
+        for stmt in comp.body
+    )
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
-    uses_v3 = bool(types) or bool(fns) or bool(externs) or bool(tests)
+    uses_v3 = bool(types) or bool(fns) or bool(externs) or bool(tests) or uses_components_2
 
     result = {
         "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
@@ -683,7 +697,242 @@ def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
 
 # ---------------------------------------------------------------- components
 
-def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str) -> dict:
+def _component_scope(env: Env) -> dict[str, str]:
+    scope = {name: safe for name, safe in env.locals.items()}
+    scope.update(env.params)
+    return scope
+
+
+def _component_req_call(env: Env, root: str, method: str, args: list, line: int) -> dict:
+    if root not in env.requires:
+        raise RevlError(env.filename, line,
+                        f"`{root}` is not a declared requirement of {env.component.name}")
+    svc = env.services[env.requires[root]]
+    decl = svc.methods.get(method)
+    if decl is None:
+        raise RevlError(env.filename, line,
+                        f"`{root}.{method}` is not a method of service {svc.name}")
+    if len(args) != len(decl.params):
+        raise RevlError(env.filename, line,
+                        f"`{root}.{method}` takes {len(decl.params)} "
+                        f"argument(s), {len(args)} given")
+    if decl.emission:
+        raise RevlError(
+            env.filename, line,
+            f"call to emission `{root}.{method}` must be marked `emit` (G4)",
+            hint="an emission crosses the system boundary and cannot be reverted; "
+                 "`emit` makes that visible at the call site",
+        )
+    return {"kind": "call", "target": {"kind": "req", "name": root},
+            "method": method, "args": args}
+
+
+def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables: set,
+                               pure_only: bool = False) -> dict:
+    filename = env.filename
+    line = getattr(expr, "line", 0)
+
+    if isinstance(expr, ExprLit):
+        return {"kind": "lit", "value": expr.value}
+    if isinstance(expr, Interp):
+        return _lower_expr(expr, env, mode="setup")
+    if isinstance(expr, ExprVar):
+        name = expr.name
+        if name in scope:
+            return {"kind": "name", "id": scope[name]}
+        if name in callables:
+            return {"kind": "var", "name": name}
+        raise RevlError(filename, line,
+                        f"`{name}` is not declared in this component effect block",
+                        hint="declare it with `let` in the effect block, or use a "
+                             "requirement/config field (G1)")
+    if isinstance(expr, ExprField):
+        if isinstance(expr.target, ExprVar) and expr.target.name == "config":
+            if expr.name not in env.config_fields:
+                raise RevlError(filename, line,
+                                f"`{expr.name}` is not a config field of {env.component.name}")
+            return {"kind": "config", "field": expr.name}
+        return {"kind": "field",
+                "target": _lower_component_pure_expr(expr.target, env, scope, callables,
+                                                     pure_only),
+                "name": expr.name}
+    if isinstance(expr, ExprCall):
+        args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
+                for a in expr.args]
+        if isinstance(expr.callee, ExprField) and isinstance(expr.callee.target, ExprVar):
+            root = expr.callee.target.name
+            method = expr.callee.name
+            if root in _HOST_CALLABLES:
+                if pure_only:
+                    raise RevlError(
+                        filename, line,
+                        f"host builtin `{root}.{method}` is an effect and cannot appear "
+                        "in pure setup",
+                        hint="move the acquisition to the final expression of the effect block (G6)",
+                    )
+                return {"kind": "host", "fn": f"{root}.{method}", "args": args}
+            if root in env.requires:
+                if pure_only:
+                    raise RevlError(
+                        filename, line,
+                        f"call to required service `{root}.{method}` is an effect and cannot "
+                        "appear in pure setup",
+                        hint="service calls must be acquired with `effect ... undo ...` or "
+                             "marked `emit` (G4/G6)",
+                    )
+                return _component_req_call(env, root, method, args, line)
+            if root in scope:
+                return {"kind": "call",
+                        "target": {"kind": "name", "id": scope[root]},
+                        "method": method, "args": args}
+        if isinstance(expr.callee, ExprVar) and expr.callee.name in callables:
+            return {"kind": "fn", "name": expr.callee.name, "args": args}
+        return {"kind": "call",
+                "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
+                                                     pure_only),
+                "args": args}
+    if isinstance(expr, ExprBin):
+        return {"kind": "bin", "op": expr.op,
+                "left": _lower_component_pure_expr(expr.left, env, scope, callables,
+                                                   pure_only),
+                "right": _lower_component_pure_expr(expr.right, env, scope, callables,
+                                                    pure_only)}
+    if isinstance(expr, ExprUn):
+        return {"kind": "un", "op": expr.op,
+                "operand": _lower_component_pure_expr(expr.operand, env, scope, callables,
+                                                      pure_only)}
+    if isinstance(expr, ExprIndex):
+        return {"kind": "index",
+                "target": _lower_component_pure_expr(expr.target, env, scope, callables,
+                                                     pure_only),
+                "index": _lower_component_pure_expr(expr.index, env, scope, callables,
+                                                    pure_only)}
+    if isinstance(expr, ExprIf):
+        return {"kind": "if",
+                "cond": _lower_component_pure_expr(expr.cond, env, scope, callables,
+                                                   pure_only),
+                "then": _lower_component_pure_expr(expr.then, env, scope, callables,
+                                                   pure_only),
+                "else": _lower_component_pure_expr(expr.otherwise, env, scope, callables,
+                                                   pure_only)}
+    if isinstance(expr, ExprRecord):
+        return {"kind": "record",
+                "fields": [[name, _lower_component_pure_expr(e, env, scope, callables,
+                                                             pure_only)]
+                           for name, e in expr.fields]}
+    if isinstance(expr, ExprList):
+        return {"kind": "list",
+                "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
+                          for e in expr.items]}
+    if isinstance(expr, ExprArrow):
+        return {"kind": "arrow", "params": expr.params,
+                "body": _lower_component_pure_expr(expr.body, env, scope, callables,
+                                                   pure_only)}
+    raise RevlError(filename, line, "unsupported expression in component effect block",
+                    hint="block-effect setup is stratum-1 pure code (G6)")
+
+
+def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables: set,
+                                mutables: set[str], out: list) -> None:
+    filename = env.filename
+    if isinstance(stmt, LetStmt):
+        safe = env.bind_local(stmt.name, stmt.line)
+        scope[stmt.name] = safe
+        if stmt.mutable:
+            mutables.add(stmt.name)
+        out.append({
+            "step": "let",
+            "name": safe,
+            "value": _lower_component_pure_expr(stmt.value, env, scope, callables,
+                                                pure_only=True),
+        })
+    elif isinstance(stmt, AssignStmt):
+        if stmt.name not in scope:
+            raise RevlError(filename, stmt.line,
+                            f"`{stmt.name}` is not declared in this effect block",
+                            hint="declare it with `let`/`var` first (G1)")
+        if stmt.name not in mutables:
+            raise RevlError(filename, stmt.line,
+                            f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
+                            hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
+        out.append({
+            "step": "assign",
+            "name": scope[stmt.name],
+            "value": _lower_component_pure_expr(stmt.value, env, scope, callables,
+                                                pure_only=True),
+        })
+    elif isinstance(stmt, ExprStmt):
+        out.append({
+            "step": "expr",
+            "expr": _lower_component_pure_expr(stmt.expr, env, scope, callables,
+                                               pure_only=True),
+        })
+    elif isinstance(stmt, IfStmt):
+        then: list[dict] = []
+        for s in stmt.then:
+            _lower_component_setup_stmt(s, env, scope, callables, mutables, then)
+        otherwise = None
+        if stmt.otherwise is not None:
+            otherwise = []
+            for s in stmt.otherwise:
+                _lower_component_setup_stmt(s, env, scope, callables, mutables, otherwise)
+        out.append({
+            "step": "if",
+            "cond": _lower_component_pure_expr(stmt.cond, env, scope, callables,
+                                               pure_only=True),
+            "then": then,
+        })
+        if otherwise is not None:
+            out[-1]["else"] = otherwise
+    elif isinstance(stmt, AssertStmt):
+        out.append({
+            "step": "assert",
+            "expr": _lower_component_pure_expr(stmt.expr, env, scope, callables,
+                                               pure_only=True),
+        })
+    else:
+        raise RevlError(filename, getattr(stmt, "line", 0),
+                        "unsupported statement in effect block setup",
+                        hint="effect block setup is stratum-1 pure code: "
+                             "`let`/`var`/`if`/pure calls are allowed (G6)")
+
+
+def _lower_component_guard_stmts(stmts: list, env: Env, callables: set) -> list[dict]:
+    out: list[dict] = []
+    for stmt in stmts:
+        if isinstance(stmt, FailStmt):
+            out.append({
+                "step": "fail",
+                "message": _lower_component_pure_expr(
+                    stmt.message, env, _component_scope(env), callables,
+                    pure_only=True,
+                ),
+            })
+        elif isinstance(stmt, IfStmt):
+            out.append(_lower_component_if(stmt, env, callables))
+        else:
+            raise RevlError(env.filename, getattr(stmt, "line", 0),
+                            "only `fail` (and nested `if` guards) may appear in a component guard",
+                            hint="component `if` is for deliberate L-Raise decisions, not general "
+                                 "control flow (G6)")
+    return out
+
+
+def _lower_component_if(stmt: IfStmt, env: Env, callables: set) -> dict:
+    scope = _component_scope(env)
+    step = {
+        "step": "if",
+        "cond": _lower_component_pure_expr(stmt.cond, env, scope, callables,
+                                           pure_only=True),
+        "then": _lower_component_guard_stmts(stmt.then, env, callables),
+    }
+    if stmt.otherwise is not None:
+        step["else"] = _lower_component_guard_stmts(stmt.otherwise, env, callables)
+    return step
+
+
+def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
+                     callables: set | None = None) -> dict:
     env = Env(comp, services, filename)
 
     provides = {}
@@ -752,16 +1001,58 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 hint="move acquisitions above the `provide` block (linker rule A2)",
             )
         if isinstance(stmt, LetEffect):
-            acquire = _lower_expr(stmt.acquire, env, mode="setup")
+            if stmt.setup:
+                saved_locals = dict(env.locals)
+                saved_taken = set(env._taken)
+                setup_steps: list[dict] = []
+                scope = _component_scope(env)
+                mutables: set[str] = set()
+                for setup_stmt in stmt.setup:
+                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
+                                                mutables, setup_steps)
+                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                env.locals = saved_locals
+                env._taken = saved_taken
+            else:
+                setup_steps = []
+                acquire = _lower_expr(stmt.acquire, env, mode="setup")
             safe = env.bind_local(stmt.bind, stmt.line)
             undo = _lower_expr(stmt.undo, env, mode="undo")
-            body.append({"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo})
+            step = {"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo}
+            if setup_steps:
+                step["setup"] = setup_steps
+            body.append(step)
         elif isinstance(stmt, EffectStmt):
+            if stmt.setup:
+                saved_locals = dict(env.locals)
+                saved_taken = set(env._taken)
+                setup_steps = []
+                scope = _component_scope(env)
+                mutables = set()
+                for setup_stmt in stmt.setup:
+                    _lower_component_setup_stmt(setup_stmt, env, scope, callables or set(),
+                                                mutables, setup_steps)
+                acquire = _lower_component_pure_expr(stmt.acquire, env, scope, callables or set())
+                env.locals = saved_locals
+                env._taken = saved_taken
+            else:
+                setup_steps = []
+                acquire = _lower_expr(stmt.acquire, env, mode="setup")
+            step = {"step": "effect", "acquire": acquire,
+                    "undo": _lower_expr(stmt.undo, env, mode="undo")}
+            if setup_steps:
+                step["setup"] = setup_steps
+            body.append(step)
+        elif isinstance(stmt, FailStmt):
             body.append({
-                "step": "effect",
-                "acquire": _lower_expr(stmt.acquire, env, mode="setup"),
-                "undo": _lower_expr(stmt.undo, env, mode="undo"),
+                "step": "fail",
+                "message": _lower_component_pure_expr(
+                    stmt.message, env, _component_scope(env), callables or set(),
+                    pure_only=True,
+                ),
             })
+        elif isinstance(stmt, IfStmt):
+            body.append(_lower_component_if(stmt, env, callables or set()))
         elif isinstance(stmt, EmitStmt):
             body.append(_lower_emit_step(stmt, env))
         elif isinstance(stmt, AwaitStmt):

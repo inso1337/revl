@@ -6,7 +6,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl.parser import ExprBin, ExprMatch, ExprVar, Parser  # noqa: E402
+from revl.parser import (  # noqa: E402
+    EffectStmt,
+    ExprBin,
+    ExprCall,
+    ExprMatch,
+    ExprVar,
+    FailStmt,
+    IfStmt,
+    LetEffect,
+    LetStmt,
+    Parser,
+)
 
 
 def _parse(source):
@@ -190,3 +201,71 @@ def test_test_block_decl():
     assert len(test.body) == 2
     assert test.body[0].__class__.__name__ == "LetStmt"
     assert test.body[1].__class__.__name__ == "AssertStmt"
+
+
+def test_component_block_effect_parses_setup_and_final_acquisition():
+    prog = _parse(
+        """
+        component Conn {
+          let conn = effect {
+            let url = normalize(config.url)
+            Pool.open(url, config.pool_size)
+          } undo conn.close()
+        }
+        """
+    )
+    (comp,) = prog.components
+    stmt = comp.body[0]
+    assert isinstance(stmt, LetEffect)
+    assert stmt.bind == "conn"
+    assert len(stmt.setup) == 1
+    assert isinstance(stmt.setup[0], LetStmt)
+    assert stmt.setup[0].name == "url"
+    assert isinstance(stmt.acquire, ExprCall)
+    assert stmt.undo.__class__.__name__ == "Postfix"
+    assert stmt.undo.head == "conn"
+
+
+def test_bare_component_effect_block_parses():
+    prog = _parse(
+        """
+        component Conn {
+          effect {
+            let url = normalize(config.url)
+            url
+          } undo Pool.close(url)
+        }
+        """
+    )
+    (comp,) = prog.components
+    stmt = comp.body[0]
+    assert isinstance(stmt, EffectStmt)
+    assert len(stmt.setup) == 1
+    assert isinstance(stmt.setup[0], LetStmt)
+    assert isinstance(stmt.acquire, ExprVar)
+    assert stmt.acquire.name == "url"
+
+
+def test_component_if_guard_with_fail_parses():
+    prog = _parse(
+        """
+        component ReplicaSet {
+          config { replicas: Int = 0 }
+          if (config.replicas < 1) fail "at least one replica required"
+        }
+        """
+    )
+    (comp,) = prog.components
+    stmt = comp.body[0]
+    assert isinstance(stmt, IfStmt)
+    assert isinstance(stmt.then[0], FailStmt)
+    assert stmt.then[0].message.__class__.__name__ == "ExprLit"
+
+
+def test_fail_rejected_in_pure_fn():
+    import pytest
+
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError, match=r"`fail` is only allowed in a component activation body \(A8\)"):
+        _parse('fn f() -> Int { fail "nope" return 0 }')
