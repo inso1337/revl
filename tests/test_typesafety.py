@@ -169,3 +169,76 @@ component P {
   let pool = effect Pool.open("u", 1) undo pool.close()
 }""")
     assert ir["components"][0]["name"] == "P"
+
+
+# ---- match in check-position (HOLE 3(b)) -----------------------------------
+
+def test_match_arm_checked_in_check_position():
+    # disagreeing arms join to an unknown type; per-arm check-position still
+    # catches the arm that violates the expected return type
+    err = _err("""
+type S = A | B
+fn f(s: S) -> Int { return match s { A => 1, B => "back" } }
+""")
+    assert "this function's return expects `Int`, got `Str`" in err
+
+
+def test_match_agreeing_arms_still_accepted():
+    ir = compile_source("""
+type S = A | B
+fn f(s: S) -> Int { return match s { A => 1, B => 2 } }
+""")
+    assert ir["functions"][0]["returns"] == "Int"
+
+
+# ---- nullary ADT ctor as a value in a `test` block (HOLE 1) ----------------
+
+def test_nullary_ctor_resolves_in_test_block():
+    # a test body is the same expression scope a fn body is: a bare nullary
+    # variant resolves as a value instead of being rejected as undeclared
+    ir = compile_source("""
+type State = FirstTime | Returning
+fn describe(s: State) -> Str { return match s { FirstTime => "new", Returning => "back" } }
+test "nullary ctor is a value" { let s = FirstTime  assert describe(s) == "new" }
+""")
+    let_step = ir["tests"][0]["body"][0]
+    assert let_step["value"] == {"kind": "adt", "type": "State",
+                                 "case": "FirstTime", "args": []}
+
+
+# ---- component effect-setup op sweep (HOLE 2 / HOLE 3(c)) -------------------
+
+SETUP = ("component C {{ config {{ p: Int = 1 }}\n"
+         "  let c = effect {{ {body}  Pool.open(\"u\", config.p) }} undo c.close()\n}}")
+
+
+def test_setup_operator_mismatch_rejected():
+    err = _err(SETUP.format(body="let bad = 1 + true"))
+    assert "operand of `+` expects `Int`, got `Bool`" in err
+
+
+def test_setup_if_condition_must_be_bool():
+    err = _err(SETUP.format(body="if (5) { let q = 1 }"))
+    assert "`if` condition expects `Bool`, got `Int`" in err
+
+
+def test_setup_bogus_stdlib_method_rejected():
+    err = _err(SETUP.format(body="let m = \"h\"  let z = m.bogusMethod()"))
+    assert "no builtin method `bogusMethod` on `Str`" in err
+
+
+def test_setup_valid_stdlib_and_operators_accepted():
+    ir = compile_source(SETUP.format(
+        body="let region = config.p  let label = \"c\" + \"onn\""))
+    assert ir["components"][0]["name"] == "C"
+
+
+def test_setup_host_method_stays_silent():
+    # host-object methods are the documented, fenced gradual frontier: a method
+    # on a host-provenance local (a Map) infers to an unknown and is left alone
+    ir = compile_source("""
+component Cache {
+  let store = effect Map.new() undo store.drop()
+  let warm = effect { let n = store.size()  Pool.open("u", n) } undo warm.close()
+}""")
+    assert ir["components"][0]["name"] == "Cache"

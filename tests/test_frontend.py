@@ -81,6 +81,7 @@ REJECTIONS = {
     "g3_dependency_cycle.rvl": "dependency cycle: Alpha -> Beta -> Alpha (G3)",
     "g4_missing_undo.rvl": "effect has no `undo` and `Pool.open` is not pure",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
+    "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
     "t3_config_default_type.rvl": "config field `n` default expects `Int`, got `Str`",

@@ -66,3 +66,63 @@ This goes in the compiler spec, not the runtimes.
   torn-state freedom: after disposal, every completed effect has run its
   inverse, in LIFO order. Authors relying on "emission after boundary never
   happens once diverted" get that guarantee on py/wasm, not on rs.
+
+## Typing gaps (fenced, not closed)
+
+The checker is sound where types are known and silent where they are not (the
+gradual frontier of the sound-typing milestone). The two silent gaps below are
+known soundness holes rather than mere unknowns, so each is loud here with its
+trigger and blast radius, the way the cordis-rs A1 divergence is. Everything
+else the checker does not type (arrows, un-annotated positions) infers to an
+unknown and is left alone by design.
+
+- **Generic instantiation is deferred** (frontier, tracked): a single-uppercase
+  type name (`T`, `E`) is a wildcard everywhere (`_is_wildcard`, `typecheck.py`)
+  and is never unified against the actual argument at a call site. Trigger: a
+  generic fn whose return mentions a type parameter, e.g. `fn id(x: T) -> T {
+  return x }` then `id("hello")` used where an `Int` is expected. Blast radius:
+  the declared return flows into any expected type unchecked, so a generic fn's
+  result is effectively untyped at the call site (`id("hello")` satisfies an
+  `Int` position). Bounded: only functions carrying single-uppercase type
+  parameters; fully monomorphic code is checked. Closing it needs explicit
+  type-parameter syntax in the parser plus a call-site unification pass (roadmap
+  "Typing follow-ups").
+
+- **Host-object methods are untyped** (by design, host provenance): a value of
+  host provenance (a `let` bound to `Map.new()` / `Pool.open(...)`, or a
+  requirement's return) carries the host stub's methods, which sit outside the
+  specified stdlib surface (docs/stdlib-2.0.md). `builtin_check` returns `None`
+  for any method not in `_BUILTIN_SIG`, so a host-object method call has unknown
+  type. Trigger: `store.get(key)` on a `Map` used in a typed position. Blast
+  radius: the result flows anywhere with no check, and a misspelled host method
+  is caught at the host runtime, not by the checker. This is the deliberate G8
+  trust boundary: host objects are on the audit surface, not the checked
+  surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are typed and
+  their misuse is refused, in `fn` bodies and (as of the setup op sweep) in
+  component effect blocks alike.
+
+## Contract rejection coverage (the executable spec)
+
+`examples/rejections/` plus the REJECTIONS table in `tests/test_frontend.py` is
+the checker's executable definition of sound: every guarantee the checker can
+refuse has a program it must refuse, with a diagnostic that names the guarantee.
+The guarantees below have no rejection file because a program cannot violate
+them at compile time; they are listed so the coverage claim is complete, not
+sampled.
+
+- **G1, G2, G3, G4, G6, G8** and **A1, A2, A6, A8** are compile-time; each has
+  at least one wired rejection. `g6_impure_statement.rvl` (confinement, "plain
+  expressions have no effect to record (G6)") was added alongside the component
+  setup op sweep.
+- **G5** (teardown cannot register effects) holds by construction: `undo`
+  bodies are pure expressions, so there is no syntactic slot for an effect
+  during teardown. There is nothing to refuse; the residue it guards against is
+  the library-side runtime concern noted above (cordis TS `assertActive`).
+- **G7** (LIFO-complete derived teardown) is a runtime property of the lowering,
+  verified by the runtime scenarios in `backends/rust/scenarios/` and
+  `backends/java/scenarios/`, not by the checker.
+- **A3, A4, A5** are lowering transforms (host-name renaming, `$$` escaping, the
+  `compensate` slot), not refusals; each has a positive test in
+  `tests/test_frontend.py` (`test_a3_host_colliding_names_are_renamed`,
+  `test_a4_literal_dollars_are_escaped`, `test_a5_compensate_lowering`).
+- **A7** is advisory; its enforcement is G4 itself (`g4_unmarked_emission.rvl`).
