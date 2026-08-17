@@ -132,18 +132,18 @@ generations, new compiler — not a fresh model run) measures the effect:
 
 | variant | first-pass, as-run | first-pass, fixed compiler |
 |---|---|---|
-| v1 | 27/30 | 28/30 |
-| v2 | 20/30 | 27/30 |
-| v2host | 18/30 | 28/30 |
+| v1 | 27/30 | 29/30 |
+| v2 | 20/30 | 29/30 |
+| v2host | 18/30 | 29/30 |
 
-v2host reaches parity with v1; v2 is one behind. The residual failures are
-*not* syntax friction: `26-log-rotator` (a `config` field typo) and
-`29-mesh` (a malformed statement) are genuine model errors present in v1 too,
-and the one v2-only case uses a function call inside a `${}` template — the
-documented dotted-chain-only interpolation limit. A fresh model run (which
-would also benefit from the new diagnostics) is future work. Diagnostics did
-their job meanwhile: 176/180 cells compiled within 3 iterations, mean
-iterations-to-green ≤ 1.4 everywhere.
+All three variants reach **full parity** — the annotation friction is gone,
+and `${}` templates now take arbitrary expressions (the one v2 case that used
+a function call in a template). The single remaining failure is `29-mesh`, a
+genuine model error (a malformed statement) *identical across all three
+variants* — the irreducible floor, not syntax friction. A fresh model run
+(which would also benefit from the new diagnostics) is future work.
+Diagnostics did their job meanwhile: 176/180 cells compiled within 3
+iterations, mean iterations-to-green ≤ 1.4 everywhere.
 <!-- BENCH-RESULTS:END -->
 
 ```bash

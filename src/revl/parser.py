@@ -1163,6 +1163,24 @@ class Parser:
 
     # pure expressions — precedence climbing (§3.2)
 
+    def _parse_template_parts(self, raw_parts, line: int):
+        """Turn lexer template parts into ("text", str) / ("expr", ast): each
+        `${...}` body is re-parsed as a full pure expression (§3.2)."""
+        parts = []
+        for kind, value in raw_parts:
+            if kind == "text":
+                parts.append(("text", value))
+                continue
+            sub = Parser(value, self.filename)
+            expr = sub.pure_expr()
+            if not sub.at("eof"):
+                extra = sub.peek()
+                raise self.err(line,
+                               f"unexpected {extra.value!r} in `${{...}}` interpolation",
+                               hint="an interpolation holds one expression")
+            parts.append(("expr", expr))
+        return parts
+
     def pure_expr(self):
         return self._ternary()
 
@@ -1365,7 +1383,7 @@ class Parser:
             return ExprLit(tok.value, tok.line)
         if tok.kind == "template":
             self.next()
-            return Interp(tok.value, tok.line)
+            return Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
@@ -1508,7 +1526,7 @@ class Parser:
             base = Lit(tok.value, tok.line)
         elif tok.kind == "template":
             self.next()
-            base = Interp(tok.value, tok.line)
+            base = Interp(self._parse_template_parts(tok.value, tok.line), tok.line)
         elif tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             base = Lit({"true": True, "false": False, "null": None}[tok.value], tok.line)

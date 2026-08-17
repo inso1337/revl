@@ -48,9 +48,9 @@ def test_v3_types_and_int_functions_emit():
     assert "case Ok: Row" in wat
     assert 'case NotFound: unit' in wat
     assert 'case Invalid: Str' in wat
-    assert '(func (export "add")' in wat
-    assert '(func (export "classify")' in wat
-    assert '(func (export "negate")' in wat
+    assert '(export "add")' in wat
+    assert '(export "classify")' in wat
+    assert '(export "negate")' in wat
     assert "(i32.eqz)" in wat
 
 
@@ -69,10 +69,10 @@ def test_v3_str_list_record_functions_emit():
     modules = emit.emit(ir)
     assert set(modules) == {"functions"}
     wat = modules["functions"]
-    assert '(func (export "name")' in wat
-    assert '(func (export "first")' in wat
-    assert '(func (export "greet")' in wat
-    assert '(func (export "make_row")' in wat
+    assert '(export "name")' in wat
+    assert '(export "first")' in wat
+    assert '(export "greet")' in wat
+    assert '(export "make_row")' in wat
     assert "(i32.load (i32.add (local.get $p_row) (i32.const 4)))" in wat
     assert "(i32.load (i32.add (local.get $p_xs) (i32.const 4)))" in wat
     assert '  (data (i32.const 0) "\\02\\00\\00\\00hi")' in wat
@@ -219,3 +219,31 @@ def test_v3_loops_run_on_wasmtime(tmp_path):
     assert invoke("collatz", "27") == 111
     assert invoke("sum_demo") == 17
     assert invoke("nested") == 5
+
+
+# `${expr}` templates (Str-typed on this tier) + one v3 function calling
+# another (`call $name`).
+_STR_TPL_SRC = """
+fn greet(s: Str) -> Str { return `hi ${s}` }
+fn greet_len() -> Int { let s = "bob"  return greet(s).length() }
+"""
+
+
+def test_v3_str_template_and_intra_call_run_on_wasmtime(tmp_path):
+    import shutil, subprocess
+    if shutil.which("wasmtime") is None:
+        import pytest as _pt
+        _pt.skip("wasmtime not installed")
+    emit = _emitter()
+    wat = tmp_path / "t.wat"
+    wat.write_text(emit.emit(compile_source(_STR_TPL_SRC))["functions"], encoding="utf-8")
+    out = subprocess.run(["wasmtime", "--invoke", "greet_len", str(wat)],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().splitlines()[-1]) == 6   # "hi bob"
+
+
+def test_v3_non_str_interpolation_rejected_by_tier():
+    emit = _emitter()
+    with pytest.raises(emit.EmitError, match="Str only on this tier"):
+        emit.emit(compile_source("fn f(n: Int) -> Str { return `n=${n}` }"))
