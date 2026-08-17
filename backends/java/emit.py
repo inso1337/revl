@@ -3,26 +3,31 @@
 Target: `cordis4j` (github.com/1na-ko/cordis4j) — the JVM port of Cordis.
 `emit(ir) -> str` produces one Java source file (interfaces + plugin classes).
 
-Mapping (DESIGN.md §7 — the backend contract is small):
+Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 
 - service     -> `public interface <Name> { <ret> <m>(<params>); }`
 - component   -> `public final class <Name>Plugin implements Plugin { apply(ctx) }`
 - requires    -> `ctx.get(<Svc>.class)` (manifest load order guarantees the
-                 provider is already active; `ctx.inject(...)` is the reactive
-                 refinement)
+                 provider is already active)
 - provides    -> `ctx.provide(ServiceKey.of(<Svc>.class), new <Impl>(...))`
-- effect/undo -> acquired value + `Disposables.of(() -> <undo>)`, composed via
-                 `Disposables.composite(...)` as the plugin's teardown
+- effect/undo -> `Context.EffectScope` (`ctx.effect()`) + `fx.track(...)`;
+                 pure v1 components keep the byte-identical
+                 `Disposables.composite(...)` teardown path
+- isolate     -> `ctx = ctx.isolate(<Svc>.class, <realm>)`
+- intercept   -> `ctx.intercept(ServiceKey.of(<Svc>.class), <metadata>)`
+- types       -> static final record classes / sealed variant interfaces
+- functions   -> `public static` methods on `Components`
+- match       -> Java 21 pattern `switch` expressions
+- externs     -> verbatim `@java` bodies
+- tests       -> static void methods collected in `REVL_TESTS`
 - config      -> plugin constructor parameters (`new XPlugin(url, pool_size)`)
 - emit        -> a plain call (the emission marker is a revl-checker concern)
 - format      -> `String.format(...)`
 
-Documented spike limits (tracked in docs/v2.0-roadmap.md):
+Still stubbed (host-runtime work, as in the wasm tier):
 
-- ir_version 1 only; v2/v3 rejected with a clear error.
 - Host objects (`Pool`/`Map`/`Job`) are opaque stubs that throw
-  `UnsupportedOperationException` (host-runtime work, as in the wasm tier).
-- Effectful provide-method bodies are stubbed; pure delegations are real.
+  `UnsupportedOperationException`.
 - Config `default` values are not applied (host loader territory).
 
 CLI: `python3 emit.py <ir.json> [> out.java]`.
@@ -147,6 +152,544 @@ def _lit(value: object) -> str:
         return f"{value}d"
     raise EmitError(f"unsupported literal: {value!r}")
 
+_JAVA_V3_BIN_OPS = {
+    "<": "<", ">": ">", "<=": "<=", ">=": ">=",
+    "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
+    "&&": "&&", "||": "||",
+}
+
+_V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
+_HOST_ROOTS = {"Pool", "Map", "Job"}
+
+
+def _split_v3_types(inner: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
+def _java_v3_type(name: object, *, boxed: bool = False) -> str:
+    """IR v3 surface type -> Java type for emitted v3 classes."""
+    if name is None or name == "Unit":
+        return "void"
+    if not isinstance(name, str) or not name.strip():
+        return "Object"
+    name = name.strip()
+    if name in TYPE_MAP:
+        java_type = TYPE_MAP[name]
+        if not boxed:
+            return java_type
+        return {
+            "long": "java.lang.Long",
+            "double": "java.lang.Double",
+            "boolean": "java.lang.Boolean",
+        }.get(java_type, java_type)
+    if "[" in name:
+        base = name[: name.index("[")]
+        inner = name[name.index("[") + 1 : name.rindex("]")]
+        args = _split_v3_types(inner)
+        if base == "List" and args:
+            return f"java.util.List<{_java_v3_type(args[0], boxed=True)}>"
+        if base == "Opt" and args:
+            return f"java.util.Optional<{_java_v3_type(args[0], boxed=True)}>"
+        if base == "Map" and len(args) == 2:
+            return (
+                f"java.util.Map<{_java_v3_type(args[0], boxed=True)}, "
+                f"{_java_v3_type(args[1], boxed=True)}>"
+            )
+        return base + "<" + ", ".join("Object" for _ in args) + ">"
+    return _ident(name, "type name")
+
+
+def _metadata_lit(value: object) -> str:
+    """Interception metadata -> a Java object literal (v2)."""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return _string(value)
+    if isinstance(value, int):
+        return f"{value}L"
+    if isinstance(value, float):
+        return f"{value}d"
+    if isinstance(value, list):
+        return "java.util.List.of(" + ", ".join(_metadata_lit(v) for v in value) + ")"
+    if isinstance(value, dict):
+        entries = ", ".join(
+            f"{_string(k)}, {_metadata_lit(v)}" for k, v in value.items()
+        )
+        return "java.util.Map.of(" + entries + ")"
+    raise EmitError(f"unsupported intercept metadata value: {value!r}")
+
+
+def _java_test_method_name(name: object, index: int, used: set[str]) -> str:
+    raw = name if isinstance(name, str) else str(name)
+    base = "test"
+    for part in re.split(r"[^A-Za-z0-9_]+", raw):
+        if part:
+            base += part[:1].upper() + part[1:]
+    candidate = base
+    while candidate in used:
+        candidate = f"{base}_{index}"
+        index += 1
+    used.add(candidate)
+    return candidate
+
+
+class _V3Ctx:
+    """Names and type layouts visible to v3 expression emitters."""
+
+    def __init__(self, types: dict, functions: list, externs: list) -> None:
+        self.types = types or {}
+        self.function_names = {fn.get("name") for fn in functions or []}
+        self.extern_names = {ext.get("name") for ext in externs or []}
+        self.case_owners: dict[str, str] = {}
+        for tname, spec in self.types.items():
+            if spec.get("kind") == "variant":
+                for case in spec.get("cases") or []:
+                    cname = case.get("name")
+                    if cname in self.case_owners:
+                        raise EmitError(
+                            f"duplicate variant case {cname!r} is not portable to "
+                            f"the Java backend without a type annotation"
+                        )
+                    self.case_owners[cname] = tname
+        self._match_counter = 0
+
+    def new_match_ignored(self) -> str:
+        self._match_counter += 1
+        return f"__revl_ignored_{self._match_counter}"
+
+    def record_type_for_fields(self, field_names: list[str]) -> str:
+        wanted = set(field_names)
+        matches = [
+            name
+            for name, spec in self.types.items()
+            if spec.get("kind") == "record"
+            and set((spec.get("fields") or {}).keys()) == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise EmitError(
+                f"record literal with fields {field_names!r} does not match any "
+                f"declared record type"
+            )
+        raise EmitError(
+            f"record literal with fields {field_names!r} is ambiguous between "
+            f"{', '.join(matches)}"
+        )
+
+
+def _v3_var(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+    name = node.get("name")
+    _ident(name, "name")
+    if rename and name in rename:
+        return rename[name]
+    if name in ctx.case_owners:
+        return name
+    if name in ctx.function_names or name in ctx.extern_names:
+        return name
+    if name == "None":
+        return "java.util.Optional.empty()"
+    return name
+
+
+def _v3_len(target: str) -> str:
+    return (
+        f"(({target} instanceof java.util.List<?>) ? "
+        f"((java.util.List<?>) {target}).size() : String.valueOf({target}).length())"
+    )
+
+
+def _v3_builtin(method: object, target: str, args: list[str]) -> str:
+    """The stdlib surface (docs/stdlib-2.0.md) as Java 21."""
+    if method == "length":
+        return _v3_len(target)
+    if method == "push":
+        return (
+            f"java.util.stream.Stream.concat({target}.stream(), "
+            f"java.util.stream.Stream.of({args[0]})).toList()"
+        )
+    if method == "slice":
+        return f"{target}.subList((int)({args[0]}), (int)({args[1]}))"
+    if method == "charAt":
+        return f"String.valueOf(String.valueOf({target}).charAt((int)({args[0]})))"
+    if method == "charCodeAt":
+        return f"(long) String.valueOf({target}).charAt((int)({args[0]}))"
+    if method == "concat":
+        return f"String.valueOf({target}).concat(String.valueOf({args[0]}))"
+    if method == "indexOf":
+        return (
+            f"(long) (({target} instanceof java.util.List<?>) ? "
+            f"((java.util.List<?>) {target}).indexOf({args[0]}) : "
+            f"String.valueOf({target}).indexOf(String.valueOf({args[0]})))"
+        )
+    raise EmitError(f"unknown builtin method {method!r}")
+
+
+def _v3_call(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+    callee = node.get("callee")
+    args = [_v3_expr(a, ctx, rename) for a in node.get("args") or []]
+    if isinstance(callee, dict) and callee.get("kind") == "var":
+        name = callee.get("name")
+        _ident(name, "callable")
+        if name in ctx.case_owners:
+            variant = _ident(ctx.case_owners[name], "type name")
+            return f"new {variant}.{name}({', '.join(args)})"
+        if name == "Some":
+            if len(args) != 1:
+                raise EmitError("Some constructor expects exactly one argument")
+            return f"java.util.Optional.of({args[0]})"
+        if name == "None":
+            if args:
+                raise EmitError("None constructor does not take arguments")
+            return "java.util.Optional.empty()"
+        if name in ("Ok", "Err"):
+            raise EmitError(
+                f"builtin Result constructor {name!r} is not portable to the Java backend yet"
+            )
+        return f"{name}({', '.join(args)})"
+    callee_s = _v3_expr(callee, ctx, rename)
+    return f"{callee_s}.apply({', '.join(args)})"
+
+
+def _v3_expr(node: object, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+    if not isinstance(node, dict) or "kind" not in node:
+        raise EmitError(f"malformed v3 expression: {node!r}")
+    kind = node["kind"]
+
+    if kind == "lit":
+        return _lit(node.get("value"))
+
+    if kind == "var":
+        return _v3_var(node, ctx, rename)
+
+    if kind == "bin":
+        op = node.get("op")
+        left = _v3_expr(node["left"], ctx, rename)
+        right = _v3_expr(node["right"], ctx, rename)
+        if op in ("==", "==="):
+            return f"java.util.Objects.equals({left}, {right})"
+        if op in ("!=", "!=="):
+            return f"!java.util.Objects.equals({left}, {right})"
+        java_op = _JAVA_V3_BIN_OPS.get(op)
+        if java_op is None:
+            raise EmitError(f"unsupported binary operator {op!r}")
+        return f"({left} {java_op} {right})"
+
+    if kind == "un":
+        operand = _v3_expr(node.get("operand"), ctx, rename)
+        if node.get("op") == "!":
+            return f"(!{operand})"
+        if node.get("op") == "-":
+            return f"(-{operand})"
+        raise EmitError(f"unsupported unary operator {node.get('op')!r}")
+
+    if kind == "call":
+        return _v3_call(node, ctx, rename)
+
+    if kind == "field":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx, rename)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}.{_ident(node.get('name'), 'field')}"
+
+    if kind == "index":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx, rename)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}.get((int)({_v3_expr(node['index'], ctx, rename)}))"
+
+    if kind == "builtin":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx, rename)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        args = [_v3_expr(a, ctx, rename) for a in node.get("args") or []]
+        return _v3_builtin(node.get("method"), target, args)
+
+    if kind == "len":
+        return _v3_len(_v3_expr(node.get("target"), ctx, rename))
+
+    if kind == "if":
+        return (
+            f"({_v3_expr(node['cond'], ctx, rename)} ? "
+            f"{_v3_expr(node['then'], ctx, rename)} : {_v3_expr(node['else'], ctx, rename)})"
+        )
+
+    if kind == "record":
+        fields = node.get("fields") or []
+        type_name = ctx.record_type_for_fields([k for k, _ in fields])
+        spec = ctx.types[type_name]
+        by_name = {k: _v3_expr(v, ctx, rename) for k, v in fields}
+        args = []
+        for field_name in spec.get("fields") or {}:
+            if field_name not in by_name:
+                raise EmitError(f"record literal is missing field {field_name!r}")
+            args.append(by_name[field_name])
+        return f"new {_ident(type_name, 'type name')}({', '.join(args)})"
+
+    if kind == "list":
+        return "java.util.List.of(" + ", ".join(
+            _v3_expr(item, ctx, rename) for item in node.get("items") or []
+        ) + ")"
+
+    if kind == "arrow":
+        params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
+        body = _v3_expr(node["body"], ctx, rename)
+        return f"({params}) -> ({body})"
+
+    if kind == "match":
+        return _v3_match_expr(node, ctx, rename)
+
+    if kind == "interp":
+        parts = node.get("parts") or []
+        segs: list[str] = []
+        for part_kind, text in parts:
+            if part_kind == "text":
+                segs.append(_string(text))
+            else:
+                segs.append(f"String.valueOf({_ident(text, 'interpolation')})")
+        if not segs:
+            return '""'
+        return " + ".join(segs)
+
+    raise EmitError(f"unsupported v3 expression kind {kind!r}")
+
+
+def _v3_match_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+    scrutinee = _v3_expr(node.get("scrutinee"), ctx, rename)
+    lines = [f"switch ({scrutinee}) {{"]
+    wildcard = None
+    for arm in node.get("arms") or []:
+        pattern = arm.get("pattern")
+        body = _v3_expr(arm.get("body"), ctx, rename)
+        if pattern == "_":
+            wildcard = f"            default -> {{ yield ({body}); }}"
+            continue
+        case = _ident(pattern, "case name")
+        qualified = f"{_ident(ctx.case_owners[case], 'type name')}.{case}" if case in ctx.case_owners else case
+        bind = arm.get("bind")
+        if bind:
+            bind = _ident(bind, "match bind")
+            case_var = f"__revl_case_{ctx._match_counter + 1}"
+            ctx._match_counter += 1
+            lines.append(f"            case {qualified} {case_var} -> {{")
+            lines.append(f"                final var {bind} = {case_var}.value;")
+            lines.append(f"                yield ({body});")
+            lines.append("            }")
+        else:
+            ignored = ctx.new_match_ignored()
+            lines.append(f"            case {qualified} {ignored} -> {{")
+            lines.append(f"                yield ({body});")
+            lines.append("            }")
+    if wildcard is None:
+        lines.append("            default -> { throw new IllegalArgumentException(\"non-exhaustive match\"); }")
+    else:
+        lines.append(wildcard)
+    lines.append("        }")
+    return "\n".join(lines)
+
+
+def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
+    pad = "    " * indent
+    step = node.get("step")
+    if step in ("let", "assign"):
+        name = _ident(node.get("name"), "binding")
+        value = _v3_expr(node.get("value"), ctx)
+        if step == "let":
+            keyword = "var" if node.get("mutable") else "final var"
+            out.append(f"{pad}{keyword} {name} = {value};")
+        else:
+            out.append(f"{pad}{name} = {value};")
+    elif step == "return":
+        if node.get("expr") is None:
+            out.append(f"{pad}return;")
+        else:
+            out.append(f"{pad}return {_v3_expr(node['expr'], ctx)};")
+    elif step == "if":
+        out.append(f"{pad}if ({_v3_expr(node['cond'], ctx)}) {{")
+        for child in node.get("then") or []:
+            _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        if node.get("else"):
+            out.append(f"{pad}}} else {{")
+            for child in node["else"]:
+                _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        out.append(f"{pad}}}")
+    elif step == "while":
+        out.append(f"{pad}while ({_v3_expr(node['cond'], ctx)}) {{")
+        for child in node.get("body") or []:
+            _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        out.append(f"{pad}}}")
+    elif step == "for":
+        bind = _ident(node.get("bind"), "loop binding")
+        out.append(f"{pad}for (var {bind} : {_v3_expr(node['iterable'], ctx)}) {{")
+        for child in node.get("body") or []:
+            _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        out.append(f"{pad}}}")
+    elif step == "let_pattern":
+        value = _v3_expr(node.get("value"), ctx)
+        tmp = f"__revl_destructure_{id(node)}"
+        keyword = "var" if node.get("mutable") else "final var"
+        out.append(f"{pad}{keyword} {tmp} = {value};")
+        names = [_ident(n, "binding") for n in node.get("names") or []]
+        if node.get("pattern") == "record":
+            for name in names:
+                out.append(f"{pad}{keyword} {name} = {tmp}.{name};")
+        else:
+            for index, name in enumerate(names):
+                out.append(f"{pad}{keyword} {name} = {tmp}.get({index});")
+            rest = node.get("rest")
+            if rest:
+                rest = _ident(rest, "binding")
+                out.append(
+                    f"{pad}{keyword} {rest} = {tmp}.subList({len(names)}, {tmp}.size());"
+                )
+    elif step == "expr":
+        out.append(f"{pad}{_v3_expr(node['expr'], ctx)};")
+    elif step == "assert":
+        out.append(
+            f"{pad}if (!({_v3_expr(node['expr'], ctx)})) "
+            f'throw new AssertionError("assertion failed");'
+        )
+    else:
+        raise EmitError(f"unsupported fn statement step {step!r}")
+
+
+def _emit_v3_types(types: dict) -> list[str]:
+    lines: list[str] = []
+    for name, spec in types.items():
+        name = _ident(name, "type name")
+        if spec.get("kind") == "record":
+            lines.append(f"public static final class {name} {{")
+            fields = spec.get("fields") or {}
+            for field, ftype in fields.items():
+                field = _ident(field, "record field")
+                lines.append(f"    public final {_java_v3_type(ftype)} {field};")
+            ctor_params = ", ".join(
+                f"{_java_v3_type(fields[f])} {_ident(f, 'record field')}"
+                for f in fields
+            )
+            lines.append(f"    public {name}({ctor_params}) {{")
+            for field in fields:
+                field = _ident(field, "record field")
+                lines.append(f"        this.{field} = {field};")
+            lines.append("    }")
+            lines.append("}")
+        else:
+            cases = spec.get("cases") or []
+            case_names = [_ident(case.get("name"), "case name") for case in cases]
+            permits = ", ".join(f"{name}.{case}" for case in case_names)
+            lines.append(f"public sealed interface {name} permits {permits} {{")
+            for case in cases:
+                cname = _ident(case.get("name"), "case name")
+                payload = case.get("payload")
+                if payload is None:
+                    lines.append(f"    final class {cname} implements {name} {{")
+                    lines.append(f"        public {cname}() {{}}")
+                    lines.append("    }")
+                else:
+                    ptype = _java_v3_type(payload)
+                    lines.append(f"    final class {cname} implements {name} {{")
+                    lines.append(f"        public final {ptype} value;")
+                    lines.append(
+                        f"        public {cname}({ptype} value) {{ this.value = value; }}"
+                    )
+                    lines.append("    }")
+            lines.append("}")
+        lines.append("")
+    return lines
+
+
+def _emit_v3_externs(externs: list) -> list[str]:
+    lines: list[str] = []
+    for ext in externs:
+        name = _ident(ext.get("name"), "extern name")
+        params = ", ".join(
+            f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'extern parameter name')}"
+            for p in ext.get("params") or []
+        )
+        ret = _java_v3_type(ext.get("returns"))
+        bodies = ext.get("bodies") or {}
+        if "java" not in bodies:
+            raise EmitError(
+                f"extern `{name}` has no @java body — not portable to this backend "
+                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+            )
+        lines.append(f"public static {ret} {name}({params}) {{")
+        body = bodies["java"].strip()
+        if body:
+            for line in body.splitlines() or [""]:
+                lines.append("    " + line)
+        else:
+            lines.append("    // (empty @java body)")
+        lines.append("}")
+        lines.append("")
+    return lines
+
+
+def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]:
+    ctx = _V3Ctx(types, functions, externs)
+    lines: list[str] = []
+    for fn in functions:
+        name = _ident(fn.get("name"), "function name")
+        params = ", ".join(
+            f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter name')}"
+            for p in fn.get("params") or []
+        )
+        ret = _java_v3_type(fn.get("returns"))
+        lines.append(f"public static {ret} {name}({params}) {{")
+        if not fn.get("body"):
+            lines.append("    // (empty body)")
+        else:
+            for stmt in fn["body"]:
+                _v3_stmt(stmt, ctx, lines, 1, test_mode=False)
+        lines.append("}")
+        lines.append("")
+    return lines
+
+
+def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> list[str]:
+    ctx = _V3Ctx(types, functions, externs)
+    lines: list[str] = []
+    used: set[str] = set()
+    test_names: list[str] = []
+    for index, test in enumerate(tests):
+        mname = _java_test_method_name(test.get("name"), index, used)
+        test_names.append(mname)
+        lines.append(f"public static void {mname}() {{")
+        for stmt in test.get("body") or []:
+            _v3_stmt(stmt, ctx, lines, 1, test_mode=True)
+        lines.append("}")
+        lines.append("")
+    if test_names:
+        runners = ", ".join(f"Components::{name}" for name in test_names)
+        lines.append(
+            f"public static final java.util.List<Runnable> REVL_TESTS = "
+            f"java.util.List.of({runners});"
+        )
+        lines.append("")
+    return lines
+
 
 class _Env:
     def __init__(self, component: dict, services: dict):
@@ -157,7 +700,8 @@ class _Env:
         self.provides: dict[str, str] = dict(component.get("provides") or {})
 
 
-def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
+def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
+          v3_ctx: _V3Ctx | None = None) -> str:
     rename = rename or {}
     kind = node.get("kind")
     if kind == "name":
@@ -172,23 +716,37 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
     if kind == "host":
         fn = node.get("fn")
         host, _, method = fn.partition(".")
-        args = ", ".join(_expr(a, env, rename) for a in node.get("args") or [])
+        args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
         return f"{host}.{method}({args})"
     if kind == "req":
-        return _ident(node.get("name"), "requirement")
+        original = node.get("name")
+        if rename and original in rename:
+            return rename[original]
+        return _ident(original, "requirement")
+    if kind == "call" and "callee" in node:
+        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename)
     if kind == "call":
         target = node.get("target") or {}
         method = _ident(node.get("method"), "method")
-        args = ", ".join(_expr(a, env, rename) for a in node.get("args") or [])
+        args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
         if target.get("kind") == "req":
-            recv = _ident(target.get("name"), "requirement")
+            recv = _expr(target, env, rename, v3_ctx)
         else:
-            recv = _expr(target, env, rename)
+            recv = _expr(target, env, rename, v3_ctx)
         return f"{recv}.{method}({args})"
     if kind == "format":
         template = node.get("template") or ""
-        args = [_expr(a, env, rename) for a in node.get("args") or []]
+        args = [_expr(a, env, rename, v3_ctx) for a in node.get("args") or []]
         return _format_java(template, args)
+    if kind == "fn":
+        fn_name = _ident(node.get("name"), "function")
+        args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
+        return f"{fn_name}({args})"
+    if kind in {
+        "var", "bin", "un", "field", "index", "if", "record", "list",
+        "arrow", "match", "interp", "len", "builtin",
+    }:
+        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename)
     raise EmitError(f"unsupported expression node in Java backend: {kind!r}")
 
 
@@ -247,7 +805,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
             for value in node:
                 walk(value)
 
-    walk(ir.get("components"))
+    walk(ir)
     out: list[str] = []
     for host in sorted(used & _HOST_STUBS.keys()):
         out.append(f"// host object stub ({host}) — real Java host objects are a follow-up")
@@ -299,7 +857,343 @@ def _method_body(env: _Env, method: dict) -> str:
     return 'throw new UnsupportedOperationException("effectful method body");'
 
 
-def _emit_component(component: dict, services: dict) -> list[str]:
+_V1_EXPR_KINDS = {"name", "lit", "config", "host", "req", "call", "format"}
+
+
+def _contains_v3_expr(node: object) -> bool:
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind == "call" and "callee" in node:
+            return True
+        if kind not in _V1_EXPR_KINDS:
+            return True
+        return any(_contains_v3_expr(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_v3_expr(value) for value in node)
+    return False
+
+
+def _component_needs_modern(component: dict) -> bool:
+    if component.get("isolate") or component.get("intercept"):
+        return True
+    for step in component.get("body") or []:
+        if step.get("setup"):
+            return True
+        if step.get("step") in {"if", "fail", "await", "return"}:
+            return True
+        if step.get("step") == "provide":
+            for method in step.get("methods") or []:
+                for stmt in method.get("body") or []:
+                    if stmt.get("step") != "return":
+                        return True
+                    if _contains_v3_expr(stmt.get("expr")):
+                        return True
+        for key in ("acquire", "undo", "expr", "compensate", "message", "cond", "value"):
+            if key in step and _contains_v3_expr(step[key]):
+                return True
+    return False
+
+
+def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx) -> str:
+    host = _host_of(component, bind)
+    if host != "Object":
+        return host
+    for step in component.get("body") or []:
+        if step.get("step") != "let-effect" or step.get("bind") != bind:
+            continue
+        expr = step.get("acquire") or {}
+        kind = expr.get("kind")
+        if kind == "record":
+            fields = [name for name, _ in expr.get("fields") or []]
+            try:
+                return v3_ctx.record_type_for_fields(fields)
+            except EmitError:
+                return "Object"
+        if kind == "list":
+            return "java.util.List<Object>"
+        if kind == "lit":
+            value = expr.get("value")
+            if isinstance(value, bool):
+                return "boolean"
+            if isinstance(value, int):
+                return "long"
+            if isinstance(value, float):
+                return "double"
+            if isinstance(value, str):
+                return "String"
+    return "Object"
+
+
+def _method_body_lines(env: _Env, method: dict, v3_ctx: _V3Ctx) -> list[str]:
+    lines: list[str] = []
+    rename = {b: f"this.{b}" for b in _binds(env.component)}
+    rename.update({local: f"this.{local}" for local in env.reqs})
+    for stmt in method.get("body") or []:
+        step = stmt.get("step")
+        if step == "return":
+            if stmt.get("expr") is None:
+                lines.append("return;")
+            else:
+                lines.append(f"return {_expr(stmt['expr'], env, rename, v3_ctx)};")
+        elif step == "effect":
+            lines.append(f"{_expr(stmt['acquire'], env, rename, v3_ctx)};")
+            lines.append(
+                f"fx.track(Disposables.of(() -> {_expr(stmt['undo'], env, rename, v3_ctx)}));"
+            )
+        elif step == "emit":
+            lines.append(f"{_expr(stmt['expr'], env, rename, v3_ctx)};")
+            if stmt.get("compensate") is not None:
+                lines.append(
+                    f"fx.track(Disposables.of(() -> "
+                    f"{_expr(stmt['compensate'], env, rename, v3_ctx)}));"
+                )
+        elif step == "await":
+            raise EmitError("await steps are not allowed inside method bodies (A1)")
+        elif step == "provide":
+            raise EmitError("provide steps are not allowed inside method bodies")
+        else:
+            raise EmitError(f"unknown step in method body: {step!r}")
+    return lines
+
+def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad: str) -> None:
+    kind = step.get("step")
+    if kind in ("let", "assign"):
+        name = _ident(step.get("name"), "binding")
+        value = _expr(step.get("value"), env, None, v3_ctx)
+        if kind == "let":
+            keyword = "var" if step.get("mutable") else "final var"
+            out.append(f"{pad}{keyword} {name} = {value};")
+        else:
+            out.append(f"{pad}{name} = {value};")
+    elif kind == "expr":
+        out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
+    elif kind == "if":
+        out.append(f"{pad}if ({_expr(step['cond'], env, None, v3_ctx)}) {{")
+        for child in step.get("then") or []:
+            _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
+        if step.get("else"):
+            out.append(f"{pad}}} else {{")
+            for child in step["else"]:
+                _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
+        out.append(f"{pad}}}")
+    elif kind == "while":
+        out.append(f"{pad}while ({_expr(step['cond'], env, None, v3_ctx)}) {{")
+        for child in step.get("body") or []:
+            _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
+        out.append(f"{pad}}}")
+    elif kind == "for":
+        bind = _ident(step.get("bind"), "loop binding")
+        out.append(f"{pad}for (var {bind} : {_expr(step['iterable'], env, None, v3_ctx)}) {{")
+        for child in step.get("body") or []:
+            _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
+        out.append(f"{pad}}}")
+    elif kind == "let_pattern":
+        value = _expr(step.get("value"), env, None, v3_ctx)
+        tmp = f"__revl_destructure_{id(step)}"
+        keyword = "var" if step.get("mutable") else "final var"
+        out.append(f"{pad}{keyword} {tmp} = {value};")
+        names = [_ident(n, "binding") for n in step.get("names") or []]
+        if step.get("pattern") == "record":
+            for name in names:
+                out.append(f"{pad}{keyword} {name} = {tmp}.{name};")
+        else:
+            for index, name in enumerate(names):
+                out.append(f"{pad}{keyword} {name} = {tmp}.get({index});")
+            rest = step.get("rest")
+            if rest:
+                rest = _ident(rest, "binding")
+                out.append(
+                    f"{pad}{keyword} {rest} = {tmp}.subList({len(names)}, {tmp}.size());"
+                )
+    elif kind == "assert":
+        out.append(
+            f"{pad}if (!({_expr(step['expr'], env, None, v3_ctx)})) "
+            f'throw new AssertionError("assertion failed");'
+        )
+    else:
+        raise EmitError(f"unsupported component setup step {kind!r}")
+
+
+def _emit_component_stmts(
+    component: dict,
+    env: _Env,
+    v3_ctx: _V3Ctx,
+    cname: str,
+    out: list[str],
+    steps: list[dict],
+    pad: str,
+) -> None:
+    for step in steps:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect"):
+            for setup in step.get("setup") or []:
+                _emit_setup_stmt(env, v3_ctx, setup, out, pad)
+            if kind == "let-effect":
+                bind = _ident(step["bind"], "binding")
+                out.append(f"{pad}var {bind} = {_expr(step['acquire'], env, None, v3_ctx)};")
+            else:
+                out.append(f"{pad}{_expr(step['acquire'], env, None, v3_ctx)};")
+            out.append(
+                f"{pad}fx.track(Disposables.of(() -> "
+                f"{_expr(step['undo'], env, None, v3_ctx)}));"
+            )
+        elif kind == "emit":
+            out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
+            if step.get("compensate") is not None:
+                out.append(
+                    f"{pad}fx.track(Disposables.of(() -> "
+                    f"{_expr(step['compensate'], env, None, v3_ctx)}));"
+                )
+        elif kind == "provide":
+            key = step.get("name")
+            service = step.get("service")
+            struct = f"{cname}{_camel(key)}"
+            ctor_args = ", ".join(
+                ["ctx", "fx"] + list(env.reqs) + list(_binds(component))
+            )
+            out.append(
+                f"{pad}fx.track(ctx.provide(ServiceKey.of({service}.class), "
+                f"new {struct}({ctor_args})));"
+            )
+        elif kind == "if":
+            out.append(f"{pad}if ({_expr(step['cond'], env, None, v3_ctx)}) {{")
+            _emit_component_stmts(
+                component, env, v3_ctx, cname, out, step.get("then") or [], pad + "    "
+            )
+            if step.get("else"):
+                out.append(f"{pad}}} else {{")
+                _emit_component_stmts(
+                    component, env, v3_ctx, cname, out, step["else"], pad + "    "
+                )
+            out.append(f"{pad}}}")
+        elif kind == "fail":
+            message = _expr(step["message"], env, None, v3_ctx)
+            out.append(f"{pad}throw new IllegalStateException(String.valueOf({message}));")
+        elif kind == "await":
+            raise EmitError("component await steps are not supported by the cordis4j backend yet")
+        elif kind == "return":
+            raise EmitError("return steps are only allowed inside method bodies")
+        else:
+            _emit_setup_stmt(env, v3_ctx, step, out, pad)
+
+
+
+
+def _emit_component_modern(
+    component: dict,
+    services: dict,
+    types: dict | None = None,
+    functions: list | None = None,
+    externs: list | None = None,
+) -> list[str]:
+    env = _Env(component, services)
+    v3_ctx = _V3Ctx(types or {}, functions or [], externs or [])
+    name = component["name"]
+    cname = _ident(name, "component")
+    isolate = component.get("isolate") or {}
+    intercept = component.get("intercept") or {}
+
+    for key in isolate:
+        if key not in env.reqs and key not in env.provides:
+            raise EmitError(f"{name}: isolate key {key!r} is not declared")
+    for key in intercept:
+        if key not in env.reqs:
+            raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
+
+    out: list[str] = []
+
+    for key, service in env.provides.items():
+        _ident(key, "provision")
+        struct = f"{cname}{_camel(key)}"
+        out.append(f"public static final class {struct} implements {service} {{")
+        out.append("    private final Context ctx;")
+        out.append("    private final Context.EffectScope fx;")
+        for local, service in env.reqs.items():
+            out.append(f"    private final {service} {local};")
+        for b in _binds(component):
+            btype = _bind_type(component, b, v3_ctx)
+            out.append(f"    private final {btype} {b};")
+        ctor_params = ", ".join(
+            ["Context ctx", "Context.EffectScope fx"]
+            + [f"{service} {local}" for local, service in env.reqs.items()]
+            + [f"{_bind_type(component, b, v3_ctx)} {b}" for b in _binds(component)]
+        )
+        out.append(f"    {struct}({ctor_params}) {{")
+        out.append("        this.ctx = ctx;")
+        out.append("        this.fx = fx;")
+        for local in env.reqs:
+            out.append(f"        this.{local} = {local};")
+        for b in _binds(component):
+            out.append(f"        this.{b} = {b};")
+        out.append("    }")
+        provide = next(
+            (s for s in component.get("body") or []
+             if s.get("step") == "provide" and s.get("name") == key),
+            {"methods": []},
+        )
+        for method in provide.get("methods") or []:
+            mname = _ident(method.get("name"), "method")
+            params = ", ".join(
+                f"{_java_v3_type(_param_type(env, key, mname, p))} {p}"
+                for p in method.get("params") or []
+            )
+            ret = _java_v3_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
+            out.append(f"    public {ret} {mname}({params}) {{")
+            for line in _method_body_lines(env, method, v3_ctx):
+                out.append(("        " + line) if line else line)
+            out.append("    }")
+        out.append("}")
+        out.append("")
+
+    config_fields = component.get("config") or []
+    ctor_params = ", ".join(
+        f"{_java_v3_type(f.get('type'))} {_ident(f.get('name'), 'config field')}"
+        for f in config_fields
+    )
+    out.append(f"public static final class {cname}Plugin implements Plugin {{")
+    for f in config_fields:
+        fname = _ident(f.get("name"), "config field")
+        out.append(f"    private final {_java_v3_type(f.get('type'))} {fname};")
+    out.append(f"    public {cname}Plugin({ctor_params}) {{")
+    for f in config_fields:
+        fname = _ident(f.get("name"), "config field")
+        out.append(f"        this.{fname} = {fname};")
+    out.append("    }")
+    out.append("    @Override")
+    out.append("    public Disposable apply(Context ctx) {")
+    for key, realm in isolate.items():
+        service = env.provides.get(key) or env.reqs[key]
+        out.append(f"        ctx = ctx.isolate({service}.class, {_string(realm)});")
+    for key, metadata in intercept.items():
+        service = env.reqs[key]
+        out.append(
+            f"        ctx.intercept(ServiceKey.of({service}.class), {_metadata_lit(metadata)});"
+        )
+    out.append("        Context.EffectScope fx = ctx.effect();")
+    for local, service in env.reqs.items():
+        out.append(f"        {service} {local} = ctx.get({service}.class);")
+    body_lines: list[str] = []
+    _emit_component_stmts(
+        component, env, v3_ctx, cname, body_lines, component.get("body") or [], "        "
+    )
+    out.extend(body_lines)
+    out.append("        return fx;")
+    out.append("    }")
+    out.append("}")
+    out.append("")
+    return out
+
+
+
+def _emit_component(
+    component: dict,
+    services: dict,
+    types: dict | None = None,
+    functions: list | None = None,
+    externs: list | None = None,
+) -> list[str]:
+    if _component_needs_modern(component):
+        return _emit_component_modern(component, services, types, functions, externs)
     env = _Env(component, services)
     name = component["name"]
     cname = _ident(name, "component")
@@ -383,16 +1277,25 @@ def _emit_component(component: dict, services: dict) -> list[str]:
     return out
 
 
-def emit(ir: dict, package_name: str = "revl") -> str:
-    """Emit one Java source file for an IR document (ir_version 1)."""
-    if not isinstance(ir, dict):
-        raise EmitError("IR document must be a dict")
-    version = ir.get("ir_version")
-    if version != 1:
-        raise EmitError(
-            f"unsupported ir_version: {version!r} — the Java backend targets "
-            f"ir_version 1 (v3 types/functions are a follow-up)"
-        )
+def _emit_service_interfaces_v3(services: dict) -> list[str]:
+    out: list[str] = []
+    for sname, service in services.items():
+        _ident(sname, "service")
+        out.append(f"public interface {sname} {{")
+        for mname, method in (service.get("methods") or {}).items():
+            _ident(mname, "method")
+            params = ", ".join(
+                f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter')}"
+                for p in method.get("params") or []
+            )
+            ret = _java_v3_type(method.get("returns")) if method.get("returns") else "void"
+            out.append(f"    {ret} {mname}({params});")
+        out.append("}")
+        out.append("")
+    return out
+
+
+def _emit_v1(ir: dict, package_name: str) -> str:
     components = ir.get("components") or []
     if not components:
         raise EmitError("IR document has no components")
@@ -417,6 +1320,91 @@ def emit(ir: dict, package_name: str = "revl") -> str:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
+
+
+def _emit_v2(ir: dict, package_name: str) -> str:
+    components = ir.get("components") or []
+    if not components:
+        raise EmitError("IR document has no components")
+
+    out: list[str] = []
+    out.append("// Generated by the revl cordis4j backend (ir_version 2) — do not edit.")
+    out.append(f"// Target: {CRATE} (github.com/1na-ko/cordis4j).")
+    out.append(f"package {_ident(package_name, 'package')};")
+    out.append("")
+    out.append("import io.cordis4j.core.Context;")
+    out.append("import io.cordis4j.core.Disposable;")
+    out.append("import io.cordis4j.core.Disposables;")
+    out.append("import io.cordis4j.core.Plugin;")
+    out.append("import io.cordis4j.core.ServiceKey;")
+    out.append("")
+    out.append("public final class Components {")
+    out.append("    private Components() {}")
+    out.append("")
+    out.extend(["    " + line if line else line for line in _emit_service_interfaces(ir.get("services") or {})])
+    out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    for component in components:
+        out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
+    out.append("}")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _emit_v3(ir: dict, package_name: str) -> str:
+    services = ir.get("services") or {}
+    components = ir.get("components") or []
+    types = ir.get("types") or {}
+    functions = ir.get("functions") or []
+    externs = ir.get("externs") or []
+    tests = ir.get("tests") or []
+    if not components and not types and not functions and not externs and not tests:
+        raise EmitError("IR document has no components, types, functions, externs, or tests")
+
+    out: list[str] = []
+    out.append("// Generated by the revl cordis4j backend (ir_version 3) — do not edit.")
+    out.append(f"// Target: {CRATE} (github.com/1na-ko/cordis4j).")
+    out.append(f"package {_ident(package_name, 'package')};")
+    out.append("")
+    out.append("import io.cordis4j.core.Context;")
+    out.append("import io.cordis4j.core.Disposable;")
+    out.append("import io.cordis4j.core.Disposables;")
+    out.append("import io.cordis4j.core.Plugin;")
+    out.append("import io.cordis4j.core.ServiceKey;")
+    out.append("")
+    out.append("public final class Components {")
+    out.append("    private Components() {}")
+    out.append("")
+    if types:
+        out.extend(["    " + line if line else line for line in _emit_v3_types(types)])
+    if services:
+        out.extend(["    " + line if line else line for line in _emit_service_interfaces_v3(services)])
+    out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if externs:
+        out.extend(["    " + line if line else line for line in _emit_v3_externs(externs)])
+    if functions:
+        out.extend(["    " + line if line else line for line in _emit_v3_functions(functions, types, externs)])
+    if tests:
+        out.extend(["    " + line if line else line for line in _emit_v3_tests(tests, types, functions, externs)])
+    for component in components:
+        out.extend(["    " + line if line else line for line in _emit_component(component, services, types, functions, externs)])
+    out.append("}")
+    return "\n".join(out).rstrip() + "\n"
+
+
+def emit(ir: dict, package_name: str = "revl") -> str:
+    """Emit one Java source file for an IR document (ir_version 1, 2, or 3)."""
+    if not isinstance(ir, dict):
+        raise EmitError("IR document must be a dict")
+    version = ir.get("ir_version")
+    if version == 1:
+        return _emit_v1(ir, package_name)
+    if version == 2:
+        return _emit_v2(ir, package_name)
+    if version == 3:
+        return _emit_v3(ir, package_name)
+    raise EmitError(
+        f"unsupported ir_version: {version!r} — the Java backend targets "
+        f"ir_version 1, 2, and 3"
+    )
 
 
 def _main(argv: list[str]) -> int:
