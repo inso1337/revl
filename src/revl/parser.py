@@ -1179,16 +1179,41 @@ class Parser:
         return self._bin(self._nullish, ("||",))
 
     def _nullish(self):
-        # `??` binds tighter than `||` and `&&` do not compose with it in TS
-        # without parens; we simply accept it as a right-associative binary
-        # operator here — the lowering wraps left/right pair in a `nullish`
-        # bin op the checker types against Opt[T] (typecheck._binop_type).
+        # `??` is a right-associative binary operator typed against Opt[T]
+        # (typecheck._binop_type). TS forbids mixing `??` with `&&`/`||`
+        # without parentheses; we enforce the same (§0: no silently different
+        # meaning) via _reject_nullish_mix.
         left = self._and()
         if self.at("??"):
-            self.next()
+            line = self.next().line
             right = self._nullish()
+            self._reject_nullish_mix("??", left, line)
+            self._reject_nullish_mix("??", right, line)
             return ExprBin("??", left, right, left.line)
         return left
+
+    @staticmethod
+    def _is_unparen_bin(node, ops: tuple) -> bool:
+        return (isinstance(node, ExprBin) and node.op in ops
+                and not getattr(node, "_paren", False))
+
+    def _reject_nullish_mix(self, op: str, operand, line: int) -> None:
+        """`??` cannot be adjacent to `&&`/`||` without parentheses, and vice
+        versa (matches TS, which makes the unparenthesized form a syntax
+        error)."""
+        if op == "??" and self._is_unparen_bin(operand, ("&&", "||")):
+            raise self.err(
+                line,
+                f"`??` cannot be mixed with `{operand.op}` without parentheses",
+                hint=f"write `(a {operand.op} b) ?? c` or `a ?? (b {operand.op} c)` "
+                     "to say which you mean",
+            )
+        if op in ("&&", "||") and self._is_unparen_bin(operand, ("??",)):
+            raise self.err(
+                line,
+                f"`{op}` cannot be mixed with `??` without parentheses",
+                hint=f"write `(a ?? b) {op} c` or `a {op} (b ?? c)` to say which you mean",
+            )
 
     def _and(self):
         return self._bin(self._eq, ("&&",))
@@ -1215,12 +1240,16 @@ class Parser:
                     break
             if op is None:
                 return left
-            self.next()
+            op_line = self.next().line
             right = operand()
+            canonical = _CANONICAL_OPS.get(op, op)
+            if canonical in ("&&", "||"):
+                self._reject_nullish_mix(canonical, left, op_line)
+                self._reject_nullish_mix(canonical, right, op_line)
             # `===`/`!==` are accepted spellings of the ONE structural
             # equality (syntax-2.0 §3.2): canonicalized here so the IR
             # carries a single operator and no backend can diverge
-            left = ExprBin(_CANONICAL_OPS.get(op, op), left, right, left.line)
+            left = ExprBin(canonical, left, right, left.line)
 
     def _unary(self):
         tok = self.peek()
@@ -1365,6 +1394,12 @@ class Parser:
             self.next()
             node = self.pure_expr()
             self.expect(")")
+            # mark the group so `??`/`&&`/`||` mixing checks treat it as
+            # explicitly parenthesized (e.g. `(a ?? b) || c` is allowed)
+            try:
+                node._paren = True
+            except AttributeError:
+                pass
             return node
         if tok.kind == "{":
             self.next()

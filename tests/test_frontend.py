@@ -90,6 +90,7 @@ REJECTIONS = {
     "v2_use_missing.rvl": "cannot find imported module `./does_not_exist.rvl`",
     "v2_optional_chain_nonoptional.rvl": "an optional access `?.` can only be followed by another `?.`",
     "t7_provide_param_annotation_mismatch.rvl": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
+    "v2_nullish_mixed_with_or.rvl": "`||` cannot be mixed with `??` without parentheses",
 }
 
 
