@@ -138,12 +138,17 @@ def test_component_await_uses_plugin_async():
     assert 'Job::run(String::from("x")).await;' in src
 
 
+# cordis-rs is a crates.io dependency (see emit.cargo_toml). We deliberately
+# do NOT pass `--offline`: a fresh CI runner has no crates.io index or crate
+# cached, so an offline resolve fails with "no matching package named
+# cordis-rs". Letting cargo hit the network resolves + downloads cordis-rs
+# 0.3 (and its transitive deps) once, then caches it for the rest of the run.
 def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
     return subprocess.run(
-        ["cargo", "check", "--offline"], cwd=tmp_path, text=True,
+        ["cargo", "check"], cwd=tmp_path, text=True,
         capture_output=True, timeout=600,
     )
 
@@ -230,7 +235,7 @@ def test_cargo_test_runs_emitted_stdlib_semantics(tmp_path):
     (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
     result = subprocess.run(
-        ["cargo", "test", "--offline"], cwd=tmp_path, text=True,
+        ["cargo", "test"], cwd=tmp_path, text=True,
         capture_output=True, timeout=600,
     )
     assert result.returncode == 0, result.stderr + result.stdout
@@ -291,7 +296,7 @@ def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
     (tmp_path / "tests" / "scenarios.rs").write_text(
         (here / "scenarios" / "scenarios.rs").read_text(encoding="utf-8"), encoding="utf-8")
     result = subprocess.run(
-        ["cargo", "test", "--offline"], cwd=tmp_path, text=True,
+        ["cargo", "test"], cwd=tmp_path, text=True,
         capture_output=True, timeout=600,
     )
     assert result.returncode == 0, result.stderr + result.stdout
