@@ -1187,6 +1187,12 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
     if kind == "name":
         return _ident(node.get("id"), "name")
 
+    if kind == "adt":
+        # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
+        # Result -> native `Ok(..)`/`Err(..)`. Reuses the constructor logic
+        # the call/var paths already use.
+        return ctx.constructor(node["case"], [_v3_expr(a, ctx) for a in node.get("args") or []])
+
     if kind == "bin":
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:

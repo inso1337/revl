@@ -88,7 +88,7 @@ claim is checked by running the emitted code, not by argument: the test
 suite compiles revl sources for `fib` (loop form) and the Collatz
 step-counter, executes the **emitted Python**, and asserts `fib(10) = 55`
 and `collatz(27) = 111`; the same sources lower through the TypeScript
-emitter. Suites at this commit: 181 passing frontend tests (incl. the
+emitter. Suites at this commit: 189 passing frontend tests (incl. the
 17-test sound-typing group, 7-test strata-composition, 6-test stdlib
 groups, and the new §3.2 group covering `??` / `?.` / `${a.b}`),
 21 python-backend, 24 ts-backend, plus the wasm demo, live hot-swap demo,
@@ -120,13 +120,14 @@ Pre-typing control: v1 93% / v2 57% / v2host 43% first-pass — i.e. **sound
 typing costs models nothing** (typed first-pass is equal-or-better, within
 run-to-run variance on n=30).
 
-What the gap actually is: one grammar friction dominates. Models
+What the gap was: one grammar friction dominated these runs. Models
 annotate provide-method parameters (`fn query(sql: Str) = ...`) exactly as
-the 2.0 `fn` stratum teaches them to, and the component grammar rejects the
-annotation — 7–10 of each run's v2/v2host first-pass failures are this
-single parse error. Accepting (and checking) optional annotations there
-would put 2.0 first-pass at parity with 1.x. Diagnostics do their job
-meanwhile: 176/180 cells compile within 3 iterations, mean
+the 2.0 `fn` stratum teaches them to, and the component grammar rejected the
+annotation — 7–10 of each run's v2/v2host first-pass failures were this
+single parse error. **That friction is now fixed:** optional provide-method
+parameter annotations are accepted and checked against the service signature
+(A6), so a re-run should put 2.0 first-pass near parity with 1.x. Diagnostics
+did their job meanwhile: 176/180 cells compiled within 3 iterations, mean
 iterations-to-green ≤ 1.4 everywhere.
 <!-- BENCH-RESULTS:END -->
 

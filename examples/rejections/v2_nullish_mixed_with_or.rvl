@@ -1,0 +1,10 @@
+// REJECTED — `??` cannot be mixed with `&&`/`||` without parentheses
+// (matches TypeScript, which makes the unparenthesized form a syntax error;
+// syntax-2.0 §0: no construct may have a silently different meaning).
+//
+// expected error:
+//   `||` cannot be mixed with `??` without parentheses
+
+fn pick(a: Opt[Bool], c: Bool) -> Bool {
+  return a ?? c || c
+}

@@ -147,6 +147,10 @@ class ProvideMethod:
     body: list
     line: int
     async_: bool = False  # `async fn` provide-method declaration (§5)
+    # optional per-param type annotations (parallel to `params`, None where
+    # omitted): `fn query(sql: Str) = ...`. The service is the source of
+    # truth (A6); an annotation, if present, is checked against it.
+    param_types: list = field(default_factory=list)
 
 
 @dataclass
@@ -1175,16 +1179,41 @@ class Parser:
         return self._bin(self._nullish, ("||",))
 
     def _nullish(self):
-        # `??` binds tighter than `||` and `&&` do not compose with it in TS
-        # without parens; we simply accept it as a right-associative binary
-        # operator here — the lowering wraps left/right pair in a `nullish`
-        # bin op the checker types against Opt[T] (typecheck._binop_type).
+        # `??` is a right-associative binary operator typed against Opt[T]
+        # (typecheck._binop_type). TS forbids mixing `??` with `&&`/`||`
+        # without parentheses; we enforce the same (§0: no silently different
+        # meaning) via _reject_nullish_mix.
         left = self._and()
         if self.at("??"):
-            self.next()
+            line = self.next().line
             right = self._nullish()
+            self._reject_nullish_mix("??", left, line)
+            self._reject_nullish_mix("??", right, line)
             return ExprBin("??", left, right, left.line)
         return left
+
+    @staticmethod
+    def _is_unparen_bin(node, ops: tuple) -> bool:
+        return (isinstance(node, ExprBin) and node.op in ops
+                and not getattr(node, "_paren", False))
+
+    def _reject_nullish_mix(self, op: str, operand, line: int) -> None:
+        """`??` cannot be adjacent to `&&`/`||` without parentheses, and vice
+        versa (matches TS, which makes the unparenthesized form a syntax
+        error)."""
+        if op == "??" and self._is_unparen_bin(operand, ("&&", "||")):
+            raise self.err(
+                line,
+                f"`??` cannot be mixed with `{operand.op}` without parentheses",
+                hint=f"write `(a {operand.op} b) ?? c` or `a ?? (b {operand.op} c)` "
+                     "to say which you mean",
+            )
+        if op in ("&&", "||") and self._is_unparen_bin(operand, ("??",)):
+            raise self.err(
+                line,
+                f"`{op}` cannot be mixed with `??` without parentheses",
+                hint=f"write `(a ?? b) {op} c` or `a {op} (b ?? c)` to say which you mean",
+            )
 
     def _and(self):
         return self._bin(self._eq, ("&&",))
@@ -1211,12 +1240,16 @@ class Parser:
                     break
             if op is None:
                 return left
-            self.next()
+            op_line = self.next().line
             right = operand()
+            canonical = _CANONICAL_OPS.get(op, op)
+            if canonical in ("&&", "||"):
+                self._reject_nullish_mix(canonical, left, op_line)
+                self._reject_nullish_mix(canonical, right, op_line)
             # `===`/`!==` are accepted spellings of the ONE structural
             # equality (syntax-2.0 §3.2): canonicalized here so the IR
             # carries a single operator and no backend can diverge
-            left = ExprBin(_CANONICAL_OPS.get(op, op), left, right, left.line)
+            left = ExprBin(canonical, left, right, left.line)
 
     def _unary(self):
         tok = self.peek()
@@ -1227,8 +1260,16 @@ class Parser:
 
     def _postfix(self):
         node = self._primary()
+        # Once an optional access (`?.`) is taken, only another `?.` may
+        # follow: a plain `.field`/`(...)`/`[i]` applied to a possibly-None
+        # result would not short-circuit (`a?.b.c` runs `.c` on None). We
+        # reject that rather than emit wrong runtime behavior — chain with
+        # `?.` (`a?.b?.c`) or unwrap the optional first.
+        optional = False
         while True:
             if self.at("."):
+                if optional:
+                    raise self._optional_chain_error()
                 self.next()
                 node = ExprField(node, self.expect("ident").value, node.line)
             elif self.at("?."):
@@ -1248,7 +1289,10 @@ class Parser:
                     node = ExprOptCall(node, name, args, node.line)
                 else:
                     node = ExprOptField(node, name, node.line)
+                optional = True
             elif self.at("("):
+                if optional:
+                    raise self._optional_chain_error()
                 self.next()
                 args = []
                 while not self.at(")"):
@@ -1258,6 +1302,8 @@ class Parser:
                 self.expect(")")
                 node = ExprCall(node, args, node.line)
             elif self.at("["):
+                if optional:
+                    raise self._optional_chain_error()
                 self.next()
                 index = self.pure_expr()
                 self.expect("]")
@@ -1265,6 +1311,16 @@ class Parser:
             else:
                 break
         return node
+
+    def _optional_chain_error(self) -> RevlError:
+        tok = self.peek()
+        return self.err(
+            tok.line,
+            "an optional access `?.` can only be followed by another `?.` — "
+            "a plain `.field`, call, or index after `?.` would not short-circuit",
+            hint="chain with `?.` (`a?.b?.c`), or unwrap the optional first with "
+                 "`match` or `??` before the next access",
+        )
 
     def _match_expr(self) -> ExprMatch:
         """`match <expr> { arm ("," arm)* [","] "}"` — syntax-2.0 §3.3."""
@@ -1338,6 +1394,12 @@ class Parser:
             self.next()
             node = self.pure_expr()
             self.expect(")")
+            # mark the group so `??`/`&&`/`||` mixing checks treat it as
+            # explicitly parenthesized (e.g. `(a ?? b) || c` is allowed)
+            try:
+                node._paren = True
+            except AttributeError:
+                pass
             return node
         if tok.kind == "{":
             self.next()
@@ -1401,8 +1463,17 @@ class Parser:
             mname = self.expect("ident").value
             self.expect("(")
             params: list[str] = []
+            param_types: list = []
             while not self.at(")"):
                 params.append(self.expect("ident").value)
+                # optional `: Type` annotation — models write these on
+                # autopilot from the `fn` stratum; accept and (later) check
+                # them against the service signature (A6)
+                if self.at(":"):
+                    self.next()
+                    param_types.append(self.type_())
+                else:
+                    param_types.append(None)
                 if self.at(","):
                     self.next()
             self.expect(")")
@@ -1415,7 +1486,8 @@ class Parser:
                 while not self.at("}"):
                     body.append(self.stmt(in_method=True, in_async_method=async_))
                 self.expect("}")
-            methods.append(ProvideMethod(mname, params, body, mline, async_=async_))
+            methods.append(ProvideMethod(mname, params, body, mline, async_=async_,
+                                         param_types=param_types))
         self.expect("}")
         return ProvideStmt(key, methods, line)
 
