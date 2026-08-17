@@ -12,18 +12,26 @@ one Java source file (service interfaces + plugin classes).
 | `component` | `public final class <Name>Plugin implements Plugin { apply(ctx) }` |
 | `requires` | `ctx.get(<Svc>.class)` |
 | `provides` | `ctx.provide(ServiceKey.of(<Svc>.class), new <Impl>(…))` |
-| `effect E undo U` | `Disposables.of(() -> <undo>)`, combined via `Disposables.composite(…)` |
+| `effect E undo U` | `Disposables.of(() -> <undo>)`, combined via `Disposables.composite(…)` / `Context.EffectScope` |
 | `emit` | plain call |
 | `format` | `String.format(…)` |
-| `config` | plugin constructor parameters |
+| `config` | plugin constructor parameters + no-arg constructor with IR defaults |
 
-## Spike limits (tracked in docs/v2.0-roadmap.md)
+## Supported IR
 
-- **ir_version 1 only.** v2 realms and v3 types/functions rejected with a clear error.
-- **Host objects** (`Pool`/`Map`/`Job`) are stubs that throw
-  `UnsupportedOperationException` (host-runtime work, as in the wasm tier).
-- **Effectful provide-method bodies** are stubbed; pure delegations are real.
-- Config **`default` values** are not applied (host loader territory).
+- **ir_version 1, 2, and 3.** v2 realms/`isolate`/`intercept`, and v3
+  types/functions/match/externs are emitted; version 4 is rejected.
+- **Host objects** (`Pool`/`Map`/`Job`) are emitted as a minimal working Java
+  runtime in the generated file. `Pool` is a functional placeholder, `Map` is
+  a real `HashMap<String, String>`, and `Job.run` is a no-op placeholder.
+- **Effectful provide-method bodies** are lowered into the component
+  `Context.EffectScope`.
+- **`await` steps** lower to a blocking call inside an `AsyncPlugin`
+  (`ctx.pluginAsync`); the emitted class implements
+  `io.cordis4j.core.AsyncPlugin` and `apply` declares `throws Exception`.
+- **`if` guards, block-effect `setup`, and `fail`** are lowered to Java
+  control flow, setup statements before acquisition, and
+  `io.cordis4j.core.CordisException` respectively.
 
 ## Verify
 
