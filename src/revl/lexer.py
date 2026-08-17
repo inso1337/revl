@@ -181,6 +181,11 @@ def _lex_template(source: str, i: int, line: int, filename: str):
                 j += 1
                 while j < n and (source[j].isalnum() or source[j] == "_"):
                     j += 1
+                # accept a dotted access chain: `${user.name}`, `${a.b.c}`
+                while j + 1 < n and source[j] == "." and (source[j + 1].isalpha() or source[j + 1] == "_"):
+                    j += 1
+                    while j < n and (source[j].isalnum() or source[j] == "_"):
+                        j += 1
                 if j < n and source[j] == "}":
                     if buf:
                         parts.append(("text", "".join(buf)))
@@ -191,8 +196,9 @@ def _lex_template(source: str, i: int, line: int, filename: str):
             raise RevlError(
                 filename,
                 line,
-                "template interpolation must be `${name}` with an identifier",
-                hint="write `${ident}` and close the brace before continuing",
+                "template interpolation must be `${name}` or `${a.b.c}` — "
+                "an identifier or dotted access chain",
+                hint="write `${ident}` (or `${x.y}`) and close the brace before continuing",
             )
         buf.append(c)
         i += 1

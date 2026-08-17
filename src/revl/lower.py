@@ -45,6 +45,8 @@ from .parser import (
     ExprList,
     ExprLit,
     ExprMatch,
+    ExprOptCall,
+    ExprOptField,
     ExprRecord,
     ExprStmt,
     ExprUn,
@@ -943,15 +945,32 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 "body": _lower_pure_expr(body, inner_scope, callables, alias_fns, filename, inner_type_env, types),
             })
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
+    if isinstance(expr, ExprOptField):
+        return {
+            "kind": "optfield",
+            "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+            "name": expr.name,
+        }
+    if isinstance(expr, ExprOptCall):
+        return {
+            "kind": "optcall",
+            "target": _lower_pure_expr(expr.target, scope, callables, alias_fns, filename, type_env, types),
+            "method": expr.method,
+            "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args],
+        }
     if isinstance(expr, Interp):
-        # G1: names interpolated in `${name}` are real references and must
-        # resolve, exactly like a bare ExprVar (the component-body path
-        # already checks these via _lower_postfix).
+        # G1: names interpolated in `${name}` (or `${a.b.c}`) are real
+        # references and must resolve, exactly like a bare ExprVar (the
+        # component-body path already checks these via _lower_postfix).
+        # Only the head of a dotted chain is a scope name; the tail is
+        # field access, which the backend f-string emits verbatim.
         for kind, value in expr.parts:
-            if kind == "var" and value not in scope and value not in callables:
-                raise RevlError(filename, getattr(expr, "line", 1),
-                                f"`{value}` is not declared in this function",
-                                hint="declare it with `let`/`var` or add it as a parameter (G1)")
+            if kind == "var":
+                head = value.split(".", 1)[0]
+                if head not in scope and head not in callables:
+                    raise RevlError(filename, getattr(expr, "line", 1),
+                                    f"`{head}` is not declared in this function",
+                                    hint="declare it with `let`/`var` or add it as a parameter (G1)")
         return {"kind": "interp", "parts": expr.parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
 
@@ -1270,6 +1289,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         return {"kind": "arrow", "params": expr.params,
                 "body": _lower_component_pure_expr(expr.body, env, scope, callables,
                                                    pure_only)}
+    if isinstance(expr, ExprOptField):
+        return {
+            "kind": "optfield",
+            "target": _lower_component_pure_expr(expr.target, env, scope, callables, pure_only),
+            "name": expr.name,
+        }
+    if isinstance(expr, ExprOptCall):
+        return {
+            "kind": "optcall",
+            "target": _lower_component_pure_expr(expr.target, env, scope, callables, pure_only),
+            "method": expr.method,
+            "args": [_lower_component_pure_expr(a, env, scope, callables, pure_only) for a in expr.args],
+        }
     raise RevlError(filename, line, "unsupported expression in component effect block",
                     hint="block-effect setup is stratum-1 pure code (G6)")
 

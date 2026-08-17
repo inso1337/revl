@@ -1279,6 +1279,12 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
     if kind == "interp":
         return _v3_interp(node)
 
+    if kind in ("optfield", "optcall"):
+        raise EmitError(
+            f"optional chaining (`?.`) is not yet lowerable on the Rust tier "
+            f"({kind!r}); unwrap with `match` or `??` for now"
+        )
+
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
 
@@ -1397,7 +1403,9 @@ def _v3_interp(node: dict) -> str:
             format_parts.append(text.replace("{", "{{").replace("}", "}}"))
         else:
             format_parts.append("{}")
-            args.append(_ident(text, "interpolation"))
+            head, _dot, rest = text.partition(".")
+            _ident(head, "interpolation")
+            args.append(head if not rest else f"{head}.{rest}")
     return f"format!({_string(''.join(format_parts))}, {', '.join(args)})"
 
 
