@@ -1257,6 +1257,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         name = expr.name
         if name in scope:
             return {"kind": "name", "id": scope[name]}
+        info = _tagged_case(name, env.types)
+        if info is not None and info.get("payload") is None \
+                and not str(info.get("adt", "")).startswith(("Result", "Opt")):
+            return {"kind": "adt", "type": info["adt"], "case": name, "args": []}
         if name in callables:
             return {"kind": "var", "name": name}
         if getattr(env, "_plain_body", False):
@@ -1333,8 +1337,20 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
-        if isinstance(expr.callee, ExprVar) and expr.callee.name in callables:
-            return {"kind": "fn", "name": expr.callee.name, "args": args}
+        if isinstance(expr.callee, ExprVar):
+            name = expr.callee.name
+            # ADT/Opt construction lowers exactly as it does in a `fn` body:
+            # tagged variants to an `adt` node, Some/None to identity/null.
+            # Emitting a plain call here would name a constructor the host
+            # runtimes do not define (they are not functions).
+            if _tagged_case(name, env.types) is not None:
+                info = (env.types.get(CASES_KEY) or {})[name]
+                return {"kind": "adt", "type": info["adt"], "case": name, "args": args}
+            if name in _BUILTIN_CONSTRUCTORS:
+                return {"kind": "call", "callee": {"kind": "var", "name": name},
+                        "args": args}
+            if name in callables:
+                return {"kind": "fn", "name": name, "args": args}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
             if len(args) != _BUILTIN_METHODS[method]:

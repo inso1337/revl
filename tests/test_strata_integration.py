@@ -185,3 +185,51 @@ component C requires kv: Kv {
 }
 ''', "v.rvl")
     assert ir["ir_version"] == 3
+
+
+# ---------------------------------------------------------------- constructors
+
+def test_adt_constructors_lower_identically_in_fn_and_component_bodies():
+    """A constructor is not a function: `Some`/`Ok`/user cases have no runtime
+    definition, so a component expression must lower them the way a `fn` body
+    does. Emitting a plain call produced `NameError: name 'Some' is not
+    defined` in the generated Python — found by running a component chain in
+    an in-memory session."""
+    from revl import compile_source
+
+    fn_ir = compile_source('fn f() -> Opt[Str] { return Some("x") }')
+    in_fn = fn_ir["functions"][0]["body"][0]["expr"]
+
+    comp_ir = compile_source(
+        'service C { fn g() -> Opt[Str] }\n'
+        'component K provides c: C { provide c { fn g() = Some("x") } }'
+    )
+    in_component = comp_ir["components"][0]["body"][0]["methods"][0]["body"][0]["expr"]
+
+    assert in_component == in_fn
+    assert in_component["kind"] == "call"  # not {"kind": "fn"} — no such function
+
+
+def test_tagged_adt_constructor_in_a_component_body():
+    from revl import compile_source
+
+    ir = compile_source(
+        "type Outcome = Found(Str) | Missing\n"
+        "service C { fn g() -> Outcome }\n"
+        'component K provides c: C { provide c { fn g() = Found("x") } }'
+    )
+    node = ir["components"][0]["body"][0]["methods"][0]["body"][0]["expr"]
+    assert node == {"kind": "adt", "type": "Outcome", "case": "Found",
+                    "args": [{"kind": "lit", "value": "x"}]}
+
+
+def test_nullary_adt_constructor_in_a_component_body():
+    from revl import compile_source
+
+    ir = compile_source(
+        "type State = Fresh | Stale\n"
+        "service C { fn g() -> State }\n"
+        "component K provides c: C { provide c { fn g() = Fresh } }"
+    )
+    node = ir["components"][0]["body"][0]["methods"][0]["body"][0]["expr"]
+    assert node == {"kind": "adt", "type": "State", "case": "Fresh", "args": []}
