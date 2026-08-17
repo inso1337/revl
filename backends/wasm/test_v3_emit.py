@@ -136,3 +136,46 @@ def test_v3_externs_and_tests_are_documented_not_rejected():
     wat = modules["functions"]
     assert "unsupported on this tier: externs host_call" in wat
     assert "unsupported on this tier: tests 'would run on a hosted backend'" in wat
+
+
+# tagged unions (user variants, Result, Opt) lower to [i32 tag][i32 payload]
+# in linear memory; match dispatches on the tag.
+_ADT_SRC = """
+type O = Found(Int) | Missing
+fn mk_u(h: Bool) -> Int { let o = h ? Found(9) : Missing  return match o { Found(v) => v, Missing => 0 } }
+fn r_d(ok: Bool) -> Int { let x = ok ? Ok(7) : Err(1)  return match x { Ok(v) => v, Err(e) => 0 - e } }
+fn opt_or(some: Bool) -> Int { let x = some ? Some(5) : None  return match x { Some(v) => v, None => 0 } }
+"""
+
+
+def test_v3_variant_result_opt_emit():
+    emit = _emitter()
+    wat = emit.emit(compile_source(_ADT_SRC))["functions"]
+    # construction: alloc 8, store tag + payload
+    assert "(call $alloc (i32.const 8))" in wat
+    assert "(i32.store (local.get $__revl_tmp) (i32.const 0))" in wat  # a tag store
+    # match: dispatch on the loaded tag
+    assert "(i32.eq (i32.load (local.get $msc_1)) (i32.const" in wat
+
+
+@pytest.mark.skipif(__import__("shutil").which("wasmtime") is None, reason="wasmtime not installed")
+def test_v3_variant_result_opt_run_on_wasmtime(tmp_path):
+    """Not just emitted — construct + match execute on the real substrate:
+    user variants, Result (Ok/Err discriminated), and Opt."""
+    import subprocess
+
+    emit = _emitter()
+    wat_path = tmp_path / "adt.wat"
+    wat_path.write_text(emit.emit(compile_source(_ADT_SRC))["functions"], encoding="utf-8")
+
+    def invoke(fn: str, arg: str) -> int:
+        out = subprocess.run(
+            ["wasmtime", "--invoke", fn, str(wat_path), arg],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert invoke("mk_u", "1") == 9 and invoke("mk_u", "0") == 0
+    assert invoke("r_d", "1") == 7 and invoke("r_d", "0") == -1   # Ok vs Err
+    assert invoke("opt_or", "1") == 5 and invoke("opt_or", "0") == 0
