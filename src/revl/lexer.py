@@ -14,7 +14,7 @@ KEYWORDS = {
     "isolate", "intercept", "realm", "in", "with",
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
-    "match", "test", "assert", "async", "as",
+    "match", "test", "assert", "async", "as", "fail",
     # reserved for later tiers
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
 }
