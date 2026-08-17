@@ -82,12 +82,21 @@ one.
 
 ## 3. The bridge tier
 
-**Status:** py↔py implemented as a first milestone (`backends/python/bridge.py`,
-demonstrated by `demo/bridge_pypy.py`): PgDatabase and UserCache from one
-`.rvl`, split across two processes over a Unix socket, with value-copy
-marshalling and peer-death-as-withdrawal verified against the real cordis-py
-runtime. The cross-language py↔node seam and `revl run` placement wiring are
-the remaining work.
+**Status:** implemented over a Unix socket, verified against the real runtimes:
+
+- **py↔py** (`backends/python/bridge.py`, `demo/bridge_pypy.py`): PgDatabase and
+  UserCache from one `.rvl`, split across two Python processes.
+- **py↔node** (`backends/typescript/bridge.ts`, `backends/typescript/bridge_node.ts`):
+  the headline seam. PgDatabase in Python, UserCache on cordis-ts in Node, one
+  service contract, JSON on the wire.
+
+Both show value-copy marshalling and peer-death-as-withdrawal (R2/R3): killing
+the provider deactivates the consumer reactively and replays its inverses LIFO,
+no exception. The crossed method (Database.execute) is a *synchronous* emission,
+which §4 flags as address-space-bound; the py↔node proxy pays that literally
+(a blocking round-trip per call), whereas an `async fn` service would proxy
+without blocking. Remaining: `revl run` placement wiring (launch the seam from
+a manifest instead of a hand-written driver).
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a
