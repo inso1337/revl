@@ -1,0 +1,338 @@
+"""The revl compiler as an MCP server (stdio, JSON-RPC 2.0).
+
+An agent driving a running revl system gets a typed protocol instead of
+filesystem access: every mutation it proposes goes through the same
+admission gate a human's `revl compile` does, and every rejection comes
+back as a structured diagnostic naming the guarantee it violated.
+
+Tools
+  revl_check       compile a candidate component (source text or files)
+  revl_admit       check a candidate *against a running composition*
+  revl_audit       manifest + G8 boundary surface of a composition
+  revl_tools       project a composition's provided services to MCP tools
+  revl_grammar     the language surface, small enough to put in a prompt
+
+Transport is newline-delimited JSON-RPC on stdin/stdout (the MCP stdio
+convention); no third-party dependency, consistent with the rest of the
+toolchain.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+
+from ..compiler import compile_files
+from ..diagnostics import GUARANTEES, report
+from ..errors import RevlError
+from .schema import tools_from_ir
+
+PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "revl", "version": "2.0"}
+
+
+# ---------------------------------------------------------------- helpers
+
+def _compile(source: str | None, files: list[str] | None,
+             manifest: dict | None = None) -> dict:
+    """Compile inline source or paths, through the same entry point the CLI
+    uses (so the admission gate is literally the same code)."""
+    if source is not None:
+        handle = tempfile.NamedTemporaryFile("w", suffix=".rvl", delete=False,
+                                             encoding="utf-8")
+        try:
+            handle.write(source)
+            handle.close()
+            return compile_files([handle.name], manifest=manifest)
+        finally:
+            os.unlink(handle.name)
+    if not files:
+        raise ValueError("provide `source` or `files`")
+    return compile_files(list(files), manifest=manifest)
+
+
+def _summary(ir: dict) -> dict:
+    manifest = ir.get("manifest") or {}
+    return {
+        "irVersion": ir.get("ir_version"),
+        "loadOrder": manifest.get("loadOrder") or [],
+        "components": [
+            {
+                "name": entry.get("name"),
+                "requires": entry.get("inject") or [],
+                "provides": entry.get("provides") or [],
+            }
+            for entry in manifest.get("components") or []
+        ],
+        "services": sorted((ir.get("services") or {}).keys()),
+    }
+
+
+def _boundary_of(ir: dict) -> dict:
+    # the CLI owns the G8 walk; import lazily so the module works whether
+    # revl is running as `python -m revl` or imported as a library
+    from ..__main__ import _boundary
+
+    return _boundary(ir)
+
+
+# ---------------------------------------------------------------- tools
+
+def _tool_check(arguments: dict) -> dict:
+    try:
+        ir = _compile(arguments.get("source"), arguments.get("files"))
+    except RevlError as error:
+        return report(error)
+    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir)}
+
+
+def _tool_admit(arguments: dict) -> dict:
+    running = arguments.get("manifest")
+    if running is None:
+        return {"ok": False, "diagnostics": [{
+            "severity": "error", "code": "REVL", "category": "usage",
+            "message": "`manifest` (a compiled IR document of the running "
+                       "composition) is required — admission is checked "
+                       "against what is already loaded",
+        }]}
+    replacing = tuple(arguments.get("replacing") or ())
+    try:
+        ir = _compile(arguments.get("source"), arguments.get("files"),
+                      manifest=running)
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = False
+        return rejected
+    if replacing:
+        try:
+            ir = compile_files(list(arguments.get("files") or []),
+                               manifest=running, replacing=replacing) \
+                if arguments.get("files") else ir
+        except RevlError as error:
+            rejected = report(error)
+            rejected["admitted"] = False
+            return rejected
+    return {
+        "ok": True,
+        "admitted": True,
+        "note": "the candidate links against the running composition; "
+                "G2/G3 hold across both and no interface drifted",
+        **_summary(ir),
+        "boundary": _boundary_of(ir),
+    }
+
+
+def _tool_audit(arguments: dict) -> dict:
+    try:
+        ir = _compile(arguments.get("source"), arguments.get("files"))
+    except RevlError as error:
+        return report(error)
+    return {
+        "ok": True,
+        "manifest": ir.get("manifest") or {},
+        "boundary": _boundary_of(ir),
+        "guarantees": GUARANTEES,
+    }
+
+
+def _tool_tools(arguments: dict) -> dict:
+    try:
+        ir = _compile(arguments.get("source"), arguments.get("files"))
+    except RevlError as error:
+        return report(error)
+    composition = arguments.get("composition") or "revl"
+    return {
+        "ok": True,
+        "tools": tools_from_ir(ir, composition=composition),
+        "note": "annotations are derived from the compiler: readOnlyHint is "
+                "true only where the checker refused unreverted mutation",
+    }
+
+
+_GRAMMAR = """\
+revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
+
+service S { fn f(a: Str) -> Int          // checked operation
+            emission fn g(a: Str) -> Int // crosses the boundary
+            async fn h() -> Str }
+
+component C requires k: S provides j: T {
+  config { field: Int = 3 }
+  isolate k in realm("tenant")        // optional realm placement (prelude)
+  let r = effect acquire() undo r.release()
+  await Job.run("work")               // iteration boundary (divert point)
+  emit k.g("x") compensate k.g("undo")
+  fail "reason"                       // deliberate L-Raise
+  provide j { fn m(a) = pure_fn(a) }
+}
+
+type Row = { id: Int, name: Str }      // record
+type Outcome = Ok(Row) | NotFound      // ADT; match is exhaustive
+pub fn f(xs: List[Row]) -> Int {       // pure stratum (TS-subset exprs)
+  var n = 0
+  for (x of xs) { if (x.id > 0) n += 1 }
+  return n
+}
+extern pure fn sha(d: Bytes) -> Str = @ts { ... } = @py { ... }
+test "name" { assert f([]) == 0 }
+
+Rules that reject code: mutation needs `undo` or `emit` (G4); reads must be
+declared (G1); no cycles or duplicate providers (G2/G3); teardown cannot
+register effects (G5); expressions are pure (G6); `null` has no type —
+absence is Opt[T]; declared types are checked at every boundary.
+"""
+
+
+def _tool_grammar(_arguments: dict) -> dict:
+    return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES}
+
+
+_SOURCE_INPUT = {
+    "source": {"type": "string",
+               "description": "inline .rvl source (use this for a generated component)"},
+    "files": {"type": "array", "items": {"type": "string"},
+              "description": "paths to .rvl files (alternative to `source`)"},
+}
+
+TOOLS = [
+    {
+        "name": "revl_check",
+        "description": "Compile a revl component. Returns the composition summary "
+                       "and G8 boundary on success, or structured diagnostics "
+                       "(code, guarantee, expected/actual, fix hint) on rejection.",
+        "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_check,
+    },
+    {
+        "name": "revl_admit",
+        "description": "Check a candidate component against a RUNNING composition "
+                       "(the admission gate): ambient services are in scope, G2/G3 "
+                       "span both, and interface drift is refused. Use before "
+                       "hot-swapping generated code into a live system.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "manifest": {"type": "object",
+                             "description": "the compiled IR of the running composition"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components being withdrawn in this admission"},
+            },
+            "required": ["manifest"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_admit,
+    },
+    {
+        "name": "revl_audit",
+        "description": "The G8 boundary surface of a composition: which emissions "
+                       "each component can perform, which are compensated, its "
+                       "iteration boundaries, and the host code it reaches.",
+        "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_audit,
+    },
+    {
+        "name": "revl_tools",
+        "description": "Project a composition's provided services to MCP tool "
+                       "definitions whose behavioural annotations are derived from "
+                       "the compiler rather than asserted by an author.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {**_SOURCE_INPUT,
+                           "composition": {"type": "string",
+                                           "description": "tool-name prefix"}},
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_tools,
+    },
+    {
+        "name": "revl_grammar",
+        "description": "The revl surface syntax and the rules that reject code — "
+                       "small enough to keep in context while generating.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_grammar,
+    },
+]
+
+_HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
+_ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
+
+
+# ---------------------------------------------------------------- protocol
+
+def handle(message: dict) -> dict | None:
+    """One JSON-RPC request -> one response (or None for a notification)."""
+    method = message.get("method")
+    request_id = message.get("id")
+
+    if method == "initialize":
+        result = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": SERVER_INFO,
+            "instructions": "Compile revl components before proposing them; use "
+                            "revl_admit against the running manifest before a swap.",
+        }
+    elif method == "tools/list":
+        result = {"tools": _ADVERTISED}
+    elif method == "tools/call":
+        params = message.get("params") or {}
+        name = params.get("name")
+        handler = _HANDLERS.get(name)
+        if handler is None:
+            return _error(request_id, -32602, f"unknown tool: {name}")
+        try:
+            payload = handler(params.get("arguments") or {})
+        except Exception as exc:  # a tool failure is a result, not a transport error
+            payload = {"ok": False, "diagnostics": [{
+                "severity": "error", "code": "REVL", "category": "internal",
+                "message": f"{type(exc).__name__}: {exc}",
+            }]}
+        result = {
+            "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+            "isError": not payload.get("ok", False),
+            "structuredContent": payload,
+        }
+    elif method in ("notifications/initialized", "initialized"):
+        return None
+    elif method == "ping":
+        result = {}
+    else:
+        if request_id is None:
+            return None
+        return _error(request_id, -32601, f"method not found: {method}")
+
+    if request_id is None:
+        return None
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _error(request_id, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": request_id,
+            "error": {"code": code, "message": message}}
+
+
+def serve(stdin=None, stdout=None) -> int:
+    """Read newline-delimited JSON-RPC from stdin until EOF."""
+    stdin = stdin or sys.stdin
+    stdout = stdout or sys.stdout
+    for line in stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            stdout.write(json.dumps(_error(None, -32700, "parse error")) + "\n")
+            stdout.flush()
+            continue
+        response = handle(message)
+        if response is not None:
+            stdout.write(json.dumps(response) + "\n")
+            stdout.flush()
+    return 0

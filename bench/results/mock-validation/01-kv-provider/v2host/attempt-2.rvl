@@ -1,0 +1,8 @@
+service Kv {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component Probe {
+  let m = effect Map.new() undo m.drop()
+}

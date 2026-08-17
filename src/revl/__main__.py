@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .compiler import compile_files
 from .distribute import distributability
+from .diagnostics import report
 from .errors import RevlError
 from .fmt import migrate_source
 from .run import KNOWN_BACKENDS, run_command
@@ -218,6 +219,41 @@ def _run_fmt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_mcp(args) -> int:
+    """`revl mcp {serve,schema,import}` — the MCP bridge (docs/mcp-bridge.md)."""
+    from .mcp.schema import import_tools, tools_from_ir
+    from .mcp.server import serve
+
+    if args.mcp_command == "serve":
+        return serve()
+
+    if args.mcp_command == "schema":
+        try:
+            ir = compile_files(args.files)
+        except RevlError as error:
+            print(json.dumps(report(error), indent=2))
+            return 1
+        print(json.dumps({"tools": tools_from_ir(ir, composition=args.composition)},
+                         indent=2))
+        return 0
+
+    # import
+    try:
+        with open(args.manifest, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.manifest}: {error}", file=sys.stderr)
+        return 1
+    source = import_tools(manifest, service=args.service, key=args.key,
+                          backend=args.backend)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(source)
+    else:
+        print(source, end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -225,6 +261,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd = sub.add_parser("compile", help="compile .rvl files to a backend IR document")
     cmd.add_argument("files", nargs="+")
     cmd.add_argument("-o", "--output", default=None, help="output path (default: stdout)")
+    cmd.add_argument("--json-diagnostics", action="store_true",
+                     help="on rejection, print a structured diagnostic (code, guarantee, "
+                          "expected/actual, hint) instead of the human rendering")
 
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
@@ -247,6 +286,24 @@ def main(argv: list[str] | None = None) -> int:
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
+
+    mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_serve = mcp_sub.add_parser("serve", help="run the compiler as an MCP server (stdio)")
+    mcp_serve.add_argument("--files", nargs="*", default=None,
+                           help="optional default composition for tools called without one")
+    mcp_schema = mcp_sub.add_parser("schema",
+                                    help="project provided services to MCP tool definitions")
+    mcp_schema.add_argument("files", nargs="+")
+    mcp_schema.add_argument("--composition", default="revl", help="tool-name prefix")
+    mcp_import = mcp_sub.add_parser("import",
+                                    help="turn an MCP tools/list manifest into revl source")
+    mcp_import.add_argument("manifest", help="JSON file: a tools/list result (or {\"tools\": [...]})")
+    mcp_import.add_argument("--service", default="Imported", help="generated service name")
+    mcp_import.add_argument("--key", default="imported", help="provision key")
+    mcp_import.add_argument("--backend", default="ts", choices=("ts", "py"),
+                            help="host block backend for the generated externs")
+    mcp_import.add_argument("-o", "--output", default=None, help="output path (default: stdout)")
 
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime (hold + REPL, or --watch)")
     run.add_argument("files", nargs="+")
@@ -271,10 +328,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return run_command(args)
 
+    if args.command == "mcp":
+        return _run_mcp(args)
+
     try:
         ir = compile_files(args.files)
     except RevlError as error:
-        print(f"error: {error}", file=sys.stderr)
+        if getattr(args, "json_diagnostics", False):
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
         return 1
 
     if args.command == "test":

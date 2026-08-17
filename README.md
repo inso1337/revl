@@ -40,6 +40,15 @@ component UserCache requires db: Database provides cache: Cache {
   back out, and the diagnostic says to unwrap with `match` or `??`. The
   unchecked remainder is enumerated, not implied: host-valued objects and
   the extern boundary, both on the G8 audit surface.
+- **Agent-native.** `revl mcp serve` runs the compiler as an MCP server, so
+  an agent proposing a component gets `revl_check` / `revl_admit` (the
+  admission gate) instead of filesystem access, and rejections come back as
+  structured diagnostics (code, guarantee, expected/actual, fix hint) —
+  `revl compile --json-diagnostics` for humans and CI. `revl mcp schema`
+  projects a composition's services to MCP tools whose `readOnlyHint` /
+  `destructiveHint` are **derived from the compiler** — including from the
+  method body, so a tool cannot describe itself as harmless when it emits.
+  See [docs/mcp-bridge.md](docs/mcp-bridge.md).
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
   cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)

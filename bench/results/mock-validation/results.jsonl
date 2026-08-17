@@ -1,0 +1,27 @@
+{"spec": "01-kv-provider", "variant": "v1", "model": "mock", "attempt": 1, "ok": false, "error": "01-kv-provider.rvl:7: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "01-kv-provider", "variant": "v1", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "01-kv-provider", "variant": "v1", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "01-kv-provider", "variant": "v2", "model": "mock", "attempt": 1, "ok": false, "error": "01-kv-provider.rvl:7: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "01-kv-provider", "variant": "v2", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "01-kv-provider", "variant": "v2", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "mock", "attempt": 1, "ok": false, "error": "01-kv-provider.rvl:7: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "02-pg-pool", "variant": "v1", "model": "mock", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:7: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "02-pg-pool", "variant": "v1", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "02-pg-pool", "variant": "v1", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "02-pg-pool", "variant": "v2", "model": "mock", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:7: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "02-pg-pool", "variant": "v2", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "02-pg-pool", "variant": "v2", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "mock", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:7: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "03-user-cache", "variant": "v1", "model": "mock", "attempt": 1, "ok": false, "error": "03-user-cache.rvl:12: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "03-user-cache", "variant": "v1", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "03-user-cache", "variant": "v1", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "03-user-cache", "variant": "v2", "model": "mock", "attempt": 1, "ok": false, "error": "03-user-cache.rvl:12: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "03-user-cache", "variant": "v2", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "03-user-cache", "variant": "v2", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
+{"spec": "03-user-cache", "variant": "v2host", "model": "mock", "attempt": 1, "ok": false, "error": "03-user-cache.rvl:12: `ghost` is not a declared requirement of Broken\n  component Broken requires <nothing> \u2014 add `requires ghost: <Service>`?", "duration_s": 0.0, "cost": 0.0}
+{"spec": "03-user-cache", "variant": "v2host", "model": "mock", "attempt": 2, "ok": true, "error": null, "duration_s": 0.0, "cost": 0.0}
+{"spec": "03-user-cache", "variant": "v2host", "model": "mock", "summary": true, "green_at": 2, "cost_total": 0.0}
