@@ -404,6 +404,26 @@ def _list_elem(ty: str) -> str:
     return ty[len("List[") : -1]
 
 
+def _split_types(inner: str) -> list[str]:
+    """Split top-level comma-separated type args, respecting `[]` nesting."""
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
 class _E:
     def __init__(self, wat: str, ty: str | None) -> None:
         self.wat = wat
@@ -502,14 +522,18 @@ class _V3Emitter:
         spec = self.all_types.get(ty)
         if spec is not None and spec.get("kind") == "record":
             return
-        if spec is not None and spec.get("kind") == "variant":
-            raise EmitError(
-                f"{where}: variant type {ty!r} is not lowerable on this tier — "
-                f"records/strings/lists are; variants stay documented layout comments"
-            )
+        # tagged unions (user variants, Opt, Result) lower to a 2-word
+        # [i32 tag][i32 payload] cell — the payload is always one i32 (an Int/
+        # Bool value or a pointer). Check payload types are themselves lowerable.
+        layout = self._tagged_layout(ty)
+        if layout is not None:
+            for _case, payload in layout:
+                if payload is not None:
+                    self._check_type(payload, f"{where}: payload of {ty!r}")
+            return
         raise EmitError(
             f"{where}: type {ty!r} is not lowerable — this tier supports "
-            f"Int/Bool/Str/Bytes/List/record values"
+            f"Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
         )
 
     def _record_fields(self, ty: str | None) -> dict[str, str] | None:
@@ -517,6 +541,30 @@ class _V3Emitter:
         if spec is None or spec.get("kind") != "record":
             return None
         return spec.get("fields") or {}
+
+    def _tagged_layout(self, ty: str | None) -> list[tuple[str, str | None]] | None:
+        """Cases of a tagged union in tag order — (case_name, payload_type).
+        User variants come from the type table; Opt/Result are built in. The
+        tag is the case's index; the payload is one i32 slot (0 if None)."""
+        if not ty:
+            return None
+        spec = self.all_types.get(ty)
+        if spec is not None and spec.get("kind") == "variant":
+            return [(c["name"], c.get("payload")) for c in spec.get("cases") or []]
+        head = ty[: ty.index("[")] if "[" in ty else ty
+        args = _split_types(ty[ty.index("[") + 1: ty.rindex("]")]) if "[" in ty else []
+        if head == "Opt" and len(args) == 1:
+            return [("None", None), ("Some", args[0])]
+        if head == "Result" and len(args) == 2:
+            return [("Ok", args[0]), ("Err", args[1])]
+        return None
+
+    def _tag_of(self, ty: str | None, case: str) -> int:
+        layout = self._tagged_layout(ty) or []
+        for index, (name, _payload) in enumerate(layout):
+            if name == case:
+                return index
+        raise EmitError(f"case {case!r} is not a case of {ty!r}")
 
     def _anon_record(self, fields: list[tuple[str, str]]) -> str:
         self._anon += 1
@@ -739,7 +787,12 @@ class _V3Emitter:
                 return "Str"
             raise EmitError(f"literal {value!r} is not lowerable on this tier")
         if kind == "var":
-            name = _ident(node.get("name"), "name")
+            name = node.get("name")
+            if name == "None":  # built-in Opt None
+                if expected and self._tagged_layout(expected) is not None:
+                    return expected
+                return "Opt[Int]"
+            _ident(name, "name")
             if name not in scope.types:
                 raise EmitError(f"unbound name {name!r}")
             return scope.types[name]
@@ -795,8 +848,16 @@ class _V3Emitter:
             return self._list_type(node, scope, expected)
         if kind == "interp":
             return "Str"
+        if kind == "adt":
+            case = node.get("case")
+            if expected and self._tagged_layout(expected) is not None \
+                    and any(c == case for c, _ in self._tagged_layout(expected)):
+                return expected
+            return node.get("type")
         if kind == "match":
-            raise EmitError("match/variants are not lowerable on this tier — records/strings/lists are")
+            for arm in node.get("arms") or []:
+                return self._infer_type(arm.get("body"), scope, expected)
+            return expected
         if kind == "arrow":
             raise EmitError("arrow values are not lowerable on this tier — the wasm module has no closures")
         raise EmitError(f"unsupported v3 expression kind {kind!r}")
@@ -806,6 +867,10 @@ class _V3Emitter:
         if callee.get("kind") != "var":
             raise EmitError("only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), "callee")
+        if name == "Some":  # built-in Opt Some(x)
+            args = node.get("args") or []
+            inner = self._infer_type(args[0], scope) if args else "Int"
+            return f"Opt[{inner or 'Int'}]"
         sig = self.fn_sigs.get(name)
         if sig is None:
             raise EmitError(f"callee {name!r} is not a lowerable function")
@@ -887,7 +952,11 @@ class _V3Emitter:
                 return _E(self._str_ptr(value), "Str")
             raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
         if kind == "var":
-            name = _ident(node.get("name"), f"{where}: name")
+            name = node.get("name")
+            if name == "None":  # built-in Opt None
+                ty = expected if self._tagged_layout(expected) is not None else "Opt[Int]"
+                return self._make_tagged(ty, "None", None, scope, where)
+            _ident(name, f"{where}: name")
             if name not in scope.slots:
                 raise EmitError(f"{where}: unbound name {name!r}")
             return _E(scope.slots[name], scope.types[name])
@@ -896,7 +965,7 @@ class _V3Emitter:
         if kind == "un":
             return self._un_expr(node, scope, where)
         if kind == "call":
-            return self._call_expr(node, scope, where)
+            return self._call_expr(node, scope, where, expected)
         if kind == "builtin":
             return self._builtin_expr(node, scope, where)
         if kind == "field":
@@ -913,8 +982,10 @@ class _V3Emitter:
             return self._list_expr(node, scope, where, expected)
         if kind == "interp":
             return self._interp_expr(node, scope, where)
+        if kind == "adt":
+            return self._adt_expr(node, scope, where, expected)
         if kind == "match":
-            raise EmitError(f"{where}: match/variants are not lowerable on this tier")
+            return self._match_expr(node, scope, where, expected)
         if kind == "arrow":
             raise EmitError(f"{where}: arrow values are not lowerable on this tier")
         raise EmitError(f"{where}: unsupported v3 expression kind {kind!r}")
@@ -972,11 +1043,19 @@ class _V3Emitter:
             return _E(f"(i32.const 0)\n      {operand.wat}\n      (i32.sub)", "Int")
         raise EmitError(f"{where}: unsupported unary operator {op!r}")
 
-    def _call_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+    def _call_expr(self, node: dict, scope: _Scope, where: str, expected: str | None = None) -> _E:
         callee = node.get("callee") or {}
         if callee.get("kind") != "var":
             raise EmitError(f"{where}: only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), f"{where}: callee")
+        if name == "Some":  # built-in Opt Some(x)
+            args = node.get("args") or []
+            if len(args) != 1:
+                raise EmitError(f"{where}: Some expects one argument")
+            payload = args[0]
+            ty = (expected if self._tagged_layout(expected) is not None
+                  else f"Opt[{self._infer_type(payload, scope) or 'Int'}]")
+            return self._make_tagged(ty, "Some", payload, scope, where)
         sig = self.fn_sigs.get(name)
         if sig is None:
             raise EmitError(f"{where}: callee {name!r} is not a lowerable function")
@@ -1133,6 +1212,83 @@ class _V3Emitter:
         lines.append(f"(local.get ${self._tmp})")
         return _E("\n      ".join(lines), ty)
 
+    # -- tagged unions (variants, Opt, Result): [i32 tag][i32 payload] --------
+
+    def _make_tagged(self, ty: str | None, case: str, payload_node: Any,
+                     scope: _Scope, where: str) -> _E:
+        layout = self._tagged_layout(ty)
+        if layout is None:
+            raise EmitError(f"{where}: {ty!r} is not a tagged union")
+        tag = self._tag_of(ty, case)
+        payload_ty = next((p for c, p in layout if c == case), None)
+        lines = [
+            "(call $alloc (i32.const 8))",
+            f"(local.set ${self._tmp})",
+            f"(i32.store (local.get ${self._tmp}) (i32.const {tag}))",
+        ]
+        if payload_node is not None:
+            value = self._expr(payload_node, scope, where, payload_ty)
+            payload_wat = value.wat
+        else:
+            payload_wat = "(i32.const 0)"
+        lines.append(
+            f"(i32.store (i32.add (local.get ${self._tmp}) (i32.const 4)) {payload_wat})"
+        )
+        lines.append(f"(local.get ${self._tmp})")
+        return _E("\n      ".join(lines), ty)
+
+    def _adt_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
+        ty = self._infer_type(node, scope, expected)
+        payload = (node.get("args") or [None])[0]
+        return self._make_tagged(ty, node.get("case"), payload, scope, where)
+
+    def _match_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
+        scrut = self._expr(node.get("scrutinee"), scope, where)
+        layout = self._tagged_layout(scrut.ty)
+        if layout is None:
+            raise EmitError(f"{where}: match scrutinee {scrut.ty!r} is not a tagged union")
+        mloc = node.get("_scrut")
+        arms = node.get("arms") or []
+        result_ty = expected or self._infer_type(arms[0].get("body"), scope, expected)
+
+        def arm_body(arm: dict) -> str:
+            bind = arm.get("bind")
+            if not bind:
+                return self._expr(arm.get("body"), scope, where, result_ty).wat
+            bname = _ident(bind, f"{where}: match bind")
+            scope.slots[bind] = f"(local.get $l_{bname})"
+            # on the i32 tier an unknown/`Any` payload is an i32 — default to Int
+            payload_ty = arm.get("payload_type")
+            scope.types[bind] = "Int" if payload_ty in (None, "Any") else payload_ty
+            body = self._expr(arm.get("body"), scope, where, result_ty).wat
+            load = f"(local.set $l_{bname} (i32.load (i32.add (local.get ${mloc}) (i32.const 4))))"
+            return f"{load}\n      {body}"
+
+        wildcard = next((a for a in arms if a.get("pattern") == "_"), None)
+        chain = arm_body(wildcard) if wildcard is not None else "(unreachable)"
+        for arm in reversed([a for a in arms if a.get("pattern") != "_"]):
+            tag = self._tag_of(scrut.ty, arm.get("pattern"))
+            cond = f"(i32.eq (i32.load (local.get ${mloc})) (i32.const {tag}))"
+            chain = (f"(if (result i32)\n        {cond}\n"
+                     f"        (then {arm_body(arm)})\n        (else {chain}))")
+        wat = f"{scrut.wat}\n      (local.set ${mloc})\n      {chain}"
+        return _E(wat, result_ty)
+
+    def _collect_match_locals(self, node: Any, binds: set, scruts: set) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "match":
+                self._match_counter += 1
+                node["_scrut"] = f"msc_{self._match_counter}"
+                scruts.add(node["_scrut"])
+                for arm in node.get("arms") or []:
+                    if arm.get("bind"):
+                        binds.add(_ident(arm["bind"], "match bind"))
+            for value in node.values():
+                self._collect_match_locals(value, binds, scruts)
+        elif isinstance(node, list):
+            for value in node:
+                self._collect_match_locals(value, binds, scruts)
+
     def _list_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
         ty = self._list_type(node, scope, expected)
         elem_ty = _list_elem(ty)
@@ -1274,7 +1430,18 @@ class _V3Emitter:
                 decls.append(f"(local $l_{lname} i32)")
                 scope.slots[lname] = f"(local.get $l_{lname})"
                 scope.types[lname] = None
-        tmp = self._fresh_tmp(set(scope.types) | local_names)
+        # match binds + one scratch pointer per match (match is in expression
+        # position, so _collect_locals doesn't reach it)
+        self._match_counter = 0
+        match_binds: set[str] = set()
+        match_scruts: set[str] = set()
+        self._collect_match_locals(fn.get("body") or [], match_binds, match_scruts)
+        for bname in sorted(match_binds):
+            if bname not in local_names:
+                decls.append(f"(local $l_{bname} i32)")
+        for sname in sorted(match_scruts):
+            decls.append(f"(local ${sname} i32)")
+        tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts)
         self._tmp = tmp
         decls.append(f"(local ${tmp} i32)")
 
