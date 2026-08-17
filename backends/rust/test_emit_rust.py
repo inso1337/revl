@@ -398,3 +398,106 @@ def test_cargo_check_compiles_method_body_bindings(tmp_path):
     )
     result = _cargo_check(tmp_path, emit.emit(ir))
     assert result.returncode == 0, result.stderr
+
+
+# --------------------------------------------------------------------------
+# Conformance gaps closed on this tier (docs/conformance.md). Each construct
+# below used to raise instead of lowering; the matrix now reports rust as
+# clean apart from the deliberate extern refusals.
+# --------------------------------------------------------------------------
+
+
+def test_nullish_lowers_to_unwrap_or_else_in_fn_bodies():
+    """`a ?? b` on `Opt[T]` = `Option<T>`. `unwrap_or_else` (not `unwrap_or`)
+    because `??` must not evaluate its right operand when the left is present."""
+    ir = compile_source(
+        """
+        fn side(n: Int) -> Int { return n * 3 }
+        fn pick(a: Opt[Int]) -> Int { return a ?? side(7) }
+        """
+    )
+    src = emit.emit(ir)
+    assert "a.unwrap_or_else(|| side(7i64))" in src
+    assert "unwrap_or(" not in src  # eager form would evaluate `side(7)` always
+
+
+def test_nullish_lowers_in_component_method_bodies():
+    """The component renderer speaks the v1 dialect (`req`, v1 `call`), which
+    the v3 renderer cannot see — `??` has to be handled in both."""
+    ir = compile_source(
+        """
+        service Bus { fn maybe(n: Int) -> Opt[Int] }
+        service S { fn f(x: Int) -> Int }
+        component C requires bus: Bus provides s: S {
+          provide s { fn f(x) = bus.maybe(x) ?? 0 }
+        }
+        """
+    )
+    src = emit.emit(ir)
+    assert "bus.maybe(x).unwrap_or_else(|| 0i64)" in src
+
+
+def test_bare_return_lowers_for_void_service_operations():
+    """`{"step": "return", "expr": null}` — the expression-body fast path has
+    no expression to inline and must fall through to the statement path."""
+    ir = compile_source(
+        """
+        service S { fn f(x: Int) }
+        component C provides s: S { provide s { fn f(x) { return } } }
+        """
+    )
+    src = emit.emit(ir)
+    assert "fn f(&self, x: i64) -> () { return; }" in src
+
+
+def test_match_reaches_the_v3_renderer_from_a_component_body():
+    """`match` in a provide-method body (legal since ff0d76e) fell into the gap
+    between the two expression renderers."""
+    ir = compile_source(
+        """
+        type Outcome = Found(Int) | Missing
+        service S { fn f(x: Int) -> Int }
+        component C provides s: S {
+          provide s {
+            fn f(x) {
+              let o = Found(x)
+              return match o { Found(v) => v, Missing => 0 }
+            }
+          }
+        }
+        """
+    )
+    src = emit.emit(ir)
+    assert "Outcome::Found(v) => v," in src
+    assert "Outcome::Missing => 0i64," in src
+
+
+def test_config_access_inside_a_fail_guard():
+    """`config.n` reached the v3 renderer through the guard's `bin` node."""
+    ir = compile_source(
+        """
+        service S { fn f(x: Int) -> Int }
+        component C provides s: S {
+          config { n: Int = 1 }
+          if (config.n < 1) { fail "bad" }
+          provide s { fn f(x) = x }
+        }
+        """
+    )
+    src = emit.emit(ir)
+    # the emitted guard reads the local `let config = CConfig { .. }`
+    assert "if (config.n.clone() < 1i64) {" in src
+
+
+def test_optional_chaining_reports_the_tier_limit_not_a_generic_message():
+    """`optfield`/`optcall` delegate to the v3 renderer purely so its specific
+    refusal is what surfaces from a component body too."""
+    ir = {"ir_version": 1, "services": {"S": {"methods": {"f": {"params": [], "returns": "Int"}}}},
+          "components": [{"name": "C", "requires": {}, "provides": {"s": "S"}, "body": [
+              {"step": "provide", "name": "s", "service": "S", "methods": [
+                  {"name": "f", "params": [], "body": [
+                      {"step": "return", "expr": {
+                          "kind": "optfield", "name": "a",
+                          "target": {"kind": "var", "name": "x"}}}]}]}]}]}
+    with pytest.raises(emit.EmitError, match="optional chaining"):
+        emit.emit(ir)
