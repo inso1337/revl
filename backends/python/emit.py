@@ -180,7 +180,9 @@ class _ComponentEmitter:
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
                 raise EmitError(f"{where}: bad field name {name!r}")
-            return f"{self._expr(expr.get('target'), where)}.{name}"
+            # record literals are dicts; ADT payloads are objects — the
+            # preamble helper reads either shape
+            return f"_revl_field({self._expr(expr.get('target'), where)}, {name!r})"
         if kind == "index":
             return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
         if kind == "bin":
@@ -596,7 +598,9 @@ def _expr(node: dict) -> str:
     if kind == "call":
         return f"{_expr(node['callee'])}({', '.join(_expr(a) for a in node['args'])})"
     if kind == "field":
-        return f"{_expr(node['target'])}.{node['name']}"
+        # record literals are dicts; ADT payloads are objects — the preamble
+        # helper reads either shape
+        return f"_revl_field({_expr(node['target'])}, {node['name']!r})"
     if kind == "index":
         return f"{_expr(node['target'])}[{_expr(node['index'])}]"
     if kind == "if":
@@ -801,6 +805,10 @@ def emit(ir: dict) -> str:
     if uses:
         out.add(0, f"from runtime import {', '.join(uses)}")
         out.add(0)
+    out.add(0, "def _revl_field(v, name):")
+    out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')
+    out.add(0, "    return v[name] if isinstance(v, dict) else getattr(v, name)")
+    out.add(0)
     if types:
         out.add(0, "from dataclasses import dataclass")
         out.add(0, "from typing import Any, Optional, Union")

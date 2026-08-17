@@ -5,6 +5,10 @@ Components: PgDatabase, UserCache
 
 from runtime import ConfigSchema, Frame, Map, Pool, fmt
 
+def _revl_field(v, name):
+    """Record literals are dicts, ADT payloads are objects."""
+    return v[name] if isinstance(v, dict) else getattr(v, name)
+
 SERVICES = {
     'Database': {
         'query': {'params': ['sql'], 'emission': False},
