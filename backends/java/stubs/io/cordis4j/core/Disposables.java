@@ -7,11 +7,13 @@ public final class Disposables {
         return action::run;
     }
 
-    /** Disposes in reverse registration order (LIFO), matching G7. */
+    /** Disposes in the GIVEN order — matching the real cordis4j (verified
+     * against its source); the emitter lists inverses in reverse
+     * acquisition order to get LIFO teardown. */
     public static Disposable composite(Disposable... items) {
         return () -> {
-            for (int i = items.length - 1; i >= 0; i--) {
-                items[i].dispose();
+            for (Disposable item : items) {
+                item.dispose();
             }
         };
     }
