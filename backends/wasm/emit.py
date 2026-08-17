@@ -19,22 +19,36 @@ Lowering — the paper's §6.7 state machine, literally:
 - `req` calls compile to `coeffect:<key>` imports — the committed view is
   the linker binding itself, alive through this component's whole teardown.
 
-Tier restrictions (cordis-wasm status: core Wasm, sync base calculus,
-i32-only ops). Violations are EmitError, never silent degradation:
-strings/format, config blocks, host builtins, `await` steps, and non-Int
-service types are all rejected with the reason.
+Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
+Violations are EmitError, never silent degradation. The component tier is
+i32-only (Int service params/returns, `await Job.run(Int)`); the v3
+functions tier additionally lowers Str/List/record values through a
+canonical-ABI-shaped linear-memory representation. Config blocks, host
+builtins outside `await Job.run`, method-time effects, and variant values
+are still rejected with a precise reason.
 
-`emit(ir) -> dict[name, wat]` — one WAT module per component.
+`emit(ir) -> dict[name, wat]` — one WAT module per component, plus a
+`functions` module for IR v3 type/function documents.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 IR_VERSION = 1
 
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _align4(value: int) -> int:
+    return (value + 3) & ~3
+
+
+def _wat_string(value: str) -> str:
+    """Escape a Python string for use as a WAT string literal."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 class EmitError(ValueError):
@@ -69,9 +83,58 @@ class _ComponentEmitter:
             )
         self.requires = component.get("requires") or {}
         self.provides = component.get("provides") or {}
+        self.isolate = component.get("isolate") or {}
+        self.intercept = component.get("intercept") or {}
+        for key in self.isolate:
+            if key not in self.requires and key not in self.provides:
+                raise EmitError(f"{self.name}: isolate key {key!r} is not declared")
+            realm = self.isolate[key]
+            if not isinstance(realm, str) or not realm:
+                raise EmitError(f"{self.name}: isolate key {key!r} has a non-static realm {realm!r}")
+        for key in self.intercept:
+            if key not in self.requires:
+                raise EmitError(f"{self.name}: intercept key {key!r} is not a requirement")
+            try:
+                json.dumps(self.intercept[key], sort_keys=True)
+            except (TypeError, ValueError) as exc:
+                raise EmitError(f"{self.name}: intercept metadata for {key!r} is not JSON: {exc}")
         self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
         self.globals: list[str] = []
         self.uses_job = False
+
+    # -- v2 realms -----------------------------------------------------------
+
+    def _scoped_key(self, key: str) -> str:
+        realm = self.isolate.get(key)
+        return f"{realm}/{key}" if realm else key
+
+    def _import_module(self, key: str) -> str:
+        return f"coeffect:{self._scoped_key(key)}"
+
+    def _provide_prefix(self, key: str) -> str:
+        return f"provide:{self._scoped_key(key)}"
+
+    def _realm_sections(self) -> list[str]:
+        """Document realm placement and intercept metadata.
+
+        The substrate has no realm registry, but its coeffect table is keyed
+        by the import/export namespace itself, so ``tenant_a/kv`` and
+        ``tenant_b/kv`` are distinct providers to the runtime.  Intercept
+        metadata is advisory: a host can read it from the custom section and
+        enforce quotas/ACLs without touching provider or consumer.
+        """
+        lines: list[str] = []
+        if self.isolate or self.intercept:
+            lines.append("  ;; realms are advisory on this tier: isolate is the")
+            lines.append("  ;; import/export namespace, intercept metadata is the")
+            lines.append("  ;; revl:intercept custom section (host-enforced, if present).")
+        if self.isolate:
+            payload = _wat_string(json.dumps(self.isolate, sort_keys=True))
+            lines.append(f'  (@custom "revl:isolate" "{payload}")')
+        if self.intercept:
+            payload = _wat_string(json.dumps(self.intercept, sort_keys=True))
+            lines.append(f'  (@custom "revl:intercept" "{payload}")')
+        return lines
 
     # -- service lookup ------------------------------------------------------
 
@@ -265,7 +328,7 @@ class _ComponentEmitter:
                 else:
                     raise EmitError(f"{mwhere}: unknown step {mkind!r}")
 
-            header = f'(func (export "provide:{key}.{mname}") {" ".join(decl)}'.rstrip()
+            header = f'(func (export "{self._provide_prefix(key)}.{mname}") {" ".join(decl)}'.rstrip()
             body = "\n    ".join(body_lines) if body_lines else "nop"
             funcs.append(f"  {header}\n    {body})")
         missing = set(declared) - {m.get("name") for m in step.get("methods") or []}
@@ -277,11 +340,12 @@ class _ComponentEmitter:
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
                  "(module"]
+        lines.extend(self._realm_sections())
         for (key, op), (arity, has_result) in sorted(self.imports.items()):
             params = " ".join(["(param i32)"] * arity)
             result = " (result i32)" if has_result else ""
             sig = f" {params}" if params else ""
-            lines.append(f'  (import "coeffect:{key}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+            lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
         if self.uses_job:
             lines.append('  (import "host" "job_run" (func $host_job_run (param i32)))')
         lines.append("  (global $__step (mut i32) (i32.const 0))")
@@ -324,42 +388,78 @@ _WASM_BIN_OPS = {
 }
 
 
-def _i32_v3_type(type_name: Any, where: str) -> bool:
-    """Return True when a v3 type lowers to wasm i32.
+def _is_unit_type(ty: str | None) -> bool:
+    return ty in (None, "Unit")
 
-    `Unit`/None are wasm's no-result signature; Int and Bool are i32 (the
-    substrate tier's only value type). Everything else is rejected.
-    """
-    if type_name in (None, "Unit"):
-        return False
-    if type_name in ("Int", "Bool"):
-        return True
-    raise EmitError(
-        f"{where}: type {type_name!r} is not lowerable — the cordis-wasm "
-        f"tier is i32-only (Int/Bool/Unit)"
-    )
+
+def _is_i32_type(ty: str | None) -> bool:
+    return ty in ("Int", "Bool")
+
+
+def _is_list_type(ty: str | None) -> bool:
+    return isinstance(ty, str) and ty.startswith("List[")
+
+
+def _list_elem(ty: str) -> str:
+    return ty[len("List[") : -1]
+
+
+class _E:
+    def __init__(self, wat: str, ty: str | None) -> None:
+        self.wat = wat
+        self.ty = ty
+
+
+class _Scope:
+    def __init__(self, slots: dict[str, str], types: dict[str, str | None]) -> None:
+        self.slots = slots
+        self.types = types
+
+
+def _wat_bytes(data: bytes) -> str:
+    parts: list[str] = []
+    for byte in data:
+        if byte == 0x22:
+            parts.append("\\22")
+        elif byte == 0x5C:
+            parts.append("\\5c")
+        elif 0x20 <= byte <= 0x7E:
+            parts.append(chr(byte))
+        else:
+            parts.append(f"\\{byte:02x}")
+    return "".join(parts)
 
 
 class _V3Emitter:
     """IR v3 types + pure functions -> a standalone WAT module.
 
-    Records/variants are documented as layout comments (the i32-only substrate
-    has no GC structs yet); pure Int/Bool functions become exported wasm
-    functions. Unsupported nodes are hard EmitErrors.
+    Int/Bool stay i32; Str/List/record values use the canonical-ABI-shaped
+    linear memory representation (u32 length/count prefix followed by bytes or
+    4-byte elements/fields). The emitted module exports its memory, so a host
+    can read string/list/record results without an object model.
     """
 
     def __init__(self, types: dict, functions: list, externs: list, tests: list) -> None:
         self.types = types or {}
+        self.all_types = dict(self.types)
         self.functions = functions or []
         self.externs = externs or []
         self.tests = tests or []
         self.fn_names = {fn.get("name") for fn in self.functions}
-        self.fn_has_result = {
-            fn.get("name"): fn.get("returns") not in (None, "Unit")
+        self.fn_sigs = {
+            fn.get("name"): {
+                "params": [p.get("type") for p in (fn.get("params") or [])],
+                "returns": fn.get("returns"),
+            }
             for fn in self.functions
         }
+        self.literal_offsets: dict[str, int] = {}
+        self.data_segments: list[tuple[int, bytes]] = []
+        self.heap_start = 0
+        self._anon = 0
+        self._tmp = "__revl_tmp"
 
-    # -- type layouts (documentation-only on the i32 substrate) -------------
+    # -- type layouts (documentation) ----------------------------------------
 
     def _type_comments(self) -> list[str]:
         if not self.types:
@@ -391,98 +491,679 @@ class _V3Emitter:
             lines.append(f"  ;; unsupported on this tier: tests {names} (test runner is host-side)")
         return lines
 
+    # -- type/layout helpers --------------------------------------------------
 
-    # -- expressions ---------------------------------------------------------
+    def _check_type(self, ty: str | None, where: str) -> None:
+        if ty in (None, "Unit", "Int", "Bool", "Str", "Bytes"):
+            return
+        if _is_list_type(ty):
+            self._check_type(_list_elem(ty), f"{where}: list element")
+            return
+        spec = self.all_types.get(ty)
+        if spec is not None and spec.get("kind") == "record":
+            return
+        if spec is not None and spec.get("kind") == "variant":
+            raise EmitError(
+                f"{where}: variant type {ty!r} is not lowerable on this tier — "
+                f"records/strings/lists are; variants stay documented layout comments"
+            )
+        raise EmitError(
+            f"{where}: type {ty!r} is not lowerable — this tier supports "
+            f"Int/Bool/Str/Bytes/List/record values"
+        )
 
-    def _expr(self, node: Any, scope: dict[str, str], where: str) -> tuple[str, bool]:
+    def _record_fields(self, ty: str | None) -> dict[str, str] | None:
+        spec = self.all_types.get(ty or "")
+        if spec is None or spec.get("kind") != "record":
+            return None
+        return spec.get("fields") or {}
+
+    def _anon_record(self, fields: list[tuple[str, str]]) -> str:
+        self._anon += 1
+        name = f"__revl_record{self._anon}"
+        self.all_types[name] = {
+            "params": [],
+            "kind": "record",
+            "fields": {field: ftype for field, ftype in fields},
+        }
+        return name
+
+    def _collect_string_literals(self) -> None:
+        seen: dict[str, None] = {}
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                if node.get("kind") == "lit" and isinstance(node.get("value"), str):
+                    seen.setdefault(node["value"], None)
+                for child in node.values():
+                    walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child)
+
+        for fn in self.functions:
+            walk(fn.get("body"))
+        offset = 0
+        for value in seen:
+            raw = value.encode("utf-8")
+            data = len(raw).to_bytes(4, "little") + raw
+            self.literal_offsets[value] = offset
+            self.data_segments.append((offset, data))
+            offset = _align4(offset + len(data))
+        self.heap_start = offset
+
+    def _str_ptr(self, value: str) -> str:
+        offset = self.literal_offsets.get(value)
+        if offset is None:
+            raise EmitError(f"internal: string literal {value!r} was not pooled")
+        return f"(i32.const {offset})"
+
+
+    # -- linear-memory runtime helpers ---------------------------------------
+
+    def _helper_funcs(self) -> list[str]:
+        return [
+            self._helper_alloc(),
+            self._helper_alloc_str(),
+            self._helper_str_concat(),
+            self._helper_str_eq(),
+            self._helper_str_slice(),
+            self._helper_str_char_at(),
+            self._helper_str_char_code_at(),
+            self._helper_list_push(),
+            self._helper_list_concat(),
+            self._helper_list_slice(),
+        ]
+
+    def _helper_alloc(self) -> str:
+        return """  (func $alloc (param $n i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $__hp))
+    (global.set $__hp
+      (i32.add
+        (global.get $__hp)
+        (i32.and
+          (i32.add (local.get $n) (i32.const 3))
+          (i32.const -4))))
+    (local.get $p))"""
+
+    def _helper_alloc_str(self) -> str:
+        return """  (func $alloc_str (param $len i32) (result i32)
+    (local $p i32)
+    (local.set $p (call $alloc (i32.add (local.get $len) (i32.const 4))))
+    (i32.store (local.get $p) (local.get $len))
+    (local.get $p))"""
+
+    def _helper_str_concat(self) -> str:
+        return """  (func $str_concat (param $a i32) (param $b i32) (result i32)
+    (local $la i32)
+    (local $lb i32)
+    (local $p i32)
+    (local.set $la (i32.load (local.get $a)))
+    (local.set $lb (i32.load (local.get $b)))
+    (local.set $p (call $alloc_str (i32.add (local.get $la) (local.get $lb))))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (local.get $a) (i32.const 4))
+      (local.get $la))
+    (memory.copy
+      (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $la))
+      (i32.add (local.get $b) (i32.const 4))
+      (local.get $lb))
+    (local.get $p))"""
+
+    def _helper_str_eq(self) -> str:
+        return """  (func $str_eq (param $a i32) (param $b i32) (result i32)
+    (local $n i32)
+    (local $i i32)
+    (local.set $n (i32.load (local.get $a)))
+    (if (i32.ne (local.get $n) (i32.load (local.get $b)))
+      (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (i32.ne
+              (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 4)) (local.get $i)))
+              (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+          (then (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (i32.const 1))"""
+
+
+    def _helper_str_slice(self) -> str:
+        return """  (func $str_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
+    (local $len i32)
+    (local $p i32)
+    (local.set $len (i32.sub (local.get $end) (local.get $start)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $start))
+      (local.get $len))
+    (local.get $p))"""
+
+    def _helper_str_char_at(self) -> str:
+        return """  (func $str_char_at (param $s i32) (param $idx i32) (result i32)
+    (local $p i32)
+    (local.set $p (call $alloc_str (i32.const 1)))
+    (i32.store8
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $idx))))
+    (local.get $p))"""
+
+    def _helper_str_char_code_at(self) -> str:
+        return """  (func $str_char_code_at (param $s i32) (param $idx i32) (result i32)
+    (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $idx))))"""
+
+    def _helper_list_push(self) -> str:
+        return """  (func $list_push (param $list i32) (param $elem i32) (result i32)
+    (local $n i32)
+    (local $p i32)
+    (local.set $n (i32.load (local.get $list)))
+    (local.set $p
+      (call $alloc
+        (i32.add
+          (i32.mul (i32.add (local.get $n) (i32.const 1)) (i32.const 4))
+          (i32.const 4))))
+    (i32.store (local.get $p) (i32.add (local.get $n) (i32.const 1)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (local.get $list) (i32.const 4))
+      (i32.mul (local.get $n) (i32.const 4)))
+    (i32.store
+      (i32.add
+        (i32.add (local.get $p) (i32.const 4))
+        (i32.mul (local.get $n) (i32.const 4)))
+      (local.get $elem))
+    (local.get $p))"""
+
+    def _helper_list_concat(self) -> str:
+        return """  (func $list_concat (param $a i32) (param $b i32) (result i32)
+    (local $na i32)
+    (local $nb i32)
+    (local $p i32)
+    (local.set $na (i32.load (local.get $a)))
+    (local.set $nb (i32.load (local.get $b)))
+    (local.set $p
+      (call $alloc
+        (i32.add
+          (i32.mul (i32.add (local.get $na) (local.get $nb)) (i32.const 4))
+          (i32.const 4))))
+    (i32.store (local.get $p) (i32.add (local.get $na) (local.get $nb)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (local.get $a) (i32.const 4))
+      (i32.mul (local.get $na) (i32.const 4)))
+    (memory.copy
+      (i32.add
+        (i32.add (local.get $p) (i32.const 4))
+        (i32.mul (local.get $na) (i32.const 4)))
+      (i32.add (local.get $b) (i32.const 4))
+      (i32.mul (local.get $nb) (i32.const 4)))
+    (local.get $p))"""
+
+    def _helper_list_slice(self) -> str:
+        return """  (func $list_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
+    (local $len i32)
+    (local $p i32)
+    (local.set $len (i32.sub (local.get $end) (local.get $start)))
+    (local.set $p
+      (call $alloc
+        (i32.add (i32.mul (local.get $len) (i32.const 4)) (i32.const 4))))
+    (i32.store (local.get $p) (local.get $len))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add
+        (i32.add (local.get $s) (i32.const 4))
+        (i32.mul (local.get $start) (i32.const 4)))
+      (i32.mul (local.get $len) (i32.const 4)))
+    (local.get $p))"""
+
+
+
+    # -- type inference -------------------------------------------------------
+
+    def _infer_type(self, node: Any, scope: _Scope, expected: str | None = None) -> str | None:
+        if not isinstance(node, dict) or "kind" not in node:
+            raise EmitError("malformed v3 expression")
+        kind = node["kind"]
+        if kind == "lit":
+            value = node.get("value")
+            if isinstance(value, bool):
+                return "Bool"
+            if isinstance(value, int) and not isinstance(value, bool):
+                return "Int"
+            if isinstance(value, str):
+                return "Str"
+            raise EmitError(f"literal {value!r} is not lowerable on this tier")
+        if kind == "var":
+            name = _ident(node.get("name"), "name")
+            if name not in scope.types:
+                raise EmitError(f"unbound name {name!r}")
+            return scope.types[name]
+        if kind == "bin":
+            op = node.get("op")
+            left = self._infer_type(node.get("left"), scope)
+            right = self._infer_type(node.get("right"), scope)
+            if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
+                return "Bool"
+            if op == "+" and left == "Str" and right == "Str":
+                return "Str"
+            if op == "+" and _is_list_type(left) and left == right:
+                return left
+            return "Int"
+        if kind == "un":
+            op = node.get("op")
+            if op == "!":
+                return "Bool"
+            if op == "-":
+                return "Int"
+            raise EmitError(f"unsupported unary operator {op!r}")
+        if kind == "call":
+            return self._call_type(node, scope)
+        if kind == "builtin":
+            return self._builtin_type(node, scope)
+        if kind == "field":
+            target_ty = self._infer_type(node.get("target"), scope)
+            fields = self._record_fields(target_ty)
+            if fields is None:
+                raise EmitError(f"field access on non-record type {target_ty!r}")
+            name = _ident(node.get("name"), "field name")
+            if name not in fields:
+                raise EmitError(f"record {target_ty!r} has no field {name!r}")
+            return fields[name]
+        if kind == "index":
+            target_ty = self._infer_type(node.get("target"), scope)
+            if target_ty == "Str":
+                return "Str"
+            if _is_list_type(target_ty):
+                return _list_elem(target_ty)
+            raise EmitError(f"indexing is only lowerable for Str and List, got {target_ty!r}")
+        if kind == "len":
+            return "Int"
+        if kind == "if":
+            then_ty = self._infer_type(node.get("then"), scope, expected)
+            else_ty = self._infer_type(node.get("else"), scope, expected)
+            if then_ty != else_ty:
+                raise EmitError("if branches must have the same type on this tier")
+            return then_ty
+        if kind == "record":
+            return self._record_type(node, scope, expected)
+        if kind == "list":
+            return self._list_type(node, scope, expected)
+        if kind == "interp":
+            return "Str"
+        if kind == "match":
+            raise EmitError("match/variants are not lowerable on this tier — records/strings/lists are")
+        if kind == "arrow":
+            raise EmitError("arrow values are not lowerable on this tier — the wasm module has no closures")
+        raise EmitError(f"unsupported v3 expression kind {kind!r}")
+
+    def _call_type(self, node: dict, scope: _Scope) -> str | None:
+        callee = node.get("callee") or {}
+        if callee.get("kind") != "var":
+            raise EmitError("only direct function calls are lowerable on this tier")
+        name = _ident(callee.get("name"), "callee")
+        sig = self.fn_sigs.get(name)
+        if sig is None:
+            raise EmitError(f"callee {name!r} is not a lowerable function")
+        return sig["returns"]
+
+
+    def _builtin_type(self, node: dict, scope: _Scope) -> str | None:
+        method = node.get("method")
+        target_ty = self._infer_type(node.get("target"), scope)
+        if method == "length":
+            return "Int"
+        if method == "push":
+            if not _is_list_type(target_ty):
+                raise EmitError("push is only lowerable on List values")
+            return target_ty
+        if method == "concat":
+            if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
+                raise EmitError("concat is only lowerable on Str/Bytes/List values")
+            return target_ty
+        if method == "slice":
+            if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
+                raise EmitError("slice is only lowerable on Str/Bytes/List values")
+            return target_ty
+        if method == "charAt":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError("charAt is only lowerable on Str/Bytes values")
+            return "Str"
+        if method == "charCodeAt":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError("charCodeAt is only lowerable on Str/Bytes values")
+            return "Int"
+        if method == "indexOf":
+            raise EmitError("indexOf is not lowerable on this tier yet — use a hosted backend")
+        raise EmitError(f"unsupported builtin method {method!r}")
+
+    def _record_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
+        fields: list[tuple[str, str]] = []
+        for raw_name, raw_value in node.get("fields") or []:
+            name = _ident(raw_name, "record field")
+            ftype = self._infer_type(raw_value, scope)
+            if ftype is None or ftype == "Unit":
+                raise EmitError(f"record field {name!r} has void type")
+            fields.append((name, ftype))
+        if expected is not None and self._record_fields(expected) is not None:
+            return expected
+        field_names = {name for name, _ in fields}
+        for name, spec in self.all_types.items():
+            if spec.get("kind") == "record" and set(spec.get("fields") or {}) == field_names:
+                return name
+        return self._anon_record(fields)
+
+    def _list_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
+        if expected is not None and _is_list_type(expected):
+            return expected
+        items = node.get("items") or []
+        if not items:
+            raise EmitError("an untyped empty list literal needs an expected List type")
+        elem_ty = self._infer_type(items[0], scope)
+        if elem_ty is None or elem_ty == "Unit":
+            raise EmitError("list elements cannot be void")
+        for item in items[1:]:
+            if self._infer_type(item, scope) != elem_ty:
+                raise EmitError("all list elements must have the same type on this tier")
+        return f"List[{elem_ty}]"
+
+    # -- expression lowering --------------------------------------------------
+
+    def _expr(self, node: Any, scope: _Scope, where: str, expected: str | None = None) -> _E:
         if not isinstance(node, dict) or "kind" not in node:
             raise EmitError(f"{where}: malformed v3 expression {node!r}")
         kind = node["kind"]
         if kind == "lit":
             value = node.get("value")
             if isinstance(value, bool):
-                return "(i32.const 1)" if value else "(i32.const 0)", True
+                return _E("(i32.const 1)" if value else "(i32.const 0)", "Bool")
             if isinstance(value, int) and not isinstance(value, bool):
-                return f"(i32.const {value})", True
-            raise EmitError(f"{where}: literal {value!r} is not lowerable — i32-only tier")
+                return _E(f"(i32.const {value})", "Int")
+            if isinstance(value, str):
+                return _E(self._str_ptr(value), "Str")
+            raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
         if kind == "var":
             name = _ident(node.get("name"), f"{where}: name")
-            slot = scope.get(name)
-            if slot is None:
+            if name not in scope.slots:
                 raise EmitError(f"{where}: unbound name {name!r}")
-            return slot, True
+            return _E(scope.slots[name], scope.types[name])
         if kind == "bin":
-            op = _WASM_BIN_OPS.get(node.get("op"))
-            if op is None:
-                raise EmitError(f"{where}: unsupported binary operator {node.get('op')!r}")
-            left, left_result = self._expr(node.get("left"), scope, where)
-            right, right_result = self._expr(node.get("right"), scope, where)
-            if not left_result or not right_result:
-                raise EmitError(f"{where}: void operand in binary expression")
-            return f"{left}\n      {right}\n      ({op})", True
+            return self._bin_expr(node, scope, where)
         if kind == "un":
-            operand, operand_result = self._expr(node.get("operand"), scope, where)
-            if not operand_result:
-                raise EmitError(f"{where}: void operand in unary expression")
-            if node.get("op") == "!":
-                return f"{operand}\n      (i32.eqz)", True
-            if node.get("op") == "-":
-                return f"(i32.const 0)\n      {operand}\n      (i32.sub)", True
-            raise EmitError(f"{where}: unsupported unary operator {node.get('op')!r}")
+            return self._un_expr(node, scope, where)
         if kind == "call":
-            return self._call(node, scope, where)
+            return self._call_expr(node, scope, where)
+        if kind == "builtin":
+            return self._builtin_expr(node, scope, where)
         if kind == "field":
-            raise EmitError(f"{where}: field access is not lowerable — the i32-only tier has no structs")
+            return self._field_expr(node, scope, where)
         if kind == "index":
-            raise EmitError(f"{where}: index access is not lowerable — the i32-only tier has no lists")
+            return self._index_expr(node, scope, where)
+        if kind == "len":
+            return self._len_expr(node, scope, where)
         if kind == "if":
-            cond, cond_result = self._expr(node.get("cond"), scope, where)
-            if not cond_result:
-                raise EmitError(f"{where}: void condition")
-            then_wat, then_result = self._expr(node.get("then"), scope, where)
-            else_wat, else_result = self._expr(node.get("else"), scope, where)
-            if then_result != else_result:
-                raise EmitError(f"{where}: if branches must both produce i32 on this tier")
-            return (
-                f"{cond}\n"
-                f"      (if (result i32)\n"
-                f"        (then {then_wat})\n"
-                f"        (else {else_wat}))",
-                then_result,
-            )
+            return self._if_expr(node, scope, where, expected)
         if kind == "record":
-            raise EmitError(f"{where}: record literals are not lowerable — the i32-only tier has no structs")
+            return self._record_expr(node, scope, where, expected)
         if kind == "list":
-            raise EmitError(f"{where}: list literals are not lowerable — the i32-only tier has no lists")
-        if kind == "arrow":
-            raise EmitError(f"{where}: arrow values are not lowerable — the i32-only tier has no closures")
-        if kind == "match":
-            raise EmitError(f"{where}: match is not lowerable — the i32-only tier has no tagged unions")
+            return self._list_expr(node, scope, where, expected)
         if kind == "interp":
-            raise EmitError(f"{where}: string interpolation is not lowerable — i32-only tier")
+            return self._interp_expr(node, scope, where)
+        if kind == "match":
+            raise EmitError(f"{where}: match/variants are not lowerable on this tier")
+        if kind == "arrow":
+            raise EmitError(f"{where}: arrow values are not lowerable on this tier")
         raise EmitError(f"{where}: unsupported v3 expression kind {kind!r}")
 
-    def _call(self, node: dict, scope: dict[str, str], where: str) -> tuple[str, bool]:
+    def _bin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        op = node.get("op")
+        left_node = node.get("left")
+        right_node = node.get("right")
+        left_ty = self._infer_type(left_node, scope)
+        right_ty = self._infer_type(right_node, scope)
+        if op in ("==", "===", "!=", "!==") and left_ty == "Str" and right_ty == "Str":
+            left = self._expr(left_node, scope, where, "Str")
+            right = self._expr(right_node, scope, where, "Str")
+            wat = f"{left.wat}\n      {right.wat}\n      (call $str_eq)"
+            if op in ("!=", "!=="):
+                wat += "\n      (i32.eqz)"
+            return _E(wat, "Bool")
+        if op == "+" and left_ty == "Str" and right_ty == "Str":
+            left = self._expr(left_node, scope, where, "Str")
+            right = self._expr(right_node, scope, where, "Str")
+            return _E(f"{left.wat}\n      {right.wat}\n      (call $str_concat)", "Str")
+        if op == "+" and _is_list_type(left_ty) and left_ty == right_ty:
+            left = self._expr(left_node, scope, where, left_ty)
+            right = self._expr(right_node, scope, where, right_ty)
+            return _E(f"{left.wat}\n      {right.wat}\n      (call $list_concat)", left_ty)
+        if op in ("<", ">", "<=", ">=") and (left_ty != "Int" or right_ty != "Int"):
+            raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int")
+        if op in ("&&", "||") and (left_ty != "Bool" or right_ty != "Bool"):
+            raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
+        if op in ("==", "===", "!=", "!==") and (left_ty not in ("Int", "Bool") or right_ty not in ("Int", "Bool")):
+            raise EmitError(f"{where}: equality on this tier is lowerable for Int, Bool, and Str")
+        if op in ("+", "-", "*", "/", "%") and (left_ty != "Int" or right_ty != "Int"):
+            raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int")
+        if op not in _WASM_BIN_OPS:
+            raise EmitError(f"{where}: unsupported binary operator {op!r}")
+        if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
+            expected = "Bool"
+        else:
+            expected = "Int"
+        left = self._expr(left_node, scope, where, expected)
+        right = self._expr(right_node, scope, where, expected)
+        if _is_unit_type(left.ty) or _is_unit_type(right.ty):
+            raise EmitError(f"{where}: void operand in binary expression")
+        result_ty = "Bool" if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||") else "Int"
+        return _E(f"{left.wat}\n      {right.wat}\n      ({_WASM_BIN_OPS[op]})", result_ty)
+
+    def _un_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        op = node.get("op")
+        operand = self._expr(node.get("operand"), scope, where, "Bool" if op == "!" else "Int")
+        if _is_unit_type(operand.ty):
+            raise EmitError(f"{where}: void operand in unary expression")
+        if op == "!":
+            return _E(f"{operand.wat}\n      (i32.eqz)", "Bool")
+        if op == "-":
+            return _E(f"(i32.const 0)\n      {operand.wat}\n      (i32.sub)", "Int")
+        raise EmitError(f"{where}: unsupported unary operator {op!r}")
+
+    def _call_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         callee = node.get("callee") or {}
-        args = node.get("args") or []
         if callee.get("kind") != "var":
             raise EmitError(f"{where}: only direct function calls are lowerable on this tier")
         name = _ident(callee.get("name"), f"{where}: callee")
-        if name in self.fn_names:
-            parts = []
-            for arg in args:
-                wat, has_result = self._expr(arg, scope, where)
-                if not has_result:
-                    raise EmitError(f"{where}: void expression used as an argument")
-                parts.append(wat)
-            parts.append(f"(call ${name})")
-            return "\n      ".join(parts), self.fn_has_result.get(name, False)
-        if name in ("Some", "Ok", "Err") and len(args) == 1:
-            return self._expr(args[0], scope, where)
-        if name == "None" and not args:
-            return "(i32.const 0)", True
-        raise EmitError(f"{where}: callee {name!r} is not a lowerable function")
+        sig = self.fn_sigs.get(name)
+        if sig is None:
+            raise EmitError(f"{where}: callee {name!r} is not a lowerable function")
+        args = node.get("args") or []
+        if len(args) != len(sig["params"]):
+            raise EmitError(f"{where}: {name} expects {len(sig['params'])} argument(s), got {len(args)}")
+        parts: list[str] = []
+        for arg, param_ty in zip(args, sig["params"]):
+            value = self._expr(arg, scope, where, param_ty)
+            if _is_unit_type(value.ty):
+                raise EmitError(f"{where}: void expression used as an argument")
+            parts.append(value.wat)
+        parts.append(f"(call ${name})")
+        return _E("\n      ".join(parts), sig["returns"])
 
+    def _builtin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        method = node.get("method")
+        target_node = node.get("target")
+        target_ty = self._infer_type(target_node, scope)
+        args = node.get("args") or []
+        if method == "length":
+            target = self._expr(target_node, scope, where, target_ty)
+            if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
+                raise EmitError(f"{where}: length is only lowerable on Str/Bytes/List")
+            return _E(f"(i32.load {target.wat})", "Int")
+        if method == "push":
+            if not _is_list_type(target_ty):
+                raise EmitError(f"{where}: push is only lowerable on List values")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, _list_elem(target_ty))
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call $list_push)", target_ty)
+        if method == "concat":
+            if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
+                raise EmitError(f"{where}: concat is only lowerable on Str/Bytes/List")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, target_ty)
+            helper = "$str_concat" if target_ty in ("Str", "Bytes") else "$list_concat"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", target_ty)
+        if method == "slice":
+            if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
+                raise EmitError(f"{where}: slice is only lowerable on Str/Bytes/List")
+            target = self._expr(target_node, scope, where, target_ty)
+            start = self._expr(args[0], scope, where, "Int")
+            end = self._expr(args[1], scope, where, "Int")
+            helper = "$str_slice" if target_ty in ("Str", "Bytes") else "$list_slice"
+            return _E(f"{target.wat}\n      {start.wat}\n      {end.wat}\n      (call {helper})", target_ty)
+        if method == "charAt":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(f"{where}: charAt is only lowerable on Str/Bytes")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Int")
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_at)", "Str")
+        if method == "charCodeAt":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(f"{where}: charCodeAt is only lowerable on Str/Bytes")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Int")
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_code_at)", "Int")
+        if method == "indexOf":
+            raise EmitError(f"{where}: indexOf is not lowerable on this tier yet")
+        raise EmitError(f"{where}: unsupported builtin method {method!r}")
+
+    def _field_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        target_ty = self._infer_type(node.get("target"), scope)
+        fields = self._record_fields(target_ty)
+        if fields is None:
+            raise EmitError(f"{where}: field access on non-record type {target_ty!r}")
+        name = _ident(node.get("name"), f"{where}: field")
+        if name not in fields:
+            raise EmitError(f"{where}: record {target_ty!r} has no field {name!r}")
+        field_ty = fields[name]
+        if _is_unit_type(field_ty):
+            raise EmitError(f"{where}: cannot access void record field {name!r}")
+        target = self._expr(node.get("target"), scope, where, target_ty)
+        offset = 4 * list(fields).index(name)
+        if offset:
+            wat = f"(i32.load (i32.add {target.wat} (i32.const {offset})))"
+        else:
+            wat = f"(i32.load {target.wat})"
+        return _E(wat, field_ty)
+
+    def _index_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        target_ty = self._infer_type(node.get("target"), scope)
+        index = self._expr(node.get("index"), scope, where, "Int")
+        if target_ty in ("Str", "Bytes"):
+            target = self._expr(node.get("target"), scope, where, target_ty)
+            return _E(f"{target.wat}\n      {index.wat}\n      (call $str_char_at)", "Str")
+        if _is_list_type(target_ty):
+            elem_ty = _list_elem(target_ty)
+            if _is_unit_type(elem_ty):
+                raise EmitError(f"{where}: list of void is not lowerable")
+            target = self._expr(node.get("target"), scope, where, target_ty)
+            if index.wat.startswith("(i32.const "):
+                value = int(index.wat[len("(i32.const ") : -1])
+                offset = 4 + 4 * value
+                wat = f"(i32.load (i32.add {target.wat} (i32.const {offset})))"
+            else:
+                wat = (
+                    f"(i32.load (i32.add {target.wat}\n"
+                    f"        (i32.add (i32.const 4) (i32.mul {index.wat} (i32.const 4)))))"
+                )
+            return _E(wat, elem_ty)
+        raise EmitError(f"{where}: indexing is only lowerable for Str and List, got {target_ty!r}")
+
+    def _len_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        target_ty = self._infer_type(node.get("target"), scope)
+        if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
+            raise EmitError(f"{where}: length is only lowerable for Str/Bytes/List")
+        target = self._expr(node.get("target"), scope, where, target_ty)
+        return _E(f"(i32.load {target.wat})", "Int")
+
+    def _if_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
+        cond = self._expr(node.get("cond"), scope, where, "Bool")
+        then_ty = self._infer_type(node.get("then"), scope, expected)
+        else_ty = self._infer_type(node.get("else"), scope, expected)
+        if then_ty != else_ty:
+            raise EmitError(f"{where}: if branches must have the same type on this tier")
+        if _is_unit_type(then_ty):
+            raise EmitError(f"{where}: void if-expression is not lowerable; use an if statement")
+        then_wat = self._expr(node.get("then"), scope, where, then_ty).wat
+        else_wat = self._expr(node.get("else"), scope, where, then_ty).wat
+        wat = (
+            f"{cond.wat}\n"
+            f"      (if (result i32)\n"
+            f"        (then {then_wat})\n"
+            f"        (else {else_wat}))"
+        )
+        return _E(wat, then_ty)
+
+    def _record_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
+        ty = self._record_type(node, scope, expected)
+        fields = self._record_fields(ty) or {}
+        raw_by_name: dict[str, Any] = {}
+        for raw_name, raw_value in node.get("fields") or []:
+            raw_by_name[_ident(raw_name, f"{where}: record field")] = raw_value
+        field_values: list[tuple[str, _E]] = []
+        for name, ftype in fields.items():
+            raw_value = raw_by_name.get(name)
+            if raw_value is None:
+                raise EmitError(f"{where}: record literal is missing field {name!r}")
+            value = self._expr(raw_value, scope, where, ftype)
+            if _is_unit_type(value.ty):
+                raise EmitError(f"{where}: record field {name!r} is void")
+            field_values.append((name, value))
+        lines = [f"(call $alloc (i32.const {4 * len(field_values)}))", f"(local.set ${self._tmp})"]
+        for position, (name, value) in enumerate(field_values):
+            offset = 4 * position
+            if offset:
+                lines.append(
+                    f"(i32.store (i32.add (local.get ${self._tmp}) (i32.const {offset})) {value.wat})"
+                )
+            else:
+                lines.append(f"(i32.store (local.get ${self._tmp}) {value.wat})")
+        lines.append(f"(local.get ${self._tmp})")
+        return _E("\n      ".join(lines), ty)
+
+    def _list_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
+        ty = self._list_type(node, scope, expected)
+        elem_ty = _list_elem(ty)
+        items = node.get("items") or []
+        values = [self._expr(item, scope, where, elem_ty) for item in items]
+        for value in values:
+            if _is_unit_type(value.ty):
+                raise EmitError(f"{where}: list element is void")
+        lines = [
+            f"(call $alloc (i32.const {4 * (len(values) + 1)}))",
+            f"(local.set ${self._tmp})",
+            f"(i32.store (local.get ${self._tmp}) (i32.const {len(values)}))",
+        ]
+        for position, value in enumerate(values):
+            offset = 4 + 4 * position
+            lines.append(
+                f"(i32.store (i32.add (local.get ${self._tmp}) (i32.const {offset})) {value.wat})"
+            )
+        lines.append(f"(local.get ${self._tmp})")
+        return _E("\n      ".join(lines), ty)
+
+    def _interp_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        parts = node.get("parts") or []
+        rendered: list[str] = []
+        for kind, value in parts:
+            if kind == "text":
+                rendered.append(self._str_ptr(str(value)))
+            elif kind == "var":
+                rendered.append(self._expr({"kind": "var", "name": value}, scope, where, "Str").wat)
+            else:
+                raise EmitError(f"{where}: unsupported interpolation part {kind!r}")
 
     # -- statements + function emission --------------------------------------
 
@@ -495,32 +1176,42 @@ class _V3Emitter:
                 self._collect_locals(stmt.get("then") or [], acc)
                 self._collect_locals(stmt.get("else") or [], acc)
 
-    def _emit_stmts(self, stmts: list, scope: dict[str, str], where: str) -> list[str]:
+    def _emit_stmts(self, stmts: list, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         out: list[str] = []
         for stmt in stmts or []:
             step = stmt.get("step")
             if step in ("let", "assign"):
                 name = _ident(stmt.get("name"), f"{where}: binding")
-                wat, has_result = self._expr(stmt.get("value"), scope, where)
-                if not has_result:
+                if step == "let":
+                    value_ty = self._infer_type(stmt.get("value"), scope)
+                else:
+                    if name not in scope.types:
+                        raise EmitError(f"{where}: assignment to undeclared {name!r}")
+                    value_ty = scope.types[name]
+                if _is_unit_type(value_ty):
                     raise EmitError(f"{where}: cannot bind a void expression")
-                out.append(wat)
+                value = self._expr(stmt.get("value"), scope, where, value_ty)
+                out.append(value.wat)
                 out.append(f"(local.set $l_{name})")
-                scope[name] = f"(local.get $l_{name})"
+                scope.slots[name] = f"(local.get $l_{name})"
+                scope.types[name] = value_ty
             elif step == "return":
-                if stmt.get("expr") is not None:
-                    wat, has_result = self._expr(stmt.get("expr"), scope, where)
-                    if not has_result:
-                        raise EmitError(f"{where}: cannot return a void expression")
-                    out.append(wat)
-                out.append("return")
+                if stmt.get("expr") is None:
+                    if not _is_unit_type(expected_return):
+                        raise EmitError(f"{where}: bare return in a typed function")
+                    out.append("return")
+                else:
+                    value = self._expr(stmt.get("expr"), scope, where, expected_return)
+                    if not _is_unit_type(value.ty):
+                        out.append(value.wat)
+                    out.append("return")
             elif step == "if":
-                cond, cond_result = self._expr(stmt.get("cond"), scope, where)
-                if not cond_result:
-                    raise EmitError(f"{where}: void condition")
-                out.append(cond)
-                then_lines = self._emit_stmts(stmt.get("then") or [], scope, where)
-                else_lines = self._emit_stmts(stmt.get("else") or [], scope, where) if stmt.get("else") else []
+                cond = self._expr(stmt.get("cond"), scope, where, "Bool")
+                then_scope = _Scope(dict(scope.slots), dict(scope.types))
+                else_scope = _Scope(dict(scope.slots), dict(scope.types))
+                then_lines = self._emit_stmts(stmt.get("then") or [], then_scope, where, expected_return)
+                else_lines = self._emit_stmts(stmt.get("else") or [], else_scope, where, expected_return) if stmt.get("else") else []
+                out.append(cond.wat)
                 out.append("(if")
                 out.append("  (then")
                 out.extend("    " + line for line in then_lines)
@@ -531,46 +1222,61 @@ class _V3Emitter:
                     out.append("  )")
                 out.append(")")
             elif step == "expr":
-                wat, has_result = self._expr(stmt.get("expr"), scope, where)
-                out.append(wat)
-                if has_result:
+                value = self._expr(stmt.get("expr"), scope, where)
+                out.append(value.wat)
+                if not _is_unit_type(value.ty):
                     out.append("(drop)")
             elif step == "assert":
-                wat, has_result = self._expr(stmt.get("expr"), scope, where)
-                if not has_result:
-                    raise EmitError(f"{where}: assert needs an i32 condition")
-                out.append(wat)
+                value = self._expr(stmt.get("expr"), scope, where, "Bool")
+                out.append(value.wat)
                 out.append("(i32.eqz)")
                 out.append("(if (then unreachable))")
             else:
                 raise EmitError(f"{where}: unsupported v3 statement step {step!r}")
         return out
 
+    def _fresh_tmp(self, taken: set[str]) -> str:
+        base = "__revl_tmp"
+        candidate = base
+        counter = 1
+        while candidate in taken:
+            candidate = f"{base}_{counter}"
+            counter += 1
+        return candidate
+
     def _emit_function(self, fn: dict) -> str:
         name = _ident(fn.get("name"), "function name")
         where = name
-        scope: dict[str, str] = {}
+        scope = _Scope({}, {})
         decls: list[str] = []
         for param in fn.get("params") or []:
             pname = _ident(param.get("name"), f"{where}: parameter")
-            _i32_v3_type(param.get("type"), f"{where}: parameter {pname}")
-            decls.append(f"(param $p_{pname} i32)")
-            scope[pname] = f"(local.get $p_{pname})"
-        has_result = _i32_v3_type(fn.get("returns"), f"{where}: return")
-        if has_result:
+            ptype = param.get("type")
+            self._check_type(ptype, f"{where}: parameter {pname}")
+            if not _is_unit_type(ptype):
+                decls.append(f"(param $p_{pname} i32)")
+            scope.slots[pname] = f"(local.get $p_{pname})"
+            scope.types[pname] = ptype
+        return_ty = fn.get("returns")
+        self._check_type(return_ty, f"{where}: return")
+        if not _is_unit_type(return_ty):
             decls.append("(result i32)")
 
         local_names: set[str] = set()
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
-            if lname not in scope:
+            if lname not in scope.types:
                 decls.append(f"(local $l_{lname} i32)")
-                scope[lname] = f"(local.get $l_{lname})"
+                scope.slots[lname] = f"(local.get $l_{lname})"
+                scope.types[lname] = None
+        tmp = self._fresh_tmp(set(scope.types) | local_names)
+        self._tmp = tmp
+        decls.append(f"(local ${tmp} i32)")
 
-        body_lines = self._emit_stmts(fn.get("body") or [], scope, where)
+        body_lines = self._emit_stmts(fn.get("body") or [], scope, where, return_ty)
         if body_lines:
             body = "\n    ".join(body_lines)
-        elif has_result:
+        elif not _is_unit_type(return_ty):
             body = "unreachable"
         else:
             body = "nop"
@@ -578,12 +1284,19 @@ class _V3Emitter:
         return f"  {header}\n    {body})"
 
     def emit(self) -> str:
+        self._collect_string_literals()
         lines = [
             ";; Generated by the revl cordis-wasm backend (ir_version 3) — do not edit.",
-            ";; pure functions + documented type layouts",
+            ";; pure functions + documented type layouts; Str/List/record values use",
+            ";; canonical-ABI-shaped linear memory (u32 length/count prefix)",
             "(module",
-            "  (memory 1)",
+            '  (memory (export "memory") 1)',
         ]
+        for offset, data in self.data_segments:
+            lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
+        lines.append(f"  (global $__hp (mut i32) (i32.const {self.heap_start}))")
+        if self.functions:
+            lines.extend(self._helper_funcs())
         lines.extend(self._type_comments())
         unsupported = self._unsupported_comments()
         if unsupported:
@@ -598,26 +1311,26 @@ class _V3Emitter:
 
 
 def _emit_v1(ir: dict) -> dict[str, str]:
-    """Lower a v1 component document to WAT modules, one per component."""
-    if ir.get("ir_version") == 2:
-        raise EmitError(
-            "ir_version 2 (realms/interception) is not lowerable on this tier yet — "
-            "realm-qualified import namespaces are future work; see docs/design-v2-realms.md"
-        )
-    if ir.get("ir_version") != IR_VERSION:
-        raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION})")
+    """Lower a v1/v2 component document to WAT modules, one per component.
+
+    v2 components carry ``isolate``/``intercept``; they are lowered to
+    realm-qualified import/export namespaces plus documented custom sections
+    (see ``_ComponentEmitter._realm_sections``).
+    """
+    version = ir.get("ir_version")
+    if version not in (1, 2):
+        raise EmitError(f"unsupported ir_version {version!r} (expected 1 or 2)")
     services = ir.get("services") or {}
     components = ir.get("components") or []
     if not components:
         raise EmitError("IR document has no components")
     out: dict[str, str] = {}
     for component in components:
-        emitter = _ComponentEmitter(component, services)
+        emitter = _ComponentEmitter(component, services, ir_version=version)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
     return out
-
 
 def _emit_v3(ir: dict) -> dict[str, str]:
     """Lower an IR v3 document.
