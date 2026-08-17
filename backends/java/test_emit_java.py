@@ -6,6 +6,7 @@ blocks) when a working JDK is present.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -364,6 +365,42 @@ def test_javac_compiles_method_level_compensate(tmp_path):
         """
     )
     _javac_compile(tmp_path, emit.emit(ir))
+
+
+CORDIS4J_CLASSES = os.environ.get("REVL_CORDIS4J_CLASSES")
+
+
+@pytest.mark.skipif(
+    JAVAC is None or JAVA is None or not CORDIS4J_CLASSES,
+    reason="needs a JDK and REVL_CORDIS4J_CLASSES (compiled cordis4j-core classes)",
+)
+def test_runtime_scenarios_on_real_cordis4j(tmp_path):
+    """The A1/G7 exit criterion for the Java tier: emitted components driven
+    by the REAL cordis4j runtime (clone github.com/1na-ko/cordis4j, javac
+    cordis4j-core/src/main/java, point REVL_CORDIS4J_CLASSES at the classes
+    dir — CI does exactly this). Scenarios: G7 LIFO teardown, A8 fail-revert
+    with failure routing, reactive inject gating + withdrawal ordering
+    (Theorem 63), and the async boundary."""
+    fixture = ROOT / "backends" / "rust" / "scenarios" / "probe.rvl"
+    ir = compile_files([str(fixture)])
+    pkg = tmp_path / "revl"
+    pkg.mkdir()
+    (pkg / "Components.java").write_text(emit.emit(ir), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    harness = HERE / "scenarios" / "RunRealScenarios.java"
+    compile_all = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", CORDIS4J_CLASSES, "-d", str(out),
+         str(pkg / "Components.java"), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_all.returncode == 0, compile_all.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", f"{CORDIS4J_CLASSES}{os.pathsep}{out}", "RunRealScenarios"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "REAL_SCENARIOS_OK" in run.stdout
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")

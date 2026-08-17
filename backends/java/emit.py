@@ -1443,16 +1443,25 @@ def _emit_component_modern(
     out.append("        Context.EffectScope fx = ctx.effect();")
     for local, service in env.reqs.items():
         out.append(f"        {service} {local} = ctx.get({service}.class);")
+    # A8 self-revert: cordis4j's ctx.effect() scope is NOT owned by the
+    # fiber until apply returns it, so a failing activation must dispose
+    # the accumulated effects itself before the failure routes to the
+    # runtime (verified against the real runtime in RunRealScenarios).
+    out.append("        try {")
     body_lines: list[str] = []
     _emit_component_stmts(
-        component, env, v3_ctx, cname, body_lines, component.get("body") or [], "        "
+        component, env, v3_ctx, cname, body_lines, component.get("body") or [], "            "
     )
     out.extend(body_lines)
     body_steps = component.get("body") or []
     if not (body_steps and body_steps[-1].get("step") == "fail"):
         # An unconditional trailing `fail` lowers to a throw; Java treats a
         # statement after it as a hard "unreachable statement" error.
-        out.append("        return fx;")
+        out.append("            return fx;")
+    out.append("        } catch (RuntimeException | Error failure) {")
+    out.append("            fx.dispose();")
+    out.append("            throw failure;")
+    out.append("        }")
     out.append("    }")
     out.append("}")
     out.append("")
@@ -1511,40 +1520,56 @@ def _emit_component(
     out.append("    public Disposable apply(Context ctx) {")
     for local, service in env.reqs.items():
         out.append(f"        {service} {local} = ctx.get({service}.class);")
+    # A8 self-revert: undos accumulate as the steps land; if a later step
+    # throws mid-activation, the accumulated inverses run (reverse order)
+    # before the failure routes to the runtime — cordis4j only owns what
+    # `apply` returns (verified in scenarios/RunRealScenarios.java).
+    out.append("        java.util.ArrayList<Disposable> undos = new java.util.ArrayList<>();")
+    out.append("        try {")
     disposers: list[str] = []
     for step in component.get("body") or []:
         kind = step.get("step")
         if kind == "let-effect":
             bind = _ident(step["bind"], "binding")
-            out.append(f"        {_host_of(component, step['bind'])} {bind} = {_expr(step['acquire'], env)};")
+            out.append(f"            {_host_of(component, step['bind'])} {bind} = {_expr(step['acquire'], env)};")
             undo = _expr(step["undo"], env)
-            disposers.append(f"            Disposables.of(() -> {undo})")
+            out.append(f"            undos.add(Disposables.of(() -> {undo}));")
+            disposers.append(bind)
         elif kind == "effect":
-            out.append(f"        {_expr(step['acquire'], env)};")
-            disposers.append(f"            Disposables.of(() -> {_expr(step['undo'], env)})")
+            out.append(f"            {_expr(step['acquire'], env)};")
+            out.append(f"            undos.add(Disposables.of(() -> {_expr(step['undo'], env)}));")
+            disposers.append("effect")
         elif kind == "emit":
-            out.append(f"        {_expr(step['expr'], env)};")
+            out.append(f"            {_expr(step['expr'], env)};")
         elif kind == "provide":
             key = step.get("name")
             service = step.get("service")
             struct = f"{cname}{_camel(key)}"
             ctor_args = ", ".join(b for b in _binds(component))
-            # The provision's disposable joins the teardown composite — the
+            # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
-            # it here would leave the provision registered after unload.
+            # it would leave the provision registered after unload.
             out.append(
-                f"        Disposable {key}_provision = "
-                f"ctx.provide(ServiceKey.of({service}.class), new {struct}({ctor_args}));"
+                f"            undos.add(ctx.provide(ServiceKey.of({service}.class), "
+                f"new {struct}({ctor_args})));"
             )
-            disposers.append(f"            {key}_provision")
+            disposers.append(key)
         else:
             raise EmitError(f"unsupported component step in Java backend: {kind!r}")
     if disposers:
-        out.append("        return Disposables.composite(")
-        out.append(",\n".join(disposers))
-        out.append("        );")
+        # Real cordis4j Disposables.composite disposes its parts in the
+        # given order, so LIFO teardown (G7) means reversing the
+        # acquisition-ordered list before handing it over.
+        out.append("            java.util.Collections.reverse(undos);")
+        out.append("            return Disposables.composite(undos.toArray(new Disposable[0]));")
     else:
-        out.append("        return Disposables.none();")
+        out.append("            return Disposables.none();")
+    out.append("        } catch (RuntimeException | Error failure) {")
+    out.append("            for (int i = undos.size() - 1; i >= 0; i--) {")
+    out.append("                undos.get(i).dispose();")
+    out.append("            }")
+    out.append("            throw failure;")
+    out.append("        }")
     out.append("    }")
     out.append("}")
     out.append("")

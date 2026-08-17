@@ -87,12 +87,19 @@ public final class Components {
         }
         @Override
         public Disposable apply(Context ctx) {
-            Pool pool = Pool.open(url, pool_size);
-            Disposable db_provision = ctx.provide(ServiceKey.of(Database.class), new PgDatabaseDb(pool));
-            return Disposables.composite(
-                Disposables.of(() -> pool.close()),
-            db_provision
-            );
+            java.util.ArrayList<Disposable> undos = new java.util.ArrayList<>();
+            try {
+                Pool pool = Pool.open(url, pool_size);
+                undos.add(Disposables.of(() -> pool.close()));
+                undos.add(ctx.provide(ServiceKey.of(Database.class), new PgDatabaseDb(pool)));
+                java.util.Collections.reverse(undos);
+                return Disposables.composite(undos.toArray(new Disposable[0]));
+            } catch (RuntimeException | Error failure) {
+                for (int i = undos.size() - 1; i >= 0; i--) {
+                    undos.get(i).dispose();
+                }
+                throw failure;
+            }
         }
     }
 
@@ -124,10 +131,15 @@ public final class Components {
         public Disposable apply(Context ctx) {
             Context.EffectScope fx = ctx.effect();
             Database db = ctx.get(Database.class);
-            var store = Map.create();
-            fx.track(Disposables.of(() -> store.drop()));
-            fx.track(ctx.provide(ServiceKey.of(Cache.class), new UserCacheCache(ctx, fx, db, store)));
-            return fx;
+            try {
+                var store = Map.create();
+                fx.track(Disposables.of(() -> store.drop()));
+                fx.track(ctx.provide(ServiceKey.of(Cache.class), new UserCacheCache(ctx, fx, db, store)));
+                return fx;
+            } catch (RuntimeException | Error failure) {
+                fx.dispose();
+                throw failure;
+            }
         }
     }
 

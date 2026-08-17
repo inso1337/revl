@@ -83,4 +83,13 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: pip install -e ".[test]"
+      # real-runtime scenario gate: compile cordis4j-core from source and
+      # point the suite at the classes (zero runtime deps, plain javac)
+      - run: |
+          git clone --depth 1 https://github.com/1na-ko/cordis4j.git /tmp/cordis4j
+          find /tmp/cordis4j/cordis4j-core/src/main/java -name '*.java' ! -name 'module-info.java' > /tmp/core-sources.txt
+          mkdir -p /tmp/cordis4j-classes
+          javac --release 21 -d /tmp/cordis4j-classes @/tmp/core-sources.txt
       - run: pytest backends/java/test_emit_java.py -q
+        env:
+          REVL_CORDIS4J_CLASSES: /tmp/cordis4j-classes
