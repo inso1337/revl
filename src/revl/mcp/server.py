@@ -20,14 +20,13 @@ toolchain.
 from __future__ import annotations
 
 import json
-import os
 import sys
-import tempfile
 
-from ..compiler import compile_files
+from ..compiler import compile_files, compile_source
 from ..diagnostics import GUARANTEES, report
 from ..errors import RevlError
 from .schema import tools_from_ir
+from .session import Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -36,21 +35,20 @@ SERVER_INFO = {"name": "revl", "version": "2.0"}
 # ---------------------------------------------------------------- helpers
 
 def _compile(source: str | None, files: list[str] | None,
-             manifest: dict | None = None) -> dict:
-    """Compile inline source or paths, through the same entry point the CLI
-    uses (so the admission gate is literally the same code)."""
+             manifest: dict | None = None, modules: dict | None = None,
+             replacing: tuple = ()) -> dict:
+    """Compile inline source or paths through the same entry points the CLI
+    uses, so the admission gate is literally the same code.
+
+    Inline source never touches the disk: `compile_source` carries the
+    ambient manifest and any in-memory `use` modules itself.
+    """
     if source is not None:
-        handle = tempfile.NamedTemporaryFile("w", suffix=".rvl", delete=False,
-                                             encoding="utf-8")
-        try:
-            handle.write(source)
-            handle.close()
-            return compile_files([handle.name], manifest=manifest)
-        finally:
-            os.unlink(handle.name)
+        return compile_source(source, "<candidate>.rvl", manifest=manifest,
+                              replacing=replacing, modules=modules)
     if not files:
         raise ValueError("provide `source` or `files`")
-    return compile_files(list(files), manifest=manifest)
+    return compile_files(list(files), manifest=manifest, replacing=replacing)
 
 
 def _summary(ir: dict) -> dict:
@@ -80,9 +78,103 @@ def _boundary_of(ir: dict) -> dict:
 
 # ---------------------------------------------------------------- tools
 
+SESSION = Session()
+
+
+def _session_error(message: str, **extra) -> dict:
+    return {"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": "session",
+        "message": message,
+    }], **extra}
+
+
+def _tool_load(arguments: dict) -> dict:
+    """Boot a composition in memory (nothing is written to disk)."""
+    try:
+        ir = _compile(arguments.get("source"), arguments.get("files"),
+                      modules=arguments.get("modules"))
+    except RevlError as error:
+        return report(error)
+    try:
+        state = SESSION.load(ir, arguments.get("config"))
+    except SessionError as error:
+        return _session_error(str(error))
+    return {"ok": True, **_summary(ir), **state}
+
+
+def _tool_call(arguments: dict) -> dict:
+    """Invoke a provided service operation on the running composition."""
+    key, method = arguments.get("key"), arguments.get("method")
+    if not key or not method:
+        return _session_error("`key` and `method` are required")
+    try:
+        return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
+    except SessionError as error:
+        return _session_error(str(error))
+    except Exception as exc:  # the callee raised — that is a result, not a crash
+        return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
+                              trace=SESSION.state().get("trace", []))
+
+
+def _tool_swap(arguments: dict) -> dict:
+    """Admit a candidate against what is running, then hot-swap it in. A
+    rejected candidate changes nothing — that is the whole point."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded — call revl_load first")
+    replacing = tuple(arguments.get("replacing") or ())
+    try:
+        _compile(arguments.get("source"), arguments.get("files"),
+                 manifest=SESSION.ir, modules=arguments.get("modules"),
+                 replacing=replacing)
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = False
+        rejected["swapped"] = False
+        rejected["note"] = "the running composition is untouched"
+        return rejected
+
+    # admitted: recompile the whole composition so the swap is a full
+    # generation (the same shape `revl run --watch` reloads)
+    try:
+        full = _compile(arguments.get("source"), arguments.get("files"),
+                        modules=arguments.get("modules"))
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = True
+        rejected["swapped"] = False
+        rejected["note"] = ("the candidate is admissible against the running "
+                            "composition, but is not a complete composition on "
+                            "its own — pass the full source set to swap")
+        return rejected
+    try:
+        state = SESSION.swap(full)
+    except SessionError as error:
+        return _session_error(str(error))
+    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+
+
+def _tool_rollback(_arguments: dict) -> dict:
+    try:
+        return {"ok": True, **SESSION.rollback()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_unload(_arguments: dict) -> dict:
+    try:
+        return {"ok": True, **SESSION.unload()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_state(_arguments: dict) -> dict:
+    return {"ok": True, **SESSION.state(drain=True)}
+
+
 def _tool_check(arguments: dict) -> dict:
     try:
-        ir = _compile(arguments.get("source"), arguments.get("files"))
+        ir = _compile(arguments.get("source"), arguments.get("files"),
+                      modules=arguments.get("modules"))
     except RevlError as error:
         return report(error)
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir)}
@@ -191,9 +283,14 @@ def _tool_grammar(_arguments: dict) -> dict:
 
 _SOURCE_INPUT = {
     "source": {"type": "string",
-               "description": "inline .rvl source (use this for a generated component)"},
+               "description": "inline .rvl source (use this for a generated component; "
+                              "it is never written to disk)"},
     "files": {"type": "array", "items": {"type": "string"},
               "description": "paths to .rvl files (alternative to `source`)"},
+    "modules": {"type": "object",
+                "description": "in-memory sources for `use` imports, keyed by the path "
+                               "the import names — so a multi-module candidate can be "
+                               "checked and loaded without touching the filesystem"},
 }
 
 TOOLS = [
@@ -248,6 +345,76 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_tools,
+    },
+    {
+        "name": "revl_load",
+        "description": "Boot a composition IN MEMORY and hold it live. Nothing is "
+                       "written to disk, so a draft component can be run and tested "
+                       "before it exists as a file. Returns fiber states, provided "
+                       "keys and the lifecycle trace.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {**_SOURCE_INPUT,
+                           "config": {"type": "object",
+                                      "description": "per-component config tables"}},
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_load,
+    },
+    {
+        "name": "revl_call",
+        "description": "Invoke a provided service operation on the running composition "
+                       "— how you test a component you just loaded. Returns the result "
+                       "and the trace it produced.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "provided key, e.g. `cache`"},
+                "method": {"type": "string", "description": "operation name"},
+                "args": {"type": "array", "description": "positional arguments"},
+            },
+            "required": ["key", "method"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_call,
+    },
+    {
+        "name": "revl_swap",
+        "description": "Admit a candidate against the RUNNING composition and hot-swap "
+                       "it in. A rejected candidate leaves the running system untouched. "
+                       "This is the acting half of revl_admit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {**_SOURCE_INPUT,
+                           "replacing": {"type": "array", "items": {"type": "string"},
+                                         "description": "components withdrawn in this swap"}},
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_swap,
+    },
+    {
+        "name": "revl_rollback",
+        "description": "Restore the generation that was running before the last swap.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_rollback,
+    },
+    {
+        "name": "revl_unload",
+        "description": "Tear the composition down and report the residue checks "
+                       "(registry, provisions, effects, listeners) — prove a component "
+                       "leaves nothing behind before you commit it to disk.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_unload,
+    },
+    {
+        "name": "revl_state",
+        "description": "What is loaded right now: fiber states, provided keys, whether "
+                       "a rollback is available, and the trace since the last call.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_state,
     },
     {
         "name": "revl_grammar",

@@ -28,11 +28,21 @@ class _LoadedModule:
 
 
 class _ModuleLoader:
-    """Loads modules and resolves `use` with cycle detection."""
+    """Loads modules and resolves `use` with cycle detection.
 
-    def __init__(self) -> None:
+    `sources` maps an absolute path to source text, so a caller can supply
+    modules that exist only in memory (an agent iterating on a candidate
+    before anything touches the disk). A path present there is parsed from
+    the string; everything else is read from the filesystem as usual.
+    """
+
+    def __init__(self, sources: dict[str, str] | None = None) -> None:
         self._cache: dict[str, _LoadedModule] = {}
         self._stack: list[str] = []
+        self._sources = sources or {}
+
+    def has_source(self, path: str) -> bool:
+        return os.path.abspath(path) in self._sources
 
     def load(self, path: str) -> _LoadedModule:
         abs_path = os.path.abspath(path)
@@ -52,7 +62,9 @@ class _ModuleLoader:
 
         self._stack.append(abs_path)
         try:
-            program = parse_file(abs_path)
+            virtual = self._sources.get(abs_path)
+            program = (Parser(virtual, abs_path).parse() if virtual is not None
+                       else parse_file(abs_path))
             module = _LoadedModule(abs_path, os.path.dirname(abs_path), program)
             for fn in program.fn_decls:
                 if fn.public:
@@ -69,7 +81,8 @@ class _ModuleLoader:
             self._cache[abs_path] = module
             for use in program.uses:
                 dep_path = os.path.join(module.dir, use.path)
-                if not os.path.exists(dep_path):
+                # a virtual source stands in for the file it names
+                if not self.has_source(dep_path) and not os.path.exists(dep_path):
                     raise RevlError(
                         abs_path, use.line,
                         f"cannot find imported module `{use.path}`",
@@ -126,18 +139,39 @@ class _ModuleLoader:
                         f"`{name}` is not a public declaration in `{where}`")
 
 
-def compile_source(source: str, filename: str = "<string>") -> dict:
-    program = Parser(source, filename).parse()
-    if program.uses:
-        use = program.uses[0]
-        raise RevlError(filename, use.line,
-                        "`use` declarations require compile_files with a real source path",
-                        hint="a source string has no module directory from which to resolve the import")
-    return check_and_lower(program)
+def compile_source(source: str, filename: str = "<string>",
+                   manifest: dict | None = None,
+                   replacing: tuple[str, ...] = (),
+                   modules: dict[str, str] | None = None) -> dict:
+    """Compile source text. Nothing is read from or written to the disk.
+
+    `manifest` is the runtime-admission gate (see compile_files); `modules`
+    supplies in-memory sources for `use` imports, keyed by the path the
+    import names. Together they let a caller — an AI agent iterating on a
+    candidate component, typically — check, admit and load code that has
+    never existed as a file.
+    """
+    if manifest is None and not modules:
+        program = Parser(source, filename).parse()
+        if program.uses:
+            use = program.uses[0]
+            raise RevlError(filename, use.line,
+                            "`use` declarations need `modules=` (in-memory sources) or "
+                            "compile_files with a real source path",
+                            hint="a bare source string has no module directory from which "
+                                 "to resolve the import")
+        return check_and_lower(program)
+
+    virtual = {os.path.abspath(filename): source}
+    for path, text in (modules or {}).items():
+        virtual[os.path.abspath(path)] = text
+    return compile_files([filename], manifest=manifest, replacing=replacing,
+                         sources=virtual)
 
 
 def compile_files(paths: list[str], manifest: dict | None = None,
-                  replacing: tuple[str, ...] = ()) -> dict:
+                  replacing: tuple[str, ...] = (),
+                  sources: dict[str, str] | None = None) -> dict:
     """Compile a composition: all services and components across the files
     are checked and linked together (the composition manifest, DESIGN §4).
 
@@ -152,7 +186,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     The returned document's `components` are only the newly compiled ones;
     its `manifest` describes the whole resulting composition.
     """
-    loader = _ModuleLoader()
+    loader = _ModuleLoader(sources)
     root_modules = [_load_root(loader, path) for path in paths]
 
     merged = Program(filename=paths[0] if paths else "<none>")
@@ -257,6 +291,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
 
 
 def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:
-    if not os.path.exists(path):
+    # a virtual source stands in for the file it names (in-memory compilation)
+    if not loader.has_source(path) and not os.path.exists(path):
         raise RevlError(path, 1, f"file not found: {path}")
     return loader.load(path)
