@@ -35,6 +35,7 @@ from .parser import (
     AwaitStmt,
     ComponentDecl,
     EffectStmt,
+    EmitExpr,
     EmitStmt,
     ExternDecl,
     FailStmt,
@@ -1247,6 +1248,23 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 and not str(info.get("adt", "")).startswith(("Result", "Opt")):
             return {"kind": "adt", "type": info["adt"], "case": expr.name, "args": []}
 
+    if isinstance(expr, EmitExpr):
+        # the value of an irreversible call; the marker stays at the call site
+        saved_mode = getattr(env, "_expr_mode", "setup")
+        env._expr_mode = "emit"
+        try:
+            node = _lower_component_pure_expr(expr.expr, env, scope, callables, pure_only)
+        finally:
+            env._expr_mode = saved_mode
+        if not _is_emission_call(node, env):
+            raise RevlError(
+                filename, expr.line,
+                f"`emit` on {_node_desc(node)}, which is not declared `emission`",
+                hint="only calls to `emission` service operations cross the boundary; "
+                     "drop the `emit` marker (G4)",
+                code="G4", category="emission",
+            )
+        return node
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, line)
@@ -1599,6 +1617,15 @@ def _method_emissions(body: list, env: "Env") -> list[str]:
                     note(f"{target.get('name')}.{expr.get('method')}")
                 else:
                     note("a host emission")
+            # an emission may also appear in value position (`let r = emit …`)
+            target = node.get("target")
+            if node.get("kind") == "call" and isinstance(target, dict) \
+                    and target.get("kind") == "req":
+                service = env.services.get(env.requires.get(target.get("name")) or "")
+                decl = (service.methods.get(node.get("method"))
+                        if service is not None else None)
+                if decl is not None and decl.emission:
+                    note(f"{target.get('name')}.{node.get('method')}")
             calls: set = set()
             _calls_in(node, calls)
             for name in sorted(calls & env.emitting_fns):
@@ -1938,6 +1965,10 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
 
 
 def _is_emission_call(node: dict, env: Env) -> bool:
+    # an `emission` extern (or a function reaching one) is a boundary
+    # crossing exactly as a service emission is, so `emit` marks it too
+    if node.get("kind") == "fn" and node.get("name") in getattr(env, "emitting_fns", ()):
+        return True
     if node.get("kind") != "call":
         return False
     target = node["target"]
