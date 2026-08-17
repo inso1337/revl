@@ -10,8 +10,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT / "src"))
 
 import emit  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 
 
 def _ir(name: str = "user_cache") -> dict:
@@ -33,9 +35,64 @@ def test_user_cache_emits_rust_structure():
     assert ".drop()" not in src
 
 
-def test_rejects_v3():
+def test_rejects_unsupported_ir_version():
     with pytest.raises(emit.EmitError, match="ir_version"):
-        emit.emit({"ir_version": 3, "components": [{"name": "X", "body": []}]})
+        emit.emit({"ir_version": 4, "components": [{"name": "X", "body": []}]})
+
+
+def test_v2_realms_emit_isolate_and_intercept():
+    ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
+    assert ir["ir_version"] == 2
+    src = emit.emit(ir)
+    assert "fn _revl_realm" in src
+    assert 'isolate_with("kv", _revl_realm("tenant_a"))' in src
+    assert 'require_with("kv", TenantAAppKvIntercept1' in src
+    assert "ctx: Arc<cordis::Context>" in src
+    assert "self.ctx.effect" in src
+
+
+def test_v3_types_functions_match_emit():
+    ir = compile_source(
+        """
+        type Row = { id: Int, name: Str }
+        type Outcome = Ok(Row) | NotFound | Invalid(Str)
+        fn add(a: Int, b: Int) -> Int { return a + b }
+        fn describe(outcome: Outcome) -> Str {
+          return match outcome {
+            Ok(row) => row.name,
+            NotFound => "not found",
+            Invalid(why) => why,
+          }
+        }
+        """
+    )
+    assert ir["ir_version"] == 3
+    src = emit.emit(ir)
+    assert "pub struct Row" in src
+    assert "pub enum Outcome" in src
+    assert "Outcome::Ok(row)" in src
+    assert "fn add(a: i64, b: i64) -> i64" in src
+
+
+def test_extern_requires_rs_body():
+    with pytest.raises(emit.EmitError, match="no @rs body"):
+        emit.emit(
+            {
+                "ir_version": 3,
+                "types": {},
+                "functions": [],
+                "externs": [
+                    {
+                        "name": "host_call",
+                        "class": "pure",
+                        "params": [],
+                        "returns": "Unit",
+                        "bodies": {"py": "pass"},
+                    }
+                ],
+                "tests": [],
+            }
+        )
 
 
 def test_migrator_await_is_rejected():
@@ -47,13 +104,45 @@ def test_migrator_await_is_rejected():
         emit.emit(ir)
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
-def test_cargo_check_compiles_against_cordis_rs(tmp_path):
-    src = emit.emit(_ir("user_cache"))
+def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
-    result = subprocess.run(
-        ["cargo", "check"], cwd=tmp_path, text=True, capture_output=True, timeout=600,
+    return subprocess.run(
+        ["cargo", "check", "--offline"], cwd=tmp_path, text=True,
+        capture_output=True, timeout=600,
     )
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_against_cordis_rs(tmp_path):
+    result = _cargo_check(tmp_path, emit.emit(_ir("user_cache")))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_v2_realms(tmp_path):
+    ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_v3_types_functions_match(tmp_path):
+    ir = compile_source(
+        """
+        type Row = { id: Int, name: Str }
+        type Outcome = Ok(Row) | NotFound | Invalid(Str)
+        fn add(a: Int, b: Int) -> Int { return a + b }
+        fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
+        fn describe(outcome: Outcome) -> Str {
+          return match outcome {
+            Ok(row) => row.name,
+            NotFound => "not found",
+            Invalid(why) => why,
+          }
+        }
+        """
+    )
+    result = _cargo_check(tmp_path, emit.emit(ir))
     assert result.returncode == 0, result.stderr
