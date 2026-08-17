@@ -1,0 +1,25 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key: Str) = store.get(key)
+
+    fn put(key: Str, value: Str) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO cache_log (k) VALUES ('${key}')`)
+    }
+  }
+}

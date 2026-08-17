@@ -1,0 +1,17 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component TransferSaga requires ledger: Database {
+  effect ledger.query("SELECT pg_advisory_lock(9001)")
+  undo ledger.query("SELECT pg_advisory_unlock(9001)")
+
+  emit ledger.execute("INSERT INTO ledger (account, amount) VALUES ('from', -100)")
+       compensate ledger.execute("INSERT INTO ledger (account, amount) VALUES ('from', 100)")
+
+  emit ledger.execute("INSERT INTO ledger (account, amount) VALUES ('to', 100)")
+       compensate ledger.execute("INSERT INTO ledger (account, amount) VALUES ('to', -100)")
+
+  await Job.run("settle")
+}

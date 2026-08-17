@@ -1,0 +1,21 @@
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+fn normKey(key: Str) -> Str {
+  if (key.length() <= 8) return key
+  return key.slice(0, 8)
+}
+
+component NormCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(normKey(key))
+    fn put(key, value) {
+      effect store.insert(normKey(key), value)
+      undo   store.remove(normKey(key))
+    }
+  }
+}

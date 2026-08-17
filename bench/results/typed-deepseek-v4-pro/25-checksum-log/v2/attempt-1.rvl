@@ -1,0 +1,28 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Sum {
+  fn digest(s: Str) -> Str
+}
+
+fn charCodeSum(s: Str) -> Int {
+  var total = 0
+  var i = 0
+  while (i < s.length()) {
+    total += s.charCodeAt(i)
+    i += 1
+  }
+  return total
+}
+
+component ChecksumLog requires db: Database provides sum: Sum {
+  emit db.execute("INSERT INTO service_log (message) VALUES ('digest service online')")
+
+  provide sum {
+    fn digest(s: Str) = `d-${charCodeSum(s)}`
+  }
+}

@@ -1,0 +1,14 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Outbox requires db: Database {
+  emit db.execute("INSERT INTO outbox (state) VALUES ('pending')")
+       compensate db.execute("DELETE FROM outbox WHERE state = 'pending'")
+
+  emit db.execute("INSERT INTO outbox (state) VALUES ('dispatched')")
+       compensate db.execute("DELETE FROM outbox WHERE state = 'dispatched'")
+}

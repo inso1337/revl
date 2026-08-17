@@ -1,0 +1,36 @@
+type Row = { id: Int }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Sum {
+  fn digest(s: Str) -> Str
+}
+
+fn hexDigit(n: Int) -> Str {
+  "0123456789abcdef".charAt(n)
+}
+
+fn computeDigest(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < s.length() && i < 16) {
+    out = out.concat(hexDigit(s.charCodeAt(i) % 16))
+    i += 1
+  }
+  while (i < 16) {
+    out = out.concat("0")
+    i += 1
+  }
+  return out
+}
+
+component ChecksumLog requires db: Database provides sum: Sum {
+  emit db.execute("INSERT INTO service_log (message) VALUES ('digest service online')")
+
+  provide sum {
+    fn digest(s) = computeDigest(s)
+  }
+}

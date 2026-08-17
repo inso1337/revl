@@ -1,0 +1,17 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Billing {
+  fn charge(acct: Str, cents: Str)
+}
+
+component BillingLedger requires db: Database provides billing: Billing {
+  provide billing {
+    fn charge(acct, cents) {
+      emit db.execute(`INSERT INTO ledger (acct, cents) VALUES (${acct}, ${cents})`)
+      compensate db.execute(`INSERT INTO ledger (acct, cents) VALUES (${acct}, -${cents})`)
+    }
+  }
+}
