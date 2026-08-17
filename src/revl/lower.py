@@ -20,6 +20,7 @@ from .typecheck import (
     CASES_KEY,
     FNS_KEY,
     check_ast,
+    check_type_wellformed,
     compatible,
     infer_ast,
     infer_ir,
@@ -193,8 +194,6 @@ def _validate_declared_types(program: Program, filename: str) -> None:
     """Reject malformed type annotations (bare builtin generics like `Opt`,
     `List[]`) at every declaration site before checking begins — otherwise a
     zero-arg generic reaches the type algebra and crashes it."""
-    from .typecheck import check_type_wellformed
-
     for fn in program.fn_decls:
         for p in fn.params:
             check_type_wellformed(filename, p.line, p.type)
@@ -746,16 +745,16 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
                     filename, stmt.line,
                     f"record destructuring requires a record, but `{value_type}` is not a record",
                 )
-        elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
-            raise RevlError(
-                filename, stmt.line,
-                f"record destructuring requires a record, but `{value_type}` is not a record",
-            )
             fields = spec.get("fields", {})
             for name in names:
                 if name not in fields:
                     raise RevlError(filename, pattern.line,
                                     f"`{name}` is not a field of record `{value_type}`")
+        elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
+            raise RevlError(
+                filename, stmt.line,
+                f"record destructuring requires a record, but `{value_type}` is not a record",
+            )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         for name in names:
             scope[name] = stmt.mutable
@@ -1614,6 +1613,22 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         if method.name in implemented:
             raise RevlError(filename, method.line, f"duplicate method `{method.name}` in provision `{stmt.key}`")
         implemented.add(method.name)
+
+        # optional param annotations (syntax-2.0: models write `fn query(sql:
+        # Str)` on autopilot): well-formed and checked against the service's
+        # declared type (A6 — the service is the source of truth).
+        for surface, annotation, (_, svc_ptype) in zip(
+            method.params, method.param_types or [None] * len(method.params), decl.params
+        ):
+            if annotation is None:
+                continue
+            check_type_wellformed(filename, method.line, annotation)
+            if svc_ptype and not (compatible(svc_ptype, annotation)
+                                  and compatible(annotation, svc_ptype)):
+                raise mismatch(
+                    filename, method.line,
+                    f"parameter `{surface}` of `{method.name}` (from service `{svc.name}`)",
+                    svc_ptype, annotation)
 
         saved = env.params
         env.params = env.bind_params(method.params, method.line)
