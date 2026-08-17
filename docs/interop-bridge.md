@@ -93,11 +93,13 @@ one.
   service contract, JSON on the wire.
 - **py↔rust** (`backends/rust/bridge_client/`, `demo/bridge_pyrust.py`): a Rust
   process consuming a Python-provided service over the wire, values marshalled
-  back into typed Rust. This is the transport proof only: cordis-rs services
-  are static traits (`Arc<dyn Database>`), so a Rust proxy that lets a cordis-rs
-  *component* consume the seam has to be emitter-generated per service (unlike
-  the dynamic py/node proxies). That codegen, plus a Rust placement runner, is
-  the follow-up.
+  back into typed Rust. cordis-rs services are static traits
+  (`Arc<dyn Database>`), so — unlike the dynamic py/node proxies — a Rust proxy
+  that lets a cordis-rs *component* consume the seam has to be
+  emitter-generated per service. **That codegen has since landed** (`e349487`,
+  §"placement backends" below): `backends/rust/emit.py` generates the proxy,
+  stub dispatcher and plugin table per composition, so Rust now both consumes
+  and serves across a seam.
 
 Both show value-copy marshalling and peer-death-as-withdrawal (R2/R3): killing
 the provider deactivates the consumer reactively and replays its inverses LIFO,
