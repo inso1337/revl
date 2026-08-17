@@ -243,10 +243,36 @@ def test_v3_str_template_and_intra_call_run_on_wasmtime(tmp_path):
     assert int(out.stdout.strip().splitlines()[-1]) == 6   # "hi bob"
 
 
-def test_v3_non_str_interpolation_rejected_by_tier():
+def test_v3_int_interpolation_runs_on_wasmtime(tmp_path):
+    """`${intExpr}` stringifies via an itoa helper (`$int_to_str`)."""
+    import shutil, subprocess
+    if shutil.which("wasmtime") is None:
+        import pytest as _pt
+        _pt.skip("wasmtime not installed")
     emit = _emitter()
-    with pytest.raises(emit.EmitError, match="Str only on this tier"):
-        emit.emit(compile_source("fn f(n: Int) -> Str { return `n=${n}` }"))
+    wat = tmp_path / "i.wat"
+    # return each char code of `${n}` so we can assert the exact digits
+    wat.write_text(
+        emit.emit(compile_source(
+            "fn ch(n: Int, i: Int) -> Int { return `${n}`.charCodeAt(i) }\n"
+            "fn width(n: Int) -> Int { return `${n}`.length() }\n"
+        ))["functions"], encoding="utf-8")
+
+    def inv(fn, *a):
+        out = subprocess.run(["wasmtime", "--invoke", fn, str(wat), *a],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert [inv("ch", "12345", str(i)) for i in range(5)] == [ord(c) for c in "12345"]
+    assert [inv("ch", "-70", str(i)) for i in range(3)] == [ord(c) for c in "-70"]
+    assert inv("width", "0") == 1 and inv("width", "-100") == 4
+
+
+def test_v3_compound_interpolation_rejected_by_tier():
+    emit = _emitter()
+    with pytest.raises(emit.EmitError, match="Str or Int on this tier"):
+        emit.emit(compile_source("fn f(xs: List[Int]) -> Str { return `xs=${xs}` }"))
 
 
 # local arrows (`let f = x => …; f(a)`) are inlined — they can't escape this
