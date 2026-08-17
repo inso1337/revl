@@ -124,3 +124,43 @@ def test_match_expression_accepts_wildcard_and_trailing_comma():
         ("Ok", "row"),
         ("_", None),
     ]
+def test_extern_parse_with_multiple_backends():
+    prog = _parse(
+        """
+        extern pure fn sha256(data: Bytes) -> Str
+          = @ts { return crypto.createHash("sha256").update(data).digest("hex") }
+          = @py { import hashlib; return hashlib.sha256(data).hexdigest() }
+        """
+    )
+    (ext,) = prog.externs
+    assert ext.classification == "pure"
+    assert ext.name == "sha256"
+    assert [(p.name, p.type) for p in ext.params] == [("data", "Bytes")]
+    assert ext.returns == "Str"
+    assert [b.backend for b in ext.bodies] == ["ts", "py"]
+    assert "crypto.createHash" in ext.bodies[0].text
+
+
+def test_extern_acquire_and_emission_parse():
+    prog = _parse(
+        """
+        extern acquire fn listen(port: Int) -> Socket undo close(socket)
+          = @py { return socket.socket() }
+        extern emission fn send(sock: Socket, data: Bytes) compensate log_unsent(sock, data)
+          = @ts { return sock.write(data) }
+        """
+    )
+    acquire, emission = prog.externs
+    assert acquire.classification == "acquire"
+    assert acquire.undo.__class__.__name__ == "ExprCall"
+    assert emission.classification == "emission"
+    assert emission.compensate.__class__.__name__ == "ExprCall"
+
+
+def test_unclassified_extern_does_not_parse():
+    import pytest
+
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError, match="unclassified extern"):
+        _parse("extern fn f() = @py { pass }")

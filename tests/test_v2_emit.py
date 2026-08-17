@@ -132,3 +132,48 @@ def test_duplicate_field_rejected():
 def test_duplicate_case_rejected():
     with pytest.raises(RevlError, match="duplicate case `NotFound`"):
         compile_source("type T = A | NotFound | NotFound")
+
+
+def test_pure_extern_lowers_to_ir_v3():
+    ir = compile_source(
+        """
+        extern pure fn sha256(data: Bytes) -> Str
+          = @ts { return crypto.createHash("sha256").update(data).digest("hex") }
+          = @py { import hashlib; return hashlib.sha256(data).hexdigest() }
+        """
+    )
+    assert ir["ir_version"] == 3
+    (ext,) = ir["externs"]
+    assert ext["name"] == "sha256"
+    assert ext["class"] == "pure"
+    assert ext["bodies"]["py"] == ' import hashlib; return hashlib.sha256(data).hexdigest() '
+    assert ext["bodies"]["ts"] == ' return crypto.createHash("sha256").update(data).digest("hex") '
+
+
+def test_pure_extern_emits_runnable_python():
+    ir = compile_source(
+        """
+        extern pure fn sha256(data: Bytes) -> Str
+          = @ts { return crypto.createHash("sha256").update(data).digest("hex") }
+          = @py { import hashlib; return hashlib.sha256(data).hexdigest() }
+        """
+    )
+    ns = {}
+    exec(compile(emit.emit(ir), "emitted_extern.py", "exec"), ns)
+    assert ns["sha256"](b"abc") == __import__("hashlib").sha256(b"abc").hexdigest()
+
+
+def test_ts_only_extern_is_not_python_portable():
+    ir = compile_source(
+        """
+        extern pure fn only_ts(data: Bytes) -> Str
+          = @ts { return String(data) }
+        """
+    )
+    with pytest.raises(emit.EmitError, match="has no @py body"):
+        emit.emit(ir)
+
+
+def test_acquire_extern_without_undo_rejected():
+    with pytest.raises(RevlError, match="must declare `undo`"):
+        compile_source("extern acquire fn listen(port: Int) -> Int = @py { return port }")

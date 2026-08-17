@@ -1,0 +1,3 @@
+use "./v2_math_lib.rvl" { add, Row }
+pub fn twice(x: Int) -> Int { return add(x, x) }
+component UsesMath { let m = effect Map.new() undo m.drop() }

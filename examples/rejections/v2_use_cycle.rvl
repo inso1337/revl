@@ -1,0 +1,2 @@
+use "./v2_use_cycle.rvl" { helper }
+fn helper() -> Int { return 1 }
