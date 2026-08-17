@@ -1,0 +1,12 @@
+service Registry {
+  fn lookup(id: Str) -> Opt[Str]
+  fn healthy() -> Bool
+}
+
+component RegistryStore provides reg: Registry {
+  let store = effect Map.new() undo store.drop()
+  provide reg {
+    fn lookup(id) = store.get(id)
+    fn healthy() = true
+  }
+}

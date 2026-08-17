@@ -124,15 +124,22 @@ crossing into the provider's pool and `cache.get` returning the value:
 Participation levels differ, and the docs are honest about it:
 - `py`/`node` are full, reactive participants: consume via a dynamic proxy,
   serve via the stub, and peer death is withdrawal (R2/R3).
-- `java` uses a generic `java.lang.reflect.Proxy` (any interface, no codegen)
-  on the in-repo cordis4j stubs (JDK 17); the crossing and teardown are
-  verified, but the stub `Context` is non-reactive, so reactive withdrawal
-  needs the real cordis4j runtime (follow-up).
-- `rust` is a consumer-first-cut for the `user_cache` composition: a
-  hand-written `Database` proxy (cordis-rs services are static traits, so a
-  general proxy/stub is emitter codegen, per the note above). It cannot serve
-  a cross-key yet, and has no monitor for peer death. Generalizing it is the
-  remaining emitter work.
+- `java` runs on the real reactive cordis4j when a JDK 21 and a compiled
+  cordis4j (`REVL_CORDIS4J_CLASSES`, or the cached checkout the verifier builds)
+  are present: `RealPlacementRunner` consumes via a generic
+  `java.lang.reflect.Proxy` (any interface, no codegen) and a monitor connection
+  turns provider death into reactive withdrawal (verified: the consumer unloads,
+  no exception). Without JDK 21 + cordis4j it falls back to the non-reactive
+  in-repo stub (`PlacementRunner`, JDK 17), which still crosses and tears down.
+- `rust` is emitter-generated (`backends/rust/emit.py`): per service a
+  `<Svc>Proxy` and a stub dispatcher plus a `plugin_by_name` table, so the
+  runner carries no composition-specific code, consumes and serves any seam,
+  and the conductor regenerates `components.rs` from the running IR before
+  `cargo build`. Verified as consumer, provider, and on a second composition
+  (`examples/registry.rvl`). Remaining: proxy/stub cover scalar return types
+  (`Int`/`Str`/`Bool`/`Float`/`Opt`/`List[Value]`/`Unit`) but not records, ADTs,
+  `Result`, or `Map` yet (a proxy panics on an unsupported return), and there is
+  no peer-death monitor on the rust side yet (py/node/java have it).
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a
