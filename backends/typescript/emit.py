@@ -453,8 +453,364 @@ def _component(component: dict, services: dict) -> list[str]:
     return lines
 
 
-def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
-    """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
+
+# ---------------------------------------------------------------------------
+# v2.0 (ir_version 3): types & pure functions (docs/syntax-2.0.md §2–§3)
+# ---------------------------------------------------------------------------
+
+_TS_V3_TYPE = {
+    "Int": "number",
+    "Float": "number",
+    "Bool": "boolean",
+    "Str": "string",
+    "Bytes": "Uint8Array",
+    "Unit": "void",
+}
+
+_TS_V3_BIN_OPS = {
+    "==": "===", "===": "===", "!=": "!==", "!==": "!==",
+    "<": "<", ">": ">", "<=": "<=", ">=": ">=",
+    "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
+    "&&": "&&", "||": "||",
+}
+
+_HOST_ROOTS = {"Pool", "Map", "Job"}
+_BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
+
+_V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
+
+
+def _split_v3_types(inner: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in inner:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
+def _ts_v3_type(type_name: object) -> str:
+    """v3 surface type -> TS type (docs/syntax-2.0.md §2)."""
+    if type_name is None:
+        return "void"
+    if not isinstance(type_name, str) or not type_name.strip():
+        return "unknown"
+    name = type_name.strip()
+    if name in _TS_V3_TYPE:
+        return _TS_V3_TYPE[name]
+    if "[" in name:
+        base = name[: name.index("[")]
+        inner = name[name.index("[") + 1: name.rindex("]")]
+        args = _split_v3_types(inner)
+        if base == "Opt":
+            return f"{_ts_v3_type(args[0])} | undefined"
+        if base == "List":
+            return f"{_ts_v3_type(args[0])}[]"
+        if base == "Map":
+            return f"Map<{_ts_v3_type(args[0])}, {_ts_v3_type(args[1])}>"
+        if base == "Result":
+            return f"{_ts_v3_type(args[0])} | {_ts_v3_type(args[1])}"
+        return base + "<" + ", ".join("unknown" for _ in args) + ">"
+    return _ident(name, "type name")
+
+
+class _TsV3Context:
+    """Names visible to lowered v3 expression emitters."""
+
+    def __init__(self, types: dict, functions: list, externs: list) -> None:
+        self.types = types or {}
+        self.function_names = {fn.get("name") for fn in functions or []}
+        self.extern_names = {ext.get("name") for ext in externs or []}
+        self.case_names: set[str] = set()
+        for spec in self.types.values():
+            if spec.get("kind") == "variant":
+                for case in spec.get("cases") or []:
+                    self.case_names.add(case.get("name"))
+        self._match_counter = 0
+
+    def new_match_tmp(self) -> str:
+        # `$` is not in revl's identifier alphabet, so this cannot collide.
+        self._match_counter += 1
+        return f"$revl_match_{self._match_counter}"
+
+
+def _v3_var(node: dict, ctx: _TsV3Context) -> str:
+    name = node.get("name")
+    _ident(name, "name")
+    if name in ctx.function_names or name in ctx.extern_names or name in ctx.case_names:
+        return name
+    if name in _HOST_ROOTS:
+        return f"host.{name}"
+    if name == "None":
+        return "undefined"
+    if name in ("Some", "Ok", "Err"):
+        return "((value) => value)"
+    return name
+
+
+def _v3_expr(node: object, ctx: _TsV3Context) -> str:
+    if not isinstance(node, dict) or "kind" not in node:
+        raise EmitError(f"malformed v3 expression: {node!r}")
+    kind = node["kind"]
+
+    if kind == "lit":
+        return _literal(node.get("value"))
+
+    if kind == "var":
+        return _v3_var(node, ctx)
+
+    if kind == "bin":
+        op = _TS_V3_BIN_OPS.get(node.get("op"))
+        if op is None:
+            raise EmitError(f"unsupported binary operator {node.get('op')!r}")
+        return f"({_v3_expr(node['left'], ctx)} {op} {_v3_expr(node['right'], ctx)})"
+
+    if kind == "un":
+        operand = _v3_expr(node.get("operand"), ctx)
+        if node.get("op") == "!":
+            return f"(!{operand})"
+        if node.get("op") == "-":
+            return f"(-{operand})"
+        raise EmitError(f"unsupported unary operator {node.get('op')!r}")
+
+    if kind == "call":
+        callee_node = node.get("callee")
+        callee = _v3_expr(callee_node, ctx)
+        if not (isinstance(callee_node, dict) and callee_node.get("kind") in _V3_ATOMIC_KINDS):
+            callee = f"({callee})"
+        args = ", ".join(_v3_expr(arg, ctx) for arg in node.get("args") or [])
+        return f"{callee}({args})"
+
+    if kind == "field":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}.{_ident(node.get('name'), 'field')}"
+
+    if kind == "index":
+        target_node = node.get("target")
+        target = _v3_expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}[{_v3_expr(node['index'], ctx)}]"
+
+    if kind == "if":
+        return (
+            f"({_v3_expr(node['cond'], ctx)} ? "
+            f"{_v3_expr(node['then'], ctx)} : {_v3_expr(node['else'], ctx)})"
+        )
+
+    if kind == "record":
+        fields = ", ".join(
+            f"{_ident(k, 'record field')}: {_v3_expr(v, ctx)}"
+            for k, v in node.get("fields") or []
+        )
+        return "{" + fields + "}"
+
+    if kind == "list":
+        return "[" + ", ".join(_v3_expr(item, ctx) for item in node.get("items") or []) + "]"
+
+    if kind == "arrow":
+        params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
+        return f"(({params}) => ({_v3_expr(node['body'], ctx)}))"
+
+    if kind == "match":
+        return _v3_match_expr(node, ctx)
+
+    if kind == "interp":
+        parts = node.get("parts") or []
+        segs = ["`"]
+        for part_kind, text in parts:
+            if part_kind == "text":
+                segs.append(_template_text(text))
+            else:
+                segs.append("${" + _ident(text, "interpolation") + "}")
+        segs.append("`")
+        return "".join(segs)
+
+    raise EmitError(f"unsupported v3 expression kind {kind!r}")
+
+
+def _v3_match_expr(node: dict, ctx: _TsV3Context) -> str:
+    tmp = ctx.new_match_tmp()
+    scrutinee = _v3_expr(node.get("scrutinee"), ctx)
+    lines = [f"(({tmp}) => {{", f"  switch ({tmp}.kind) {{"]
+    wildcard = None
+    for arm in node.get("arms") or []:
+        pattern = arm.get("pattern")
+        body = _v3_expr(arm.get("body"), ctx)
+        if pattern == "_":
+            wildcard = f"      return ({body})"
+            continue
+        case = _ident(pattern, "case name")
+        lines.append(f"    case {_string(case)}:")
+        bind = arm.get("bind")
+        if bind:
+            bind = _ident(bind, "match bind")
+            lines.append(f"      return (({bind}) => ({body}))({tmp}.value)")
+        else:
+            lines.append(f"      return ({body})")
+    if wildcard is None:
+        lines.append("    default:")
+        lines.append('      throw new TypeError("non-exhaustive match")')
+    else:
+        lines.append("    default:")
+        lines.append(wildcard)
+    lines.append("  }")
+    lines.append(f"}})({scrutinee})")
+    return "\n".join(lines)
+
+
+
+def _v3_stmt(node: dict, ctx: _TsV3Context, out: list[str], indent: int, *, test_mode: bool) -> None:
+    step = node.get("step")
+    if step in ("let", "assign"):
+        name = _ident(node.get("name"), "binding")
+        value = _v3_expr(node.get("value"), ctx)
+        if step == "let":
+            keyword = "let" if node.get("mutable") else "const"
+            out.append(f"{'  ' * indent}{keyword} {name} = {value}")
+        else:
+            out.append(f"{'  ' * indent}{name} = {value}")
+    elif step == "return":
+        if node.get("expr") is None:
+            out.append(f"{'  ' * indent}return")
+        else:
+            out.append(f"{'  ' * indent}return {_v3_expr(node['expr'], ctx)}")
+    elif step == "if":
+        out.append(f"{'  ' * indent}if ({_v3_expr(node['cond'], ctx)}) {{")
+        for child in node.get("then") or []:
+            _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        if node.get("else"):
+            out.append(f"{'  ' * indent}}} else {{")
+            for child in node["else"]:
+                _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
+        out.append(f"{'  ' * indent}}}")
+    elif step == "expr":
+        out.append(f"{'  ' * indent}{_v3_expr(node['expr'], ctx)}")
+    elif step == "assert":
+        if test_mode:
+            out.append(f"{'  ' * indent}expect({_v3_expr(node['expr'], ctx)}).toBeTruthy()")
+        else:
+            out.append(
+                f"{'  ' * indent}if (!({_v3_expr(node['expr'], ctx)})) "
+                f'throw new Error("assertion failed")'
+            )
+    else:
+        raise EmitError(f"unsupported fn statement step {step!r}")
+
+
+def _emit_ts_types(types: dict) -> list[str]:
+    lines: list[str] = []
+    for name, spec in types.items():
+        name = _ident(name, "type name")
+        if spec.get("kind") == "record":
+            lines.append(f"export interface {name} {{")
+            for field, ftype in (spec.get("fields") or {}).items():
+                lines.append(f"  {_ident(field, 'record field')}: {_ts_v3_type(ftype)}")
+            lines.append("}")
+        else:
+            cases = spec.get("cases") or []
+            lines.append(f"export type {name} =")
+            for index, case in enumerate(cases):
+                cname = _ident(case.get("name"), "case name")
+                if case.get("payload") is None:
+                    member = f"{{ kind: {_string(cname)} }}"
+                else:
+                    member = f"{{ kind: {_string(cname)}; value: {_ts_v3_type(case['payload'])} }}"
+                lines.append(("  | " if index else "  ") + member)
+            lines.append("")
+            for case in cases:
+                cname = _ident(case.get("name"), "case name")
+                payload = case.get("payload")
+                if payload is None:
+                    lines.append(f"export function {cname}(): {name} {{")
+                    lines.append(f"  return {{ kind: {_string(cname)} }}")
+                else:
+                    lines.append(f"export function {cname}(value: {_ts_v3_type(payload)}): {name} {{")
+                    lines.append(f"  return {{ kind: {_string(cname)}, value }}")
+                lines.append("}")
+                lines.append("")
+        lines.append("")
+    return lines
+
+
+def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]:
+    ctx = _TsV3Context(types, functions, externs)
+    lines: list[str] = []
+    for fn in functions:
+        name = _ident(fn.get("name"), "function name")
+        params = ", ".join(
+            f"{_ident(p.get('name'), 'parameter name')}: {_ts_v3_type(p.get('type'))}"
+            for p in fn.get("params") or []
+        )
+        returns = _ts_v3_type(fn.get("returns"))
+        lines.append(f"export function {name}({params}): {returns} {{")
+        if not fn.get("body"):
+            lines.append("  // (empty body)")
+        else:
+            for stmt in fn["body"]:
+                _v3_stmt(stmt, ctx, lines, 2, test_mode=False)
+        lines.append("}")
+        lines.append("")
+    return lines
+
+
+def _emit_ts_externs(externs: list) -> list[str]:
+    lines: list[str] = []
+    for ext in externs:
+        name = _ident(ext.get("name"), "extern name")
+        params = ", ".join(
+            f"{_ident(p.get('name'), 'extern parameter name')}: {_ts_v3_type(p.get('type'))}"
+            for p in ext.get("params") or []
+        )
+        returns = _ts_v3_type(ext.get("returns"))
+        bodies = ext.get("bodies") or {}
+        if "ts" not in bodies:
+            raise EmitError(
+                f"extern `{name}` has no @ts body — not portable to this backend "
+                f"(available: {', '.join(sorted(bodies)) or 'none'})"
+            )
+        lines.append(f"export function {name}({params}): {returns} {{")
+        body = bodies["ts"].strip()
+        if body:
+            for line in body.splitlines() or [""]:
+                lines.append("  " + line)
+        else:
+            lines.append("  // (empty @ts body)")
+        lines.append("}")
+        lines.append("")
+    return lines
+
+
+def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> list[str]:
+    ctx = _TsV3Context(types, functions, externs)
+    lines: list[str] = []
+    for test in tests:
+        lines.append(f"it({_string(test.get('name'))}, () => {{")
+        if not test.get("body"):
+            lines.append("  // (empty test body)")
+        else:
+            for stmt in test["body"]:
+                _v3_stmt(stmt, ctx, lines, 2, test_mode=True)
+        lines.append("})")
+        lines.append("")
+    return lines
+
+
+def _emit_v1(ir: dict, *, runtime_import: str) -> str:
+    """Emit a v1/v2 component module (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
     if ir.get("ir_version") not in (1, 2):
@@ -516,6 +872,95 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
         out.append("")
 
     return "\n".join(out).rstrip() + "\n"
+
+
+def _emit_v3(ir: dict, *, runtime_import: str) -> str:
+    """Emit an IR v3 module: types, pure functions, externs, tests, and any
+    v1-shaped component bodies carried alongside them."""
+    services = ir.get("services") or {}
+    components = ir.get("components") or []
+    types = ir.get("types") or {}
+    functions = ir.get("functions") or []
+    externs = ir.get("externs") or []
+    tests = ir.get("tests") or []
+    if not components and not types and not functions and not externs and not tests:
+        raise EmitError("IR document has no components, types, functions, externs, or tests")
+
+    out: list[str] = [
+        "// Generated by revl backends/typescript/emit.py — do not edit.",
+        "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
+        "import type { Context } from 'cordis'",
+        f"import {{ host }} from '{runtime_import}'",
+    ]
+    if tests:
+        out.append("import { expect, it } from 'vitest'")
+    out.append("")
+
+    if types:
+        out.extend(_emit_ts_types(types))
+    if externs:
+        out.extend(_emit_ts_externs(externs))
+    if functions:
+        out.extend(_emit_ts_functions(functions, types, externs))
+    if tests:
+        out.extend(_emit_ts_tests(tests, types, functions, externs))
+
+    # Service interfaces (coeffect interfaces, DESIGN.md §3.1).
+    for sname, service in services.items():
+        _ident(sname, "service")
+        out.append(f"export interface {sname} {{")
+        for mname, method in (service.get("methods") or {}).items():
+            _ident(mname, "method")
+            params = ", ".join(
+                f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'))}"
+                for p in method.get("params") or []
+            )
+            returns = _ts_type(method["returns"]) if method.get("returns") else "void"
+            if method.get("emission"):
+                out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
+            out.append(f"  {mname}({params}): {returns}")
+        out.append("}")
+        out.append("")
+
+    # Typed committed-view access: ctx.<key> for every provision in the doc.
+    provided: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            if key in provided and provided[key] != service:
+                raise EmitError(
+                    f"provision key {key!r} bound to two services (G2)"
+                )
+            provided[key] = service
+    if provided:
+        out.append("declare module 'cordis' {")
+        out.append("  interface Context {")
+        for key, service in provided.items():
+            out.append(f"    {key}: {service}")
+        out.append("  }")
+        out.append("}")
+        out.append("")
+
+    seen = set()
+    for component in components:
+        if component.get("name") in seen:
+            raise EmitError(f"duplicate component name: {component.get('name')!r}")
+        seen.add(component.get("name"))
+        out.extend(_component(component, services))
+        out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
+    """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
+    if not isinstance(ir, dict):
+        raise EmitError("IR document must be an object")
+    version = ir.get("ir_version")
+    if version in (1, 2):
+        return _emit_v1(ir, runtime_import=runtime_import)
+    if version == 3:
+        return _emit_v3(ir, runtime_import=runtime_import)
+    raise EmitError(f"unsupported ir_version: {version!r}")
 
 
 def _main(argv: list[str]) -> int:
