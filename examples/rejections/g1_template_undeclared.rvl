@@ -1,0 +1,11 @@
+// REJECTED — G1: an undeclared name inside `${…}` is undeclared access.
+// Interpolated identifiers are real references; the stratum-1 lowering
+// resolves the head of the chain against the function scope.
+//
+// expected error:
+//   `nobody` is not declared in this function
+//   declare it with `let`/`var` or add it as a parameter (G1)
+
+fn greet() -> Str {
+  return `hello ${nobody}`
+}

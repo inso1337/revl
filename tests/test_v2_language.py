@@ -394,3 +394,68 @@ def test_fail_rejected_in_pure_fn():
 
     with pytest.raises(RevlError, match=r"`fail` is only allowed in a component activation body \(A8\)"):
         _parse('fn f() -> Int { fail "nope" return 0 }')
+
+
+# ---------------------------------------------------------------------------
+# syntax-2.0 §3.2: `??` nullish coalescing, `?.` optional chaining, dotted
+# template interpolation `${a.b}` — all three parse and compile end to end
+# after the 2.0-review fix batch.
+
+def test_nullish_coalescing_parses_and_lowers():
+    from revl.compiler import compile_source
+
+    ir = compile_source("fn pick(x: Opt[Int]) -> Int { return x ?? 0 }")
+    fn = ir["functions"][0]
+    ret = fn["body"][0]["expr"]
+    assert ret == {
+        "kind": "bin", "op": "??",
+        "left": {"kind": "var", "name": "x"},
+        "right": {"kind": "lit", "value": 0},
+    }
+
+
+def test_optional_chaining_field_and_call_parse():
+    from revl.compiler import compile_source
+
+    ir = compile_source(
+        "type Row = { id: Int, name: Str }\n"
+        "fn nm(r: Opt[Row]) -> Opt[Str] { return r?.name }\n"
+    )
+    ret = ir["functions"][0]["body"][0]["expr"]
+    assert ret["kind"] == "optfield" and ret["name"] == "name"
+
+
+def test_template_dotted_chain_lexes_and_lowers():
+    from revl.compiler import compile_source
+
+    ir = compile_source(
+        "type U = { name: Str }\n"
+        "fn hi(u: U) -> Str { return `hi ${u.name}` }\n"
+    )
+    ret = ir["functions"][0]["body"][0]["expr"]
+    assert ret == {"kind": "interp", "parts": [("text", "hi "), ("var", "u.name")]}
+
+
+def test_python_backend_runs_nullish_and_template():
+    """The two features aren't only parsed — the reference backend produces
+    executable code."""
+    import types
+
+    backend_dir = ROOT / "backends" / "python"
+    sys.path.insert(0, str(backend_dir))
+    try:
+        from revl.compiler import compile_source
+        import emit  # backend module
+
+        src = (
+            "type U = { name: Str }\n"
+            "fn pick(x: Opt[Int]) -> Int { return x ?? 42 }\n"
+            "fn greet(u: U) -> Str { return `hi ${u.name}` }\n"
+        )
+        module = types.ModuleType("t")
+        exec(compile(emit.emit(compile_source(src)), "<t>", "exec"), module.__dict__)
+        assert module.pick(None) == 42
+        assert module.pick(7) == 7  # Some(7) == 7 under T | None
+        assert module.greet({"name": "world"}) == "hi world"
+    finally:
+        sys.path.remove(str(backend_dir))

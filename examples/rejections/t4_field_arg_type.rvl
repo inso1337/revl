@@ -1,0 +1,18 @@
+// REJECTED — service-arg type check flows through record field access.
+// Previously infer_ir had no case for `field`, so mismatches hid behind
+// any `r.f` argument; the whole-record case was correctly rejected.
+//
+// expected error:
+//   `s.take` argument `s` expects `Str`, got `Int`
+
+type Row = { id: Int, name: Str }
+
+service S {
+  fn get() -> Row
+  fn take(s: Str) -> Int
+}
+
+component C requires s: S {
+  let r = effect s.get() undo s.get()
+  let z = effect s.take(r.id) undo s.get()
+}

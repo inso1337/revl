@@ -82,6 +82,12 @@ REJECTIONS = {
     "g4_missing_undo.rvl": "effect has no `undo` and `Pool.open` is not pure",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
+    "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
+    "t3_config_default_type.rvl": "config field `n` default expects `Int`, got `Str`",
+    "t4_field_arg_type.rvl": "`s.take` argument `s` expects `Str`, got `Int`",
+    "t5_destructure_nonrecord.rvl": "record destructuring requires a record, but `List[Int]` is not a record",
+    "t6_bare_generic.rvl": "`Opt` takes 1 type argument(s), got 0",
+    "v2_use_missing.rvl": "cannot find imported module `./does_not_exist.rvl`",
 }
 
 
