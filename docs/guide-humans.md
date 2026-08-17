@@ -247,7 +247,13 @@ python -m revl compile app.rvl -o out.json   # parse → check → link → IR
 python -m revl audit app.rvl                 # manifest + G8 boundary surface
 python -m revl test app.rvl                  # run in-file test blocks
 python -m revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
+python -m revl run app.rvl                   # boot on cordis-py; hold live with a REPL over provided services
+python -m revl run app.rvl --watch           # recompile on edit; a rejected change keeps the run alive
+python -m revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
 ```
+
+`run` needs the cordis-py runtime (`backends/python/setup.sh`); `--backend`
+selects the tier (only `py` is runnable today).
 
 ## Backends
 

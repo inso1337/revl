@@ -11,6 +11,7 @@ from pathlib import Path
 from .compiler import compile_files
 from .errors import RevlError
 from .fmt import migrate_source
+from .run import KNOWN_BACKENDS, run_command
 
 
 def _fn_call_names(node, out: set) -> None:
@@ -237,10 +238,24 @@ def main(argv: list[str] | None = None) -> int:
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
 
+    run = sub.add_parser("run", help="boot a composition on a Cordis runtime (hold + REPL, or --watch)")
+    run.add_argument("files", nargs="+")
+    run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
+                     help="target runtime tier (default: py; only py is runnable today)")
+    run.add_argument("--config", default=None,
+                     help="TOML/JSON file of `component-name = { ... }` config tables")
+    run.add_argument("--watch", action="store_true",
+                     help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
+    run.add_argument("--plan", action="store_true",
+                     help="print the load plan (order, config, callable keys) and exit, without a runtime")
+
     args = parser.parse_args(argv)
 
     if args.command == "fmt":
         return _run_fmt(args)
+
+    if args.command == "run":
+        return run_command(args)
 
     try:
         ir = compile_files(args.files)
