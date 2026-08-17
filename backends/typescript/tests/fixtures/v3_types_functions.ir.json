@@ -1,0 +1,422 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "Row": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "id": "Int",
+        "name": "Str"
+      }
+    },
+    "Outcome": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Ok",
+          "payload": "Row"
+        },
+        {
+          "name": "NotFound",
+          "payload": null
+        },
+        {
+          "name": "Invalid",
+          "payload": "Str"
+        }
+      ]
+    }
+  },
+  "functions": [
+    {
+      "name": "add",
+      "params": [
+        {
+          "name": "a",
+          "type": "Int"
+        },
+        {
+          "name": "b",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "var",
+              "name": "a"
+            },
+            "right": {
+              "kind": "var",
+              "name": "b"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "classify",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "<",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "lit",
+                "value": "neg"
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "if",
+            "cond": {
+              "kind": "bin",
+              "op": "===",
+              "left": {
+                "kind": "var",
+                "name": "n"
+              },
+              "right": {
+                "kind": "lit",
+                "value": 0
+              }
+            },
+            "then": {
+              "kind": "lit",
+              "value": "zero"
+            },
+            "else": {
+              "kind": "lit",
+              "value": "pos"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "first",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Int]"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "index",
+            "target": {
+              "kind": "var",
+              "name": "xs"
+            },
+            "index": {
+              "kind": "lit",
+              "value": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "makeRow",
+      "params": [
+        {
+          "name": "id",
+          "type": "Int"
+        },
+        {
+          "name": "name",
+          "type": "Str"
+        }
+      ],
+      "returns": "Row",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "record",
+            "fields": [
+              [
+                "id",
+                {
+                  "kind": "var",
+                  "name": "id"
+                }
+              ],
+              [
+                "name",
+                {
+                  "kind": "var",
+                  "name": "name"
+                }
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "describe",
+      "params": [
+        {
+          "name": "outcome",
+          "type": "Outcome"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "var",
+              "name": "outcome"
+            },
+            "arms": [
+              {
+                "pattern": "Ok",
+                "bind": "row",
+                "body": {
+                  "kind": "field",
+                  "target": {
+                    "kind": "var",
+                    "name": "row"
+                  },
+                  "name": "name"
+                }
+              },
+              {
+                "pattern": "NotFound",
+                "bind": null,
+                "body": {
+                  "kind": "lit",
+                  "value": "not found"
+                }
+              },
+              {
+                "pattern": "Invalid",
+                "bind": "why",
+                "body": {
+                  "kind": "var",
+                  "name": "why"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "label",
+      "params": [
+        {
+          "name": "outcome",
+          "type": "Outcome"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "var",
+              "name": "outcome"
+            },
+            "arms": [
+              {
+                "pattern": "Ok",
+                "bind": "row",
+                "body": {
+                  "kind": "field",
+                  "target": {
+                    "kind": "var",
+                    "name": "row"
+                  },
+                  "name": "name"
+                }
+              },
+              {
+                "pattern": "_",
+                "bind": null,
+                "body": {
+                  "kind": "lit",
+                  "value": "other"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "negate",
+      "params": [
+        {
+          "name": "b",
+          "type": "Bool"
+        }
+      ],
+      "returns": "Bool",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "un",
+            "op": "!",
+            "operand": {
+              "kind": "var",
+              "name": "b"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "neg",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "un",
+            "op": "-",
+            "operand": {
+              "kind": "var",
+              "name": "n"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "list",
+      "params": [],
+      "returns": "List[Int]",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "list",
+            "items": [
+              {
+                "kind": "lit",
+                "value": 1
+              },
+              {
+                "kind": "lit",
+                "value": 2
+              },
+              {
+                "kind": "lit",
+                "value": 3
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "choose",
+      "params": [
+        {
+          "name": "b",
+          "type": "Bool"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "if",
+            "cond": {
+              "kind": "var",
+              "name": "b"
+            },
+            "then": {
+              "kind": "lit",
+              "value": 1
+            },
+            "else": {
+              "kind": "lit",
+              "value": 2
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "greet",
+      "class": "pure",
+      "params": [
+        {
+          "name": "name",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": " return \"hello \" + name "
+      }
+    }
+  ]
+}

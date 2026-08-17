@@ -78,6 +78,18 @@ describe('emitter (docs/backend-ir.md §Acceptance item 1)', () => {
     expect(result.stderr).toContain('ir_version')
   })
 
+  it('emits IR v3 test blocks as runnable vitest its', () => {
+    const vitest = join(backend, 'node_modules', '.bin', 'vitest')
+    const result = spawnSync(vitest, ['run', 'tests/generated/v3_tests.test.ts'], {
+      cwd: backend,
+      encoding: 'utf-8',
+      env: { ...process.env, CI: '1' },
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('tests/generated/v3_tests.test.ts')
+    expect(result.stdout).toContain('2 passed')
+  })
+
   it('rejects binding names that would shadow emitter scaffolding', () => {
     const dir = mkdtempSync(join(tmpdir(), 'revl-emit-'))
     const bad = {

@@ -1,0 +1,100 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "functions": [
+    {
+      "name": "add",
+      "params": [
+        {
+          "name": "a",
+          "type": "Int"
+        },
+        {
+          "name": "b",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "var",
+              "name": "a"
+            },
+            "right": {
+              "kind": "var",
+              "name": "b"
+            }
+          }
+        }
+      ],
+      "verified": true
+    }
+  ],
+  "tests": [
+    {
+      "name": "add works",
+      "body": [
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "add"
+              },
+              "args": [
+                {
+                  "kind": "lit",
+                  "value": 1
+                },
+                {
+                  "kind": "lit",
+                  "value": 2
+                }
+              ]
+            },
+            "right": {
+              "kind": "lit",
+              "value": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bool works",
+      "body": [
+        {
+          "step": "let",
+          "name": "t",
+          "value": {
+            "kind": "lit",
+            "value": true
+          },
+          "mutable": false
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "var",
+            "name": "t"
+          }
+        }
+      ]
+    }
+  ]
+}
