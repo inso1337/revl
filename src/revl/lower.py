@@ -474,6 +474,24 @@ def _variant_case_payload(types: dict, type_name: str | None, case_name: str) ->
     return None
 
 
+def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> str | None:
+    """The payload type bound by a match arm. User variants come from the case
+    table; built-in Opt/Result payloads come from the scrutinee's type args
+    (`Opt[T]` -> Some binds T; `Result[T, E]` -> Ok binds T, Err binds E)."""
+    user = _variant_case_payload(types, scrutinee_type, pattern)
+    if user is not None:
+        return user
+    head, args = parse_type(scrutinee_type)
+    if head == "Opt" and pattern == "Some" and args:
+        return args[0]
+    if head == "Result" and args and len(args) == 2:
+        if pattern == "Ok":
+            return args[0]
+        if pattern == "Err":
+            return args[1]
+    return None
+
+
 def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
     type_name = _expr_static_type(expr.scrutinee, type_env, types)
     spec = types.get(type_name or "")
@@ -967,17 +985,22 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         for pattern, bind, body in expr.arms:
             inner_scope = dict(scope)
             inner_type_env = dict(type_env)
+            payload_type = _arm_payload_type(scrutinee_type, pattern, types)
             if bind is not None:
                 inner_scope[bind] = False
                 inner_type_env.pop(bind, None)
-                payload_type = _variant_case_payload(types, scrutinee_type, pattern)
                 if payload_type is not None:
                     inner_type_env[bind] = payload_type
-            arms.append({
+            arm = {
                 "pattern": pattern,
                 "bind": bind,
                 "body": _lower_pure_expr(body, inner_scope, callables, alias_fns, filename, inner_type_env, types),
-            })
+            }
+            # payload type helps backends that must cast (e.g. Java's tagged
+            # Result); other emitters ignore it
+            if payload_type is not None:
+                arm["payload_type"] = payload_type
+            arms.append(arm)
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, ExprOptField):
         return {
