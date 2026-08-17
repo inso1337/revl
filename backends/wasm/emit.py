@@ -206,7 +206,44 @@ class _ComponentEmitter:
             )
         if kind == "format":
             raise EmitError(f"{where}: strings are not lowerable — i32-only tier")
+        if kind in ("bin", "un"):
+            # pure i32 arithmetic/comparison inside a component or method body
+            # — this tier's native shape, and what a method that names an
+            # intermediate is usually doing (tests/test_cross_tier.py)
+            return self._i32_operator(node, scope, where)
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
+
+    _I32_BINOPS = {
+        "+": "i32.add", "-": "i32.sub", "*": "i32.mul",
+        "/": "i32.div_s", "%": "i32.rem_s",
+        "==": "i32.eq", "===": "i32.eq", "!=": "i32.ne", "!==": "i32.ne",
+        "<": "i32.lt_s", ">": "i32.gt_s", "<=": "i32.le_s", ">=": "i32.ge_s",
+        "&&": "i32.and", "||": "i32.or",
+    }
+
+    def _i32_operator(self, node: Any, scope: dict[str, str], where: str) -> tuple[str, bool]:
+        if node.get("kind") == "un":
+            op = node.get("op")
+            operand, has_result = self._expr(node.get("operand"), scope, where)
+            if not has_result:
+                raise EmitError(f"{where}: unary `{op}` on a void expression")
+            if op == "-":
+                return f"(i32.sub (i32.const 0) {operand})", True
+            if op == "!":
+                return f"(i32.eqz {operand})", True
+            raise EmitError(f"{where}: unary `{op}` is not lowerable on the i32 tier")
+
+        op = node.get("op")
+        instruction = self._I32_BINOPS.get(op)
+        if instruction is None:
+            raise EmitError(
+                f"{where}: operator `{op}` is not lowerable on the i32 tier"
+            )
+        left, left_result = self._expr(node.get("left"), scope, where)
+        right, right_result = self._expr(node.get("right"), scope, where)
+        if not (left_result and right_result):
+            raise EmitError(f"{where}: `{op}` on a void expression")
+        return f"({instruction} {left} {right})", True
 
     def _statement(self, node: Any, scope: dict[str, str], where: str) -> str:
         """An expression evaluated for effect: drop an unused result."""

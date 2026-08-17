@@ -156,6 +156,18 @@ class _Scope:
 # Expression kinds that never need parentheses when used as a call target.
 _ATOMIC_KINDS = {"name", "config", "req", "call", "host"}
 
+# The 2.0 expression kinds live in `_v3_expr`; the component/method renderer
+# below owns the component-specific ones (`req`, `config`, `name`, `host`,
+# `format`). A component body mixes both — `let msg = prefix + name` is a
+# pure `bin` beside a `req` call — so the two renderers fall back to each
+# other. Without this a construct every other tier accepted was refused here
+# (see tests/test_cross_tier.py).
+_ACTIVE_V3: "list" = []
+
+
+def _v3_context_for_components() -> object:
+    return _ACTIVE_V3[0] if _ACTIVE_V3 else _TsV3Context({}, [], [])
+
 
 def _expr(node: object, scope: _Scope) -> str:
     if not isinstance(node, dict) or "kind" not in node:
@@ -253,7 +265,11 @@ def _expr(node: object, scope: _Scope) -> str:
     if kind == "list":
         return "[" + ", ".join(_expr(item, scope) for item in node.get("items") or []) + "]"
 
-    raise EmitError(f"unknown expression kind: {kind!r}")
+    # anything else is a pure 2.0 expression: the v3 renderer owns those
+    # kinds, and falls back here for the component-specific ones
+    ctx = _v3_context_for_components()
+    ctx.component_scope = scope
+    return _v3_expr(node, ctx)
 
 
 def _method_body(steps: list, scope: _Scope, indent: str) -> list[str]:
@@ -742,6 +758,10 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
         args = ", ".join(_v3_expr(a, ctx) for a in node.get("args") or [])
         return f"{target}?.{_ident(node.get('method'), 'optional method')}({args})"
 
+    # a component-specific expression nested inside a pure one
+    scope = getattr(ctx, "component_scope", None)
+    if scope is not None and kind in ("req", "config", "name", "host", "format"):
+        return _expr(node, scope)
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
 
@@ -1106,11 +1126,19 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
     version = ir.get("ir_version")
-    if version in (1, 2):
-        return _emit_v1(ir, runtime_import=runtime_import)
-    if version == 3:
-        return _emit_v3(ir, runtime_import=runtime_import)
-    raise EmitError(f"unsupported ir_version: {version!r}")
+    # publish a v3 context for the whole document so component/method bodies
+    # can render pure 2.0 expressions (see _v3_context_for_components)
+    _ACTIVE_V3.append(_TsV3Context(ir.get("types") or {},
+                                   ir.get("functions") or [],
+                                   ir.get("externs") or []))
+    try:
+        if version in (1, 2):
+            return _emit_v1(ir, runtime_import=runtime_import)
+        if version == 3:
+            return _emit_v3(ir, runtime_import=runtime_import)
+        raise EmitError(f"unsupported ir_version: {version!r}")
+    finally:
+        _ACTIVE_V3.pop()
 
 
 def _main(argv: list[str]) -> int:

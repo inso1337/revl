@@ -365,3 +365,36 @@ def test_cargo_check_compiles_v3_host_await_fail_block_effect(tmp_path):
     assert "return Err(cordis::CordisError::with_message" in src
     result = _cargo_check(tmp_path, src)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_method_body_bindings(tmp_path):
+    """A provide-method that names intermediates — the shape every other tier
+    accepted while the Rust backend refused it."""
+    ir = compile_source(
+        """
+        service Bus { emission fn send(m: Str) -> Int }
+        service Greet { emission fn hello(name: Str) -> Str }
+        service Plain { fn shout(name: Str) -> Str }
+
+        component Speaker requires bus: Bus provides greet: Greet, plain: Plain {
+          provide greet {
+            fn hello(name) {
+              emit bus.send(name)
+              let prefix = "hi, "
+              let message = prefix + name
+              return message
+            }
+          }
+          provide plain {
+            fn shout(name) {
+              var loud = name
+              loud = loud + "!"
+              return loud
+            }
+          }
+        }
+        """
+    )
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr

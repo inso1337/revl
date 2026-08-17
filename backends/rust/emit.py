@@ -554,25 +554,47 @@ def _method_return(env: _Env, key: str, mname: str):
     return env.services[service]["methods"].get(mname, {}).get("returns")
 
 
-def _method_body(env: _Env, method: dict) -> str:
+def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
+    """A pure method body as Rust statements.
+
+    The result is inlined into `fn name(..) -> T { <here> }`, so a plain
+    binding is a `let`, and the trailing `return` step keeps its keyword.
+    """
     steps = method.get("body") or []
     if len(steps) == 1 and steps[0].get("step") == "return":
-        rename = {b: f"self.{b}" for b in _binds(env.component)}
         return _expr(steps[0]["expr"], env, rename)
-    raise EmitError(
-        f"{env.name}.{method.get('name')}: pure method bodies must be a single "
-        f"return in the Rust backend (got {len(steps)} steps)"
-    )
+
+    parts: list[str] = []
+    scope = dict(rename)
+    for step in steps:
+        kind = step.get("step")
+        if kind == "let":
+            name = _ident(step.get("name"), "binding")
+            scope.pop(name, None)  # a local shadows an outer rename
+            parts.append(f"let {'mut ' if step.get('mutable') else ''}"
+                         f"{name} = {_expr(step['value'], env, scope)};")
+        elif kind == "assign":
+            name = _ident(step.get("name"), "binding")
+            parts.append(f"{name} = {_expr(step['value'], env, scope)};")
+        elif kind == "return":
+            expr = step.get("expr")
+            parts.append("return;" if expr is None
+                         else f"return {_expr(expr, env, scope)};")
+        else:
+            raise EmitError(
+                f"{env.name}.{method.get('name')}: a pure method body admits "
+                f"bindings and a return in the Rust backend, not {kind!r}"
+            )
+    return " ".join(parts)
+
+
+def _method_body(env: _Env, method: dict) -> str:
+    rename = {b: f"self.{b}" for b in _binds(env.component)}
+    return _pure_method_statements(env, method, rename)
 
 
 def _method_body_pure_new(env: _Env, method: dict) -> str:
-    steps = method.get("body") or []
-    if len(steps) == 1 and steps[0].get("step") == "return":
-        return _expr(steps[0]["expr"], env, _method_scope_rename(env))
-    raise EmitError(
-        f"{env.name}.{method.get('name')}: pure method bodies must be a single "
-        f"return in the Rust backend (got {len(steps)} steps)"
-    )
+    return _pure_method_statements(env, method, _method_scope_rename(env))
 
 
 def _component_has_effectful_methods(component: dict) -> bool:
@@ -724,6 +746,14 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             out.append(
                 f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
             )
+        elif kind in ("let", "assign"):
+            name = _ident(step.get("name"), "binding")
+            if kind == "let":
+                rename.pop(name, None)  # a local shadows an outer rename
+                out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
+                           f"{name} = {_expr(step['value'], env, rename)};")
+            else:
+                out.append(f"{pad}{name} = {_expr(step['value'], env, rename)};")
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         else:
