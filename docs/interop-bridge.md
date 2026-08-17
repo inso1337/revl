@@ -139,11 +139,15 @@ Participation levels differ, and the docs are honest about it:
   `<Svc>Proxy` and a stub dispatcher plus a `plugin_by_name` table, so the
   runner carries no composition-specific code, consumes and serves any seam,
   and the conductor regenerates `components.rs` from the running IR before
-  `cargo build`. Verified as consumer, provider, and on a second composition
-  (`examples/registry.rvl`). Remaining: proxy/stub cover scalar return types
-  (`Int`/`Str`/`Bool`/`Float`/`Opt`/`List[Value]`/`Unit`) but not records, ADTs,
-  `Result`, or `Map` yet (a proxy panics on an unsupported return), and there is
-  no peer-death monitor on the rust side yet (py/node/java have it).
+  `cargo build`. It is now a full reactive participant: a peer-death monitor
+  disposes the proxy on provider EOF, so a dead provider deactivates the rust
+  consumer reactively (`Active -> Pending`, verified), like py/node/java. Its
+  proxy/stub marshal scalars, `Opt`, `List`, `Map`, records, `Result`, and user
+  ADTs via serde. Records/`Map`/`List`/`Opt`/scalars are plain JSON and so
+  cross-language-consistent; `Result` and ADTs use serde's externally-tagged
+  form, which round-trips rust<->rust but would need the other emitters aligned
+  to the same tagging to cross languages. The only unmarshalled type is the
+  opaque host `Value`.
 
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a
