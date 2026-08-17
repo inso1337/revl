@@ -57,6 +57,7 @@ def test_end_to_end_typescript_golden():
 
 REJECTIONS = {
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
+    "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",
     "v2_intercept_on_provision.rvl": "`intercept` applies to required keys only — `kv` is a provision",
