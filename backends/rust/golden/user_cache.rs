@@ -115,10 +115,6 @@ impl Cache for UserCacheCache {
         let value_undo = value.clone();
         let _ = self.store.insert(key.clone(), value.clone());
         let _ = self.ctx.effect("UserCache.put.effect.0", move || { store_undo.remove(key_undo); Ok(()) });
-        let store_undo = self.store.clone();
-        let db_undo = self.db.clone();
-        let key_undo = key.clone();
-        let value_undo = value.clone();
         let _ = self.db.execute(format!("INSERT INTO cache_log VALUES ({0})", key.clone()));
     }
 }

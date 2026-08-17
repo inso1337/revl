@@ -388,7 +388,11 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
 
 def _format(template: str, args: list[str]) -> str:
     # IR format templates use `$0`/`$1` placeholders and `$$` for a literal `$`
-    # (A4). Map them onto Rust `format!` `{0}`/`{1}`.
+    # (A4). Map them onto Rust `format!` `{0}`/`{1}`. Literal text must have
+    # its braces doubled or `format!` reads them as (invalid) format specs.
+    def literal(text: list[str]) -> str:
+        return "".join(text).replace("{", "{{").replace("}", "}}")
+
     pieces, i, buf = [], 0, []
     while i < len(template):
         ch = template[i]
@@ -401,13 +405,13 @@ def _format(template: str, args: list[str]) -> str:
             while j < len(template) and template[j].isdigit():
                 j += 1
             if j > i + 1:
-                pieces.append("".join(buf) + "{" + template[i + 1 : j] + "}")
+                pieces.append(literal(buf) + "{" + template[i + 1 : j] + "}")
                 buf = []
                 i = j
                 continue
         buf.append(ch)
         i += 1
-    pieces.append("".join(buf))
+    pieces.append(literal(buf))
     return f"format!({_string(''.join(pieces))}, {', '.join(args)})"
 
 
@@ -554,14 +558,20 @@ def _method_body(env: _Env, method: dict) -> str:
     if len(steps) == 1 and steps[0].get("step") == "return":
         rename = {b: f"self.{b}" for b in _binds(env.component)}
         return _expr(steps[0]["expr"], env, rename)
-    return "todo!()"
+    raise EmitError(
+        f"{env.name}.{method.get('name')}: pure method bodies must be a single "
+        f"return in the Rust backend (got {len(steps)} steps)"
+    )
 
 
 def _method_body_pure_new(env: _Env, method: dict) -> str:
     steps = method.get("body") or []
     if len(steps) == 1 and steps[0].get("step") == "return":
         return _expr(steps[0]["expr"], env, _method_scope_rename(env))
-    return "todo!()"
+    raise EmitError(
+        f"{env.name}.{method.get('name')}: pure method bodies must be a single "
+        f"return in the Rust backend (got {len(steps)} steps)"
+    )
 
 
 def _component_has_effectful_methods(component: dict) -> bool:
@@ -695,11 +705,15 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{param}.clone()"
             label = _string(f"{env.name}.{method.get('name')}.{kind}.{index}")
-            if step.get("compensate") is None:
+            # An undo closure is registered for every effect, and for an emit
+            # only when it carries a compensate — the `*_undo` clones exist
+            # exactly when that closure exists.
+            registers_undo = kind == "effect" or step.get("compensate") is not None
+            if registers_undo:
                 _method_undo_clones(env, method, out, indent)
             acquire = _expr(step.get("acquire") or step.get("expr"), env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
-            if kind == "emit" and step.get("compensate") is None:
+            if not registers_undo:
                 continue
             undo = (
                 _expr(step["compensate"], env, undo_rename)
@@ -1222,7 +1236,8 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
         target = _v3_expr(target_node, ctx)
         if target_node.get("kind") not in _V3_ATOMIC_KINDS:
             target = f"({target})"
-        return f"({target})[{_v3_expr(node['index'], ctx)}].clone()"
+        # revl Int is i64; Rust indexing wants usize.
+        return f"({target})[({_v3_expr(node['index'], ctx)}) as usize].clone()"
 
     if kind == "if":
         return (
@@ -1247,7 +1262,8 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
 
     if kind == "len":
         target = _v3_expr(node.get("target"), ctx)
-        return f"({target}.len() as i64)"
+        # Via the helper trait: String::len is bytes, revl length is elements.
+        return f"{target}.revl_length()"
 
     if kind == "builtin":
         target_node = node.get("target")
@@ -1268,21 +1284,82 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
 
 
 def _v3_builtin(method: str, target: str, args: list[str]) -> str:
+    """The stdlib surface (docs/stdlib-2.0.md), dispatched via the Revl*Ops
+    helper traits so every (method, Str|List) pair from the spec table
+    compiles — Rust resolves the receiver type statically."""
     if method == "length":
-        return f"({target}.len() as i64)"
+        return f"{target}.revl_length()"
     if method == "push":
-        return f"{{ let mut _v = {target}.clone(); _v.push({args[0]}); _v }}"
+        return f"{target}.revl_push({args[0]})"
     if method == "concat":
-        return f"{{ let mut _v = {target}.clone(); _v.extend({args[0]}.iter().cloned()); _v }}"
+        return f"{target}.revl_concat(&{args[0]})"
     if method == "slice":
-        return f"{{ let _v = {target}.clone(); _v[{args[0]}..{args[1]}].to_vec() }}"
+        return f"{target}.revl_slice({args[0]}, {args[1]})"
     if method == "charAt":
-        return f"{{ {target}.chars().nth({args[0]}).unwrap().to_string() }}"
+        return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap().to_string() }}"
     if method == "charCodeAt":
-        return f"{{ {target}.chars().nth({args[0]}).unwrap() as u32 as i64 }}"
+        return f"{{ {target}.chars().nth(({args[0]}) as usize).unwrap() as u32 as i64 }}"
     if method == "indexOf":
-        return f"{{ {target}.find({args[0]}).map(|i| i as i64).unwrap_or(-1) }}"
+        return f"{target}.revl_index_of(&{args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
+
+
+def _stdlib_helper_traits() -> list[str]:
+    """Emitted once per module when any builtin/len node is present.
+
+    Parity notes: string positions are char-based (matching the Python
+    backend, where str indexing is per code point); `revl_index_of` returns
+    -1 when absent on both hosts; `revl_push`/`revl_concat` are persistent
+    (docs/stdlib-2.0.md).
+    """
+    return [
+        "trait RevlStrOps {",
+        "    fn revl_length(&self) -> i64;",
+        "    fn revl_slice(&self, a: i64, b: i64) -> String;",
+        "    fn revl_index_of(&self, needle: &String) -> i64;",
+        "    fn revl_concat(&self, other: &String) -> String;",
+        "}",
+        "impl RevlStrOps for String {",
+        "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }",
+        "    fn revl_slice(&self, a: i64, b: i64) -> String {",
+        "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()",
+        "    }",
+        "    fn revl_index_of(&self, needle: &String) -> i64 {",
+        "        let hay: Vec<char> = self.chars().collect();",
+        "        let nee: Vec<char> = needle.chars().collect();",
+        "        if nee.is_empty() { return 0; }",
+        "        if nee.len() > hay.len() { return -1; }",
+        "        for i in 0..=(hay.len() - nee.len()) {",
+        "            if hay[i..i + nee.len()] == nee[..] { return i as i64; }",
+        "        }",
+        "        -1",
+        "    }",
+        "    fn revl_concat(&self, other: &String) -> String { format!(\"{}{}\", self, other) }",
+        "}",
+        "trait RevlListOps<T> {",
+        "    fn revl_length(&self) -> i64;",
+        "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T>;",
+        "    fn revl_index_of(&self, needle: &T) -> i64;",
+        "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T>;",
+        "    fn revl_push(&self, item: T) -> Vec<T>;",
+        "}",
+        "impl<T: Clone + PartialEq> RevlListOps<T> for Vec<T> {",
+        "    fn revl_length(&self) -> i64 { self.len() as i64 }",
+        "    fn revl_slice(&self, a: i64, b: i64) -> Vec<T> {",
+        "        self[a.max(0) as usize..b.max(0) as usize].to_vec()",
+        "    }",
+        "    fn revl_index_of(&self, needle: &T) -> i64 {",
+        "        self.iter().position(|x| x == needle).map(|i| i as i64).unwrap_or(-1)",
+        "    }",
+        "    fn revl_concat(&self, other: &Vec<T>) -> Vec<T> {",
+        "        let mut _v = self.clone(); _v.extend(other.iter().cloned()); _v",
+        "    }",
+        "    fn revl_push(&self, item: T) -> Vec<T> {",
+        "        let mut _v = self.clone(); _v.push(item); _v",
+        "    }",
+        "}",
+        "",
+    ]
 
 
 def _v3_interp(node: dict) -> str:
@@ -1509,10 +1586,36 @@ def _needs_realm_helper(components: list) -> bool:
     return any(component.get("isolate") for component in components)
 
 
+def _uses_stdlib(ir: dict) -> bool:
+    """True when any builtin/len node appears anywhere in the document."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") in ("builtin", "len"):
+                found = True
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    walk(ir.get("functions"))
+    walk(ir.get("tests"))
+    return found
+
+
 def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
     out.extend(_emit_service_traits(ir.get("services") or {}))
     out.extend(_emit_host_stubs(ir))
+    if _uses_stdlib(ir):
+        out.extend(_stdlib_helper_traits())
     if _needs_realm_helper(components):
         out.extend(_revl_realm_helper())
     for component in components:

@@ -25,7 +25,8 @@ public final class Components {
     public static final class Map {
         private final java.util.HashMap<String, String> values = new java.util.HashMap<>();
         private Map() {}
-        public static Map new() {
+        // revl `Map.new()` — renamed: `new` is a Java reserved word.
+        public static Map create() {
             return new Map();
         }
         public void drop() {
@@ -87,9 +88,10 @@ public final class Components {
         @Override
         public Disposable apply(Context ctx) {
             Pool pool = Pool.open(url, pool_size);
-            ctx.provide(ServiceKey.of(Database.class), new PgDatabaseDb(pool));
+            Disposable db_provision = ctx.provide(ServiceKey.of(Database.class), new PgDatabaseDb(pool));
             return Disposables.composite(
-                Disposables.of(() -> pool.close())
+                Disposables.of(() -> pool.close()),
+            db_provision
             );
         }
     }
@@ -122,7 +124,7 @@ public final class Components {
         public Disposable apply(Context ctx) {
             Context.EffectScope fx = ctx.effect();
             Database db = ctx.get(Database.class);
-            var store = Map.new();
+            var store = Map.create();
             fx.track(Disposables.of(() -> store.drop()));
             fx.track(ctx.provide(ServiceKey.of(Cache.class), new UserCacheCache(ctx, fx, db, store)));
             return fx;

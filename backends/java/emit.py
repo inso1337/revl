@@ -68,6 +68,15 @@ _HOST_STUBS = {
     },
 }
 
+# revl host-method names that are Java reserved words must be renamed at both
+# the call site and the runtime-class definition (`Map.new()` is a parse
+# error — `new` cannot be a method name).
+_HOST_METHOD_RENAMES = {"new": "create"}
+
+
+def _host_method(name: str) -> str:
+    return _HOST_METHOD_RENAMES.get(name, name)
+
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _JAVA_RESERVED = {
@@ -346,36 +355,85 @@ def _v3_var(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> st
 
 
 def _v3_len(target: str) -> str:
-    return (
-        f"(({target} instanceof java.util.List<?>) ? "
-        f"((java.util.List<?>) {target}).size() : String.valueOf({target}).length())"
-    )
+    return f"revlLength({target})"
 
 
 def _v3_builtin(method: object, target: str, args: list[str]) -> str:
-    """The stdlib surface (docs/stdlib-2.0.md) as Java 21."""
+    """The stdlib surface (docs/stdlib-2.0.md), dispatched through the
+    `revl*` static overloads (emitted once per file) — javac resolves the
+    receiver's static type, so every (method, Str|List) pair from the spec
+    table compiles. The previous inline lowerings picked one type per method
+    (`subList` broke Str.slice, `String.concat` broke List.concat) and the
+    `instanceof java.util.List` ternaries did not compile for receivers
+    statically typed `String`."""
     if method == "length":
-        return _v3_len(target)
+        return f"revlLength({target})"
     if method == "push":
-        return (
-            f"java.util.stream.Stream.concat({target}.stream(), "
-            f"java.util.stream.Stream.of({args[0]})).toList()"
-        )
+        return f"revlPush({target}, {args[0]})"
     if method == "slice":
-        return f"{target}.subList((int)({args[0]}), (int)({args[1]}))"
+        return f"revlSlice({target}, {args[0]}, {args[1]})"
     if method == "charAt":
         return f"String.valueOf(String.valueOf({target}).charAt((int)({args[0]})))"
     if method == "charCodeAt":
         return f"(long) String.valueOf({target}).charAt((int)({args[0]}))"
     if method == "concat":
-        return f"String.valueOf({target}).concat(String.valueOf({args[0]}))"
+        return f"revlConcat({target}, {args[0]})"
     if method == "indexOf":
-        return (
-            f"(long) (({target} instanceof java.util.List<?>) ? "
-            f"((java.util.List<?>) {target}).indexOf({args[0]}) : "
-            f"String.valueOf({target}).indexOf(String.valueOf({args[0]})))"
-        )
+        return f"revlIndexOf({target}, {args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
+
+
+def _emit_stdlib_helpers() -> list[str]:
+    """Static overloads backing the builtin surface — emitted once per file
+    when any builtin/len node is present. Overload resolution replaces
+    runtime `instanceof` dispatch; `revlPush`/`revlConcat`/`revlSlice`
+    return copies (persistent, docs/stdlib-2.0.md)."""
+    return [
+        "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
+        "private static long revlLength(String s) { return s.length(); }",
+        "private static long revlLength(java.util.List<?> xs) { return xs.size(); }",
+        "private static long revlLength(Object x) {",
+        "    return (x instanceof java.util.List<?>) ? ((java.util.List<?>) x).size() : String.valueOf(x).length();",
+        "}",
+        "private static String revlSlice(String s, long a, long b) { return s.substring((int) a, (int) b); }",
+        "private static <T> java.util.List<T> revlSlice(java.util.List<T> xs, long a, long b) {",
+        "    return java.util.List.copyOf(xs.subList((int) a, (int) b));",
+        "}",
+        "private static long revlIndexOf(String s, String needle) { return s.indexOf(needle); }",
+        "private static <T> long revlIndexOf(java.util.List<T> xs, T v) { return xs.indexOf(v); }",
+        "private static String revlConcat(String a, String b) { return a.concat(b); }",
+        "private static <T> java.util.List<T> revlConcat(java.util.List<T> a, java.util.List<T> b) {",
+        "    return java.util.stream.Stream.concat(a.stream(), b.stream()).toList();",
+        "}",
+        "private static <T> java.util.List<T> revlPush(java.util.List<T> xs, T v) {",
+        "    return java.util.stream.Stream.concat(xs.stream(), java.util.stream.Stream.of(v)).toList();",
+        "}",
+        "",
+    ]
+
+
+def _uses_stdlib(ir: dict) -> bool:
+    """True when any builtin/len node appears anywhere in the document."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") in ("builtin", "len"):
+                found = True
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    walk(ir.get("functions"))
+    walk(ir.get("tests"))
+    return found
 
 
 def _v3_call(
@@ -446,7 +504,7 @@ def _v3_expr(
         args = ", ".join(
             _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
         )
-        return f"{host}.{method}({args})"
+        return f"{host}.{_host_method(method)}({args})"
 
     if kind == "call":
         if "callee" in node:
@@ -606,6 +664,20 @@ def _v3_match_expr(
     return "\n".join(lines)
 
 
+def _let_keyword(node: dict) -> str:
+    """Declaration type for a v3 `let`/`var`.
+
+    An empty list literal has no element type, and `var` would freeze it as
+    `List<Object>` — later pushes and the declared return type then fail to
+    unify. A raw `java.util.List` keeps javac's erasure in play (unchecked
+    warning, correct code); non-empty literals infer their element type.
+    """
+    value = node.get("value")
+    if isinstance(value, dict) and value.get("kind") == "list" and not value.get("items"):
+        return "java.util.List"
+    return "var" if node.get("mutable") else "final var"
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -613,8 +685,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         name = _ident(node.get("name"), "binding")
         value = _v3_expr(node.get("value"), ctx)
         if step == "let":
-            keyword = "var" if node.get("mutable") else "final var"
-            out.append(f"{pad}{keyword} {name} = {value};")
+            out.append(f"{pad}{_let_keyword(node)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif step == "return":
@@ -813,7 +884,7 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
         fn = node.get("fn")
         host, _, method = fn.partition(".")
         args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
-        return f"{host}.{method}({args})"
+        return f"{host}.{_host_method(method)}({args})"
     if kind == "req":
         original = node.get("name")
         if rename and original in rename:
@@ -847,7 +918,12 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
 
 
 def _format_java(template: str, args: list[str]) -> str:
-    # `$0`/`$1` placeholders -> `%s`; `$$` -> literal `$` (A4).
+    # `$0`/`$1` placeholders -> `%s`; `$$` -> literal `$` (A4). A literal `%`
+    # in the template text must become `%%` or String.format throws
+    # UnknownFormatConversionException at runtime (SQL LIKE patterns).
+    def literal(text: list[str]) -> str:
+        return "".join(text).replace("%", "%%")
+
     pieces, i, buf = [], 0, []
     while i < len(template):
         ch = template[i]
@@ -860,13 +936,13 @@ def _format_java(template: str, args: list[str]) -> str:
             while j < len(template) and template[j].isdigit():
                 j += 1
             if j > i + 1:
-                pieces.append("".join(buf) + "%s")
+                pieces.append(literal(buf) + "%s")
                 buf = []
                 i = j
                 continue
         buf.append(ch)
         i += 1
-    pieces.append("".join(buf))
+    pieces.append(literal(buf))
     return f"String.format({_string(''.join(pieces))}, {', '.join(args)})"
 
 
@@ -919,7 +995,8 @@ def _emit_map_runtime() -> list[str]:
         "public static final class Map {",
         "    private final java.util.HashMap<String, String> values = new java.util.HashMap<>();",
         "    private Map() {}",
-        "    public static Map new() {",
+        "    // revl `Map.new()` — renamed: `new` is a Java reserved word.",
+        "    public static Map create() {",
         "        return new Map();",
         "    }",
         "    public void drop() {",
@@ -1142,8 +1219,7 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         name = _ident(step.get("name"), "binding")
         value = _expr(step.get("value"), env, None, v3_ctx)
         if kind == "let":
-            keyword = "var" if step.get("mutable") else "final var"
-            out.append(f"{pad}{keyword} {name} = {value};")
+            out.append(f"{pad}{_let_keyword(step)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif kind == "expr":
@@ -1438,7 +1514,14 @@ def _emit_component(
             service = step.get("service")
             struct = f"{cname}{_camel(key)}"
             ctor_args = ", ".join(b for b in _binds(component))
-            out.append(f"        ctx.provide(ServiceKey.of({service}.class), new {struct}({ctor_args}));")
+            # The provision's disposable joins the teardown composite — the
+            # modern path tracks it via fx.track(ctx.provide(...)); dropping
+            # it here would leave the provision registered after unload.
+            out.append(
+                f"        Disposable {key}_provision = "
+                f"ctx.provide(ServiceKey.of({service}.class), new {struct}({ctor_args}));"
+            )
+            disposers.append(f"            {key}_provision")
         else:
             raise EmitError(f"unsupported component step in Java backend: {kind!r}")
     if disposers:
@@ -1488,6 +1571,8 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     out.append("")
     out.extend(["    " + line if line else line for line in _emit_service_interfaces(ir.get("services") or {})])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if _uses_stdlib(ir):
+        out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -1511,6 +1596,8 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     out.append("")
     out.extend(["    " + line if line else line for line in _emit_service_interfaces(ir.get("services") or {})])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if _uses_stdlib(ir):
+        out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -1542,6 +1629,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if services:
         out.extend(["    " + line if line else line for line in _emit_service_interfaces_v3(services)])
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
+    if _uses_stdlib(ir):
+        out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
     if externs:
         out.extend(["    " + line if line else line for line in _emit_v3_externs(externs)])
     if functions:
