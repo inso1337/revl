@@ -1705,6 +1705,15 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     filename, method.line,
                     f"parameter `{surface}` of `{method.name}` (from service `{svc.name}`)",
                     svc_ptype, annotation)
+        # optional `-> T` return annotation, checked against the service
+        if method.returns is not None:
+            check_type_wellformed(filename, method.line, method.returns)
+            if decl.returns and not (compatible(decl.returns, method.returns)
+                                     and compatible(method.returns, decl.returns)):
+                raise mismatch(
+                    filename, method.line,
+                    f"return type of `{method.name}` (from service `{svc.name}`)",
+                    decl.returns, method.returns)
 
         saved = env.params
         env.params = env.bind_params(method.params, method.line)
