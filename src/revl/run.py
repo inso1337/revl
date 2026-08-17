@@ -312,6 +312,10 @@ class _Driver:
 
 
 def run_command(args) -> int:
+    if getattr(args, "placement", None):
+        from .placement import run_placement  # noqa: PLC0415 — lazy: no cordis needed to orchestrate
+        return run_placement(args.files, args.placement, once=getattr(args, "once", False))
+
     backend = getattr(args, "backend", "py")
     if backend not in KNOWN_BACKENDS:
         print(f"error: unknown backend {backend!r} (known: {', '.join(KNOWN_BACKENDS)})",
