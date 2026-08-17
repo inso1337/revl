@@ -75,6 +75,8 @@ REJECTIONS = {
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
+    "t1_service_arg_type.rvl": "`db.query` argument `sql` expects `Str`, got `Int`",
+    "t2_null_in_expression.rvl": "`null` has no type in revl",
     "g2_provision_conflict.rvl": "provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)",
     "g3_dependency_cycle.rvl": "dependency cycle: Alpha -> Beta -> Alpha (G3)",
     "g4_missing_undo.rvl": "effect has no `undo` and `Pool.open` is not pure",

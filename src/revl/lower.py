@@ -16,6 +16,17 @@ from __future__ import annotations
 import keyword
 
 from .errors import RevlError
+from .typecheck import (
+    CASES_KEY,
+    FNS_KEY,
+    check_ast,
+    compatible,
+    infer_ast,
+    infer_ir,
+    mismatch,
+    null_error,
+    parse_type,
+)
 from .parser import (
     AssertStmt,
     AssignStmt,
@@ -116,10 +127,17 @@ def _safe_name(name: str, taken: set[str]) -> str:
 
 
 class Env:
-    def __init__(self, component: ComponentDecl, services: dict[str, ServiceDecl], filename: str):
+    def __init__(self, component: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
+                 types: dict | None = None):
         self.component = component
         self.services = services
         self.filename = filename
+        self.types = types or {}
+        # component-body type environment: safe-name -> type, plus the
+        # "config.<field>" and "req.<local>" markers infer_ir resolves
+        self.type_env: dict[str, str] = {}
+        for cfg_field in component.config:
+            self.type_env[f"config.{cfg_field.name}"] = cfg_field.type
         self.config_fields = {f.name for f in component.config}
         self.requires = dict()  # local -> service name
         for local, svc, line in component.requires:
@@ -128,6 +146,7 @@ class Env:
             if local in self.requires:
                 raise RevlError(filename, line, f"duplicate requirement name `{local}` in {component.name}")
             self.requires[local] = svc
+            self.type_env[f"req.{local}"] = svc
         self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()
@@ -325,7 +344,8 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types)
+            _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types,
+                             expected_return=decl.returns)
         entry = {
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
@@ -339,6 +359,42 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     return fns
 
 
+def _signature_table(program: Program) -> dict:
+    """{name: {"params": [type...], "returns": type|None}} for fns + externs."""
+    sigs: dict = {}
+    for fn_decl in program.fn_decls:
+        sigs[fn_decl.name] = {"params": [p.type for p in fn_decl.params],
+                              "returns": fn_decl.returns}
+    for ext in program.externs:
+        sigs[ext.name] = {"params": [p.type for p in ext.params],
+                          "returns": ext.returns}
+    return sigs
+
+
+def _case_table(types: dict) -> dict:
+    """ADT constructor table: case name -> {"adt", "payload"}. Builtins first;
+    ambiguous user cases (same name in two ADTs) are dropped to stay silent."""
+    cases: dict = {
+        "Some": {"adt": "Opt[Any]", "payload": None},
+        "None": {"adt": "Opt[Any]", "payload": None},
+        "Ok": {"adt": "Result[Any, Any]", "payload": None},
+        "Err": {"adt": "Result[Any, Any]", "payload": None},
+    }
+    ambiguous: set = set()
+    for type_name, spec in types.items():
+        if type_name.startswith("__") or spec.get("kind") != "variant":
+            continue
+        for case in spec.get("cases", []):
+            name = case["name"]
+            if name in cases or name in ambiguous:
+                if name not in ("Some", "None", "Ok", "Err"):
+                    ambiguous.add(name)
+                    cases.pop(name, None)
+                continue
+            cases[name] = {"adt": type_name, "payload": case["payload"]}
+    return cases
+
+
 def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
     """Best-effort static type of a pure expression.
 
@@ -346,30 +402,8 @@ def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
     not recoverable from the local type environment, lowering still proceeds
     (the Python emitter adds a runtime fallback for those cases).
     """
-    if isinstance(expr, ExprVar):
-        return type_env.get(expr.name)
-    if isinstance(expr, ExprField):
-        target = _expr_static_type(expr.target, type_env, types)
-        spec = types.get(target or "")
-        if spec is not None and spec.get("kind") == "record":
-            return spec.get("fields", {}).get(expr.name)
-        return None
-    if isinstance(expr, ExprLit):
-        if isinstance(expr.value, bool):
-            return "Bool"
-        if isinstance(expr.value, int):
-            return "Int"
-        if isinstance(expr.value, float):
-            return "Float"
-        if isinstance(expr.value, str):
-            return "Str"
-        return None
-    if isinstance(expr, ExprList):
-        if not expr.items:
-            return "List[Never]"
-        item_type = _expr_static_type(expr.items[0], type_env, types)
-        return f"List[{item_type or 'Any'}]"
-    return None
+    # delegated to the bidirectional checker's inference (non-raising form)
+    return infer_ast(expr, type_env, types)
 
 
 def _type_arg(type_name: str | None, base: str) -> str | None:
@@ -544,8 +578,15 @@ def _lower_tests(program: Program, filename: str) -> list:
     return tests
 
 
+def _bool_cond(expr, type_env: dict, types: dict, filename: str, where: str) -> None:
+    t = infer_ast(expr, type_env, types, filename)
+    if t is not None and t != "Bool":
+        raise mismatch(filename, getattr(expr, "line", 0), f"`{where}` condition", "Bool", t)
+
+
 def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: list, filename: str,
-                     type_env: dict | None = None, types: dict | None = None) -> None:
+                     type_env: dict | None = None, types: dict | None = None,
+                     expected_return: str | None = None) -> None:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
     if isinstance(stmt, LetStmt):
@@ -557,7 +598,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             scope[stmt.name] = "host"
         else:
             scope[stmt.name] = stmt.mutable
-        inferred = _expr_static_type(stmt.value, type_env, types)
+        inferred = infer_ast(stmt.value, type_env, types, filename)
         if inferred is not None:
             type_env[stmt.name] = inferred
         body.append({"step": "let", "name": stmt.name,
@@ -579,36 +620,52 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             # `x += e` desugars to `x = x + e`; the parser only composes the
             # operator, so lowering never has to remember it beyond this point.
             value = ExprBin(stmt.op[:-1], ExprVar(stmt.name, stmt.line), stmt.value, stmt.line)
-        inferred = _expr_static_type(value, type_env, types)
-        if inferred is not None:
+        inferred = infer_ast(value, type_env, types, filename)
+        declared = type_env.get(stmt.name)
+        if declared and inferred and not compatible(declared, inferred):
+            raise mismatch(filename, stmt.line,
+                           f"assignment to `{stmt.name}` (a `{declared}` variable)",
+                           declared, inferred)
+        if inferred is not None and declared is None:
             type_env[stmt.name] = inferred
         body.append({"step": "assign", "name": stmt.name,
                      "value": _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, ReturnStmt):
+        if stmt.expr is not None:
+            check_ast(stmt.expr, expected_return, type_env, types, filename, "this function's return")
+        elif expected_return:
+            raise RevlError(filename, stmt.line,
+                            f"bare `return` in a function declared to return `{expected_return}`")
         body.append({"step": "return",
                      "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, IfStmt):
         then: list[dict] = []
+        _bool_cond(stmt.cond, type_env, types, filename, "if")
         for s in stmt.then:
-            _lower_pure_stmt(s, scope, callables, alias_fns, then, filename, type_env, types)
+            _lower_pure_stmt(s, scope, callables, alias_fns, then, filename, type_env, types, expected_return)
         otherwise = None
         if stmt.otherwise is not None:
             otherwise = []
             for s in stmt.otherwise:
-                _lower_pure_stmt(s, scope, callables, alias_fns, otherwise, filename, type_env, types)
+                _lower_pure_stmt(s, scope, callables, alias_fns, otherwise, filename, type_env, types, expected_return)
         body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, alias_fns, filename, type_env, types),
                      "then": then, "else": otherwise})
     elif isinstance(stmt, WhileStmt):
+        _bool_cond(stmt.cond, type_env, types, filename, "while")
         cond = _lower_pure_expr(stmt.cond, scope, callables, alias_fns, filename, type_env, types)
         inner_scope = dict(scope)
         inner_type_env = dict(type_env)
         inner_body: list[dict] = []
         for s in stmt.body:
-            _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types)
+            _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types, expected_return)
         body.append({"step": "while", "cond": cond, "body": inner_body})
     elif isinstance(stmt, ForStmt):
         if stmt.bind in scope:
             raise RevlError(filename, stmt.line, f"`{stmt.bind}` is already declared in this function")
+        iter_diag = infer_ast(stmt.iterable, type_env, types, filename)
+        if iter_diag is not None and parse_type(iter_diag)[0] != "List":
+            raise RevlError(filename, stmt.line,
+                            f"`for ... of` iterates a `List[...]`, got `{iter_diag}`")
         iterable = _lower_pure_expr(stmt.iterable, scope, callables, alias_fns, filename, type_env, types)
         inner_scope = dict(scope)
         inner_type_env = dict(type_env)
@@ -619,11 +676,13 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             inner_type_env[stmt.bind] = element_type
         inner_body = []
         for s in stmt.body:
-            _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types)
+            _lower_pure_stmt(s, inner_scope, callables, alias_fns, inner_body, filename, inner_type_env, types, expected_return)
         body.append({"step": "for", "bind": stmt.bind, "iterable": iterable, "body": inner_body})
     elif isinstance(stmt, ExprStmt):
+        infer_ast(stmt.expr, type_env, types, filename)
         body.append({"step": "expr", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     elif isinstance(stmt, AssertStmt):
+        _bool_cond(stmt.expr, type_env, types, filename, "assert")
         body.append({"step": "assert", "expr": _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
     else:  # pragma: no cover — grammar prevents it
         raise RevlError(filename, getattr(stmt, "line", 1), "unexpected statement in fn body")
@@ -733,6 +792,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args],
             }
     if isinstance(expr, ExprLit):
+        if expr.value is None:
+            raise null_error(filename, expr.line)
         return {"kind": "lit", "value": expr.value}
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
@@ -877,20 +938,25 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         | {ext.name for ext in program.externs}
     )
 
+    # types and signatures are built first so component lowering can
+    # type-check service/fn call sites (the sound-typing milestone)
+    types = _lower_type_decls(program, program.filename)
+    types[FNS_KEY] = _signature_table(program)
+    types[CASES_KEY] = _case_table(types)
+    fns = _lower_fns(program, program.filename, types)
+    externs = _lower_externs(program, program.filename)
+    tests = _lower_tests(program, program.filename)
+
     components = []
     seen = set()
     for comp in program.components:
         if comp.name in seen:
             raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
         seen.add(comp.name)
-        components.append(_lower_component(comp, services, program.filename, component_callables))
+        components.append(_lower_component(comp, services, program.filename, component_callables,
+                                           types))
 
     manifest = _link(program, components, ambient.get("components") or [])
-
-    types = _lower_type_decls(program, program.filename)
-    fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename)
-    tests = _lower_tests(program, program.filename)
 
     uses_components_2 = any(
         isinstance(stmt, (FailStmt, IfStmt))
@@ -899,7 +965,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         for stmt in comp.body
     )
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
-    uses_v3 = bool(types) or bool(fns) or bool(externs) or bool(tests)
+    uses_v3 = any(not name.startswith("__") for name in types) or bool(fns) or bool(externs) or bool(tests)
     uses_v3 = uses_v3 or any(
         svc.commutative or any(m.async_ or m.commutative for m in svc.methods.values())
         for svc in services.values()
@@ -936,8 +1002,9 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         "components": components,
         "manifest": manifest,
     }
-    if types:
-        result["types"] = types
+    user_types = {name: spec for name, spec in types.items() if not name.startswith("__")}
+    if user_types:
+        result["types"] = user_types
     if fns:
         result["functions"] = fns
     if externs:
@@ -1007,6 +1074,11 @@ def _component_req_call(env: Env, root: str, method: str, args: list, line: int)
             hint="an emission crosses the system boundary and cannot be reverted; "
                  "`emit` makes that visible at the call site",
         )
+    for arg, (pname, ptype) in zip(args, decl.params):
+        actual = infer_ir(arg, env.type_env, env.types, env.services)
+        if ptype and actual and not compatible(ptype, actual):
+            raise mismatch(env.filename, line,
+                           f"`{root}.{method}` argument `{pname}`", ptype, actual)
     return {"kind": "call", "target": {"kind": "req", "name": root},
             "method": method, "args": args}
 
@@ -1017,6 +1089,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     line = getattr(expr, "line", 0)
 
     if isinstance(expr, ExprLit):
+        if expr.value is None:
+            raise null_error(filename, line)
         return {"kind": "lit", "value": expr.value}
     if isinstance(expr, Interp):
         return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
@@ -1243,8 +1317,8 @@ def _lower_component_if(stmt: IfStmt, env: Env, callables: set) -> dict:
 
 
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
-                     callables: set | None = None) -> dict:
-    env = Env(comp, services, filename)
+                     callables: set | None = None, types: dict | None = None) -> dict:
+    env = Env(comp, services, filename, types)
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
 
     provides = {}
@@ -1329,6 +1403,9 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")
             safe = env.bind_local(stmt.bind, stmt.line)
+            acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
+            if acquired_type is not None:
+                env.type_env[safe] = acquired_type
             undo = _lower_expr(stmt.undo, env, mode="undo")
             step = {"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo}
             if setup_steps:
@@ -1427,6 +1504,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
 
         saved = env.params
         env.params = env.bind_params(method.params, method.line)
+        # method params carry the service's declared types (A6): surface
+        # names bind the body, the service contributes the signature
+        saved_tenv = dict(env.type_env)
+        for surface, (_, ptype) in zip(method.params, decl.params):
+            env.type_env[env.params[surface]] = ptype
         mbody = []
         returned = False
         for mstmt in method.body:
@@ -1450,12 +1532,19 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     )
                 mbody.append({"step": "await", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
             elif isinstance(mstmt, ReturnStmt):
-                mbody.append({"step": "return", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
+                lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
+                if decl.returns:
+                    actual = infer_ir(lowered_return, env.type_env, env.types, env.services)
+                    if actual and not compatible(decl.returns, actual):
+                        raise mismatch(filename, mstmt.line,
+                                       f"`{method.name}` returns", decl.returns, actual)
+                mbody.append({"step": "return", "expr": lowered_return})
                 returned = True
             else:  # pragma: no cover
                 raise RevlError(filename, mstmt.line, "unexpected statement in method body")
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
+        env.type_env = saved_tenv
         methods.append({"name": method.name, "params": safe_params, "body": mbody})
 
     missing = set(svc.methods) - implemented
@@ -1505,6 +1594,8 @@ def _lower_expr(expr, env: Env, mode: str):
     arrives with IR v1/A5).
     """
     if isinstance(expr, Lit):
+        if expr.value is None:
+            raise null_error(env.filename, expr.line)
         return {"kind": "lit", "value": expr.value}
     if isinstance(expr, Interp):
         template = []
@@ -1586,6 +1677,15 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
                     hint="an emission crosses the system boundary and cannot be reverted; "
                          "`emit` makes that visible at the call site",
                 )
+            lowered = [_lower_expr(a, env, mode) for a in op.args]
+            for arg, (pname, ptype) in zip(lowered, decl.params):
+                actual = infer_ir(arg, env.type_env, env.types, env.services)
+                if ptype and actual and not compatible(ptype, actual):
+                    raise mismatch(env.filename, op.line,
+                                   f"`{node['name']}.{op.name}` argument `{pname}`",
+                                   ptype, actual)
+            node = {"kind": "call", "target": node, "method": op.name, "args": lowered}
+            continue
         node = {
             "kind": "call",
             "target": node,

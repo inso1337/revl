@@ -1,0 +1,15 @@
+// REJECTED — T2 (null safety): `null` has no type in revl expressions.
+// Absence is `Opt[T]` (syntax-2.0 §2); `null` survives only as a config
+// default, where it means "required".
+//
+// expected error:
+//   `null` has no type in revl — absence is `Opt[T]`
+
+service Cache { fn get(key: Str) -> Opt[Str] }
+
+component BadNull provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) { return null }
+  }
+}
