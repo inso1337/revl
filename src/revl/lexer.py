@@ -114,16 +114,36 @@ def lex(source: str, filename: str) -> list[Token]:
 
 
 def _lex_string(source: str, i: int, line: int, filename: str):
-    """Plain double-quoted string; `$` is an ordinary literal character.
+    """Plain double-quoted string; `$` is an ordinary literal character —
+    except that `$identifier` is rejected: it was interpolation in 1.x, and
+    letting it silently become a literal is exactly the uncanny-valley trap
+    syntax-2.0 warns about (§9).
 
     Returns (index-after-closing-quote, text).
     """
+    import re as _re
+
     buf: list[str] = []
     n = len(source)
     while i < n:
         c = source[i]
         if c == '"':
-            return i + 1, "".join(buf)
+            text = "".join(buf)
+            # both legacy forms had a 1.x meaning that a 2.0 plain string
+            # silently changes: `$ident` was interpolation, `$$` was the
+            # escape for one literal dollar
+            stale = _re.search(r"\$\$|\$[A-Za-z_][A-Za-z0-9_]*", text)
+            if stale:
+                raise RevlError(
+                    filename, line,
+                    f"`{stale.group(0)}` in a plain string — this was "
+                    f"{'an escaped dollar' if stale.group(0) == '$$' else 'interpolation'} "
+                    f"in 1.x and would silently change meaning",
+                    hint="run `revl fmt --migrate` to convert to a template literal, "
+                         "or write a backtick template: interpolation is `${name}`, "
+                         "and a literal dollar needs no escape there (§9)",
+                )
+            return i + 1, text
         if c == "\n":
             raise RevlError(filename, line, "unterminated string literal")
         buf.append(c)

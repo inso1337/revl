@@ -67,3 +67,33 @@ def test_plain_double_quoted_string_dollar_is_literal():
     tokens = lex('"cost: $9.99"', "<test>")
     assert tokens[0].kind == "string"
     assert tokens[0].value == "cost: $9.99"
+
+
+# --- §9 guard rail: legacy `$` forms in plain strings are rejected ----------
+
+def test_stale_interpolation_is_rejected_not_silently_literal():
+    import pytest
+    from revl import RevlError, compile_source
+
+    with pytest.raises(RevlError, match=r"`\$item` in a plain string"):
+        compile_source(
+            'service B { emission fn send(m: Str) }\n'
+            'component C requires b: B { emit b.send("cost for $item") }', "s.rvl")
+
+
+def test_stale_dollar_escape_is_rejected():
+    import pytest
+    from revl import RevlError, compile_source
+
+    with pytest.raises(RevlError, match=r"`\$\$` in a plain string"):
+        compile_source(
+            'service B { emission fn send(m: Str) }\n'
+            'component C requires b: B { emit b.send("5$$ off") }', "s.rvl")
+
+
+def test_non_legacy_dollars_stay_legal():
+    from revl import compile_source
+
+    compile_source(
+        'service B { emission fn send(m: Str) }\n'
+        'component C requires b: B { emit b.send("cost is $5") }', "s.rvl")

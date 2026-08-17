@@ -420,6 +420,12 @@ class Program:
     fn_alias_scopes: dict[int, dict[str, set[str]]] = field(default_factory=dict)
 
 
+# `===` -> `==`, `!==` -> `!=`: both spellings, one meaning (structural,
+# no coercion); the formatter story is canonicalization, the IR never
+# carries the triple form
+_CANONICAL_OPS = {"===": "==", "!==": "!="}
+
+
 # ---------------------------------------------------------------- parser
 
 class Parser:
@@ -754,11 +760,11 @@ class Parser:
             return self.component_if()
         if tok.kind == "kw" and tok.value == "emit":
             self.next()
-            expr = self.expr()
+            expr = self.pure_expr()
             compensate = None
             if self.at("kw", "compensate"):
                 self.next()
-                compensate = self.expr()
+                compensate = self.pure_expr()
             return EmitStmt(expr, tok.line, compensate)
         if tok.kind == "kw" and tok.value == "await":
             if in_method and not in_async_method:
@@ -771,12 +777,12 @@ class Parser:
                          "a provide method (services 2.0, §5)",
                 )
             self.next()
-            return AwaitStmt(self.expr(), tok.line)
+            return AwaitStmt(self.pure_expr(), tok.line)
         if tok.kind == "kw" and tok.value == "return":
             if not in_method:
                 raise self.err(tok.line, "`return` is only allowed inside a provide method body")
             self.next()
-            return ReturnStmt(self.expr(), tok.line)
+            return ReturnStmt(self.pure_expr(), tok.line)
         if tok.kind == "kw" and tok.value == "isolate":
             if in_method:
                 raise self.err(tok.line, "`isolate` is not allowed inside a method body")
@@ -826,7 +832,7 @@ class Parser:
             acquire = stmts[-1].expr
             setup = stmts[:-1]
         else:
-            acquire = self.expr()
+            acquire = self.pure_expr()
         if not self.at("kw", "undo"):
             head = _describe_expr(acquire)
             raise self.err(
@@ -835,7 +841,7 @@ class Parser:
                 hint=f"write `effect {head}(...) undo <expr>`, or mark the call `emit` if it deliberately crosses the system boundary (G4)",
             )
         self.next()
-        undo = self.expr()
+        undo = self.pure_expr()
         return acquire, undo, line, setup
 
     def component_if(self) -> IfStmt:
@@ -1177,7 +1183,10 @@ class Parser:
                 return left
             self.next()
             right = operand()
-            left = ExprBin(op, left, right, left.line)
+            # `===`/`!==` are accepted spellings of the ONE structural
+            # equality (syntax-2.0 §3.2): canonicalized here so the IR
+            # carries a single operator and no backend can diverge
+            left = ExprBin(_CANONICAL_OPS.get(op, op), left, right, left.line)
 
     def _unary(self):
         tok = self.peek()
@@ -1352,7 +1361,7 @@ class Parser:
             self.expect(")")
             if self.at("="):
                 self.next()
-                body = [ReturnStmt(self.expr(), mline)]
+                body = [ReturnStmt(self.pure_expr(), mline)]
             else:
                 self.expect("{")
                 body = []
@@ -1408,7 +1417,24 @@ def _describe_expr(expr) -> str:
         return "`" + ".".join([expr.head] + [op.name for op in expr.ops]) + "`"
     if isinstance(expr, Lit):
         return repr(expr.value)
+    path = _dotted_path(expr)
+    if path:
+        return f"`{path}`"
+    if isinstance(expr, ExprLit):
+        return repr(expr.value)
     return "the expression"
+
+
+def _dotted_path(expr) -> str | None:
+    """Render ExprCall/ExprField/ExprVar chains as `a.b.c` for diagnostics."""
+    if isinstance(expr, ExprCall):
+        return _dotted_path(expr.callee)
+    if isinstance(expr, ExprField):
+        target = _dotted_path(expr.target)
+        return f"{target}.{expr.name}" if target else None
+    if isinstance(expr, ExprVar):
+        return expr.name
+    return None
 
 
 def parse_file(path: str) -> Program:
