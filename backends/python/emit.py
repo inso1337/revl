@@ -118,12 +118,16 @@ class _ComponentEmitter:
             # stays readable during this component's own teardown (R3)
             return f"ctx.{name}"
         if kind == "call":
-            target = self._expr(expr.get("target"), where)
-            method = expr.get("method")
-            if not isinstance(method, str) or not method.isidentifier():
-                raise EmitError(f"{where}: bad method name {method!r}")
+            if "target" in expr:
+                target = self._expr(expr.get("target"), where)
+                method = expr.get("method")
+                if not isinstance(method, str) or not method.isidentifier():
+                    raise EmitError(f"{where}: bad method name {method!r}")
+                args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+                return f"{target}.{method}({args})"
+            callee = self._expr(expr.get("callee"), where)
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-            return f"{target}.{method}({args})"
+            return f"{callee}({args})"
         if kind == "host":
             fn = expr.get("fn") or ""
             root, _, rest = fn.partition(".")
@@ -132,6 +136,44 @@ class _ComponentEmitter:
             self.uses.add(root)
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             return f"{fn}({args})"
+        if kind == "fn":
+            name = _ident(expr.get("name"), f"{where}: function")
+            args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+            return f"{name}({args})"
+        if kind == "var":
+            return _ident(expr.get("name"), f"{where}: variable")
+        if kind == "field":
+            name = expr.get("name")
+            if not isinstance(name, str) or not name.isidentifier():
+                raise EmitError(f"{where}: bad field name {name!r}")
+            return f"{self._expr(expr.get('target'), where)}.{name}"
+        if kind == "index":
+            return f"{self._expr(expr.get('target'), where)}[{self._expr(expr.get('index'), where)}]"
+        if kind == "bin":
+            op = _PY_BIN_OPS.get(expr.get("op"))
+            if op is None:
+                raise EmitError(f"{where}: unsupported binary operator {expr.get('op')!r}")
+            return f"({self._expr(expr.get('left'), where)} {op} {self._expr(expr.get('right'), where)})"
+        if kind == "un":
+            if expr.get("op") == "!":
+                return f"(not {self._expr(expr.get('operand'), where)})"
+            if expr.get("op") == "-":
+                return f"(-{self._expr(expr.get('operand'), where)})"
+            raise EmitError(f"{where}: unsupported unary operator {expr.get('op')!r}")
+        if kind == "if":
+            return (f"({self._expr(expr.get('then'), where)} if "
+                    f"{self._expr(expr.get('cond'), where)} else "
+                    f"{self._expr(expr.get('else'), where)})")
+        if kind == "record":
+            return "{" + ", ".join(
+                f"{name!r}: {self._expr(value, where)}"
+                for name, value in expr.get("fields") or []
+            ) + "}"
+        if kind == "list":
+            return "[" + ", ".join(self._expr(item, where) for item in expr.get("items") or []) + "]"
+        if kind == "arrow":
+            params = ", ".join(expr.get("params") or [])
+            return f"lambda {params}: {self._expr(expr.get('body'), where)}"
         if kind == "format":
             self.uses.add("fmt")
             template = expr.get("template")
@@ -147,16 +189,56 @@ class _ComponentEmitter:
         self._counter += 1
         return f"{self.name}.{suffix}#{self._counter}"
 
+    def _setup_step(self, out: _Lines, indent: int, step: dict, where: str) -> None:
+        """A pure setup step inside a block-effect acquisition."""
+        kind = step.get("step")
+        if kind == "let":
+            name = _ident(step.get("name"), f"{where}: setup bind")
+            out.add(indent, f"{name} = {self._expr(step.get('value'), where)}")
+        elif kind == "assign":
+            name = _ident(step.get("name"), f"{where}: setup assign")
+            out.add(indent, f"{name} = {self._expr(step.get('value'), where)}")
+        elif kind == "expr":
+            out.add(indent, self._expr(step.get("expr"), where))
+        elif kind == "if":
+            out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
+            for nested in step.get("then") or []:
+                self._setup_step(out, indent + 1, nested, where)
+            if step.get("else"):
+                out.add(indent, "else:")
+                for nested in step.get("else") or []:
+                    self._setup_step(out, indent + 1, nested, where)
+        elif kind == "assert":
+            out.add(indent, f"assert {self._expr(step.get('expr'), where)}")
+        else:
+            raise EmitError(f"{where}: unknown setup step {kind!r}")
+
     def _body_step(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         """A step at activation-body level — lines inside the body generator."""
         kind = step.get("step")
         if kind == "let-effect":
+            if step.get("setup"):
+                for setup in step["setup"]:
+                    self._setup_step(out, indent, setup, where)
             bind = _ident(step.get("bind"), f"{where}: bind")
             out.add(indent, f"{bind} = {self._expr(step.get('acquire'), where)}")
             out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "effect":
+            if step.get("setup"):
+                for setup in step["setup"]:
+                    self._setup_step(out, indent, setup, where)
             out.add(indent, self._expr(step.get("acquire"), where))
             out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
+        elif kind == "fail":
+            out.add(indent, f"raise RuntimeError({self._expr(step.get('message'), where)})")
+        elif kind == "if":
+            out.add(indent, f"if {self._expr(step.get('cond'), where)}:")
+            for nested in step.get("then") or []:
+                self._body_step(out, indent + 1, nested, where)
+            if step.get("else"):
+                out.add(indent, "else:")
+                for nested in step.get("else") or []:
+                    self._body_step(out, indent + 1, nested, where)
         elif kind == "emit":
             out.add(indent, self._expr(step.get("expr"), where))
             if step.get("compensate") is not None:
@@ -307,6 +389,10 @@ class _ComponentEmitter:
             # ctx.plugin — the fiber's context chain is fixed at plugin time
             out.add(1, f"'isolate': {dict(self.isolate)!r},")
         out.add(0, "}")
+        # Block-effect setup can reference host roots through pure v3 `var`
+        # nodes (e.g. Pool.open inside `effect { ... }`); collect them even
+        # though the old `host` fast path was not used.
+        self.uses.update(_find_host_roots(self.ir.get("body") or []))
         return out
 
 
