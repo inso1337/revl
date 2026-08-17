@@ -71,7 +71,21 @@ def _i32_only(type_name: Any, where: str) -> None:
 
 
 class _ComponentEmitter:
-    def __init__(self, component: dict, services: dict, ir_version: int = IR_VERSION) -> None:
+    """A component document -> one WAT module.
+
+    Component/method bodies are i32 at the service boundary, but *inside* the
+    module a method may use the same values a v3 `fn` can.  Rather than carry a
+    second, poorer expression renderer, this class keeps a `_V3Emitter` as a
+    value engine (`self.v3`) and delegates every kind that is not i32-native to
+    it, splicing component-only nodes (`req` calls, `config`, `host`) back in
+    as pre-lowered WAT.  Anything a delegated body needs — the linear-memory
+    helpers, string data, and the top-level `fn`s it calls — is emitted into
+    this module, so the component stays self-contained.
+    """
+
+    def __init__(self, component: dict, services: dict, ir_version: int = IR_VERSION,
+                 types: dict | None = None, functions: list | None = None,
+                 externs: list | None = None) -> None:
         self.ir = component
         self.services = services
         self.ir_version = ir_version
@@ -101,6 +115,15 @@ class _ComponentEmitter:
         self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
         self.globals: list[str] = []
         self.uses_job = False
+        # the value engine: the *same* renderer the v3 `fn` tier uses
+        self.v3 = _V3Emitter(types or {}, functions or [], externs or [], [])
+        self.externs = {ext.get("name"): ext for ext in (externs or [])}
+        self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
+        self.needed_fns: list[str] = []   # top-level fns this component calls
+        self.uses_v3 = False              # a delegated expression was lowered
+        self.extra_locals: set[str] = set()  # v3 scratch locals for one method
+        self.func_uses_v3 = False
+        self.activation_locals: list[str] = []
 
     # -- v2 realms -----------------------------------------------------------
 
@@ -156,27 +179,50 @@ class _ComponentEmitter:
 
     # -- expressions ---------------------------------------------------------
 
-    def _expr(self, node: Any, scope: dict[str, str], where: str) -> tuple[str, bool]:
-        """Returns (wat, has_result)."""
+    #: kinds the component path lowers itself, straight to i32 instructions.
+    #: everything else that is a real expression goes to the v3 value engine.
+    _DELEGATED = frozenset({
+        "if", "fn", "list", "record", "field", "index", "builtin", "len",
+        "adt", "match", "interp", "format", "arrow", "var",
+    })
+
+    def _expr(self, node: Any, scope: dict[str, str], where: str,
+              types: dict[str, str | None] | None = None) -> tuple[str, bool]:
+        """Returns (wat, has_result) — the i32 view used by activation steps."""
+        value = self._lower(node, scope, types if types is not None else {}, where)
+        return value.wat, not _is_unit_type(value.ty)
+
+    def _lower(self, node: Any, scope: dict[str, str],
+               types: dict[str, str | None], where: str) -> _E:
+        """Lower one expression, carrying the value's revl type.
+
+        i32-native kinds are emitted here; anything the v3 `fn` renderer
+        already models is delegated to it (`_delegate`) so the two paths agree
+        by construction instead of by duplication.
+        """
         if not isinstance(node, dict) or "kind" not in node:
             raise EmitError(f"{where}: malformed expression {node!r}")
         kind = node["kind"]
         if kind == "lit":
             value = node.get("value")
-            if not isinstance(value, int) or isinstance(value, bool):
-                raise EmitError(
-                    f"{where}: literal {value!r} is not lowerable — i32-only tier"
-                )
-            return f"(i32.const {value})", True
+            if isinstance(value, int) and not isinstance(value, bool):
+                return _E(f"(i32.const {value})", "Int")
+            # Bool/Str literals are in-module values: the engine owns them
+            return self._delegate(node, scope, types, where)
         if kind == "name":
             name = _ident(node.get("id"), f"{where}: name")
             slot = scope.get(name)
             if slot is None:
                 raise EmitError(f"{where}: unbound name {name!r}")
-            return slot, True
+            return _E(slot, types.get(name, "Int"))
         if kind == "req":
             raise EmitError(f"{where}: a required service is only usable as a call target")
         if kind == "call":
+            if node.get("callee") is not None:
+                # the frontend spells `Some(x)` (and other builtin
+                # constructors) in the v3 dialect even inside a component
+                # body — callee-shaped, not req-shaped
+                return self._delegate(node, scope, types, where)
             target = node.get("target") or {}
             if target.get("kind") != "req":
                 raise EmitError(
@@ -191,12 +237,18 @@ class _ComponentEmitter:
                 raise EmitError(f"{where}: {key}.{op} takes {arity} argument(s)")
             parts = []
             for arg in args:
-                wat, arg_result = self._expr(arg, scope, where)
-                if not arg_result:
+                value = self._lower(arg, scope, types, where)
+                if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: void expression used as an argument")
-                parts.append(wat)
+                if not _is_i32_type(value.ty):
+                    raise EmitError(
+                        f"{where}: a {value.ty!r} argument cannot cross this tier's "
+                        f"i32 coeffect boundary — {key}.{op} is declared over Int; "
+                        f"keep compound values inside the module"
+                    )
+                parts.append(value.wat)
             call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
-            return call, has_result
+            return _E(call, "Int" if has_result else None)
         if kind == "config":
             raise EmitError(f"{where}: config is not available on this tier")
         if kind == "host":
@@ -204,13 +256,15 @@ class _ComponentEmitter:
                 f"{where}: host builtin {node.get('fn')!r} is not available on "
                 f"the cordis-wasm tier — express state through coeffects instead"
             )
-        if kind == "format":
-            raise EmitError(f"{where}: strings are not lowerable — i32-only tier")
         if kind in ("bin", "un"):
             # pure i32 arithmetic/comparison inside a component or method body
             # — this tier's native shape, and what a method that names an
-            # intermediate is usually doing (tests/test_cross_tier.py)
-            return self._i32_operator(node, scope, where)
+            # intermediate is usually doing (tests/test_cross_tier.py).
+            # Operators the i32 path has no instruction for (`??`, Str `+`,
+            # Str `==`) are the engine's: it knows the operand types.
+            return self._i32_operator(node, scope, types, where)
+        if kind in self._DELEGATED:
+            return self._delegate(node, scope, types, where)
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
     _I32_BINOPS = {
@@ -221,39 +275,184 @@ class _ComponentEmitter:
         "&&": "i32.and", "||": "i32.or",
     }
 
-    def _i32_operator(self, node: Any, scope: dict[str, str], where: str) -> tuple[str, bool]:
+    def _i32_operator(self, node: Any, scope: dict[str, str],
+                      types: dict[str, str | None], where: str) -> _E:
         if node.get("kind") == "un":
             op = node.get("op")
-            operand, has_result = self._expr(node.get("operand"), scope, where)
-            if not has_result:
+            operand = self._lower(node.get("operand"), scope, types, where)
+            if _is_unit_type(operand.ty):
                 raise EmitError(f"{where}: unary `{op}` on a void expression")
+            if not _is_i32_type(operand.ty):
+                return self._delegate(node, scope, types, where)
             if op == "-":
-                return f"(i32.sub (i32.const 0) {operand})", True
+                return _E(f"(i32.sub (i32.const 0) {operand.wat})", "Int")
             if op == "!":
-                return f"(i32.eqz {operand})", True
+                return _E(f"(i32.eqz {operand.wat})", "Bool")
             raise EmitError(f"{where}: unary `{op}` is not lowerable on the i32 tier")
 
         op = node.get("op")
-        instruction = self._I32_BINOPS.get(op)
-        if instruction is None:
-            raise EmitError(
-                f"{where}: operator `{op}` is not lowerable on the i32 tier"
-            )
-        left, left_result = self._expr(node.get("left"), scope, where)
-        right, right_result = self._expr(node.get("right"), scope, where)
-        if not (left_result and right_result):
+        left = self._lower(node.get("left"), scope, types, where)
+        right = self._lower(node.get("right"), scope, types, where)
+        if _is_unit_type(left.ty) or _is_unit_type(right.ty):
             raise EmitError(f"{where}: `{op}` on a void expression")
-        return f"({instruction} {left} {right})", True
+        instruction = self._I32_BINOPS.get(op)
+        if instruction is None or not (_is_i32_type(left.ty) and _is_i32_type(right.ty)):
+            # `??`, Str concatenation, Str equality, List `+` — the engine has
+            # them and knows the operand types; it refuses with its own reason
+            # if the combination is genuinely not lowerable.
+            return self._delegate(node, scope, types, where)
+        result_ty = "Bool" if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||") else "Int"
+        return _E(f"({instruction} {left.wat} {right.wat})", result_ty)
 
-    def _statement(self, node: Any, scope: dict[str, str], where: str) -> str:
+    def _statement(self, node: Any, scope: dict[str, str], where: str,
+                   types: dict[str, str | None] | None = None) -> str:
         """An expression evaluated for effect: drop an unused result."""
-        wat, has_result = self._expr(node, scope, where)
+        wat, has_result = self._expr(node, scope, where, types)
         return f"(drop {wat})" if has_result else wat
+
+    # -- delegation to the v3 value engine -----------------------------------
+
+    def _delegate(self, node: Any, scope: dict[str, str],
+                  types: dict[str, str | None], where: str) -> _E:
+        v3_node = self._to_v3(node, scope, types, where)
+        # match/arrow scratch locals have to be declared on the enclosing
+        # function, and `_collect_*` stamps ids onto the nodes, so both run
+        # before the engine renders the tree.
+        binds: set[str] = set()
+        scruts: set[str] = set()
+        self.v3._collect_match_locals(v3_node, binds, scruts)
+        arrows: set[str] = set()
+        self.v3._collect_arrow_locals(v3_node, arrows)
+        self.extra_locals.update(f"l_{name}" for name in binds)
+        self.extra_locals.update(scruts)
+        self.extra_locals.update(arrows)
+        self.uses_v3 = True
+        self.func_uses_v3 = True
+        return self.v3._expr(v3_node, _Scope(dict(scope), dict(types)), where)
+
+    def _open_function(self) -> None:
+        """Reset the engine's per-function state before lowering a body.
+
+        `_V3Emitter` keeps arrow/match/loop counters and the scratch-local name
+        on itself (they are per-function in the `fn` tier); a component method
+        is a function too, so it gets the same fresh state.
+        """
+        self.v3._tmp = "__revl_tmp"
+        self.v3._arrows = {}
+        self.v3._arrow_counter = 0
+        self.v3._match_counter = 0
+        self.v3._loop_counter = 0
+        self.v3._for_temps = []
+        self.extra_locals = set()
+        self.func_uses_v3 = False
+
+    def _save_function_state(self) -> tuple:
+        """`activate_step` is one function spanning every body segment, but a
+        `provide` step in the middle of that body opens functions of its own.
+        Save the activation function's rendering state across them."""
+        return (self.extra_locals, self.func_uses_v3, self.v3._tmp,
+                self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
+                self.v3._loop_counter, self.v3._for_temps)
+
+    def _restore_function_state(self, saved: tuple) -> None:
+        (self.extra_locals, self.func_uses_v3, self.v3._tmp,
+         self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
+         self.v3._loop_counter, self.v3._for_temps) = saved
+
+    def _to_v3(self, node: Any, scope: dict[str, str],
+               types: dict[str, str | None], where: str) -> Any:
+        """Rewrite a component-flavoured node into the v3 renderer's vocabulary.
+
+        The two IR dialects differ in exactly three places: names are
+        ``name``/``id`` here and ``var``/``name`` there, a call to a top-level
+        function is ``fn`` here and ``call`` there, and templates are ``format``
+        here and ``interp`` there.  Component-only nodes (`req` calls, `config`,
+        `host`) have no v3 spelling, so they are lowered on this path and
+        spliced in as an opaque pre-lowered ``__wat`` node.
+        """
+        if isinstance(node, list):
+            return [self._to_v3(item, scope, types, where) for item in node]
+        if not isinstance(node, dict):
+            return node
+        kind = node.get("kind")
+        if kind == "name":
+            return {"kind": "var", "name": node.get("id")}
+        if kind == "fn":
+            name = _ident(node.get("name"), f"{where}: function")
+            if name not in self.fn_by_name and name in self.externs:
+                available = ", ".join(sorted((self.externs[name].get("bodies") or {}))) or "none"
+                raise EmitError(
+                    f"{where}: extern `{name}` has no @wasm body — not portable "
+                    f"to this backend (available: {available})"
+                )
+            return {
+                "kind": "call",
+                "callee": {"kind": "var", "name": name},
+                "args": [self._to_v3(arg, scope, types, where)
+                         for arg in node.get("args") or []],
+            }
+        if kind == "format":
+            parts: list[list] = []
+            args = node.get("args") or []
+            for part_kind, part in _format_parts(node.get("template") or ""):
+                if part_kind == "text":
+                    parts.append(["text", part])
+                    continue
+                if part >= len(args):
+                    raise EmitError(f"{where}: template placeholder ${part} has no argument")
+                parts.append(["expr", self._to_v3(args[part], scope, types, where)])
+            return {"kind": "interp", "parts": parts}
+        if kind in ("config", "host", "req") or (kind == "call" and node.get("callee") is None):
+            value = self._lower(node, scope, types, where)
+            return {"kind": "__wat", "wat": value.wat, "ty": value.ty}
+        return {key: self._to_v3(value, scope, types, where)
+                for key, value in node.items()}
+
+    # -- the top-level `fn`s this component needs in its own module ----------
+
+    @staticmethod
+    def _called_names(node: Any, acc: set[str]) -> set[str]:
+        """Function names referenced anywhere in a tree, in either dialect."""
+        if isinstance(node, dict):
+            if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+                acc.add(node["name"])
+            callee = node.get("callee")
+            if node.get("kind") == "call" and isinstance(callee, dict) \
+                    and callee.get("kind") == "var" and isinstance(callee.get("name"), str):
+                acc.add(callee["name"])
+            for value in node.values():
+                _ComponentEmitter._called_names(value, acc)
+        elif isinstance(node, list):
+            for value in node:
+                _ComponentEmitter._called_names(value, acc)
+        return acc
+
+    def _need_fn(self, name: str) -> None:
+        if name in self.needed_fns or name not in self.fn_by_name:
+            return
+        self.needed_fns.append(name)   # before recursing: `fn fib` calls itself
+        for inner in sorted(self._called_names(self.fn_by_name[name].get("body"), set())):
+            self._need_fn(inner)
+
+    def _plan(self) -> None:
+        """Compute the call closure and pool the string literals it can reach.
+
+        Literals must be pooled before anything renders, because `_str_ptr`
+        resolves an offset at render time.
+        """
+        body = self.ir.get("body") or []
+        for name in sorted(self._called_names(body, set())):
+            self._need_fn(name)
+        roots: list[Any] = [body]
+        roots.extend(self.fn_by_name[name].get("body") for name in self.needed_fns)
+        self.v3._collect_string_literals(roots)
 
     # -- component -----------------------------------------------------------
 
     def emit(self) -> str:
         where = self.name
+        self._plan()
+        self._open_function()
         scope: dict[str, str] = {}
         segments: list[str] = []          # activate_step bodies, in order
         inverses: list[tuple[int, str]] = []  # (segment index completed, wat)
@@ -304,10 +503,17 @@ class _ComponentEmitter:
                 self.uses_job = True
                 segments.append(f"(call $host_job_run {arg_wat})")
             elif kind == "provide":
+                saved = self._save_function_state()
                 provide_funcs.extend(self._provide(step, scope, where))
+                self._restore_function_state(saved)
             else:
                 raise EmitError(f"{where}: unknown step {kind!r}")
 
+        # scratch slots a delegated expression needed inside a body segment or
+        # an inverse — they belong to activate_step/deactivate, not a method
+        self.activation_locals = sorted(self.extra_locals)
+        if self.func_uses_v3:
+            self.activation_locals.append(self.v3._tmp)
         return self._module(segments, inverses, provide_funcs)
 
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
@@ -331,11 +537,19 @@ class _ComponentEmitter:
             if len(params) != len(spec_params):
                 raise EmitError(f"{where}: method {mname!r} arity does not match the service")
 
+            self._open_function()
+            # the allocation scratch slot must not shadow a binding of the
+            # method's own (the `fn` tier picks its temp the same way)
+            self.v3._tmp = self.v3._fresh_tmp(
+                set(params) | {mstep.get("name") for mstep in method.get("body") or []
+                               if isinstance(mstep.get("name"), str)})
             mscope = dict(scope)
+            mtypes: dict[str, str | None] = {name: "Int" for name in scope}
             decl = []
             for i, param in enumerate(params):
                 decl.append(f"(param $p_{param} i32)")
                 mscope[param] = f"(local.get $p_{param})"
+                mtypes[param] = "Int"
             has_result = spec.get("returns") is not None
             if has_result:
                 decl.append("(result i32)")
@@ -346,12 +560,33 @@ class _ComponentEmitter:
             for mstep in method.get("body") or []:
                 mkind = mstep.get("step")
                 if mkind == "return":
-                    wat, expr_result = self._expr(mstep["expr"], mscope, mwhere)
-                    if has_result and not expr_result:
+                    if mstep.get("expr") is None:
+                        # a void service operation: `{"step": "return",
+                        # "expr": null}` is the natural body, and wasm has the
+                        # instruction for it
+                        if has_result:
+                            raise EmitError(
+                                f"{mwhere}: bare `return` in a method the service "
+                                f"declares as returning {spec.get('returns')!r}"
+                            )
+                        body_lines.append("(return)")
+                        continue
+                    value = self._lower(mstep["expr"], mscope, mtypes, mwhere)
+                    if has_result and _is_unit_type(value.ty):
                         raise EmitError(f"{mwhere}: void expression returned from a typed method")
-                    body_lines.append(wat if has_result else f"(drop {wat})" if expr_result else wat)
+                    if has_result and not _is_i32_type(value.ty):
+                        raise EmitError(
+                            f"{mwhere}: a {value.ty!r} value cannot cross this tier's "
+                            f"i32 service boundary — the operation is declared "
+                            f"{spec.get('returns')!r}; compound values stay inside the "
+                            f"module (return them from a `fn`, or use a hosted backend)"
+                        )
+                    body_lines.append(
+                        value.wat if has_result
+                        else f"(drop {value.wat})" if not _is_unit_type(value.ty)
+                        else value.wat)
                 elif mkind == "emit":
-                    body_lines.append(self._statement(mstep["expr"], mscope, mwhere))
+                    body_lines.append(self._statement(mstep["expr"], mscope, mwhere, mtypes))
                     if mstep.get("compensate") is not None:
                         raise EmitError(
                             f"{mwhere}: method-time compensation is not lowerable — "
@@ -363,17 +598,18 @@ class _ComponentEmitter:
                     name = mstep.get("name")
                     if not isinstance(name, str) or not name.isidentifier():
                         raise EmitError(f"{mwhere}: bad binding name {name!r}")
-                    wat, expr_result = self._expr(mstep["value"], mscope, mwhere)
-                    if not expr_result:
+                    value = self._lower(mstep["value"], mscope, mtypes, mwhere)
+                    if _is_unit_type(value.ty):
                         raise EmitError(f"{mwhere}: `{name}` is bound to a void expression")
                     if mkind == "let":
                         if name in mlocals:
                             raise EmitError(f"{mwhere}: `{name}` is already bound")
                         mlocals.append(name)
                         mscope[name] = f"(local.get ${name})"
+                        mtypes[name] = value.ty
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
-                    body_lines.append(f"(local.set ${name} {wat})")
+                    body_lines.append(f"(local.set ${name} {value.wat})")
                 elif mkind in ("effect", "let-effect"):
                     raise EmitError(
                         f"{mwhere}: method-time effects are not lowerable — the "
@@ -387,6 +623,12 @@ class _ComponentEmitter:
             # wasm requires local declarations before the body
             if mlocals:
                 header += "".join(f" (local ${name} i32)" for name in mlocals)
+            # scratch slots the value engine needs (match binds + scrutinee
+            # pointers, inlined-arrow params, the allocation temporary)
+            for extra in sorted(self.extra_locals):
+                header += f" (local ${extra} i32)"
+            if self.func_uses_v3:
+                header += f" (local ${self.v3._tmp} i32)"
             body = "\n    ".join(body_lines) if body_lines else "nop"
             funcs.append(f"  {header}\n    {body})")
         missing = set(declared) - {m.get("name") for m in step.get("methods") or []}
@@ -395,6 +637,16 @@ class _ComponentEmitter:
         return funcs
 
     def _module(self, segments: list[str], inverses: list[tuple[int, str]], provide_funcs: list[str]) -> str:
+        # the top-level `fn`s this component calls are emitted into its own
+        # module, so `call $name` resolves and the component stays a single
+        # self-contained artifact for the runtime to instantiate
+        fn_defs = [self.v3._emit_function(self.fn_by_name[name]) for name in self.needed_fns]
+        rendered = "\n".join(provide_funcs + fn_defs + segments
+                             + [wat for _index, wat in inverses])
+        # linear memory is pulled in only when something actually reaches for
+        # it, so a purely-i32 component emits exactly the module it always did
+        needs_memory = self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)
+
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
                  "(module"]
@@ -406,12 +658,20 @@ class _ComponentEmitter:
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
         if self.uses_job:
             lines.append('  (import "host" "job_run" (func $host_job_run (param i32)))')
+        if needs_memory:
+            lines.append('  (memory (export "memory") 1)')
+            for offset, data in self.v3.data_segments:
+                lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
+            lines.append(f"  (global $__hp (mut i32) (i32.const {self.v3.heap_start}))")
         lines.append("  (global $__step (mut i32) (i32.const 0))")
         for glob in self.globals:
             lines.append(f"  (global {glob} (mut i32) (i32.const 0))")
 
+        activation_decls = "".join(f" (local ${name} i32)"
+                                   for name in self.activation_locals)
+
         # activate_step: one iteration per body segment (paper §4.3.2)
-        lines.append('  (func (export "activate_step") (result i32)')
+        lines.append(f'  (func (export "activate_step") (result i32){activation_decls}')
         total = len(segments)
         for i, seg in enumerate(segments):
             more = 1 if i + 1 < total else 0
@@ -423,7 +683,7 @@ class _ComponentEmitter:
         lines.append("    (i32.const 0))")
 
         # deactivate: the accumulator — completed steps' inverses, LIFO
-        lines.append('  (func (export "deactivate")')
+        lines.append(f'  (func (export "deactivate"){activation_decls}')
         if inverses:
             for index, wat in reversed(inverses):
                 lines.append(f"    (if (i32.ge_s (global.get $__step) (i32.const {index}))")
@@ -434,8 +694,49 @@ class _ComponentEmitter:
         lines.append("  )")
 
         lines.extend(provide_funcs)
+        if needs_memory:
+            lines.extend(self.v3._helper_funcs())
+        lines.extend(fn_defs)
         lines.append(")")
         return "\n".join(lines) + "\n"
+
+
+#: WAT that only appears when a value lives in linear memory. Scanning the
+#: rendered body for these is what decides whether a component module declares
+#: a memory at all — a plain i32 component must stay byte-identical.
+_MEMORY_TOKENS = (
+    "$alloc", "$str_", "$list_", "$int_to_str",
+    "i32.load", "i32.store", "memory.copy",
+)
+
+
+def _format_parts(template: str) -> list[tuple[str, Any]]:
+    """Split a component `format` template into text/argument-index parts.
+
+    The component dialect spells a template as ``"n=$0"`` plus an argument
+    list; the v3 renderer wants ``interp`` parts. One function so the literal
+    pooler and the node rewriter cannot disagree about the text segments.
+    """
+    parts: list[tuple[str, Any]] = []
+    buffer: list[str] = []
+    index = 0
+    while index < len(template):
+        char = template[index]
+        if char == "$" and index + 1 < len(template) and template[index + 1].isdigit():
+            end = index + 1
+            while end < len(template) and template[end].isdigit():
+                end += 1
+            if buffer:
+                parts.append(("text", "".join(buffer)))
+                buffer = []
+            parts.append(("arg", int(template[index + 1:end])))
+            index = end
+            continue
+        buffer.append(char)
+        index += 1
+    if buffer:
+        parts.append(("text", "".join(buffer)))
+    return parts
 
 
 _WASM_BIN_OPS = {
@@ -634,7 +935,13 @@ class _V3Emitter:
         }
         return name
 
-    def _collect_string_literals(self) -> None:
+    def _collect_string_literals(self, roots: list | None = None) -> None:
+        """Pool every string constant reachable from `roots` into data.
+
+        `roots` defaults to this module's function bodies. The component path
+        passes its own set (its body plus only the functions it calls) so a
+        component module carries just the data it can reach.
+        """
         seen: dict[str, None] = {}
 
         def walk(node: Any) -> None:
@@ -646,14 +953,19 @@ class _V3Emitter:
                     for part_kind, part in node.get("parts") or []:
                         if part_kind == "text":
                             seen.setdefault(part, None)
+                if node.get("kind") == "format":
+                    # the component dialect's template: same text, other shape
+                    for part_kind, part in _format_parts(node.get("template") or ""):
+                        if part_kind == "text":
+                            seen.setdefault(part, None)
                 for child in node.values():
                     walk(child)
             elif isinstance(node, list):
                 for child in node:
                     walk(child)
 
-        for fn in self.functions:
-            walk(fn.get("body"))
+        for root in (roots if roots is not None else [fn.get("body") for fn in self.functions]):
+            walk(root)
         offset = 0
         for value in seen:
             raw = value.encode("utf-8")
@@ -898,8 +1210,14 @@ class _V3Emitter:
             if name not in scope.types:
                 raise EmitError(f"unbound name {name!r}")
             return scope.types[name]
+        if kind == "__wat":
+            # a component-path expression already lowered to WAT (a `req` call,
+            # config/host access); it is opaque here but carries its type
+            return node.get("ty")
         if kind == "bin":
             op = node.get("op")
+            if op == "??":
+                return self._nullish_type(node, scope)
             left = self._infer_type(node.get("left"), scope)
             right = self._infer_type(node.get("right"), scope)
             if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
@@ -1059,6 +1377,8 @@ class _V3Emitter:
         if not isinstance(node, dict) or "kind" not in node:
             raise EmitError(f"{where}: malformed v3 expression {node!r}")
         kind = node["kind"]
+        if kind == "__wat":
+            return _E(node.get("wat"), node.get("ty"))
         if kind == "lit":
             value = node.get("value")
             if isinstance(value, bool):
@@ -1107,8 +1427,55 @@ class _V3Emitter:
             raise EmitError(f"{where}: arrow values are not lowerable on this tier")
         raise EmitError(f"{where}: unsupported v3 expression kind {kind!r}")
 
+    def _opt_payload(self, ty: str | None) -> str | None:
+        """The `Some` payload type of an `Opt[T]`, or None if `ty` is not Opt."""
+        layout = self._tagged_layout(ty)
+        if layout is None or [case for case, _p in layout] != ["None", "Some"]:
+            return None
+        return next(payload for case, payload in layout if case == "Some")
+
+    def _nullish_type(self, node: dict, scope: _Scope) -> str | None:
+        payload = self._opt_payload(self._infer_type(node.get("left"), scope))
+        if payload is None:
+            raise EmitError("`??` needs an Opt value on its left")
+        return payload
+
+    def _nullish_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+        """`a ?? b` on the tagged-cell model: read the tag, take the payload.
+
+        `Opt` is `[i32 tag][i32 payload]` with `None` = 0 and `Some` = 1, so
+        nullish coalescing is one load and a branch. It is lowerable exactly
+        when the Opt value is *in* the module; an `Opt` returned by a required
+        service never gets here — the i32 coeffect boundary rejects it first.
+        """
+        left_node, right_node = node.get("left"), node.get("right")
+        left_ty = self._infer_type(left_node, scope)
+        payload_ty = self._opt_payload(left_ty)
+        if payload_ty is None:
+            raise EmitError(
+                f"{where}: `??` needs an Opt value on its left, got {left_ty!r}"
+            )
+        left = self._expr(left_node, scope, where, left_ty)
+        right = self._expr(right_node, scope, where, payload_ty)
+        if right.ty != payload_ty:
+            raise EmitError(
+                f"{where}: the `??` default is {right.ty!r} but the Opt carries "
+                f"{payload_ty!r}"
+            )
+        tmp = self._tmp
+        wat = (
+            f"{left.wat}\n      (local.set ${tmp})\n"
+            f"      (if (result i32)\n"
+            f"        (i32.eq (i32.load (local.get ${tmp})) (i32.const 1))\n"
+            f"        (then (i32.load (i32.add (local.get ${tmp}) (i32.const 4))))\n"
+            f"        (else {right.wat}))"
+        )
+        return _E(wat, payload_ty)
+
     def _bin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         op = node.get("op")
+        if op == "??":
+            return self._nullish_expr(node, scope, where)
         left_node = node.get("left")
         right_node = node.get("right")
         left_ty = self._infer_type(left_node, scope)
@@ -1391,18 +1758,42 @@ class _V3Emitter:
             raise EmitError(f"{where}: match scrutinee {scrut.ty!r} is not a tagged union")
         mloc = node.get("_scrut")
         arms = node.get("arms") or []
-        result_ty = expected or self._infer_type(arms[0].get("body"), scope, expected)
 
-        def arm_body(arm: dict) -> str:
+        def arm_scope(arm: dict) -> _Scope:
+            """The arm's body sees its payload binding — and nothing else sees it."""
             bind = arm.get("bind")
             if not bind:
-                return self._expr(arm.get("body"), scope, where, result_ty).wat
+                return scope
             bname = _ident(bind, f"{where}: match bind")
-            scope.slots[bind] = f"(local.get $l_{bname})"
-            # on the i32 tier an unknown/`Any` payload is an i32 — default to Int
             payload_ty = arm.get("payload_type")
-            scope.types[bind] = "Int" if payload_ty in (None, "Any") else payload_ty
-            body = self._expr(arm.get("body"), scope, where, result_ty).wat
+            if payload_ty in (None, "Any"):
+                # the arm's own annotation is optional; the variant's layout
+                # always knows what this case carries
+                payload_ty = next(
+                    (payload for case, payload in layout if case == arm.get("pattern")),
+                    None)
+            if payload_ty == "Any":
+                # e.g. an inferred `Result[Any, Any]`: the layout knows no more
+                # than the arm did
+                payload_ty = None
+            inner = _Scope(dict(scope.slots), dict(scope.types))
+            inner.slots[bind] = f"(local.get $l_{bname})"
+            # on the i32 tier an unknown payload is still an i32 — default to Int
+            inner.types[bind] = payload_ty or "Int"
+            return inner
+
+        # the result type has to be inferred *inside* the first arm's scope:
+        # `match o { Found(v) => v, … }` has no meaning where `v` is unbound,
+        # and there is no `expected` to fall back on in a component body
+        result_ty = expected or self._infer_type(
+            arms[0].get("body"), arm_scope(arms[0]), expected)
+
+        def arm_body(arm: dict) -> str:
+            body = self._expr(arm.get("body"), arm_scope(arm), where, result_ty).wat
+            bind = arm.get("bind")
+            if not bind:
+                return body
+            bname = _ident(bind, f"{where}: match bind")
             load = f"(local.set $l_{bname} (i32.load (i32.add (local.get ${mloc}) (i32.const 4))))"
             return f"{load}\n      {body}"
 
@@ -1756,7 +2147,10 @@ def _emit_v1(ir: dict) -> dict[str, str]:
         raise EmitError("IR document has no components")
     out: dict[str, str] = {}
     for component in components:
-        emitter = _ComponentEmitter(component, services, ir_version=version)
+        emitter = _ComponentEmitter(
+            component, services, ir_version=version,
+            types=ir.get("types"), functions=ir.get("functions"),
+            externs=ir.get("externs"))
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
@@ -1781,7 +2175,9 @@ def _emit_v3(ir: dict) -> dict[str, str]:
 
     out: dict[str, str] = {}
     for component in components:
-        emitter = _ComponentEmitter(component, services, ir_version=3)
+        emitter = _ComponentEmitter(component, services, ir_version=3,
+                                    types=types, functions=functions,
+                                    externs=externs)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
