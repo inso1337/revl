@@ -1874,6 +1874,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # method params carry the service's declared types (A6): surface
         # names bind the body, the service contributes the signature
         saved_tenv = dict(env.type_env)
+        method_locals: dict[str, str] = {}
         for surface, (_, ptype) in zip(method.params, decl.params):
             env.type_env[env.params[surface]] = ptype
         mbody = []
@@ -1898,6 +1899,26 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                              "boundaries (paper §4.3.2) exist only during activation (A1)",
                     )
                 mbody.append({"step": "await", "expr": _lower_expr(mstmt.expr, env, mode="setup")})
+            elif isinstance(mstmt, LetStmt):
+                # a plain value binding: name an intermediate result instead
+                # of nesting every call into a single expression
+                if mstmt.name in env.params or mstmt.name in method_locals:
+                    raise RevlError(filename, mstmt.line,
+                                    f"`{mstmt.name}` is already bound in `{method.name}`")
+                safe = _safe_name(mstmt.name, set(env.params.values()) | set(method_locals.values()))
+                value = _lower_expr(mstmt.value, env, mode="setup")
+                method_locals[mstmt.name] = safe
+                env.params[mstmt.name] = safe  # visible to later statements
+                mbody.append({"step": "let", "name": safe, "value": value,
+                              "mutable": bool(mstmt.mutable)})
+            elif isinstance(mstmt, AssignStmt):
+                if mstmt.name not in method_locals:
+                    raise RevlError(filename, mstmt.line,
+                                    f"`{mstmt.name}` is not declared in `{method.name}`",
+                                    hint="declare it with `let` (single-assignment) or "
+                                         "`var` (mutable)")
+                mbody.append({"step": "assign", "name": method_locals[mstmt.name],
+                              "value": _lower_expr(mstmt.value, env, mode="setup")})
             elif isinstance(mstmt, ReturnStmt):
                 lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
                 if decl.returns:

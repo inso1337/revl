@@ -1347,6 +1347,12 @@ def _method_body_lines(
                 )
         elif step == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
+        elif step in ("let", "assign"):
+            # a plain value binding inside a method body
+            name = _ident(stmt.get("name"), "binding")
+            value = _expr(stmt["value"], env, rename, v3_ctx)
+            lines.append(f"var {name} = {value};" if step == "let"
+                         else f"{name} = {value};")
         elif step == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:

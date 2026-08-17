@@ -304,6 +304,7 @@ class _ComponentEmitter:
                 decl.append("(result i32)")
 
             body_lines = []
+            mlocals: list[str] = []
             mwhere = f"{where}.{key}.{mname}"
             for mstep in method.get("body") or []:
                 mkind = mstep.get("step")
@@ -319,6 +320,23 @@ class _ComponentEmitter:
                             f"{mwhere}: method-time compensation is not lowerable — "
                             f"the wasm accumulator is the activation state machine"
                         )
+                elif mkind in ("let", "assign"):
+                    # a plain value binding: a wasm local, since a method body
+                    # is a function and locals are exactly what it has
+                    name = mstep.get("name")
+                    if not isinstance(name, str) or not name.isidentifier():
+                        raise EmitError(f"{mwhere}: bad binding name {name!r}")
+                    wat, expr_result = self._expr(mstep["value"], mscope, mwhere)
+                    if not expr_result:
+                        raise EmitError(f"{mwhere}: `{name}` is bound to a void expression")
+                    if mkind == "let":
+                        if name in mlocals:
+                            raise EmitError(f"{mwhere}: `{name}` is already bound")
+                        mlocals.append(name)
+                        mscope[name] = f"(local.get ${name})"
+                    elif name not in mlocals:
+                        raise EmitError(f"{mwhere}: `{name}` is not declared")
+                    body_lines.append(f"(local.set ${name} {wat})")
                 elif mkind in ("effect", "let-effect"):
                     raise EmitError(
                         f"{mwhere}: method-time effects are not lowerable — the "
@@ -329,6 +347,9 @@ class _ComponentEmitter:
                     raise EmitError(f"{mwhere}: unknown step {mkind!r}")
 
             header = f'(func (export "{self._provide_prefix(key)}.{mname}") {" ".join(decl)}'.rstrip()
+            # wasm requires local declarations before the body
+            if mlocals:
+                header += "".join(f" (local ${name} i32)" for name in mlocals)
             body = "\n    ".join(body_lines) if body_lines else "nop"
             funcs.append(f"  {header}\n    {body})")
         missing = set(declared) - {m.get("name") for m in step.get("methods") or []}

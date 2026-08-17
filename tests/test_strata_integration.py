@@ -233,3 +233,60 @@ def test_nullary_adt_constructor_in_a_component_body():
     )
     node = ir["components"][0]["body"][0]["methods"][0]["body"][0]["expr"]
     assert node == {"kind": "adt", "type": "State", "case": "Fresh", "args": []}
+
+
+# ------------------------------------------- plain bindings in method bodies
+
+def test_a_method_body_can_name_an_intermediate_value():
+    """`let x = <expr>` in a provide method: previously only the effect form
+    was allowed there, so intermediate results had to be nested into one
+    expression. `let x = effect … undo …` still means the acquisition."""
+    from revl import compile_source
+
+    ir = compile_source(
+        "service S { fn f(x: Str) -> Str }\n"
+        "component A provides s: S {\n"
+        "  provide s { fn f(x) { let y = x  return y } }\n"
+        "}"
+    )
+    body = ir["components"][0]["body"][0]["methods"][0]["body"]
+    assert body[0] == {"step": "let", "name": "y",
+                       "value": {"kind": "name", "id": "x"}, "mutable": False}
+    assert body[1]["step"] == "return"
+
+
+def test_a_method_body_binding_is_host_name_safe():
+    from revl import compile_source
+
+    ir = compile_source(
+        "service S { fn f(x: Str) -> Str }\n"
+        "component A provides s: S {\n"
+        "  provide s { fn f(x) { let class = x  return class } }\n"
+        "}"
+    )
+    body = ir["components"][0]["body"][0]["methods"][0]["body"]
+    assert body[0]["name"] == "class_"          # A3 renaming applies here too
+    assert body[1]["expr"] == {"kind": "name", "id": "class_"}
+
+
+def test_a_var_binding_in_a_method_body_can_be_reassigned():
+    from revl import compile_source
+
+    ir = compile_source(
+        "service S { fn f(x: Str) -> Str }\n"
+        "component A provides s: S {\n"
+        '  provide s { fn f(x) { var y = x  y = "other"  return y } }\n'
+        "}"
+    )
+    steps = [s["step"] for s in ir["components"][0]["body"][0]["methods"][0]["body"]]
+    assert steps == ["let", "assign", "return"]
+
+
+def test_an_activation_body_still_refuses_a_plain_binding():
+    """A component body records effects; a plain value binding there has
+    nothing to revert, so it keeps pointing at the effect form (G6)."""
+    from revl import RevlError, compile_source
+
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("component A { let x = 1 }")
+    assert "binds a plain value" in str(excinfo.value)
