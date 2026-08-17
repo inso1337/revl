@@ -571,7 +571,14 @@ def _interp_fstring(parts) -> str:
     segs = ['f"']
     for kind, text in parts:
         if kind == "text":
-            segs.append(text.replace("\\", "\\\\").replace('"', '\\"').replace("{", "{{").replace("}", "}}"))
+            # escape for a single-line double-quoted f-string: backslash and
+            # quote, brace-doubling for f-string literals, and control chars
+            # (a raw newline in a template would otherwise be an unterminated
+            # f-string literal)
+            escaped = (text.replace("\\", "\\\\").replace('"', '\\"')
+                       .replace("{", "{{").replace("}", "}}")
+                       .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t"))
+            segs.append(escaped)
         else:
             head, _dot, rest = text.partition(".")
             expr = head

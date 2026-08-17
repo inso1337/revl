@@ -1,0 +1,13 @@
+// REJECTED — an optional access `?.` cannot be followed by a plain
+// (non-optional) access: `a?.b.c` would run `.c` on a None result rather
+// than short-circuit. Chain with `?.` (`a?.b?.c`) or unwrap first.
+//
+// expected error:
+//   an optional access `?.` can only be followed by another `?.`
+
+type Inner = { c: Int }
+type Outer = { b: Inner }
+
+fn deep(o: Opt[Outer]) -> Opt[Int] {
+  return o?.b.c
+}
