@@ -82,6 +82,13 @@ one.
 
 ## 3. The bridge tier
 
+**Status:** py↔py implemented as a first milestone (`backends/python/bridge.py`,
+demonstrated by `demo/bridge_pypy.py`): PgDatabase and UserCache from one
+`.rvl`, split across two processes over a Unix socket, with value-copy
+marshalling and peer-death-as-withdrawal verified against the real cordis-py
+runtime. The cross-language py↔node seam and `revl run` placement wiring are
+the remaining work.
+
 A third backend target (alongside cordis-py and cordis-wasm) whose job is to
 emit, for each cross-process seam, a **proxy** on the consumer side and a
 **stub** on the provider side, over a **transport-agnostic** channel. The
