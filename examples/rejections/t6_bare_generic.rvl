@@ -1,0 +1,10 @@
+// REJECTED — a builtin generic head with the wrong number of arguments is
+// not a type (previously crashed the checker with IndexError).
+//
+// expected error:
+//   `Opt` takes 1 type argument(s), got 0 (`Opt`)
+//   write e.g. `Opt[Int]` — a bare `Opt` is not a type
+
+fn f() -> Opt {
+  return Some(1)
+}

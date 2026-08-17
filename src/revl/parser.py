@@ -290,6 +290,21 @@ class ExprIndex:
 
 
 @dataclass
+class ExprOptField:
+    target: object
+    name: str
+    line: int
+
+
+@dataclass
+class ExprOptCall:
+    target: object
+    method: str
+    args: list
+    line: int
+
+
+@dataclass
 class ExprIf:
     cond: object
     then: object
@@ -717,6 +732,9 @@ class Parser:
 
     def literal(self):
         tok = self.peek()
+        if tok.kind == "-" and self.toks[self.pos + 1].kind == "int":
+            self.next()
+            return -self.next().value
         if tok.kind == "int":
             return self.next().value
         if tok.kind == "string":
@@ -1154,7 +1172,19 @@ class Parser:
         return cond
 
     def _or(self):
-        return self._bin(self._and, ("||",))
+        return self._bin(self._nullish, ("||",))
+
+    def _nullish(self):
+        # `??` binds tighter than `||` and `&&` do not compose with it in TS
+        # without parens; we simply accept it as a right-associative binary
+        # operator here — the lowering wraps left/right pair in a `nullish`
+        # bin op the checker types against Opt[T] (typecheck._binop_type).
+        left = self._and()
+        if self.at("??"):
+            self.next()
+            right = self._nullish()
+            return ExprBin("??", left, right, left.line)
+        return left
 
     def _and(self):
         return self._bin(self._eq, ("&&",))
@@ -1201,6 +1231,23 @@ class Parser:
             if self.at("."):
                 self.next()
                 node = ExprField(node, self.expect("ident").value, node.line)
+            elif self.at("?."):
+                # `expr?.name` / `expr?.name(args)`: short-circuit on Opt-None.
+                # Modelled as an ExprOptField / ExprOptCall so lowering can
+                # emit a conditional and typing can flow Opt into inner types.
+                self.next()
+                name = self.expect("ident").value
+                if self.at("("):
+                    self.next()
+                    args = []
+                    while not self.at(")"):
+                        args.append(self.pure_expr())
+                        if self.at(","):
+                            self.next()
+                    self.expect(")")
+                    node = ExprOptCall(node, name, args, node.line)
+                else:
+                    node = ExprOptField(node, name, node.line)
             elif self.at("("):
                 self.next()
                 args = []

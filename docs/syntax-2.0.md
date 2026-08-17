@@ -142,7 +142,10 @@ revl has a single equality: structural value equality, no coercion. Both
 spellings `==` and `===` are accepted and mean that one thing (`!=`/`!==`
 likewise). Rationale: models emit both reflexively; making one of them an
 error would burn feedback cycles on a distinction revl doesn't have. The
-formatter canonicalizes to `==`.
+compiler canonicalizes to `==` in the IR (the parser folds `===`→`==`,
+`!==`→`!=`), so no backend can diverge; a source-level formatter pass that
+also rewrites the spelling is future work (`revl fmt` today only does
+`--migrate`).
 
 ### 3.5 Local mutation: `var`, `while`, `for`
 

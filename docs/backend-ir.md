@@ -1,5 +1,12 @@
 # revl backend IR (v0 contract)
 
+> **Historical contract.** This file froze the *v0* shape so the frontend
+> and backends could be built in parallel. No emitter produces
+> `ir_version: 0` any more — the shipping contract is `ir_version` 1/2/3
+> (docs/backend-ir-v1.md for the v1 deltas, docs/design-v2-realms.md for
+> 2, docs/syntax-2.0.md §9 for 3). Kept for provenance; read
+> docs/backend-ir-v1.md for what emitters actually accept.
+
 The frontend (parser → checker → linker) lowers each component to a JSON
 document; a backend turns that document into a component for its host runtime.
 This file freezes the v0 contract so frontend and backends can be built in

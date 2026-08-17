@@ -1,6 +1,7 @@
 # revl v2 — isolation realms & coeffect interception
 
-**Status:** design ratified · implementation in this branch (`v2/realms`)
+**Status:** implemented (merged into `v2.0`) — cordis-py, cordis (TS), and
+the wasm substrate; runtime-verified on cordis-py and cordis v4.
 
 The paper's §3.2.3 mechanisms, deferred from v1 (DESIGN.md non-goals):
 **realms** let the same coeffect key resolve to different providers for
@@ -108,8 +109,15 @@ component and only-when-non-empty: `"isolate": {key: realm}`,
   provider; the consumer fiber's `_effective_intercept()[key]` equals
   the declared record.
 
-**cordis (TS), wasm**: reject `ir_version: 2` by version with a message
-naming the feature and pointing here. cordis v4 has the same
-isolate/intercept APIs, so TS parity is mechanical follow-up; the wasm
-tier's natural realization is realm-qualified import namespaces
-(`coeffect:tenant_a/kv`) — future work, noted, not implemented.
+**cordis (TS): implemented.** The TS backend lowers `isolate`/`intercept`
+onto cordis v4's identical APIs (`backends/typescript/emit.py`, runtime
+`plug`/`realmLabel`), verified against the real runtime in
+`backends/typescript/tests/v2_realms.test.ts` (two providers of one key in
+two realms; each consumer observes its own provider; realm-local
+withdrawal).
+
+**wasm: implemented as realm-qualified namespaces.** The substrate has no
+realm registry, so `isolate` becomes the import/export namespace
+(`{realm}/{key}`) and `intercept` metadata rides in `revl:isolate` /
+`revl:intercept` custom sections (host-enforced if present). The wasm tier
+rejects only `ir_version: 3` (typed core) by version.

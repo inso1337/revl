@@ -51,8 +51,11 @@ either: the table vs `open/close/query/execute/new/get/insert/remove/drop`).
 ## Versioning
 
 A `builtin` IR node anywhere in a component implies `ir_version: 3`; pure
-v1 documents are unaffected. The wasm tier rejects builtin nodes with its
-usual named tier error (i32-only — no strings or lists there yet).
+v1 documents are unaffected. The wasm tier lowers the fixed-shape builtins
+(`length`, `push`, `concat`, `slice`, `charAt`, `charCodeAt`) over its
+canonical-ABI string/list model and rejects the rest (`indexOf`, `split`,
+`join`, `repeat`) with its usual named tier error — not yet lowerable on
+that tier.
 
 ## Planned (needed for self-hosting, not yet specified)
 
