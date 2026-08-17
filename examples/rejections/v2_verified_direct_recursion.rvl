@@ -1,0 +1,11 @@
+// REJECTED — `verified fn` totality gate (syntax-2.0 §7).
+// A verified function may only use structural recursion or bounded loops;
+// direct or mutual recursion is rejected when totality cannot be proven.
+//
+// expected error:
+//   verified fn `recurse` is not total: it participates in direct or mutual recursion
+//     (verified totality, syntax-2.0 §7)
+
+verified fn recurse(n: Int) -> Int {
+  return recurse(n)
+}
