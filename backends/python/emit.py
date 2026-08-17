@@ -71,6 +71,28 @@ class _Lines:
         return "\n".join(self._lines)
 
 
+def _render_builtin(method, target: str, args: list) -> str:
+    """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
+    `push`/`concat` are persistent (value semantics); `indexOf` returns -1
+    when absent on both hosts."""
+    if method == "length":
+        return f"len({target})"
+    if method == "push":
+        return f"({target} + [{args[0]}])"
+    if method == "slice":
+        return f"{target}[{args[0]}:{args[1]}]"
+    if method == "charAt":
+        return f"{target}[{args[0]}]"
+    if method == "charCodeAt":
+        return f"ord({target}[{args[0]}])"
+    if method == "concat":
+        return f"({target} + {args[0]})"
+    if method == "indexOf":
+        return (f"(lambda _v, _n: _v.find(_n) if isinstance(_v, str) "
+                f"else (_v.index(_n) if _n in _v else -1))({target}, {args[0]})")
+    raise EmitError(f"unknown builtin method {method!r}")
+
+
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict) -> None:
         self.ir = component
@@ -101,6 +123,10 @@ class _ComponentEmitter:
         if not isinstance(expr, dict) or "kind" not in expr:
             raise EmitError(f"{where}: malformed expression {expr!r}")
         kind = expr["kind"]
+        if kind == "builtin":
+            t = self._expr(expr.get("target"), where)
+            a = [self._expr(x, where) for x in expr.get("args") or []]
+            return _render_builtin(expr.get("method"), t, a)
         if kind == "lit":
             return repr(expr.get("value"))
         if kind == "name":
@@ -573,6 +599,10 @@ def _expr(node: dict) -> str:
         return "[" + ", ".join(_expr(e) for e in node["items"]) + "]"
     if kind == "len":
         return f"len({_expr(node['target'])})"
+    if kind == "builtin":
+        return _render_builtin(
+            node.get("method"), _expr(node["target"]),
+            [_expr(a) for a in node.get("args") or []])
     if kind == "arrow":
         params = list(node["params"])
         captures = node.get("captures") or []

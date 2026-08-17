@@ -61,6 +61,29 @@ from .parser import (
 )
 
 IR_VERSION = 1
+
+# finding 6: the specified stdlib surface (docs/stdlib-2.0.md). Method calls
+# on values must name one of these (arity-checked); everything else is a
+# compile error — never a verbatim pass-through to whatever the host object
+# happens to have. Names are chosen to be collision-free with the v1 host
+# stub objects (open/close/query/execute/new/get/insert/remove/drop).
+_BUILTIN_METHODS = {
+    "length": 0, "push": 1, "slice": 2, "charAt": 1,
+    "charCodeAt": 1, "indexOf": 1, "concat": 1,
+}
+
+
+def _is_host_valued(expr, scope) -> bool:
+    """A receiver holding a HOST object (Map.new(), Pool.open(...), or a let
+    bound to one): its methods belong to the host stub, not the stdlib
+    table, and stay verbatim."""
+    from .parser import ExprCall as _C, ExprField as _F, ExprVar as _V
+
+    if isinstance(expr, _V):
+        return scope.get(expr.name) == "host"
+    if isinstance(expr, _C) and isinstance(expr.callee, _F)             and isinstance(expr.callee.target, _V):
+        return expr.callee.target.name in _HOST_CALLABLES
+    return False
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
 IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
 
@@ -528,7 +551,12 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
     if isinstance(stmt, LetStmt):
         if stmt.name in scope:
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is already declared in this function")
-        scope[stmt.name] = stmt.mutable
+        # host provenance: a let bound to a host constructor call carries
+        # host-object methods, exempt from the stdlib method table
+        if not stmt.mutable and _is_host_valued(stmt.value, scope):
+            scope[stmt.name] = "host"
+        else:
+            scope[stmt.name] = stmt.mutable
         inferred = _expr_static_type(stmt.value, type_env, types)
         if inferred is not None:
             type_env[stmt.name] = inferred
@@ -719,6 +747,32 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return {"kind": "un", "op": expr.op,
                 "operand": _lower_pure_expr(expr.operand, scope, callables, alias_fns, filename, type_env, types)}
     if isinstance(expr, ExprCall):
+        _callee = expr.callee
+        _host_receiver = isinstance(_callee, ExprField) and (
+            _is_host_valued(_callee.target, scope)
+            # the constructor root itself (Map.new(), Pool.open(...)):
+            or (isinstance(_callee.target, ExprVar)
+                and _callee.target.name in _HOST_CALLABLES
+                and _callee.target.name not in scope)
+        )
+        if isinstance(expr.callee, ExprField) and not _host_receiver:
+            method = expr.callee.name
+            arity = _BUILTIN_METHODS.get(method)
+            if arity is None:
+                raise RevlError(
+                    filename, expr.line,
+                    f"no builtin method `{method}` on values — the stdlib surface is "
+                    f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
+                    hint="records carry data, not methods; call functions as `f(x)`, "
+                         "and call arrows through a `let` binding",
+                )
+            if len(expr.args) != arity:
+                raise RevlError(filename, expr.line,
+                                f"builtin `{method}` takes {arity} argument(s), "
+                                f"{len(expr.args)} given")
+            return {"kind": "builtin", "method": method,
+                    "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
+                    "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
         return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
                 "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
     if isinstance(expr, ExprField):
@@ -851,6 +905,15 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         for svc in services.values()
     )
     uses_v3 = uses_v3 or uses_components_2
+
+    def _has_builtin(node) -> bool:
+        if isinstance(node, dict):
+            return node.get("kind") == "builtin" or any(_has_builtin(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_has_builtin(v) for v in node)
+        return False
+
+    uses_v3 = uses_v3 or any(_has_builtin(comp.get("body")) for comp in components)
 
     result = {
         "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
@@ -1010,12 +1073,31 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                              "marked `emit` (G4/G6)",
                     )
                 return _component_req_call(env, root, method, args, line)
+            if method in _BUILTIN_METHODS:
+                if len(args) != _BUILTIN_METHODS[method]:
+                    raise RevlError(filename, line,
+                                    f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
+                                    f"argument(s), {len(args)} given")
+                return {"kind": "builtin", "method": method,
+                        "target": _lower_component_pure_expr(expr.callee.target, env, scope,
+                                                             callables, pure_only),
+                        "args": args}
             if root in scope:
                 return {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
         if isinstance(expr.callee, ExprVar) and expr.callee.name in callables:
             return {"kind": "fn", "name": expr.callee.name, "args": args}
+        if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
+            method = expr.callee.name
+            if len(args) != _BUILTIN_METHODS[method]:
+                raise RevlError(filename, line,
+                                f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
+                                f"argument(s), {len(args)} given")
+            return {"kind": "builtin", "method": method,
+                    "target": _lower_component_pure_expr(expr.callee.target, env, scope,
+                                                         callables, pure_only),
+                    "args": args}
         return {"kind": "call",
                 "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
                                                      pure_only),

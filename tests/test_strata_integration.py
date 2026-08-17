@@ -110,3 +110,70 @@ component C requires kv: Kv {
     source = module.emit(ir)
     compile(source, "emitted.py", "exec")  # must be valid Python
     assert "double(sha(3))" in source.replace(" ", "").replace("(3))", "(3))") or "double" in source
+
+
+# --- finding 6: the stdlib surface (docs/stdlib-2.0.md) ---------------------
+
+def _emit_py(ir):
+    spec = importlib.util.spec_from_file_location(
+        "pyemit_stdlib", ROOT / "backends" / "python" / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.emit(ir)
+
+
+def test_stdlib_executes_identically_to_spec():
+    ir = compile_source('''
+pub fn seq(n: Int) -> List[Int] { var out = [] var i = 0 while (i < n) { out = out.push(i) i += 1 } return out }
+pub fn head(s: Str) -> Str { return s.slice(0, 1) }
+pub fn find(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
+pub fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
+''', "std.rvl")
+    namespace = {}
+    exec(compile(_emit_py(ir), "std.py", "exec"), namespace)
+    assert namespace["seq"](5) == [0, 1, 2, 3, 4]
+    assert namespace["head"]("revl") == "r"
+    assert namespace["find"]("revl", "zz") == -1, "-1 when absent, both hosts"
+    assert namespace["findL"]([4, 5, 6], 9) == -1
+
+
+def test_push_is_persistent():
+    ir = compile_source('''
+pub fn keep(xs: List[Int]) -> List[Int] { let bigger = xs.push(9) return xs }
+''', "p.rvl")
+    namespace = {}
+    exec(compile(_emit_py(ir), "p.py", "exec"), namespace)
+    original = [1, 2]
+    assert namespace["keep"](original) == [1, 2]
+    assert original == [1, 2], "push must never mutate in place (value semantics)"
+
+
+def test_unknown_method_is_a_compile_error_not_a_passthrough():
+    with pytest.raises(RevlError, match="no builtin method `shove`"):
+        compile_source('pub fn f(xs: List[Int]) -> List[Int] { return xs.shove(1) }', "u.rvl")
+
+
+def test_builtin_arity_is_checked():
+    with pytest.raises(RevlError, match=r"builtin `slice` takes 2 argument\(s\)"):
+        compile_source('pub fn f(s: Str) -> Str { return s.slice(1) }', "a.rvl")
+
+
+def test_host_objects_keep_their_own_methods():
+    ir = compile_source('''
+test "host map" {
+  let m = Map.new()
+  m.insert("k", "v")
+  assert m.get("k") == "v"
+}
+''', "h.rvl")
+    assert ir["tests"], "host-object methods stay verbatim (provenance exemption)"
+
+
+def test_builtin_in_component_bumps_to_v3():
+    ir = compile_source('''
+service Kv { fn put(k: Int, v: Int) }
+component C requires kv: Kv {
+  effect kv.put(1, [1, 2].length()) undo kv.put(1, 0)
+}
+''', "v.rvl")
+    assert ir["ir_version"] == 3
