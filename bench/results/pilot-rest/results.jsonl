@@ -1,0 +1,4 @@
+{"spec": "01-kv-provider", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.37, "cost": 0.002844465}
+{"spec": "01-kv-provider", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002844}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 7.12, "cost": 0.003184635}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003185}

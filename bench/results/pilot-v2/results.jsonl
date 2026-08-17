@@ -1,0 +1,2 @@
+{"spec": "01-kv-provider", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 7.36, "cost": 0.002973225}
+{"spec": "01-kv-provider", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002973}
