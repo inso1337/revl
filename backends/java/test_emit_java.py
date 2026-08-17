@@ -466,3 +466,115 @@ def test_java_runs_emitted_stdlib_semantics(tmp_path):
     )
     assert run.returncode == 0, run.stderr
     assert "REVL_TESTS_OK" in run.stdout
+
+
+# --------------------------------------------------------------------------
+# Conformance gaps closed on this tier (docs/conformance.md). Each construct
+# below used to raise instead of lowering; the matrix now reports java as
+# clean apart from the deliberate extern refusals.
+# --------------------------------------------------------------------------
+
+
+def test_nullish_lowers_to_or_else_get():
+    """`a ?? b` on `Opt[T]` = `java.util.Optional<T>`. `orElseGet` (not
+    `orElse`) because `??` must not evaluate its right operand when the left
+    is present, and `orElse` takes an already-evaluated value."""
+    ir = compile_source(
+        """
+        fn side(n: Int) -> Int { return n * 3 }
+        fn pick(a: Opt[Int]) -> Int { return a ?? side(7) }
+        """
+    )
+    src = emit.emit(ir)
+    assert "a.orElseGet(() -> side(7L))" in src
+    assert ".orElse(" not in src  # eager form would evaluate `side(7)` always
+
+
+def test_nullish_lowers_in_component_method_bodies():
+    ir = compile_source(
+        """
+        service Bus { fn maybe(n: Int) -> Opt[Int] }
+        service S { fn f(x: Int) -> Int }
+        component C requires bus: Bus provides s: S {
+          provide s { fn f(x) = bus.maybe(x) ?? 0 }
+        }
+        """
+    )
+    src = emit.emit(ir)
+    assert "this.bus.maybe(x).orElseGet(() -> 0L)" in src
+
+
+def test_bare_return_lowers_for_void_service_operations():
+    """`{"step": "return", "expr": null}` used to crash with an AttributeError
+    in the expression-body fast path."""
+    ir = compile_source(
+        """
+        service S { fn f(x: Int) }
+        component C provides s: S { provide s { fn f(x) { return } } }
+        """
+    )
+    src = emit.emit(ir)
+    assert "public void f(long x) { return; }" in src
+
+
+def test_keyword_named_function_is_renamed_not_rejected():
+    """`fn double(..)` is legal revl; `double` is a Java keyword. A3 renaming
+    (`src/revl/lower.py::_safe_name`) applies at declaration and call sites."""
+    ir = compile_source(
+        """
+        fn double(n: Int) -> Int { return n * 2 }
+        service S { fn f(x: Int) -> Int }
+        component C provides s: S { provide s { fn f(x) = double(x) } }
+        """
+    )
+    src = emit.emit(ir)
+    assert "public static long double_(long n)" in src
+    assert "return double_(x);" in src
+    # the un-renamed keyword must not survive anywhere as an identifier
+    assert "double(" not in src
+
+
+def test_keyword_named_extern_is_renamed_at_declaration_and_call():
+    ir = compile_source(
+        """
+        extern pure fn native(n: Int) -> Int = @java { return n; } = @py { return n }
+        fn use_it(n: Int) -> Int { return native(n) }
+        """
+    )
+    src = emit.emit(ir)
+    assert "public static long native_(long n)" in src
+    assert "return native_(n);" in src
+
+
+def test_renaming_collision_is_refused():
+    """A3 renaming is table-free, so `double` and `double_` would both land on
+    `double_`. That is the one lossy case and it must refuse, not pick one."""
+    ir = compile_source(
+        """
+        fn double(n: Int) -> Int { return n * 2 }
+        fn double_(n: Int) -> Int { return n * 4 }
+        fn use_both(n: Int) -> Int { return double(n) + double_(n) }
+        """
+    )
+    with pytest.raises(emit.EmitError, match="both lower to the Java name"):
+        emit.emit(ir)
+
+
+def test_match_in_a_component_method_body():
+    ir = compile_source(
+        """
+        type Outcome = Found(Int) | Missing
+        service S { fn f(x: Int) -> Int }
+        component C provides s: S {
+          provide s {
+            fn f(x) {
+              let o = Found(x)
+              return match o { Found(v) => v, Missing => 0 }
+            }
+          }
+        }
+        """
+    )
+    src = emit.emit(ir)
+    assert "Outcome.Found" in src
+    assert "Outcome.Missing" in src
