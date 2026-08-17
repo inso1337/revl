@@ -1283,7 +1283,7 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
         return _v3_match_expr(node, ctx)
 
     if kind == "interp":
-        return _v3_interp(node)
+        return _v3_interp(node, ctx)
 
     if kind in ("optfield", "optcall"):
         raise EmitError(
@@ -1400,19 +1400,20 @@ def _stdlib_helper_traits() -> list[str]:
     ]
 
 
-def _v3_interp(node: dict) -> str:
+def _v3_interp(node: dict, ctx: _V3Ctx) -> str:
     parts = node.get("parts") or []
     format_parts: list[str] = []
     args: list[str] = []
-    for kind, text in parts:
+    for kind, value in parts:
         if kind == "text":
-            format_parts.append(text.replace("{", "{{").replace("}", "}}"))
-        else:
+            format_parts.append(value.replace("{", "{{").replace("}", "}}"))
+        else:  # ["expr", ir_node]
             format_parts.append("{}")
-            head, _dot, rest = text.partition(".")
-            _ident(head, "interpolation")
-            args.append(head if not rest else f"{head}.{rest}")
-    return f"format!({_string(''.join(format_parts))}, {', '.join(args)})"
+            args.append(_v3_expr(value, ctx))
+    joined = "".join(format_parts)
+    if not args:
+        return f"format!({_string(joined)})"
+    return f"format!({_string(joined)}, {', '.join(args)})"
 
 
 def _v3_match_expr(node: dict, ctx: _V3Ctx) -> str:

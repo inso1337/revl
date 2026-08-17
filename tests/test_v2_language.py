@@ -425,15 +425,26 @@ def test_optional_chaining_field_and_call_parse():
     assert ret["kind"] == "optfield" and ret["name"] == "name"
 
 
-def test_template_dotted_chain_lexes_and_lowers():
+def test_template_expression_interpolation_lowers():
     from revl.compiler import compile_source
 
+    # `${...}` holds a full expression, lowered like any other (here a field
+    # access and, below, a function call)
     ir = compile_source(
         "type U = { name: Str }\n"
         "fn hi(u: U) -> Str { return `hi ${u.name}` }\n"
     )
     ret = ir["functions"][0]["body"][0]["expr"]
-    assert ret == {"kind": "interp", "parts": [("text", "hi "), ("var", "u.name")]}
+    assert ret["kind"] == "interp"
+    assert ret["parts"][0] == ["text", "hi "]
+    assert ret["parts"][1][0] == "expr"
+    assert ret["parts"][1][1] == {"kind": "field",
+                                  "target": {"kind": "var", "name": "u"}, "name": "name"}
+
+    ir2 = compile_source("fn g(a: Int, b: Int) -> Str { return `${a + b}!` }")
+    parts = ir2["functions"][0]["body"][0]["expr"]["parts"]
+    assert parts[0][0] == "expr" and parts[0][1]["kind"] == "bin"
+    assert parts[1] == ["text", "!"]
 
 
 def test_python_backend_runs_nullish_and_template():

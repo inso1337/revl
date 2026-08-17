@@ -139,30 +139,30 @@
   ;;   case NotFound: unit
   ;;   case Invalid: Str
 
-  (func (export "add") (param $p_a i32) (param $p_b i32) (result i32) (local $__revl_tmp i32)
+  (func $add (export "add") (param $p_a i32) (param $p_b i32) (result i32) (local $__revl_tmp i32)
     (local.get $p_a)
       (local.get $p_b)
       (i32.add)
     return)
 
-  (func (export "negate") (param $p_b i32) (result i32) (local $__revl_tmp i32)
+  (func $negate (export "negate") (param $p_b i32) (result i32) (local $__revl_tmp i32)
     (local.get $p_b)
       (i32.eqz)
     return)
 
-  (func (export "name") (param $p_row i32) (result i32) (local $__revl_tmp i32)
+  (func $name (export "name") (param $p_row i32) (result i32) (local $__revl_tmp i32)
     (i32.load (i32.add (local.get $p_row) (i32.const 4)))
     return)
 
-  (func (export "first") (param $p_xs i32) (result i32) (local $__revl_tmp i32)
+  (func $first (export "first") (param $p_xs i32) (result i32) (local $__revl_tmp i32)
     (i32.load (i32.add (local.get $p_xs) (i32.const 4)))
     return)
 
-  (func (export "greet") (result i32) (local $__revl_tmp i32)
+  (func $greet (export "greet") (result i32) (local $__revl_tmp i32)
     (i32.const 0)
     return)
 
-  (func (export "make_row") (param $p_id i32) (param $p_name i32) (result i32) (local $__revl_tmp i32)
+  (func $make_row (export "make_row") (param $p_id i32) (param $p_name i32) (result i32) (local $__revl_tmp i32)
     (call $alloc (i32.const 8))
       (local.set $__revl_tmp)
       (i32.store (local.get $__revl_tmp) (local.get $p_id))
@@ -170,7 +170,7 @@
       (local.get $__revl_tmp)
     return)
 
-  (func (export "classify") (param $p_n i32) (result i32) (local $__revl_tmp i32)
+  (func $classify (export "classify") (param $p_n i32) (result i32) (local $__revl_tmp i32)
     (local.get $p_n)
       (i32.const 0)
       (i32.lt_s)

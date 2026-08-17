@@ -583,6 +583,11 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
+                if node.get("kind") == "interp":
+                    # template text segments are string literals too
+                    for part_kind, part in node.get("parts") or []:
+                        if part_kind == "text":
+                            seen.setdefault(part, None)
                 for child in node.values():
                     walk(child)
             elif isinstance(node, list):
@@ -1316,15 +1321,20 @@ class _V3Emitter:
         for kind, value in parts:
             if kind == "text":
                 rendered.append(self._str_ptr(str(value)))
-            elif kind == "var":
-                # a dotted chain (`u.name`) is head + nested field access
-                head, _dot, rest = value.partition(".")
-                sub: dict = {"kind": "var", "name": head}
-                for field in rest.split(".") if rest else []:
-                    sub = {"kind": "field", "target": sub, "name": field}
-                rendered.append(self._expr(sub, scope, where, "Str").wat)
-            else:
-                raise EmitError(f"{where}: unsupported interpolation part {kind!r}")
+            else:  # ["expr", ir_node] — must be Str (i32 tier has no int->str)
+                piece = self._expr(value, scope, where, "Str")
+                if piece.ty != "Str":
+                    raise EmitError(
+                        f"{where}: a `${{…}}` template interpolates Str only on this "
+                        f"tier, got {piece.ty!r} (no int→string)"
+                    )
+                rendered.append(piece.wat)
+        if not rendered:
+            return _E(self._str_ptr(""), "Str")
+        wat = rendered[0]
+        for piece in rendered[1:]:
+            wat = f"{wat}\n      {piece}\n      (call $str_concat)"
+        return _E(wat, "Str")
 
     # -- statements + function emission --------------------------------------
 
@@ -1517,7 +1527,9 @@ class _V3Emitter:
             body = "unreachable"
         else:
             body = "nop"
-        header = f'(func (export "{name}") {" ".join(decls)}'.rstrip()
+        # the `$name` identifier lets one v3 function call another
+        # (`call $name`); without it intra-module calls fail to resolve
+        header = f'(func ${name} (export "{name}") {" ".join(decls)}'.rstrip()
         return f"  {header}\n    {body})"
 
     def emit(self) -> str:
