@@ -1,0 +1,12 @@
+// REJECTED — T1 (sound typing): a service argument of the wrong type.
+// `query` declares `sql: Str`; the literal is an Int. Before the typing
+// milestone this compiled and failed (or coerced) at runtime on the host.
+//
+// expected error:
+//   `db.query` argument `sql` expects `Str`, got `Int`
+
+service Database { fn query(sql: Str) -> List[Row] }
+
+component Probe requires db: Database {
+  let rows = effect db.query(42) undo db.query("cleanup")
+}

@@ -56,10 +56,10 @@ def test_services_20_async_and_commutative_lower_and_emit():
 
         component Db provides db: Database {
           provide db {
-            fn query(sql) { return null }
+            fn query(sql) { return [] }
             async fn stats() {
               await Job.run("stats")
-              return null
+              return { hits: 0 }
             }
             fn execute(sql) { return 1 }
           }
