@@ -35,11 +35,22 @@ one Java source file (service interfaces + plugin classes).
 
 ## Verify
 
-A JDK is required (not present in the dev environment):
+The suite (`test_emit_java.py`) asserts emitted structure at the string
+level everywhere, and — when a working JDK is present (CI pins Temurin 21)
+— **compiles emitted sources with `javac` against the assumed cordis4j API
+in [stubs/](stubs/)** and runs an emitted `test` block on the JVM
+(`REVL_TESTS`). The stdlib surface lowers through typed `revl*` static
+overloads so every (method, Str|List) pair from docs/stdlib-2.0.md resolves
+at compile time; revl `Map.new()` is emitted as `Map.create()` (`new` is a
+Java reserved word).
+
+Against the real jar:
 
 ```bash
 python3 emit.py ../../examples/user_cache.ir.json > Components.java
 javac -cp cordis4j-core.jar Components.java
 ```
 
-The test suite asserts the emitted structure at the string level (no JDK needed).
+The stubs are the emitter's declared API assumption — validating them
+against the real cordis4j jar (and porting the A1/G7 runtime scenarios) is
+tracked in docs/v2.0-roadmap.md.

@@ -9,10 +9,16 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "src"))
 
-import emit  # noqa: E402
+# Load this backend's emitter under a unique module name — a bare
+# `import emit` collides with the other backends' emitters when the
+# suites run in one pytest invocation.
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("revl_rust_emit", Path(__file__).resolve().parent / "emit.py")
+emit = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(emit)
 from revl import compile_files, compile_source  # noqa: E402
 
 
@@ -169,6 +175,89 @@ def test_cargo_check_compiles_v3_types_functions_match(tmp_path):
             NotFound => "not found",
             Invalid(why) => why,
           }
+        }
+        """
+    )
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+STDLIB_SRC = """
+pub fn seq(n: Int) -> List[Int] { var out = [] var i = 0 while (i < n) { out = out.push(i) i += 1 } return out }
+pub fn head(s: Str) -> Str { return s.slice(0, 1) }
+pub fn find(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
+pub fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
+pub fn cat(a: Str, b: Str) -> Str { return a.concat(b) }
+pub fn catL(xs: List[Int], ys: List[Int]) -> List[Int] { return xs.concat(ys) }
+test "stdlib parity with the python backend" {
+  assert seq(5).length() == 5
+  assert seq(5)[4] == 4
+  assert head("revl") == "r"
+  assert find("revl", "zz") == 0 - 1
+  assert find("revl", "ev") == 1
+  assert findL([4, 5, 6], 9) == 0 - 1
+  assert findL([4, 5, 6], 6) == 2
+  assert cat("re", "vl") == "revl"
+  assert catL([1], [2, 3]).length() == 3
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_stdlib_builtins_on_str_and_list(tmp_path):
+    """Review finding: slice/indexOf/concat previously failed to compile for
+    one of {Str, List} each; indexing failed for both (i64 vs usize)."""
+    ir = compile_source(STDLIB_SRC + "\npub fn first(xs: List[Int], i: Int) -> Int { return xs[i] }\n")
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_test_runs_emitted_stdlib_semantics(tmp_path):
+    """Not just compiles: the emitted #[test] executes the spec's semantics
+    (persistent push, -1 when absent, char-based string positions)."""
+    ir = compile_source(STDLIB_SRC)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = subprocess.run(
+        ["cargo", "test", "--offline"], cwd=tmp_path, text=True,
+        capture_output=True, timeout=600,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "1 passed" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_method_level_compensate(tmp_path):
+    """Review finding: `emit ... compensate` in a provide method referenced
+    `*_undo` clones that were only generated when compensate was absent."""
+    ir = compile_source(
+        """
+        service Db { fn q(s: Str) -> Int
+          emission fn ex(s: Str) -> Int }
+        service N { fn ping(u: Str) }
+        component C requires db: Db provides n: N {
+          let m = effect Map.new() undo m.drop()
+          provide n {
+            fn ping(u) { emit db.ex(u) compensate db.ex(u) }
+          }
+        }
+        """
+    )
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+def test_cargo_check_compiles_braces_in_templates(tmp_path):
+    """Review finding: literal `{`/`}` in a template reached `format!`
+    unescaped and broke the format string."""
+    ir = compile_source(
+        """
+        service Db { emission fn ex(s: Str) -> Int }
+        component B requires db: Db {
+          emit db.ex(`INSERT {"k": 1}`)
         }
         """
     )

@@ -45,3 +45,42 @@ jobs:
       - run: cd backends/typescript && npm ci
       - run: cd backends/typescript && npx vitest run
       - run: cd backends/typescript && npx tsc --noEmit
+
+  backend-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: pytest backends/wasm/test_v3_emit.py -q
+
+  backend-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install -e ".[test]"
+      - run: pytest backends/rust/test_emit_rust.py -q
+
+  backend-java:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # the javac gate compiles emitted sources against the cordis4j API
+      # stubs and runs emitted test blocks on the JVM — without a JDK those
+      # tests skip silently, which is how invalid Java once shipped in a
+      # golden. Keep the JDK pinned here.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: pip install -e ".[test]"
+      - run: pytest backends/java/test_emit_java.py -q
