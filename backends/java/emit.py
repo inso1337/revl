@@ -135,6 +135,47 @@ def _ident(name: object, role: str) -> str:
     return name
 
 
+def _fn_name(name: object) -> str:
+    """The Java identifier for a revl top-level `fn` or extern.
+
+    revl's name space is larger than Java's: `fn double(..)` is a perfectly
+    legal revl program, but `double` is a Java keyword. Rejecting it would make
+    a portable program unportable for a spelling reason, so rename it with the
+    same A3 scheme `src/revl/lower.py::_safe_name` uses for bindings — append
+    `_` until the name is free. The mapping is a pure function of the name, so
+    declaration sites and call sites agree without threading a table around;
+    `_check_fn_name_collisions` covers the one case where that is not enough.
+    """
+    if not isinstance(name, str) or not _IDENT_RE.match(name):
+        raise EmitError(f"invalid function identifier: {name!r}")
+    candidate = name
+    while candidate in _JAVA_RESERVED or candidate in _EMITTER_RESERVED:
+        candidate += "_"
+    return candidate
+
+
+def _check_fn_name_collisions(functions: list, externs: list) -> None:
+    """Reject programs where A3 renaming would merge two distinct callables.
+
+    `_fn_name` is table-free, so a program declaring both `double` and
+    `double_` would map both onto `double_`. That is the only way the scheme
+    can lose information, and silently emitting one over the other would be
+    wrong code — refuse instead.
+    """
+    seen: dict[str, str] = {}
+    for decl in list(functions or []) + list(externs or []):
+        original = decl.get("name")
+        if not isinstance(original, str) or not _IDENT_RE.match(original):
+            continue
+        java = _fn_name(original)
+        if java in seen and seen[java] != original:
+            raise EmitError(
+                f"functions {seen[java]!r} and {original!r} both lower to the "
+                f"Java name {java!r} after reserved-word renaming; rename one"
+            )
+        seen[java] = original
+
+
 def _camel(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
@@ -202,6 +243,10 @@ _JAVA_V3_BIN_OPS = {
 }
 
 _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
+# Kinds that render as a Java postfix-safe primary, so a `.method()` suffix can
+# be appended without wrapping them in parentheses. Wider than the set above
+# because `_v3_expr` also renders the v1 component dialect (`req`, `config`, ..).
+_V3_POSTFIX_SAFE_KINDS = _V3_ATOMIC_KINDS | {"name", "req", "config", "host", "fn"}
 _HOST_ROOTS = {"Pool", "Map", "Job"}
 
 
@@ -347,12 +392,16 @@ class _V3Ctx:
 
 def _v3_var(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
     name = node.get("name")
+    # A reference to a top-level callable is resolved before `_ident`, which
+    # would reject a keyword-named one (`double`) that `_fn_name` can rename.
+    if not (rename and name in rename) and (
+        name in ctx.function_names or name in ctx.extern_names
+    ):
+        return _fn_name(name)
     _ident(name, "name")
     if rename and name in rename:
         return rename[name]
     if name in ctx.case_owners:
-        return name
-    if name in ctx.function_names or name in ctx.extern_names:
         return name
     if name == "None":
         return "java.util.Optional.empty()"
@@ -480,6 +529,9 @@ def _v3_call(
     args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
     if isinstance(callee, dict) and callee.get("kind") == "var":
         name = callee.get("name")
+        if name in ctx.function_names or name in ctx.extern_names:
+            # keyword-named callables are renamed, not rejected (see `_fn_name`)
+            return f"{_fn_name(name)}({', '.join(args)})"
         _ident(name, "callable")
         if name in ctx.case_owners:
             variant = _ident(ctx.case_owners[name], "type name")
@@ -569,7 +621,7 @@ def _v3_expr(
         return _format_java(template, args)
 
     if kind == "fn":
-        fn_name = _ident(node.get("name"), "function")
+        fn_name = _fn_name(node.get("name"))
         args = ", ".join(
             _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
         )
@@ -577,6 +629,17 @@ def _v3_expr(
 
     if kind == "bin":
         op = node.get("op")
+        if op == "??":
+            # `a ?? b` (docs/syntax-2.0.md §3.2): `Opt[T]` is
+            # `java.util.Optional<T>` on this tier, so the absent case is
+            # `Optional.empty()`. `orElseGet` keeps `b` lazy — `??` must not
+            # evaluate its right operand when `a` is present, and `orElse`
+            # would evaluate it unconditionally.
+            left_opt = _v3_expr(node["left"], ctx, rename, env)
+            if node["left"].get("kind") not in _V3_POSTFIX_SAFE_KINDS:
+                left_opt = f"({left_opt})"
+            right_opt = _v3_expr(node["right"], ctx, rename, env)
+            return f"{left_opt}.orElseGet(() -> {right_opt})"
         left = _v3_expr(node["left"], ctx, rename, env)
         right = _v3_expr(node["right"], ctx, rename, env)
         if op in ("==", "==="):
@@ -919,7 +982,7 @@ def _emit_v3_types(types: dict) -> list[str]:
 def _emit_v3_externs(externs: list) -> list[str]:
     lines: list[str] = []
     for ext in externs:
-        name = _ident(ext.get("name"), "extern name")
+        name = _fn_name(ext.get("name"))
         params = ", ".join(
             f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'extern parameter name')}"
             for p in ext.get("params") or []
@@ -947,7 +1010,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     ctx = _V3Ctx(types, functions, externs)
     lines: list[str] = []
     for fn in functions:
-        name = _ident(fn.get("name"), "function name")
+        name = _fn_name(fn.get("name"))
         params = ", ".join(
             f"{_java_v3_type(p.get('type'))} {_ident(p.get('name'), 'parameter name')}"
             for p in fn.get("params") or []
@@ -1035,7 +1098,7 @@ def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
         args = [_expr(a, env, rename, v3_ctx) for a in node.get("args") or []]
         return _format_java(template, args)
     if kind == "fn":
-        fn_name = _ident(node.get("name"), "function")
+        fn_name = _fn_name(node.get("name"))
         args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
         return f"{fn_name}({args})"
     if kind in {
@@ -1213,6 +1276,14 @@ def _method_return(env: _Env, key: str, mname: str):
 def _method_body(env: _Env, key: str, method: dict) -> str:
     steps = method.get("body") or []
     if len(steps) == 1 and steps[0].get("step") == "return":
+        if steps[0].get("expr") is None:
+            # bare `return` — a void service operation
+            if _method_return(env, key, method.get("name")) is not None:
+                raise EmitError(
+                    f"{env.name}.{method.get('name')}: bare 'return' in an "
+                    f"operation declared to return a value"
+                )
+            return "return;"
         rename = {b: f"this.{b}" for b in _binds(env.component)}
         value = _expr(steps[0]["expr"], env, rename)
         # A `void` service operation cannot `return <expr>;` in Java — run
@@ -1788,6 +1859,7 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     tests = ir.get("tests") or []
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
+    _check_fn_name_collisions(functions, externs)
 
     out: list[str] = []
     out.append("// Generated by the revl cordis4j backend (ir_version 3) — do not edit.")
