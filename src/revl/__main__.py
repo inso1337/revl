@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .compiler import compile_files
 from .distribute import distributability
-from .diagnostics import report
+from .diagnostics import explain, report
 from .errors import RevlError
 from .fmt import migrate_source
 from .run import KNOWN_BACKENDS, run_command
@@ -231,6 +231,25 @@ def _run_import(args) -> int:
     return 0
 
 
+def _run_explain(args) -> int:
+    """`revl explain <code>` — the other half of a structured diagnostic. A
+    rejection hands back a code; this turns the code back into the guarantee
+    it enforces and the rewrite that satisfies it, without a round trip to
+    DESIGN.md."""
+    record = explain(args.code)
+    if args.json:
+        print(json.dumps(record, indent=2))
+        return 0 if record["ok"] else 1
+    if not record["ok"]:
+        print(f"error: {record['message']}", file=sys.stderr)
+        print(f"known codes: {', '.join(record['known'])}", file=sys.stderr)
+        return 1
+    print(f"{record['code']}  {record['guarantee']}")
+    if record.get("fix"):
+        print(f"  fix: {record['fix']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -241,6 +260,10 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--json-diagnostics", action="store_true",
                      help="on rejection, print a structured diagnostic (code, guarantee, "
                           "expected/actual, hint) instead of the human rendering")
+
+    exp = sub.add_parser("explain", help="what a diagnostic code means and how to fix it")
+    exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
+    exp.add_argument("--json", action="store_true", help="machine-readable output")
 
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
@@ -324,6 +347,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="with --placement: bring the composition up, run probes, then tear down and exit")
 
     args = parser.parse_args(argv)
+
+    if args.command == "explain":
+        return _run_explain(args)
 
     if args.command == "fmt":
         return _run_fmt(args)
