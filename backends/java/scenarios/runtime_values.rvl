@@ -1,0 +1,60 @@
+// Runtime-VALUE fixtures for the Java tier. Every construct here is EXECUTED
+// against the real cordis4j jar by RunRuntimeValues.java and asserted on the
+// value or ordering it produces — not merely compiled or golden-matched. It
+// exercises the consolidated expression renderer (match branch selection +
+// payload binding, string interpolation, the stdlib typed overloads), the
+// Pool host runtime's capacity accounting, and method-time effect ordering on
+// a real EffectScope.
+//
+// It also pins the field-call lowering fix: a host method call in a top-level
+// function (`Pool.open(..)`, `p.execute(..)`) used to emit `Pool.open.apply(..)`
+// and never compiled — see poolExec below.
+
+type Row = { id: Int, name: Str }
+type Outcome = Ok(Row) | NotFound | Invalid(Str)
+
+// match: branch selection + payload binding, including a record field access
+// through the bound variable.
+pub fn describe(o: Outcome) -> Str {
+  return match o {
+    Ok(row) => row.name,
+    NotFound => "none",
+    Invalid(why) => why,
+  }
+}
+
+// string interpolation including a literal `%` (the v3 renderer lowers this to
+// string concatenation, so `%` is a plain character — a regression to the
+// String.format path would throw UnknownFormatConversionException at runtime).
+pub fn greet(name: Str, pct: Int) -> Str { return `hi ${name}: ${pct}% done` }
+
+// stdlib typed overloads — String family (each dispatches to a distinct
+// revl* overload; a shape-dispatch bug would silently call the List variant).
+pub fn head(s: Str) -> Str { return s.slice(0, 1) }
+pub fn catS(a: Str, b: Str) -> Str { return a.concat(b) }
+pub fn findS(s: Str, sub: Str) -> Int { return s.indexOf(sub) }
+pub fn parts(s: Str, sep: Str) -> List[Str] { return s.split(sep) }
+pub fn glue(xs: List[Str], sep: Str) -> Str { return xs.join(sep) }
+pub fn rep(s: Str, n: Int) -> Str { return s.repeat(n) }
+
+// stdlib typed overloads — List family.
+pub fn catL(xs: List[Int], ys: List[Int]) -> List[Int] { return xs.concat(ys) }
+pub fn findL(xs: List[Int], v: Int) -> Int { return xs.indexOf(v) }
+pub fn pushL(xs: List[Int], v: Int) -> List[Int] { return xs.push(v) }
+
+// Pool host runtime reached through the fixed field-call lowering: open a pool
+// in a top-level function and run a statement. `execute` reports rows-affected
+// (== 1 across every tier).
+pub fn poolExec(url: Str) -> Int {
+  let p = Pool.open(url, 3)
+  return p.execute("INSERT INTO t VALUES (1)")
+}
+
+// method-time effect ordering: each `ping` runs its emission then registers a
+// compensation on the component effect scope. Teardown must run the
+// compensations LIFO on the real runtime.
+service Probe { fn mark(m: Str) -> Int  emission fn send(m: Str) -> Int }
+service N { emission fn ping(u: Str) }
+component C requires probe: Probe provides n: N {
+  provide n { fn ping(u) { emit probe.send(u) compensate probe.mark(u) } }
+}

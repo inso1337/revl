@@ -26,5 +26,6 @@ export default function setup(): void {
   emitFixture('tenants.ir.json', 'tenants.ts')
   emitFixture('v3_types_functions.ir.json', 'v3_types_functions.ts')
   emitFixture('conformance.ir.json', 'conformance.ts')
+  emitFixture('v3_stdlib.ir.json', 'v3_stdlib.ts')
   emitFixture('v3_tests.ir.json', 'v3_tests.test.ts')
 }
