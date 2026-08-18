@@ -861,8 +861,15 @@ def _emit_tests(tests: list) -> "_Lines":
     out = _Lines()
     out.add(0, "REVL_TESTS = []")
     out.add(0)
+    if any(test.get("lifecycle") for test in tests):
+        out.extend(_emit_lifecycle_harness())
     for index, test in enumerate(tests):
         fn_name = f"test_{index}"
+        if test.get("lifecycle"):
+            out.extend(_emit_lifecycle_test(test, fn_name))
+            out.add(0, f"REVL_TESTS.append(({test['name']!r}, {fn_name}))")
+            out.add(0)
+            continue
         out.add(0, f"def {fn_name}():")
         if not test.get("body"):
             out.add(1, "pass")
@@ -872,6 +879,166 @@ def _emit_tests(tests: list) -> "_Lines":
         out.add(0, f"REVL_TESTS.append(({test['name']!r}, {fn_name}))")
         out.add(0)
     return out
+
+
+# ---------------------------------------------------------------------------
+# v2.0 §7.1: lifecycle tests
+#
+# A lifecycle test is a script over a *live* composition, so it compiles to an
+# async driver run with `asyncio.run` and registered in REVL_TESTS like any
+# other test (the `revl test` runner is unchanged).
+#
+# `assert no_residue` is R4 from docs/backend-ir.md §Required semantics, taken
+# from the reference suite that defines it for this tier
+# (backends/python/tests/test_semantics.py::
+#  test_r4_no_residue_after_unloading_everything): the composition leaves the
+# host runtime with no bindings, listeners, or effects. It has a second half,
+# because the first half alone cannot fail for any component the compiler
+# accepts — the emitted module hand-rolls no teardown at all (R5), so the
+# runtime's own introspection always returns to baseline. The falsifiable part
+# of residue-freedom is R1's: every host resource acquired during the test
+# must have been released by its `undo`. Both halves are asserted.
+# ---------------------------------------------------------------------------
+
+# The reference tier's host-builtin vocabulary (docs/backend-ir.md §Host
+# builtins; runtime.Pool / runtime.Map): acquisition verb -> release verb.
+_LIFECYCLE_ACQUIRE = {"new": "drop", "open": "close"}
+
+
+_LIFECYCLE_HARNESS = '''
+def _revl_residue(root):
+    """R4 (docs/backend-ir.md): what the host runtime holds for a composition."""
+    return {
+        "listeners": {n: len(cbs) for n, cbs in root.events._hooks.items() if cbs},
+        "effects": root.fiber._disposables.length,
+        "provisions": sorted(impl.name for impl in root.reflect.store.values()),
+        "runtimes": root.registry.size,
+    }
+
+
+def _revl_unreleased(events):
+    """Host resources acquired during the test and never released (R1)."""
+    live = {}
+    for event in events:
+        tag, _, verb = event.split(" ", 1)[0].rpartition(".")
+        if not tag:
+            continue
+        if verb in _REVL_ACQUIRE:
+            live[tag] = verb
+        elif verb in _REVL_ACQUIRE.values():
+            live.pop(tag, None)
+    return sorted(
+        "{} ({}() with no {}())".format(tag, verb, _REVL_ACQUIRE[verb])
+        for tag, verb in live.items()
+    )
+
+
+def _revl_no_residue(root, baseline, events, where):
+    """`assert no_residue` — R4 plus the R1 property that makes it falsifiable."""
+    now = _revl_residue(root)
+    changed = ["{}: {!r} -> {!r}".format(k, baseline[k], now[k])
+               for k in now if now[k] != baseline[k]]
+    unreleased = _revl_unreleased(events)
+    if not changed and not unreleased:
+        return
+    detail = []
+    if changed:
+        detail.append("host runtime still holds " + "; ".join(changed) + " (R4)")
+    if unreleased:
+        detail.append("host resources never released: " + ", ".join(unreleased) + " (R1)")
+    raise AssertionError(where + ": residue \u2014 " + " | ".join(detail))
+
+
+async def _revl_settle():
+    for _ in range(20):
+        await _revl_asyncio.sleep(0)
+
+
+async def _revl_call(root, key, method, args, where):
+    impl = root.get(key)
+    if impl is None:
+        raise AssertionError(
+            "{}: no provider for key {!r} \u2014 its component is loaded but not ACTIVE; "
+            "a component with an unmet `requires` stays PENDING (R2)".format(where, key))
+    result = getattr(impl, method)(*args)
+    if _revl_inspect.isawaitable(result):
+        result = await result
+    return result
+'''
+
+
+def _emit_lifecycle_harness() -> "_Lines":
+    out = _Lines()
+    out.add(0, f"_REVL_ACQUIRE = {_LIFECYCLE_ACQUIRE!r}")
+    out.add(0)
+    for line in _LIFECYCLE_HARNESS.strip("\n").split("\n"):
+        out.add(0, line)
+    out.add(0)
+    out.add(0)
+    return out
+
+
+def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
+    name = test["name"]
+    where = f"lifecycle test {name!r}"
+    out = _Lines()
+    out.add(0, f"def {fn_name}():")
+    out.add(1, "# cordis-py is imported here, not at module scope: a document may")
+    out.add(1, "# mix pure `test` blocks with lifecycle ones, and only the latter")
+    out.add(1, "# need a runtime.")
+    out.add(1, "from cordis import Context")
+    out.add(0)
+    out.add(1, "async def _run():")
+    out.add(2, "root = Context()")
+    out.add(2, "events = []")
+    out.add(2, "_revl_fibers = {}")
+    out.add(2, "set_trace(events.append)")
+    out.add(2, "try:")
+    out.add(3, "baseline = _revl_residue(root)")
+    body = test.get("body") or []
+    if not body:
+        out.add(3, "pass")
+    for step in body:
+        _lifecycle_step(out, 3, step, where)
+    out.add(2, "finally:")
+    out.add(3, "set_trace(None)")
+    out.add(3, "for fiber in reversed(list(_revl_fibers.values())):")
+    out.add(4, "try:")
+    out.add(5, "await fiber.dispose()")
+    out.add(4, "except Exception:")
+    out.add(5, "pass")
+    out.add(0)
+    out.add(1, "_revl_asyncio.run(_run())")
+    out.add(0)
+    return out
+
+
+def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
+    kind = step.get("step")
+    if kind == "load":
+        component = _ident(step["component"], "component name")
+        config = ", ".join(f"{name!r}: {_expr(value)}"
+                           for name, value in (step.get("config") or {}).items())
+        out.add(indent, f"_revl_fibers[{component!r}] = plug(root, {component}, {{{config}}})")
+        out.add(indent, "await _revl_settle()")
+    elif kind == "unload":
+        component = _ident(step["component"], "component name")
+        out.add(indent, f"await _revl_fibers.pop({component!r}).dispose()")
+        out.add(indent, "await _revl_settle()")
+    elif kind == "call":
+        args = ", ".join(_expr(arg) for arg in step.get("args") or [])
+        call = (f"await _revl_call(root, {step['key']!r}, {step['method']!r}, "
+                f"[{args}], {where!r})")
+        bind = step.get("bind")
+        out.add(indent, f"{_ident(bind, 'lifecycle binding')} = {call}" if bind else call)
+        out.add(indent, "await _revl_settle()")
+    elif kind == "assert_no_residue":
+        out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
+    elif kind == "assert":
+        rendered = _expr(step["expr"])
+        out.add(indent, f"assert {rendered}, {where + ': assertion failed'!r}")
+    else:  # pragma: no cover — the lowerer emits nothing else
+        raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
 
 
 def _find_host_roots(nodes) -> set[str]:
@@ -941,10 +1108,14 @@ def emit(ir: dict) -> str:
     if len(set(names)) != len(names):
         raise EmitError("duplicate component names")
 
+    lifecycle = [test for test in tests if test.get("lifecycle")]
     uses = sorted(
         set().union(*(emitter.uses for emitter in emitters))
         | _find_host_roots(functions)
         | _find_host_roots(tests)
+        # §7.1: the lifecycle driver loads components through the realm-aware
+        # `plug` and reads the host-builtin trace to detect unreleased resources
+        | ({"plug", "set_trace"} if lifecycle else set())
     )
 
     out = _Lines()
@@ -955,6 +1126,10 @@ def emit(ir: dict) -> str:
     out.add(0)
     if uses:
         out.add(0, f"from runtime import {', '.join(uses)}")
+        out.add(0)
+    if lifecycle:
+        out.add(0, "import asyncio as _revl_asyncio")
+        out.add(0, "import inspect as _revl_inspect")
         out.add(0)
     out.add(0, "def _revl_field(v, name):")
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')

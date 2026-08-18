@@ -2227,10 +2227,32 @@ def _emit_v3(ir: dict) -> dict[str, str]:
     return out
 
 
+def _refuse_lifecycle_tests(tests: list) -> None:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
+
+    A lifecycle test is not a pure test unit: it loads components into a live
+    context, calls through provision keys, unloads them, and asserts
+    residue-freedom by reading the *host runtime's* introspection (R1/R4,
+    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
+    Refuse by name — a construct that is silently dropped by one renderer and
+    present in another is this project's recurring bug class.
+    """
+    for test in tests or []:
+        if test.get("lifecycle"):
+            raise EmitError(
+                f"lifecycle test {test.get('name')!r} is not lowerable on the {'wasm'} tier: "
+                "it drives a live composition (load/call/unload) and asserts R4 "
+                "residue-freedom through the host runtime's introspection, which only the "
+                "reference tier implements — run it with `revl test --backend py` "
+                "(docs/syntax-2.0.md §7.1)"
+            )
+
+
 def emit(ir: dict) -> dict[str, str]:
     """Lower one IR document to WAT modules (v1 components, v3 types/fns)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1 or version == 2:
         return _emit_v1(ir)
