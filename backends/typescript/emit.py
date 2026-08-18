@@ -62,12 +62,59 @@ CONTEXT_MEMBERS = {
 }
 
 
+def _split_ts_types(inner: str) -> list[str]:
+    """Split a type argument list on commas outside `[...]` / `(...)`."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(inner):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(inner[start:i].strip())
+            start = i + 1
+    parts.append(inner[start:].strip())
+    return parts
+
+
+def _split_fn_type(name: str) -> "tuple[list[str], str] | None":
+    """`"(Int, Str) -> Bool"` -> `(["Int", "Str"], "Bool")`, else None.
+
+    A function type (docs/function-types.md) is the one surface type not
+    spelled `Head[Args]`, so it is recognised before the generic path.
+    """
+    if not name.startswith("("):
+        return None
+    depth = 0
+    for i, ch in enumerate(name):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                rest = name[i + 1:].lstrip()
+                if not rest.startswith("->"):
+                    return None
+                inner = name[1:i].strip()
+                return (_split_ts_types(inner) if inner else []), rest[2:].strip()
+    return None
+
+
 def _ts_type(name: object) -> str:
     """Surface type -> TS type (IR v1/A6). Unknown names map to `unknown`."""
     if not isinstance(name, str) or not name:
         return "unknown"
     if name in TYPE_MAP:
         return TYPE_MAP[name]
+    fn = _split_fn_type(name.strip())
+    if fn is not None:
+        # revl `(Int, Str) -> Bool` is TS `(a0: number, a1: string) => boolean`.
+        # TS function types *require* parameter names and revl's do not carry
+        # them, so positional placeholders are supplied here; they are not
+        # observable at any call site.
+        params, returns = fn
+        rendered = ", ".join(f"a{i}: {_ts_type(p)}" for i, p in enumerate(params))
+        return f"(({rendered}) => {_ts_type(returns)})"
     generic = re.match(r"^(\w+)\[(.+)\]$", name)
     if generic:
         head, inner = generic.group(1), generic.group(2)
@@ -615,9 +662,9 @@ def _split_v3_types(inner: str) -> list[str]:
     depth = 0
     current: list[str] = []
     for ch in inner:
-        if ch == "[":
+        if ch in "[(":
             depth += 1
-        elif ch == "]":
+        elif ch in "])":
             depth -= 1
         if ch == "," and depth == 0:
             parts.append("".join(current).strip())
@@ -638,6 +685,15 @@ def _ts_v3_type(type_name: object) -> str:
     name = type_name.strip()
     if name in _TS_V3_TYPE:
         return _TS_V3_TYPE[name]
+    fn = _split_fn_type(name)
+    if fn is not None:
+        # revl `(Int, Str) -> Bool` is TS `((a0: number, a1: string) => boolean)`.
+        # TS function types *require* parameter names and revl's do not carry
+        # them, so positional placeholders are supplied; they are not
+        # observable anywhere (docs/function-types.md).
+        params, returns = fn
+        rendered = ", ".join(f"a{i}: {_ts_v3_type(p)}" for i, p in enumerate(params))
+        return f"(({rendered}) => {_ts_v3_type(returns)})"
     if "[" in name:
         base = name[: name.index("[")]
         inner = name[name.index("[") + 1: name.rindex("]")]
@@ -800,13 +856,22 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
         return "[" + ", ".join(_v3_expr(item, ctx) for item in node.get("items") or []) + "]"
 
     if kind == "arrow":
-        # Arrow parameters are explicitly `any`, not implicitly: the checker
-        # enumerates arrows in its unchecked remainder (typecheck.py header),
-        # so the compiler has no type to emit here and a guess would be worse
-        # than an admission. `strict` rejects only an *implicit* any, so
-        # writing it is also what makes the emitted file compile.
-        params = ", ".join(f"{_ident(p, 'arrow parameter')}: any"
-                           for p in node.get("params") or [])
+        # An arrow the checker typed carries its parameter types in the IR
+        # (docs/function-types.md), and they are emitted verbatim — this is a
+        # real TS signature, not an admission.
+        #
+        # An arrow with *no* expected type and no annotations is still on the
+        # checker's unchecked frontier (typecheck.py header), and there the
+        # parameter is written `any` deliberately: the compiler has no type,
+        # and a guess would be worse than the admission. `strict` rejects only
+        # an *implicit* any, so writing it is also what makes the file compile.
+        names = node.get("params") or []
+        declared = node.get("param_types") or []
+        declared = list(declared) + [None] * (len(names) - len(declared))
+        params = ", ".join(
+            f"{_ident(p, 'arrow parameter')}: "
+            f"{_ts_v3_type(t) if isinstance(t, str) and t not in ('Any', 'Never') else 'any'}"
+            for p, t in zip(names, declared))
         return f"(({params}) => ({_v3_expr(node['body'], ctx)}))"
 
     if kind == "match":

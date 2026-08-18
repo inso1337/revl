@@ -345,6 +345,13 @@ class ExprArrow:
     params: list[str]
     body: object
     line: int
+    # `(v: Int) => ...` — the author's parameter annotations, parallel to
+    # `params` (None where written bare). The checker *overwrites* this with
+    # the types it resolved (from an annotation or from the expected type) and
+    # fills `returns`, so lowering can put a real signature in the IR; both
+    # stay None/empty exactly when the arrow is still untyped.
+    param_types: list = field(default_factory=list)
+    returns: str | None = None
 
 
 @dataclass
@@ -383,6 +390,10 @@ class LetStmt:
     value: object
     mutable: bool
     line: int
+    # `let g: (Int) -> Int = …` — an optional declared type. It is the
+    # checking position for the right-hand side (and the only way to give an
+    # un-annotated arrow a type without passing it somewhere).
+    type: str | None = None
 
 
 @dataclass
@@ -679,6 +690,40 @@ class Parser:
         return ServiceDecl(name, methods, line, commutative=commutative)
 
     def type_(self) -> str:
+        """A type. `(` heads either a function type or a grouped type.
+
+        The function type is spelled `(Int, Str) -> Bool` — syntax-2.0 §2 keeps
+        type syntax revl's own, and `->` is already revl's return arrow in
+        `fn`, `extern` and service signatures, so a function type reads as the
+        signature it is with the parameter names elided. (TS's `(a: number) =>
+        boolean` is not adopted: it *requires* parameter names, so the "same
+        meaning → same syntax" premise of §0 fails.) See docs/function-types.md.
+        """
+        if self.at("("):
+            line = self.next().line
+            inner: list[str] = []
+            while not self.at(")"):
+                inner.append(self.type_())
+                if self.at(","):
+                    self.next()
+            self.expect(")")
+            if self.at("arrow"):
+                self.next()
+                # the return type is parsed as a full type, so `(Int) -> Str?`
+                # is `(Int) -> Opt[Str]` and a right-nested `(Int) -> (Str) ->
+                # Bool` associates to the right, as in every ML-family language
+                return f"({', '.join(inner)}) -> {self.type_()}"
+            if len(inner) != 1:
+                raise self.err(
+                    line,
+                    f"`({', '.join(inner)})` is not a type — revl has no tuples",
+                    hint="a parenthesised type group holds exactly one type; "
+                         "a function type needs a `-> ReturnType` "
+                         "(docs/function-types.md)",
+                )
+            # a grouped type: `((Int) -> Bool)?` is how an *optional function*
+            # is spelled, since a trailing `?` otherwise binds to the return
+            return self._type_suffix_tail(inner[0])
         return self._type_suffix(self.expect("ident", what="a type").value)
 
     def _type_suffix(self, base: str) -> str:
@@ -698,6 +743,10 @@ class Parser:
             rendered = f"{base}[{', '.join(inner)}]"
         else:
             rendered = base
+        return self._type_suffix_tail(rendered)
+
+    def _type_suffix_tail(self, rendered: str) -> str:
+        """The `?` tail alone, given an already-rendered type."""
         if self.at("?"):
             self.next()
             rendered = f"Opt[{rendered}]"  # T? sugar (syntax-2.0 §2)
@@ -781,11 +830,27 @@ class Parser:
             mutable = tok.value == "var"
             self.next()
             bind = self.expect("ident").value
+            declared = None
+            if self.at(":"):
+                self.next()
+                declared = self.type_()
             self.expect("=")
             # `let x = effect … undo …` binds an acquisition; anything else
             # binds a plain value, so a method can name an intermediate
             # result instead of nesting every call into one expression
             if not mutable and self.at("kw", "effect"):
+                if declared is not None:
+                    # an acquisition binds a *host-valued* object, which the
+                    # checker's frontier documents as untyped; accepting an
+                    # annotation here and then ignoring it would be a silent lie
+                    raise self.err(
+                        tok.line,
+                        f"`let {bind}: {declared} = effect …` — an acquisition "
+                        "binding cannot be annotated",
+                        hint="`effect` binds a host-valued object, whose type "
+                             "revl does not model (see the frontier in "
+                             "src/revl/typecheck.py); drop the annotation",
+                    )
                 acquire, undo, line, setup = self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup)
             if not in_method:
@@ -797,7 +862,7 @@ class Parser:
                          f"`let {bind} = effect … undo …`, or move the computation "
                          "into a `fn` (G6)",
                 )
-            return LetStmt(bind, self.pure_expr(), mutable, tok.line)
+            return LetStmt(bind, self.pure_expr(), mutable, tok.line, declared)
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup)
@@ -1017,6 +1082,13 @@ class Parser:
                     self.next()
             self.expect("}")
             return TypeDecl(name, params, fields, [], line, public)
+        if self.at("("):
+            # `type Handler = (Int) -> Str`: a variant case is a bare name, so
+            # a `(` here can only head a function type. Carried as the sole
+            # case name exactly like `type Rows = List[Row]` below, and
+            # recognised as a transparent alias in lowering.
+            return TypeDecl(name, params, [],
+                            [VariantCase(self.type_(), None, line)], line, public)
         cases: list[VariantCase] = []
         while True:
             cline = self.peek().line
@@ -1111,8 +1183,12 @@ class Parser:
                 self.expect("=")
                 return LetPatternStmt(pattern, self.pure_expr(), mutable, tok.line)
             name = self.expect("ident").value
+            declared = None
+            if self.at(":"):
+                self.next()
+                declared = self.type_()
             self.expect("=")
-            return LetStmt(name, self.pure_expr(), mutable, tok.line)
+            return LetStmt(name, self.pure_expr(), mutable, tok.line, declared)
         if tok.kind == "kw" and tok.value == "return":
             self.next()
             value = None if self.at("}") else self.pure_expr()
@@ -1455,7 +1531,7 @@ class Parser:
             self.next()
             if self.at("=>"):
                 self.next()
-                return ExprArrow([tok.value], self.pure_expr(), tok.line)
+                return ExprArrow([tok.value], self.pure_expr(), tok.line, [None])
             return ExprVar(tok.value, tok.line)
         if tok.kind == "kw" and tok.value == "config":
             # `config` is a keyword for the declaration block, but in pure
@@ -1467,13 +1543,22 @@ class Parser:
             if self._arrow_params_ahead():
                 self.next()
                 params = []
+                param_types: list = []
                 while not self.at(")"):
                     params.append(self.expect("ident").value)
+                    # `(v: Int) => ...` — an optional per-parameter annotation.
+                    # It is what types an arrow that is *not* in checking
+                    # position (docs/function-types.md).
+                    if self.at(":"):
+                        self.next()
+                        param_types.append(self.type_())
+                    else:
+                        param_types.append(None)
                     if self.at(","):
                         self.next()
                 self.expect(")")
                 self.expect("=>")
-                return ExprArrow(params, self.pure_expr(), tok.line)
+                return ExprArrow(params, self.pure_expr(), tok.line, param_types)
             self.next()
             node = self.pure_expr()
             self.expect(")")
@@ -1510,26 +1595,36 @@ class Parser:
         raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
 
     def _arrow_params_ahead(self) -> bool:
-        # current token is '(' — is this `(a, b) => ...` rather than `(expr)`?
+        """Current token is `(` — is this `(a, b) => …` / `(a: Int) => …`
+        rather than a parenthesised expression?
+
+        A parameter annotation can be an arbitrarily nested type (`(f: (Int)
+        -> List[Str]) => …`), so the list is skipped by balancing brackets
+        rather than by token shape; what settles it is the `=>` after the
+        closing paren, which can follow nothing else. The first two tokens are
+        still shape-checked so that a malformed `(a + b) => c` reports as a bad
+        expression rather than as a bad parameter list."""
         i = self.pos
         if self.toks[i].kind != "(":
             return False
-        i += 1
-        if self.toks[i].kind == ")":
-            i += 1
-        else:
-            while True:
-                if self.toks[i].kind != "ident":
-                    return False
-                i += 1
-                if self.toks[i].kind == ",":
-                    i += 1
-                    continue
-                break
-            if self.toks[i].kind != ")":
+        head = self.toks[i + 1]
+        if head.kind != ")" and not (
+            head.kind == "ident" and self.toks[i + 2].kind in (",", ")", ":")
+        ):
+            return False
+        depth = 0
+        while i < len(self.toks):
+            kind = self.toks[i].kind
+            if kind in ("(", "["):
+                depth += 1
+            elif kind in (")", "]"):
+                depth -= 1
+                if depth == 0:
+                    return self.toks[i + 1].kind == "=>"
+            elif kind == "eof":
                 return False
             i += 1
-        return self.toks[i].kind == "=>"
+        return False
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line

@@ -7,8 +7,25 @@ Design (see the "type safety" milestone discussion):
   *against* declarations and inferred locally.
 - The checker is **sound where types are known and silent where they are
   not**: a definite mismatch between two known types is an error; positions
-  whose types cannot be recovered (host-valued objects, arrows) stay
-  unchecked and are the documented gradual frontier.
+  whose types cannot be recovered stay unchecked and are the documented
+  gradual frontier. What is still on that frontier:
+    * host-valued objects (`Map.new()`, `Pool.open(..)`, `Job.run(..)` and
+      every member reached through one) — their *arguments* are checked
+      against `_HOST_ARG_SIG`, their results are opaque;
+    * an arrow with **no expected type and no parameter annotations**
+      (`let g = v => v + 1`) — its body is still walked, but the arrow
+      itself has no type. An arrow in checking position, or one whose
+      parameters are annotated, is typed and checked (see "function types");
+    * function *values* inside a component body (stratum 3): `infer_ir`
+      types no arrow and no call through one, so an arrow that reaches a
+      `provide` method body is unchecked even where the surrounding service
+      signature names a function type. Stratum 1 (`fn`/`test` bodies) is
+      where function types are checked (docs/function-types.md §limits).
+- Function types (docs/function-types.md): `(Int, Str) -> Bool` is a type
+  like any other. `parse_type` normalises it to the head `FN_HEAD` with
+  `[param..., return]`, so the whole algebra below — unify, substitute,
+  compatible, tparam marking — works on it without a special case beyond
+  variance.
 - `null` has no type: absence is `Opt[T]` (syntax-2.0 §2). The literal is
   rejected in every expression position (config defaults use a separate
   grammar and keep it).
@@ -42,25 +59,82 @@ _SIZED_HEADS = {"Str", "Bytes", "List"}
 
 # ---------------------------------------------------------------- algebra
 
+# The head `parse_type` reports for a function type `(P, ...) -> R`, whose
+# args are `[P, ..., R]` — the return type last. It is deliberately spelled
+# with characters no identifier may contain, so it can never collide with a
+# user type name the way a reserved word like `Fn` would.
+FN_HEAD = "->"
+
+
+def _split_top_level(text: str) -> list[str]:
+    """Split on commas outside `[...]` and `(...)`."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return parts
+
+
+def _split_fn_type(name: str) -> tuple[list[str], str] | None:
+    """`"(Int, Str) -> Bool"` -> `(["Int", "Str"], "Bool")`, else None.
+
+    Only a *leading* parenthesised list followed by `->` is a function type;
+    the `->` must be at paren/bracket depth 0 so that a nested function type
+    (`(Int) -> ((Str) -> Bool)`) does not split at the wrong arrow.
+    """
+    if not name.startswith("("):
+        return None
+    depth = 0
+    for i, ch in enumerate(name):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                rest = name[i + 1:].lstrip()
+                if not rest.startswith("->"):
+                    return None
+                inner = name[1:i].strip()
+                params = _split_top_level(inner) if inner else []
+                return params, rest[2:].strip()
+    return None
+
+
+def format_type(head: str | None, args: list[str]) -> str | None:
+    """The inverse of `parse_type`: rebuild a type from head + arguments."""
+    if head is None:
+        return None
+    if head == FN_HEAD:
+        *params, returns = args
+        return f"({', '.join(params)}) -> {returns}"
+    if not args:
+        return head
+    return f"{head}[{', '.join(args)}]"
+
+
 def parse_type(name: str | None) -> tuple[str | None, list[str]]:
-    """"List[Row]" -> ("List", ["Row"]); "Str" -> ("Str", [])."""
+    """"List[Row]" -> ("List", ["Row"]); "Str" -> ("Str", []).
+
+    A function type normalises to `(FN_HEAD, [param..., return])`, which is
+    what lets the rest of the algebra treat it as an ordinary type
+    application (`format_type` puts the surface spelling back).
+    """
     if not name:
         return None, []
+    fn = _split_fn_type(name.strip())
+    if fn is not None:
+        params, returns = fn
+        return FN_HEAD, params + [returns]
     if "[" not in name or not name.endswith("]"):
         return name, []
     head, _, rest = name.partition("[")
-    inner = rest[:-1]
-    args, depth, start = [], 0, 0
-    for i, ch in enumerate(inner):
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            args.append(inner[start:i].strip())
-            start = i + 1
-    args.append(inner[start:].strip())
-    return head, args
+    return head, _split_top_level(rest[:-1])
 
 
 # builtin parametric type heads and their exact arity
@@ -138,8 +212,7 @@ def mark_tparams(type_name: str | None, tparams: set[str]) -> str | None:
     head, args = parse_type(type_name)
     if head and not args:
         return _TPARAM + head if head in tparams else head
-    inner = ", ".join(mark_tparams(a, tparams) or a for a in args)
-    return f"{head}[{inner}]"
+    return format_type(head, [mark_tparams(a, tparams) or a for a in args])
 
 
 def render_type(type_name: str | None) -> str | None:
@@ -181,8 +254,7 @@ def substitute(type_name: str | None, subst: dict) -> str | None:
     head, args = parse_type(type_name)
     if head and not args:
         return subst.get(head, head)
-    inner = ", ".join(substitute(a, subst) or a for a in args)
-    return f"{head}[{inner}]"
+    return format_type(head, [substitute(a, subst) or a for a in args])
 
 
 def _is_wildcard(name: str | None) -> bool:
@@ -203,6 +275,17 @@ def compatible(expected: str | None, actual: str | None) -> bool:
     ahead, aargs = parse_type(actual)
     if ehead == "Float" and ahead == "Int":
         return True  # numeric widening
+    if ehead == FN_HEAD:
+        # A function value flows where a function type is expected only if it
+        # accepts everything that position will pass it and returns something
+        # the position can use: parameters contravariant, result covariant.
+        # The generic elementwise rule below would make parameters covariant,
+        # which accepts `(Int) -> X` where `(Float) -> X` is required and then
+        # hands the callee a Float.
+        if ehead != ahead or len(eargs) != len(aargs):
+            return False
+        return (all(compatible(a, e) for e, a in zip(eargs[:-1], aargs[:-1]))
+                and compatible(eargs[-1], aargs[-1]))
     if ehead == "Opt":
         einner = eargs[0] if eargs else None  # bare `Opt` degrades to wildcard
         if ahead == "Opt":
@@ -578,6 +661,13 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         arg_types = [infer_ast(a, tenv, types, filename) for a in expr.args]
         if isinstance(expr.callee, ExprVar):
             name = expr.callee.name
+            # a local of function type shadows everything else: `let g = ...`
+            # / a `(Int) -> Int` parameter is the callee, not a same-named
+            # top-level fn or ADT case
+            local = tenv.get(name)
+            if parse_type(local)[0] == FN_HEAD:
+                return call_function_value(expr, local, f"`{name}`", arg_types,
+                                           tenv, types, filename, line)
             case = (types.get(CASES_KEY) or {}).get(name)
             if case is not None:
                 if filename and case["payload"] and arg_types and arg_types[0] and \
@@ -608,6 +698,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                             code="T1", category="type-mismatch",
                         )
                 if not sig.get("tparams"):
+                    _check_arrow_args(expr.args, params, tenv, types, filename,
+                                      f"`{name}(...)`")
                     if filename:
                         for i, (p, a) in enumerate(zip(params, arg_types)):
                             if p and a and not compatible(p, a):
@@ -625,10 +717,18 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                     bound = substitute(p, subst)
                     raise mismatch(filename, line,
                                    f"argument {i + 1} of `{name}(...)`", bound, a)
+                _check_arrow_args(expr.args, [substitute(p, subst) for p in params],
+                                  tenv, types, filename, f"`{name}(...)`")
                 return substitute(sig["returns"], subst)
         if isinstance(expr.callee, ExprField):
             target_t = infer_ast(expr.callee.target, tenv, types, filename)
             return builtin_check(expr.callee.name, target_t, arg_types, filename, line)
+        # any other callee expression: an arrow applied in place, a function
+        # value read out of a `let` chain, …
+        callee_t = infer_ast(expr.callee, tenv, types, filename)
+        if parse_type(callee_t)[0] == FN_HEAD:
+            return call_function_value(expr, callee_t, "this call's callee",
+                                       arg_types, tenv, types, filename, line)
         return None
     if isinstance(expr, ExprMatch):
         result = None
@@ -650,23 +750,154 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             result = t if result is None else join(result, t)
         return result
     if isinstance(expr, ExprArrow):
-        # An arrow's own parameters are un-annotated, so its result is unknown
-        # — but its *body* is an ordinary expression over the enclosing scope,
-        # and skipping it let every check above leak: `(x) => s[0]` and
-        # `(x) => o.name` were accepted inside an arrow and refused outside it.
-        # Parameters shadow into the unknown; free variables keep their types.
+        # An arrow in *inference* position has no expected type to read its
+        # parameters off, so it is typed only when the author wrote them:
+        # `(v: Int) => v + 1` has type `(Int) -> Int`. Without annotations the
+        # arrow still has no type (it is the last item on the frontier the
+        # header enumerates) — but its *body* is an ordinary expression over
+        # the enclosing scope, and skipping it let every check above leak:
+        # `(x) => s[0]` and `(x) => o.name` were accepted inside an arrow and
+        # refused outside it. Parameters shadow into the unknown; free
+        # variables keep their types.
+        annotations = arrow_annotations(expr)
         inner = dict(tenv)
-        for param in expr.params:
-            inner.pop(param, None)
-        infer_ast(expr.body, inner, types, filename)
-        return None
+        for param, ptype in zip(expr.params, annotations):
+            if ptype:
+                inner[param] = ptype
+            else:
+                inner.pop(param, None)
+        body_t = infer_ast(expr.body, inner, types, filename)
+        if expr.params and any(a is None for a in annotations):
+            return None
+        return _resolve_arrow(expr, list(annotations), body_t)
     return None
+
+
+def arrow_annotations(expr) -> list:
+    """The author's `(v: Int) => ...` parameter annotations, one per
+    parameter (None where the parameter was written bare)."""
+    written = list(getattr(expr, "param_types", None) or [])
+    written += [None] * (len(expr.params) - len(written))
+    return written[:len(expr.params)]
+
+
+def _resolve_arrow(expr, param_types: list, returns: str | None) -> str:
+    """Record an arrow's now-known parameter/return types on the AST node and
+    return its function type.
+
+    Lowering reads these back off the node (`lower.py::_lower_pure_expr`), so
+    the types the checker recovered are exactly the ones that reach the IR and
+    the backends; an unknown component degrades to the `Any` wildcard rather
+    than to a guess."""
+    # `render_type` strips the implicit-type-parameter marker: the IR carries
+    # the author's spelling, and the marker never leaves the checker (see
+    # "type parameters" above). Without it, checking an arrow against an
+    # uninstantiated `(T) -> T` would write `?T` into the IR.
+    resolved = [render_type(p) or "Any" for p in param_types]
+    expr.param_types = resolved
+    expr.returns = render_type(returns) or "Any"
+    return format_type(FN_HEAD, resolved + [expr.returns])
+
+
+def _check_arrow_args(args, params, tenv: dict, types: dict,
+                      filename: str | None, what: str) -> None:
+    """Give arrow arguments their checking position.
+
+    The generic argument loop compares *inferred* types, and an un-annotated
+    arrow infers to nothing — so an arrow handed to a `fn` would stay both
+    unchecked and untyped. Checking it against the declared parameter type is
+    what types it, and what puts its parameter/return types on the AST node
+    for lowering."""
+    from .parser import ExprArrow
+
+    if not filename:
+        return
+    for i, (arg, param) in enumerate(zip(args, params)):
+        if isinstance(arg, ExprArrow) and parse_type(param)[0] == FN_HEAD:
+            check_ast(arg, param, tenv, types, filename,
+                      f"argument {i + 1} of {what}")
+
+
+def call_function_value(expr, fn_type: str, what: str, arg_types: list,
+                        tenv: dict, types: dict,
+                        filename: str | None, line: int) -> str | None:
+    """Type a call through a value of function type (a `let`-bound arrow, a
+    parameter, a record field read into a `let` …)."""
+    _, parts = parse_type(fn_type)
+    params, returns = parts[:-1], parts[-1]
+    if filename and len(expr.args) != len(params):
+        rendered = ", ".join(render_type(p) or "_" for p in params) or "no arguments"
+        raise RevlError(
+            filename, line,
+            f"{what} is a `{render_type(fn_type)}` and takes {len(params)} "
+            f"argument(s), {len(expr.args)} given",
+            hint=f"its parameters are `({rendered})` — revl has no default, "
+                 "optional, or variadic parameters, so every call supplies "
+                 "exactly the declared arity",
+            code="T1", category="type-mismatch",
+        )
+    _check_arrow_args(expr.args, params, tenv, types, filename, what)
+    if filename:
+        for i, (p, a) in enumerate(zip(params, arg_types)):
+            if p and a and not compatible(p, a):
+                raise mismatch(filename, line, f"argument {i + 1} of {what}", p, a)
+    return returns
+
+
+def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
+                 filename: str, where: str, line: int) -> None:
+    """Check an arrow against an expected type — the checking position that
+    takes arrows off the unchecked frontier.
+
+    The expected function type supplies the parameter types the arrow never
+    wrote, so the body is checked in an environment where they are known, and
+    against the expected *return* type. A parameter the author did annotate
+    must still accept what this position will pass it (contravariance), so an
+    annotation can only ever be wider than the expectation."""
+    if _is_wildcard(expected):
+        infer_ast(expr, tenv, types, filename)
+        return
+    if ehead != FN_HEAD:
+        raise RevlError(
+            filename, line,
+            f"{where} expects `{render_type(expected)}`, got an arrow",
+            hint="an arrow is a function value; write the expected type as a "
+                 "function type, e.g. `(Int) -> Str` (docs/function-types.md)",
+            code="T1", category="type-mismatch",
+            expected=render_type(expected), actual="a function value",
+        )
+    want_params, want_return = eargs[:-1], eargs[-1]
+    if len(expr.params) != len(want_params):
+        rendered = ", ".join(render_type(p) or "_" for p in want_params) or "no parameters"
+        raise RevlError(
+            filename, line,
+            f"{where} expects `{render_type(expected)}` — {len(want_params)} "
+            f"parameter(s), but this arrow declares {len(expr.params)}",
+            hint=f"the expected parameters are `({rendered})`",
+            code="T1", category="type-mismatch",
+        )
+    annotations = arrow_annotations(expr)
+    resolved: list = []
+    inner = dict(tenv)
+    for name, written, want in zip(expr.params, annotations, want_params):
+        if written and not compatible(written, want):
+            raise mismatch(filename, line,
+                           f"parameter `{name}` of this arrow (from {where})",
+                           want, written)
+        resolved.append(written or want)
+        if resolved[-1]:
+            inner[name] = resolved[-1]
+        else:
+            inner.pop(name, None)
+    check_ast(expr.body, want_return, inner, types, filename,
+              f"the body of this arrow (from {where})")
+    _resolve_arrow(expr, resolved, want_return)
 
 
 def check_ast(expr, expected: str | None, tenv: dict, types: dict,
               filename: str, where: str) -> None:
     """Bidirectional check of a parser-AST expression against `expected`."""
-    from .parser import ExprIf, ExprList, ExprMatch, ExprRecord
+    from .parser import ExprArrow, ExprIf, ExprList, ExprMatch, ExprRecord
 
     line = getattr(expr, "line", 0)
     if expected is None:
@@ -691,6 +922,9 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                       f"field `{name}` of `{expected}`")
         return
     ehead, eargs = parse_type(expected)
+    if isinstance(expr, ExprArrow):
+        _check_arrow(expr, expected, ehead, eargs, tenv, types, filename, where, line)
+        return
     if isinstance(expr, ExprList) and ehead == "List":
         for item in expr.items:
             check_ast(item, eargs[0], tenv, types, filename, f"element of `{expected}`")

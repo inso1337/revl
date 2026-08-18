@@ -95,6 +95,25 @@ Three hazards, each of which has already cost a backend a bug:
    split paths — is the tier with zero gaps. The structural fix is one
    expression renderer per backend, with tier limits as explicit refusals.
 
+## `arrow` and function types
+
+An `arrow` node carries `params` (names) and `body`, plus `captures` in the
+pure-fn dialect. When the checker recovered a signature for it, it *also*
+carries `param_types` (parallel to `params`) and `returns`:
+
+```json
+{ "kind": "arrow", "params": ["v"], "param_types": ["Int"], "returns": "Int",
+  "captures": [], "body": { ... } }
+```
+
+Both keys are **absent together** exactly when the arrow is still untyped
+(`let g = v => v + 1`, with no expected type and no `(v: Int)` annotation).
+That is the distinction a backend needs: "typed as `Any`" and "no type at
+all" are not the same, and only the second justifies emitting an admission
+such as TypeScript's explicit `any`. A declared function type is spelled
+`(Int, Str) -> Bool` wherever a type appears — see docs/function-types.md,
+which also records which tiers refuse values of function type and why.
+
 ## `match`, ADTs and `Opt`
 
 - `Opt` is **not tagged**: `Some(x)` is `x` and `None` is the host's absent
