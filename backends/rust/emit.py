@@ -202,21 +202,6 @@ def _string(value: str) -> str:
     return json.dumps(value)
 
 
-def _rust_lit(node: dict) -> str:
-    value = node.get("value")
-    if value is None:
-        return "None"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, str):
-        return _string(value)
-    if isinstance(value, int):
-        return f"{value}i64"
-    raise EmitError(f"unsupported literal node: {node!r}")
-
-
 def _rust_v3_lit(node: dict) -> str:
     """v3 literal: strings are owned `String` (revl `Str` is `String`)."""
     value = node.get("value")
@@ -365,88 +350,15 @@ class _Env:
         return self._v3_ctx
 
 
-# v1-dialect expression kinds that render as a Rust postfix-safe primary, so a
-# `.method()` suffix can be appended without wrapping them in parentheses.
-_V1_ATOMIC_KINDS = {"name", "lit", "call", "req", "config", "host", "var", "field", "index"}
-
-
-def _expr_arg(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
-    """Lower a call argument, coercing string literals to `String`."""
-    value = _expr(node, env, rename)
-    if isinstance(node, dict) and node.get("kind") == "lit" and isinstance(node.get("value"), str):
-        return f"String::from({value})"
-    return value
-
-
 def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None) -> str:
-    """Lower one IR expression node (v1 component dialect) to a Rust expr."""
-    rename = rename or {}
-    kind = node.get("kind")
-    if kind == "name":
-        original = node.get("id")
-        if rename and original in rename:
-            return rename[original]  # already a Rust expr (e.g. `self.pool`)
-        return _ident(original, "binding")
-    if kind == "lit":
-        return _rust_lit(node)
-    if kind == "config":
-        field = _ident(node.get("field"), "config field")
-        return f"config.{field}.clone()"
-    if kind == "host":
-        fn = node.get("fn")  # e.g. "Pool.open"
-        host, _, method = fn.partition(".")
-        args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
-        return f"{host}::{_mname(method)}({args})"
-    if kind == "req":
-        original = node.get("name")
-        if rename and original in rename:
-            return rename[original]
-        return _ident(original, "requirement")
-    if kind == "call":
-        if "callee" in node and "target" not in node:
-            callee = _expr(node.get("callee"), env, rename)
-            args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
-            return f"({callee})({args})"
-        target = node.get("target") or {}
-        method = _ident(_mname(node.get("method")), "method")
-        args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
-        if target.get("kind") == "req":
-            recv = _ident(target.get("name"), "requirement")
-            if rename and target.get("name") in rename:
-                recv = rename[target.get("name")]
-        else:
-            recv = _expr(target, env, rename)
-        return f"{recv}.{method}({args})"
-    if kind == "format":
-        template = node.get("template") or ""
-        args = [_expr(a, env, rename) for a in node.get("args") or []]
-        return _format(template, args)
-    if kind == "fn":
-        name = _ident(node.get("name"), "function")
-        args = ", ".join(_expr_arg(a, env, rename) for a in node.get("args") or [])
-        return f"{name}({args})"
-    if kind == "bin" and node.get("op") == "??":
-        # `??` is handled here as well as in `_v3_expr` because its operands
-        # are in the *v1* dialect in a component body (`req`, v1 `call`, ..),
-        # which the v3 renderer cannot see. Delegating the whole node would
-        # lose the dialect. See `_v3_expr` for the lowering rationale.
-        left = _expr(node["left"], env, rename)
-        if node["left"].get("kind") not in _V1_ATOMIC_KINDS:
-            left = f"({left})"
-        return f"{left}.unwrap_or_else(|| {_expr(node['right'], env, rename)})"
-    # Every remaining v3 expression kind is rendered by the v3 renderer. Listing
-    # the kinds here (rather than delegating unconditionally) is what let
-    # `match` fall through the gap between the two renderers, so this set must
-    # stay in step with `_v3_expr` — including `optfield`/`optcall`, which
-    # delegate purely so that _v3_expr's specific tier-limit message is what
-    # the user sees instead of the generic one below.
-    if kind in {
-        "var", "bin", "un", "field", "index", "if",
-        "record", "list", "arrow", "builtin", "adt",
-        "match", "interp", "len", "optfield", "optcall",
-    }:
-        return _v3_expr(node, env.v3_ctx())
-    raise EmitError(f"unsupported expression node in Rust backend: {kind!r}")
+    """Lower a component-body expression via the single Rust expression renderer.
+
+    Component bodies carry a per-scope ``rename`` map (``pool`` -> ``self.pool``
+    for captured effects/requirements); the shared type table lives on
+    ``env.v3_ctx()``. Both are handed to ``_render_expr``, which is the one
+    function that lowers every IR expression kind on this tier.
+    """
+    return _render_expr(node, env.v3_ctx(), rename or {})
 
 
 def _format(template: str, args: list[str]) -> str:
@@ -1099,7 +1011,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             )
             ret = (_rust_type(_method_return(env, key, original_mname), env.types)
                    if _method_return(env, key, original_mname) else "()")
-            # A provide-method body is rendered by the v3 renderer, which
+            # A provide-method body is rendered by the shared expression renderer, which
             # needs the parameter types to tell a string `+` from a numeric one.
             env.v3_ctx().var_types = {
                 p: _param_type(env, key, original_mname, p)
@@ -1236,7 +1148,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             )
             ret = (_rust_type(_method_return(env, key, mname), env.types)
                    if _method_return(env, key, mname) else "()")
-            # A provide-method body is rendered by the v3 renderer, which
+            # A provide-method body is rendered by the shared expression renderer, which
             # needs the parameter types to tell a string `+` from a numeric one.
             env.v3_ctx().var_types = {
                 p: _param_type(env, key, mname, p)
@@ -1269,13 +1181,12 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
-    """Lower a setup value, coercing string literals to owned `String`.
+    """Lower a setup value.
 
-    revl `Str` is emitted as `String`; a setup `let` is the first time a
-    literal can become a named local, so it must not be inferred as `&str`.
+    revl `Str` is emitted as `String`, and `_render_expr` already lowers every
+    string literal to an owned `String::from(..)`, so a setup `let` binding
+    never risks being inferred as `&str` and needs no extra coercion here.
     """
-    if isinstance(node, dict) and node.get("kind") == "lit" and isinstance(node.get("value"), str):
-        return f"String::from({_expr(node, env)})"
     return _expr(node, env)
 
 
@@ -1389,7 +1300,15 @@ _V3_BIN_OPS = {
     "||": "||",
 }
 
-_V3_ATOMIC_KINDS = {"var", "name", "field", "index", "call", "lit"}
+# Expression kinds that render as a Rust postfix-safe primary, so a `.method()`,
+# `.field`, `[index]` or `.unwrap_or_else(..)` suffix can be appended without
+# wrapping them in parentheses. The set is the union of both dialects' atomic
+# kinds: the 2.0 primaries (`var`/`name`/`field`/`index`/`call`/`lit`) plus the
+# component primaries (`req`/`config`/`host`), which never appear in a 2.0 body
+# but must stay paren-free when a component `??`/receiver builds on them.
+_ATOMIC_KINDS = {
+    "var", "name", "field", "index", "call", "lit", "req", "config", "host",
+}
 _V3_HOST_ROOTS = set(_HOST_STUBS)
 _V3_BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 
@@ -1518,13 +1437,40 @@ class _V3Ctx:
 
 
 
-def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
+def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+    """Lower one IR expression node to a Rust expression.
+
+    This is the *single* expression renderer for the Rust tier. It covers both
+    IR dialects a document can mix:
+
+    * the component ("v1") dialect — ``req``/``config``/``host``/``format``/
+      ``fn`` and the component-shaped ``call`` (``target``/``method``); and
+    * the 2.0 dialect — ``callee``/``args`` calls, ``match``, ``arrow``, ADTs,
+      the stdlib ``builtin`` surface, string ``+`` via ``format!``, …
+
+    Where a kind exists in *both* dialects the renderer dispatches on **shape**
+    (which distinguishing keys are present), never on kind alone — see ``call``,
+    which reads ``callee`` for the 2.0 form and ``target``/``method`` for the
+    component form. ``rename`` is the component-capture map (``pool`` ->
+    ``self.pool``); a 2.0 body passes no rename, so the map is simply empty
+    there. String literals lower to owned ``String`` in every position (revl
+    ``Str`` is ``String``), so no dialect-specific literal coercion is needed.
+    """
     if not isinstance(node, dict) or "kind" not in node:
-        raise EmitError(f"malformed v3 expression: {node!r}")
+        raise EmitError(f"malformed expression: {node!r}")
+    rename = rename or {}
     kind = node["kind"]
 
     if kind == "lit":
         return _rust_v3_lit(node)
+
+    if kind == "name":
+        # A component capture (`self.pool`) arrives via the rename map already
+        # rendered as a Rust expression; otherwise it is a plain identifier.
+        original = node.get("id")
+        if rename and original in rename:
+            return rename[original]
+        return _ident(original, "name")
 
     if kind == "var":
         name = node.get("name")
@@ -1538,32 +1484,58 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
             return name
         return name
 
-    if kind == "name":
-        return _ident(node.get("id"), "name")
+    if kind == "req":
+        # component dialect: a required capability, possibly a `self.`-capture.
+        original = node.get("name")
+        if rename and original in rename:
+            return rename[original]
+        return _ident(original, "requirement")
 
     if kind == "config":
-        # Component guards (`if (config.n < 1) { fail .. }`) reach this
-        # renderer through the surrounding `bin`/`un` node. `_emit_component_*`
-        # puts a local `let config = <Comp>Config { .. }` in scope, so this is
-        # the same rendering the v1 component renderer uses.
+        # Component guards (`if (config.n < 1) { fail .. }`) reach this renderer
+        # through the surrounding `bin`/`un` node, and `_method_body`/setup put a
+        # local `let config = <Comp>Config { .. }` in scope, so config reads the
+        # same way whether it arrives via the component or the 2.0 path.
         return f"config.{_ident(node.get('field'), 'config field')}.clone()"
+
+    if kind == "host":
+        # component dialect: `Pool.open(..)` -> `Pool::open(..)`.
+        fn = node.get("fn")  # e.g. "Pool.open"
+        host, _, method = fn.partition(".")
+        args = ", ".join(_render_expr(a, ctx, rename) for a in node.get("args") or [])
+        return f"{host}::{_mname(method)}({args})"
+
+    if kind == "format":
+        # component dialect: `$0`/`$1` template -> Rust `format!`.
+        template = node.get("template") or ""
+        args = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+        return _format(template, args)
+
+    if kind == "fn":
+        # component dialect: a free-function call `name(..)`.
+        name = _ident(node.get("name"), "function")
+        args = ", ".join(_render_expr(a, ctx, rename) for a in node.get("args") or [])
+        return f"{name}({args})"
 
     if kind == "adt":
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
         # Result -> native `Ok(..)`/`Err(..)`. Reuses the constructor logic
         # the call/var paths already use.
-        return ctx.constructor(node["case"], [_v3_expr(a, ctx) for a in node.get("args") or []])
+        return ctx.constructor(
+            node["case"], [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+        )
 
     if kind == "bin":
         if node.get("op") == "??":
             # `a ?? b` (docs/syntax-2.0.md §3.2): `Opt[T]` is `Option<T>` on
             # this tier, so the absent case is `None`. `unwrap_or_else` keeps
             # `b` lazy — `??` must not evaluate its right operand when `a` is
-            # present, and `unwrap_or` would evaluate it unconditionally.
-            left = _v3_expr(node["left"], ctx)
-            if node["left"].get("kind") not in _V3_ATOMIC_KINDS:
+            # present, and `unwrap_or` would evaluate it unconditionally. This
+            # is the sole `??` lowering; both dialects funnel through here now.
+            left = _render_expr(node["left"], ctx, rename)
+            if node["left"].get("kind") not in _ATOMIC_KINDS:
                 left = f"({left})"
-            return f"{left}.unwrap_or_else(|| {_v3_expr(node['right'], ctx)})"
+            return f"{left}.unwrap_or_else(|| {_render_expr(node['right'], ctx, rename)})"
         if node.get("op") == "+" and (
                 _v3_is_str(node.get("left"), ctx) or _v3_is_str(node.get("right"), ctx)):
             # Rust's `+` on strings takes `String + &str` only: `&str + String`
@@ -1572,15 +1544,16 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
             # every combination and always yields `String`, which is what `Str`
             # lowers to. (Both spellings shipped broken until `cargo check` ran
             # over the emitted code — docs/conformance.md.)
-            return (f'format!("{{}}{{}}", {_v3_expr(node["left"], ctx)}, '
-                    f'{_v3_expr(node["right"], ctx)})')
+            return (f'format!("{{}}{{}}", {_render_expr(node["left"], ctx, rename)}, '
+                    f'{_render_expr(node["right"], ctx, rename)})')
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
-        return f"({_v3_expr(node['left'], ctx)} {op} {_v3_expr(node['right'], ctx)})"
+        return (f"({_render_expr(node['left'], ctx, rename)} {op} "
+                f"{_render_expr(node['right'], ctx, rename)})")
 
     if kind == "un":
-        operand = _v3_expr(node.get("operand"), ctx)
+        operand = _render_expr(node.get("operand"), ctx, rename)
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
@@ -1588,82 +1561,100 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
     if kind == "call":
-        callee_node = node.get("callee") or {}
-        arg_exprs = [_v3_expr(a, ctx) for a in node.get("args") or []]
-        args = ", ".join(arg_exprs)
-        if callee_node.get("kind") == "field":
-            target_node = callee_node.get("target") or {}
-            method = callee_node.get("name")
-            if target_node.get("kind") == "var" and target_node.get("name") in _V3_HOST_ROOTS:
-                return f"{target_node['name']}::{_mname(method)}({args})"
-            target = _v3_expr(target_node, ctx)
-            if target_node.get("kind") not in _V3_ATOMIC_KINDS:
-                target = f"({target})"
-            return f"{target}.{_ident(method, 'method')}({args})"
-        callee_name = callee_node.get("name") if callee_node.get("kind") == "var" else None
-        if callee_name is not None and (
-            callee_name in ctx.case_adt or callee_name in _V3_BUILTIN_CONSTRUCTORS
-        ):
-            return ctx.constructor(callee_name, arg_exprs)
-        callee = _v3_expr(callee_node, ctx)
-        if callee_node.get("kind") not in _V3_ATOMIC_KINDS:
-            callee = f"({callee})"
-        return f"{callee}({args})"
+        # Shape dispatch: the 2.0 form carries `callee`; the component form
+        # carries `target`/`method`. Reading the wrong child would silently emit
+        # the wrong receiver, so the presence of `callee` — not the kind — is
+        # what selects the form.
+        if "callee" in node:
+            callee_node = node.get("callee") or {}
+            arg_exprs = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+            args = ", ".join(arg_exprs)
+            if callee_node.get("kind") == "field":
+                target_node = callee_node.get("target") or {}
+                method = callee_node.get("name")
+                if target_node.get("kind") == "var" and target_node.get("name") in _V3_HOST_ROOTS:
+                    return f"{target_node['name']}::{_mname(method)}({args})"
+                target = _render_expr(target_node, ctx, rename)
+                if target_node.get("kind") not in _ATOMIC_KINDS:
+                    target = f"({target})"
+                return f"{target}.{_ident(method, 'method')}({args})"
+            callee_name = callee_node.get("name") if callee_node.get("kind") == "var" else None
+            if callee_name is not None and (
+                callee_name in ctx.case_adt or callee_name in _V3_BUILTIN_CONSTRUCTORS
+            ):
+                return ctx.constructor(callee_name, arg_exprs)
+            callee = _render_expr(callee_node, ctx, rename)
+            if callee_node.get("kind") not in _ATOMIC_KINDS:
+                callee = f"({callee})"
+            return f"{callee}({args})"
+        # component form: `target.method(args)`.
+        target = node.get("target") or {}
+        method = _ident(_mname(node.get("method")), "method")
+        args = ", ".join(_render_expr(a, ctx, rename) for a in node.get("args") or [])
+        if target.get("kind") == "req":
+            recv = _ident(target.get("name"), "requirement")
+            if rename and target.get("name") in rename:
+                recv = rename[target.get("name")]
+        else:
+            recv = _render_expr(target, ctx, rename)
+        return f"{recv}.{method}({args})"
 
     if kind == "field":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if target_node.get("kind") not in _V3_ATOMIC_KINDS:
+        target = _render_expr(target_node, ctx, rename)
+        if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if target_node.get("kind") not in _V3_ATOMIC_KINDS:
+        target = _render_expr(target_node, ctx, rename)
+        if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         # revl Int is i64; Rust indexing wants usize.
-        return f"({target})[({_v3_expr(node['index'], ctx)}) as usize].clone()"
+        return f"({target})[({_render_expr(node['index'], ctx, rename)}) as usize].clone()"
 
     if kind == "if":
         return (
-            f"if {_v3_expr(node['cond'], ctx)} {{ {_v3_expr(node['then'], ctx)} }} "
-            f"else {{ {_v3_expr(node['else'], ctx)} }}"
+            f"if {_render_expr(node['cond'], ctx, rename)} "
+            f"{{ {_render_expr(node['then'], ctx, rename)} }} "
+            f"else {{ {_render_expr(node['else'], ctx, rename)} }}"
         )
 
     if kind == "record":
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
         body = ", ".join(
-            f"{_ident(k, 'record field')}: {_v3_expr(v, ctx)}" for k, v in fields
+            f"{_ident(k, 'record field')}: {_render_expr(v, ctx, rename)}" for k, v in fields
         )
         return f"{type_name} {{ {body} }}"
 
     if kind == "list":
-        return "vec![" + ", ".join(_v3_expr(item, ctx) for item in node.get("items") or []) + "]"
+        return ("vec![" + ", ".join(
+            _render_expr(item, ctx, rename) for item in node.get("items") or []) + "]")
 
     if kind == "arrow":
         params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
-        return f"move |{params}| {{ {_v3_expr(node['body'], ctx)} }}"
+        return f"move |{params}| {{ {_render_expr(node['body'], ctx, rename)} }}"
 
     if kind == "len":
-        target = _v3_expr(node.get("target"), ctx)
+        target = _render_expr(node.get("target"), ctx, rename)
         # Via the helper trait: String::len is bytes, revl length is elements.
         return f"{target}.revl_length()"
 
     if kind == "builtin":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if target_node.get("kind") not in _V3_ATOMIC_KINDS:
+        target = _render_expr(target_node, ctx, rename)
+        if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
-        args = [_v3_expr(a, ctx) for a in node.get("args") or []]
+        args = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
         return _v3_builtin(node.get("method"), target, args)
 
     if kind == "match":
-        return _v3_match_expr(node, ctx)
+        return _v3_match_expr(node, ctx, rename)
 
     if kind == "interp":
-        return _v3_interp(node, ctx)
+        return _v3_interp(node, ctx, rename)
 
     if kind in ("optfield", "optcall"):
         raise EmitError(
@@ -1671,7 +1662,7 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
             f"({kind!r}); unwrap with `match` or `??` for now"
         )
 
-    raise EmitError(f"unsupported v3 expression kind {kind!r}")
+    raise EmitError(f"unsupported expression kind {kind!r} in Rust backend")
 
 
 
@@ -1780,7 +1771,7 @@ def _stdlib_helper_traits() -> list[str]:
     ]
 
 
-def _v3_interp(node: dict, ctx: _V3Ctx) -> str:
+def _v3_interp(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
     parts = node.get("parts") or []
     format_parts: list[str] = []
     args: list[str] = []
@@ -1789,20 +1780,20 @@ def _v3_interp(node: dict, ctx: _V3Ctx) -> str:
             format_parts.append(value.replace("{", "{{").replace("}", "}}"))
         else:  # ["expr", ir_node]
             format_parts.append("{}")
-            args.append(_v3_expr(value, ctx))
+            args.append(_render_expr(value, ctx, rename))
     joined = "".join(format_parts)
     if not args:
         return f"format!({_string(joined)})"
     return f"format!({_string(joined)}, {', '.join(args)})"
 
 
-def _v3_match_expr(node: dict, ctx: _V3Ctx) -> str:
-    scrutinee = _v3_expr(node.get("scrutinee"), ctx)
+def _v3_match_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+    scrutinee = _render_expr(node.get("scrutinee"), ctx, rename)
     arms = node.get("arms") or []
     lines = [f"match {scrutinee} {{"]
     for arm in arms:
         pattern = ctx.match_pattern(arm)
-        body = _v3_expr(arm.get("body"), ctx)
+        body = _render_expr(arm.get("body"), ctx, rename)
         lines.append(f"    {pattern} => {body},")
     if not any(arm.get("pattern") == "_" for arm in arms):
         # lower.py has already checked exhaustiveness for known ADTs.
@@ -1814,7 +1805,7 @@ def _v3_match_expr(node: dict, ctx: _V3Ctx) -> str:
 
 def _v3_let_pattern(node: dict, ctx: _V3Ctx, out: list[str], indent: int) -> None:
     pad = "    " * indent
-    value = _v3_expr(node.get("value"), ctx)
+    value = _render_expr(node.get("value"), ctx)
     pattern = node.get("pattern")
     names = [_ident(n, "binding") for n in node.get("names") or []]
     keyword = "let mut" if node.get("mutable") else "let"
@@ -1841,7 +1832,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
         inferred = _v3_infer_type(node.get("value"), ctx)
-        value = _v3_expr(node.get("value"), ctx)
+        value = _render_expr(node.get("value"), ctx)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         if step == "let":
@@ -1853,9 +1844,9 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if node.get("expr") is None:
             out.append(f"{pad}return;")
         else:
-            out.append(f"{pad}return {_v3_expr(node['expr'], ctx)};")
+            out.append(f"{pad}return {_render_expr(node['expr'], ctx)};")
     elif step == "if":
-        out.append(f"{pad}if {_v3_expr(node['cond'], ctx)} {{")
+        out.append(f"{pad}if {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("then") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         if node.get("else"):
@@ -1864,22 +1855,22 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
-        out.append(f"{pad}while {_v3_expr(node['cond'], ctx)} {{")
+        out.append(f"{pad}while {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
         bind = _ident(node.get("bind"), "loop binding")
-        out.append(f"{pad}for {bind} in {_v3_expr(node['iterable'], ctx)} {{")
+        out.append(f"{pad}for {bind} in {_render_expr(node['iterable'], ctx)} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "let_pattern":
         _v3_let_pattern(node, ctx, out, indent)
     elif step == "expr":
-        out.append(f"{pad}let _ = {_v3_expr(node['expr'], ctx)};")
+        out.append(f"{pad}let _ = {_render_expr(node['expr'], ctx)};")
     elif step == "assert":
-        out.append(f"{pad}assert!({_v3_expr(node['expr'], ctx)});")
+        out.append(f"{pad}assert!({_render_expr(node['expr'], ctx)});")
     else:
         raise EmitError(f"unsupported fn statement step {step!r}")
 
