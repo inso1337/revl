@@ -1,0 +1,21 @@
+// REJECTED — a provide method that never returns, implementing a service
+// method that promises a value. A service declaration is a promise to every
+// consumer bound to the key, and the emitted java method / rust trait impl
+// both fall off the end ("missing return statement", E0308) while python
+// hands the caller a silent `None`.
+//
+// expected error:
+//   `get` implements `Store.get`, which returns `Str`, but this body never
+//   returns a value
+
+service Store {
+  fn get(key: Str) -> Str
+}
+
+component Memory provides store: Store {
+  provide store {
+    fn get(key) {
+      let normalized = key
+    }
+  }
+}

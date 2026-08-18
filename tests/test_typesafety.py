@@ -242,3 +242,293 @@ component Cache {
   let warm = effect { let n = store.size()  Pool.open("u", n) } undo warm.close()
 }""")
     assert ir["components"][0]["name"] == "Cache"
+
+
+# ---- typing follow-ups: programs the strict tiers refuse -------------------
+#
+# Each block below closed a hole where the checker accepted a program that
+# rust/java will not compile. The rejection is paired with the legal spellings
+# it must NOT touch: the guarantee is "refuse the unportable", not "refuse the
+# unfamiliar".
+
+
+# 1/2 — a declared return type must be produced on every path.
+# python silently returns None, TS undefined; rust E0308, javac
+# "missing return statement".
+
+def test_fn_body_that_never_returns_is_rejected():
+    err = _err("fn f() -> Int { let x = 1 }")
+    assert "`f` is declared to return `Int` but its body never returns a value" in err
+    assert "rust E0308" in err  # the diagnostic names the tier that refuses it
+
+
+def test_fn_with_bare_if_falls_off_the_end():
+    err = _err("fn f(b: Bool) -> Int { if (b) { return 1 } }")
+    assert "control can reach the end of its body without a `return`" in err
+
+
+def test_loop_body_return_does_not_count_as_a_path():
+    # a `for`/`while` may run zero times — java and rust agree
+    err = _err("fn f(xs: List[Int]) -> Int { for (x of xs) { return x } }")
+    assert "control can reach the end of its body without a `return`" in err
+
+
+def test_returning_fns_that_are_legal_stay_accepted():
+    ir = compile_source("""
+fn unit_needs_no_return(x: Int) { let y = x + 1 }
+fn both_arms(b: Bool) -> Int { if (b) { return 1 } else { return 2 } }
+fn nested(b: Bool, c: Bool) -> Int {
+  if (b) { if (c) { return 1 } else { return 2 } } else { return 3 }
+}
+fn trailing(b: Bool) -> Int { if (b) { return 1 }  return 2 }
+fn after_loop(xs: List[Int]) -> Int { for (x of xs) { let y = x }  return 0 }
+fn diverging() -> Int { while (true) { let x = 1 } }
+""")
+    assert [fn["name"] for fn in ir["functions"]] == [
+        "unit_needs_no_return", "both_arms", "nested", "trailing",
+        "after_loop", "diverging"]
+
+
+# 3 — call arity is exact (no defaults, no varargs): rust E0061,
+# javac "cannot be applied to given types".
+
+def test_call_with_too_many_arguments_is_rejected():
+    err = _err("fn g(a: Int) -> Int { return a }\nfn h() -> Int { return g(1, 2) }")
+    assert "`g` takes 1 argument(s), 2 given" in err
+
+
+def test_call_with_too_few_arguments_is_rejected():
+    err = _err("fn g(a: Int, b: Int) -> Int { return a + b }\n"
+               "fn h() -> Int { return g(1) }")
+    assert "`g` takes 2 argument(s), 1 given" in err
+
+
+def test_extern_call_arity_is_checked_too():
+    err = _err("extern pure fn hash(s: Str) -> Int\n"
+               "  = @py { return hash(s) }\n"
+               'fn h() -> Int { return hash("a", "b") }')
+    assert "`hash` takes 1 argument(s), 2 given" in err
+
+
+def test_correct_arity_still_accepted():
+    ir = compile_source("fn g(a: Int, b: Int) -> Int { return a + b }\n"
+                        "fn h() -> Int { return g(1, 2) }")
+    assert len(ir["functions"]) == 2
+
+
+# 4 — nothing reaches *through* an Opt. `T` flows into `Opt[T]` and never
+# silently back out (README headline): rust E0609, javac "cannot find symbol".
+
+OPT = "type Row = { name: Str, tags: List[Str] }\n"
+
+
+def test_field_access_through_an_optional_is_rejected():
+    err = _err(OPT + "fn f(o: Opt[Row]) -> Str { return o.name }")
+    assert "field access `.name` on `Opt[Row]`" in err
+    assert "`T` flows into `Opt[T]`, never silently back out" in err
+    assert "?.name" in err  # the diagnostic names the fix
+
+
+def test_index_through_an_optional_is_rejected():
+    err = _err("fn f(o: Opt[List[Int]]) -> Int { return o[0] }")
+    assert "index `[...]` on `Opt[List[Int]]`" in err
+
+
+def test_builtin_method_on_an_optional_is_rejected():
+    err = _err("fn f(o: Opt[Str]) -> Int { return o.length }")
+    assert "field access `.length` on `Opt[Str]`" in err
+
+
+def test_optional_chain_yields_an_optional_not_the_inner_type():
+    # `o?.name` is `Opt[Str]`, so returning it as `Str` is the ordinary
+    # unwrap-first mismatch rather than a silent escape
+    err = _err(OPT + "fn f(o: Opt[Row]) -> Str { return o?.name }")
+    assert "this function's return expects `Str`, got `Opt[Str]`" in err
+
+
+def test_optional_chain_on_a_nonoptional_is_rejected():
+    err = _err(OPT + "fn f(r: Row) -> Opt[Str] { return r?.name }")
+    assert "`?.` needs an optional on the left, got `Row`" in err
+
+
+def test_optional_chain_field_must_exist_on_the_inner_record():
+    err = _err(OPT + "fn f(o: Opt[Row]) -> Opt[Str] { return o?.bogus }")
+    assert "`Row` has no field `bogus`" in err
+
+
+def test_legal_optional_uses_stay_accepted():
+    ir = compile_source(OPT + """
+type Outer = { row: Row }
+fn chained(o: Opt[Outer]) -> Opt[Str] { return o?.row?.name }
+fn one_hop(o: Opt[Row]) -> Opt[Str] { return o?.name }
+fn with_fallback(o: Opt[Row]) -> Str { return o?.name ?? "anonymous" }
+fn unwrapped(o: Opt[Row]) -> Str { return match o { Some(r) => r.name, None => "" } }
+fn injected(r: Row) -> Opt[Row] { return Some(r) }
+fn opt_method(o: Opt[Str]) -> Opt[Int] { return o?.length() }
+""")
+    assert len(ir["functions"]) == 6
+
+
+def test_field_through_optional_rejected_in_a_component_body():
+    # the same discipline inside the component effect-setup sweep: the
+    # requirement's declared `Opt[Row]` return may not be reached through
+    err = _err("""
+type Row = { name: Str }
+service Finder { fn find(k: Str) -> Opt[Row] }
+component C requires fx: Finder {
+  let hit = effect fx.find("k") undo fx.find("k")
+  let c = effect { let n = hit.name  Pool.open(n, 1) } undo c.close()
+}""")
+    assert "the optional wrapper has no such member" in err
+
+
+# 5 — `Str` is not indexable; the specified surface is charAt/slice.
+# rust E0277, javac "cannot find symbol" (the emitter renders `.get(i)`).
+
+def test_str_index_is_rejected():
+    err = _err("fn f(s: Str) -> Str { return s[0] }")
+    assert "`Str` has no index operator" in err
+    assert "s.charAt(i)" in err
+
+
+def test_list_index_and_charat_stay_accepted():
+    ir = compile_source("""
+fn nth(xs: List[Int]) -> Int { return xs[0] }
+fn ch(s: Str) -> Str { return s.charAt(0) }
+fn code(s: Str) -> Int { return s.charCodeAt(0) }
+fn sub(s: Str) -> Str { return s.slice(0, 2) }
+""")
+    assert len(ir["functions"]) == 4
+
+
+# 6 — a match arm must name a declared case (or `_`).
+# javac "cannot find symbol"; the rust emitter raises EmitError.
+
+def test_unknown_match_case_is_rejected():
+    err = _err("type Status = Active | Retired\n"
+               "fn f(s: Status) -> Int { return match s { Active => 1, Retired => 2, Pending => 3 } }")
+    assert "`Pending` is not a case of `Status` (cases: `Active`, `Retired`)" in err
+
+
+def test_unknown_match_case_rejected_even_with_a_wildcard_arm():
+    # `_` silences exhaustiveness, but a *misspelled* case is still a typo
+    err = _err("type Status = Active | Retired\n"
+               "fn f(s: Status) -> Int { return match s { Actve => 1, _ => 0 } }")
+    assert "`Actve` is not a case of `Status`" in err
+
+
+def test_wildcard_and_payload_arms_stay_accepted():
+    ir = compile_source("""
+type Status = Active | Retired
+type Outcome = Won(Int) | Lost(Str)
+fn a(s: Status) -> Int { return match s { Active => 1, _ => 0 } }
+fn b(o: Outcome) -> Int { return match o { Won(n) => n, Lost(why) => why.length } }
+fn c(o: Opt[Int]) -> Int { return match o { Some(v) => v, None => 0 } }
+fn d(r: Result[Int, Str]) -> Int { return match r { Ok(v) => v, Err(e) => 0 } }
+""")
+    assert len(ir["functions"]) == 4
+
+
+# ---- generic instantiation (roadmap "Typing follow-ups" #6) ----------------
+#
+# A single-uppercase name in a fn signature that is not a declared type is that
+# fn's implicit type parameter. It is a wildcard only inside that fn's own
+# body; at a call site it is unified against the actual arguments. A single
+# uppercase name that *is* declared is an ordinary nominal type.
+
+def test_generic_return_is_instantiated_at_the_call_site():
+    err = _err("fn ident(x: T) -> T { return x }\n"
+               'fn g() -> Int { return ident("hello") }')
+    assert "this function's return expects `Int`, got `Str`" in err
+
+
+def test_generic_parameters_must_agree_across_arguments():
+    err = _err("fn pair(a: T, b: T) -> T { return a }\n"
+               'fn g() -> Int { return pair(1, "x") }')
+    assert "argument 2 of `pair(...)` expects `Int`, got `Str`" in err
+
+
+def test_generic_under_a_constructor_is_instantiated():
+    err = _err("fn head(xs: List[T]) -> T { return xs[0] }\n"
+               "fn g() -> Str { return head([1, 2]) }")
+    assert "this function's return expects `Str`, got `Int`" in err
+
+
+def test_independent_type_parameters_do_not_collide():
+    ir = compile_source("fn fst(a: T, b: E) -> T { return a }\n"
+                        'fn g() -> Int { return fst(1, "x") }')
+    assert len(ir["functions"]) == 2
+
+
+def test_generic_opt_injection_still_holds_at_the_call_site():
+    ir = compile_source("fn wrap(x: T) -> Opt[T] { return Some(x) }\n"
+                        "fn g() -> Opt[Int] { return wrap(1) }")
+    assert len(ir["functions"]) == 2
+
+
+def test_declared_one_letter_type_is_no_longer_a_wildcard():
+    # `type S = A | B` used to be unchecked *everywhere* purely because its
+    # name is one character long — a strictly worse hole than the generics one
+    err = _err("type S = A | B\nfn f(s: S) -> Int { return s }")
+    assert "this function's return expects `Int`, got `S`" in err
+
+
+def test_declared_one_letter_type_still_flows_where_it_should():
+    ir = compile_source("type S = A | B\nfn f(s: S) -> S { return s }")
+    assert ir["functions"][0]["returns"] == "S"
+
+
+def test_type_parameter_marker_never_reaches_the_ir():
+    ir = compile_source("fn ident(x: T) -> T { return x }\n"
+                        'fn g() -> Str { return ident("hi") }')
+    assert ir["functions"][0]["returns"] == "T"
+    assert ir["functions"][0]["params"] == [{"name": "x", "type": "T"}]
+
+
+# ---- the same checks inside arrow bodies and component bodies -------------
+
+def test_arrow_bodies_are_checked_like_any_expression():
+    err = _err("fn f(s: Str) -> Int { let g = (x) => s[0]\n  return 1 }")
+    assert "`Str` has no index operator" in err
+
+
+def test_arrow_body_call_arity_is_checked():
+    err = _err("fn h(a: Int) -> Int { return a }\n"
+               "fn f() -> Int { let g = (x) => h(1, 2)\n  return 1 }")
+    assert "`h` takes 1 argument(s), 2 given" in err
+
+
+def test_arrow_parameters_stay_unknown():
+    # an arrow's own parameters are un-annotated: the body must still typecheck
+    # against the enclosing scope without inventing types for them
+    ir = compile_source("fn f(s: Str) -> Int { let g = (x) => x + 1\n"
+                        "  let h = (s) => s + 1\n  return 1 }")
+    assert ir["functions"][0]["name"] == "f"
+
+
+def test_component_body_call_arity_is_checked():
+    err = _err("fn h(a: Int) -> Int { return a }\n"
+               'component C { let c = effect { let n = h(1, 2)  Pool.open("u", n) }'
+               " undo c.close() }")
+    assert "`h` takes 1 argument(s), 2 given" in err
+
+
+def test_component_body_call_argument_type_is_checked():
+    err = _err("fn h(a: Int) -> Int { return a }\n"
+               'component C { let c = effect { let n = h("x")  Pool.open("u", n) }'
+               " undo c.close() }")
+    assert "argument 1 of `h(...)` expects `Int`, got `Str`" in err
+
+
+def test_provide_method_must_return_what_the_service_promises():
+    err = _err("service Store { fn get(key: Str) -> Str }\n"
+               "component M provides store: Store {\n"
+               "  provide store { fn get(key) { let n = key } }\n}")
+    assert "`get` implements `Store.get`, which returns `Str`, but this body never returns a value" in err
+
+
+def test_provide_method_with_no_declared_return_needs_none():
+    ir = compile_source("service Sink { fn ping(key: Str) }\n"
+                        "component M provides sink: Sink {\n"
+                        "  provide sink { fn ping(key) { let n = key } }\n}")
+    assert ir["components"][0]["name"] == "M"

@@ -1,0 +1,15 @@
+// REJECTED — a `fn` whose *some* paths return: the trailing `if` has no
+// `else`, so falling through the bare `if` reaches the end of the body with
+// no value (rust E0308, javac "missing return statement"; python returns
+// None). An `if`/`else` where both arms return is fine, and so is a final
+// `return` after the `if` — neither is refused.
+//
+// expected error:
+//   `rank` is declared to return `Int` but control can reach the end of its
+//   body without a `return`
+
+fn rank(hot: Bool) -> Int {
+  if (hot) {
+    return 1
+  }
+}
