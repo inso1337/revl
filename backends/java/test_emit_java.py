@@ -578,3 +578,92 @@ def test_match_in_a_component_method_body():
     src = emit.emit(ir)
     assert "Outcome.Found" in src
     assert "Outcome.Missing" in src
+
+
+# --- ADT bindings and switch totality ----------------------------------------
+# The conformance matrix's `expr/ADT construct + match` failed javac twice over
+# once the emitted java was handed to a real compiler (docs/conformance.md).
+
+_ADT_MATCH_SRC = """
+type Outcome = Found(Int) | Missing
+service S { fn f(x: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn f(x) {
+      let o = Found(x)
+      return match o { Found(v) => v, Missing => 0 }
+    }
+  }
+}
+"""
+
+
+def test_adt_binding_is_declared_with_the_sealed_interface():
+    """`let o = Found(x)` has type `Outcome` in revl, but `var` would freeze
+    the java binding at `Outcome.Found` — and then the `Missing` arm of the
+    switch is a pattern the selector can never match ("incompatible types:
+    Found cannot be converted to Missing")."""
+    src = emit.emit(compile_source(_ADT_MATCH_SRC))
+    assert "Outcome o = new Outcome.Found(x);" in src
+    assert "var o = new Outcome.Found" not in src
+
+
+def test_a_total_switch_gets_no_default_label():
+    """Arms covering every case of a sealed ADT are already exhaustive to
+    javac, which then rejects the extra `default` outright."""
+    src = emit.emit(compile_source(_ADT_MATCH_SRC))
+    assert "case Outcome.Found" in src
+    assert "case Outcome.Missing" in src
+    assert "non-exhaustive match" not in src
+
+
+def test_a_partial_switch_keeps_its_guard():
+    src = emit.emit(compile_source(
+        "type Outcome = Found(Int) | Missing | Broken\n"
+        "fn f(o: Outcome) -> Int { return match o { Found(v) => v, _ => 0 } }"
+    ))
+    assert "default -> { yield (0L); }" in src
+
+
+# --- arrows ------------------------------------------------------------------
+
+_ARROW_SRC = """
+fn add_n(n: Int) -> Int { let f = x => x + n  return f(1) }
+fn twice() -> Int { let g = x => x * 2  return g(3) + g(10) }
+fn capture_by_value() -> Int { var n = 1  let f = y => y + n  n = 100  return f(5) }
+fn compose(a: Int) -> Int { let h = x => x + 1  let sq = x => x * x  return sq(h(a)) }
+fn aliased(a: Int) -> Int { let g = x => x + 1  let h = g  return h(a) }
+"""
+
+
+def test_local_arrows_are_beta_reduced_at_the_call_site():
+    """An arrow's parameters are untyped (typecheck.py's unchecked frontier),
+    so there is no functional interface to declare the binding with and no
+    `g(n)` call syntax for a lambda-valued local. The call is inlined instead,
+    which is also the only lowering that does not invent a parameter type."""
+    src = emit.emit(compile_source(_ARROW_SRC))
+    assert "-> (" not in src, "an arrow must not be emitted as a java lambda"
+    assert "return ((((3L) * 2L)) + (((10L) * 2L)));" in src  # inlined twice
+    # by-value capture (syntax-2.0 §3.5): snapshot at the binding, not the call
+    assert "final var __revl_capture_f_n = n;" in src
+    assert "return (((5L) + __revl_capture_f_n));" in src
+
+
+def test_an_arrow_in_value_position_is_refused():
+    with pytest.raises(emit.EmitError, match="not lowerable on the Java tier"):
+        emit.emit(compile_source(
+            "fn boxed(a: Int) -> Int { let fs = [x => x + 1]  return a }"))
+
+
+def test_an_arrow_argument_is_never_evaluated_twice():
+    """Substitution is only safe for a pure, cheap argument; anything else
+    would run once per occurrence of the parameter."""
+    with pytest.raises(emit.EmitError, match="more than once"):
+        emit.emit(compile_source(
+            "fn step(n: Int) -> Int { return n + 1 }\n"
+            "fn sq(a: Int) -> Int { let s = x => x * x  return s(step(a)) }"))
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_adt_matches_and_arrows(tmp_path):
+    _javac_compile(tmp_path, emit.emit(compile_source(_ADT_MATCH_SRC + _ARROW_SRC)))

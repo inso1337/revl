@@ -17,7 +17,10 @@ Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 - intercept   -> `ctx.intercept(ServiceKey.of(<Svc>.class), <metadata>)`
 - types       -> static final record classes / sealed variant interfaces
 - functions   -> `public static` methods on `Components`
-- match       -> Java 21 pattern `switch` expressions
+- match       -> Java 21 pattern `switch` expressions (no `default` when the
+                 arms already cover the sealed ADT — javac rejects the pair)
+- arrows      -> beta-reduced at the call site; there is no functional
+                 interface to target for an untyped parameter (see "arrows")
 - externs     -> verbatim `@java` bodies
 - tests       -> static void methods collected in `REVL_TESTS`
 - config      -> plugin constructor parameters (`new XPlugin(url, pool_size)`)
@@ -386,6 +389,10 @@ class _V3Ctx:
                         )
                     self.case_owners[cname] = tname
         self._match_counter = 0
+        # local `let`s bound to an arrow literal, in the body being emitted:
+        # {binding name: {"arrow": <arrow node>, "captures": {name: snapshot}}}.
+        # See `_inline_arrow` for why an arrow has no Java declaration.
+        self.arrows: dict[str, dict] = {}
 
     def new_match_ignored(self) -> str:
         self._match_counter += 1
@@ -423,6 +430,9 @@ def _v3_var(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> st
     _ident(name, "name")
     if rename and name in rename:
         return rename[name]
+    if name in ctx.arrows:
+        # an arrow binding has no Java declaration to refer to (see "arrows")
+        raise EmitError(_ARROW_VALUE_REFUSAL)
     if name in ctx.case_owners:
         return name
     if name == "None":
@@ -541,6 +551,162 @@ def _uses_stdlib(ir: dict) -> bool:
     return found
 
 
+# --------------------------------------------------------------------------
+# arrows
+#
+# revl's checker *enumerates arrows in its unchecked frontier* (see the header
+# of src/revl/typecheck.py): an arrow's parameters have no declared type and
+# none is inferred, and `infer_ast` returns `None` for the arrow itself. Java
+# has no way to spell that. A lambda is not a value with a type of its own —
+# it needs a *target type*, i.e. a functional interface with a fixed arity and
+# concrete parameter/return types, which is exactly the information that does
+# not exist. The two ways out both fail:
+#
+#   * `java.util.function.Function<Object, Object>` is the type-honest choice,
+#     but Java has no arithmetic on `Object`, so the body of even the simplest
+#     arrow (`v => v + 1`) stops compiling. Type-honest and unusable.
+#   * `Function<Long, Long>` (or a generated `long`-typed interface) compiles
+#     that one body by *inventing* an arity and a parameter type the compiler
+#     was never given, and silently miscompiles a string or record arrow.
+#
+# So arrows are **beta-reduced at the call site** instead: `let g = v => …` has
+# no Java declaration, and `g(a)` emits the body with `a` substituted for `v`.
+# Nothing is invented — javac derives the parameter types from the actual
+# arguments, the same conclusion the wasm tier reached for its own reasons
+# (backends/wasm/emit.py `_inline_arrow`). The cost is that an arrow can only
+# be called, never used as a value; that position raises rather than emitting
+# Java that does not compile, because revl has no lowerable function type to
+# put it in anyway.
+#
+# By-value capture (docs/syntax-2.0.md §3.5: "captures are by-value") is
+# preserved by snapshotting each captured `var` into a `final` local at the
+# binding site — the call site may be reached after the `var` has moved on.
+
+_ARROW_VALUE_REFUSAL = (
+    "an arrow value is not lowerable on the Java tier — a Java lambda needs a "
+    "target type, and an arrow's parameters are untyped; bind it with `let` "
+    "and call it"
+)
+
+# expression kinds that are pure and cheap enough to substitute at more than
+# one occurrence of a parameter; anything else would be re-evaluated.
+_ARROW_REPEATABLE_KINDS = {
+    "lit", "var", "name", "config", "req", "field", "index", "un", "bin",
+    "if", "len",
+}
+
+
+def _subexprs(node: dict):
+    for key, value in node.items():
+        if key == "kind":
+            continue
+        if isinstance(value, dict) and "kind" in value:
+            yield value
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and "kind" in item:
+                    yield item
+
+
+def _arrow_repeatable(node: object, ctx: _V3Ctx) -> bool:
+    if not isinstance(node, dict):
+        return False
+    if node.get("kind") == "call":
+        # a call to another local arrow is itself beta-reduced, so judge what
+        # it will actually expand to (arrow composition stays lowerable)
+        nested = _arrow_callee(node.get("callee"), ctx)
+        if nested is None:
+            return False
+        return _arrow_repeatable(nested["arrow"].get("body"), ctx) and all(
+            _arrow_repeatable(a, ctx) for a in node.get("args") or [])
+    if node.get("kind") not in _ARROW_REPEATABLE_KINDS:
+        return False
+    return all(_arrow_repeatable(sub, ctx) for sub in _subexprs(node))
+
+
+def _name_uses(node: object, name: str) -> int:
+    if not isinstance(node, dict):
+        return 0
+    total = 1 if (
+        (node.get("kind") == "var" and node.get("name") == name)
+        or (node.get("kind") == "name" and node.get("id") == name)
+    ) else 0
+    return total + sum(_name_uses(sub, name) for sub in _subexprs(node))
+
+
+def _arrow_callee(callee: object, ctx: _V3Ctx) -> dict | None:
+    """The arrow binding this callee names, if any: an arrow literal applied
+    on the spot, or a local `let` that was bound to one."""
+    if not isinstance(callee, dict):
+        return None
+    if callee.get("kind") == "arrow":
+        return {"arrow": callee, "captures": {}}
+    if callee.get("kind") == "var":
+        return ctx.arrows.get(callee.get("name"))
+    if callee.get("kind") == "name":
+        return ctx.arrows.get(callee.get("id"))
+    return None
+
+
+def _bind_local_arrow(
+    ctx: _V3Ctx,
+    name: str,
+    value: object,
+    out: list[str],
+    pad: str,
+    rename: dict[str, str] | None,
+    env: "_Env | None",
+) -> bool:
+    """Handle a `let` whose right-hand side is an arrow, or an alias of one.
+
+    The arrow itself emits no declaration (there is no type to declare it
+    with); only the by-value snapshot of each captured mutable `var` does.
+    Returns False when this `let` binds an ordinary value.
+    """
+    alias = _arrow_callee(value, ctx)
+    if alias is not None and not (isinstance(value, dict) and value.get("kind") == "arrow"):
+        ctx.arrows[name] = alias  # `let h = g` — a second name for one arrow
+        return True
+    if not (isinstance(value, dict) and value.get("kind") == "arrow"):
+        return False
+    captures: dict[str, str] = {}
+    for captured in value.get("captures") or []:
+        _ident(captured, "arrow capture")
+        snapshot = f"__revl_capture_{name}_{captured}"
+        source = _v3_expr({"kind": "var", "name": captured}, ctx, rename, env)
+        out.append(f"{pad}final var {snapshot} = {source};")
+        captures[captured] = snapshot
+    ctx.arrows[name] = {"arrow": value, "captures": captures}
+    return True
+
+
+def _inline_arrow(
+    binding: dict,
+    arg_nodes: list,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None = None,
+    env: "_Env | None" = None,
+) -> str:
+    arrow = binding["arrow"]
+    params = [_ident(p, "arrow parameter") for p in arrow.get("params") or []]
+    if len(arg_nodes) != len(params):
+        raise EmitError(
+            f"arrow expects {len(params)} argument(s), got {len(arg_nodes)}"
+        )
+    body = arrow.get("body")
+    inner = dict(rename or {})
+    inner.update(binding.get("captures") or {})
+    for param, arg in zip(params, arg_nodes):
+        if _name_uses(body, param) > 1 and not _arrow_repeatable(arg, ctx):
+            raise EmitError(
+                f"arrow parameter {param!r} is used more than once and its "
+                f"argument cannot be substituted twice without re-evaluating "
+                f"it — bind the argument to a `let` first"
+            )
+        inner[param] = f"({_v3_expr(arg, ctx, rename, env)})"
+    return f"({_v3_expr(body, ctx, inner, env)})"
+
+
 def _v3_call(
     node: dict,
     ctx: _V3Ctx,
@@ -548,7 +714,13 @@ def _v3_call(
     env: _Env | None = None,
 ) -> str:
     callee = node.get("callee")
-    args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
+    arg_nodes = node.get("args") or []
+    # An arrow is only ever *called* on this tier (see `_inline_arrow`), so a
+    # call is resolved against the local arrow bindings before anything else.
+    arrow = _arrow_callee(callee, ctx)
+    if arrow is not None:
+        return _inline_arrow(arrow, arg_nodes, ctx, rename, env)
+    args = [_v3_expr(a, ctx, rename, env) for a in arg_nodes]
     if isinstance(callee, dict) and callee.get("kind") == "var":
         name = callee.get("name")
         if name in ctx.function_names or name in ctx.extern_names:
@@ -607,6 +779,8 @@ def _v3_expr(
         original = node.get("id")
         if rename and original in rename:
             return rename[original]
+        if original in ctx.arrows:
+            raise EmitError(_ARROW_VALUE_REFUSAL)
         return _ident(original, "binding")
 
     if kind == "config":
@@ -734,9 +908,11 @@ def _v3_expr(
         ) + ")"
 
     if kind == "arrow":
-        params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
-        body = _v3_expr(node["body"], ctx, rename, env)
-        return f"({params}) -> ({body})"
+        # reached only in *value* position — a called arrow is beta-reduced by
+        # `_v3_call`. There is no functional interface to target here (see the
+        # "arrows" note above), and revl has no lowerable function type that
+        # would let the value go anywhere useful.
+        raise EmitError(_ARROW_VALUE_REFUSAL)
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename, env)
@@ -815,6 +991,7 @@ def _v3_match_expr(
 
     lines = [f"switch ({scrutinee}) {{"]
     wildcard = None
+    covered = {arm.get("pattern") for arm in arms}
     for arm in arms:
         pattern = arm.get("pattern")
         body = _v3_expr(arm.get("body"), ctx, rename, env)
@@ -837,15 +1014,53 @@ def _v3_match_expr(
             lines.append(f"            case {qualified} {ignored} -> {{")
             lines.append(f"                yield ({body});")
             lines.append("            }")
-    if wildcard is None:
-        lines.append("            default -> { throw new IllegalArgumentException(\"non-exhaustive match\"); }")
-    else:
+    if wildcard is not None:
         lines.append(wildcard)
+    elif not _covers_variant(covered, ctx):
+        lines.append("            default -> { throw new IllegalArgumentException(\"non-exhaustive match\"); }")
     lines.append("        }")
     return "\n".join(lines)
 
 
-def _let_keyword(node: dict) -> str:
+def _covers_variant(patterns: set, ctx: _V3Ctx) -> bool:
+    """Do these arms name every case of one sealed ADT?
+
+    A pattern `switch` over a sealed type that is already total is *complete*
+    to javac; the guard arm this emitter used to append unconditionally is
+    then at best dead and at worst rejected outright ("switch has both an
+    unconditional pattern and a default label"). Omitting it also hands the
+    exhaustiveness check to javac, which is where it belongs — revl already
+    rejects a non-exhaustive match in `lower.py`, so the guard only ever fired
+    for a match the frontend could not see the scrutinee type of, and that
+    case still gets it.
+    """
+    owners = {ctx.case_owners.get(p) for p in patterns}
+    if len(owners) != 1 or None in owners:
+        return False
+    spec = ctx.types.get(owners.pop()) or {}
+    return {case.get("name") for case in spec.get("cases") or []} <= patterns
+
+
+def _adt_binding_type(value: object, ctx: _V3Ctx | None) -> str | None:
+    """The sealed-interface name a binding must be declared with when it is
+    initialised from an ADT construction, or None.
+
+    revl types `Found(x)` as its *ADT* (`typecheck.py`: an ADT constructor
+    returns `case["adt"]`), but the java tier gives each case its own nested
+    class, so `var o = new Outcome.Found(x)` freezes `o` at the variant.
+    A later `match` on `o` then emits `case Outcome.Missing …` against a
+    selector of type `Outcome.Found` — javac: "incompatible types: Found
+    cannot be converted to Missing" — and `case Outcome.Found …` becomes an
+    unconditional pattern, which may not sit next to a `default` label.
+    Naming the interface restores the type revl gave the expression.
+    """
+    if ctx is None or not isinstance(value, dict) or value.get("kind") != "adt":
+        return None
+    owner = ctx.case_owners.get(value.get("case"))
+    return _ident(owner, "type name") if owner else None
+
+
+def _let_keyword(node: dict, ctx: _V3Ctx | None = None) -> str:
     """Declaration type for a v3 `let`/`var`.
 
     An empty list literal has no element type, and `var` would freeze it as
@@ -856,6 +1071,9 @@ def _let_keyword(node: dict) -> str:
     value = node.get("value")
     if isinstance(value, dict) and value.get("kind") == "list" and not value.get("items"):
         return "java.util.List"
+    adt = _adt_binding_type(value, ctx)
+    if adt is not None:
+        return adt if node.get("mutable") else f"final {adt}"
     return "var" if node.get("mutable") else "final var"
 
 
@@ -864,9 +1082,13 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
     step = node.get("step")
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
-        value = _v3_expr(node.get("value"), ctx)
+        raw = node.get("value")
+        if step == "let" and _bind_local_arrow(ctx, name, raw, out, pad, None, None):
+            return
+        ctx.arrows.pop(name, None)  # the name no longer denotes an arrow
+        value = _v3_expr(raw, ctx)
         if step == "let":
-            out.append(f"{pad}{_let_keyword(node)} {name} = {value};")
+            out.append(f"{pad}{_let_keyword(node, ctx)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif step == "return":
@@ -890,6 +1112,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         out.append(f"{pad}}}")
     elif step == "for":
         bind = _ident(node.get("bind"), "loop binding")
+        ctx.arrows.pop(bind, None)
         out.append(f"{pad}for (var {bind} : {_v3_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
@@ -1038,6 +1261,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
             for p in fn.get("params") or []
         )
         ret = _java_v3_type(fn.get("returns"))
+        ctx.arrows = {}  # arrow bindings are local to one body
         lines.append(f"public static {ret} {name}({params}) {{")
         if not fn.get("body"):
             lines.append("    // (empty body)")
@@ -1057,6 +1281,7 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
     for index, test in enumerate(tests):
         mname = _java_test_method_name(test.get("name"), index, used)
         test_names.append(mname)
+        ctx.arrows = {}  # arrow bindings are local to one body
         lines.append(f"public static void {mname}() {{")
         for stmt in test.get("body") or []:
             _v3_stmt(stmt, ctx, lines, 1, test_mode=True)
@@ -1415,6 +1640,7 @@ def _method_body_lines(
     env: _Env, method: dict, v3_ctx: _V3Ctx, *, returns_void: bool = False
 ) -> list[str]:
     lines: list[str] = []
+    v3_ctx.arrows = {}  # arrow bindings are local to one body
     rename = {b: f"this.{b}" for b in _binds(env.component)}
     rename.update({local: f"this.{local}" for local in env.reqs})
     for stmt in method.get("body") or []:
@@ -1445,8 +1671,13 @@ def _method_body_lines(
         elif step in ("let", "assign"):
             # a plain value binding inside a method body
             name = _ident(stmt.get("name"), "binding")
-            value = _expr(stmt["value"], env, rename, v3_ctx)
-            lines.append(f"var {name} = {value};" if step == "let"
+            raw = stmt.get("value")
+            if step == "let" and _bind_local_arrow(v3_ctx, name, raw, lines, "", rename, env):
+                continue
+            v3_ctx.arrows.pop(name, None)
+            value = _expr(raw, env, rename, v3_ctx)
+            decl = _adt_binding_type(raw, v3_ctx) or "var"
+            lines.append(f"{decl} {name} = {value};" if step == "let"
                          else f"{name} = {value};")
         elif step == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
@@ -1460,7 +1691,7 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
         name = _ident(step.get("name"), "binding")
         value = _expr(step.get("value"), env, None, v3_ctx)
         if kind == "let":
-            out.append(f"{pad}{_let_keyword(step)} {name} = {value};")
+            out.append(f"{pad}{_let_keyword(step, v3_ctx)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif kind == "expr":

@@ -35,13 +35,11 @@ from validate import VALIDATORS  # noqa: E402
 # worked through — and the test also fails when a baselined case starts
 # passing, so the list can only shrink.
 KNOWN_FAILURES: dict[str, set[str]] = {
-    # rust is at zero: the host-builtin contract (typecheck.py `_HOST_ARG_SIG`)
-    # closed both of its remaining cases, and the `T` -> `Opt[T]` injection
-    # closed the third.
-    "java": {
-        "expr/ADT construct + match",
-        "fn/arrow lambda",
-    },
+    # Empty, and it should stay that way: every tier's emitted code is now
+    # accepted by that tier's own compiler. The test fails both on a new
+    # failure and on a baselined case that starts passing, so this list can
+    # only ever shrink — an entry here is a debt with a name, not a mute
+    # button.
 }
 
 
