@@ -28,6 +28,15 @@ public final class RunScenarios {
         }
     }
 
+    private static void expectNoPendingJobs(String scenario) {
+        long pending = revl.Components.Job.pending();
+        if (pending != 0L) {
+            System.err.println(scenario + ": " + pending + " job(s) still pending — "
+                + "the `await` step evaluated the call without joining the handle");
+            System.exit(1);
+        }
+    }
+
     private static Context freshContext() {
         LOG.clear();
         Context ctx = new Context();
@@ -43,13 +52,20 @@ public final class RunScenarios {
         d.dispose();
         expect("g7 teardown", "do:a", "do:b", "undo:b", "undo:a");
 
-        // A1 boundary shape: activation crosses the await (Job.run no-op),
-        // the post-boundary emission runs, disposal reverts LIFO.
+        // A1 boundary shape: activation crosses the await, the
+        // post-boundary emission runs, disposal reverts LIFO.
         ctx = freshContext();
+        revl.Components.Job.reset();
         d = new revl.Components.BoundaryPlugin().apply(ctx);
         expect("boundary activation", "do:a", "do:b", "emit:post");
+        // ...and *crossing* it means joining the handle. The emitter used to
+        // lower the step to a bare `Job.run("boundary");`, which starts the
+        // job and drops the handle, so activation returned with the job still
+        // in flight. Job.pending() makes that residue countable.
+        expectNoPendingJobs("boundary activation");
         d.dispose();
         expect("boundary teardown", "do:a", "do:b", "emit:post", "undo:b", "undo:a");
+        expectNoPendingJobs("boundary teardown");
 
         // Provider/consumer: the provision disposable is tracked (review
         // finding J8) — after provider disposal the service is gone.
