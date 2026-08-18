@@ -1230,10 +1230,50 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+# ------------------------------------------------------------ typed holes
+
+def _refuse_holes(ir: dict) -> None:
+    """A typed hole is an unmet obligation, not code (docs/holes.md).
+
+    Emitting one would put a placeholder into TypeScript and make tsc the
+    thing that complains — in its own vocabulary, about a line revl wrote.
+    revl already knows the draft is unfinished, so the refusal belongs
+    here, before a single character is emitted.
+    """
+    found: list = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "hole":
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for section in ("components", "functions", "tests", "externs"):
+        walk(ir.get(section))
+    if not found:
+        return
+    where = ", ".join(
+        f"{h.get('file') or '?'}:{h.get('line') or '?'} "
+        f"(expects `{h.get('type')}`)" for h in found[:3])
+    if len(found) > 3:
+        where += f", and {len(found) - 3} more"
+    raise EmitError(
+        f"refusing to emit TypeScript: this document still has {len(found)} typed "
+        f"hole(s) — {where}. A hole type-checks so the surrounding draft can "
+        f"be checked, but it has no implementation and there is nothing to "
+        f"lower. Fill every hole, then emit (docs/holes.md)."
+    )
+
+
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
+    _refuse_holes(ir)
     version = ir.get("ir_version")
     # publish a v3 context for the whole document so component/method bodies
     # can render pure 2.0 expressions (see _v3_context_for_components)

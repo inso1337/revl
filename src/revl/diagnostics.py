@@ -38,6 +38,7 @@ GUARANTEES = {
     "A8": "mid-body failure reverts and contains (L-Raise)",
     "T1": "declared types are checked",
     "T2": "absence is Opt[T]; `null` has no type",
+    "T3": "a hole is an obligation: it checks, but it never runs (docs/holes.md)",
 }
 
 # message-shape -> (code, category) for rejections that carry no tag
@@ -93,6 +94,31 @@ def classify(error: RevlError) -> dict:
     if code in GUARANTEES:
         record["guarantee"] = GUARANTEES[code]
     return record
+
+
+def obligations(holes: list[dict]) -> dict:
+    """Open typed holes as an agent-consumable document (docs/holes.md).
+
+    Severity is `obligation`, not `error`: the draft compiled. It is the
+    admission gate that says no while any of these is open, and an agent
+    should treat the list as its remaining work, not as a rejection.
+    """
+    return {
+        "ok": True,
+        "holes": [
+            {
+                "severity": "obligation",
+                "code": "T3",
+                "category": "hole",
+                "file": hole.get("file"),
+                "line": hole.get("line"),
+                "expected": hole.get("type"),
+                "message": hole.get("message"),
+                "guarantee": GUARANTEES["T3"],
+            }
+            for hole in holes
+        ],
+    }
 
 
 def report(error: RevlError) -> dict:
