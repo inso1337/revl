@@ -306,6 +306,7 @@ or **[docs/vision.md](docs/vision.md)** for what this is *for*.
 - [syntax-2.0.md](docs/syntax-2.0.md) — the full 2.0 language reference
 - [stdlib-2.0.md](docs/stdlib-2.0.md) — the specified stdlib surface
 - [function-types.md](docs/function-types.md) · [holes.md](docs/holes.md) · [capabilities.md](docs/capabilities.md) — newer type-system surface
+- [generics.md](docs/generics.md) — implicit and explicit `[T]` type parameters
 - [design-v2-realms.md](docs/design-v2-realms.md) · [design-v2-instances.md](docs/design-v2-instances.md) — realms, interception, instances
 
 **Testing & guarantees**
