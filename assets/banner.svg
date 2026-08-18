@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <title>revl — the agent-first programming language</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#131a2a"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <marker id="ah-teal" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#2dd4bf"/>
+    </marker>
+    <marker id="ah-violet" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- mark: revertible-effect loop -->
+  <g transform="translate(115, 195)">
+    <path d="M 62 118 A 120 120 0 0 1 270 118" fill="none" stroke="url(#teal)"
+          stroke-width="26" stroke-linecap="round" marker-end="url(#ah-teal)"/>
+    <path d="M 270 214 A 120 120 0 0 1 62 214" fill="none" stroke="url(#violet)"
+          stroke-width="26" stroke-linecap="round" marker-end="url(#ah-violet)"/>
+    <rect x="116" y="116" width="100" height="100" rx="24" fill="none" stroke="#e6edf3" stroke-width="13"/>
+    <circle cx="166" cy="166" r="15" fill="#e6edf3"/>
+  </g>
+
+  <!-- wordmark + tagline -->
+  <text x="520" y="225" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="100" font-weight="700" fill="#e6edf3">revl</text>
+  <text x="524" y="278" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
+        font-size="28" fill="#2dd4bf">the agent-first programming language</text>
+
+  <!-- feature list -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">
+    <text x="524" y="345">
+      <tspan font-weight="700" fill="#2dd4bf">Dynamic</tspan>
+      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#8b949e">hot-load, unload &amp; swap components in a running system</tspan>
+    </text>
+    <text x="524" y="387">
+      <tspan font-weight="700" fill="#2dd4bf">Polyglot</tspan>
+      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#8b949e">Python · TypeScript · Rust · Java components interoperate live</tspan>
+    </text>
+    <text x="524" y="429">
+      <tspan font-weight="700" fill="#2dd4bf">Multiplatform</tspan>
+      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#8b949e">one source, five targets — including WASM</tspan>
+    </text>
+    <text x="524" y="471">
+      <tspan font-weight="700" fill="#2dd4bf">Self-mutating</tspan>
+      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#8b949e">a component proposes new components; the compiler decides</tspan>
+    </text>
+    <text x="524" y="513">
+      <tspan font-weight="700" fill="#2dd4bf">Type-safe &amp; null-safe</tspan>
+      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#8b949e">strict interfaces → fewer iterations to a reusable component</tspan>
+    </text>
+    <text x="524" y="555">
+      <tspan font-weight="700" fill="#2dd4bf">Revertible</tspan>
+      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#8b949e">every effect has a compiler-derived undo; teardown leaves no residue</tspan>
+    </text>
+  </g>
+</svg>

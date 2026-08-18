@@ -27,7 +27,7 @@ import json
 import sys
 
 from ..compiler import compile_files, compile_source
-from ..diagnostics import GUARANTEES, report
+from ..diagnostics import FIXES, GUARANTEES, report
 from ..errors import RevlError
 from .query_tools import QUERY_TOOLS
 from .schema import tools_from_ir
@@ -357,7 +357,11 @@ absence is Opt[T]; declared types are checked at every boundary.
 
 
 def _tool_grammar(_arguments: dict) -> dict:
-    return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES}
+    # `fixes` is the `revl explain` payload: for every guarantee, the rewrite
+    # that satisfies it — so an agent that gets a code back can act without
+    # a second round trip
+    return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES,
+            "fixes": FIXES}
 
 
 _SOURCE_INPUT = {
@@ -377,7 +381,11 @@ TOOLS = [
         "name": "revl_check",
         "description": "Compile a revl component. Returns the composition summary "
                        "and G8 boundary on success, or structured diagnostics "
-                       "(code, guarantee, expected/actual, fix hint) on rejection.",
+                       "(code, guarantee, expected/actual, fix hint) on rejection. "
+                       "A rejection that came out of a search — the G4 emission "
+                       "fixed point, a G3 cycle, a G2 provider conflict — also "
+                       "carries `why`: the derivation, step by step, with source "
+                       "locations.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,

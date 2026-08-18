@@ -40,6 +40,56 @@ GUARANTEES = {
     "T2": "absence is Opt[T]; `null` has no type",
 }
 
+# how to satisfy each guarantee — the one-line rewrite `revl explain <code>`
+# prints, kept beside GUARANTEES so the pair stays in step. A code with no
+# entry still explains itself through GUARANTEES.
+FIXES = {
+    "G1": "add the key to the component's `requires` clause, or drop the access",
+    "G2": "one provider per key per realm — withdraw one component, or `isolate` "
+          "them into different realms",
+    "G3": "break the cycle: split the interface, or move the shared state into a "
+          "third component both depend on",
+    "G4": "give the mutation an `undo`, or admit it is irreversible — `emit` at the "
+          "call site and `emission fn` on the service operation",
+    "G5": "teardown may not register new effects; acquire during activation instead",
+    "G6": "outside an effect form every statement is pure — bind the value with "
+          "`let`, or wrap the call in `effect ... undo ...`",
+    "G7": "teardown is derived and LIFO; a `verified fn` must be total, so make "
+          "every recursive call structurally smaller",
+    "G8": "keep the boundary enumerable — declare host code as an `extern` with a "
+          "`pure`/`acquire`/`emission` classification",
+    "A1": "`await` is an iteration boundary and exists only during activation — "
+          "move it into the component body",
+    "A2": "acquire everything before the first `provide`",
+    "A3": "identifiers are rewritten to host-safe names automatically; rename the "
+          "source binding if the collision was deliberate",
+    "A5": "an emission takes `compensate <expr>` — best-effort cleanup for what "
+          "cannot be undone",
+    "A6": "a provide-method must match the service declaration: name, arity, "
+          "parameter types, `async`",
+    "A8": "a mid-body failure reverts and contains; `fail` belongs in a component "
+          "activation body",
+    "T1": "make the types agree at the call site, or change the declaration",
+    "T2": "revl has no `null` — model absence as `Opt[T]` and unwrap with `??`, "
+          "`?.` or `match`",
+}
+
+
+def explain(code: str) -> dict:
+    """What a diagnostic code means and how to fix it — the `revl explain`
+    payload. Unknown codes answer with the roster rather than nothing, so a
+    typo is one command from the right code."""
+    normalized = (code or "").strip().upper()
+    if normalized not in GUARANTEES:
+        return {"ok": False, "code": normalized,
+                "message": f"no diagnostic code `{normalized}`",
+                "known": sorted(GUARANTEES)}
+    record = {"ok": True, "code": normalized, "guarantee": GUARANTEES[normalized]}
+    if normalized in FIXES:
+        record["fix"] = FIXES[normalized]
+    return record
+
+
 # message-shape -> (code, category) for rejections that carry no tag
 _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"^`null` has no type"), "T2", "null-safety"),
@@ -92,6 +142,11 @@ def classify(error: RevlError) -> dict:
         record["actual"] = actual
     if code in GUARANTEES:
         record["guarantee"] = GUARANTEES[code]
+    # the derivation behind a search-based rejection (why.py): the G4
+    # emission chain, the G3 cycle path, the two G2 providers
+    why = getattr(error, "why", None)
+    if why is not None:
+        record["why"] = why.to_json()
     return record
 
 
