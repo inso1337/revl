@@ -437,6 +437,54 @@ def test_runtime_scenarios_on_real_cordis4j(tmp_path):
     assert "REAL_SCENARIOS_OK" in run.stdout
 
 
+@pytest.mark.skipif(
+    JAVAC is None or JAVA is None or not CORDIS4J_CLASSES,
+    reason="needs a JDK and REVL_CORDIS4J_CLASSES (compiled cordis4j-core classes)",
+)
+def test_global_realm_divergence_characterized(tmp_path):
+    """CHARACTERIZES a KNOWN divergence, it does not assert conformance.
+
+    revl's contract (docs/design-v2-realms.md) is that equal realm-label
+    strings denote the SAME realm. That holds at runtime on cordis-py,
+    cordis (TS) and cordis-rs, but is FALSE on cordis4j at the level revl's
+    emitter targets: the emitter emits `ctx.isolate(Svc.class, "t")` inside
+    each component's apply() (emit.py:2127-2129), and core Context.isolate
+    always mints a fresh child with its own store
+    (cordis4j core/internal/ContextImpl.java:160-168, ServiceRegistry.java:41);
+    the label-keyed interning lives one layer up in Loader
+    (core/Loader.java:67, :341-359), which the emitted plugins never reach.
+
+    This runs revl's own emitted code (examples/tenants.rvl) on the REAL
+    cordis4j jar and pins the divergent behavior: two components naming
+    realm("tenant_a") for `kv` do NOT conflict/share (both load
+    independently), a consumer in realm "tenant_a" does NOT resolve a
+    provider in realm "tenant_a", and — the one conforming direction —
+    distinct realm strings still separate. The harness fails loudly if the
+    sharing directions START to conform, which is the signal to close the
+    errata entry ("cordis4j global-realm divergence") and flip the Java
+    xfail in tests/test_realm_conformance.py.
+    """
+    ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
+    pkg = tmp_path / "revl"
+    pkg.mkdir()
+    (pkg / "Components.java").write_text(emit.emit(ir), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    harness = HERE / "scenarios" / "RunRealmDivergence.java"
+    compile_all = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", CORDIS4J_CLASSES, "-d", str(out),
+         str(pkg / "Components.java"), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_all.returncode == 0, compile_all.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", f"{CORDIS4J_CLASSES}{os.pathsep}{out}", "RunRealmDivergence"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "REALM_DIVERGENCE_CHARACTERIZED" in run.stdout
+
+
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
 def test_java_runs_runtime_scenarios_on_stub_runtime(tmp_path):
     """G7/lifecycle scenarios: emitted components driven on the JVM by the
