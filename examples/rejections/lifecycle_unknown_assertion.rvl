@@ -1,0 +1,13 @@
+// `no_residue` is the lifecycle assertion; a misspelling is not a stray name.
+service Store { fn get(key: Str) -> Str }
+
+component Kv provides kv: Store {
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(key) = m.get(key) }
+}
+
+lifecycle test "misspells the assertion" {
+  load Kv
+  unload Kv
+  assert no_leaks
+}

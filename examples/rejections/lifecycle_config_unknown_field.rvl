@@ -1,0 +1,14 @@
+// `load C with { ... }` is checked against C's `config` block.
+service Store { fn get(key: Str) -> Str }
+
+component Kv provides kv: Store {
+  config { size: Int = 16 }
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(key) = m.get(key) }
+}
+
+lifecycle test "misnames a config field" {
+  load Kv with { sixe: 32 }
+  unload Kv
+  assert no_residue
+}

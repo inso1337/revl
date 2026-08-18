@@ -1,0 +1,67 @@
+// Lifecycle tests (docs/syntax-2.0.md §7.1): the paradigm's own guarantee,
+// asserted from inside the language.
+//
+// The same pair as examples/user_cache.rvl, driven from inside the language:
+// load the composition, call through the provision key, unload it, and assert
+// that nothing was left behind. See examples/lifecycle_leak.rvl for the
+// negative case — the same assertion catching a component whose `undo` is not
+// the inverse of its acquisition.
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 10 }
+
+  let pool = effect Pool.open(config.url, config.pool_size)
+             undo   pool.close()
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO cache_log VALUES (${key})`)
+    }
+  }
+}
+
+lifecycle test "cache reverts cleanly" {
+  load PgDatabase with { url: "postgres://primary:5432/app" }
+  load UserCache
+  call cache.put("k", "v")
+  let hit = call cache.get("k")
+  assert hit == Some("v")
+  unload UserCache
+  unload PgDatabase
+  assert no_residue
+}
+
+lifecycle test "a reloaded cache starts empty" {
+  load PgDatabase with { url: "postgres://primary:5432/app", pool_size: 4 }
+  load UserCache
+  call cache.put("alice", "42")
+  unload UserCache
+  load UserCache
+  let stale = call cache.get("alice")
+  assert stale == None
+  unload UserCache
+  unload PgDatabase
+  assert no_residue
+}
