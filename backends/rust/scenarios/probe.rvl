@@ -44,3 +44,29 @@ component KvConsumer requires kv: Kv, probe: Probe {
   effect probe.mark("consumer:up") undo probe.mark("consumer:down")
   effect kv.put("who", "consumer") undo kv.put("who", "")
 }
+
+// Realm-label registry proof (see backends/rust/emit.py `_revl_realm`).
+// This provider provides `kv` isolated in realm("t"); scenarios.rs drives it
+// on the real cordis-rs runtime and checks that another context branch keyed
+// on the SAME label sees the provision (equal labels = same realm) while a
+// branch keyed on a DIFFERENT label does not (distinct labels = distinct
+// realms), and that the emitted labels never collide with cordis's counter.
+component RealmStoreT requires probe: Probe provides kv: Kv {
+  isolate kv in realm("t")
+  let store = effect Map.new() undo store.drop()
+  effect probe.mark("store_t:up") undo probe.mark("store_t:down")
+  provide kv {
+    fn put(k, v) = store.insert(k, v)
+  }
+}
+
+// A second, DISTINCT realm label. Its presence registers "other" in the
+// compile-time realm registry so scenarios.rs can probe cross-realm
+// separation; the two labels ("t", "other") must lower to distinct Isolations.
+component RealmStoreOther requires probe: Probe provides kv: Kv {
+  isolate kv in realm("other")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn put(k, v) = store.insert(k, v)
+  }
+}
