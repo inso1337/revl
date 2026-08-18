@@ -164,10 +164,13 @@ def check_type_wellformed(filename: str, line: int, type_name: str | None) -> No
 
 # ------------------------------------------------- type parameters
 #
-# revl has no type-parameter syntax yet, so a `fn` signature declares one
-# implicitly: a single-uppercase name that is not a declared type (`fn id(x: T)
-# -> T`). Marking those names *once*, when the signature table is built, is
-# what lets the rest of the checker stop guessing:
+# A `fn`/`extern` signature declares type parameters two ways, both feeding the
+# same machinery. Implicitly: a single-uppercase name that is not a declared
+# type (`fn id(x: T) -> T`). Explicitly (roadmap item 6): a `[T, U]` list after
+# the name (`fn id[T](x: T) -> T`, `fn first[Elem](xs: List[Elem]) -> Elem`),
+# which is a strict superset — it can name a parameter the single-uppercase
+# heuristic would miss, and states intent. Marking those names *once*, when the
+# signature table is built, is what lets the rest of the checker stop guessing:
 #
 #   - a marked name (`?T`) is a wildcard inside the fn's own body, where it is
 #     genuinely universally quantified, and is unified against the actual
@@ -187,15 +190,68 @@ def is_tparam_name(name: str, declared: dict) -> bool:
     return len(name) == 1 and name.isupper() and name not in declared
 
 
-def collect_tparams(type_names, declared: dict) -> set[str]:
-    """Implicit type parameters mentioned anywhere in these declared types."""
-    found: set[str] = set()
+# type heads that always name a concrete type; an explicit `[T]` parameter may
+# not shadow one (nor a user-declared type). See `validate_explicit_tparams`.
+_BUILTIN_TYPE_NAMES = {
+    "Int", "Float", "Str", "Bool", "Bytes", "Unit",
+    "Opt", "List", "Map", "Result", "Any", "Never",
+}
+
+
+def validate_explicit_tparams(names, declared: dict,
+                              filename: str | None, line: int) -> set[str]:
+    """Validate an explicit `fn id[T, U](...)` list and return it as a set.
+
+    Shadowing is *rejected*, not silently allowed: a name in `[...]` may not
+    collide with a builtin or a user-declared type. revl's implicit-generics
+    rule closed exactly the hole where a one-letter name silently wildcarded a
+    real `type S = A | B`; letting an explicit `[S]` reopen it — even scoped to
+    one body — would resurrect the same "is this the ADT or a type variable?"
+    ambiguity. Renaming the parameter is cheap and unambiguous, so we reject
+    (docs/generics.md). Duplicates are already caught in the parser; guarded
+    here too for programmatically-built decls."""
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            if filename:
+                raise RevlError(filename, line,
+                                f"duplicate type parameter `{name}`")
+            continue
+        if name in _BUILTIN_TYPE_NAMES or name in declared:
+            if filename:
+                what = "a builtin type" if name in _BUILTIN_TYPE_NAMES \
+                    else "a declared type"
+                raise RevlError(
+                    filename, line,
+                    f"type parameter `{name}` shadows {what}",
+                    hint="rename the type parameter — a `[...]` name may not "
+                         "collide with a builtin or declared type "
+                         "(docs/generics.md)",
+                )
+            continue
+        seen.add(name)
+    return seen
+
+
+def collect_tparams(type_names, declared: dict, explicit=()) -> set[str]:
+    """Type parameters mentioned anywhere in these declared types.
+
+    Implicit ones are single-uppercase names that are not declared types. The
+    `explicit` set adds names the author declared with `fn id[T](...)`: those
+    are type parameters regardless of the single-uppercase heuristic, so an
+    author can name one the heuristic would miss (`fn first[Elem](xs:
+    List[Elem]) -> Elem`). An explicit name is included even if it never
+    appears in a parameter or return, so its mere declaration marks the
+    signature generic — exactly the same set the implicit path would build."""
+    explicit = set(explicit)
+    found: set[str] = set(explicit)
 
     def walk(name: str | None) -> None:
         if not name:
             return
         head, args = parse_type(name)
-        if head and not args and is_tparam_name(head, declared):
+        if head and not args and (head in explicit
+                                  or is_tparam_name(head, declared)):
             found.add(head)
         for arg in args:
             walk(arg)

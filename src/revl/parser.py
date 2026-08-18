@@ -241,6 +241,9 @@ class ExternDecl:
     bodies: list[HostBody]
     public: bool
     line: int
+    # explicit type-parameter names from an `extern pure fn id[T](...)` list.
+    # externs share the fn signature table, so the same machinery covers them.
+    type_params: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -260,6 +263,10 @@ class FnDecl:
     line: int
     verified: bool = False
     source: str = ""  # provenance: the file this fn was parsed from
+    # explicit type-parameter names from a `fn id[T](...)` list (roadmap item
+    # 6). Empty for the implicit form. Fed into the same tparam machinery the
+    # implicit single-uppercase heuristic uses; never reaches the IR.
+    type_params: list[str] = field(default_factory=list)
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -722,6 +729,7 @@ class Parser:
         classification = self.next().value
         self.expect("kw", "fn")
         name = self.expect("ident").value
+        type_params = self._type_param_list()
         self.expect("(")
         params: list[FnParam] = []
         while not self.at(")"):
@@ -753,7 +761,8 @@ class Parser:
             bodies.append(HostBody(backend, text, host_tok.line))
         if not bodies:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
-        return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line)
+        return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
+                          type_params=type_params)
 
     def _capability_list(self) -> tuple[str, ...]:
         """`[a, b]` after `emission` — the boundaries this operation may cross.
@@ -1268,9 +1277,39 @@ class Parser:
                 break
         return TypeDecl(name, params, [], cases, line, public)
 
+    def _type_param_list(self) -> list[str]:
+        """An optional `[T, U]` type-parameter list after a `fn`/`extern` name
+        (roadmap item 6). Returns [] when there is no `[`, so the implicit form
+        `fn id(x: T)` is unaffected. Names are recorded on the declaration and
+        become that function's type parameters in the checker (see
+        docs/generics.md). Collision with a declared/builtin type is diagnosed
+        later, in the checker, where the whole-program type table is known.
+
+        provide-methods do not take this list: they are not entries in the
+        shared fn/extern signature table, so `fn f[...]()` inside a `service`
+        still fails at `[` as before."""
+        if not self.at("["):
+            return []
+        bline = self.next().line
+        names: list[str] = []
+        while not self.at("]"):
+            tok = self.expect("ident", what="a type-parameter name")
+            if tok.value in names:
+                raise self.err(tok.line, f"duplicate type parameter `{tok.value}`")
+            names.append(tok.value)
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        if not names:
+            raise self.err(bline, "an empty type-parameter list `[]` is not allowed",
+                           hint="drop the brackets for a non-generic fn, or name "
+                                "at least one parameter: `fn id[T](x: T) -> T`")
+        return names
+
     def fn_decl(self, public: bool, verified: bool = False) -> FnDecl:
         line = self.expect("kw", "fn").line
         name = self.expect("ident").value
+        type_params = self._type_param_list()
         self.expect("(")
         params: list[FnParam] = []
         while not self.at(")"):
@@ -1292,7 +1331,7 @@ class Parser:
             body.append(self.fn_stmt())
         self.expect("}")
         return FnDecl(name, params, returns, body, public, line, verified,
-                      source=self.filename)
+                      source=self.filename, type_params=type_params)
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
