@@ -102,6 +102,40 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         print(f"  {key}: {keys[key]}  ->  {', '.join(methods) or '(no methods)'}")
 
 
+_REPLAY_COMMANDS = (":timeline", ":inspect", ":back", ":forward")
+
+
+def _replay_command(line: str):
+    """Parse a REPL replay command (docs/replay.md §6).
+
+    Returns ``(op, at, force, component)`` or ``None`` when the line is not a
+    replay command. Kept free of any runtime so it can be tested on its own.
+
+        :timeline [component]
+        :inspect <k> [component]
+        :back <k> [!] [component]      -- `!` forces across uncompensated emissions
+        :forward <k> [component]
+    """
+    parts = line.split()
+    if not parts or parts[0] not in _REPLAY_COMMANDS:
+        return None
+    op, rest = parts[0][1:], parts[1:]
+    force = "!" in rest
+    rest = [part for part in rest if part != "!"]
+    at = None
+    if op != "timeline":
+        if not rest:
+            raise ValueError(f":{op} needs a step index (-1 means "
+                             f"'before every step')")
+        try:
+            at = int(rest[0])
+        except ValueError:
+            raise ValueError(f":{op} needs an integer step index, "
+                             f"got {rest[0]!r}") from None
+        rest = rest[1:]
+    return op, at, force, (rest[0] if rest else None)
+
+
 # --------------------------------------------------------------------------
 # the runtime driver (py tier)
 # --------------------------------------------------------------------------
@@ -112,7 +146,8 @@ class _Driver:
     trace, an interactive REPL, and a no-residue teardown. Modeled on
     demo/live.py, generalized off the IR manifest."""
 
-    def __init__(self, ir, config, emit, runtime_mod, Context, FiberState):
+    def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
+                 record: bool = False):
         self.ir = ir
         self.config = config
         self.emit = emit
@@ -121,11 +156,20 @@ class _Driver:
         self.root = Context()
         self.fibers: dict[str, object] = {}
         self.generation = 0
+        self.emitted: tuple = ("", "")  # (filename, source) of the last emit
+        self.recorder = self._make_recorder() if record else None
 
         self.runtime.set_trace(self._on_host)
         self.root.on("internal/status", self._on_fiber)
         self._baseline_hooks = self._hooks()
         self._baseline_disposables = self.root.fiber._disposables.length
+
+    # -- backwards replay (docs/replay.md) ---------------------------------
+
+    def _make_recorder(self):
+        from .mcp.session import replay_module  # noqa: PLC0415 — lazy, no cordis
+
+        return replay_module().Recorder(self.ir)
 
     # -- trace -------------------------------------------------------------
 
@@ -153,10 +197,21 @@ class _Driver:
         self.generation += 1
         source = self.emit.emit(ir)
         module = types.ModuleType(f"revl_run_gen{self.generation}")
+        filename = f"<revl-run gen{self.generation}>"
+        # kept so a replay recorder can quote the emitted line a step came
+        # from — exec'd modules are invisible to linecache
+        self.emitted = (filename, source)
         # register before exec: emitted record types are @dataclass, and
         # dataclasses resolves fields via sys.modules[cls.__module__]
         sys.modules[module.__name__] = module
-        exec(compile(source, f"<revl-run gen{self.generation}>", "exec"), module.__dict__)
+        exec(compile(source, filename, "exec"), module.__dict__)
+        if self.recorder is not None:
+            # between emit and plugin: recording replaces each component's
+            # `apply`, and the fiber's context chain is fixed at plugin time
+            self.recorder.register_source(filename, source)
+            self.recorder.activation_origin()
+            self.recorder.timelines.clear()
+            self.recorder.instrument(module, ir)
         return module
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
@@ -204,6 +259,10 @@ class _Driver:
             print(f"  {key}: {keys[key]}  ->  {', '.join(methods) or '(no methods)'}")
 
     async def _eval(self, line: str) -> None:
+        # tag whatever this line accumulates with the line itself, so
+        # `:forward` can re-run it (docs/replay.md §4.4)
+        if self.recorder is not None:
+            self.recorder.set_origin({"phase": "repl", "line": line})
         try:
             result = eval(line, {"__builtins__": builtins}, self._namespace())  # noqa: S307
             if hasattr(result, "__await__"):
@@ -213,12 +272,79 @@ class _Driver:
                 self._log("call", "=>", repr(result))
         except Exception as exc:  # noqa: BLE001 — a REPL reports, never crashes
             self._log("error", type(exc).__name__, str(exc))
+        finally:
+            if self.recorder is not None:
+                self.recorder.activation_origin()
+
+    # -- replay REPL commands ----------------------------------------------
+
+    async def _replay(self, op: str, at, force: bool, component) -> None:
+        """Run one `:timeline` / `:inspect` / `:back` / `:forward` command."""
+        if self.recorder is None:
+            self._log("error", "replay",
+                      "not recording — restart with `revl run ... --record` "
+                      "(recording is installed before activation, so it cannot "
+                      "be turned on now)")
+            return
+        from .mcp.session import replay_module  # noqa: PLC0415 — lazy, no cordis
+
+        replay = replay_module()
+        try:
+            if op == "timeline":
+                for name, timeline in self.recorder.timelines.items():
+                    if component and name != component:
+                        continue
+                    self._log("replay", name,
+                              f"{len(timeline.steps)} recorded step(s)")
+                    for step in timeline.steps:
+                        mark = "x" if step.undone else (
+                            "!" if step.kind == replay.KIND_EMISSION else " ")
+                        self._log("step", f"{step.index:>3} {mark} {step.kind}",
+                                  f"{step.label}   {step.source or ''}".rstrip())
+                self._log("note", "guarantee", replay.GUARANTEE)
+                return
+            timeline = self.recorder.timeline(component)
+            if op == "inspect":
+                view = timeline.inspect(at)
+                self._log("replay", "at", f"{view['at']} {view['atLabel']}")
+                self._log("replay", "provisions", ", ".join(view["activeProvisions"]) or "-")
+                for step in view["accumulated"]:
+                    self._log("acc", f"{step['index']:>3} {step['kind']}", step["label"])
+                return
+            if op == "back":
+                report = await timeline.step_back(at, force=force)
+                for step in report["inversesRan"] + report["compensationsRan"]:
+                    self._log("undo", step["kind"], step["label"])
+                for step in report["emissionsCrossed"]:
+                    self._log("CROSSED", step["kind"], f"{step['label']} — irreversible")
+                for step in report["failed"]:
+                    self._log("FAIL", step["label"], step["error"] or "")
+                await self._flush()
+                self._log("note", "guarantee", report["guarantee"])
+                return
+            plan = timeline.forward_plan(at)
+            for blocked in plan["notReplayable"]:
+                self._log("skip", blocked["label"], blocked["reason"])
+            for item in plan["replay"]:
+                if item["kind"] == "repl":
+                    self._log("redo", "repl", item["line"])
+                    await self._eval(item["line"])
+                else:
+                    line = (f"{item['key']}.{item['method']}"
+                            f"({', '.join(repr(a) for a in item['args'])})")
+                    self._log("redo", "call", line)
+                    await self._eval(line)
+        except replay.ReplayError as exc:
+            self._log("refused", type(exc).__name__, str(exc))
 
     async def hold_repl(self) -> int:
         module = self._emit_module(self.ir)
         print("== load composition ==")
         await self._load(self.ir, module)
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
+        if self.recorder is not None:
+            print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
+                  "`:forward k` (see docs/replay.md)")
         self._print_keys()
         loop = asyncio.get_running_loop()
         try:
@@ -234,6 +360,14 @@ class _Driver:
                     break
                 if line in (":keys", ":help"):
                     self._print_keys()
+                    continue
+                try:
+                    command = _replay_command(line)
+                except ValueError as exc:
+                    self._log("error", "usage", str(exc))
+                    continue
+                if command is not None:
+                    await self._replay(*command)
                     continue
                 await self._eval(line)
         finally:
@@ -363,7 +497,8 @@ def run_command(args) -> int:
               file=sys.stderr)
         return 3
 
-    driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState)
+    driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
+                     record=bool(getattr(args, "record", False)))
     try:
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))

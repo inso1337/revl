@@ -45,6 +45,21 @@ def _backend():
     return emit, runtime_mod, Context, FiberState
 
 
+def replay_module():
+    """The backwards-replay engine (`backends/python/replay.py`).
+
+    Imported on its own path because it needs no cordis: the timeline, the
+    step-back and the forward plan are pure python over the accumulator, so
+    they can be exercised without a runtime installed.
+    """
+    backend_dir = Path(__file__).resolve().parents[3] / "backends" / "python"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    import replay  # noqa: PLC0415 — backend import after path setup
+
+    return replay
+
+
 def _capturing_driver_class():
     """`run._Driver`, with its trace captured instead of printed."""
     from ..run import _Driver  # noqa: PLC0415 — lazy: importing run pulls cordis
@@ -74,6 +89,7 @@ class Session:
         self.ir: dict | None = None
         self.previous: dict | None = None  # the generation `rollback` restores
         self.config: dict = {}
+        self.recorder = None  # replay.Recorder, when loaded with record=True
 
     # -- plumbing ----------------------------------------------------------
 
@@ -93,7 +109,8 @@ class Session:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def load(self, ir: dict, config: dict | None = None) -> dict:
+    def load(self, ir: dict, config: dict | None = None,
+             record: bool = False) -> dict:
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         emit, runtime_mod, Context, FiberState = _backend()
@@ -101,8 +118,26 @@ class Session:
         self.config = config or {}
         self._driver = driver_class(ir, self.config, emit, runtime_mod, Context, FiberState)
         self.ir = ir
-        self._run(self._driver._load(ir, self._driver._emit_module(ir)))
-        return self.state(drain=True)
+        self.recorder = replay_module().Recorder(ir) if record else None
+        self._run(self._driver._load(ir, self._prepare_module(ir)))
+        return self.state(drain=True) | ({"recording": True} if record else {})
+
+    def _prepare_module(self, ir: dict):
+        """Emit the module and, when recording, instrument it before load.
+
+        Instrumentation has to happen between emit and `plugin`, because it
+        replaces each component's `apply` — the fiber's context chain is fixed
+        at plugin time and there is no way in afterwards.
+        """
+        driver = self._driver
+        module = driver._emit_module(ir)
+        if self.recorder is not None:
+            filename, source = driver.emitted
+            self.recorder.register_source(filename, source)
+            self.recorder.activation_origin()
+            self.recorder.timelines.clear()
+            self.recorder.instrument(module, ir)
+        return module
 
     def swap(self, ir: dict) -> dict:
         """Replace the running composition. The caller has already had the
@@ -111,7 +146,7 @@ class Session:
         self.previous = self.ir
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = ir
-        self._run(driver._load(ir, driver._emit_module(ir)))
+        self._run(driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True)
 
     def rollback(self) -> dict:
@@ -176,8 +211,92 @@ class Session:
             await driver._flush()
             return result
 
-        result = self._run(invoke())
+        # tag whatever this call accumulates with the invocation that caused
+        # it — that provenance is what makes forward replay expressible
+        if self.recorder is not None:
+            self.recorder.set_origin({"phase": "call", "key": key,
+                                      "method": method, "args": list(args or [])})
+        try:
+            result = self._run(invoke())
+        finally:
+            if self.recorder is not None:
+                self.recorder.activation_origin()
         return {"result": _plain(result), "trace": driver.drain_events()}
+
+    # -- backwards replay (docs/replay.md) ---------------------------------
+
+    def _timeline(self, component: str | None):
+        if self.recorder is None:
+            raise SessionError(
+                "this composition was not loaded with recording on — call "
+                "revl_load with `record: true` (recording has to be installed "
+                "before activation, so it cannot be turned on retroactively)")
+        replay = replay_module()
+        try:
+            return self.recorder.timeline(component)
+        except replay.ReplayError as error:
+            raise SessionError(str(error)) from None
+
+    def timeline(self, component: str | None = None) -> dict:
+        """The recorded accumulator: every effect step in order, its inverse,
+        and every emission — marked as the one thing that has none."""
+        if self.recorder is None:
+            raise SessionError(
+                "this composition was not loaded with recording on — call "
+                "revl_load with `record: true`")
+        if component is None:
+            return self.recorder.as_dict()
+        return self._timeline(component).as_dict()
+
+    def inspect_step(self, component: str | None, at: int) -> dict:
+        return self._timeline(component).inspect(at)
+
+    def step_back(self, component: str | None, to: int,
+                  force: bool = False) -> dict:
+        """Unwind the accumulator to step `to`, leaving the component LIVE.
+
+        This is not a teardown: no fiber is disposed, the provisions that
+        survive stay callable, and the composition can be inspected and
+        stepped forward again.
+        """
+        replay = replay_module()
+        timeline = self._timeline(component)
+        try:
+            report = self._run(timeline.step_back(to, force=force))
+        except replay.IrreversibleStep as error:
+            raise SessionError(str(error)) from None
+        except replay.ReplayError as error:
+            raise SessionError(str(error)) from None
+        if self._driver is not None:
+            self._run(self._driver._flush())
+            report["trace"] = self._driver.drain_events()
+            report["providedKeys"] = sorted(
+                k for k, v in self._driver._namespace().items() if v is not None)
+        return report
+
+    def replay_forward(self, component: str | None, frm: int) -> dict:
+        """Re-run the tail after step `frm` by re-invoking the calls that
+        produced it. Activation-body steps are reported as not replayable
+        rather than faked — see docs/replay.md."""
+        timeline = self._timeline(component)
+        plan = timeline.forward_plan(frm)
+        replayed = []
+        for item in plan["replay"]:
+            if item.get("kind") != "call":
+                # a REPL-origin step (`revl run --record`); the session has no
+                # REPL to re-evaluate it in, so it is reported, not guessed at
+                replayed.append({**item, "error": "not replayable from a session "
+                                                  "— this step came from a REPL line"})
+                continue
+            outcome = {"key": item["key"], "method": item["method"],
+                       "args": item["args"]}
+            try:
+                outcome["result"] = self.call(item["key"], item["method"],
+                                              item["args"])["result"]
+            except Exception as exc:  # noqa: BLE001 — a failed replay is a result
+                outcome["error"] = f"{type(exc).__name__}: {exc}"
+            replayed.append(outcome)
+        return {**plan, "replayed": replayed}
 
     def state(self, drain: bool = False) -> dict:
         if self._driver is None:
@@ -194,6 +313,7 @@ class Session:
             "loadOrder": manifest.get("loadOrder") or [],
             "providedKeys": sorted(driver._namespace()),
             "canRollback": self.previous is not None,
+            "recording": self.recorder is not None,
             **({"trace": driver.drain_events()} if drain else {}),
         }
 

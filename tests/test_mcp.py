@@ -220,7 +220,9 @@ def test_initialize_and_tools_list():
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert set(tools) == {"revl_check", "revl_admit", "revl_audit", "revl_tools",
                           "revl_grammar", "revl_load", "revl_call", "revl_swap",
-                          "revl_rollback", "revl_unload", "revl_state"}
+                          "revl_rollback", "revl_unload", "revl_state",
+                          "revl_timeline", "revl_inspect_step", "revl_step_back",
+                          "revl_replay_forward"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True
