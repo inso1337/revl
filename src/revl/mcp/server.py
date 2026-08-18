@@ -27,7 +27,7 @@ import json
 import sys
 
 from ..compiler import compile_files, compile_source
-from ..diagnostics import FIXES, GUARANTEES, report
+from ..diagnostics import FIXES, GUARANTEES, obligations, report
 from ..errors import RevlError
 from .query_tools import QUERY_TOOLS
 from .schema import tools_from_ir
@@ -225,7 +225,12 @@ def _tool_check(arguments: dict) -> dict:
                       modules=arguments.get("modules"))
     except RevlError as error:
         return report(error)
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir)}
+    # `holes` is the agent's own remaining work on this draft: every
+    # placeholder it wrote that still has a type and no implementation
+    # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
+    # and not admissible until these are closed".
+    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
+            "holes": obligations(ir.get("holes") or [])["holes"]}
 
 
 def _tool_admit(arguments: dict) -> dict:
@@ -379,13 +384,12 @@ _SOURCE_INPUT = {
 TOOLS = [
     {
         "name": "revl_check",
-        "description": "Compile a revl component. Returns the composition summary "
-                       "and G8 boundary on success, or structured diagnostics "
-                       "(code, guarantee, expected/actual, fix hint) on rejection. "
-                       "A rejection that came out of a search — the G4 emission "
-                       "fixed point, a G3 cycle, a G2 provider conflict — also "
-                       "carries `why`: the derivation, step by step, with source "
-                       "locations.",
+        "description": "Compile a revl component. Returns the composition summary, "
+                       "the G8 boundary and `holes` (open typed-hole obligations, "
+                       "each with file, line, expected type and message) on success, "
+                       "or structured diagnostics (code, guarantee, expected/actual, "
+                       "fix hint) on rejection. A draft with holes compiles; it is "
+                       "refused at admission until every hole is filled.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,

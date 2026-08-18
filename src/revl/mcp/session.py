@@ -21,6 +21,9 @@ import asyncio
 import sys
 from pathlib import Path
 
+from ..holes import collect as collect_holes
+from ..holes import summarize as summarize_holes
+
 
 class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…)."""
@@ -113,6 +116,16 @@ class Session:
              record: bool = False) -> dict:
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
+        # booting is admission: a draft with open obligations is checkable but
+        # not runnable, and the refusal belongs here rather than in the Python
+        # emitter's lap (docs/holes.md)
+        open_holes = collect_holes(ir)
+        if open_holes:
+            raise SessionError(
+                f"cannot load: {len(open_holes)} open typed hole(s) — "
+                f"{summarize_holes(open_holes)}. A hole has a type and no "
+                f"implementation, so it may never enter a running composition; "
+                f"`revl_check` lists them (docs/holes.md)")
         emit, runtime_mod, Context, FiberState = _backend()
         driver_class = _capturing_driver_class()
         self.config = config or {}

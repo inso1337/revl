@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import keyword
 
+from . import holes
 from .errors import RevlError
 from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
@@ -31,6 +32,7 @@ from .typecheck import (
     infer_ast,
     infer_ir,
     mismatch,
+    pin_hole,
     null_error,
     parse_type,
 )
@@ -48,6 +50,7 @@ from .parser import (
     ExprBin,
     ExprCall,
     ExprField,
+    ExprHole,
     ExprIf,
     ExprIndex,
     ExprList,
@@ -620,6 +623,8 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         }
         if decl.verified:
             entry["verified"] = True
+        if decl.source:
+            _retarget_holes(entry["body"], decl.source)
         fns.append(entry)
     return fns
 
@@ -909,6 +914,10 @@ def _lower_tests(program: Program, filename: str, types: dict) -> list:
 
 
 def _bool_cond(expr, type_env: dict, types: dict, filename: str, where: str) -> None:
+    # a condition is a check position like any other: `if (hole "…")` is a
+    # `Bool` obligation, not an untyped hole (docs/holes.md)
+    if pin_hole(expr, "Bool", filename, f"`{where}` condition"):
+        return
     t = infer_ast(expr, type_env, types, filename)
     if t is not None and t != "Bool":
         raise mismatch(filename, getattr(expr, "line", 0), f"`{where}` condition", "Bool", t)
@@ -1123,10 +1132,56 @@ def _tagged_case(name: str, types: dict) -> dict | None:
     return (types.get(CASES_KEY) or {}).get(name)
 
 
+def _lower_hole(expr: ExprHole, filename: str) -> dict:
+    """`hole` -> the IR's one non-executable node (docs/holes.md).
+
+    A hole must know its type by now: the checker pins it from context in
+    check position, and `hole[T]` states it outright. Anywhere else the
+    honest answer is a rejection — guessing would hand the author a type the
+    compiler invented, which is exactly the drowning-in-noise failure holes
+    exist to fix.
+    """
+    type_name = expr.known_type
+    if type_name is None:
+        raise RevlError(
+            filename, expr.line,
+            "this `hole` has no expected type — nothing in its context says "
+            "what it must eventually be",
+            hint="annotate it (`hole[Str] \"why\"`), or put it somewhere with a "
+                 "declared type: a `fn`'s `-> T`, a service method's return, or "
+                 "an argument of a declared function (docs/holes.md)",
+            code="T3", category="hole",
+        )
+    check_type_wellformed(filename, expr.line, type_name)
+    node = {"kind": "hole", "type": type_name, "file": filename, "line": expr.line}
+    if expr.message is not None:
+        node["message"] = expr.message
+    return node
+
+
+def _retarget_holes(node, source: str) -> None:
+    """Point holes at the file they were written in.
+
+    Lowering runs over one merged program, so its `filename` is the first
+    root path; a declaration carries its own provenance and an obligation an
+    agent must go and fill is worthless with the wrong path on it.
+    """
+    if isinstance(node, dict):
+        if node.get("kind") == "hole":
+            node["file"] = source
+        for value in node.values():
+            _retarget_holes(value, source)
+    elif isinstance(node, list):
+        for value in node:
+            _retarget_holes(value, source)
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
     types = types if types is not None else {}
+    if isinstance(expr, ExprHole):
+        return _lower_hole(expr, filename)
     # ADT construction (Result / user variants) lowers to a tagged `adt` node
     # (Opt's Some/None are not tagged — handled as identity/null downstream).
     _cases = types.get(CASES_KEY) or {}
@@ -1386,9 +1441,12 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         if comp.name in seen:
             raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
         seen.add(comp.name)
-        components.append(_lower_component(comp, services, program.filename, component_callables,
-                                           types, emitting_fns, emitting_caps,
-                                           emission_evidence))
+        lowered_comp = _lower_component(comp, services, program.filename,
+                                        component_callables, types, emitting_fns,
+                                        emitting_caps, emission_evidence)
+        if comp.source:
+            _retarget_holes(lowered_comp, comp.source)
+        components.append(lowered_comp)
 
     manifest = _link(program, components, ambient.get("components") or [])
 
@@ -1453,6 +1511,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["externs"] = externs
     if tests:
         result["tests"] = tests
+    # the obligation ledger (docs/holes.md). Present only when the draft has
+    # holes, so an IR document for finished code is byte-identical to before.
+    obligations = holes.collect(result)
+    if obligations:
+        result["holes"] = obligations
     return result
 
 
@@ -1532,6 +1595,9 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                                pure_only: bool = False) -> dict:
     filename = env.filename
     line = getattr(expr, "line", 0)
+
+    if isinstance(expr, ExprHole):
+        return _lower_hole(expr, filename)
 
     # ADT construction (Result / user variants) — same tagged `adt` node as
     # the pure-fn path; Opt's Some/None stay untagged.
@@ -1853,6 +1919,9 @@ def _lower_component_guard_stmts(stmts: list, env: Env, callables: set) -> list[
 
 def _lower_component_if(stmt: IfStmt, env: Env, callables: set) -> dict:
     scope = _component_scope(env)
+    # a guard condition is a `Bool` position, so a hole there is a `Bool`
+    # obligation rather than an untyped one (docs/holes.md)
+    pin_hole(stmt.cond, "Bool", env.filename, "`if` guard condition")
     step = {
         "step": "if",
         "cond": _lower_component_pure_expr(stmt.cond, env, scope, callables,
@@ -2431,6 +2500,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     mbody.append({"step": "return", "expr": None})
                     returned = True
                     continue
+                # a hole in return position takes the *service's* declared
+                # return type: the service is the source of truth for the
+                # signature (A6), so it is also the source of the obligation
+                pin_hole(mstmt.expr, decl.returns, filename,
+                         f"`{method.name}` returns")
                 lowered_return = _lower_expr(mstmt.expr, env, mode="setup")
                 if decl.returns:
                     actual = infer_ir(lowered_return, env.type_env, env.types, env.services)
