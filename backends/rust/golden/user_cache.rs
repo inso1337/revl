@@ -365,9 +365,16 @@ pub fn plugin_by_name(name: &str) -> Option<cordis::PluginHandle> {
     }
 }
 
+pub fn _revl_isolate_ctx(ctx: &cordis::Context, name: &str) -> cordis::Context {
+    match name {
+        _ => ctx.clone(),
+    }
+}
+
 pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value) -> Option<cordis::Fiber> {
     match name {
         "pg_database" => {
+            let ctx = _revl_isolate_ctx(ctx, "pg_database");
             let _c = config.get("PgDatabase").cloned().unwrap_or(serde_json::Value::Null);
             Some(ctx.plugin(pg_database(), PgDatabaseConfig {
                 url: _c.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| String::new()),
@@ -375,6 +382,7 @@ pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value)
             }))
         },
         "user_cache" => {
+            let ctx = _revl_isolate_ctx(ctx, "user_cache");
             Some(ctx.plugin(user_cache(), ()))
         },
         _ => None,
