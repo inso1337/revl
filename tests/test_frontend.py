@@ -138,6 +138,13 @@ REJECTIONS = {
     "lifecycle_stmt_in_pure_test.rvl": "`load` is only allowed in a `lifecycle test` body",
     "lifecycle_config_unknown_field.rvl": "`sixe` is not a config field of Kv",
     "lifecycle_no_swap.rvl": "there is no `swap` statement",
+    # admission compatibility (roadmap §5): a service redeclared in one
+    # document is a duplicate (identity), never a compatible swap — the
+    # compatibility relation only relaxes exact-match across the runtime
+    # boundary. See tests/test_service_compat.py for the manifest-relative
+    # drift rejections, which need a running composition and so cannot be a
+    # single-file fixture.
+    "service_compat_duplicate.rvl": "duplicate service `Cache`",
 }
 
 # ------------------------------------------------------------------ coverage

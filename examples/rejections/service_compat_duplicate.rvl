@@ -1,0 +1,20 @@
+// Two declarations of one service in a single document are a *duplicate*,
+// never a compatible swap: admission's structural-compatibility relation
+// (docs/service-compat.md, roadmap §5) relaxes exact-match only across the
+// runtime boundary — a redeclaration checked against a *running* manifest.
+// Within one compilation the second `Cache` is a same-key identity clash, and
+// the fact that it would be a *compatible* superset (it only adds `put`)
+// changes nothing: it is still refused as a duplicate.
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component Store provides cache: Cache {
+  let m = effect Map.new() undo m.drop()
+  provide cache { fn get(key) = m.get(key) }
+}
