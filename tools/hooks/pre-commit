@@ -11,6 +11,22 @@ set -e
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
+# In a git worktree the checkout has no `.venv` of its own — it lives beside
+# the main checkout. Resolving the interpreter only against $root made this
+# hook print "SKIPPED (no pytest)" for every worktree agent, which is exactly
+# where an unverified commit is most likely. Fall back to the primary
+# checkout's venv (git-common-dir points at the shared .git).
+main_root=$(cd "$(git rev-parse --git-common-dir)/.." 2>/dev/null && pwd || echo "$root")
+if [ -x .venv/bin/pytest ]; then
+    PYTEST=.venv/bin/pytest
+elif [ -x "$main_root/.venv/bin/pytest" ]; then
+    PYTEST="$main_root/.venv/bin/pytest"
+elif command -v pytest >/dev/null 2>&1; then
+    PYTEST=pytest
+else
+    PYTEST=""
+fi
+
 fail=0
 step() {
     printf '  %-36s' "$1"
@@ -29,17 +45,15 @@ echo "pre-commit:"
 # The frontend suite, which includes tests/test_conformance_validate.py: every
 # tier's emitted code is handed to that tier's real compiler. That is the check
 # that catches "the emitter did not raise, but its output does not compile".
-if [ -x .venv/bin/pytest ]; then
-    step "frontend + emitted-code validation" .venv/bin/pytest tests/ -q
-elif command -v pytest >/dev/null 2>&1; then
-    step "frontend + emitted-code validation" pytest tests/ -q
+if [ -n "$PYTEST" ]; then
+    step "frontend + emitted-code validation" "$PYTEST" tests/ -q
 else
     echo "  frontend                           SKIPPED (no pytest)"
 fi
 
 # The TypeScript backend suite runs tsc over emitted code and shells out to the
 # emitters. CI was red for hours on a failure only this suite sees.
-if [ -d backends/typescript/node_modules ]; then
+if [ -d backends/typescript/node_modules ] || [ -d "$main_root/backends/typescript/node_modules" ]; then
     step "typescript backend (vitest)" sh -c \
         'cd backends/typescript && npx vitest run --silent'
 else
