@@ -2227,10 +2227,28 @@ def _emit_v3(ir: dict) -> dict[str, str]:
     return out
 
 
+# A `fault test` is executed by driving a real activation and inspecting the
+# runtime's residue afterwards (docs/fault-tests.md).  The wasm tier
+# has no such driver, so it is refused loudly instead of being dropped on the
+# floor: a silently-missing fault test is a guarantee nobody is checking.
+def _refuse_fault_tests(ir) -> None:
+    fault_tests = (ir or {}).get("fault_tests") or []
+    if not fault_tests:
+        return
+    names = ", ".join(repr(unit.get("name")) for unit in fault_tests)
+    raise EmitError(
+        f"fault tests do not lower to the wasm tier ({names}) — `fault test` runs "
+        f"on the python reference tier only (docs/fault-tests.md). Compile "
+        f"this document with --backend py, or move the fault tests to a "
+        f"module that is not emitted for this tier."
+    )
+
+
 def emit(ir: dict) -> dict[str, str]:
     """Lower one IR document to WAT modules (v1 components, v3 types/fns)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    _refuse_fault_tests(ir)
     version = ir.get("ir_version")
     if version == 1 or version == 2:
         return _emit_v1(ir)

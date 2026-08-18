@@ -39,6 +39,37 @@ def _emitter(backend: str) -> types.ModuleType:
     return _EMITTERS[backend]
 
 
+def _fault(ir: dict, module=None) -> list:
+    """The document's `fault test` units (docs/fault-tests.md)."""
+    from .fault import fault_units  # noqa: PLC0415 — no cordis needed to *read* them
+
+    return fault_units(ir, module)
+
+
+def _without_fault_tests(ir: dict) -> dict:
+    """*ir* minus its fault-test section, for a tier that cannot run them.
+
+    The emitters refuse a document carrying `fault_tests` outright — that is
+    the hard guarantee against a silent mis-emit.  A tier runner strips the
+    section first and says so, so a document's ordinary `test` blocks still
+    get their cross-tier proof instead of being taken down with it.
+    """
+    if not (ir.get("fault_tests") or []):
+        return ir
+    stripped = dict(ir)
+    stripped.pop("fault_tests", None)
+    return stripped
+
+
+def _fault_note(ir: dict, tier: str) -> str:
+    units = ir.get("fault_tests") or []
+    if not units:
+        return ""
+    print(f"[{tier}] note: {len(units)} fault test(s) not run on this tier — "
+          f"`fault test` runs on the py reference tier only (docs/fault-tests.md)")
+    return f"; {len(units)} fault test(s) skipped (py tier only)"
+
+
 def run_py(ir: dict) -> tuple[str, str]:
     """Exec the cordis-py output in-process (the original runner)."""
     emit = _emitter("python")
@@ -56,7 +87,8 @@ def run_py(ir: dict) -> tuple[str, str]:
     finally:
         sys.modules.pop(module.__name__, None)
     entries = getattr(module, "REVL_TESTS", None) or []
-    if not entries:
+    fault_entries = _fault(ir, module)
+    if not entries and not fault_entries:
         return ("pass", "no tests emitted by the backend")
 
     failures = 0
@@ -73,9 +105,32 @@ def run_py(ir: dict) -> tuple[str, str]:
         else:
             print(f"PASS {name}")
 
+    summary = []
+    if entries:
+        summary.append(f"{len(entries) - failures} of {len(entries)} test(s) passed"
+                       if failures else f"{len(entries)} test(s) passed")
+    if fault_entries:
+        from .fault import run_fault_units  # noqa: PLC0415 — lazy: needs cordis
+
+        try:
+            fault_failures, fault_total = run_fault_units(ir, fault_entries)
+        except ModuleNotFoundError as error:
+            # a fault test drives a real activation, so it needs the runtime
+            # the plain `test` blocks do not; missing it is a skip, never a pass
+            reason = (f"{len(fault_entries)} fault test(s) skipped "
+                      f"(the cordis-py runtime is not installed: {error.name!r} missing — "
+                      f"sh backends/python/setup.sh)")
+            if not entries:
+                return ("skip", reason)
+            summary.append(reason)
+        else:
+            failures += fault_failures
+            summary.append(
+                f"{fault_total - fault_failures} of {fault_total} fault test(s) passed")
+
     if failures:
-        return ("fail", f"{failures} of {len(entries)} test(s) failed")
-    return ("pass", f"{len(entries)} test(s) passed")
+        return ("fail", "; ".join(summary) or f"{failures} test(s) failed")
+    return ("pass", "; ".join(summary))
 
 
 def run_ts(ir: dict) -> tuple[str, str]:
@@ -83,8 +138,10 @@ def run_ts(ir: dict) -> tuple[str, str]:
     vitest = BACKENDS / "typescript" / "node_modules" / ".bin" / "vitest"
     if not vitest.exists():
         return ("skip", "vitest not installed (`cd backends/typescript && npm ci`)")
+    note = _fault_note(ir, "ts")
     try:
-        source = _emitter("typescript").emit(ir, runtime_import="../../runtime.ts")
+        source = _emitter("typescript").emit(_without_fault_tests(ir),
+                                             runtime_import="../../runtime.ts")
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
         return ("fail", f"emitter refused: {error}")
     generated = BACKENDS / "typescript" / "tests" / "generated"
@@ -105,7 +162,7 @@ def run_ts(ir: dict) -> tuple[str, str]:
         print(output)
     if result.returncode != 0:
         return ("fail", f"vitest exited {result.returncode}")
-    return ("pass", "vitest: all emitted tests passed")
+    return ("pass", "vitest: all emitted tests passed" + note)
 
 
 _CRATES_IO: bool | None = None
@@ -134,9 +191,10 @@ def run_rust(ir: dict) -> tuple[str, str]:
         return ("skip", "cargo not installed")
     if not _crates_io_reachable():
         return ("skip", "crates.io unreachable (cordis-rs is resolved from the index)")
+    note = _fault_note(ir, "rust")
     try:
         emit = _emitter("rust")
-        source = emit.emit(ir)
+        source = emit.emit(_without_fault_tests(ir))
         cargo_toml = emit.cargo_toml("revl_test")
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
         return ("fail", f"emitter refused: {error}")
@@ -152,7 +210,7 @@ def run_rust(ir: dict) -> tuple[str, str]:
         print(output)
     if result.returncode != 0:
         return ("fail", f"cargo test exited {result.returncode}")
-    return ("pass", "cargo test: all emitted tests passed")
+    return ("pass", "cargo test: all emitted tests passed" + note)
 
 
 def _java_tool(name: str) -> str | None:
@@ -176,8 +234,9 @@ def run_java(ir: dict) -> tuple[str, str]:
     java = _java_tool("java")
     if javac is None or java is None:
         return ("skip", "no working JDK")
+    note = _fault_note(ir, "java")
     try:
-        source = _emitter("java").emit(ir)
+        source = _emitter("java").emit(_without_fault_tests(ir))
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
         return ("fail", f"emitter refused: {error}")
     with tempfile.TemporaryDirectory(prefix="revl_test_java_") as tmpd:
@@ -225,13 +284,15 @@ def run_java(ir: dict) -> tuple[str, str]:
         return ("fail", run.stderr.strip() or f"JVM exited {run.returncode}")
     if "REVL_TESTS_OK" not in run_output:
         return ("fail", "REVL_TESTS did not complete")
-    return ("pass", "JVM: all REVL_TESTS ran")
+    return ("pass", "JVM: all REVL_TESTS ran" + note)
 
 
 def run_wasm(ir: dict) -> tuple[str, str]:
     """The wasm tier has no in-language test runner — test blocks are
     host-side (the emitter itself notes ``unsupported on this tier``)."""
-    return ("skip", "test blocks do not lower to the wasm tier (the test runner is host-side)")
+    tail = _fault_note(ir, "wasm")
+    return ("skip",
+            "test blocks do not lower to the wasm tier (the test runner is host-side)" + tail)
 
 
 RUNNERS: dict[str, callable] = {
@@ -247,7 +308,7 @@ _TAG = {"pass": "ok", "skip": "skipped", "fail": "FAIL"}
 
 def test_command(ir: dict, backend: str) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code."""
-    if not (ir.get("tests") or []):
+    if not (ir.get("tests") or []) and not (ir.get("fault_tests") or []):
         print("no tests to run")
         return 0
 
