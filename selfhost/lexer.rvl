@@ -57,6 +57,7 @@ fn keywords() -> List[Str] {
     "isolate", "intercept", "realm", "in", "with",
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
+    "hole",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative"]
 }
 
@@ -121,6 +122,54 @@ fn scan_string(source: Str, i: Int) -> Scan {
   return { j: 0 - 1, out: text3, nl: 0 }
 }
 
+// Whitespace including newline (is_space deliberately excludes it, since
+// the main loop tracks lines). Used to trim an interpolation body, which
+// the reference lexer does with str.strip().
+fn is_ws(c: Str) -> Bool {
+  let n = code0(c)
+  if (n == 10) { return true }
+  return is_space(c)
+}
+
+fn trim(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while (a < b && is_ws(s.slice(a, a + 1))) { a += 1 }
+  while (b > a && is_ws(s.slice(b - 1, b))) { b -= 1 }
+  let aa = a
+  let bb = b
+  return s.slice(aa, bb)
+}
+
+// The balanced-brace body of a `${` interpolation, starting at i (the
+// char after `{`). Returns j = index OF the closing `}`, out = the raw
+// source between the braces, nl = newlines consumed. j = -1 if unbalanced.
+// Raw capture is what the reference lexer does: the parser re-parses the
+// body as a full expression, so `${a + b}` and `${r.count}` are legal.
+fn scan_interp(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  var depth = 1
+  var nl = 0
+  while (j < n) {
+    let c = source.charAt(j)
+    let cc = code0(c)
+    if (cc == 123) { depth += 1 }
+    if (cc == 125) {
+      depth -= 1
+      if (depth == 0) {
+        let jj = j
+        let lines = nl
+        return { j: jj, out: source.slice(i, jj), nl: lines }
+      }
+    }
+    if (cc == 10) { nl += 1 }
+    j += 1
+  }
+  let lines2 = nl
+  return { j: 0 - 1, out: "", nl: lines2 }
+}
+
 // Template body after the opening backtick. Parts serialize as
 // "t:<text>" / "v:<name>" joined by "|"; nl counts newlines consumed so
 // the caller reports the END line (reference-lexer parity).
@@ -142,19 +191,23 @@ fn scan_template(source: Str, i: Int) -> Scan {
     }
     if (cc != 96) {
       var handled = false
-      if (cc == 36 && source.slice(j + 1, j + 2) == "{" && is_alpha(source.slice(j + 2, j + 3))) {
-        let word = scan_word(source, j + 2)
-        if (source.slice(word.j, word.j + 1) == "}") {
-          if (buf != "") { parts = parts.push("t:".concat(buf)) }
-          buf = ""
-          parts = parts.push("v:".concat(word.out))
-          j = word.j + 1
-          handled = true
-        }
-        if (source.slice(word.j, word.j + 1) != "}") {
-          let lines2 = nl
+      if (cc == 36 && source.slice(j + 1, j + 2) == "{") {
+        let inner = scan_interp(source, j + 2)
+        if (inner.j == 0 - 1) {
+          let lines2 = nl + inner.nl
           return { j: 0 - 1, out: "", nl: lines2 }
         }
+        let body = trim(inner.out)
+        if (body == "") {
+          let lines3 = nl + inner.nl
+          return { j: 0 - 1, out: "", nl: lines3 }
+        }
+        if (buf != "") { parts = parts.push("t:".concat(buf)) }
+        buf = ""
+        parts = parts.push("v:".concat(body))
+        nl += inner.nl
+        j = inner.j + 1
+        handled = true
       }
       if (!handled) {
         if (cc == 10) { nl += 1 }
