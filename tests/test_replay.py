@@ -1,18 +1,24 @@
 """Backwards replay over the effect accumulator (docs/replay.md).
 
-These tests drive the *real* pipeline — revl source -> frontend IR -> the
-cordis-py emitter -> the recorder -> the timeline — against
-:class:`FakeContext`, a stand-in that implements the slice of the cordis
-context protocol an emitted component actually uses.  cordis-py is not
-installed in this checkout (`backends/python/tests` skips for the same
-reason), so a stub is what makes the replay engine executable here; it is a
-stub of the *documented contract*, not of cordis's internals, and it is
-deliberately strict about the two properties the engine leans on: an
-effect's yielded disposers run LIFO, and disposal is single-flight.
+Two layers, both driving the real pipeline — revl source -> frontend IR ->
+the cordis-py emitter -> the recorder -> the timeline.
 
-What that means for the reader: everything below really runs, but the final
-hop — the recorder against cordis-py itself — is exercised by the emitted
-shape, not by cordis.  See the report in docs/replay.md §"Status".
+The first layer runs against :class:`FakeContext`, a stand-in implementing the
+slice of the cordis context protocol an emitted component actually uses.  It
+is a stub of the *documented contract*, not of cordis's internals, and it is
+deliberately strict about the two properties the engine leans on: an effect's
+yielded disposers run LIFO, and disposal is single-flight.  It runs on any
+interpreter, so the engine stays testable with no runtime installed.
+
+The second layer (`@needs_cordis`, at the bottom) runs the production path —
+`revl.mcp.Session`, a real `cordis.Context`, real fibers — and asserts the
+same properties, plus the ones only a real runtime can show: that `unload`
+after a step-back still leaves no residue, and that recording does not perturb
+a mid-body failure.  Run it with an interpreter that has the runtime:
+
+    backends/python/.venv/bin/python -m pytest tests/test_replay.py -q
+
+See docs/replay.md §7 for exactly what each layer establishes.
 """
 
 from __future__ import annotations
@@ -657,3 +663,243 @@ def test_run_accepts_record_without_a_runtime_installed():
         check=False)
     assert result.returncode == 0, result.stderr
     assert "load order" in result.stdout
+
+
+# ------------------------------------------------- against the real cordis-py
+#
+# Everything above runs against FakeContext. This section runs the *production*
+# path — revl.mcp.Session, a real cordis.Context, real fibers — and asserts the
+# same properties. It skips where cordis-py is absent (the root .venv); it
+# executes under backends/python/.venv, which has it.
+
+# NOT a module-level `pytest.importorskip`: that skips the whole file, which
+# would silently drop the 28 stub-context tests above wherever cordis-py is
+# absent. The marker skips only the tests that genuinely need a real runtime.
+try:  # noqa: SIM105
+    import cordis  # noqa: F401
+    HAVE_CORDIS = True
+except ModuleNotFoundError:  # pragma: no cover — depends on the interpreter
+    HAVE_CORDIS = False
+
+needs_cordis = pytest.mark.skipif(
+    not HAVE_CORDIS,
+    reason="needs the cordis-py runtime (run under "
+           "backends/python/.venv/bin/python)")
+
+# safe without cordis: session.py imports the runtime lazily, inside _backend()
+from revl.mcp.session import Session, SessionError  # noqa: E402
+
+
+@pytest.fixture
+def session():
+    live = Session()
+    yield live
+    if live.loaded:
+        live.unload()
+
+
+def real(live, source: str, config: dict | None = None) -> dict:
+    return live.load(compile_source(source, "<replay-test>.rvl"), config,
+                     record=True)
+
+
+def step_kinds(payload: dict) -> list:
+    return [step["kind"] for step in payload["steps"]]
+
+
+@needs_cordis
+def test_real_cordis_records_the_same_timeline(session):
+    """The classification is not an artifact of the stub: a real
+    `ctx.provide` disposer is still identified, by identity, as a provision."""
+    real(session, NOTES)
+    session.call("notes", "put", ["k", "v"])
+    payload = session.timeline("N")
+    assert step_kinds(payload) == ["effect", "provision", "hinge", "effect"]
+    assert payload["steps"][0]["source"] == "yield lambda: store.drop()"
+    assert payload["steps"][1]["label"] == "provide notes"
+    assert payload["steps"][3]["origin"] == {"phase": "call", "key": "notes",
+                                             "method": "put", "args": ["k", "v"]}
+
+
+@needs_cordis
+def test_real_cordis_step_back_restores_state_and_leaves_it_live(session):
+    real(session, NOTES)
+    session.call("notes", "put", ["k", "v"])
+    assert session.call("notes", "get", ["k"])["result"] == "v"
+
+    report = session.step_back("N", 2)
+    assert [s["label"] for s in report["inversesRan"]] == ["N.notes.put#1/effect"]
+    assert report["providedKeys"] == ["notes"]
+    assert session.call("notes", "get", ["k"])["result"] is None
+
+    # not torn down: the fiber is still ACTIVE and the service still works
+    assert session.state()["components"] == [{"name": "N", "state": "ACTIVE"}]
+    session.call("notes", "put", ["z", "9"])
+    assert session.call("notes", "get", ["z"])["result"] == "9"
+
+
+@needs_cordis
+def test_real_cordis_step_back_then_unload_still_leaves_no_residue(session):
+    """The once-only inverse against the real fiber: replay ran `store.drop()`
+    early, and the runtime's own unload must neither double-free it nor skip
+    anything else. R4 has to survive time travel."""
+    real(session, NOTES)
+    session.call("notes", "put", ["k", "v"])
+    session.step_back("N", -1)
+
+    report = session.unload()
+    assert report["noResidue"] is True
+    assert report["checks"] == {"registry": True, "provisions": True,
+                                "effects": True, "listeners": True}
+
+
+@needs_cordis
+def test_real_cordis_refuses_then_forces_across_an_emission(session):
+    real(session, USER_CACHE, PG_CONFIG)
+    session.call("cache", "put", ["k", "v"])
+    assert step_kinds(session.timeline("UserCache")) == [
+        "effect", "provision", "hinge", "effect", "emission"]
+
+    with pytest.raises(SessionError, match="uncompensated emission"):
+        session.step_back("UserCache", 2)
+    assert session.call("cache", "get", ["k"])["result"] == "v"  # nothing ran
+
+    report = session.step_back("UserCache", 2, force=True)
+    assert [s["label"] for s in report["emissionsCrossed"]] == ["db.execute"]
+    assert "still out in the world" in report["warning_emissions"]
+    assert session.call("cache", "get", ["k"])["result"] is None
+
+
+@needs_cordis
+def test_real_cordis_compensation_appends_a_new_emission(session):
+    real(session, COMPENSATED)
+    session.call("ping", "go", ["hello"])
+    assert step_kinds(session.timeline("P")) == [
+        "effect", "provision", "hinge", "effect", "emission", "compensation"]
+
+    report = session.step_back("P", 3)
+    assert [s["label"] for s in report["compensationsRan"]] == ["compensate bus.send"]
+    assert [s["label"] for s in report["emissionsCompensated"]] == ["bus.send"]
+    assert report["emissionsCrossed"] == []
+    # stepping back over a compensated emission GROWS the emission record
+    assert step_kinds(session.timeline("P"))[-1] == "emission"
+
+
+@needs_cordis
+def test_real_cordis_records_the_a1_boundary_of_an_async_body(session):
+    """The riskiest wrapper: an `await` body compiles to an async generator,
+    and the recorder has to re-wrap it as one without disturbing A1."""
+    state = real(session, AWAITING)
+    assert state["components"] == [{"name": "W", "state": "ACTIVE"}]
+    assert step_kinds(session.timeline("W")) == [
+        "effect", "boundary", "effect", "hinge"]
+    report = session.step_back("W", 0)
+    assert [s["label"] for s in report["inversesRan"]] == ["W/body/effect"]
+
+
+@needs_cordis
+def test_real_cordis_withdraws_a_provision_without_tearing_the_fiber_down(session):
+    real(session, COMPENSATED)
+    report = session.step_back("P", 0)
+    assert report["providedKeys"] == ["bus"]          # `ping` is gone
+    view = session.inspect_step("P", 0)
+    assert view["activeProvisions"] == []
+    assert view["withdrawnProvisions"] == ["ping"]
+    # ...and P is still ACTIVE — withdrawn is not disposed
+    assert {c["name"]: c["state"] for c in session.state()["components"]} == {
+        "B": "ACTIVE", "P": "ACTIVE"}
+
+
+@needs_cordis
+def test_real_cordis_replay_forward_re_runs_the_call(session):
+    real(session, COMPENSATED)
+    session.call("ping", "go", ["one"])
+    session.step_back("P", 3, force=True)
+    before = len(session.timeline("P")["steps"])
+
+    plan = session.replay_forward("P", 3)
+    assert plan["replay"] == [{"kind": "call", "key": "ping", "method": "go",
+                               "args": ["one"]}]
+    assert plan["notReplayable"] == []
+    assert plan["replayed"][0]["key"] == "ping"
+    # the re-run accumulated fresh steps rather than resurrecting the old ones
+    assert len(session.timeline("P")["steps"]) > before
+
+
+# -- recording must not change what it observes ----------------------------
+
+SYNC_FAIL = """
+component F {
+  config { url: Str }
+  let a = effect Map.new() undo a.drop()
+  let p = effect Pool.open(config.url, 2) undo p.close()
+  let b = effect Map.new() undo b.drop()
+}
+"""
+
+ASYNC_FAIL = """
+component G {
+  config { url: Str }
+  let a = effect Map.new() undo a.drop()
+  await Job.run("g")
+  let p = effect Pool.open(config.url, 2) undo p.close()
+  let b = effect Map.new() undo b.drop()
+}
+"""
+
+
+def _fail_outcome(source: str, component: str, record: bool) -> tuple:
+    live = Session()
+    try:
+        state = live.load(compile_source(source, "<replay-test>.rvl"),
+                          {component: {"url": "boom://nope"}}, record=record)
+        states = {c["name"]: c["state"] for c in state["components"]}
+        return states, live.unload()["noResidue"]
+    finally:
+        if live.loaded:
+            live.unload()
+
+
+@needs_cordis
+def test_recording_does_not_perturb_a_sync_mid_body_failure():
+    """A8: the acquisition refuses, the completed inverses run LIFO, the fiber
+    lands FAILED and leaves no residue — with recording on, identically."""
+    plain, plain_clean = _fail_outcome(SYNC_FAIL, "F", record=False)
+    recorded, recorded_clean = _fail_outcome(SYNC_FAIL, "F", record=True)
+    assert plain == {"F": "FAILED"}
+    assert recorded == plain
+    assert plain_clean is True and recorded_clean is True
+
+
+@needs_cordis
+def test_recording_does_not_perturb_an_async_mid_body_failure():
+    """cordis-py routes an *async* body's mid-body failure to the effect guard
+    rather than the fiber's error slot, so the fiber does not land FAILED (a
+    known cordis-py gap, reported independently by the fault-injection work).
+
+    This test does not assert which state that is — it asserts the property
+    this recorder owns: recording observes the failure without changing it.
+    """
+    plain, plain_clean = _fail_outcome(ASYNC_FAIL, "G", record=False)
+    recorded, recorded_clean = _fail_outcome(ASYNC_FAIL, "G", record=True)
+    assert recorded == plain
+    assert plain_clean is True and recorded_clean is True
+
+
+@needs_cordis
+def test_the_timeline_witnesses_a_partial_unwind_after_a_failure():
+    """The accumulator is the honest record of a failed activation: the steps
+    that completed, and who undid them."""
+    live = Session()
+    try:
+        live.load(compile_source(SYNC_FAIL, "<replay-test>.rvl"),
+                  {"F": {"url": "boom://nope"}}, record=True)
+        steps = live.timeline("F")["steps"]
+        # only the first effect ever made it into the accumulator, and the
+        # runtime — not a step_back — is what unwound it
+        assert [s["kind"] for s in steps] == ["effect"]
+        assert steps[0]["undone"] is True
+        assert steps[0]["undoneBy"] == "runtime"
+    finally:
+        if live.loaded:
+            live.unload()

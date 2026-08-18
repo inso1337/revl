@@ -283,26 +283,61 @@ revl> :forward 2
 
 The engine is python-tier only, which is where the reference runtime lives.
 
-`tests/test_replay.py` (28 tests) drives the real pipeline — revl source →
+`tests/test_replay.py` has 39 tests in two layers.
+
+**28 against a stub context.** These drive the pipeline — revl source →
 frontend IR → the cordis-py emitter → the recorder → the timeline → step-back
-and forward replay. It runs the real `runtime.Map`/`Pool` host builtins and
-asserts against the real trace.
-
-**cordis-py is not installed in this checkout** (`backends/python/tests` skips
-for the same pre-existing reason), so the context those tests run against is
-`FakeContext` — a stand-in implementing the documented slice of the cordis
-context protocol that an emitted component actually uses: an effect's
+and forward replay — against `FakeContext`, a stand-in implementing the slice
+of the cordis context protocol an emitted component actually uses: an effect's
 generator runs to completion at registration, its yielded disposers run LIFO
-within the effect, and disposal is single-flight. It is a stub of the
-*contract*, not of cordis's internals. What that means precisely:
+within the effect, and disposal is single-flight. They use the real
+`runtime.Map`/`Pool` host builtins and assert against the real trace. They run
+on any interpreter, with or without a runtime installed.
 
-* **executed here:** everything from emitted source downwards — recording,
-  classification, ordering, once-only inverses, the emission refusal, forced
-  crossing, compensation handling, forward plans, and the MCP tool surface;
-* **not executed here:** the recorder against cordis-py itself. The
-  `_RecordingContext` delegates every call to the real bound method, so cordis
-  only ever operates on its own `Context` — but that has not been observed
-  running in this checkout, and this document should not claim it has.
+**11 against real cordis-py**, through the production path — `revl.mcp.Session`,
+a real `cordis.Context`, real fibers. They are marked `@needs_cordis` and skip
+where the runtime is absent. To run them:
 
-Other tiers (TS, rust, java, wasm) accumulate the same inverses in the same
-order; nothing here has been ported to them.
+```
+backends/python/.venv/bin/python -m pytest tests/test_replay.py -q
+```
+
+What that layer establishes, observed rather than argued:
+
+* the classification is not an artifact of the stub — a **real** `ctx.provide`
+  disposer is still identified as a provision, by object identity;
+* step-back restores the state its inverses guard, and leaves the fiber
+  `ACTIVE` and the service callable — withdrawn is not disposed;
+* **`unload` after a step-back still reports `noResidue: true`** on all four
+  checks. This is the sharpest result: the once-only inverse is shared with
+  the real fiber's teardown, so replaying `store.drop()` early neither
+  double-frees it nor causes the runtime to skip anything else. R4 survives
+  time travel;
+* the emission refusal, the forced crossing, and compensation-appends-an-
+  emission all behave as documented against a real `Database` provider;
+* an `await` body — which compiles to an **async generator**, the riskiest
+  thing the recorder re-wraps — records its A1 boundary with the fiber
+  reaching `ACTIVE` and unwinding cleanly.
+
+**Recording is observationally neutral on the failure path.** Two tests load a
+component whose acquisition refuses (`boom://`) with recording off and on, and
+assert the fiber state and residue verdict are identical. For a *sync* body
+that state is `FAILED`, which is A8 as specified. For an *async* body it is
+not: cordis-py routes an async body's mid-body failure to the effect guard
+rather than the fiber's error slot, so inverses run LIFO with no residue but
+the fiber stays `ACTIVE` instead of landing `FAILED`. That is a **cordis-py
+gap, not a replay gap** — it reproduces identically with recording off, and
+was found independently by the fault-injection work. The test deliberately
+asserts *neutrality* rather than the state itself, so it keeps passing when
+cordis-py fixes it.
+
+A related nicety: the timeline is a useful witness of a failed activation. For
+the sync failure it shows exactly one accumulated step, `undone: true`,
+`undoneBy: "runtime"` — the partial unwind, recorded.
+
+What is still **not** covered here: multi-generation replay across a
+`revl_swap` (the recorder starts fresh timelines per generation, which is
+tested, but stepping back into a superseded generation is not a thing this
+supports); and the `extern emission` limit in §5. Other tiers (TS, rust, java,
+wasm) accumulate the same inverses in the same order; nothing here has been
+ported to them.
