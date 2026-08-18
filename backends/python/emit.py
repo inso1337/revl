@@ -746,6 +746,18 @@ def _expr(node: dict) -> str:
             lhs = _expr(node["left"])
             rhs = _expr(node["right"])
             return f"({rhs} if {lhs} is None else {lhs})"
+        if node["op"] == "%" and node.get("operands") in ("Int", "Float"):
+            # `%` is the TRUNCATED remainder — it takes the sign of the
+            # dividend, as in TypeScript (§0) — and pairs with `div_trunc` so
+            # that (a.div_trunc(b)) * b + a % b == a. Python's `%` floors and
+            # takes the sign of the *divisor*, so it is the one tier that has
+            # to build this. The Euclidean remainder is `mod`, which is a
+            # different operation with a different name (docs/arithmetic.md).
+            # The same form serves Int and Float (it is `math.fmod` written
+            # out), so an emitted module needs no import for it.
+            lhs, rhs = _expr(node["left"]), _expr(node["right"])
+            return (f"(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 "
+                    f"else -(abs(_a) % abs(_b)))({lhs}, {rhs})")
         op = _PY_BIN_OPS.get(node["op"])
         if op is None:
             raise EmitError(f"unsupported binary operator {node['op']!r}")

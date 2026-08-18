@@ -130,15 +130,6 @@ def test_java_equality_goes_through_objects_equals():
 # to the IR contract, not a backend patch. See docs/contract-errata.md.
 
 DIVERGENCES = {
-    # python's `%` still floors (-7 % 3 == 2) where rust, java and JS truncate
-    # (== -1). Unlike division this is NOT settled: §0 says `%` should mean
-    # what TypeScript means (truncated), so python is the outlier to move —
-    # but that changes existing programs, so it stays pinned until decided.
-    # Anyone who wants a defined answer today has `mod` (docs/arithmetic.md).
-    "modulo truncates toward zero": (
-        'test "m" { assert (0 - 7) % 3 == 0 - 1 }',
-        {"py": "fail", "ts": "pass", "rust": "pass"},
-    ),
     # TS numbers are f64, so Int arithmetic silently loses precision past 2^53.
     # Unlike the others this needs BigInt, not a type annotation.
     "Int keeps precision past 2^53": (
@@ -198,6 +189,9 @@ def test_str_ordering_agrees_everywhere():
 # is where C, python and the mathematics all disagree.
 
 INTEGER_ARITHMETIC = """
+test "rem takes the sign of the dividend"    { assert (0 - 7) % 3 == 0 - 1 }
+test "rem with a negative divisor"           { assert 7 % (0 - 3) == 1 }
+test "rem with both negative"                { assert (0 - 7) % (0 - 3) == 0 - 1 }
 test "div_trunc rounds toward zero"      { assert (0 - 7).div_trunc(2) == 0 - 3 }
 test "div_trunc on positives"            { assert 7.div_trunc(2) == 3 }
 test "div_floor rounds toward -infinity" { assert (0 - 7).div_floor(2) == 0 - 4 }
@@ -271,3 +265,46 @@ def test_typescript_guards_the_divisor():
     for helper in ("revlDivTrunc", "revlDivFloor", "revlDivEuclid", "revlMod"):
         assert f"function {helper}" in emitted, helper
     assert "revl: division by zero" in emitted
+
+
+# --------------------------------------------------------- the pairing law
+#
+# Every remainder pairs with a division, and the pair satisfies
+# (a div b) * b + (a rem b) == a. Publishing the law and testing it is what
+# makes the choice of convention checkable rather than a matter of taste:
+#
+#   div_trunc  pairs with  %      (truncated, sign of the dividend)
+#   div_euclid pairs with  mod    (Euclidean, remainder always >= 0)
+#
+# `div_floor` has no remainder partner in the surface, deliberately: what
+# people reach for floored `%` to get is index safety, and `mod` gives that
+# strictly better — non-negative for *either* sign of the divisor.
+
+PAIRING_LAW = "\n".join(
+    [f'test "trunc/rem {a} {b}" '
+     f'{{ assert ({a}).div_trunc({b}) * ({b}) + ({a}) % ({b}) == ({a}) }}'
+     for a, b in [("7", "3"), ("0 - 7", "3"), ("7", "0 - 3"), ("0 - 7", "0 - 3"),
+                  ("9", "3"), ("0 - 9", "3"), ("1", "7"), ("0 - 1", "7")]]
+    + [f'test "euclid/mod {a} {b}" '
+       f'{{ assert ({a}).div_euclid({b}) * ({b}) + ({a}).mod({b}) == ({a}) }}'
+       for a, b in [("7", "3"), ("0 - 7", "3"), ("7", "0 - 3"), ("0 - 7", "0 - 3"),
+                    ("9", "3"), ("0 - 9", "3"), ("1", "7"), ("0 - 1", "7")]]
+)
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_division_remainder_pairing_law(tier: str):
+    status, message = _run(tier, PAIRING_LAW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} breaks the pairing law: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_division_remainder_pairing_law_slow(tier: str):
+    status, message = _run(tier, PAIRING_LAW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} breaks the pairing law: {message}"
