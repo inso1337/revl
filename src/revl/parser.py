@@ -679,7 +679,15 @@ class Parser:
         return ServiceDecl(name, methods, line, commutative=commutative)
 
     def type_(self) -> str:
-        base = self.expect("ident", what="a type").value
+        return self._type_suffix(self.expect("ident", what="a type").value)
+
+    def _type_suffix(self, base: str) -> str:
+        """The `[...]` / `?` tail of a type, given its head.
+
+        Split out of `type_` so `type X = List[Row]` can decide *after* reading
+        the head that what follows is a type application rather than a variant
+        case (a case is a bare name with an optional parenthesised payload, so
+        `[` or `?` here is unambiguous)."""
         if self.at("["):
             self.next()
             inner = [self.type_()]
@@ -1013,6 +1021,25 @@ class Parser:
         while True:
             cline = self.peek().line
             cname = self.expect("ident").value
+            if not cases and (self.at("[") or self.at("?")):
+                # `type Rows = List[Row]` / `type MaybeRow = Row?`: a variant
+                # case is a bare name with an optional parenthesised payload,
+                # so a `[` or `?` here can only be a type application — this is
+                # an alias right-hand side. It is carried as the sole case name
+                # (a name no case could otherwise have) and recognised as an
+                # alias in lowering, where the type table is known.
+                rendered = self._type_suffix(cname)
+                if self.at("|"):
+                    raise self.err(
+                        self.peek().line,
+                        "revl has no union types — `|` separates the cases of a "
+                        f"variant, and `{rendered}` is a type, not a case",
+                        hint="declare the alternatives as named cases "
+                             "(`type T = Hit(Row) | Missing`), or alias a single "
+                             "type (`type Rows = List[Row]`) — syntax-2.0 §2",
+                    )
+                return TypeDecl(name, params, [],
+                                [VariantCase(rendered, None, cline)], line, public)
             payload = None
             if self.at("("):
                 self.next()

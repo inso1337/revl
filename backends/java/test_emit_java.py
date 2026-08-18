@@ -149,7 +149,9 @@ def test_host_objects_are_real_java_runtime_classes():
     assert "public java.util.Optional<String> get(String key)" in src
     assert "public static Pool open(String url, long poolSize)" in src
     assert "return java.util.List.of();" in src
-    assert "return 0L;" in src
+    # Pool.execute reports rows-affected; 1 matches python/TS/rust (the
+    # java tier used to return 0 — a cross-tier divergence this pins shut).
+    assert "return 1L;" in src
 
 
 def test_config_defaults_emit_no_arg_constructor():

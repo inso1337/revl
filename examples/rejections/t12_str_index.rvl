@@ -1,0 +1,12 @@
+// REJECTED — `[...]` indexes a `List`, never a `Str`. The specified string
+// surface is `charAt` / `charCodeAt` / `slice` (docs/stdlib-2.0.md): rust
+// indexes bytes and refuses an integer index with E0277, and the java emitter
+// renders `s.get(i)` on a `String` ("cannot find symbol"), so `s[0]` is
+// unportable even where python and TypeScript happen to accept it.
+//
+// expected error:
+//   `Str` has no index operator — `[...]` indexes a `List` only
+
+fn first(s: Str) -> Str {
+  return s[0]
+}

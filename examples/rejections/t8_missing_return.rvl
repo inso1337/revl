@@ -1,0 +1,13 @@
+// REJECTED — a `fn` with a declared return type whose body never returns.
+//
+// Python (the reference backend) would silently hand back `None` and
+// TypeScript `undefined`, while rust refuses with E0308 and javac with
+// "missing return statement". A program the checker accepts must compile on
+// every tier, so the strict reading is the frontend's.
+//
+// expected error:
+//   `budget` is declared to return `Int` but its body never returns a value
+
+fn budget(base: Int) -> Int {
+  let doubled = base * 2
+}

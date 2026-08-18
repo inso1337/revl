@@ -14,6 +14,11 @@ What this is *for* — and the honest scope of the "future of programming" claim
 — is [docs/vision.md](docs/vision.md).
 
 ```revl
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)   // its body emits, so the interface says so
+}
+
 component UserCache requires db: Database provides cache: Cache {
   let store = effect Map.new() undo store.drop()
 
@@ -61,7 +66,13 @@ component UserCache requires db: Database provides cache: Cache {
   16 cases that emit code their own compiler rejects (13 java, 3 rust).
   python, typescript and wasm validate clean; the rest are baselined in
   `tests/test_conformance_validate.py`, which fails on new breakage *and* on
-  a baselined case that starts passing, so the list can only shrink.
+  a baselined case that starts passing, so the list can only shrink. Each
+  tier's validator skips loudly when its toolchain is missing, and two of
+  them are missing in CI: the job that runs this suite installs neither
+  `backends/typescript/node_modules` nor `wasmtime`, so the *typescript* and
+  *wasm* halves of "validates clean" are reproducible locally
+  (`pytest tests/test_conformance_validate.py -q -rs`, with `npm ci` and
+  `wasmtime` present) but are **not** gated on every push.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
   cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)
@@ -78,8 +89,14 @@ runnable (**cordis-py**, **cordis** (TS), and the **cordis-wasm substrate**,
 link → IR ([docs/backend-ir-v1.md](docs/backend-ir-v1.md)), and the
 emitters produce runnable components. On the wasm substrate, confinement is
 enforced by the sandbox and `effect/undo` compiles to a state machine with
-physical partial rollback. Divert-during-`await` semantics (A1) are verified
-on all three runnable backends. `python -m revl audit` prints a
+physical partial rollback. Divert-during-`await` (A1) is *executed* on
+cordis-py
+(`backends/python/tests/test_v1_semantics.py::test_a1_divert_during_await_skips_emission`)
+and checked *structurally* on wasm — the golden asserts the post-`await`
+effect is a separate segment a divert can skip
+(`tests/test_wasm_backend.py::test_pulse_await_lowering`). The TypeScript
+tier's runtime has the in-flight window for it but **no divert test yet**;
+that is a gap, not a guarantee. `python -m revl audit` prints a
 composition's manifest and G8 boundary surface; `compile_files(...,
 manifest=running)` is the runtime-admission gate. The rejection suite in
 [examples/rejections/](examples/rejections/) is the checker's executable
@@ -106,20 +123,52 @@ is tracked in the [2.0 roadmap](docs/v2.0-roadmap.md).
 ### Turing-complete, demonstrated by execution
 
 2.0's pure stratum is Turing-complete (`var` + `while` + recursion), and the
-claim is checked by running the emitted code, not by argument: the test
-suite compiles revl sources for `fib` (loop form) and the Collatz
-step-counter, executes the **emitted Python**, and asserts `fib(10) = 55`
-and `collatz(27) = 111`; the same sources lower through the TypeScript
-emitter.
+claim is checked by running the emitted code, not by argument. The gate is
+`backends/wasm/test_v3_emit.py::test_v3_loops_run_on_wasmtime`: it compiles
+revl sources for `fib` (loop form) and the Collatz step-counter, hands the
+emitted module to **real wasmtime**, and asserts `fib(10) = 55`,
+`fib(20) = 6765` and `collatz(27) = 111`.
 
-**Suites** (run them; the numbers move): 281 frontend tests including the
-sound-typing, strata-composition, stdlib, MCP-session, self-evolution,
-cross-tier and emitted-code-validation groups; 38 typescript, 21 python, 16 rust and 21 java backend
-tests; 28 wasm tests executed on real wasmtime; plus the live hot-swap demo,
-the self-evolution demo and the cordisc cross-check. Some suites skip rather
-than fail when a toolchain is absent — the rust cargo tests need crates.io
-reachable, the wasm tests need `wasmtime` on `PATH`, the java tests need a
-JDK — and each says which half is missing.
+```bash
+pytest backends/wasm/test_v3_emit.py -q      # needs wasmtime on PATH; CI pins v47.0.3
+```
+
+Recursion executes on the same substrate
+(`tests/test_wasm_backend.py`, recursive `fib(10) = 55`). Loops, `for-of`,
+mutation and destructuring execute through the **emitted Python** in
+`tests/test_v2_emit.py::test_loops_mutation_and_destructuring_emit_and_execute`
+— but no test runs *these two programs* through the python or typescript
+emitters, so treat wasmtime as the one that proves it.
+
+**Suites** — each with the command that counts it, because a number with no
+command behind it is the failure mode this project keeps hitting:
+
+| suite | command | collected |
+|---|---|---|
+| frontend (typing, strata, stdlib, MCP-session, self-evolution, cross-tier, emitted-code validation) | `pytest tests/ -q` | 292 |
+| wasm tier | `pytest tests/test_wasm_backend.py backends/wasm/test_v3_emit.py -q` | 42 |
+| java tier | `pytest backends/java/test_emit_java.py -q` | 29 |
+| rust tier | `pytest backends/rust/test_emit_rust.py -q` | 26 |
+| python tier | `sh backends/python/setup.sh && cd backends/python && .venv/bin/pytest -q` | 21 |
+| typescript tier | `cd backends/typescript && npm ci && npx vitest run` | — |
+
+Plus the live hot-swap demo, the self-evolution demo and the cordisc
+cross-check. **Read the skips.** Most suites skip rather than fail when a
+toolchain is absent, and a skip is not a pass: of the 42 wasm-tier tests, 20
+execute on real `wasmtime` and skip without it; the java tier skips 8 without
+a JDK; the rust cargo tests need crates.io reachable; the cordis-py runtime
+tests skip without `backends/python/setup.sh`. The python tier is the
+exception — without its own venv it *errors* at collection rather than
+skipping, so run it the way the table says.
+
+Three things in that list are **local-only checks, not CI gates**, because
+the job that runs `tests/` installs neither cordis-py nor
+`backends/typescript/node_modules`: the self-evolution demo
+(`tests/test_self_evolution.py`), the live MCP session
+(`tests/test_mcp_session.py`), and the cordisc cross-check
+(`tests/test_cordisc_crosscheck.py`, which needs cordisc checked out beside
+this repo). They pass on a fully-provisioned machine; they skip on every
+push. `pytest tests/ -q -rs` prints exactly which.
 
 ### The acceptance benchmark (syntax-2.0 §10)
 
@@ -132,45 +181,57 @@ generations and summaries are committed under `bench/results/`.
 <!-- BENCH-RESULTS:BEGIN -->
 Two full 30×3 runs with DeepSeek V4 Pro (3-iteration error-feedback loop,
 ~$0.25 total): one scored against the **typing-enforced** checker
-(`37bed37`, the shipping compiler), one against the pre-typing checker
-(`9a8c670`) as a control.
+(`37bed37`), one against the pre-typing checker (`9a8c670`) as a control.
+Those as-run numbers are frozen in each run's `summary.md`:
 
-Typed checker (`bench/results/typed-deepseek-v4-pro`):
-
-| variant | first-pass compile | green ≤ 3 iters | mean iters-to-green |
+| variant | v1 | v2 | v2host |
 |---|---|---|---|
-| v1 (1.x syntax) | 27/30 (90%) | 29/30 | 1.07 |
-| v2 (2.0 syntax) | 20/30 (67%) | 29/30 | 1.31 |
-| v2host (2.0 + host blocks) | 18/30 (60%) | 30/30 | 1.40 |
+| typed (`bench/results/typed-deepseek-v4-pro`) | 27/30 | 20/30 | 18/30 |
+| pre-typing control (`bench/results/baseline-deepseek-v4-pro`) | 28/30 | 17/30 | 13/30 |
 
-Pre-typing control: v1 93% / v2 57% / v2host 43% first-pass — i.e. **sound
-typing costs models nothing** (typed first-pass is equal-or-better, within
-run-to-run variance on n=30).
+Sound typing cost models nothing (typed first-pass is equal-or-better, within
+run-to-run variance on n=30). One grammar friction dominated the v2/v2host
+gap: models write the full provide-method signature
+(`fn query(sql: Str) -> Int = ...`) exactly as the `fn` stratum teaches them
+to, and the component grammar rejected those annotations. That friction is
+fixed (A6: optional provide-method parameter and return-type annotations,
+checked against the service signature).
 
-What the gap was: one grammar friction dominated these runs. Models write the
-full provide-method signature (`fn query(sql: Str) -> Int = ...`) exactly as
-the 2.0 `fn` stratum teaches them to, and the component grammar rejected the
-parameter and return-type annotations — most of each run's v2/v2host
-first-pass failures were this single parse error. **That friction is now
-fixed:** optional provide-method parameter *and* return-type annotations are
-accepted and checked against the service signature (A6). Re-compiling the
-committed first-pass generations against the fixed compiler (same
-generations, new compiler — not a fresh model run) measures the effect:
+**Re-score against the current compiler.** `bench/rescore.py` recompiles the
+committed `attempt-1.rvl` files — *the same generations, a newer compiler; not
+a fresh model run, and it calls no provider* — and reports a failure taxonomy:
 
-| variant | first-pass, as-run | first-pass, fixed compiler |
+```bash
+python3 bench/rescore.py --run all      # measured at compiler d71c689
+```
+
+| variant | as-run | re-score @ `d71c689` |
 |---|---|---|
-| v1 | 27/30 | 29/30 |
-| v2 | 20/30 | 29/30 |
-| v2host | 18/30 | 29/30 |
+| v1 | 27/30 | 22/30 |
+| v2 | 20/30 | 23/30 |
+| v2host | 18/30 | 23/30 |
 
-All three variants reach **full parity** — the annotation friction is gone,
-and `${}` templates now take arbitrary expressions (the one v2 case that used
-a function call in a template). The single remaining failure is `29-mesh`, a
-genuine model error (a malformed statement) *identical across all three
-variants* — the irreducible floor, not syntax friction. A fresh model run
-(which would also benefit from the new diagnostics) is future work.
-Diagnostics did their job meanwhile: 176/180 cells compiled within 3
-iterations, mean iterations-to-green ≤ 1.4 everywhere.
+**The re-score is lower than the as-run number, and that is the honest
+result.** The A6 fix alone took all three variants to 28/29/29 (measurable:
+`python3 bench/rescore.py --run all --compiler-root <export of 056539f>`).
+Landing G4's *upper-bound* direction — a service operation declared plain `fn`
+may not be implemented by a body that reaches an emission — then took 18 of
+the 90 cells red. Those 18 are not model errors: six specs pinned an interface
+declaring `fn put(...)` plain while the brief instructed the model to emit
+inside it, so under the new rule the spec was unsatisfiable and the prompts
+never taught the rule anyway. Both are fixed for the next run (the seven
+affected `specs.json` interfaces now say `emission fn`; all three prompts now
+state the upper-bound direction), but fixing them cannot retroactively change
+generations produced before the rule existed.
+
+The remaining 4 failures are genuine model errors: an invented stdlib method
+(`take` on `Str`) and `29-mesh`, where every variant wrote a bare `kv.put(k, v)`
+in statement position — legal only as `let _ = kv.put(k, v)`, a form the
+prompts did not mention and now do.
+
+**A fresh model run is what would move these numbers, and it has not been
+done since the rule landed.** Treat the re-score as a regression measurement
+of the corpus, not as a current model capability figure.
 <!-- BENCH-RESULTS:END -->
 
 ```bash

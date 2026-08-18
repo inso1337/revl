@@ -324,7 +324,7 @@ def test_loops_mutation_and_destructuring_emit_and_execute():
 
         fn skip_spaces(source: Str, start: Int) -> Int {
           var i = start
-          while (i < source.length && source[i] == " ") i += 1
+          while (i < source.length && source.charAt(i) == " ") i += 1
           return i
         }
 

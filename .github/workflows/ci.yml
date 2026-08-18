@@ -63,9 +63,52 @@ jobs:
           mkdir -p /tmp/wasmtime
           tar -C /tmp/wasmtime -xJf /tmp/wasmtime.tar.xz
           echo "/tmp/wasmtime/wasmtime-v47.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      # installing the runtime is only half of it: if the download ever
+      # breaks, the tests would go back to skipping and the job would still
+      # be green. Prove the binary is there, then make its absence fatal.
+      - run: wasmtime --version
       # the tier's runtime tests live partly in tests/test_wasm_backend.py
       # (the frontend half of the wasm backend) — run both files here.
-      - run: pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q
+      - run: pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q --junitxml=/tmp/wasm-junit.xml
+        env:
+          # turns "wasmtime not installed" from a silent skip into a failure;
+          # unset locally, so offline dev still skips cleanly
+          REVL_REQUIRE_WASMTIME: "1"
+      # belt and braces, and it covers the whole tier rather than only the
+      # file that reads the flag: this job must not skip a single test.
+      - name: no wasm test may skip in CI
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          report = pathlib.Path("/tmp/wasm-junit.xml")
+          if not report.is_file():
+              print("::error::pytest wrote no junit report - the run did not start")
+              sys.exit(1)
+          text = report.read_text(encoding="utf-8", errors="replace")
+          # The guard exists for WASMTIME coverage. One skip is legitimately
+          # about a *different* optional runtime - the cordis-wasm substrate
+          # prototype, a separate repo CI does not provision. Exempt exactly
+          # that reason and fail on every other skip, so the exemption cannot
+          # quietly widen.
+          ALLOWED = ("cordis-wasm venv not available",)
+          reasons = re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)
+          counted = sum(int(n) for n in re.findall(r'<testsuite\b[^>]*?\bskipped="(\d+)"', text))
+          if len(reasons) != counted:
+              print(f"::error::junit reports {counted} skip(s) but {len(reasons)} "
+                    "skip message(s) - cannot audit them, refusing to pass")
+              sys.exit(1)
+          unexpected = [r for r in reasons if r not in ALLOWED]
+          if unexpected:
+              for reason in unexpected:
+                  print(f"::error::wasm test skipped in CI: {reason}")
+              print(f"::error::{len(unexpected)} wasm test(s) skipped - the tier's "
+                    "runtime coverage is not actually running")
+              sys.exit(1)
+          for reason in reasons:
+              print(f"exempt (not a wasmtime gate): {reason}")
+          print(f"no wasmtime-gated wasm tests skipped ({len(reasons)} exempt)")
+          PY
 
   backend-rust:
     runs-on: ubuntu-latest
@@ -76,6 +119,11 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
       - run: pip install -e ".[test]"
+      # the cargo gates resolve offline first and fall back to the networked
+      # resolve when a crate is not in the local registry — which is always
+      # the case on a fresh runner, so CI still fetches cordis-rs exactly as
+      # before. The offline-first attempt is what lets an offline dev machine
+      # with a warm ~/.cargo run these for real instead of skipping them.
       - run: pytest backends/rust/test_emit_rust.py -q
 
   backend-java:
@@ -104,3 +152,42 @@ jobs:
       - run: pytest backends/java/test_emit_java.py -q
         env:
           REVL_CORDIS4J_CLASSES: /tmp/cordis4j-classes
+
+  # The conformance matrix's second half: emitted code must survive its own
+  # toolchain, not merely leave the emitter without raising. That gate
+  # (tests/test_conformance_validate.py) lives in the frontend suite, where
+  # only python is installed — so four of five tiers skipped there and the
+  # blind spot the matrix was built to close stayed open in CI. This job is
+  # the one place every tier's compiler exists at once.
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install wasmtime (pinned)
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
+          mkdir -p /tmp/wasmtime
+          tar -C /tmp/wasmtime -xJf /tmp/wasmtime.tar.xz
+          echo "/tmp/wasmtime/wasmtime-v47.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      - run: pip install -e ".[test]"
+      # the typescript validator drives tsc through the compiler API, so it
+      # needs the backend's own node_modules
+      - run: cd backends/typescript && npm ci
+      # a tier whose validator cannot run reports `unavailable`, and
+      # `--validate` still exits 0 — right on a laptop, wrong here. Fail the
+      # job before the gate runs rather than let a tier go unchecked.
+      - run: python3 tools/conformance.py --check-toolchains
+      # the baselined gate: new toolchain rejections fail, and a baselined
+      # failure that starts passing fails too, so the list can only shrink
+      - run: pytest tests/test_conformance_validate.py -q

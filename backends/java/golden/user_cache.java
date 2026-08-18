@@ -43,25 +43,98 @@ public final class Components {
         }
     }
 
-    // host object runtime (Pool) — functional placeholder
+    // host object runtime (Pool) — a bounded connection pool over a
+    // deterministic in-memory database (no driver dependency).  Semantics
+    // are shared across tiers: backends/python/runtime.py, section
+    // `.. _pool-job-semantics:`.
     public static final class Pool {
         private final String url;
         private final long poolSize;
+        private final java.util.ArrayList<Long> idle = new java.util.ArrayList<>();
+        private final java.util.ArrayList<Long> checkedOut = new java.util.ArrayList<>();
+        private boolean closed = false;
         private Pool(String url, long poolSize) {
             this.url = url;
             this.poolSize = poolSize;
+            for (long i = 1L; i <= poolSize; i++) {
+                idle.add(i);
+            }
         }
         public static Pool open(String url, long poolSize) {
+            if (poolSize < 1L) {
+                throw new IllegalStateException(
+                    "pool size must be an integer >= 1 (got " + poolSize + ")");
+            }
             return new Pool(url, poolSize);
         }
+        public String url() {
+            return url;
+        }
+        public long capacity() {
+            if (closed) {
+                return 0L;
+            }
+            return poolSize;
+        }
+        public long inUse() {
+            return checkedOut.size();
+        }
+        public long available() {
+            return idle.size();
+        }
+        // Statements borrow silently; only an explicit acquire/release is a
+        // traced operation on the tiers that trace.
+        private long borrow(String op) {
+            if (closed) {
+                throw new IllegalStateException(
+                    "pool." + op + " after close/drop — use-after-free");
+            }
+            if (idle.isEmpty()) {
+                throw new IllegalStateException(
+                    "pool." + op + " exhausted (size=" + poolSize
+                        + ", in_use=" + checkedOut.size() + ")");
+            }
+            long conn = idle.remove(0);
+            checkedOut.add(conn);
+            return conn;
+        }
+        private void giveBack(long conn) {
+            checkedOut.remove(Long.valueOf(conn));
+            idle.add(conn);
+            java.util.Collections.sort(idle);
+        }
+        public long acquire() {
+            return borrow("acquire");
+        }
+        public void release(long conn) {
+            if (closed) {
+                throw new IllegalStateException(
+                    "pool.release after close/drop — use-after-free");
+            }
+            if (!checkedOut.contains(Long.valueOf(conn))) {
+                throw new IllegalStateException(
+                    "pool.release conn=" + conn + " is not checked out");
+            }
+            giveBack(conn);
+        }
         public void close() {
-            // Placeholder: a real pool would close its connections here.
+            if (closed) {
+                throw new IllegalStateException(
+                    "pool.close after close/drop — use-after-free");
+            }
+            checkedOut.clear();
+            idle.clear();
+            closed = true;
         }
         public java.util.List<Object> query(String sql) {
+            long conn = borrow("query");
+            giveBack(conn);
             return java.util.List.of();
         }
         public long execute(String sql) {
-            return 0L;
+            long conn = borrow("execute");
+            giveBack(conn);
+            return 1L;
         }
     }
 

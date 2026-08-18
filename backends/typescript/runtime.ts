@@ -1,10 +1,17 @@
-// revl cordis/TypeScript backend — host-builtin stub stdlib + adapter glue.
+// revl cordis/TypeScript backend — host stdlib + adapter glue.
 //
 // The emitted modules import `host` from here.  Everything is deliberately
 // observable: every host call is recorded into `hostLog` (and forwarded to
 // subscribers) so the demo and the R1–R4 tests can assert ordering, and every
 // acquired resource registers in `liveResources` so R4 (no-residue) can be
 // asserted against the host as well as against cordis introspection.
+//
+// `Pool` and `Job` are NOT placeholders: `Pool` is a real bounded connection
+// pool over a deterministic fake database and `Job` is a real cancellable
+// asynchronous unit of work.  Their semantics are defined once, for every
+// tier, in backends/python/runtime.py under ".. _pool-job-semantics:" — this
+// file implements exactly that state machine (same errors, same trace
+// strings, same tick count).  Change that text first, then all four tiers.
 
 import type { Context } from 'cordis'
 
@@ -71,6 +78,8 @@ export function resetHost(): void {
   liveResources.clear()
   poolCounter = 0
   mapCounter = 0
+  jobCounter = 0
+  jobHandles.length = 0
 }
 
 function record(entry: string): void {
@@ -86,16 +95,23 @@ export const liveResources = new Set<string>()
 
 let poolCounter = 0
 
+/** A bounded connection pool (see backends/python/runtime.py,
+ * ".. _pool-job-semantics:").  Real capacity accounting over a
+ * deterministic fake database — no driver dependency. */
 export class PoolHandle {
   closed = false
   readonly statements: string[] = []
   readonly label: string
   readonly url: string
   readonly size: number
+  /** idle connection ids, lowest first (determinism) */
+  private idle: number[]
+  private checkedOut: number[] = []
 
   constructor(url: string, size: number) {
     this.url = url
     this.size = size
+    this.idle = Array.from({ length: size }, (_, i) => i + 1)
     this.label = `pool#${++poolCounter}(${url})`
     liveResources.add(this.label)
     record(`${this.label}.open size=${size}`)
@@ -105,26 +121,167 @@ export class PoolHandle {
     if (this.closed) throw new Error(`${this.label}.${op} after close`)
   }
 
+  /** Borrow a connection for the duration of one statement (silent: only an
+   * explicit acquire/release is traced, so existing traces are unchanged). */
+  private borrow(op: string): number {
+    this.assertOpen(op)
+    if (this.idle.length === 0) {
+      throw new Error(
+        `${this.label}.${op} exhausted (size=${this.size}, in_use=${this.checkedOut.length})`,
+      )
+    }
+    const conn = this.idle.shift() as number
+    this.checkedOut.push(conn)
+    return conn
+  }
+
+  private giveBack(conn: number): void {
+    this.checkedOut.splice(this.checkedOut.indexOf(conn), 1)
+    this.idle.push(conn)
+    this.idle.sort((a, b) => a - b)
+  }
+
+  capacity(): number {
+    return this.closed ? 0 : this.size
+  }
+
+  inUse(): number {
+    return this.checkedOut.length
+  }
+
+  available(): number {
+    return this.idle.length
+  }
+
+  /** Check out the lowest-numbered idle connection; throws when exhausted. */
+  acquire(): number {
+    const conn = this.borrow('acquire')
+    record(`${this.label}.acquire conn=${conn} ${this.checkedOut.length}/${this.size}`)
+    return conn
+  }
+
+  release(conn: number): void {
+    this.assertOpen('release')
+    if (!this.checkedOut.includes(conn)) {
+      throw new Error(`${this.label}.release conn=${conn} is not checked out`)
+    }
+    this.giveBack(conn)
+    record(`${this.label}.release conn=${conn} ${this.checkedOut.length}/${this.size}`)
+  }
+
   query(sql: any): any[] {
-    this.assertOpen('query')
-    record(`${this.label}.query(${sql})`)
-    this.statements.push(String(sql))
-    return []
+    const conn = this.borrow('query')
+    try {
+      record(`${this.label}.query(${sql})`)
+      this.statements.push(String(sql))
+      return []
+    } finally {
+      this.giveBack(conn)
+    }
   }
 
   execute(sql: any): number {
-    this.assertOpen('execute')
-    record(`${this.label}.execute(${sql})`)
-    this.statements.push(String(sql))
-    return 1
+    const conn = this.borrow('execute')
+    try {
+      record(`${this.label}.execute(${sql})`)
+      this.statements.push(String(sql))
+      return 1
+    } finally {
+      this.giveBack(conn)
+    }
   }
 
   close(): void {
     this.assertOpen('close')
+    this.checkedOut.length = 0 // a close actually releases
+    this.idle.length = 0
     this.closed = true
     liveResources.delete(this.label)
     record(`${this.label}.close`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Job — a cancellable asynchronous unit of work (see the semantics block in
+// backends/python/runtime.py).  Deterministic: exactly JOB_TICKS microtask
+// turns of simulated work, never a timer.
+
+export const JOB_TICKS = 5
+
+export type JobState = 'pending' | 'done' | 'cancelled'
+
+export class JobCancelledError extends Error {}
+
+let jobCounter = 0
+const jobHandles: JobHandle[] = []
+
+export class JobHandle implements PromiseLike<string> {
+  readonly name: string
+  readonly serial: number
+  private status: JobState = 'pending'
+  private remainingTicks = JOB_TICKS
+  private driven: Promise<string> | undefined
+
+  constructor(name: string) {
+    this.name = name
+    this.serial = ++jobCounter
+    jobHandles.push(this)
+    record(`job.run ${name} start`)
+  }
+
+  state(): JobState {
+    return this.status
+  }
+
+  get remaining(): number {
+    return this.remainingTicks
+  }
+
+  /** pending -> cancelled (true); a no-op returning false otherwise. */
+  cancel(): boolean {
+    if (this.status !== 'pending') return false
+    this.status = 'cancelled'
+    record(`job.run ${this.name} cancelled`)
+    return true
+  }
+
+  private async drive(): Promise<string> {
+    if (this.status === 'done') return this.name
+    if (this.status === 'cancelled') {
+      throw new JobCancelledError(`job "${this.name}" cancelled`)
+    }
+    while (this.remainingTicks > 0) {
+      await Promise.resolve()
+      // `state()` (not `this.status`) — cancel() may have run during the
+      // await, which control-flow narrowing cannot see.
+      if (this.state() === 'cancelled') {
+        throw new JobCancelledError(`job "${this.name}" cancelled`)
+      }
+      this.remainingTicks--
+    }
+    this.status = 'done'
+    record(`job.run ${this.name} done`)
+    return this.name
+  }
+
+  // Thenable, not an eagerly-started Promise: the work begins on the first
+  // `await`, matching the lazy tiers (python/rust) tick-for-tick.
+  then<T1 = string, T2 = never>(
+    onfulfilled?: ((value: string) => T1 | PromiseLike<T1>) | null,
+    onrejected?: ((reason: any) => T2 | PromiseLike<T2>) | null,
+  ): PromiseLike<T1 | T2> {
+    if (!this.driven) this.driven = this.drive()
+    return this.driven.then(onfulfilled, onrejected)
+  }
+}
+
+/** Handles still in flight — a teardown that abandons a job leaves this > 0. */
+export function pendingJobs(): number {
+  return jobHandles.filter((job) => job.state() === 'pending').length
+}
+
+export function jobHandleList(): JobHandle[] {
+  return [...jobHandles]
 }
 
 let mapCounter = 0
@@ -183,12 +340,18 @@ export interface ConfigFieldSpec {
   default?: unknown
 }
 
+/** component name -> the configuration it last actually ran with, after
+ * defaults.  The trace event `<Component>.config {...}` carries the same
+ * information; this is the queryable form. */
+export const resolvedConfig = new globalThis.Map<string, Record<string, unknown>>()
+
 function applyConfigDefaults(
   component: string,
   raw: object | undefined,
   spec: Record<string, ConfigFieldSpec>,
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {}
+  const defaulted: string[] = []
   for (const [field, fieldSpec] of Object.entries(spec)) {
     const value = (raw as Record<string, unknown> | undefined)?.[field]
     if (value !== undefined) {
@@ -197,8 +360,16 @@ function applyConfigDefaults(
       throw new TypeError(`${component}: missing required config field "${field}"`)
     } else {
       config[field] = fieldSpec.default
+      defaulted.push(field)
     }
   }
+  resolvedConfig.set(component, config)
+  const body = Object.keys(config)
+    .sort()
+    .map((key) => `${key}=${JSON.stringify(config[key])}`)
+    .join(', ')
+  const tail = defaulted.length ? ` [defaults: ${defaulted.sort().join(', ')}]` : ''
+  record(`${component}.config {${body}}${tail}`)
   return config
 }
 
@@ -211,7 +382,11 @@ export const host = {
         record(`pool.open refused ${url}`)
         throw new Error(`refused to open ${url}`)
       }
-      return new PoolHandle(String(url), Number(size))
+      const capacity = Number(size)
+      if (!Number.isInteger(capacity) || capacity < 1) {
+        throw new Error(`pool size must be an integer >= 1 (got ${size})`)
+      }
+      return new PoolHandle(String(url), capacity)
     },
   },
   Map: {
@@ -220,14 +395,14 @@ export const host = {
     },
   },
   Job: {
-    // async host builtin (IR v1/A1): resolves on later ticks so `await`
-    // steps have a real in-flight window for divert tests
-    async run(name: any): Promise<string> {
-      record(`job.run ${name} start`)
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      record(`job.run ${name} done`)
-      return String(name)
+    // async host builtin (IR v1/A1): a cancellable handle that resolves on
+    // later ticks, so `await` steps have a real in-flight window — and real
+    // async state — for the divert tests
+    run(name: any): JobHandle {
+      return new JobHandle(String(name))
     },
+    pending: pendingJobs,
+    TICKS: JOB_TICKS,
   },
   applyConfigDefaults,
 }

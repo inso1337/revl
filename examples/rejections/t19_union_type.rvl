@@ -1,0 +1,17 @@
+// REJECTED — a TypeScript-style union of types. revl's `|` separates the
+// *cases* of a variant, which are constructor names, not types: `List[Row]`
+// is a type and cannot be a case. Without this the right-hand side would read
+// as a variant whose first case is unspellable, which is the same silent
+// divergence `type X = Y` used to have.
+//
+// expected error:
+//   revl has no union types — `|` separates the cases of a variant, and
+//   `List[Row]` is a type, not a case
+
+type Row = { id: Int }
+
+type Payload = List[Row] | Str
+
+fn take(p: Payload) -> Int {
+  return 1
+}

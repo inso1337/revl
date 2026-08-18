@@ -1,0 +1,15 @@
+// REJECTED — a cycle among type aliases. `type X = Y` where `Y` names an
+// existing type is a transparent alias: it is substituted verbatim at every
+// declaration site and its declaration erased, so a cycle has no expansion to
+// substitute. Refusing it here beats looping in the resolver or emitting a
+// type no tier defines.
+//
+// expected error:
+//   type alias cycle: Handle -> Ref -> Handle
+
+type Handle = Ref
+type Ref = Handle
+
+fn open(h: Handle) -> Int {
+  return 1
+}

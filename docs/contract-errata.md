@@ -70,23 +70,48 @@ This goes in the compiler spec, not the runtimes.
 ## Typing gaps (fenced, not closed)
 
 The checker is sound where types are known and silent where they are not (the
-gradual frontier of the sound-typing milestone). The two silent gaps below are
-known soundness holes rather than mere unknowns, so each is loud here with its
+gradual frontier of the sound-typing milestone). The gaps below are known
+soundness holes rather than mere unknowns, so each is loud here with its
 trigger and blast radius, the way the cordis-rs A1 divergence is. Everything
-else the checker does not type (arrows, un-annotated positions) infers to an
-unknown and is left alone by design.
+else the checker does not type infers to an unknown and is left alone by
+design.
 
-- **Generic instantiation is deferred** (frontier, tracked): a single-uppercase
-  type name (`T`, `E`) is a wildcard everywhere (`_is_wildcard`, `typecheck.py`)
-  and is never unified against the actual argument at a call site. Trigger: a
-  generic fn whose return mentions a type parameter, e.g. `fn id(x: T) -> T {
-  return x }` then `id("hello")` used where an `Int` is expected. Blast radius:
-  the declared return flows into any expected type unchecked, so a generic fn's
-  result is effectively untyped at the call site (`id("hello")` satisfies an
-  `Int` position). Bounded: only functions carrying single-uppercase type
-  parameters; fully monomorphic code is checked. Closing it needs explicit
-  type-parameter syntax in the parser plus a call-site unification pass (roadmap
-  "Typing follow-ups").
+**Closed since the last revision** (roadmap "Typing follow-ups"; rejection
+files `t8`–`t17`). One of these — generic instantiation — was fenced here; the
+rest were *not*, which is the failure mode this section exists to prevent: a
+review found six programs the checker accepted and the strict tiers refuse,
+none of them named by any fence. Each closure is verified against `javac
+--release 21` and the emitted Rust.
+
+- a declared return not produced on every path — in a `fn` and in a `provide`
+  method alike (rust E0308, java "missing return statement"; python silently
+  returned `None`, and python is the reference backend);
+- a call with the wrong arity (rust E0061, java "cannot be applied to given
+  types"), in `fn`, component and `test` bodies;
+- any access *through* an `Opt` — `.field`, `[i]`, a stdlib method — plus `?.`
+  on a non-optional and `?.` typed as the inner rather than `Opt[inner]` (rust
+  E0609, java "cannot find symbol"). This one contradicted the README's
+  headline claim outright: `return o` was refused while `o.name` escaped to an
+  unknown and then flowed anywhere;
+- `Str` indexing (rust E0277, java "cannot find symbol" — the emitter renders
+  `.get(i)` on a `String`); the specified surface is `charAt` / `charCodeAt` /
+  `slice`;
+- a `match` arm naming something that is not a case of the scrutinee's ADT
+  (java "cannot find symbol", rust `EmitError`);
+- generic instantiation at the call site (below);
+- **`type X = Y` silently meaning something other than an alias.** It parsed as
+  a one-case variant whose single case was named `Y`, so `type Sku = Str` made
+  the author's own alias unusable (`f("abc")` was refused for a `Sku`
+  parameter) while `fn g() -> Sku { return Str }` was accepted, `Str` having
+  resolved as that variant's nullary case constructor. This was the governing
+  principle's own failure case — `type X = Y` is TypeScript's alias spelling
+  and revl gave it a different meaning with no diagnostic — and a live trap for
+  importers, since a WIT `type sku = string` transcribed naively was quietly
+  wrong. Now a transparent alias; see below for where the line falls.
+
+Arrow bodies are now checked against their enclosing scope, which is where the
+first four used to hide. Do not re-fence any of these; each has an executable
+rejection.
 
 - **Host-object methods are untyped** (by design, host provenance): a value of
   host provenance (a `let` bound to `Map.new()` / `Pool.open(...)`, or a
@@ -100,6 +125,71 @@ unknown and is left alone by design.
   surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are typed and
   their misuse is refused, in `fn` bodies and (as of the setup op sweep) in
   component effect blocks alike.
+
+- **Arrow *values* have no type** (frontier, narrowed): an arrow's parameters
+  are un-annotated and no arrow type is reconstructed, so the arrow itself, and
+  anything obtained by calling one, infers to an unknown. Trigger: `let f = (x)
+  => "s"` then `f(1)` in an `Int` position. Blast radius: the call's result
+  flows anywhere unchecked, and the arrow's arity is not checked at the call
+  site. Narrowed, not open: the arrow's *body* is now type-checked against the
+  enclosing scope, so a captured variable misused inside a lambda (`(x) =>
+  o.name` on an `Opt`, `(x) => s[0]`, a wrong-arity call) is refused exactly as
+  it is outside one. Closing the rest needs arrow-parameter annotations in the
+  grammar.
+
+- **Type parameters are implicit, so they cannot be spelled or constrained**
+  (frontier, tracked): instantiation itself is closed — a single-uppercase name
+  in a `fn` signature that is not a declared type is that fn's type parameter,
+  is a wildcard only inside that fn's own body, and is unified against the
+  actual arguments at every call site (`collect_tparams` / `unify`,
+  `typecheck.py`), so `fn id(x: T) -> T` then `id("hello")` no longer satisfies
+  an `Int` position. What is *not* closed is the declaration form. There is no
+  `[T]` syntax, so: (a) the rule is positional-by-spelling — a one-letter
+  signature type is generic whether or not the author meant it, and a typo'd
+  one-letter name silently becomes a type parameter rather than an error;
+  (b) parameters cannot be bounded or shared across signatures; (c) only `fn`
+  and `extern` signatures quantify — a one-letter name in a record field or an
+  ADT payload is an ordinary opaque nominal type, like any other undeclared
+  name (undeclared multi-letter names such as the `Row` in `-> List[Row]` are
+  deliberately opaque, since service returns are host-shaped). Closing it needs
+  explicit type-parameter syntax in the parser.
+
+- **Type aliases are transparent, and the alias/variant line is drawn where
+  TypeScript's own is** (closed, recorded because the rule is subtle): `type X
+  = Y` is an alias exactly when `Y` names an existing type — a builtin, a
+  declared record/variant/alias, a type application (`List[Row]`), or the `T?`
+  sugar. It is then substituted at every declaration site and its declaration
+  erased, so no alias name reaches the type table, the IR or a backend. When
+  `Y` is *undeclared*, the one-case-variant reading stands: `type Status =
+  Pending` is still how an opaque nominal is spelled, and a payload always
+  makes a newtype (`type W = Wrap(Int)`), never an alias.
+
+  The split is not arbitrary — it is TypeScript's, verified against `tsc
+  --strict`: `type Sku = string` compiles and is transparent in both
+  directions, while `type Sku = Ident` and `type K = Ident | Keyword` with
+  undeclared names are hard errors (TS2304). So revl now agrees with
+  TypeScript everywhere TypeScript compiles, and is free to mean its own thing
+  only where TypeScript refuses — which is exactly what the governing
+  principle asks for. Transparent rather than nominal for the same reason: a
+  nominal alias would need construction syntax revl does not have, and would
+  re-commit the sin by giving TypeScript's spelling a different meaning.
+
+  Consequences worth knowing: an alias cannot carry type parameters (there is
+  nothing to instantiate), an alias cycle is refused rather than looped on, and
+  `List[Row] | Str` is refused with "revl has no union types" — `|` separates
+  variant *cases*, which are constructor names, not types. The interaction with
+  implicit type parameters resolves in the alias's favour and does so before
+  the signature table is built: `type S = Str` makes `S` mean `Str`, while an
+  undeclared one-letter name in a signature is still that fn's type parameter.
+
+- **A `match` over an untypable scrutinee stays best-effort** (frontier,
+  unchanged): case-name and exhaustiveness checks need the scrutinee's ADT.
+  When it is not recoverable — a host-valued local, an arrow result — both
+  checks are skipped and the Python emitter adds a runtime fallback. Trigger:
+  `match store.lookup(k) { ... }` on a host object. Blast radius: a missing or
+  misspelled case in that one `match` reaches the tiers. Narrowed: a bare
+  nullary constructor now types as its ADT, so `match FirstTime { ... }` is
+  checked; only genuinely unknown scrutinees are silent.
 
 ## Contract rejection coverage (the executable spec)
 
@@ -126,3 +216,11 @@ sampled.
   `tests/test_frontend.py` (`test_a3_host_colliding_names_are_renamed`,
   `test_a4_literal_dollars_are_escaped`, `test_a5_compensate_lowering`).
 - **A7** is advisory; its enforcement is G4 itself (`g4_unmarked_emission.rvl`).
+- **T1–T19** are the type-soundness refusals. `t8`–`t19` were added with the
+  typing follow-ups above and are deliberately paired: each rejection file
+  states the tier error it prevents, and `tests/test_typesafety.py` asserts
+  both the refusal *and* the legal spellings it must not touch (a `fn`
+  returning nothing needs no `return`; `if`/`else` where both arms return is
+  fine; `o?.name`, `o?.name ?? d` and a `match` unwrap all stay accepted;
+  `xs[0]`, `s.charAt(0)` and a `_` arm stay accepted). A soundness check with
+  no false-positive test is a check nobody can safely tighten later.

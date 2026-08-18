@@ -4,8 +4,12 @@ one process, consumed in another, over a Unix-domain socket.
 Two halves, both transport-agnostic in shape (this cut uses AF_UNIX):
 
 * **stub** (`serve`): the provider side. Given a running ``cordis.Context``
-  and the keys to export, it listens and dispatches each incoming call to
-  ``ctx.get(key).method(*args)``. Value results marshal straight back.
+  and the keys to export *with the method names each key exports*, it listens
+  and dispatches each incoming call to ``ctx.get(key).method(*args)``. Both
+  halves of the request are checked against the declaration — an unknown key
+  and an unknown method are refused identically — so the seam is exactly the
+  enumerable surface the service declares (G8), not "whatever attribute the
+  provided object happens to have". Value results marshal straight back.
 * **proxy** (`proxy_component`): the consumer side. A component that provides
   ``key`` with a forwarding object whose methods RPC to the stub. To the
   consumer it is an ordinary provider of ``key``; the seam is invisible.
@@ -31,6 +35,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Mapping
 
 
 # ---------------------------------------------------------------------------
@@ -96,14 +101,56 @@ def _connect(path: str, attempts: int = 100, delay: float = 0.05) -> socket.sock
 # ---------------------------------------------------------------------------
 
 
-async def _invoke(ctx, keyset, req: dict) -> dict:
+def _export_table(exports) -> dict:
+    """Normalize `serve`'s `exports` argument to ``{key: allowed methods | None}``.
+
+    Two accepted forms:
+
+    * a mapping ``{key: [method, ...]}`` — the *declared* form. The list is the
+      service's own operation list, read off the IR (`src/revl/placement.py`
+      ships it in the process spec), so the stub admits exactly what the
+      `service` declaration admits.
+    * a bare iterable of keys — the legacy form (demo/bridge_pypy.py). With no
+      declared list the allowlist is derived at dispatch time from the provided
+      object's public methods: weaker, because it trusts the object rather than
+      the interface, but still an allowlist (dunders, privates and
+      non-callables are refused).
+    """
+    if isinstance(exports, Mapping):
+        return {key: frozenset(methods or ()) for key, methods in exports.items()}
+    return {key: None for key in exports}
+
+
+def _public_methods(service) -> frozenset:
+    """Fallback allowlist: the provided object's own public callables."""
+    names = set()
+    for name in dir(service):
+        if name.startswith("_"):
+            continue
+        try:
+            if callable(getattr(service, name)):
+                names.add(name)
+        except Exception:  # noqa: BLE001 — a property that raises is not a method
+            continue
+    return frozenset(names)
+
+
+async def _invoke(ctx, exports: dict, req: dict) -> dict:
     key, method, args = req.get("key"), req.get("method"), req.get("args") or []
-    if key not in keyset:
+    if key not in exports:
         return {"ok": False, "error": f"key {key!r} is not exported by this process"}
     try:
         service = ctx.get(key)
         if service is None:
             return {"ok": False, "error": f"no provider for key {key!r} right now"}
+        allowed = exports[key]
+        if allowed is None:  # legacy key-only export: derive from the object
+            allowed = _public_methods(service)
+        if method not in allowed:
+            listed = ", ".join(sorted(allowed)) or "(none)"
+            return {"ok": False,
+                    "error": f"method {method!r} is not exported for key {key!r} "
+                             f"(exported: {listed})"}
         result = getattr(service, method)(*args)
         if inspect.isawaitable(result):
             result = await result
@@ -112,10 +159,15 @@ async def _invoke(ctx, keyset, req: dict) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-async def serve(ctx, keys, path: str):
-    """Listen on `path` and answer calls to any of `keys` against `ctx`.
-    Returns the asyncio server; the caller keeps it (and the process) alive."""
-    keyset = set(keys)
+async def serve(ctx, exports, path: str):
+    """Listen on `path` and answer calls against `ctx` for the exported surface.
+
+    `exports` is either ``{key: [method, ...]}`` (the declared allowlist, what
+    placement passes) or a bare iterable of keys (legacy; see `_export_table`).
+    A request naming a key or a method outside that surface is refused with an
+    error reply — never dispatched. Returns the asyncio server; the caller
+    keeps it (and the process) alive."""
+    table = _export_table(exports)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -127,7 +179,7 @@ async def serve(ctx, keys, path: str):
                     req = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                reply = await _invoke(ctx, keyset, req)
+                reply = await _invoke(ctx, table, req)
                 writer.write((json.dumps(reply) + "\n").encode())
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):

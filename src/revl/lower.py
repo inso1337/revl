@@ -21,6 +21,9 @@ from .typecheck import (
     FNS_KEY,
     _SIZED_HEADS,
     check_ast,
+    collect_tparams,
+    render_type,
+    mark_tparams,
     check_type_wellformed,
     compatible,
     host_check,
@@ -196,6 +199,134 @@ _HOST_CALLABLES = {"Map", "Pool", "Job"}
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 
 
+# Builtin heads a `type X = Y` right-hand side may name. `Any`/`Never` are the
+# type algebra's wildcards; the rest are the declared builtin surface.
+_ALIASABLE_BUILTINS = _BUILTIN_NONRECORD | {"Any", "Never"}
+
+
+def _alias_target(decl: TypeDecl, declared: set[str]) -> str | None:
+    """The type `type X = Y` aliases, or None when the decl is a real variant.
+
+    `type X = Y` is TypeScript's alias spelling, and syntax-2.0's governing
+    principle is that no construct may exist in both languages with silently
+    different meaning. So the split follows TypeScript's own:
+
+    - Where TypeScript *compiles* it — `Y` names an existing type — revl means
+      what TypeScript means: a transparent alias. `type Sku = Str` used to
+      declare a one-case variant whose case was named `Str`, which made the
+      author's own alias unusable (`f("abc")` was refused for a `Sku`
+      parameter) while `return Str` was accepted as a case constructor.
+    - Where TypeScript *rejects* it — `Y` is undeclared (TS2304) — revl is free
+      to mean something else, because there is no shared meaning to diverge
+      from. `type Status = Pending` keeps its one-case-variant reading, which
+      is how an opaque nominal is spelled today.
+
+    A payload makes it a newtype (`type W = Wrap(Int)`), never an alias.
+    """
+    if decl.fields or len(decl.cases) != 1:
+        return None
+    case = decl.cases[0]
+    if case.payload is not None:
+        return None
+    head, args = parse_type(case.name)
+    if args:
+        return case.name  # a type application; the parser only builds these here
+    if head in _ALIASABLE_BUILTINS or head in declared:
+        return case.name
+    return None
+
+
+def _resolve_type_aliases(program: Program, filename: str) -> None:
+    """Erase transparent type aliases from the program, in place.
+
+    Aliases are substituted at every declaration site and their declarations
+    dropped, so nothing downstream — the type table, the checker, the IR, the
+    backends — ever sees the alias name. That is what `transparent` means, and
+    it is the reading TypeScript has: `Sku` and `Str` are interchangeable in
+    both directions. A *nominal* alias would be a distinct type needing
+    construction syntax revl does not have, and would re-commit the very sin
+    this fixes (both languages compiling `type X = Y` with different meanings).
+    """
+    declared = {d.name for d in program.type_decls}
+    aliases: dict[str, TypeDecl] = {}
+    for decl in program.type_decls:
+        target = _alias_target(decl, declared)
+        if target is None:
+            continue
+        if decl.params:
+            raise RevlError(
+                filename, decl.line,
+                f"type alias `{decl.name}` cannot declare type parameters",
+                hint="an alias is substituted verbatim, so it has nothing to "
+                     "instantiate — drop the parameters, or declare a variant "
+                     "with named cases (syntax-2.0 §2)",
+            )
+        # an alias is a declaration, so its right-hand side is checked here
+        # rather than only where the alias happens to be used
+        check_type_wellformed(filename, decl.line, target)
+        aliases[decl.name] = decl
+    if not aliases:
+        return
+
+    def expand(type_name: str, stack: tuple) -> str:
+        head, args = parse_type(type_name)
+        if args:
+            return f"{head}[{', '.join(expand(a, stack) for a in args)}]"
+        if head not in aliases:
+            return head
+        if head in stack:
+            chain = " -> ".join(stack[stack.index(head):] + (head,))
+            raise RevlError(
+                filename, aliases[head].line,
+                f"type alias cycle: {chain}",
+                hint="an alias is substituted verbatim, so a cycle has no "
+                     "expansion — break it, or declare one of them as a variant",
+            )
+        return expand(_alias_target(aliases[head], declared), stack + (head,))
+
+    resolved = {name: expand(_alias_target(decl, declared), (name,))
+                for name, decl in aliases.items()}
+
+    def subst(type_name):
+        if not type_name:
+            return type_name
+        head, args = parse_type(type_name)
+        if args:
+            return f"{head}[{', '.join(subst(a) for a in args)}]"
+        return resolved.get(head, head)
+
+    # every declaration site that carries a type annotation; kept in step with
+    # `_validate_declared_types` below, which enumerates the same surface
+    for fn in program.fn_decls:
+        for p in fn.params:
+            p.type = subst(p.type)
+        fn.returns = subst(fn.returns)
+    for ext in program.externs:
+        for p in ext.params:
+            p.type = subst(p.type)
+        ext.returns = subst(ext.returns)
+    for svc in program.services:
+        for m in svc.methods.values():
+            m.params = [(pname, subst(ptype)) for pname, ptype in m.params]
+            m.returns = subst(m.returns)
+    for decl in program.type_decls:
+        for fld in decl.fields:
+            fld.type = subst(fld.type)
+        for case in decl.cases:
+            case.payload = subst(case.payload)
+    for comp in program.components:
+        for cfg in comp.config:
+            cfg.type = subst(cfg.type)
+        for stmt in comp.body:
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            for method in stmt.methods:
+                method.param_types = [subst(t) for t in method.param_types]
+                method.returns = subst(method.returns)
+
+    program.type_decls = [d for d in program.type_decls if d.name not in aliases]
+
+
 def _validate_declared_types(program: Program, filename: str) -> None:
     """Reject malformed type annotations (bare builtin generics like `Opt`,
     `List[]`) at every declaration site before checking begins — otherwise a
@@ -358,6 +489,84 @@ def _check_verified_totality(program: Program, filename: str) -> None:
             )
 
 
+def _has_return(stmts) -> bool:
+    """True when a `return` appears anywhere in this statement tree."""
+    for stmt in stmts:
+        if isinstance(stmt, ReturnStmt):
+            return True
+        if isinstance(stmt, IfStmt):
+            if _has_return(stmt.then) or _has_return(stmt.otherwise or []):
+                return True
+        elif isinstance(stmt, (WhileStmt, ForStmt)):
+            if _has_return(stmt.body):
+                return True
+    return False
+
+
+def _definitely_returns(stmts) -> bool:
+    """True when control cannot reach the end of `stmts` without returning.
+
+    Deliberately the same conservative rule Java and Rust apply, so a body this
+    accepts is a body those tiers accept:
+
+    - a `return` terminates;
+    - an `if` terminates only when it has an `else` *and* both arms terminate
+      (a bare `if` may be skipped);
+    - `for` and a conditional `while` may run zero times, so neither terminates;
+    - `while (true)` diverges (there is no `break` in the grammar), so nothing
+      after it is reachable — Java and Rust agree, and no tier needs a value.
+    """
+    for stmt in stmts:
+        if isinstance(stmt, ReturnStmt):
+            return True
+        if isinstance(stmt, IfStmt):
+            if (stmt.otherwise is not None
+                    and _definitely_returns(stmt.then)
+                    and _definitely_returns(stmt.otherwise)):
+                return True
+        elif isinstance(stmt, WhileStmt):
+            if isinstance(stmt.cond, ExprLit) and stmt.cond.value is True:
+                return True
+    return False
+
+
+def _check_returns_on_every_path(decl: FnDecl, filename: str) -> None:
+    """A fn with a declared return type must return on every path.
+
+    Falling off the end is a portability trap, not a nicety: Python (the
+    reference backend) silently yields `None`, TypeScript yields `undefined`,
+    while Rust refuses with E0308 and Java with "missing return statement". A
+    program the checker accepts must compile on every tier, so the strict
+    reading is the frontend's.
+    """
+    if not decl.returns or _definitely_returns(decl.body):
+        return
+    last_line = getattr(decl.body[-1], "line", decl.line) if decl.body else decl.line
+    if not _has_return(decl.body):
+        raise RevlError(
+            filename, decl.line,
+            f"`{decl.name}` is declared to return `{decl.returns}` but its body "
+            f"never returns a value",
+            hint=f"end the body with `return <{decl.returns}>`, or drop the "
+                 f"`-> {decl.returns}` annotation if the fn produces nothing — "
+                 "revl has no implicit result (rust E0308, java \"missing return "
+                 "statement\")",
+            code="T1", category="type-mismatch",
+            expected=decl.returns, actual=None,
+        )
+    raise RevlError(
+        filename, last_line,
+        f"`{decl.name}` is declared to return `{decl.returns}` but control can "
+        f"reach the end of its body without a `return`",
+        hint="every path must return: give the trailing `if` an `else` that "
+             "returns, or add a final `return` after it — a `for`/`while` may "
+             "run zero times and never counts (rust E0308, java \"missing "
+             "return statement\")",
+        code="T1", category="type-mismatch",
+        expected=decl.returns, actual=None,
+    )
+
+
 def _lower_fns(program: Program, filename: str, types: dict | None = None) -> list:
     _check_verified_totality(program, filename)
     types = types or {}
@@ -373,21 +582,28 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         if decl.name in seen:
             raise RevlError(filename, decl.line, f"duplicate function `{decl.name}`")
         seen.add(decl.name)
+        # the body sees the *marked* signature: this fn's own type parameters
+        # are wildcards inside it (they are universally quantified there), while
+        # a one-letter nominal type stays checked
+        sig = (types.get(FNS_KEY) or {}).get(decl.name) or {}
+        marked_params = sig.get("params") or [p.type for p in decl.params]
+        marked_returns = sig.get("returns", decl.returns)
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
-        for param in decl.params:
+        for param, marked in zip(decl.params, marked_params):
             if param.name in scope:
                 raise RevlError(filename, param.line,
                                 f"duplicate parameter `{param.name}` in fn {decl.name}")
             scope[param.name] = False
-            type_env[param.name] = param.type
+            type_env[param.name] = marked
         module_callables = program.fn_scopes.get(id(decl), default_callables)
         callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | set(module_callables) | {ext.name for ext in program.externs}
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
             _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types,
-                             expected_return=decl.returns)
+                             expected_return=marked_returns)
+        _check_returns_on_every_path(decl, filename)
         entry = {
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
@@ -401,15 +617,27 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     return fns
 
 
-def _signature_table(program: Program) -> dict:
-    """{name: {"params": [type...], "returns": type|None}} for fns + externs."""
+def _signature_table(program: Program, types: dict | None = None) -> dict:
+    """{name: {"params": [type...], "returns": type|None, "tparams": set}} for
+    fns + externs.
+
+    Each signature's implicit type parameters (single-uppercase names that are
+    not declared types) are marked here, once, so the rest of the checker can
+    tell a universally quantified `T` from a nominal type that merely has a
+    one-letter name. Marked types never reach the IR — this table is the
+    checker's view, and `_lower_fns`/`_lower_externs` emit the author's
+    spelling."""
+    declared = {name: spec for name, spec in (types or {}).items()
+                if not name.startswith("__")}
     sigs: dict = {}
-    for fn_decl in program.fn_decls:
-        sigs[fn_decl.name] = {"params": [p.type for p in fn_decl.params],
-                              "returns": fn_decl.returns}
-    for ext in program.externs:
-        sigs[ext.name] = {"params": [p.type for p in ext.params],
-                          "returns": ext.returns}
+    for decl in list(program.fn_decls) + list(program.externs):
+        raw_params = [p.type for p in decl.params]
+        tparams = collect_tparams(raw_params + [decl.returns], declared)
+        sigs[decl.name] = {
+            "params": [mark_tparams(t, tparams) for t in raw_params],
+            "returns": mark_tparams(decl.returns, tparams),
+            "tparams": tparams,
+        }
     return sigs
 
 
@@ -503,6 +731,24 @@ def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, fi
     spec = types.get(type_name or "")
     if spec is None or spec.get("kind") != "variant":
         return
+    # An arm naming something that is not a case of the scrutinee's ADT has no
+    # meaning on any tier: Java emits a `case` label for a constant that does
+    # not exist ("cannot find symbol") and the Rust emitter raises EmitError.
+    # Python/TS silently never take the arm, so the divergence is a portability
+    # bug rather than a compile error there — which is exactly what revl exists
+    # to refuse.
+    declared = [case["name"] for case in spec.get("cases", [])]
+    for pattern, _, _ in expr.arms:
+        if pattern != "_" and pattern not in declared:
+            raise RevlError(
+                filename, expr.line,
+                f"`{pattern}` is not a case of `{type_name}` "
+                f"(cases: {', '.join(f'`{c}`' for c in declared)})",
+                hint="a match arm names one of the ADT's declared cases, or `_` for "
+                     "a catch-all — a bare name is not a binding pattern "
+                     "(syntax-2.0 §3.3); check the spelling or add the case to "
+                     f"`type {type_name}`",
+            )
     covered = {pattern for pattern, _, _ in expr.arms if pattern != "_"}
     if "_" in {pattern for pattern, _, _ in expr.arms}:
         return
@@ -701,7 +947,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         declared = type_env.get(stmt.name)
         if declared and inferred and not compatible(declared, inferred):
             raise mismatch(filename, stmt.line,
-                           f"assignment to `{stmt.name}` (a `{declared}` variable)",
+                           f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)",
                            declared, inferred)
         if inferred is not None and declared is None:
             type_env[stmt.name] = inferred
@@ -748,7 +994,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         iter_diag = infer_ast(stmt.iterable, type_env, types, filename)
         if iter_diag is not None and parse_type(iter_diag)[0] != "List":
             raise RevlError(filename, stmt.line,
-                            f"`for ... of` iterates a `List[...]`, got `{iter_diag}`")
+                            f"`for ... of` iterates a `List[...]`, got `{render_type(iter_diag)}`")
         iterable = _lower_pure_expr(stmt.iterable, scope, callables, alias_fns, filename, type_env, types)
         inner_scope = dict(scope)
         inner_type_env = dict(type_env)
@@ -790,17 +1036,17 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             if spec.get("kind") != "record":
                 raise RevlError(
                     filename, stmt.line,
-                    f"record destructuring requires a record, but `{value_type}` is not a record",
+                    f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
                 )
             fields = spec.get("fields", {})
             for name in names:
                 if name not in fields:
                     raise RevlError(filename, pattern.line,
-                                    f"`{name}` is not a field of record `{value_type}`")
+                                    f"`{name}` is not a field of record `{render_type(value_type)}`")
         elif value_type is not None and parse_type(value_type)[0] in _BUILTIN_NONRECORD:
             raise RevlError(
                 filename, stmt.line,
-                f"record destructuring requires a record, but `{value_type}` is not a record",
+                f"record destructuring requires a record, but `{render_type(value_type)}` is not a record",
             )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         for name in names:
@@ -835,7 +1081,7 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
         ):
             raise RevlError(
                 filename, stmt.line,
-                f"list destructuring requires a `List[...]`, but `{value_type}` is not a list",
+                f"list destructuring requires a `List[...]`, but `{render_type(value_type)}` is not a list",
             )
         value_ir = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         element_type = _type_arg(value_type, "List")
@@ -1112,9 +1358,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     # types and signatures are built first so component lowering can
     # type-check service/fn call sites (the sound-typing milestone)
+    _resolve_type_aliases(program, program.filename)
     _validate_declared_types(program, program.filename)
     types = _lower_type_decls(program, program.filename)
-    types[FNS_KEY] = _signature_table(program)
+    types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename)
@@ -1995,6 +2242,23 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 returned = True
             else:  # pragma: no cover
                 raise RevlError(filename, mstmt.line, "unexpected statement in method body")
+        if decl.returns and not returned:
+            # same guarantee as a `fn` with a declared return, on the other
+            # surface that has one: the emitted java method and rust trait impl
+            # both fall off the end ("missing return statement" / E0308) while
+            # python hands the caller a silent None
+            raise RevlError(
+                comp.source or filename, method.line,
+                f"`{method.name}` implements `{svc.name}.{method.name}`, which "
+                f"returns `{render_type(decl.returns)}`, but this body never "
+                f"returns a value",
+                hint=f"end the body with `return <{render_type(decl.returns)}>` — a "
+                     f"provider must produce what its service promises, or "
+                     f"consumers bound to `{svc.name}` receive nothing (rust E0308, "
+                     'java "missing return statement")',
+                code="T1", category="type-mismatch",
+                expected=decl.returns, actual=None,
+            )
         safe_params = [env.params[p] for p in method.params]
         env.params = saved
         env.type_env = saved_tenv
