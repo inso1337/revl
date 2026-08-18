@@ -13,7 +13,7 @@
 // 36 dollar, 96 backtick. Lookahead uses slice (clamping), never a
 // bare charAt past the end.
 
-type Token = { kind: Str, text: Str, line: Int }
+pub type Token = { kind: Str, text: Str, line: Int }
 type Step = { i: Int, line: Int, tok: Token }
 type Scan = { j: Int, out: Str, nl: Int }
 
@@ -122,6 +122,16 @@ fn scan_string(source: Str, i: Int) -> Scan {
   return { j: 0 - 1, out: text3, nl: 0 }
 }
 
+// Template parts are flattened into one Str (a token carries no richer
+// shape), joined by "|" — so a part whose own text contains "|" would be
+// unrecoverable. `${a || b}` is ordinary revl, and a differential fuzz
+// against the reference parser hit it about once in 400 expressions.
+// Escape "%" as "%%" and "|" as "%p"; the decoder scans left to right, so
+// "%%p" reads back as "%p" and not as "|".
+fn esc(s: Str) -> Str {
+  return s.split("%").join("%%").split("|").join("%p")
+}
+
 // Whitespace including newline (is_space deliberately excludes it, since
 // the main loop tracks lines). Used to trim an interpolation body, which
 // the reference lexer does with str.strip().
@@ -183,7 +193,7 @@ fn scan_template(source: Str, i: Int) -> Scan {
     let c = source.charAt(j)
     let cc = code0(c)
     if (cc == 96) {
-      if (buf != "") { parts = parts.push("t:".concat(buf)) }
+      if (buf != "") { parts = parts.push("t:".concat(esc(buf))) }
       let jj = j
       let done = parts
       let lines = nl
@@ -202,9 +212,9 @@ fn scan_template(source: Str, i: Int) -> Scan {
           let lines3 = nl + inner.nl
           return { j: 0 - 1, out: "", nl: lines3 }
         }
-        if (buf != "") { parts = parts.push("t:".concat(buf)) }
+        if (buf != "") { parts = parts.push("t:".concat(esc(buf))) }
         buf = ""
-        parts = parts.push("v:".concat(body))
+        parts = parts.push("v:".concat(esc(body)))
         nl += inner.nl
         j = inner.j + 1
         handled = true

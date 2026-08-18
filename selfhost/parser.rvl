@@ -1,0 +1,835 @@
+// The revl pure-expression parser, in revl (syntax-2.0 §3.2) — stage two
+// of the self-hosting exit criterion, and, more to the point, the second
+// half of a differential oracle: two independent implementations of the
+// same grammar, forced to agree on every input.
+//
+// Scope is deliberately the *expression* layer. That is where precedence,
+// associativity and the `??`/`&&` mixing rules live, which is where parser
+// bugs actually are; declarations are mostly linear and mostly boring.
+//
+// Parity is with src/revl/parser.py's `pure_expr()`, compared as a
+// canonical S-expression (tests/test_selfhost_parser.py renders the
+// reference AST to the same shape). Errors are values here — revl's pure
+// stratum has no exceptions — so the reference *raising* and this parser
+// returning `Bad` is the agreement we check on rejection.
+//
+// Known limit, inherited from the lexer's flattened template token: a
+// `${...}` body containing a literal `|` cannot be recovered from the
+// serialized parts. See docs/selfhost-findings.md.
+
+use "./lexer.rvl" { Token, lex_src }
+
+// ---------------------------------------------------------------- AST
+
+type BinN     = { op: Str, l: Expr, r: Expr, paren: Bool }
+type UnN      = { op: Str, e: Expr }
+type CallN    = { target: Expr, args: List[Expr] }
+type OptCallN = { target: Expr, name: Str, args: List[Expr] }
+type FieldN   = { target: Expr, name: Str }
+type IndexN   = { target: Expr, idx: Expr }
+type IfN      = { cond: Expr, then_: Expr, els: Expr }
+type InitN    = { name: Str, value: Expr }
+type RecN     = { fields: List[InitN] }
+type ListN    = { items: List[Expr] }
+type ParamN   = { name: Str, ty: Str }
+type ArrowN   = { params: List[ParamN], body: Expr }
+type ArmN     = { pat: Str, bind: Str, body: Expr }
+type MatchN   = { scrut: Expr, arms: List[ArmN] }
+type PartN    = { kind: Str, text: Str, e: Expr }
+type TemplN   = { parts: List[PartN] }
+type HoleN    = { ty: Str, msg: Str }
+
+type Expr =
+    IntLit(Str)
+  | StrLit(Str)
+  | BoolLit(Str)
+  | NullLit
+  | Var(Str)
+  | Bin(BinN)
+  | Un(UnN)
+  | Emit(UnN)
+  | Call(CallN)
+  | Field(FieldN)
+  | OptField(FieldN)
+  | OptCall(OptCallN)
+  | Index(IndexN)
+  | If(IfN)
+  | Rec(RecN)
+  | Lst(ListN)
+  | Arrow(ArrowN)
+  | Match(MatchN)
+  | Templ(TemplN)
+  | Hole(HoleN)
+  | Bad(Str)
+
+// A parse result: the index after what was consumed, and the node.
+type PR   = { i: Int, e: Expr }
+// A collected sequence, with an out-of-band failure channel (no exceptions).
+type Seq  = { i: Int, xs: List[Expr], ok: Bool, msg: Str }
+type Arms = { i: Int, xs: List[ArmN], ok: Bool, msg: Str }
+type Inits = { i: Int, xs: List[InitN], ok: Bool, msg: Str }
+type Pars = { i: Int, xs: List[ParamN], ok: Bool, msg: Str }
+type TyR  = { i: Int, ty: Str, ok: Bool }
+
+// ---------------------------------------------------------------- tokens
+
+fn eof_tok() -> Token { return { kind: "eof", text: "", line: 0 } }
+
+fn tk(ts: List[Token], i: Int) -> Token {
+  if (i < ts.length()) { return ts[i] }
+  return eof_tok()
+}
+
+fn at(ts: List[Token], i: Int, k: Str) -> Bool { return tk(ts, i).kind == k }
+
+fn at_kw(ts: List[Token], i: Int, w: Str) -> Bool {
+  let t = tk(ts, i)
+  return t.kind == "kw" && t.text == w
+}
+
+pub fn is_bad(e: Expr) -> Bool {
+  return match e { Bad(m) => true, _ => false, }
+}
+
+fn bad(msg: Str) -> PR { return { i: 0 - 1, e: Bad(msg) } }
+
+// ---------------------------------------------------------------- render
+
+fn join_exprs(xs: List[Expr]) -> Str {
+  var out = []
+  var i = 0
+  while (i < xs.length()) {
+    out = out.push(render(xs[i]))
+    i += 1
+  }
+  return out.join(" ")
+}
+
+fn render_arms(xs: List[ArmN]) -> Str {
+  var out = []
+  var i = 0
+  while (i < xs.length()) {
+    let a = xs[i]
+    let b = a.bind == "" ? "_" : a.bind
+    out = out.push("(arm ".concat(a.pat).concat(" ").concat(b).concat(" ")
+                   .concat(render(a.body)).concat(")"))
+    i += 1
+  }
+  return out.join(" ")
+}
+
+fn render_inits(xs: List[InitN]) -> Str {
+  var out = []
+  var i = 0
+  while (i < xs.length()) {
+    let f = xs[i]
+    out = out.push("(f ".concat(f.name).concat(" ").concat(render(f.value)).concat(")"))
+    i += 1
+  }
+  return out.join(" ")
+}
+
+fn render_params(xs: List[ParamN]) -> Str {
+  var out = []
+  var i = 0
+  while (i < xs.length()) {
+    let p = xs[i]
+    let t = p.ty == "" ? "_" : p.ty
+    out = out.push("(p ".concat(p.name).concat(" ").concat(t).concat(")"))
+    i += 1
+  }
+  return out.join(" ")
+}
+
+fn render_parts(xs: List[PartN]) -> Str {
+  var out = []
+  var i = 0
+  while (i < xs.length()) {
+    let p = xs[i]
+    if (p.kind == "t") { out = out.push("(t ".concat(p.text).concat(")")) }
+    if (p.kind != "t") { out = out.push("(e ".concat(render(p.e)).concat(")")) }
+    i += 1
+  }
+  return out.join(" ")
+}
+
+pub fn render(e: Expr) -> Str {
+  return match e {
+    IntLit(v)  => "(int ".concat(v).concat(")"),
+    StrLit(v)  => "(str ".concat(v).concat(")"),
+    BoolLit(v) => "(bool ".concat(v).concat(")"),
+    NullLit    => "(null)",
+    Var(n)     => "(var ".concat(n).concat(")"),
+    Bin(b)     => "(bin ".concat(b.op).concat(" ").concat(render(b.l)).concat(" ")
+                    .concat(render(b.r)).concat(")"),
+    Un(u)      => "(un ".concat(u.op).concat(" ").concat(render(u.e)).concat(")"),
+    Emit(u)    => "(emit ".concat(render(u.e)).concat(")"),
+    Call(c)    => "(call ".concat(render(c.target)).concat(" ")
+                    .concat(join_exprs(c.args)).concat(")"),
+    Field(f)   => "(field ".concat(render(f.target)).concat(" ").concat(f.name).concat(")"),
+    OptField(f) => "(optfield ".concat(render(f.target)).concat(" ").concat(f.name).concat(")"),
+    OptCall(c) => "(optcall ".concat(render(c.target)).concat(" ").concat(c.name)
+                    .concat(" ").concat(join_exprs(c.args)).concat(")"),
+    Index(x)   => "(index ".concat(render(x.target)).concat(" ").concat(render(x.idx)).concat(")"),
+    If(f)      => "(if ".concat(render(f.cond)).concat(" ").concat(render(f.then_))
+                    .concat(" ").concat(render(f.els)).concat(")"),
+    Rec(r)     => "(rec ".concat(render_inits(r.fields)).concat(")"),
+    Lst(l)     => "(list ".concat(join_exprs(l.items)).concat(")"),
+    Arrow(a)   => "(arrow ".concat(render_params(a.params)).concat(" ")
+                    .concat(render(a.body)).concat(")"),
+    Match(m)   => "(match ".concat(render(m.scrut)).concat(" ")
+                    .concat(render_arms(m.arms)).concat(")"),
+    Templ(t)   => "(templ ".concat(render_parts(t.parts)).concat(")"),
+    Hole(h)    => "(hole ".concat(h.ty == "" ? "_" : h.ty).concat(" ")
+                    .concat(h.msg == "" ? "_" : h.msg).concat(")"),
+    Bad(m)     => "(bad)",
+  }
+}
+
+// ---------------------------------------------------------------- types
+
+// `IDENT ['[' type (',' type)* ']'] ['?']`, plus the parenthesised group /
+// function form. Rendered exactly as parser.py's `type_()` returns it.
+fn p_type(ts: List[Token], i: Int) -> TyR {
+  if (at(ts, i, "(")) {
+    var j = i + 1
+    var inner = []
+    var ok = true
+    while (ok && !at(ts, j, ")") && !at(ts, j, "eof")) {
+      let t = p_type(ts, j)
+      if (!t.ok) { ok = false }
+      if (t.ok) {
+        inner = inner.push(t.ty)
+        j = t.i
+        if (at(ts, j, ",")) { j += 1 }
+      }
+    }
+    if (!ok) { return { i: 0 - 1, ty: "", ok: false } }
+    if (!at(ts, j, ")")) { return { i: 0 - 1, ty: "", ok: false } }
+    j += 1
+    if (at(ts, j, "arrow")) {
+      let r = p_type(ts, j + 1)
+      if (!r.ok) { return { i: 0 - 1, ty: "", ok: false } }
+      let params_s = inner.join(", ")
+      return { i: r.i, ty: "(".concat(params_s).concat(") -> ").concat(r.ty), ok: true }
+    }
+    if (inner.length() != 1) { return { i: 0 - 1, ty: "", ok: false } }
+    return p_type_tail(ts, j, inner[0])
+  }
+  if (!at(ts, i, "ident")) { return { i: i, ty: "", ok: false } }
+  let base = tk(ts, i).text
+  var j2 = i + 1
+  var rendered = base
+  if (at(ts, j2, "[")) {
+    var args = []
+    var k = j2 + 1
+    var ok2 = true
+    while (ok2 && !at(ts, k, "]") && !at(ts, k, "eof")) {
+      let a = p_type(ts, k)
+      if (!a.ok) { ok2 = false }
+      if (a.ok) {
+        args = args.push(a.ty)
+        k = a.i
+        if (at(ts, k, ",")) { k += 1 }
+      }
+    }
+    if (!ok2) { return { i: 0 - 1, ty: "", ok: false } }
+    if (!at(ts, k, "]")) { return { i: 0 - 1, ty: "", ok: false } }
+    rendered = base.concat("[").concat(args.join(", ")).concat("]")
+    j2 = k + 1
+  }
+  return p_type_tail(ts, j2, rendered)
+}
+
+fn p_type_tail(ts: List[Token], i: Int, rendered: Str) -> TyR {
+  if (at(ts, i, "?")) {
+    return { i: i + 1, ty: "Opt[".concat(rendered).concat("]"), ok: true }
+  }
+  return { i: i, ty: rendered, ok: true }
+}
+
+// ---------------------------------------------------------------- ladder
+
+// `??` may not sit next to an unparenthesised `&&`/`||`, and vice versa —
+// TS makes the unparenthesised form a syntax error and §0 forbids a
+// silently different meaning.
+fn unparen_bin_in(e: Expr, ops: Str) -> Bool {
+  return match e {
+    Bin(b) => !b.paren && ops.indexOf(b.op) != 0 - 1,
+    _ => false,
+  }
+}
+
+fn mixes(op: Str, l: Expr, r: Expr) -> Bool {
+  if (op == "??") {
+    if (unparen_bin_in(l, "&&|||")) { return true }
+    return unparen_bin_in(r, "&&|||")
+  }
+  if (unparen_bin_in(l, "??")) { return true }
+  return unparen_bin_in(r, "??")
+}
+
+fn mk_bin(op: Str, l: Expr, r: Expr) -> Expr {
+  return Bin({ op: op, l: l, r: r, paren: false })
+}
+
+fn canon(op: Str) -> Str {
+  if (op == "===") { return "==" }
+  if (op == "!==") { return "!=" }
+  return op
+}
+
+pub fn p_expr(ts: List[Token], i: Int) -> PR { return p_ternary(ts, i) }
+
+fn p_ternary(ts: List[Token], i: Int) -> PR {
+  let c = p_or(ts, i)
+  if (is_bad(c.e)) { return c }
+  if (at(ts, c.i, "?")) {
+    let t = p_ternary(ts, c.i + 1)
+    if (is_bad(t.e)) { return t }
+    if (!at(ts, t.i, ":")) { return bad("expected :") }
+    let f = p_ternary(ts, t.i + 1)
+    if (is_bad(f.e)) { return f }
+    return { i: f.i, e: If({ cond: c.e, then_: t.e, els: f.e }) }
+  }
+  return c
+}
+
+fn p_or(ts: List[Token], i: Int) -> PR {
+  var acc = p_nullish(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  while (at(ts, acc.i, "||")) {
+    let r = p_nullish(ts, acc.i + 1)
+    if (is_bad(r.e)) { return r }
+    if (mixes("||", acc.e, r.e)) { return bad("|| mixed with ??") }
+    acc = { i: r.i, e: mk_bin("||", acc.e, r.e) }
+  }
+  return acc
+}
+
+// right-associative, unlike every other binary level
+fn p_nullish(ts: List[Token], i: Int) -> PR {
+  let l = p_and(ts, i)
+  if (is_bad(l.e)) { return l }
+  if (at(ts, l.i, "??")) {
+    let r = p_nullish(ts, l.i + 1)
+    if (is_bad(r.e)) { return r }
+    if (mixes("??", l.e, r.e)) { return bad("?? mixed with &&/||") }
+    return { i: r.i, e: mk_bin("??", l.e, r.e) }
+  }
+  return l
+}
+
+fn p_and(ts: List[Token], i: Int) -> PR {
+  var acc = p_eq(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  while (at(ts, acc.i, "&&")) {
+    let r = p_eq(ts, acc.i + 1)
+    if (is_bad(r.e)) { return r }
+    if (mixes("&&", acc.e, r.e)) { return bad("&& mixed with ??") }
+    acc = { i: r.i, e: mk_bin("&&", acc.e, r.e) }
+  }
+  return acc
+}
+
+fn eq_op(ts: List[Token], i: Int) -> Str {
+  if (at(ts, i, "==")) { return "==" }
+  if (at(ts, i, "===")) { return "===" }
+  if (at(ts, i, "!=")) { return "!=" }
+  if (at(ts, i, "!==")) { return "!==" }
+  return ""
+}
+
+fn p_eq(ts: List[Token], i: Int) -> PR {
+  var acc = p_cmp(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  var go = true
+  while (go) {
+    let op = eq_op(ts, acc.i)
+    if (op == "") { go = false }
+    if (op != "") {
+      let r = p_cmp(ts, acc.i + 1)
+      if (is_bad(r.e)) { return r }
+      acc = { i: r.i, e: mk_bin(canon(op), acc.e, r.e) }
+    }
+  }
+  return acc
+}
+
+fn cmp_op(ts: List[Token], i: Int) -> Str {
+  if (at(ts, i, "<")) { return "<" }
+  if (at(ts, i, ">")) { return ">" }
+  if (at(ts, i, "<=")) { return "<=" }
+  if (at(ts, i, ">=")) { return ">=" }
+  return ""
+}
+
+fn p_cmp(ts: List[Token], i: Int) -> PR {
+  var acc = p_add(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  var go = true
+  while (go) {
+    let op = cmp_op(ts, acc.i)
+    if (op == "") { go = false }
+    if (op != "") {
+      let r = p_add(ts, acc.i + 1)
+      if (is_bad(r.e)) { return r }
+      acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
+    }
+  }
+  return acc
+}
+
+fn add_op(ts: List[Token], i: Int) -> Str {
+  if (at(ts, i, "+")) { return "+" }
+  if (at(ts, i, "-")) { return "-" }
+  return ""
+}
+
+fn p_add(ts: List[Token], i: Int) -> PR {
+  var acc = p_mul(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  var go = true
+  while (go) {
+    let op = add_op(ts, acc.i)
+    if (op == "") { go = false }
+    if (op != "") {
+      let r = p_mul(ts, acc.i + 1)
+      if (is_bad(r.e)) { return r }
+      acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
+    }
+  }
+  return acc
+}
+
+fn mul_op(ts: List[Token], i: Int) -> Str {
+  if (at(ts, i, "*")) { return "*" }
+  if (at(ts, i, "/")) { return "/" }
+  if (at(ts, i, "%")) { return "%" }
+  return ""
+}
+
+fn p_mul(ts: List[Token], i: Int) -> PR {
+  var acc = p_unary(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  var go = true
+  while (go) {
+    let op = mul_op(ts, acc.i)
+    if (op == "") { go = false }
+    if (op != "") {
+      let r = p_unary(ts, acc.i + 1)
+      if (is_bad(r.e)) { return r }
+      acc = { i: r.i, e: mk_bin(op, acc.e, r.e) }
+    }
+  }
+  return acc
+}
+
+fn p_unary(ts: List[Token], i: Int) -> PR {
+  if (at(ts, i, "!") || at(ts, i, "-")) {
+    let op = tk(ts, i).kind
+    let r = p_unary(ts, i + 1)
+    if (is_bad(r.e)) { return r }
+    return { i: r.i, e: Un({ op: op, e: r.e }) }
+  }
+  if (at_kw(ts, i, "emit")) {
+    let em = p_unary(ts, i + 1)
+    if (is_bad(em.e)) { return em }
+    return { i: em.i, e: Emit({ op: "emit", e: em.e }) }
+  }
+  return p_postfix(ts, i)
+}
+
+// A comma-separated expression list up to `close`.
+fn p_seq(ts: List[Token], i: Int, close: Str) -> Seq {
+  var j = i
+  var xs = []
+  var ok = true
+  var msg = ""
+  while (ok && !at(ts, j, close) && !at(ts, j, "eof")) {
+    let a = p_expr(ts, j)
+    if (is_bad(a.e)) {
+      ok = false
+      msg = "bad element"
+    }
+    if (!is_bad(a.e)) {
+      xs = xs.push(a.e)
+      j = a.i
+      if (at(ts, j, ",")) { j += 1 }
+    }
+  }
+  if (ok && !at(ts, j, close)) {
+    ok = false
+    msg = "expected ".concat(close)
+  }
+  let jj = j
+  let items = xs
+  let fin = ok
+  let why = msg
+  return { i: jj + 1, xs: items, ok: fin, msg: why }
+}
+
+fn p_postfix(ts: List[Token], i: Int) -> PR {
+  var acc = p_primary(ts, i)
+  if (is_bad(acc.e)) { return acc }
+  // Once `?.` is taken only another `?.` may follow: a plain `.f`/call/index
+  // on a possibly-None result would not short-circuit.
+  var optional = false
+  var go = true
+  while (go) {
+    if (at(ts, acc.i, ".")) {
+      if (optional) { return bad("plain access after ?.") }
+      if (!at(ts, acc.i + 1, "ident")) { return bad("expected ident after .") }
+      let nm = tk(ts, acc.i + 1).text
+      acc = { i: acc.i + 2, e: Field({ target: acc.e, name: nm }) }
+    } else if (at(ts, acc.i, "?.")) {
+      if (!at(ts, acc.i + 1, "ident")) { return bad("expected ident after ?.") }
+      let nm2 = tk(ts, acc.i + 1).text
+      if (at(ts, acc.i + 2, "(")) {
+        let s = p_seq(ts, acc.i + 3, ")")
+        if (!s.ok) { return bad(s.msg) }
+        acc = { i: s.i, e: OptCall({ target: acc.e, name: nm2, args: s.xs }) }
+      } else {
+        acc = { i: acc.i + 2, e: OptField({ target: acc.e, name: nm2 }) }
+      }
+      optional = true
+    } else if (at(ts, acc.i, "(")) {
+      if (optional) { return bad("call after ?.") }
+      let s2 = p_seq(ts, acc.i + 1, ")")
+      if (!s2.ok) { return bad(s2.msg) }
+      acc = { i: s2.i, e: Call({ target: acc.e, args: s2.xs }) }
+    } else if (at(ts, acc.i, "[")) {
+      if (optional) { return bad("index after ?.") }
+      let x = p_expr(ts, acc.i + 1)
+      if (is_bad(x.e)) { return x }
+      if (!at(ts, x.i, "]")) { return bad("expected ]") }
+      acc = { i: x.i + 1, e: Index({ target: acc.e, idx: x.e }) }
+    } else {
+      go = false
+    }
+  }
+  return acc
+}
+
+// `(` heads an arrow parameter list rather than a group when the bracket
+// that closes it is followed by `=>` — nothing else can follow one.
+fn arrow_ahead(ts: List[Token], i: Int) -> Bool {
+  if (!at(ts, i, "(")) { return false }
+  let h = tk(ts, i + 1)
+  let after = tk(ts, i + 2).kind
+  if (h.kind != ")") {
+    if (h.kind != "ident") { return false }
+    if (after != "," && after != ")" && after != ":") { return false }
+  }
+  var j = i
+  var depth = 0
+  while (!at(ts, j, "eof")) {
+    let k = tk(ts, j).kind
+    if (k == "(" || k == "[") { depth += 1 }
+    if (k == ")" || k == "]") {
+      depth -= 1
+      if (depth == 0) { return tk(ts, j + 1).kind == "=>" }
+    }
+    j += 1
+  }
+  return false
+}
+
+fn p_params(ts: List[Token], i: Int) -> Pars {
+  var j = i
+  var xs = []
+  var ok = true
+  while (ok && !at(ts, j, ")") && !at(ts, j, "eof")) {
+    if (!at(ts, j, "ident")) { ok = false }
+    if (at(ts, j, "ident")) {
+      let nm = tk(ts, j).text
+      var ty = ""
+      j += 1
+      if (at(ts, j, ":")) {
+        let t = p_type(ts, j + 1)
+        if (!t.ok) { ok = false }
+        if (t.ok) {
+          ty = t.ty
+          j = t.i
+        }
+      }
+      if (ok) {
+        let ann = ty
+        xs = xs.push({ name: nm, ty: ann })
+        if (at(ts, j, ",")) { j += 1 }
+      }
+    }
+  }
+  if (ok && !at(ts, j, ")")) { ok = false }
+  let jj = j
+  let ps = xs
+  let fin = ok
+  return { i: jj + 1, xs: ps, ok: fin, msg: "" }
+}
+
+fn p_arms(ts: List[Token], i: Int) -> Arms {
+  var j = i
+  var xs = []
+  var ok = true
+  var go = true
+  while (go && ok && !at(ts, j, "}") && !at(ts, j, "eof")) {
+    if (!at(ts, j, "ident")) { ok = false }
+    if (at(ts, j, "ident")) {
+      let pat = tk(ts, j).text
+      var bind = ""
+      j += 1
+      if (pat != "_" && at(ts, j, "(")) {
+        if (!at(ts, j + 1, "ident")) { ok = false }
+        if (at(ts, j + 1, "ident")) {
+          bind = tk(ts, j + 1).text
+          if (!at(ts, j + 2, ")")) { ok = false }
+          j += 3
+        }
+      }
+      if (ok && !at(ts, j, "=>")) { ok = false }
+      if (ok) {
+        let b = p_expr(ts, j + 1)
+        if (is_bad(b.e)) { ok = false }
+        if (!is_bad(b.e)) {
+          let bnd = bind
+          xs = xs.push({ pat: pat, bind: bnd, body: b.e })
+          j = b.i
+          // the reference breaks when an arm is not followed by `,`; the
+          // comma must be tested BEFORE it is consumed
+          if (at(ts, j, ",")) { j += 1 } else { go = false }
+        }
+      }
+    }
+  }
+  if (ok && !at(ts, j, "}")) { ok = false }
+  let jj = j
+  let arms = xs
+  let fin = ok
+  return { i: jj + 1, xs: arms, ok: fin, msg: "" }
+}
+
+fn p_inits(ts: List[Token], i: Int) -> Inits {
+  var j = i
+  var xs = []
+  var ok = true
+  while (ok && !at(ts, j, "}") && !at(ts, j, "eof")) {
+    if (!at(ts, j, "ident")) { ok = false }
+    if (at(ts, j, "ident")) {
+      let nm = tk(ts, j).text
+      if (!at(ts, j + 1, ":")) { ok = false }
+      if (at(ts, j + 1, ":")) {
+        let v = p_expr(ts, j + 2)
+        if (is_bad(v.e)) { ok = false }
+        if (!is_bad(v.e)) {
+          xs = xs.push({ name: nm, value: v.e })
+          j = v.i
+          if (at(ts, j, ",")) { j += 1 }
+        }
+      }
+    }
+  }
+  if (ok && !at(ts, j, "}")) { ok = false }
+  let jj = j
+  let fs = xs
+  let fin = ok
+  return { i: jj + 1, xs: fs, ok: fin, msg: "" }
+}
+
+// Inverse of the lexer's `esc`: a left-to-right scan, so "%%p" reads back
+// as "%p" rather than as "|".
+fn unesc(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let c = s.slice(i, i + 1)
+    if (c == "%") {
+      let d = s.slice(i + 1, i + 2)
+      if (d == "p") { out = out.concat("|") } else { out = out.concat("%") }
+      i += 2
+    } else {
+      out = out.concat(c)
+      i += 1
+    }
+  }
+  return out
+}
+
+// Template token text is "t:<text>" / "v:<raw source>" joined by "|"; each
+// interpolation body is re-parsed as a full expression (§3.2).
+fn p_template(text: Str) -> Expr {
+  let raw = text.split("|")
+  var parts = []
+  var i = 0
+  var ok = true
+  while (ok && i < raw.length()) {
+    let seg = raw[i]
+    let tag = seg.slice(0, 2)
+    let body = unesc(seg.slice(2, seg.length()))
+    if (tag == "t:") { parts = parts.push({ kind: "t", text: body, e: NullLit }) }
+    if (tag == "v:") {
+      let sub = parse_expr_str(body)
+      if (is_bad(sub)) { ok = false }
+      if (!is_bad(sub)) { parts = parts.push({ kind: "e", text: "", e: sub }) }
+    }
+    if (tag != "t:" && tag != "v:") { ok = false }
+    i += 1
+  }
+  if (!ok) { return Bad("bad template part") }
+  let ps = parts
+  return Templ({ parts: ps })
+}
+
+fn p_primary(ts: List[Token], i: Int) -> PR {
+  let t = tk(ts, i)
+  if (t.kind == "int") { return { i: i + 1, e: IntLit(t.text) } }
+  if (t.kind == "string") { return { i: i + 1, e: StrLit(t.text) } }
+  if (t.kind == "template") {
+    let e = p_template(t.text)
+    if (is_bad(e)) { return bad("bad template") }
+    return { i: i + 1, e: e }
+  }
+  if (t.kind == "kw" && (t.text == "true" || t.text == "false")) {
+    return { i: i + 1, e: BoolLit(t.text) }
+  }
+  if (t.kind == "kw" && t.text == "null") { return { i: i + 1, e: NullLit } }
+  if (t.kind == "ident") {
+    if (at(ts, i + 1, "=>")) {
+      let b = p_expr(ts, i + 2)
+      if (is_bad(b.e)) { return b }
+      let one = [{ name: t.text, ty: "" }]
+      return { i: b.i, e: Arrow({ params: one, body: b.e }) }
+    }
+    return { i: i + 1, e: Var(t.text) }
+  }
+  // `config` heads `config.<field>` in expression position
+  if (t.kind == "kw" && t.text == "config") { return { i: i + 1, e: Var(t.text) } }
+  if (t.kind == "kw" && t.text == "hole") {
+    var j = i + 1
+    var ty = ""
+    if (at(ts, j, "[")) {
+      let ty_ = p_type(ts, j + 1)
+      if (!ty_.ok) { return bad("bad hole type") }
+      if (!at(ts, ty_.i, "]")) { return bad("expected ]") }
+      ty = ty_.ty
+      j = ty_.i + 1
+    }
+    var msg = ""
+    if (at(ts, j, "string")) {
+      msg = tk(ts, j).text
+      j += 1
+    }
+    let jj = j
+    let tt = ty
+    let mm = msg
+    return { i: jj, e: Hole({ ty: tt, msg: mm }) }
+  }
+  if (t.kind == "kw" && t.text == "match") {
+    let scr = p_expr(ts, i + 1)
+    if (is_bad(scr.e)) { return scr }
+    if (!at(ts, scr.i, "{")) { return bad("expected { after match scrutinee") }
+    let a = p_arms(ts, scr.i + 1)
+    if (!a.ok) { return bad("bad match arm") }
+    return { i: a.i, e: Match({ scrut: scr.e, arms: a.xs }) }
+  }
+  if (t.kind == "(") {
+    if (arrow_ahead(ts, i)) {
+      let ps = p_params(ts, i + 1)
+      if (!ps.ok) { return bad("bad arrow params") }
+      if (!at(ts, ps.i, "=>")) { return bad("expected =>") }
+      let ab = p_expr(ts, ps.i + 1)
+      if (is_bad(ab.e)) { return ab }
+      return { i: ab.i, e: Arrow({ params: ps.xs, body: ab.e }) }
+    }
+    let inner = p_expr(ts, i + 1)
+    if (is_bad(inner.e)) { return inner }
+    if (!at(ts, inner.i, ")")) { return bad("expected )") }
+    return { i: inner.i + 1, e: mark_paren(inner.e) }
+  }
+  if (t.kind == "{") {
+    let fs = p_inits(ts, i + 1)
+    if (!fs.ok) { return bad("bad record field") }
+    return { i: fs.i, e: Rec({ fields: fs.xs }) }
+  }
+  if (t.kind == "[") {
+    let ls = p_seq(ts, i + 1, "]")
+    if (!ls.ok) { return bad(ls.msg) }
+    return { i: ls.i, e: Lst({ items: ls.xs }) }
+  }
+  return bad("expected an expression")
+}
+
+fn mark_paren(e: Expr) -> Expr {
+  return match e {
+    Bin(b) => Bin({ op: b.op, l: b.l, r: b.r, paren: true }),
+    _ => e,
+  }
+}
+
+// ---------------------------------------------------------------- entry
+
+// Parse one expression and require it to consume the whole input.
+pub fn parse_expr_str(src: Str) -> Expr {
+  let ts = lex_src(src)
+  let r = p_expr(ts, 0)
+  if (is_bad(r.e)) { return r.e }
+  if (!at(ts, r.i, "eof")) { return Bad("trailing tokens") }
+  return r.e
+}
+
+pub fn parse_render(src: Str) -> Str { return render(parse_expr_str(src)) }
+
+// ---------------------------------------------------------------- tests
+
+test "precedence: * binds tighter than +" {
+  assert parse_render("1 + 2 * 3") == "(bin + (int 1) (bin * (int 2) (int 3)))"
+}
+
+test "left associativity of -" {
+  assert parse_render("a - b - c") == "(bin - (bin - (var a) (var b)) (var c))"
+}
+
+test "?? is right associative" {
+  assert parse_render("a ?? b ?? c") == "(bin ?? (var a) (bin ?? (var b) (var c)))"
+}
+
+test "=== canonicalizes to ==" {
+  assert parse_render("a === b") == "(bin == (var a) (var b))"
+}
+
+test "?? may not mix with || unparenthesised" {
+  assert parse_render("a ?? b || c") == "(bad)"
+}
+
+test "parenthesised ?? may sit beside ||" {
+  assert parse_render("(a ?? b) || c") == "(bin || (bin ?? (var a) (var b)) (var c))"
+}
+
+test "optional chain rejects a plain access after ?." {
+  assert parse_render("a?.b.c") == "(bad)"
+}
+
+test "ternary is right associative" {
+  assert parse_render("a ? b : c ? d : e")
+    == "(if (var a) (var b) (if (var c) (var d) (var e)))"
+}
+
+test "postfix chains" {
+  assert parse_render("f(1).g[2]")
+    == "(index (field (call (var f) (int 1)) g) (int 2))"
+}
+
+test "arrow with annotated params" {
+  assert parse_render("(a: Int, b) => a + b")
+    == "(arrow (p a Int) (p b _) (bin + (var a) (var b)))"
+}
+
+test "template re-parses its interpolations" {
+  assert parse_render("`n=${r.count}!`")
+    == "(templ (t n=) (e (field (var r) count)) (t !))"
+}
+
+test "match arms" {
+  assert parse_render("match e { Ok(v) => v, _ => 0, }")
+    == "(match (var e) (arm Ok v (var v)) (arm _ _ (int 0)))"
+}
