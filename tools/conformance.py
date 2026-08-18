@@ -58,6 +58,14 @@ CASES: list[tuple[str, str, str]] = [
     ("service", "emission op",
      _component("  provide s { fn f(x) = 1 }",
                 services="service S { emission fn f(x: Int) -> Int }\n")),
+    # capability-scoped emission (docs/capabilities.md): the scope is a
+    # checker/audit artefact, so every tier must emit the call unchanged
+    ("service", "capability-scoped emission op",
+     "service D { emission fn w(x: Int) -> Int }\n"
+     "service S { emission[d] fn f(x: Int) -> Int }\n"
+     "component C requires d: D provides s: S {\n"
+     "  provide s { fn f(x) { return emit d.w(x) } }\n"
+     "}"),
     ("service", "async op",
      _component("  provide s { async fn f(x) { return x } }",
                 services="service S { async fn f(x: Int) -> Int }\n")),

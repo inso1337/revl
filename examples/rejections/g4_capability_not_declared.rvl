@@ -1,0 +1,39 @@
+// REJECTED — G4 (capability-scoped emission): a provider emits through a
+// boundary its declaration does not name.
+//
+// `emission` alone says only "this crosses the boundary". `emission[db]`
+// says *where*: the operation may reach the composition key `db` and
+// nothing else. The bound runs the same direction as the plain one — a
+// provider may use fewer capabilities than declared (purer than promised),
+// never more — so a consumer bound to `Cache` can read `emission[db]` and
+// know no hot-swapped provider will start talking to the message bus.
+//
+// This provider does exactly that: it emits through `bus`, which
+// `Cache.put` never granted.
+//
+// expected error:
+//   `Cache.put` is declared `emission[db]`, but this implementation emits through `bus`
+
+service Database {
+  emission fn execute(sql: Str) -> Int
+}
+
+service Bus {
+  emission fn publish(topic: Str, payload: Str)
+}
+
+service Cache {
+  emission[db] fn put(key: Str, value: Str)
+}
+
+component LeakyCache requires db: Database, bus: Bus provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO cache VALUES (${key})`)
+      emit bus.publish("cache.put", key)
+    }
+  }
+}
