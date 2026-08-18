@@ -96,7 +96,8 @@ def _tool_load(arguments: dict) -> dict:
     except RevlError as error:
         return report(error)
     try:
-        state = SESSION.load(ir, arguments.get("config"))
+        state = SESSION.load(ir, arguments.get("config"),
+                             record=bool(arguments.get("record")))
     except SessionError as error:
         return _session_error(str(error))
     return {"ok": True, **_summary(ir), **state}
@@ -169,6 +170,48 @@ def _tool_unload(_arguments: dict) -> dict:
 
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
+
+
+# -- backwards replay (docs/replay.md) ------------------------------------
+
+def _tool_timeline(arguments: dict) -> dict:
+    try:
+        return {"ok": True, **SESSION.timeline(arguments.get("component"))}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_inspect_step(arguments: dict) -> dict:
+    if "at" not in arguments:
+        return _session_error("`at` is required (-1 means 'before every step')")
+    try:
+        return {"ok": True, **SESSION.inspect_step(arguments.get("component"),
+                                                   arguments["at"])}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_step_back(arguments: dict) -> dict:
+    if "to" not in arguments:
+        return _session_error("`to` is required (-1 unwinds everything recorded)")
+    try:
+        return {"ok": True, **SESSION.step_back(arguments.get("component"),
+                                                arguments["to"],
+                                                force=bool(arguments.get("force")))}
+    except SessionError as error:
+        # a refused unwind is a *result*, not a crash: it means the range
+        # contains an emission that cannot be undone
+        return _session_error(str(error), refused=True)
+
+
+def _tool_replay_forward(arguments: dict) -> dict:
+    if "from" not in arguments:
+        return _session_error("`from` is required")
+    try:
+        return {"ok": True, **SESSION.replay_forward(arguments.get("component"),
+                                                     arguments["from"])}
+    except SessionError as error:
+        return _session_error(str(error))
 
 
 def _tool_check(arguments: dict) -> dict:
@@ -356,7 +399,14 @@ TOOLS = [
             "type": "object",
             "properties": {**_SOURCE_INPUT,
                            "config": {"type": "object",
-                                      "description": "per-component config tables"}},
+                                      "description": "per-component config tables"},
+                           "record": {"type": "boolean",
+                                      "description": "record the effect accumulator so "
+                                                     "the composition can be stepped "
+                                                     "backwards (revl_timeline / "
+                                                     "revl_step_back). Must be set at "
+                                                     "load: recording is installed "
+                                                     "before activation."}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_load,
@@ -415,6 +465,78 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_state,
+    },
+    {
+        "name": "revl_timeline",
+        "description": "The recorded effect accumulator of a running composition: "
+                       "every effect step in order, the inverse registered for it, "
+                       "and every emission — marked as the one kind of step that "
+                       "has no inverse. Requires `revl_load` with `record: true`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"component": {"type": "string",
+                                         "description": "component name; omit for all"}},
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_timeline,
+    },
+    {
+        "name": "revl_inspect_step",
+        "description": "What the composition looks like at step k: which provisions "
+                       "are active, which inverses are still accumulated (newest "
+                       "first), which have already run, and the emissions that "
+                       "happened at or before k.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "at": {"type": "integer",
+                       "description": "step index; -1 means before every step"},
+            },
+            "required": ["at"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_inspect_step,
+    },
+    {
+        "name": "revl_step_back",
+        "description": "Unwind the accumulator to step k by running the registered "
+                       "inverses from the top down, newest first — leaving the "
+                       "component LIVE, not torn down. Refuses if the range crosses "
+                       "an emission with no `compensate` (an emission cannot be "
+                       "undone); `force` crosses anyway and reports what was crossed. "
+                       "The guarantee is 'the inverses ran in order', never 'state "
+                       "was restored'.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "to": {"type": "integer",
+                       "description": "unwind down to this step; -1 unwinds everything"},
+                "force": {"type": "boolean",
+                          "description": "cross uncompensated emissions anyway"},
+            },
+            "required": ["to"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_step_back,
+    },
+    {
+        "name": "revl_replay_forward",
+        "description": "Re-run the tail after step k by re-invoking the service calls "
+                       "that produced it — how you re-test after a fix. Activation-body "
+                       "steps are reported as not replayable (the body is one generator; "
+                       "its head cannot be skipped) rather than faked.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "from": {"type": "integer", "description": "replay steps after this one"},
+            },
+            "required": ["from"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_replay_forward,
     },
     {
         "name": "revl_grammar",

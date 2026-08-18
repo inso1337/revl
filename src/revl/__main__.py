@@ -316,6 +316,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
+    run.add_argument("--record", action="store_true",
+                     help="record the effect accumulator so the REPL can step "
+                          "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
     run.add_argument("--plan", action="store_true",
                      help="print the load plan (order, config, callable keys) and exit, without a runtime")
     run.add_argument("--placement", default=None,
