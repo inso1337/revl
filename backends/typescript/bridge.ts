@@ -136,11 +136,56 @@ export function makeProxy(key: string, methods: string[], socketPath: string) {
   return { component, onPeerLost: (cb: () => void) => lostCallbacks.push(cb) }
 }
 
-/** Provider side: export `keys` from `ctx` over a Unix socket, so another
- *  process can proxy them. Dispatches each JSON call to the committed view
- *  `ctx[key][method](...args)`; the reply carries the value (or the error). */
-export async function serve(ctx: Context, keys: string[], socketPath: string): Promise<net.Server> {
-  const exported = new Set(keys)
+/** Normalize `serve`'s exports to key -> allowed method names.
+ *
+ *  Two accepted forms, mirroring backends/python/bridge.py:
+ *  - `{ key: [method, ...] }` — the *declared* form: the service's own
+ *    operation list, read off the IR (src/revl/placement.py ships it in the
+ *    process spec), so the stub admits exactly what the `service` declaration
+ *    admits.
+ *  - `string[]` — the legacy key-only form (demo/bridge_ts_adt.mts). With no
+ *    declared list the allowlist is derived at dispatch time from the provided
+ *    object's own function-valued properties: weaker (it trusts the object,
+ *    not the interface) but still an allowlist. */
+function exportTable(
+  exports: string[] | Record<string, string[]>,
+): Map<string, Set<string> | null> {
+  const table = new Map<string, Set<string> | null>()
+  if (Array.isArray(exports)) {
+    for (const key of exports) table.set(key, null)
+  } else {
+    for (const [key, methods] of Object.entries(exports)) table.set(key, new Set(methods ?? []))
+  }
+  return table
+}
+
+function publicMethods(service: unknown): Set<string> {
+  const names = new Set<string>()
+  for (let o = service as Record<string, unknown> | null; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const name of Object.getOwnPropertyNames(o)) {
+      if (name === 'constructor' || name.startsWith('_')) continue
+      try {
+        if (typeof (service as Record<string, unknown>)[name] === 'function') names.add(name)
+      } catch {
+        /* a getter that throws is not a method */
+      }
+    }
+  }
+  return names
+}
+
+/** Provider side: export a declared surface from `ctx` over a Unix socket, so
+ *  another process can proxy it. Dispatches each JSON call to the committed
+ *  view `ctx[key][method](...args)` — but only after checking BOTH halves of
+ *  the request against the declaration: an unknown key and an unknown method
+ *  are refused identically, so the seam is exactly the enumerable surface the
+ *  service declares (G8). The reply carries the value (or the error). */
+export async function serve(
+  ctx: Context,
+  exports: string[] | Record<string, string[]>,
+  socketPath: string,
+): Promise<net.Server> {
+  const table = exportTable(exports)
 
   const server = net.createServer((sock) => {
     let buf = ''
@@ -154,13 +199,22 @@ export async function serve(ctx: Context, keys: string[], socketPath: string): P
         let reply: unknown
         try {
           const req = JSON.parse(line)
-          if (!exported.has(req.key)) {
+          if (!table.has(req.key)) {
             reply = { ok: false, error: `key ${req.key} is not exported by this process` }
           } else {
             const service = (ctx as any)[req.key]
-            let result = service[req.method](...(req.args ?? []))
-            if (result && typeof result.then === 'function') result = await result
-            reply = { ok: true, value: encodeValue(result ?? null) }
+            const allowed = table.get(req.key) ?? publicMethods(service)
+            if (!allowed.has(req.method)) {
+              const listed = [...allowed].sort().join(', ') || '(none)'
+              reply = {
+                ok: false,
+                error: `method ${req.method} is not exported for key ${req.key} (exported: ${listed})`,
+              }
+            } else {
+              let result = service[req.method](...(req.args ?? []))
+              if (result && typeof result.then === 'function') result = await result
+              reply = { ok: true, value: encodeValue(result ?? null) }
+            }
           }
         } catch (error) {
           reply = { ok: false, error: String(error) }

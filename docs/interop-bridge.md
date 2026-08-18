@@ -121,7 +121,10 @@ Placement wiring is implemented: `revl run app.rvl --placement p.toml` splits
 the components across processes and wires each seam straight from the manifest
 (`src/revl/placement.py`), the manifest-driven form of demo/bridge_pypy.py.
 `--once` brings the composition up, runs per-process probes (which may cross a
-seam), and tears down. Each process declares its `backend`:
+seam), and tears down. It preflights the runtimes a placement asks for *before*
+spawning anything — a missing cordis-py (or node, cargo, JDK) is one diagnostic
+naming the setup command, not one traceback per child — and cleans up the
+sockets and specs it created. Each process declares its `backend`:
 
 - `py` (default) runs on cordis-py via `src/revl/_process_runner.py`;
 - `node` runs on cordis-ts via `backends/typescript/placement_runner.ts`;
@@ -223,6 +226,86 @@ Three decisions make it honest:
   (demo/live.py). Leak 3, the worst failure mode in distributed systems, is
   revl's best-handled event — a first-class reactive transition instead of an
   exception.
+
+### Trust model
+
+The bridge is a **local development tool for a single trusting user**, and this
+section says exactly what that buys and what it does not. It is the security
+statement for §3; nothing below is aspirational.
+
+**Who may write a placement file.** A placement `.toml` is *trusted input, at
+the same level as the `.rvl` source*. It names which components run where, and
+it carries probes that call into the running composition. Anyone who may write
+a placement file can therefore make your composition do whatever its own
+services do. Treat a placement file exactly as you treat source: review it,
+version it, and never run one that arrived from somewhere you would not accept
+a patch from.
+
+**What a probe can do.** A probe is *parsed, never evaluated*. The grammar is
+one method call on one key that process holds, with literal arguments:
+
+```
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]     # admitted
+probe = ["__import__('os').system('...')"]                     # refused
+probe = ["cache.put(open('/etc/passwd').read(), '42')"]        # refused: not a literal
+```
+
+Every runner enforces the same grammar — `src/revl/_process_runner.py`
+(`ast.parse` + `ast.literal_eval`, no builtins in scope), the node runner
+(`backends/typescript/placement_runner.ts`, a scanner rather than
+`new Function`), and the rust/java runners, which already took probes
+structurally. So a probe reaches the *declared surface* of a service and
+nothing else. It is not a sandbox for what happens next: a probe that calls an
+`emission fn` gets the real effect, crossing the seam into the provider's real
+pool. That is the point of the probe — but it means "a probe cannot run
+arbitrary code" is a statement about the *probe*, not about the composition it
+calls.
+
+**Who may call across a seam.** Each provider process listens on an AF_UNIX
+socket inside a `tempfile.mkdtemp()` directory, which is `0700` — so the
+transport is reachable by **the same OS user only**, and the directory mode is
+the entire access control. There is no authentication, no authorization and no
+encryption on the wire, and none is needed at this scope. It also means the
+seam **must not be moved to a network transport as-is**: a TCP or
+cross-machine bridge is a different threat model and needs a real authN/authZ
+story before it is written (see §7).
+
+**What the stub will dispatch.** Both halves of a request are checked against
+the declaration before anything is called:
+
+- the **key** must be one this process exports (`spec.serve.keys`, from the IR);
+- the **method** must be one the `service` declares for that key
+  (`spec.serve.methods`, also from the IR).
+
+An unknown key and an unknown method are refused identically, with an error
+reply — a request never reaches attribute lookup on the provided object. This
+is the same claim `revl audit` makes about the boundary (G8): the surface is
+*enumerable*, and here it is also *checked*. Per tier: py and node check the
+declared list (`backends/python/bridge.py`, `backends/typescript/bridge.ts`);
+java resolves the method on the emitted service *interface* by reflection, so
+an undeclared name has nowhere to land; rust dispatches through an emitted
+`match` over the declared methods, so an unknown name is not expressible.
+(The legacy `serve(ctx, ["db"], sock)` form, used by the hand-written demos,
+has no declared list and derives the allowlist from the provided object's own
+public methods — weaker, because it trusts the object rather than the
+interface, but still an allowlist.)
+
+**What crosses, and what leaks with it.** Values cross **by copy** (the
+canonical encoding above); resource types — anything an `extern acquire`
+returns — never cross at all, and `revl audit` refuses such a service at the
+seam rather than marshalling it silently. Two things do cross that are worth
+naming: **error strings** (a provider-side exception is marshalled to the
+consumer as `"<Type>: <message>"`, so a message carrying a connection string
+or a secret carries it across the seam), and the **environment** (placement
+spawns children with the conductor's `os.environ`, so every process in a
+composition sees the same secrets the conductor does).
+
+**What this is not.** It is not a sandbox, not a multi-tenant boundary, and not
+a defense against a hostile process on the same machine running as the same
+user — such a process can connect to the socket and call the exported surface,
+exactly as the consumer does. The checks above make the seam *well-defined and
+enumerable*, which is a correctness and thesis property (G8), not a claim of
+isolation.
 
 ## 4. Distributability as a checked property
 

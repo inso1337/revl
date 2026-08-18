@@ -4,3 +4,7 @@ node_modules/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+
+# written by `revl run --placement` (backends/typescript/_gen/mod_*.ts): the
+# emitted cordis-ts module for a node-placed process, generated per run
+backends/typescript/_gen/
