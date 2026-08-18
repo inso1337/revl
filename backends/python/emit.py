@@ -874,6 +874,39 @@ def _emit_tests(tests: list) -> "_Lines":
     return out
 
 
+def _emit_fault_tests(fault_tests: list, names: list) -> "_Lines":
+    """Emit the fault-test manifest (docs/fault-tests.md).
+
+    A fault test is not code in the module: it is an *experiment on* the
+    module, driven by the harness in `src/revl/fault.py`, which re-emits the
+    component with a `fail` step spliced in at the injection point.  What the
+    module carries is therefore the declaration itself, so an emitted module
+    is self-describing and the harness never has to be handed the IR
+    separately.  This is the py tier's answer to "lower it or refuse it";
+    the other four tiers refuse (they have no fault-test driver).
+    """
+    out = _Lines()
+    out.add(0, "REVL_FAULT_TESTS = [")
+    for unit in fault_tests:
+        component = unit.get("component")
+        if component not in names:
+            raise EmitError(
+                f"fault test {unit.get('name')!r} names unknown component {component!r}")
+        at = unit.get("at") or {}
+        entry = {
+            "name": unit.get("name"),
+            "component": component,
+            "step": at.get("step"),
+            "effect": at.get("effect"),
+            "assert": list(unit.get("assert") or []),
+            "config": dict(unit.get("config") or {}),
+        }
+        out.add(1, f"{entry!r},")
+    out.add(0, "]")
+    out.add(0)
+    return out
+
+
 def _find_host_roots(nodes) -> set[str]:
     """Host builtins referenced by pure fn/test bodies.
 
@@ -971,6 +1004,7 @@ def emit(ir: dict) -> str:
     functions = ir.get("functions") or []
     externs = ir.get("externs") or []
     tests = ir.get("tests") or []
+    fault_tests = ir.get("fault_tests") or []
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
 
@@ -1033,6 +1067,8 @@ def emit(ir: dict) -> str:
         out.extend(_emit_externs(externs))
     if tests:
         out.extend(_emit_tests(tests))
+    if fault_tests:
+        out.extend(_emit_fault_tests(fault_tests, names))
     out.add(0, "SERVICES = {")
     for service_name, service in services.items():
         out.add(1, f"{service_name!r}: {{")
