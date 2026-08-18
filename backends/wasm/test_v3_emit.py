@@ -69,6 +69,28 @@ def _emitter():
     return module
 
 
+def _run_module(tmp_path, source: str):
+    """Compile `source` to WAT and return an `invoke(fn, *args) -> int` bound to
+    it, run on the real wasmtime substrate — the same harness the collatz/fib
+    tests use (write WAT, `wasmtime --invoke`, read the last stdout line),
+    factored out so the scenarios below can share one module per program."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    wat_path = tmp_path / "mod.wat"
+    wat_path.write_text(_emitter().emit(compile_source(source))["functions"], encoding="utf-8")
+
+    def invoke(fn: str, *args) -> int:
+        out = subprocess.run(
+            ["wasmtime", "--invoke", fn, str(wat_path), *[str(a) for a in args]],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip().splitlines()[-1])
+
+    return invoke
+
+
 def test_v3_types_and_int_functions_emit():
     emit = _emitter()
     ir = compile_source(
@@ -349,3 +371,208 @@ def test_v3_escaping_arrow_still_rejected():
     emit = _emitter()
     with pytest.raises(emit.EmitError, match="not lowerable"):
         emit.emit(compile_source("fn apply(f: Fn[Int, Int], x: Int) -> Int { return f(x) }"))
+
+
+# ---------------------------------------------------------------------------
+# EXECUTED runtime scenarios for the v3 `fn` tier.
+#
+# The tests above this block that end in `_emit` assert on emitted *text*
+# (`assert '(export "add")' in wat`) — they prove the emitter did not raise,
+# not that the module computes the right answer. A silent lowering bug (a
+# clobbered scratch pointer, an off-by-one memory offset, a mis-dispatched
+# tag) sails straight through a string assertion. The scenarios below hand the
+# module to wasmtime and assert the COMPUTED RESULT, closing that gap for the
+# constructs that previously had emit-string-only or no runtime coverage.
+# ---------------------------------------------------------------------------
+
+
+def test_v3_int_scalar_functions_run_on_wasmtime(tmp_path):
+    """Int arithmetic, `if`-return, the `?:` ternary and the `!` Bool operator
+    ACTUALLY COMPUTE — previously asserted only as emitted text in
+    `test_v3_types_and_int_functions_emit`."""
+    invoke = _run_module(tmp_path, """
+        fn add(a: Int, b: Int) -> Int { return a + b }
+        fn classify(n: Int) -> Int {
+          if (n < 0) return 0
+          return n === 0 ? 1 : 2
+        }
+        fn negate(b: Bool) -> Int { return !b ? 1 : 0 }
+    """)
+    assert invoke("add", 3, 4) == 7 and invoke("add", -8, 8) == 0
+    assert invoke("classify", -5) == 0
+    assert invoke("classify", 0) == 1
+    assert invoke("classify", 9) == 2
+    assert invoke("negate", 0) == 1 and invoke("negate", 1) == 0
+
+
+def test_v3_record_linear_memory_roundtrip_runs_on_wasmtime(tmp_path):
+    """A record built in linear memory reads its fields back with the right
+    values — construction + field access (Int and Str fields, and a List
+    field). `test_v3_str_list_record_functions_emit` only checks the WAT
+    string, so a wrong field offset would not be caught there."""
+    invoke = _run_module(tmp_path, """
+        type Row = { id: Int, name: Str }
+        type Bag = { xs: List[Int], n: Int }
+        fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
+        fn row_id(id: Int) -> Int { let r = make_row(id, "x")  return r.id }
+        fn row_name_len() -> Int { let r = { id: 7, name: "abcde" }  return r.name.length() + r.id }
+        fn bag_pick(i: Int) -> Int { let b = { xs: [4, 5, 6], n: 2 }  return b.xs[i] + b.n }
+    """)
+    assert invoke("row_id", 42) == 42
+    assert invoke("row_name_len") == 12          # len("abcde")=5 + id 7
+    assert invoke("bag_pick", 0) == 6 and invoke("bag_pick", 2) == 8
+
+
+def test_v3_nested_allocation_does_not_clobber_base_pointer(tmp_path):
+    """REGRESSION: a record/list/variant used as a *field, element, or payload*
+    of another one used to reuse a single `$__revl_tmp` scratch pointer, so the
+    inner allocation overwrote the outer's base pointer mid-construction. The
+    emitter did not raise and the emitted text looked plausible — only running
+    it revealed the corruption (e.g. `{ inner: { v: 11 }, k: 5 }` returned 1285
+    instead of 16). Every construct here allocates inside another; the results
+    are exact."""
+    invoke = _run_module(tmp_path, """
+        type Inner = { v: Int }
+        type Outer = { inner: Inner, k: Int }
+        type A = { v: Int }
+        type B = { a: A, x: Int }
+        type C = { b: B, y: Int }
+        type T = { p: List[Int], q: Int, r: List[Int] }
+        type Rec = { w: Int }
+        fn nested_record() -> Int { let o = { inner: { v: 11 }, k: 5 }  return o.inner.v + o.k }
+        fn triple_nested() -> Int {
+          let c = { b: { a: { v: 1 }, x: 2 }, y: 4 }
+          return c.b.a.v * 100 + c.b.x * 10 + c.y
+        }
+        fn two_alloc_fields() -> Int {
+          let t = { p: [1, 2], q: 5, r: [3, 4, 9] }
+          return t.p[1] + t.q + t.r[2]
+        }
+        fn list_of_records() -> Int {
+          let rs = [{ w: 2 }, { w: 3 }, { w: 4 }]
+          var s = 0  for (rec of rs) { s += rec.w }  return s
+        }
+    """)
+    assert invoke("nested_record") == 16      # was 1285 before the fix
+    assert invoke("triple_nested") == 124
+    assert invoke("two_alloc_fields") == 16   # 2 + 5 + 9
+    assert invoke("list_of_records") == 9     # 2 + 3 + 4, was 13 before the fix
+
+
+def test_v3_list_linear_memory_roundtrip_runs_on_wasmtime(tmp_path):
+    """List literals in linear memory: index, length, and the persistent
+    `push`/`concat`/`slice` builtins compute the right values. Only `first`
+    had emit-string coverage before; the persistent builtins had none."""
+    invoke = _run_module(tmp_path, """
+        fn first(xs: List[Int]) -> Int { return xs[0] }
+        fn sum3() -> Int { let xs = [10, 20, 30]  return xs[0] + xs[1] + xs[2] }
+        fn len4() -> Int { let xs = [1, 2, 3, 4]  return xs.length() }
+        fn pushed() -> Int { let xs = [1, 2]  let ys = xs.push(3)  return ys[2] * 10 + ys.length() }
+        fn joined() -> Int { let xs = [1, 2]  let ys = [3, 4, 5]  return xs.concat(ys).length() }
+        fn sliced() -> Int { let xs = [1, 2, 3, 4]  let ys = xs.slice(1, 3)  return ys[0] * 10 + ys.length() }
+    """)
+    assert invoke("sum3") == 60
+    assert invoke("len4") == 4
+    assert invoke("pushed") == 33            # ys[2]==3, len==3
+    assert invoke("joined") == 5
+    assert invoke("sliced") == 22            # ys[0]==2, len==2
+
+
+def test_v3_str_builtins_run_on_wasmtime(tmp_path):
+    """`length`/`concat`/`charCodeAt`/`charAt`/`slice` and Str `==` compute the
+    right values on the linear-memory string model. These had NO runtime
+    coverage — only `greet_len` (one `.length()`) and int interpolation did."""
+    invoke = _run_module(tmp_path, """
+        fn slen() -> Int { let s = "hello"  return s.length() }
+        fn cat_len() -> Int { return "foo".concat("bar").length() }
+        fn code(i: Int) -> Int { return "ABC".charCodeAt(i) }
+        fn char_code() -> Int { return "ABC".charAt(1).charCodeAt(0) }
+        fn slice_len() -> Int { return "hello".slice(1, 3).length() }
+        fn eq_same() -> Int { return "abcd" == "abcd" ? 1 : 0 }
+        fn eq_difflen() -> Int { return "ab" == "abc" ? 1 : 0 }
+        fn eq_diff() -> Int { return "abc" == "abd" ? 1 : 0 }
+    """)
+    assert invoke("slen") == 5
+    assert invoke("cat_len") == 6
+    assert [invoke("code", i) for i in range(3)] == [ord(c) for c in "ABC"]
+    assert invoke("char_code") == ord("B")
+    assert invoke("slice_len") == 2
+    assert invoke("eq_same") == 1
+    assert invoke("eq_difflen") == 0 and invoke("eq_diff") == 0
+
+
+def test_v3_variant_allocated_payload_runs_on_wasmtime(tmp_path):
+    """A user variant whose case carries a RECORD or Str payload: construct,
+    `match`, then read a field / length of the payload. This exercises the
+    tagged-cell path with an *allocated* payload (the same clobber surface as
+    the regression above, from the variant side), which the existing
+    `Found(9)`/`Ok(7)`/`Some(5)` runtime cases — all i32 payloads — did not."""
+    invoke = _run_module(tmp_path, """
+        type Rec = { a: Int, b: Int }
+        type Boxed = Box(Rec) | Empty
+        type Note = Msg(Str) | Silent
+        fn unbox(h: Int) -> Int {
+          let w = h == 1 ? Box({ a: 3, b: 4 }) : Empty
+          return match w { Box(r) => r.a * 10 + r.b, Empty => 0 }
+        }
+        fn note_len(h: Int) -> Int {
+          let m = h == 1 ? Msg("hello") : Silent
+          return match m { Msg(s) => s.length(), Silent => 0 }
+        }
+    """)
+    assert invoke("unbox", 1) == 34 and invoke("unbox", 0) == 0
+    assert invoke("note_len", 1) == 5 and invoke("note_len", 0) == 0
+
+
+def test_v3_nullish_coalesce_runs_on_wasmtime(tmp_path):
+    """`a ?? b` reads the Opt tag and takes the payload-or-default at runtime,
+    including when the `??` is nested inside a record field (a clobber site).
+    `??` had emit coverage in the component tier only."""
+    invoke = _run_module(tmp_path, """
+        fn pick(some: Int) -> Int { let o = some == 1 ? Some(9) : None  return o ?? 0 }
+        fn in_record(some: Int) -> Int {
+          let o = some == 1 ? Some(9) : None
+          let h = { v: o ?? 0, w: 100 }
+          return h.v + h.w
+        }
+    """)
+    assert invoke("pick", 1) == 9 and invoke("pick", 0) == 0
+    assert invoke("in_record", 1) == 109 and invoke("in_record", 0) == 100
+
+
+def test_v3_match_bind_inside_loop_runs_on_wasmtime(tmp_path):
+    """REGRESSION: a `match` with a payload binding used as an OPERAND (e.g.
+    `s += match x { J(v) => v, K => 100 }`, the natural shape inside a loop)
+    raised EmitError "unbound name 'v'". `_infer_type` descended into the arm
+    body WITHOUT binding the arm payload, so type inference of the enclosing
+    binary/`+=` expression failed even though the construct lowers fine. Now it
+    both emits and computes."""
+    invoke = _run_module(tmp_path, """
+        type V = J(Int) | K
+        fn while_sum(n: Int) -> Int {
+          var s = 0  var i = 0
+          while (i < n) {
+            let x = i == 1 ? J(i) : K
+            s += match x { J(v) => v, K => 100 }
+            i += 1
+          }
+          return s
+        }
+        fn for_sum() -> Int {
+          let items = [J(2), K, J(5)]
+          var s = 0
+          for (x of items) { s += match x { J(v) => v, K => 100 } }
+          return s
+        }
+    """)
+    assert invoke("while_sum", 3) == 201     # K(100) + J(1) + K(100)
+    assert invoke("for_sum") == 107          # 2 + 100 + 5
+
+
+def test_v3_indexof_rejected_by_tier():
+    """DELIBERATE BOUNDARY: `indexOf` is not lowerable on this tier (it needs a
+    search loop the i32 model does not spell yet). A boundary that silently
+    started emitting would be as much a regression as a miscompile."""
+    emit = _emitter()
+    with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
+        emit.emit(compile_source('fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }'))
