@@ -32,8 +32,9 @@ import re
 from typing import Any, Callable, Optional
 
 __all__ = [
-    "ConfigError", "ConfigSchema", "Frame", "Job", "JobCancelled", "JobHandle",
-    "Map", "Pool", "PoolError", "add_trace", "fmt", "plug", "realm_label",
+    "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
+    "JobHandle", "Map", "Pool", "PoolError", "add_trace", "arm_fault_probe",
+    "disarm_fault_probe", "fmt", "plug", "realm_label",
     "remove_trace", "resolved_config", "set_trace", "trace_observers",
 ]
 
@@ -143,6 +144,121 @@ def _record(event: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# fault probe: instrumentation for `fault test` (docs/fault-tests.md)
+# ---------------------------------------------------------------------------
+
+
+class FaultProbe:
+    """Records one component activation's inverse accumulation and replay.
+
+    A `fault test` needs two orders to compare: the order in which the
+    activation *accumulated* its inverses, and the order in which the runtime
+    actually *ran* them while unwinding.  Both are observed here rather than
+    reconstructed from the host trace, because a host trace only sees effects
+    that touch a stub builtin — a `provide` withdrawal or a pure closure undo
+    leaves no trace event at all, and those are exactly the inverses an
+    L-Raise regression would drop.
+
+    The probe wraps the component body generator installed by
+    :meth:`Frame.install` and tags every yielded disposer with its
+    accumulation index; the wrapper appends that index to :attr:`ran` when the
+    runtime disposes it.  R1/A8 hold iff ``ran == list(reversed(accumulated))``.
+
+    Only the component named at arming time is instrumented, so siblings in
+    the same composition run exactly as they normally would.
+    """
+
+    __slots__ = ("component", "accumulated", "ran", "_n")
+
+    def __init__(self, component: str) -> None:
+        self.component = component
+        self.accumulated: list = []   # accumulation indices, in order
+        self.ran: list = []           # the same indices, in disposal order
+        self._n = 0
+
+    # -- instrumentation ---------------------------------------------------
+
+    def _tag(self, value: Any, frame: "Frame") -> Any:
+        """Wrap one yielded disposer; pass anything else through untouched."""
+        if not callable(value):
+            return value            # `yield None` — an A1 iteration boundary
+        if getattr(value, "__self__", None) is frame:
+            return value            # `yield frame.drain` — the accumulator itself
+        self._n += 1
+        index = self._n
+        self.accumulated.append(index)
+
+        def _instrumented(_index=index, _undo=value):
+            self.ran.append(_index)
+            return _undo()
+
+        return _instrumented
+
+    def instrument(self, body: Callable, frame: "Frame") -> Callable:
+        """Return a body generator function equivalent to *body*, tagged.
+
+        cordis iterates an effect body with a plain ``for``/``async for`` and
+        never ``send``s or ``throw``s into it (see cordis fiber ``_execute``),
+        so a re-yielding wrapper is protocol-faithful.
+        """
+        if inspect.isasyncgenfunction(body):
+            async def _async_wrapper():
+                async for value in body():
+                    yield self._tag(value, frame)
+            return _async_wrapper
+
+        def _wrapper():
+            for value in body():
+                yield self._tag(value, frame)
+        return _wrapper
+
+    # -- results -----------------------------------------------------------
+
+    def lifo_violation(self) -> Optional[tuple]:
+        """``(position, ran_index, expected_index)`` for the first inverse that
+        broke LIFO, or ``None`` when the replay was exact.
+
+        ``ran_index`` is ``None`` when the replay simply stopped early — an
+        inverse that never ran is a LIFO violation too, and the more serious
+        one, so it is reported here rather than silently passing.
+        """
+        expected = list(reversed(self.accumulated))
+        for position, index in enumerate(self.ran):
+            if position >= len(expected):
+                return (position + 1, index, None)
+            if expected[position] != index:
+                return (position + 1, index, expected[position])
+        if len(self.ran) != len(expected):
+            return (len(self.ran) + 1, None, expected[len(self.ran)])
+        return None
+
+    def never_ran(self) -> list:
+        """Accumulation indices whose inverse was never disposed."""
+        ran = set(self.ran)
+        return [index for index in self.accumulated if index not in ran]
+
+
+_fault_probe: Optional[FaultProbe] = None
+
+
+def arm_fault_probe(component: str) -> FaultProbe:
+    """Instrument the next activation of *component*; returns the probe.
+
+    Process-global and single-slot on purpose: a fault test drives exactly one
+    activation at a time, and a leftover probe from a crashed run is visible
+    rather than silently accumulating.
+    """
+    global _fault_probe
+    _fault_probe = FaultProbe(component)
+    return _fault_probe
+
+
+def disarm_fault_probe() -> None:
+    global _fault_probe
+    _fault_probe = None
+
+
+# ---------------------------------------------------------------------------
 # adapter: the component accumulator
 # ---------------------------------------------------------------------------
 
@@ -183,6 +299,9 @@ class Frame:
 
     def install(self, body: Callable) -> Any:
         """Install the component body (a generator function) as one effect."""
+        probe = _fault_probe
+        if probe is not None and probe.component == self.name:
+            body = probe.instrument(body, self)
         return self.ctx.effect(body, f"{self.name}/body")
 
     def adopt(self, effect: Any) -> Any:

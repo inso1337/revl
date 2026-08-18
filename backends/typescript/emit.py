@@ -1230,10 +1230,28 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+# A `fault test` is executed by driving a real activation and inspecting the
+# runtime's residue afterwards (docs/fault-tests.md).  The cordis (TS) tier
+# has no such driver, so it is refused loudly instead of being dropped on the
+# floor: a silently-missing fault test is a guarantee nobody is checking.
+def _refuse_fault_tests(ir) -> None:
+    fault_tests = (ir or {}).get("fault_tests") or []
+    if not fault_tests:
+        return
+    names = ", ".join(repr(unit.get("name")) for unit in fault_tests)
+    raise EmitError(
+        f"fault tests do not lower to the cordis (TS) tier ({names}) — `fault test` runs "
+        f"on the python reference tier only (docs/fault-tests.md). Compile "
+        f"this document with --backend py, or move the fault tests to a "
+        f"module that is not emitted for this tier."
+    )
+
+
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be an object")
+    _refuse_fault_tests(ir)
     version = ir.get("ir_version")
     # publish a v3 context for the whole document so component/method bodies
     # can render pure 2.0 expressions (see _v3_context_for_components)

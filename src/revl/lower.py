@@ -901,6 +901,98 @@ def _lower_tests(program: Program, filename: str, types: dict) -> list:
     return tests
 
 
+# `fail at effect X` is sugar: it resolves to the index of the body step that
+# binds X, so every backend and the runner see exactly one addressing scheme
+# (a step index).  Index is the primitive because it is total — *every* body
+# step has one, including `emit`, `provide`, `await` and unbound `effect`
+# blocks — while a name only exists for `let effect NAME = …`.  The name form
+# is the refactor-stable one to write, so both spellings are kept and the
+# diagnostics always report the pair.
+_FAULT_ASSERTS = (
+    "failed", "no-residue", "inverses-lifo", "no-emissions", "siblings-unaffected",
+)
+
+
+def _fault_effect_index(body: list, name: str) -> int | None:
+    """1-based index of the top-level `let-effect` step binding *name*."""
+    for index, step in enumerate(body, 1):
+        if step.get("step") == "let-effect" and step.get("bind") == name:
+            return index
+    return None
+
+
+def _lower_fault_tests(program: Program, components: list, filename: str) -> list:
+    """Lower `fault test` blocks to IR fault units (docs/fault-tests.md).
+
+    Runs after component lowering: the injection point is validated against
+    the *lowered* body, so `fail at step 4` is a compile error when the
+    component only has three steps rather than a confusing runtime miss.
+    """
+    if not program.fault_tests:
+        return []
+    by_name = {component["name"]: component for component in components}
+    units: list[dict] = []
+    seen: set[str] = set()
+    for decl in program.fault_tests:
+        if decl.name in seen:
+            raise RevlError(filename, decl.line, f"duplicate fault test `{decl.name}`")
+        seen.add(decl.name)
+        component = by_name.get(decl.component)
+        if component is None:
+            known = ", ".join(sorted(by_name)) or "(none in this composition)"
+            raise RevlError(filename, decl.line,
+                            f"fault test `{decl.name}` names unknown component `{decl.component}`",
+                            hint=f"components in this composition: {known}")
+        body = component.get("body") or []
+        if not body:
+            raise RevlError(filename, decl.line,
+                            f"component `{decl.component}` has an empty activation body — "
+                            f"there is no point at which it can fail")
+        if decl.at_effect is not None:
+            step = _fault_effect_index(body, decl.at_effect)
+            if step is None:
+                bindings = [s.get("bind") for s in body if s.get("step") == "let-effect"]
+                known = ", ".join(f"`{b}`" for b in bindings) or "(none)"
+                raise RevlError(
+                    filename, decl.line,
+                    f"fault test `{decl.name}`: component `{decl.component}` has no "
+                    f"`let … effect` step bound to `{decl.at_effect}`",
+                    hint=f"effect bindings in `{decl.component}`: {known}")
+        else:
+            step = decl.at_step
+            if step > len(body):
+                raise RevlError(
+                    filename, decl.line,
+                    f"fault test `{decl.name}`: `fail at step {step}` is past the end of "
+                    f"`{decl.component}` (its activation body has {len(body)} step(s))")
+        known_config = {field.get("name") for field in component.get("config") or []}
+        for key in decl.config:
+            if key not in known_config:
+                fields = ", ".join(sorted(known_config)) or "(none)"
+                raise RevlError(
+                    filename, decl.line,
+                    f"fault test `{decl.name}`: `{decl.component}` has no config field `{key}`",
+                    hint=f"config fields of `{decl.component}`: {fields}")
+        asserts: list[str] = []
+        for kind, line in decl.asserts:
+            if kind not in _FAULT_ASSERTS:  # pragma: no cover — parser gates the spelling
+                raise RevlError(filename, line, f"unknown fault-test assertion `{kind}`")
+            if kind not in asserts:
+                asserts.append(kind)
+        unit = {
+            "name": decl.name,
+            "component": decl.component,
+            "at": {"step": step},
+            "assert": asserts,
+        }
+        if decl.at_effect is not None:
+            unit["at"]["effect"] = decl.at_effect
+        if decl.config:
+            unit["config"] = dict(decl.config)
+        units.append(unit)
+    return units
+
+
 def _bool_cond(expr, type_env: dict, types: dict, filename: str, where: str) -> None:
     t = infer_ast(expr, type_env, types, filename)
     if t is not None and t != "Bool":
@@ -1377,6 +1469,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         components.append(_lower_component(comp, services, program.filename, component_callables,
                                            types, emitting_fns))
 
+    fault_tests = _lower_fault_tests(program, components, program.filename)
+
     manifest = _link(program, components, ambient.get("components") or [])
 
     uses_components_2 = any(
@@ -1392,6 +1486,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         for svc in services.values()
     )
     uses_v3 = uses_v3 or uses_components_2
+    # a `fault_tests` section is an additive v3 feature; the version bump is
+    # itself a guard, so a consumer that predates the section refuses the
+    # whole document instead of silently dropping the fault tests
+    uses_v3 = uses_v3 or bool(fault_tests)
 
     def _has_builtin(node) -> bool:
         if isinstance(node, dict):
@@ -1435,6 +1533,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         result["externs"] = externs
     if tests:
         result["tests"] = tests
+    if fault_tests:
+        result["fault_tests"] = fault_tests
     return result
 
 
