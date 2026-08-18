@@ -1,5 +1,10 @@
 # Backend IR v1 — deltas over v0
 
+> **Frozen v1 contract.** Everything added since lives in
+> [docs/backend-ir-v3.md](backend-ir-v3.md) — realms, types, functions,
+> externs, tests, and the component-body steps and expression kinds a
+> backend must handle today.
+
 v1 lands the amendments accepted in docs/contract-errata.md. The v0 document
 (docs/backend-ir.md) stays frozen as the historical contract; this file lists
 only what changes. `ir_version` is `1`. Emitters accept v1 only — the

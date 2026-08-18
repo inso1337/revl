@@ -1,5 +1,10 @@
 # revl backend IR (v0 contract)
 
+> **Frozen v0 contract.** Everything added since lives in
+> [docs/backend-ir-v3.md](backend-ir-v3.md) — realms, types, functions,
+> externs, tests, and the component-body steps and expression kinds a
+> backend must handle today.
+
 > **Historical contract.** This file froze the *v0* shape so the frontend
 > and backends could be built in parallel. No emitter produces
 > `ir_version: 0` any more — the shipping contract is `ir_version` 1/2/3
