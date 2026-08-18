@@ -214,10 +214,13 @@ it cannot drift silently. **These are not fixed.**
   integer division has named operations (`div_trunc` / `div_floor` /
   `div_euclid`), and `mod` gives the Euclidean remainder. See
   docs/arithmetic.md.
-- **`%` disagrees on negatives.** python floors (`-7 % 3 == 2`); rust, java
-  and JS truncate (`== -1`). Truncation is the majority *and* the pairing
-  that keeps `(a / b) * b + a % b == a`, so python is the outlier to move —
-  but moving it changes existing programs, so it is a decision, not a patch.
+- ✅ **`%` disagreed on negatives** — *closed.* python floored (`-7 % 3 == 2`)
+  where rust, java and JS truncate (`== -1`). `%` is now the truncated
+  remainder everywhere, which §0 requires (it is TypeScript's spelling) and
+  which the pairing law confirms: `%` partners `div_trunc`, `mod` partners
+  `div_euclid`, and both identities are asserted by execution over sixteen
+  sign combinations. python builds the truncated form; every other tier had
+  it natively.
 - **`Int` loses precision past 2^53 on TypeScript.** JS numbers are f64, so
   `9007199254740993 - 9007199254740992` is `0`. python is arbitrary-precision
   and rust is `i64`. Unlike the other two this needs `BigInt`, not a type

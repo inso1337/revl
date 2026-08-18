@@ -40,9 +40,25 @@ revl makes you say which one you mean:
 
 ## `%` keeps TypeScript's meaning; `mod` is the mathematical one
 
-`%` is the **truncated remainder**, taking the sign of the *dividend*, because
-that is what `%` means in TypeScript and §0 does not permit the same spelling
-to mean something else.
+`%` is the **truncated remainder**, taking the sign of the *dividend*. That is
+what `%` means in TypeScript, so §0 requires it — but it is also the choice
+that makes the surface coherent, because every remainder pairs with a division:
+
+> **The pairing law.** For any `a` and non-zero `b`:
+> `a.div_trunc(b) * b + a % b == a`, and
+> `a.div_euclid(b) * b + a.mod(b) == a`.
+
+`div_floor` deliberately has no remainder partner. What people reach for a
+floored `%` to get is index safety, and `mod` gives that **strictly better** —
+non-negative for *either* sign of the divisor, where floored is only
+non-negative when the divisor is positive.
+
+Publishing the law is what makes the convention checkable instead of a matter
+of taste. `tests/test_cross_tier_execution.py` asserts both identities over
+sixteen sign combinations, by executing them on every tier.
+
+python was the outlier: its `%` floors and takes the sign of the *divisor*, so
+it is the one tier that builds the truncated form rather than inheriting it.
 
 `a.mod(b)` is the **Euclidean remainder**: always in `[0, |b|)`, whatever the
 signs.
@@ -67,6 +83,8 @@ than inheriting a host rule:
 | tier | `div_trunc` | `div_floor` | `div_euclid` | `mod` |
 |---|---|---|---|---|
 | python | built (`//` floors) | native `//` | built | `a % abs(b)` |
+
+`%` itself is built on python for the same reason — its native `%` floors.
 | typescript | `Math.trunc` | `Math.floor` | built | built |
 | rust | native `/` | built | `div_euclid` | `rem_euclid().abs()` |
 | java | native `/` | `Math.floorDiv` | built | `Math.floorMod(a, abs(b))` |
@@ -118,12 +136,6 @@ divergence is recorded but not closed: it is a decision about whether revl's
 
 ## Still open
 
-- **`%` on negatives diverges between tiers today.** python floors where
-  everyone else truncates. §0 says python is the one to move; that changes the
-  meaning of existing programs, so it is pinned in
-  `tests/test_cross_tier_execution.py` and recorded in
-  docs/contract-errata.md rather than changed silently. `mod` gives anyone a
-  defined answer in the meantime.
 - **`Int` has no stated width, and overflow is unspecified.** `MAX + 1` grows
   on python, faults on rust, and silently loses precision on TypeScript past
   2^53. A language offering compile-time guarantees should not leave silent
