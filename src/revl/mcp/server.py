@@ -8,6 +8,7 @@ back as a structured diagnostic naming the guarantee it violated.
 Tools
   revl_check       compile a candidate component (source text or files)
   revl_admit       check a candidate *against a running composition*
+  revl_plan        the delta a swap would produce, without applying it
   revl_audit       manifest + G8 boundary surface of a composition
   revl_tools       project a composition's provided services to MCP tools
   revl_grammar     the language surface, small enough to put in a prompt
@@ -216,6 +217,36 @@ def _tool_admit(arguments: dict) -> dict:
     }
 
 
+def _tool_plan(arguments: dict) -> dict:
+    """Dry-run a swap: report the delta without applying it.
+
+    Design decision: when no `manifest` is supplied and this server holds a
+    live composition, the plan runs against *that*. `revl_plan` then reads
+    as the rehearsal for `revl_swap` with the identical arguments — the
+    agent does not have to round-trip the running IR through its context to
+    ask "what would this do?". An explicit `manifest` always wins, and the
+    `against` field says which was used.
+    """
+    from ..plan import plan as build_plan  # noqa: PLC0415 — lazy, mirrors _boundary_of
+
+    running = arguments.get("manifest")
+    against = "manifest"
+    if running is None and SESSION.loaded:
+        running, against = SESSION.ir, "session"
+    elif running is None:
+        against = "nothing (cold start — every provision is a gain)"
+
+    result = build_plan(
+        source=arguments.get("source"),
+        files=arguments.get("files"),
+        manifest=running,
+        modules=arguments.get("modules"),
+        replacing=tuple(arguments.get("replacing") or ()),
+    )
+    return {**result, "against": against,
+            "note": "nothing was admitted, swapped or written — this is a plan"}
+
+
 def _tool_audit(arguments: dict) -> dict:
     try:
         ir = _compile(arguments.get("source"), arguments.get("files"))
@@ -322,6 +353,30 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_admit,
+    },
+    {
+        "name": "revl_plan",
+        "description": "Dry run for admission: what a swap WOULD do, without doing "
+                       "it. Reports provisions gained and withdrawn, which running "
+                       "components divert or reactivate as a consequence, the LIFO "
+                       "teardown order, how the composition's irreversible reach "
+                       "(G8) changes, and any interface drift. A rejected candidate "
+                       "is explained, not thrown. Defaults to the composition this "
+                       "server has loaded, so it is the rehearsal for revl_swap.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "manifest": {"type": "object",
+                             "description": "compiled IR of the running composition; "
+                                            "omit to plan against the loaded session "
+                                            "(or against nothing, for a cold start)"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_plan,
     },
     {
         "name": "revl_audit",
@@ -443,7 +498,8 @@ def handle(message: dict) -> dict | None:
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
             "instructions": "Compile revl components before proposing them; use "
-                            "revl_admit against the running manifest before a swap.",
+                            "revl_admit against the running manifest before a swap, "
+                            "and revl_plan to see what that swap would do first.",
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}
