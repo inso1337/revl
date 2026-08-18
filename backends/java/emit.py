@@ -796,6 +796,20 @@ def _v3_call(
                 f"builtin Result constructor {name!r} is not portable to the Java backend yet"
             )
         return f"{name}({', '.join(args)})"
+    if isinstance(callee, dict) and callee.get("kind") == "field":
+        # A call whose callee is a member access is a *method invocation*
+        # (`Pool.open(..)`, `p.execute(..)`, `Job.run(..)`), not the
+        # application of a functional-valued field. Java has no `.field(args)`
+        # unification with `.field.apply(args)`, so rendering it through the
+        # generic `.apply` fallback below emitted `Pool.open.apply(url, 3L)`,
+        # which does not compile ("package Pool does not exist"). The other
+        # tiers all lower this to a real method call (ts `p.execute(..)`, rust
+        # `p.execute(..)`); this is the Java tier catching up.
+        target_node = callee.get("target")
+        target = _expr(target_node, ctx, rename, env)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}.{_ident(callee.get('name'), 'method')}({', '.join(args)})"
     callee_s = _expr(callee, ctx, rename, env)
     return f"{callee_s}.apply({', '.join(args)})"
 
@@ -1430,6 +1444,17 @@ def _emit_host_stubs(ir: dict) -> list[str]:
         if isinstance(node, dict):
             if node.get("kind") == "host":
                 used.add((node.get("fn") or "").split(".")[0])
+            # v3 top-level functions never lower host calls to a `host` node —
+            # `Pool.open(..)`/`Map.new()`/`Job.run(..)` stay a `field` access on
+            # a `var` named after the host root (see `_v3_call`). Without this
+            # the runtime class was omitted and the emitted method referenced a
+            # nonexistent `Pool`, so a host call outside a component body never
+            # compiled even after the call itself lowered correctly.
+            if node.get("kind") == "field":
+                target = node.get("target")
+                if (isinstance(target, dict) and target.get("kind") == "var"
+                        and target.get("name") in _HOST_ROOTS):
+                    used.add(target.get("name"))
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

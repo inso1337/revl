@@ -310,6 +310,32 @@ def test_stdlib_builtins_use_typed_overloads():
     assert "private static <T> java.util.List<T> revlConcat" in src
 
 
+def test_host_call_in_a_top_level_function_is_a_method_call():
+    """A host method call in a v3 top-level function — `Pool.open(..)`,
+    `p.execute(..)` — is a *method invocation*, not the application of a
+    functional field. `_v3_call` special-cased only `var` callees, so a
+    `field` callee fell through to the generic `.apply(..)` form and emitted
+    `Pool.open.apply(url, 3L)`, which does not compile ("package Pool does not
+    exist"); ts/rust/python all lower this to a real call. And because the
+    call never produced a `host` node, the Pool runtime class was omitted too,
+    so the emitted method referenced a nonexistent `Pool`."""
+    ir = compile_source(
+        """
+        pub fn poolExec(url: Str) -> Int {
+          let p = Pool.open(url, 3)
+          return p.execute("INSERT")
+        }
+        """
+    )
+    src = emit.emit(ir)
+    assert "Pool.open(url, 3L)" in src
+    assert 'p.execute("INSERT")' in src
+    assert ".apply(" not in src, "a host method call must not lower to `.apply(..)`"
+    # ...and the runtime class it calls into has to be emitted.
+    assert "public static final class Pool" in src
+    assert "public static Pool open(String url, long poolSize)" in src
+
+
 STDLIB_SRC = """
 pub fn seq(n: Int) -> List[Int] { var out = [] var i = 0 while (i < n) { out = out.push(i) i += 1 } return out }
 pub fn head(s: Str) -> Str { return s.slice(0, 1) }
@@ -483,6 +509,77 @@ def test_global_realm_divergence_characterized(tmp_path):
     )
     assert run.returncode == 0, run.stderr + run.stdout
     assert "REALM_DIVERGENCE_CHARACTERIZED" in run.stdout
+
+
+@pytest.mark.skipif(
+    JAVAC is None or JAVA is None or not CORDIS4J_CLASSES,
+    reason="needs a JDK and REVL_CORDIS4J_CLASSES (compiled cordis4j-core classes)",
+)
+def test_runtime_values_on_real_cordis4j(tmp_path):
+    """Runtime *values* on the REAL cordis4j jar, the companion to the
+    lifecycle-ordering exit criterion (test_runtime_scenarios_on_real_cordis4j).
+
+    Where that harness pins call ORDER, this one pins the VALUES the
+    consolidated expression renderer (commit d87d87e), the stdlib typed
+    overloads and the Pool host runtime produce, plus method-time `compensate`
+    ordering on a real EffectScope — coverage that was previously only
+    javac-compiled or golden-matched:
+      - match branch selection + payload binding (Ok(row)/NotFound/Invalid(msg))
+      - string interpolation carrying a literal `%`
+      - Str-vs-List stdlib overload dispatch (slice/concat/indexOf/split/join/
+        repeat/push)
+      - Pool capacity accounting (open/acquire/release/close/exhaustion)
+      - method-time compensations run LIFO at teardown
+    Fixture: backends/java/scenarios/runtime_values.rvl (java-owned)."""
+    fixture = HERE / "scenarios" / "runtime_values.rvl"
+    ir = compile_files([str(fixture)])
+    pkg = tmp_path / "revl"
+    pkg.mkdir()
+    (pkg / "Components.java").write_text(emit.emit(ir), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    checks = HERE / "scenarios" / "RuntimeValueChecks.java"
+    harness = HERE / "scenarios" / "RunRuntimeValues.java"
+    compile_all = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", CORDIS4J_CLASSES, "-d", str(out),
+         str(pkg / "Components.java"), str(checks), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_all.returncode == 0, compile_all.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", f"{CORDIS4J_CLASSES}{os.pathsep}{out}", "RunRuntimeValues"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "RUNTIME_VALUES_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_runs_runtime_values_on_stub_runtime(tmp_path):
+    """Offline mirror of test_runtime_values_on_real_cordis4j: the same
+    runtime-independent value checks (RuntimeValueChecks) plus method-time
+    ordering, driven on the JVM by the stub reference runtime
+    (scenarios/RunRuntimeValuesStub.java). The pure-value checks execute the
+    emitted renderer/host-runtime output identically to the real-jar run; only
+    the EffectScope construction differs (concrete `new Context()` vs the real
+    Contexts.create() façade)."""
+    fixture = HERE / "scenarios" / "runtime_values.rvl"
+    ir = compile_files([str(fixture)])
+    out = _javac_compile(tmp_path, emit.emit(ir))
+    checks = HERE / "scenarios" / "RuntimeValueChecks.java"
+    harness = HERE / "scenarios" / "RunRuntimeValuesStub.java"
+    compile_harness = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out),
+         str(checks), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_harness.returncode == 0, compile_harness.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "RunRuntimeValuesStub"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "RUNTIME_VALUES_OK" in run.stdout
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
