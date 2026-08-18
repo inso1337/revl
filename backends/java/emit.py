@@ -67,9 +67,20 @@ _HOST_STUBS = {
         "get": ("java.util.Optional<String>", ["String"]),
     },
     "Job": {
-        "run": ("void", ["String"]),
+        # `Job.run(name) -> handle` (docs/backend-ir-v1.md, "Host builtins"):
+        # the result is an asynchronous handle, not `void`. An `await` step
+        # has to have something to join.
+        "run": ("Self", ["String"]),
     },
 }
+
+# Host builtins whose result is an asynchronous handle. An `await` step over
+# one must *join* it (A1: "evaluate expr, await its result, discard the
+# value") rather than merely evaluate the call — abandoning the handle leaves
+# the job in flight past activation. Rust gets this for free, because its
+# `Job::run` is an `async fn` and the step lowers to `.await`; Java has no
+# await operator, so the join is explicit.
+_HOST_AWAITABLE = {"Job.run"}
 
 # revl host-method names that are Java reserved words must be renamed at both
 # the call site and the runtime-class definition (`Map.new()` is a parse
@@ -1483,12 +1494,67 @@ def _emit_pool_runtime() -> list[str]:
 
 
 def _emit_job_runtime() -> list[str]:
+    """An asynchronous unit of work — `Job.run(name)` hands back a *handle*.
+
+    The v1 contract (docs/backend-ir-v1.md, "Host builtins") types it that
+    way for a reason: an `await` step is only meaningful if there is
+    something to join. The old shape returned `void`, so the emitted
+    `Job.run("x");` could not be joined even in principle and every awaited
+    job stayed in flight past activation. ``pending()`` makes that residue
+    countable, which is what the scenario harnesses assert on.
+
+    No timers: ``await()`` burns ``TICKS`` cooperative scheduler turns and
+    settles, so the behaviour is deterministic under test.
+    """
     return [
-        "// host object runtime (Job) — no-op placeholder",
+        "// host object runtime (Job) — an asynchronous unit of work.",
+        "// `Job.run(name) -> handle` (docs/backend-ir-v1.md, \"Host builtins\"); an",
+        "// `await` step joins the handle, so activation leaves nothing pending.",
         "public static final class Job {",
-        "    private Job() {}",
-        "    public static void run(String name) {",
-        "        // Placeholder: a real job runner would execute `name`.",
+        "    /** scheduler turns of simulated work (same number on every tier) */",
+        "    public static final int TICKS = 5;",
+        "    private static final java.util.List<Job> HANDLES =",
+        "        java.util.Collections.synchronizedList(new java.util.ArrayList<>());",
+        "    private final String name;",
+        "    private volatile String status = \"pending\";",
+        "    private int remaining = TICKS;",
+        "    private Job(String name) {",
+        "        this.name = name;",
+        "    }",
+        "    public static Job run(String name) {",
+        "        Job job = new Job(name);",
+        "        HANDLES.add(job);",
+        "        return job;",
+        "    }",
+        "    public String name() {",
+        "        return name;",
+        "    }",
+        "    public String state() {",
+        "        return status;",
+        "    }",
+        "    /** Drive the job to completion: TICKS cooperative turns, then done. */",
+        "    public String await() {",
+        "        while (remaining > 0) {",
+        "            Thread.yield();",
+        "            remaining--;",
+        "        }",
+        "        status = \"done\";",
+        "        return name;",
+        "    }",
+        "    /** Handles still in flight — teardown residue, made countable. */",
+        "    public static long pending() {",
+        "        synchronized (HANDLES) {",
+        "            long n = 0L;",
+        "            for (Job job : HANDLES) {",
+        "                if (\"pending\".equals(job.state())) {",
+        "                    n++;",
+        "                }",
+        "            }",
+        "            return n;",
+        "        }",
+        "    }",
+        "    public static void reset() {",
+        "        HANDLES.clear();",
         "    }",
         "}",
         "",
@@ -1801,13 +1867,30 @@ def _emit_component_stmts(
                 f"{pad}throw new CordisException(String.valueOf({message}));"
             )
         elif kind == "await":
-            out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
+            out.append(f"{pad}{_await_join(step['expr'], env, v3_ctx)};")
         elif kind == "return":
             raise EmitError("return steps are only allowed inside method bodies")
         else:
             _emit_setup_stmt(env, v3_ctx, step, out, pad)
 
 
+
+
+def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
+    """An A1 `await` step: evaluate, **join** the result, discard the value.
+
+    Emitting the call alone is not an await. `Job.run("x");` starts the job
+    and drops the handle on the floor, so activation returns with the job
+    still pending — the boundary the paper (§4.3.2) says the runtime may
+    divert at never actually closes. Awaiting something that is not a handle
+    is the identity, so an expression the emitter cannot see to be
+    asynchronous stays a plain expression statement.
+    """
+    rendered = _expr(node, env, None, v3_ctx)
+    if (isinstance(node, dict) and node.get("kind") == "host"
+            and (node.get("fn") or "") in _HOST_AWAITABLE):
+        return f"{rendered}.await()"
+    return rendered
 
 
 def _emit_component_modern(
