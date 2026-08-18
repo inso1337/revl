@@ -1,0 +1,37 @@
+// The negative case: `assert no_residue` catching a real leak.
+//
+// `LeakyDatabase` is accepted by the whole front end. G4 demands only that an
+// acquisition carry an `undo`; nothing in the type system knows whether that
+// undo is the *inverse* of the acquisition (`verified effect`, syntax-2.0 §7,
+// would — it is not implemented). Here the undo runs a query instead of
+// closing the pool, so every unload leaves a live connection pool behind.
+//
+// This file is *expected to fail*:
+//
+//   revl test examples/lifecycle_leak.rvl        # exits 1
+//
+// tests/test_lifecycle_exec.py asserts that it does.
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component LeakyDatabase provides leaky: Database {
+  config { url: Str }
+
+  let pool = effect Pool.open(config.url, 4)
+             undo   pool.query("SELECT 1")     // not the inverse of `open`
+
+  provide leaky {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
+
+lifecycle test "a leaky undo leaves residue" {
+  load LeakyDatabase with { url: "postgres://primary:5432/app" }
+  call leaky.query("SELECT 1")
+  unload LeakyDatabase
+  assert no_residue
+}

@@ -1,0 +1,13 @@
+// A plain `test` block is pure (syntax-2.0 §7); driving a composition needs
+// the `lifecycle` modifier.
+service Store { fn get(key: Str) -> Str }
+
+component Kv provides kv: Store {
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(key) = m.get(key) }
+}
+
+test "forgets the modifier" {
+  load Kv
+  assert true
+}

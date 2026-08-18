@@ -428,11 +428,44 @@ class AssertStmt:
     line: int
 
 
+# --- v2.0 §7.1: lifecycle test statements ---------------------------------
+# Stratum-3 statements, legal only inside a `lifecycle test` body. They are a
+# script over a live composition, not pure code, so they are their own node
+# set rather than an extension of the pure statement grammar.
+
+@dataclass
+class LoadStmt:
+    component: str
+    config: list[tuple[str, object, int]]   # (field, expr, line)
+    line: int
+
+
+@dataclass
+class UnloadStmt:
+    component: str
+    line: int
+
+
+@dataclass
+class CallStmt:
+    key: str
+    method: str
+    args: list
+    bind: str | None
+    line: int
+
+
+@dataclass
+class ResidueStmt:
+    line: int
+
+
 @dataclass
 class TestDecl:
     name: str
     body: list
     line: int
+    lifecycle: bool = False
 
 
 @dataclass
@@ -562,6 +595,20 @@ class Parser:
                 program.fn_decls.append(self.fn_decl(False))
             elif self.at("kw", "test"):
                 program.tests.append(self.test_decl())
+            elif self.at("ident", "lifecycle"):
+                # contextual keyword: `lifecycle` is a modifier on `test`
+                # (syntax-2.0 §7.1). It is deliberately NOT a lexer keyword —
+                # the grammar delta is one token in one position, and the
+                # self-hosted lexer's token stream stays unchanged.
+                nxt = self.toks[self.pos + 1]
+                if not (nxt.kind == "kw" and nxt.value == "test"):
+                    raise self.err(
+                        self.peek().line,
+                        "`lifecycle` is a modifier on `test` — expected `test` after it",
+                        hint='write `lifecycle test "name" { ... }` (syntax-2.0 §7.1)',
+                    )
+                self.next()
+                program.tests.append(self.test_decl(lifecycle=True))
             else:
                 tok = self.peek()
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
@@ -1077,7 +1124,7 @@ class Parser:
         self.expect("}")
         return FnDecl(name, params, returns, body, public, line, verified)
 
-    def test_decl(self) -> TestDecl:
+    def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
         tok = self.expect("string")
         name = tok.value
@@ -1086,9 +1133,117 @@ class Parser:
         self.expect("{")
         body = []
         while not self.at("}"):
-            body.append(self.fn_stmt())
+            if lifecycle:
+                body.append(self.lifecycle_stmt())
+            else:
+                self._reject_lifecycle_stmt_here()
+                body.append(self.fn_stmt())
         self.expect("}")
-        return TestDecl(name, body, line)
+        return TestDecl(name, body, line, lifecycle)
+
+    # -- v2.0 §7.1: lifecycle test bodies -----------------------------------
+
+    # `load` / `unload` / `call` are *contextual* statement keywords: they are
+    # ordinary identifiers everywhere else in the language, and only a
+    # `lifecycle test` body reads them as statements.
+    _LIFECYCLE_STMT_WORDS = ("load", "unload", "call")
+
+    def _reject_lifecycle_stmt_here(self) -> None:
+        """A lifecycle statement inside a plain `test` (or any pure body) is
+        refused by name rather than by a confusing expression-parse error."""
+        tok = self.peek()
+        nxt = self.toks[self.pos + 1]
+        word = None
+        if tok.kind == "ident" and tok.value in self._LIFECYCLE_STMT_WORDS and nxt.kind == "ident":
+            word = tok.value
+        elif tok.kind == "kw" and tok.value == "assert" and nxt.kind == "ident" and nxt.value == "no_residue":
+            word = "assert no_residue"
+        if word is None:
+            return
+        raise self.err(
+            tok.line,
+            f"`{word}` is only allowed in a `lifecycle test` body",
+            hint='a plain `test` block is pure (syntax-2.0 §7); write `lifecycle test "name" '
+                 "{ ... }` to drive a composition (§7.1)",
+        )
+
+    def lifecycle_stmt(self):
+        tok = self.peek()
+        if tok.kind == "ident" and tok.value == "load":
+            self.next()
+            component = self.expect("ident", what="a component name").value
+            config: list[tuple[str, object, int]] = []
+            if self.at("kw", "with"):
+                self.next()
+                self.expect("{")
+                while not self.at("}"):
+                    field = self.expect("ident", what="a config field name")
+                    self.expect(":")
+                    config.append((field.value, self.pure_expr(), field.line))
+                    if self.at(","):
+                        self.next()
+                self.expect("}")
+            return LoadStmt(component, config, tok.line)
+        if tok.kind == "ident" and tok.value == "unload":
+            self.next()
+            return UnloadStmt(self.expect("ident", what="a component name").value, tok.line)
+        if tok.kind == "kw" and tok.value in ("let", "var"):
+            if tok.value == "var":
+                raise self.err(tok.line, "`var` has no meaning in a lifecycle test — bindings name "
+                                         "the result of a `call` and are single-assignment",
+                               hint="use `let`")
+            self.next()
+            bind = self.expect("ident").value
+            self.expect("=")
+            return self._call_stmt(bind)
+        if tok.kind == "ident" and tok.value == "call":
+            return self._call_stmt(None)
+        if tok.kind == "kw" and tok.value == "assert":
+            self.next()
+            nxt = self.peek()
+            if nxt.kind == "ident" and nxt.value == "no_residue":
+                self.next()
+                return ResidueStmt(tok.line)
+            # anything else is a pure Bool expression over the test's `let`
+            # bindings; an unbound bare word is caught in lowering, where the
+            # binding scope is known, and reported as an unknown assertion
+            return AssertStmt(self.pure_expr(), tok.line)
+        if tok.kind == "ident" and tok.value == "swap":
+            # `swap C -> C2` cannot exist: G2 forbids two components in one
+            # document from providing the same key, so a replacement provider
+            # for a key is not expressible (syntax-2.0 §7.1).
+            raise self.err(
+                tok.line,
+                "there is no `swap` statement",
+                hint="two components may not provide the same key in one document (G2), so a "
+                     "replacement *provider* is not expressible; a replacement *instance* is "
+                     "`unload C` then `load C with { ... }` (syntax-2.0 §7.1)",
+            )
+        raise self.err(
+            tok.line,
+            f"expected a lifecycle statement, found {tok.value!r}",
+            hint="a lifecycle test body is `load` / `unload` / `call` / `let … = call …` / "
+                 "`assert` (syntax-2.0 §7.1)",
+        )
+
+    def _call_stmt(self, bind: str | None) -> CallStmt:
+        tok = self.peek()
+        if not (tok.kind == "ident" and tok.value == "call"):
+            raise self.err(tok.line, f"expected `call` after `let {bind} =`, found {tok.value!r}",
+                           hint="a lifecycle binding names the result of a service call: "
+                                "`let x = call key.op(args)`")
+        self.next()
+        key = self.expect("ident", what="a provision key").value
+        self.expect(".")
+        method = self.expect("ident", what="an operation name").value
+        self.expect("(")
+        args = []
+        while not self.at(")"):
+            args.append(self.pure_expr())
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        return CallStmt(key, method, args, bind, tok.line)
 
     def fn_stmt(self):
         tok = self.peek()
