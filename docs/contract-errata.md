@@ -80,6 +80,91 @@ This goes in the compiler spec, not the runtimes.
   torn-state freedom: after disposal, every completed effect has run its
   inverse, in LIFO order. Authors relying on "emission after boundary never
   happens once diverted" get that guarantee on py/wasm, not on rs.
+- **cordis4j global-realm divergence** (documented, runtime-verified): revl's
+  contract (docs/design-v2-realms.md) is that realms are keyed by label and
+  **equal realm-label strings denote the same realm** — two components that
+  both `isolate kv in realm("t")` share one realm, so a second provider of `kv`
+  in realm `"t"` is a G2 conflict and a consumer in realm `"t"` resolves the
+  provider in realm `"t"`. That holds at runtime on cordis-py, cordis (TS), and
+  cordis-rs. It is **false on cordis4j (Java)** at the level revl's emitter
+  targets: equal strings do **not** share, they separate.
+
+  *Observable difference (runtime-verified on the real cordis4j jar with revl's
+  own emitted code — `examples/tenants.rvl` → `emit.emit`, driven by
+  `backends/java/scenarios/RunRealmDivergence.java`):*
+  - Two `TenantAStorePlugin` instances, both emitting `ctx.isolate(Kv.class,
+    "tenant_a")` and both providing `kv`, loaded onto one root → **BOTH LOAD**.
+    The contract requires a G2 `SupplyConflictException` (one label = one
+    realm). `root.find(kv)` is even `<absent>` — each provision hides in its own
+    isolate child.
+  - `TenantAApp` (`isolate kv in realm("tenant_a")`, requires `kv`) loaded after
+    `TenantAStore` (same realm) → **`NoSuchServiceException`** ("looked up
+    through the context chain: #9 → #7 (root)"): the consumer's isolate child is
+    a *different* context from the provider's, so it never resolves the
+    provider. The reference tiers resolve it. (Distinct realm strings —
+    `tenant_a` vs `tenant_b` — separate correctly on every tier, including Java;
+    only the equal-string *sharing* direction diverges.)
+
+  *Root cause (verified against the real cordis4j sources,
+  github.com/1na-ko/cordis4j, cordis4j-core):* revl's Java emitter emits
+  `ctx = ctx.isolate(<Svc>.class, "<label>")` **inside each component's
+  `apply()`** (`backends/java/emit.py:2127-2129`). Core `Context` exposes
+  exactly one isolate overload, `<T> Context isolate(Class<T>, String)`
+  (`core/Context.java:124`), and it **always mints a fresh child** —
+  `new ContextImpl(this)` + `child.registry.overrideRealm(type, realm)`
+  (`core/internal/ContextImpl.java:160-168`). Each `ContextImpl` owns its own
+  `ServiceRegistry.store` (`core/internal/ServiceRegistry.java:41`); the realm
+  label is folded into the store key only within that context
+  (`provide` at `:87-92`, `get` / parent-chain walk at `:148-155`,
+  `effectiveRealm` at `:57-68`). There is **no** get-or-create-by-label form on
+  `Context`, so two `isolate(_, "t")` calls are two disjoint stores. The global
+  "equal strings = one realm" interning exists exactly one layer up, in
+  `Loader`: a `Map<String, IsolatedDomain> domains` (`core/Loader.java:67`)
+  keyed by the full isolate-chain **path** and get-or-created per label
+  (`core/Loader.java:341-359`, key at `:346`, reuse-or-create at `:347-351`),
+  with refcounted disposal of the derived context once the realm drains
+  (`:275-296`). revl's emitter never reaches `Loader`: it composes with direct
+  `ctx.plugin(...)` / `ctx.inject(...)` (see
+  `backends/java/scenarios/RunRealScenarios.java`,
+  `backends/java/placement/RealPlacementRunner.java`), so the interning layer is
+  bypassed. Net: on Java, **local** realms (per-instance, distinct) come for
+  free from a bare `isolate`/`fork`, but **global** (label-shared) realms are
+  effectively unimplemented in the emitted code. This is the exact inverse of
+  the other hosted tiers, whose shims/emitters intern the label string directly.
+
+  *Why revl's emitted code cannot currently close it:* label-keyed sharing on
+  cordis4j lives only in `Loader.reconcileTree(List<ComponentSpec>)` over a
+  `ComponentSpec.Isolate(type, realm, children)` tree (`Loader.of(Context)` at
+  `core/Loader.java:81-82`, `reconcileTree` at `:123`, `ComponentSpec.Isolate`
+  in `core/ComponentSpec.java`). revl does not emit that: it emits self-contained
+  `Plugin`s that isolate themselves inside `apply()` and are composed by the host
+  with plain `plugin`/`inject` calls. Two independent `apply()` invocations have
+  nothing to intern a string against. Closing the gap would require one of:
+  (i) re-architecting the Java backend to drive composition through `Loader` +
+  a `ComponentSpec.Isolate` tree — replacing the `plugin`/`inject` composition
+  that G7 LIFO teardown, A8 self-revert, and Theorem-63 withdrawal ordering are
+  all built and runtime-verified against, and making Java's composition model
+  diverge from the other four tiers; or (ii) hand-rolling interning in emitted
+  glue (a static `Map` keyed by root identity + type + realm that get-or-creates
+  the isolate child) — which reimplements, worse, what `Loader` already does
+  (no path-keyed nesting, no refcounted disposal at `:275-296`, and it leaks
+  contexts and would reuse a disposed context on reload) and injects global
+  mutable state into every emitted program. Both are out of proportion, so this
+  divergence is documented rather than force-fixed.
+
+  *Recommended path:* route Java realm placement through `Loader` — lift the
+  `isolate` out of `apply()` and emit a `Loader.of(root).reconcileTree(...)`
+  composition whose `ComponentSpec.Isolate` nodes carry the realm labels, so
+  cordis4j's own `domains` interning (`core/Loader.java:341-359`) makes equal
+  strings share and handles refcounted derived-context disposal. That is a
+  composition-model change spanning the whole Java backend (emitter + the
+  scenario/placement harnesses) and is a coordinator-level decision, not a
+  contained emitter tweak. Until it lands, the Java tier honors local realms and
+  the *distinct-string* separation, but not global label sharing; the cross-tier
+  gate (`tests/test_realm_conformance.py`) marks Java `xfail(strict=True)` with
+  this entry as the tracked reason, and
+  `backends/java/test_emit_java.py::test_global_realm_divergence_characterized`
+  pins the current behavior so it cannot regress silently.
 
 ## Typing gaps (fenced, not closed)
 
