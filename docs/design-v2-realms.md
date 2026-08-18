@@ -120,6 +120,22 @@ onto cordis v4's identical APIs (`backends/typescript/emit.py`, runtime
 two realms; each consumer observes its own provider; realm-local
 withdrawal).
 
+**cordis-rs: implemented, runtime-verified.** Same shape as py/ts.
+cordis-rs fixes a fiber's isolation scope at plug time — its reactive
+`Inject` gate is evaluated against the context the plugin is registered on,
+before the plugin closure runs, and both the gate and provisions key off the
+fiber's captured `meta.isolates`. So isolation *cannot* be applied inside the
+plugin body: the emitter lowers `"isolate": {key: realm}` into
+`_revl_isolate_ctx(ctx, name)` and isolates the registration context
+(`ctx.isolate_with(key, _revl_realm(realm))`) *before* `ctx.plugin(...)`,
+the direct analogue of the py/ts `plug()` helper. `_revl_realm` is a
+deterministic compile-time label registry (equal strings → one `Isolation`,
+tagged into a reserved high region disjoint from cordis's scope counter).
+Runtime acceptance in `backends/rust/scenarios/`: an isolated
+`requires kv in realm("t")` consumer stays `Pending` until a separately
+plugged isolated provider supplies `kv` in the same realm, then reactively
+activates (and deactivates on withdrawal).
+
 **wasm: implemented as realm-qualified namespaces.** The substrate has no
 realm registry, so `isolate` becomes the import/export namespace
 (`{realm}/{key}`) and `intercept` metadata rides in `revl:isolate` /

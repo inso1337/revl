@@ -8,7 +8,7 @@ The organizing fact: **the five tiers are disjoint by directory** (`backends/{py
 |---|---|---|---|
 | cordis-py | user fork (carries revl fixes) | reference — 29 test files, executed | none blocking; the place instance-parametric work lands |
 | cordis-ts | upstream | 10 test files, `tsc` + executed | thinner realm runtime coverage than py |
-| cordis-rs | upstream crate (0.3.0) | 1 scenario file, `cargo check`/`cargo test` | reactive isolate-linking hangs `Pending`; realm labels just fixed |
+| cordis-rs | upstream crate (0.3.0) | 1 scenario file (8 tests), `cargo check`/`cargo test` | none blocking — reactive isolate-linking fixed (plug-time isolation, emitter-side); realm labels fixed |
 | cordis4j | upstream (github/1na-ko) | 1 scenario file, real-jar scenarios | global-realm divergence (errata'd, xfail) |
 | cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | *named* realms conform (gate green); lacks *local/identity* realms (instance-parametric) |
 
@@ -18,7 +18,7 @@ Ownership dictates fix path: **wasm and py are first-party** (change directly); 
 
 ---
 
-## Wave A — Runtime truth (LANDED except rust)
+## Wave A — Runtime truth (LANDED)
 
 Goal: every guarantee a tier claims is asserted by *executing* emitted code on the real runtime, not by compile-gating or golden text. **It paid off immediately — executing instead of inspecting caught two correctness bugs that had shipped to `main`, invisible to the emit-string/golden gates that were green the whole time.**
 
@@ -26,7 +26,7 @@ Goal: every guarantee a tier claims is asserted by *executing* emitted code on t
 - **A2-wasm** — ✅ **on main.** 23 wasmtime scenarios + **two lowering fixes**: a *silent miscompile* (nested record/list/variant/`??` shared one module-wide scratch, so `{inner:{v:11},k:5}` computed `1285` instead of `16`), and a valid-code rejection (`match`-bind inside a loop). Both invisible to emit-string tests.
 - **A2-java** — ✅ **on main.** 42 real-cordis4j-jar value assertions + a **compile fix**: a host call in a top-level `fn` (`Pool.open(..)`) emitted non-compiling Java (`Pool.open.apply(..)` → "package Pool does not exist") — a construct that worked on three other tiers, silently broken on Java because nothing executed it.
 - **A2-ts** — ✅ **on main.** Proved cordis-ts reactively resolves an isolated consumer to its same-realm provider (the reference point for the rust layer decision below) + 8 executed v3 stdlib/Opt/interp/match assertions that were `tsc`/golden-only. No bug found.
-- **A1 · rust reactive isolate-linking** — ⏳ **in progress** (running in a separate session). An isolated consumer's `requires kv in realm("t")` never activates (stays `Pending`) because the `Inject` gate reads the un-isolated root context. The A2-ts result settled the baseline: ts *does* resolve it, so the open question is only the layer — same isolation placement as ts and cordis-rs evaluates the gate wrong → cordis-rs PR; different placement → revl emitter fix. Folds into main when it lands.
+- **A1 · rust reactive isolate-linking** — ✅ **resolved — revl emitter fix** (lands with `agent/rust-realm-reactive-link`). An isolated consumer's `requires kv in realm("t")` stayed `Pending` because the emitter applied `ctx.isolate_with(...)` *inside* the plugin closure, so cordis-rs evaluated the `Inject` gate against the un-isolated root context (the fiber's `meta.isolates` never carried the realm). **Layer decided empirically, not from the ts baseline alone:** driven directly, the raw cordis-rs, cordis-py and cordis-ts runtimes *all* link an isolated same-realm consumer/provider when isolation is applied at the context level, and *all* hang `Pending` when it is applied inside the closure — so cordis-rs is correct and **no upstream PR is needed**. Fix moves isolation to plug time (`_revl_isolate_ctx`, mirroring the py/ts `plug()` helper) in `backends/rust/emit.py`; a new same-realm consumer/provider scenario (`backends/rust/scenarios/`) and the updated conformance harness (`tests/fixtures/realm_conformance/harness/realms.rs`) assert it on the real runtime.
 
 > **Correction folded in (gate result):** an earlier draft listed "wasm local realms" as a Wave-A win. Wrong — wasm has no xfail; its *named* realms already conform at runtime. What wasm lacks is *local/identity* realms for runtime-created instances → design-gated Wave-B work (B3 below).
 
