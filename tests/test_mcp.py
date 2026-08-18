@@ -224,7 +224,10 @@ def test_initialize_and_tools_list():
                           # composition queries (docs/queries.md)
                           "revl_query_emitters", "revl_query_withdraw",
                           "revl_query_dependents", "revl_query_reach",
-                          "revl_query_drift"}
+                          "revl_query_drift",
+                          # backwards replay (docs/replay.md)
+                          "revl_timeline", "revl_inspect_step", "revl_step_back",
+                          "revl_replay_forward"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True
