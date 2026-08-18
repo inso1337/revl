@@ -11,7 +11,7 @@ service Kv {
 component Pulse requires kv: Kv {
   effect kv.set(1, 11) undo kv.set(1, 0)
 
-  await Job.run(42)
+  await Job.run("pulse")
 
   effect kv.set(2, 22) undo kv.set(2, 0)
 }

@@ -44,9 +44,11 @@ def test_pulse_await_lowering():
     golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text()
     assert pulse == golden
     assert '(import "host" "job_run"' in pulse
-    assert "(call $host_job_run (i32.const 42))" in pulse
+    # the job name is interned at compile time (the host op is i32-only), so
+    # the first distinct name in the module is id 1
+    assert "(call $host_job_run (i32.const 1))" in pulse
     # the effect after the await is a separate segment: divert can skip it
-    assert pulse.index("job_run (i32.const 42)") < pulse.index("(i32.const 2) (i32.const 22)")
+    assert pulse.index("job_run (i32.const 1)") < pulse.index("(i32.const 2) (i32.const 22)")
 
 
 def test_import_section_is_the_coeffect_specification():

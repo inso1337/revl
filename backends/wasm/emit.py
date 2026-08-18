@@ -21,7 +21,7 @@ Lowering — the paper's §6.7 state machine, literally:
 
 Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
 Violations are EmitError, never silent degradation. The component tier is
-i32-only (Int service params/returns, `await Job.run(Int)`); the v3
+i32-only (Int service params/returns, `await Job.run(name)`); the v3
 functions tier additionally lowers Str/List/record values through a
 canonical-ABI-shaped linear-memory representation. Config blocks, host
 builtins outside `await Job.run`, method-time effects, and variant values
@@ -115,6 +115,8 @@ class _ComponentEmitter:
         self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
         self.globals: list[str] = []
         self.uses_job = False
+        # job name -> interned i32 id (see _job_id)
+        self.job_names: dict[str, int] = {}
         # the value engine: the *same* renderer the v3 `fn` tier uses
         self.v3 = _V3Emitter(types or {}, functions or [], externs or [], [])
         self.externs = {ext.get("name"): ext for ext in (externs or [])}
@@ -346,6 +348,29 @@ class _ComponentEmitter:
         self.extra_locals = set()
         self.func_uses_v3 = False
 
+    # The cordis-wasm runtime documents job id 13 (and any negative id) as its
+    # refusal hook for L-Raise tests. Interning would otherwise never produce
+    # one, so the name `refuse` is reserved for it: the affordance stays
+    # reachable from revl source and is named on both sides instead of being a
+    # bare magic number in one of them.
+    REFUSING_JOB = "refuse"
+    REFUSING_JOB_ID = 13
+
+    def _job_id(self, name: str) -> int:
+        """A stable i32 id for a job name.
+
+        Assigned in first-seen order per module, skipping the reserved
+        refusal id so an ordinary job can never land on it by accident.
+        """
+        if name == self.REFUSING_JOB:
+            return self.REFUSING_JOB_ID
+        if name not in self.job_names:
+            nxt = len(self.job_names) + 1
+            while nxt == self.REFUSING_JOB_ID or nxt in self.job_names.values():
+                nxt += 1
+            self.job_names[name] = nxt
+        return self.job_names[name]
+
     def _save_function_state(self) -> tuple:
         """`activate_step` is one function spanning every body segment, but a
         `provide` step in the middle of that body opens functions of its own.
@@ -493,15 +518,27 @@ class _ComponentEmitter:
                 expr = step.get("expr") or {}
                 if expr.get("kind") != "host" or expr.get("fn") != "Job.run" or len(expr.get("args") or []) != 1:
                     raise EmitError(
-                        f"{where}: `await` on this tier supports only `Job.run(Int)` "
+                        f"{where}: `await` on this tier supports only `Job.run(name)` "
                         f"(the runtime's async host op); other awaitables live on "
                         f"the hosted backends"
                     )
-                arg_wat, has_result = self._expr(expr["args"][0], scope, where)
-                if not has_result:
-                    raise EmitError(f"{where}: Job.run needs an Int argument")
+                # `Job.run` takes a name (typecheck.py's host contract), and the
+                # runtime's host op takes an i32. A *literal* name is known at
+                # compile time, so intern it: each distinct name gets a stable
+                # id and the tier keeps the same contract as every other one
+                # rather than a private i32 spelling of it. A computed name is
+                # not knowable here, and says so.
+                arg = expr["args"][0]
+                if not (isinstance(arg, dict) and arg.get("kind") == "lit"
+                        and isinstance(arg.get("value"), str)):
+                    raise EmitError(
+                        f"{where}: Job.run needs a literal name on the cordis-wasm "
+                        f"tier — the host op is i32-only, so the name is interned "
+                        f"at compile time and a computed one cannot be"
+                    )
+                job_id = self._job_id(arg["value"])
                 self.uses_job = True
-                segments.append(f"(call $host_job_run {arg_wat})")
+                segments.append(f"(call $host_job_run (i32.const {job_id}))")
             elif kind == "provide":
                 saved = self._save_function_state()
                 provide_funcs.extend(self._provide(step, scope, where))
