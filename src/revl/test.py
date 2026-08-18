@@ -1,0 +1,272 @@
+"""`revl test` across tiers — roadmap item 4 / §3.
+
+One source's `test` blocks, proven on every backend whose toolchain is
+present. ``py`` keeps the original in-process runner; every other tier reuses
+that backend's existing execution recipe (the same subprocess shapes the
+per-tier suites use). A tier whose toolchain is absent is *skipped with a
+reason* — a skipped tier is never reported as passing, and ``--all`` is the
+portability assertion: it fails the run if any *available* tier fails.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+BACKENDS = ROOT / "backends"
+
+_EMITTERS: dict[str, types.ModuleType] = {}
+
+
+def _emitter(backend: str) -> types.ModuleType:
+    """Load a backend emitter under a unique module name (a bare ``import
+    emit`` would collide across backends when more than one is loaded)."""
+    if backend not in _EMITTERS:
+        spec = importlib.util.spec_from_file_location(
+            f"revl_{backend}_emit", BACKENDS / backend / "emit.py")
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EMITTERS[backend] = module
+    return _EMITTERS[backend]
+
+
+def run_py(ir: dict) -> tuple[str, str]:
+    """Exec the cordis-py output in-process (the original runner)."""
+    emit = _emitter("python")
+    module = types.ModuleType("revl_test_module")
+    # Register before exec: the emitter renders record types as @dataclass,
+    # and dataclasses._process_class resolves each field via
+    # sys.modules[cls.__module__] — an unregistered module raises
+    # AttributeError on any file that declares a record type (CPython 3.12+).
+    sys.modules[module.__name__] = module
+    backend_dir = str(BACKENDS / "python")
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    try:
+        exec(compile(emit.emit(ir), "<revl-test>", "exec"), module.__dict__)
+    finally:
+        sys.modules.pop(module.__name__, None)
+    entries = getattr(module, "REVL_TESTS", None) or []
+    if not entries:
+        return ("pass", "no tests emitted by the backend")
+
+    failures = 0
+    for name, test_fn in entries:
+        try:
+            test_fn()
+        except AssertionError as error:
+            failures += 1
+            message = str(error).strip() or "assertion failed"
+            print(f"FAIL {name}: {message}")
+        except Exception as error:  # noqa: BLE001 — the runner reports every failure
+            failures += 1
+            print(f"FAIL {name}: {type(error).__name__}: {error}")
+        else:
+            print(f"PASS {name}")
+
+    if failures:
+        return ("fail", f"{failures} of {len(entries)} test(s) failed")
+    return ("pass", f"{len(entries)} test(s) passed")
+
+
+def run_ts(ir: dict) -> tuple[str, str]:
+    """Emit the v3 test blocks and run them under the backend's vitest."""
+    vitest = BACKENDS / "typescript" / "node_modules" / ".bin" / "vitest"
+    if not vitest.exists():
+        return ("skip", "vitest not installed (`cd backends/typescript && npm ci`)")
+    try:
+        source = _emitter("typescript").emit(ir, runtime_import="../../runtime.ts")
+    except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        return ("fail", f"emitter refused: {error}")
+    generated = BACKENDS / "typescript" / "tests" / "generated"
+    generated.mkdir(parents=True, exist_ok=True)
+    path = generated / f"revl_test_{os.getpid()}.test.ts"
+    try:
+        path.write_text(source, encoding="utf-8")
+        result = subprocess.run(
+            [str(vitest), "run", str(path)],
+            cwd=BACKENDS / "typescript",
+            capture_output=True, text=True, timeout=180,
+            env={**os.environ, "CI": "1"},
+        )
+    finally:
+        path.unlink(missing_ok=True)
+    output = (result.stdout + result.stderr).strip()
+    if output:
+        print(output)
+    if result.returncode != 0:
+        return ("fail", f"vitest exited {result.returncode}")
+    return ("pass", "vitest: all emitted tests passed")
+
+
+_CRATES_IO: bool | None = None
+
+
+def _crates_io_reachable() -> bool:
+    """Whether cordis-rs can be resolved. Cached: probed once per run.
+
+    cordis-rs is a crates.io dependency (see backends/rust/emit.cargo_toml);
+    an offline resolve fails with "no matching package", so probe once and
+    skip with a reason instead of failing after minutes of retries.
+    """
+    global _CRATES_IO
+    if _CRATES_IO is None:
+        try:
+            socket.create_connection(("index.crates.io", 443), timeout=3).close()
+            _CRATES_IO = True
+        except OSError:
+            _CRATES_IO = False
+    return _CRATES_IO
+
+
+def run_rust(ir: dict) -> tuple[str, str]:
+    """Emit a throwaway crate and run its ``#[test]``s under ``cargo test``."""
+    if shutil.which("cargo") is None:
+        return ("skip", "cargo not installed")
+    if not _crates_io_reachable():
+        return ("skip", "crates.io unreachable (cordis-rs is resolved from the index)")
+    try:
+        emit = _emitter("rust")
+        source = emit.emit(ir)
+        cargo_toml = emit.cargo_toml("revl_test")
+    except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        return ("fail", f"emitter refused: {error}")
+    with tempfile.TemporaryDirectory(prefix="revl_test_rust_") as tmpd:
+        tmp = Path(tmpd)
+        (tmp / "src").mkdir()
+        (tmp / "src" / "lib.rs").write_text(source, encoding="utf-8")
+        (tmp / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+        result = subprocess.run(["cargo", "test"], cwd=tmp,
+                                capture_output=True, text=True, timeout=600)
+        output = (result.stdout + result.stderr).strip()
+    if output:
+        print(output)
+    if result.returncode != 0:
+        return ("fail", f"cargo test exited {result.returncode}")
+    return ("pass", "cargo test: all emitted tests passed")
+
+
+def _java_tool(name: str) -> str | None:
+    """A toolchain binary that actually works (macOS ships a `javac` shim
+    that errors when no JDK is installed)."""
+    exe = shutil.which(name)
+    if exe is None:
+        return None
+    try:
+        probe = subprocess.run([exe, "-version"], capture_output=True,
+                               text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return exe if probe.returncode == 0 else None
+
+
+def run_java(ir: dict) -> tuple[str, str]:
+    """Compile the emitted cordis4j plugin against the stubs (or the real
+    classes on ``REVL_CORDIS4J_CLASSES``) and run ``REVL_TESTS`` on a JVM."""
+    javac = _java_tool("javac")
+    java = _java_tool("java")
+    if javac is None or java is None:
+        return ("skip", "no working JDK")
+    try:
+        source = _emitter("java").emit(ir)
+    except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        return ("fail", f"emitter refused: {error}")
+    with tempfile.TemporaryDirectory(prefix="revl_test_java_") as tmpd:
+        tmp = Path(tmpd)
+        pkg = tmp / "revl"
+        pkg.mkdir()
+        (pkg / "Components.java").write_text(source, encoding="utf-8")
+        out = tmp / "out"
+        out.mkdir()
+
+        real_classes = os.environ.get("REVL_CORDIS4J_CLASSES")
+        if real_classes:
+            compile_components = subprocess.run(
+                [javac, "--release", "21", "-cp", str(out) + os.pathsep + real_classes,
+                 "-d", str(out), str(pkg / "Components.java")],
+                capture_output=True, text=True, timeout=600)
+        else:
+            stubs = [str(s) for s in sorted((BACKENDS / "java" / "stubs").rglob("*.java"))]
+            compile_components = subprocess.run(
+                [javac, "--release", "21", "-d", str(out)] + stubs
+                + [str(pkg / "Components.java")],
+                capture_output=True, text=True, timeout=600)
+        if compile_components.returncode != 0:
+            return ("fail", f"javac failed: {compile_components.stderr.strip()}")
+
+        runner = tmp / "RunRevlTests.java"
+        runner.write_text(
+            "public class RunRevlTests {\n"
+            "    public static void main(String[] args) {\n"
+            "        revl.Components.REVL_TESTS.forEach(Runnable::run);\n"
+            "        System.out.println(\"REVL_TESTS_OK\");\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8")
+        compile_runner = subprocess.run(
+            [javac, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+            capture_output=True, text=True, timeout=600)
+        if compile_runner.returncode != 0:
+            return ("fail", f"javac runner failed: {compile_runner.stderr.strip()}")
+        run = subprocess.run([java, "-cp", str(out), "RunRevlTests"],
+                             capture_output=True, text=True, timeout=600)
+        run_output = run.stdout
+
+    if run.returncode != 0:
+        return ("fail", run.stderr.strip() or f"JVM exited {run.returncode}")
+    if "REVL_TESTS_OK" not in run_output:
+        return ("fail", "REVL_TESTS did not complete")
+    return ("pass", "JVM: all REVL_TESTS ran")
+
+
+def run_wasm(ir: dict) -> tuple[str, str]:
+    """The wasm tier has no in-language test runner — test blocks are
+    host-side (the emitter itself notes ``unsupported on this tier``)."""
+    return ("skip", "test blocks do not lower to the wasm tier (the test runner is host-side)")
+
+
+RUNNERS: dict[str, callable] = {
+    "py": run_py,
+    "ts": run_ts,
+    "rust": run_rust,
+    "java": run_java,
+    "wasm": run_wasm,
+}
+
+_TAG = {"pass": "ok", "skip": "skipped", "fail": "FAIL"}
+
+
+def test_command(ir: dict, backend: str) -> int:
+    """Run the document's `test` blocks on the chosen tier(s); exit code."""
+    if not (ir.get("tests") or []):
+        print("no tests to run")
+        return 0
+
+    if backend == "all":
+        failures = 0
+        for name, runner in RUNNERS.items():
+            outcome, message = runner(ir)
+            print(f"[{name}] {_TAG[outcome]}: {message}")
+            if outcome == "fail":
+                failures += 1
+        if failures:
+            print(f"{failures} tier(s) failed", file=sys.stderr)
+            return 1
+        print("all tiers passed")
+        return 0
+
+    outcome, message = RUNNERS[backend](ir)
+    if outcome == "pass":
+        print(f"[{backend}] ok: {message}")
+        return 0
+    print(f"[{backend}] {message}", file=sys.stderr)
+    return 1
