@@ -15,6 +15,8 @@ KEYWORDS = {
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
+    # typed holes (docs/holes.md): a placeholder with a type and no body
+    "hole",
     # reserved for later tiers
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
 }

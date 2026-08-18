@@ -414,16 +414,45 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     return ret
 
 
+def pin_hole(expr, expected: str | None, filename: str | None = None,
+             where: str = "this hole") -> bool:
+    """Give a typed hole the type its context expects (docs/holes.md).
+
+    Returns True when `expr` is a hole. An annotated hole keeps its own
+    annotation and is *checked* against the expectation, so `hole[Str]` in an
+    `Int` position is a real diagnostic rather than a silent coercion — the
+    whole point of a hole is that it carries a type it must eventually meet.
+    """
+    from .parser import ExprHole
+
+    if not isinstance(expr, ExprHole):
+        return False
+    if expr.type is not None:
+        if filename and expected and not compatible(expected, expr.type):
+            raise mismatch(filename, getattr(expr, "line", 0), where,
+                           expected, expr.type)
+        return True
+    if expected is not None and not _is_wildcard(expected):
+        expr.resolved = expected
+    return True
+
+
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
     from .parser import (
-        ExprArrow, ExprBin, ExprCall, ExprField, ExprIf, ExprIndex,
+        ExprArrow, ExprBin, ExprCall, ExprField, ExprHole, ExprIf, ExprIndex,
         ExprList, ExprLit, ExprMatch, ExprOptCall, ExprOptField, ExprRecord,
         ExprUn, ExprVar, Interp, Lit,
     )
 
     line = getattr(expr, "line", 0)
+    if isinstance(expr, ExprHole):
+        # A hole *is* its expected type: whatever the checker has already
+        # pinned to it (annotation or context). Unknown here is not an error
+        # — the surrounding form may still supply it in check position; the
+        # refusal for a hole that never learns its type is raised at lowering.
+        return expr.known_type
     if isinstance(expr, (ExprLit, Lit)):
         v = expr.value
         if v is None:
@@ -608,6 +637,12 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                             code="T1", category="type-mismatch",
                         )
                 if not sig.get("tparams"):
+                    # a hole in argument position learns its type from the
+                    # declared parameter (docs/holes.md). Monomorphic
+                    # signatures only: a generic `T` position would pin a
+                    # wildcard, and a hole never takes a type it cannot mean.
+                    for param_type, arg in zip(params, expr.args):
+                        pin_hole(arg, param_type)
                     if filename:
                         for i, (p, a) in enumerate(zip(params, arg_types)):
                             if p and a and not compatible(p, a):
@@ -669,6 +704,11 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
     from .parser import ExprIf, ExprList, ExprMatch, ExprRecord
 
     line = getattr(expr, "line", 0)
+    # a hole in check position takes the expectation as its type and is done:
+    # it has no sub-expressions to check, and it satisfies whatever is asked
+    # of it by construction (docs/holes.md)
+    if pin_hole(expr, expected, filename, where):
+        return
     if expected is None:
         infer_ast(expr, tenv, types, filename)
         return
@@ -755,6 +795,9 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return None
     if kind in ("format", "interp"):
         return "Str"
+    if kind == "hole":
+        # a lowered hole always carries the type it was admitted with
+        return node.get("type")
     if kind == "name":
         return tenv.get(node.get("id"))
     if kind == "var":

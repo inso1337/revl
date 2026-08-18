@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 
 from .errors import RevlError
+from .holes import refuse_admission
 from .lower import check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 
@@ -287,7 +288,14 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                 if entry.get("name") not in dropped
             ],
         }
-    return check_and_lower(merged, ambient)
+    document = check_and_lower(merged, ambient)
+    if manifest is not None:
+        # The admission gate. Compiling a draft is fine — that is how an
+        # agent gets a verdict on the parts it has written — but admitting
+        # one into a running composition is not: a hole has a type and no
+        # implementation (docs/holes.md).
+        refuse_admission(document)
+    return document
 
 
 def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:

@@ -9,9 +9,10 @@ from pathlib import Path
 
 from .compiler import compile_files
 from .distribute import distributability
-from .diagnostics import report
+from .diagnostics import obligations, report
 from .errors import RevlError
 from .fmt import migrate_source
+from .holes import render as render_holes
 from .run import KNOWN_BACKENDS, run_command
 from .test import test_command
 
@@ -345,6 +346,21 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"error: {error}", file=sys.stderr)
         return 1
+
+    # Open obligations go to stderr so a piped/redirected IR document stays
+    # exactly the IR document; the same list is in `ir["holes"]` for anything
+    # reading the JSON (docs/holes.md).
+    open_holes = ir.get("holes") or []
+    if open_holes:
+        if getattr(args, "json_diagnostics", False):
+            print(json.dumps(obligations(open_holes), indent=2), file=sys.stderr)
+        else:
+            plural = "s" if len(open_holes) > 1 else ""
+            print(f"{len(open_holes)} open hole{plural} — this is a draft: it "
+                  f"compiles, admission will refuse it (docs/holes.md)",
+                  file=sys.stderr)
+            for rendered in render_holes(open_holes):
+                print(f"  {rendered}", file=sys.stderr)
 
     if args.command == "test":
         return test_command(ir, args.backend)
