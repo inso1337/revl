@@ -86,12 +86,28 @@ jobs:
               print("::error::pytest wrote no junit report - the run did not start")
               sys.exit(1)
           text = report.read_text(encoding="utf-8", errors="replace")
-          skipped = sum(int(n) for n in re.findall(r'<testsuite\b[^>]*?\bskipped="(\d+)"', text))
-          if skipped:
-              print(f"::error::{skipped} wasm test(s) skipped in CI - the tier's "
+          # The guard exists for WASMTIME coverage. One skip is legitimately
+          # about a *different* optional runtime - the cordis-wasm substrate
+          # prototype, a separate repo CI does not provision. Exempt exactly
+          # that reason and fail on every other skip, so the exemption cannot
+          # quietly widen.
+          ALLOWED = ("cordis-wasm venv not available",)
+          reasons = re.findall(r'<skipped\b[^>]*?\bmessage="([^"]*)"', text)
+          counted = sum(int(n) for n in re.findall(r'<testsuite\b[^>]*?\bskipped="(\d+)"', text))
+          if len(reasons) != counted:
+              print(f"::error::junit reports {counted} skip(s) but {len(reasons)} "
+                    "skip message(s) - cannot audit them, refusing to pass")
+              sys.exit(1)
+          unexpected = [r for r in reasons if r not in ALLOWED]
+          if unexpected:
+              for reason in unexpected:
+                  print(f"::error::wasm test skipped in CI: {reason}")
+              print(f"::error::{len(unexpected)} wasm test(s) skipped - the tier's "
                     "runtime coverage is not actually running")
               sys.exit(1)
-          print("no wasm tests skipped")
+          for reason in reasons:
+              print(f"exempt (not a wasmtime gate): {reason}")
+          print(f"no wasmtime-gated wasm tests skipped ({len(reasons)} exempt)")
           PY
 
   backend-rust:
