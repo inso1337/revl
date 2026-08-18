@@ -487,7 +487,7 @@ def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
         (here / "scenarios" / "scenarios.rs").read_text(encoding="utf-8"), encoding="utf-8")
     result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "7 passed" in result.stdout
+    assert "8 passed" in result.stdout
 
 
 @needs_cargo

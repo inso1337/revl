@@ -19,7 +19,7 @@
 
 use revl_scenarios::Probe;
 use revl_scenarios::{boundary, fails_after, kv_consumer, kv_provider, realm_store_t, two_steps};
-use revl_scenarios::{Kv, _revl_realm};
+use revl_scenarios::{realm_kv_consumer_t, Kv, _revl_isolate_ctx, _revl_realm};
 use std::sync::{Arc, Mutex};
 
 struct Recorder {
@@ -175,7 +175,9 @@ fn realm_labels_share_within_and_separate_across() {
     // emitted plugin uses, so the provide side and the probe side agree only
     // if the lowering is deterministic.
     let (root, log) = root_with_probe();
-    let store = root.plugin(realm_store_t(), ());
+    // The realm placement is applied at plug time (isolate BEFORE plugin), the
+    // same lowering `_revl_load` uses — not inside the plugin body.
+    let store = _revl_isolate_ctx(&root, "realm_store_t").plugin(realm_store_t(), ());
     store.wait().unwrap();
     assert!(marks(&log).contains(&"store_t:up".to_string()), "provider must activate");
 
@@ -193,5 +195,57 @@ fn realm_labels_share_within_and_separate_across() {
     assert!(
         unseen.is_none(),
         "a branch naming realm(\"other\") must NOT see the realm(\"t\") provision (distinct labels = distinct realms)"
+    );
+}
+
+#[test]
+fn isolated_consumer_reactively_links_to_isolated_provider_same_realm() {
+    // The realm-isolation reactive-linking regression: a consumer that
+    // `requires kv in realm("t")` and a provider that `isolate kv in
+    // realm("t")` are plugged on SEPARATE isolated branches. The consumer must
+    // start Pending (no kv yet) and reactively activate once the provider
+    // supplies kv in the SAME realm. Before the emitter applied isolation at
+    // plug time, the consumer's Inject gate was evaluated on the un-isolated
+    // root context and it hung Pending forever.
+    let (root, log) = root_with_probe();
+
+    // Plug the consumer FIRST, isolated in realm("t"): its gate must hold it
+    // because nothing provides kv in that realm yet.
+    let consumer =
+        _revl_isolate_ctx(&root, "realm_kv_consumer_t").plugin(realm_kv_consumer_t(), ());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(
+        consumer.state(),
+        cordis::FiberState::Pending,
+        "consumer must stay Pending until an in-realm provider exists"
+    );
+    assert!(
+        !marks(&log).contains(&"consumer_t:up".to_string()),
+        "consumer must not activate before the provider: {:?}",
+        marks(&log)
+    );
+
+    // Now plug the isolated provider in the SAME realm("t").
+    let provider = _revl_isolate_ctx(&root, "realm_store_t").plugin(realm_store_t(), ());
+    provider.wait().unwrap();
+    consumer.wait().unwrap();
+
+    assert_eq!(
+        consumer.state(),
+        cordis::FiberState::Active,
+        "consumer must reactively activate once kv is provided in realm(\"t\")"
+    );
+    let after = marks(&log);
+    assert!(
+        after.contains(&"consumer_t:up".to_string()),
+        "consumer activation must have run its effect: {after:?}"
+    );
+
+    // Withdrawing the provider deactivates the consumer (reactive lifecycle).
+    provider.dispose().unwrap();
+    let after = marks(&log);
+    assert!(
+        after.contains(&"consumer_t:down".to_string()),
+        "withdrawing the in-realm provider must deactivate the consumer: {after:?}"
     );
 }
