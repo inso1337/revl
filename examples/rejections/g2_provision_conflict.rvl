@@ -8,11 +8,11 @@
 service Database { fn query(sql: Str) -> List[Row] }
 
 component PgDatabase provides db: Database {
-  let pool = effect Pool.open("pg://") undo pool.close()
+  let pool = effect Pool.open("pg://", 4) undo pool.close()
   provide db { fn query(sql) = pool.query(sql) }
 }
 
 component SqliteDatabase provides db: Database {
-  let pool = effect Pool.open("sqlite://") undo pool.close()
+  let pool = effect Pool.open("sqlite://", 4) undo pool.close()
   provide db { fn query(sql) = pool.query(sql) }
 }

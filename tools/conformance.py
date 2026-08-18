@@ -78,7 +78,7 @@ CASES: list[tuple[str, str, str]] = [
      _component("  let m = effect { let k = 1  Map.new() } undo m.drop()\n"
                 "  provide s { fn f(x) = x }")),
     ("component", "await (A1 boundary)",
-     _component("  await Job.run(1)\n  provide s { fn f(x) = x }")),
+     _component("  await Job.run(\"boot\")\n  provide s { fn f(x) = x }")),
     ("component", "fail (A8)",
      _component("  config { n: Int = 1 }\n  if (config.n < 1) { fail \"bad\" }\n"
                 "  provide s { fn f(x) = x }")),
@@ -102,7 +102,7 @@ CASES: list[tuple[str, str, str]] = [
      _component("  provide s { fn f(x) { var y = x  y = 2  return y } }")),
     ("method", "method-time effect",
      _component("  let m = effect Map.new() undo m.drop()\n"
-                "  provide s { fn f(x) { effect m.insert(x, x)  undo m.remove(x)  return x } }")),
+                "  provide s { fn f(x) { effect m.insert(\"k\", \"v\")  undo m.remove(\"k\")  return x } }")),
     ("method", "emit in method",
      _component("  provide s { fn f(x) { emit bus.send(x)  return x } }",
                 services="service Bus { emission fn send(n: Int) -> Int }\n"

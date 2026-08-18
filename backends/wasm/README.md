@@ -24,7 +24,7 @@ python3 emit.py <ir.json> <out-dir>
 ~/Projects/cordis-wasm/.venv/bin/python demo.py
 ```
 
-`await Job.run(Int)` is supported (A1): the segment launches an async
+`await Job.run(name)` is supported (A1): the segment launches an async
 host op, the runtime awaits it before the next boundary check — the
 iteration lands (inertia is physical), a divert during the wait skips
 every later step, and a refusing job is L-Raise with paper-faithful
@@ -52,7 +52,7 @@ withholding. See demo.py scenarios 6-8.
   module exports `memory` so a host can read results. `Int`/`Bool` remain
   plain i32. Supported builtins: `length`, `push`, `concat`, `slice`,
   `charAt`, `charCodeAt`.
-- **`await Job.run(Int)`** continues to lower to the runtime's async host op.
+- **`await Job.run(name)`** continues to lower to the runtime's async host op.
 
 ## Notable semantics on this tier
 

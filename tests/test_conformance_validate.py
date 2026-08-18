@@ -39,19 +39,9 @@ KNOWN_FAILURES: dict[str, set[str]] = {
     # through `cargo check` together. Two of the three (`await`, method-time
     # effect) fail on java as well, so the cause is likely shared and upstream
     # of either renderer rather than two coincidences.
-    # Both survivors are the same root cause: host builtins (`Job`, `Map`)
-    # have no declared signatures, so the frontend cannot check an argument
-    # against them and the typed tiers reject what python and TypeScript
-    # happily accept. See docs/conformance.md.
-    "rust": {
-        "component/await (A1 boundary)",
-        "method/method-time effect",
-    },
+    # rust is at zero: the host-builtin contract (typecheck.py `_HOST_ARG_SIG`)
+    # closed both of its remaining cases.
     "java": {
-        # the shared host-builtin pair, as above
-        "component/await (A1 boundary)",
-        "method/method-time effect",
-        # java-only, still open
         "method/emit as value",
         "expr/template string",
         "expr/ADT construct + match",
@@ -135,7 +125,7 @@ def test_iteration_boundary_yields_a_disposable():
     """cordis types a yield as `Disposable<T> = () => T`; `null` is not one."""
     out = _ts("service S { fn f(x: Int) -> Int }\n"
               "component C provides s: S {\n"
-              "  await Job.run(1)\n"
+              "  await Job.run(\"boot\")\n"
               "  provide s { fn f(x) = x }\n"
               "}")
     assert "yield null" not in out

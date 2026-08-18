@@ -23,6 +23,7 @@ from .typecheck import (
     check_ast,
     check_type_wellformed,
     compatible,
+    host_check,
     infer_ast,
     infer_ir,
     mismatch,
@@ -1366,6 +1367,10 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         "in pure setup",
                         hint="move the acquisition to the final expression of the effect block (G6)",
                     )
+                host_check(f"{root}.{method}",
+                           [infer_ir(a, env.type_env, env.types, env.services)
+                            for a in args],
+                           filename, line)
                 return {"kind": "host", "fn": f"{root}.{method}", "args": args}
             if root in env.requires:
                 if pure_only:
@@ -2120,11 +2125,12 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
         node = {"kind": "req", "name": head}
     elif head[:1].isupper() and ops and ops[0].args is not None:
         call = ops.pop(0)
-        node = {
-            "kind": "host",
-            "fn": f"{head}.{call.name}",
-            "args": [_lower_expr(a, env, mode) for a in call.args],
-        }
+        host_args = [_lower_expr(a, env, mode) for a in call.args]
+        host_check(f"{head}.{call.name}",
+                   [infer_ir(a, env.type_env, env.types, env.services)
+                    for a in host_args],
+                   env.filename, expr.line)
+        node = {"kind": "host", "fn": f"{head}.{call.name}", "args": host_args}
     else:
         declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
         raise RevlError(

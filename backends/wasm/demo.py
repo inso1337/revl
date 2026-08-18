@@ -131,7 +131,7 @@ async def async_main() -> None:
     await rt.quiesce()
     check(rt.call(kv, "provide:kv.get", 1) == 11 and rt.call(kv, "provide:kv.get", 2) == 22,
           "both effects landed across the await")
-    check(any("job Pulse: done 42" in line for line in rt.log), "the job ran to completion")
+    check(any("job Pulse: done 1" in line for line in rt.log), "the job ran to completion")
 
     print("== 7. A1: divert during the in-flight await skips later steps ==")
     rt = Runtime()
@@ -169,7 +169,7 @@ service Kv {
 }
 component BadPulse requires kv: Kv {
   effect kv.set(1, 11) undo kv.set(1, 0)
-  await Job.run(13)
+  await Job.run("refuse")
 }
 """
 

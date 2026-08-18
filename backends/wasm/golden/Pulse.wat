@@ -12,7 +12,7 @@
       (return (i32.const 1))))
     (if (i32.eq (global.get $__step) (i32.const 1))
       (then
-      (call $host_job_run (i32.const 42))
+      (call $host_job_run (i32.const 1))
       (global.set $__step (i32.const 2))
       (return (i32.const 1))))
     (if (i32.eq (global.get $__step) (i32.const 2))

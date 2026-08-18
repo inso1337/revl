@@ -221,6 +221,48 @@ _BUILTIN_SIG = {
 }
 
 
+# Host builtins (DESIGN §7). Each backend already carried its own copy of
+# these signatures — rust in a table, java in its stubs, wasm as an i32
+# assumption, python/TS not at all — so four tiers disagreed about a contract
+# no one enforced. `await Job.run(1)` type-checked and then failed in `rustc`
+# and `javac`. The frontend owns it now; the tiers implement it.
+#
+# Arguments only. A host builtin's *result* is a host-valued object, which
+# typecheck.py's header already enumerates as part of the unchecked frontier
+# (and which `revl audit` surfaces via G8) — so nothing here claims to know
+# what comes back.
+_HOST_ARG_SIG: dict[str, list[str]] = {
+    "Map.new": [],
+    "Map.drop": [],
+    "Map.insert": ["Str", "Str"],
+    "Map.remove": ["Str"],
+    "Map.get": ["Str"],
+    "Pool.open": ["Str", "Int"],
+    "Pool.close": [],
+    "Pool.query": ["Str"],
+    "Pool.execute": ["Str"],
+    "Job.run": ["Str"],
+}
+
+
+def host_check(fn: str, arg_types: list, filename: str | None, line: int) -> None:
+    """Check a host builtin call against its declared argument types."""
+    params = _HOST_ARG_SIG.get(fn)
+    if params is None or not filename:
+        return
+    if len(arg_types) != len(params):
+        raise RevlError(
+            filename, line,
+            f"host builtin `{fn}` takes {len(params)} argument"
+            f"{'' if len(params) == 1 else 's'}, got {len(arg_types)}",
+            hint=f"the signature is `{fn}({', '.join(params) or ''})`",
+            code="HOST-ARITY", category="host-boundary")
+    for expected, actual in zip(params, arg_types):
+        if actual and not compatible(expected, actual):
+            raise mismatch(filename, line, f"host builtin `{fn}` argument",
+                           expected, actual)
+
+
 def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int) -> str | None:
     """Type a stdlib method call; raises on definite mismatches."""
