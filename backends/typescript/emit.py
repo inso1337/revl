@@ -201,121 +201,156 @@ class _Scope:
 
 
 # Expression kinds that never need parentheses when used as a call target.
+# `call`/`field`/`index` targets are parenthesised unless atomic; the
+# component dialect and the 2.0 dialect each have their own atomic set
+# (`_V3_ATOMIC_KINDS` is defined further down). The one renderer checks
+# whichever set fits the branch's shape.
 _ATOMIC_KINDS = {"name", "config", "req", "call", "host"}
 
-# The 2.0 expression kinds live in `_v3_expr`; the component/method renderer
-# below owns the component-specific ones (`req`, `config`, `name`, `host`,
-# `format`). A component body mixes both — `let msg = prefix + name` is a
-# pure `bin` beside a `req` call — so the two renderers fall back to each
-# other. Without this a construct every other tier accepted was refused here
-# (see tests/test_cross_tier.py).
-_ACTIVE_V3: "list" = []
-
-
-def _v3_context_for_components() -> object:
-    return _ACTIVE_V3[0] if _ACTIVE_V3 else _TsV3Context({}, [], [])
-
-
-# `call` exists in *both* dialects with different shapes — component form is
-# `target`/`method`, the 2.0 form is `callee`/`args` — so the node kind alone
-# does not say which renderer owns it. Everything else here is component-only.
+# The component (v1) dialect owns these kinds: `req`/`config`/`name` resolve
+# against the component scope, and `host`/`format` are component-only
+# spellings. `call` is deliberately NOT listed — it exists in *both* dialects
+# with different shapes (component `target`/`method` vs 2.0 `callee`/`args`),
+# so the single renderer dispatches it on SHAPE, never on kind.
 _COMPONENT_ONLY_KINDS = {"req", "config", "name", "host", "format"}
 
 
-def _is_component_node(node: dict) -> bool:
-    kind = node.get("kind")
-    return kind in _COMPONENT_ONLY_KINDS or (kind == "call" and "target" in node)
-
-
-def _fn_call(node: dict, render_arg) -> str:
+def _fn_call(node: dict, ctx: "_Ctx") -> str:
     """`{"kind": "fn", "name": ..., "args": [...]}` — a call to a top-level
     `fn` or `extern`.
 
-    This is how the component lowering spells a call that a `fn` body spells
-    as a `call` node with a `var` callee (src/revl/lower.py), so both
-    renderers have to know it; `render_arg` supplies the dialect for the
-    arguments.
+    This is how the component lowering spells a call that a 2.0 `fn` body
+    spells as a `call` node with a `var` callee (src/revl/lower.py). One
+    renderer now covers both dialects, so the kind is enough here; the args
+    render through the same `_expr`.
     """
     name = _ident(node.get("name"), "function")
-    if _ACTIVE_V3:
-        ctx = _ACTIVE_V3[0]
-        if name not in ctx.function_names and name not in ctx.extern_names:
-            raise EmitError(
-                f"call to unknown function {name!r} — no `fn` or `extern` of "
-                f"that name is declared in this document"
-            )
-    args = ", ".join(render_arg(arg) for arg in node.get("args") or [])
+    if name not in ctx.function_names and name not in ctx.extern_names:
+        raise EmitError(
+            f"call to unknown function {name!r} — no `fn` or `extern` of "
+            f"that name is declared in this document"
+        )
+    args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
     return f"{name}({args})"
 
 
-def _expr(node: object, scope: _Scope) -> str:
+def _expr(node: object, ctx: "_Ctx") -> str:
+    """The single expression renderer for both of revl's IR dialects.
+
+    revl mixes two expression dialects inside one component body: the v1
+    "component" dialect (`req`, `config`, `host`, `format`, and a `call`
+    shaped `target`/`method`) and the 2.0 dialect (`var`, `bin`, `un`,
+    `field`, `index`, `builtin`, `if`, `arrow`, `match`, `interp`, ADTs,
+    `??`, and a `call` shaped `callee`/`args`). These used to be two functions
+    that fell through to each other; the fall-through read the wrong child on
+    any kind that lived in both dialects. This renderer owns every kind, and
+    for the kinds that exist in both it dispatches on the presence of
+    distinguishing keys (SHAPE) — never on the kind alone.
+
+    `ctx.component_scope` is the component `_Scope` while rendering a component
+    or method body and None in a pure 2.0 fn/test body; the component-only
+    kinds require it and refuse clearly when it is absent (a tier limit is an
+    explicit refusal, not a silent fall-through).
+    """
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed expression: {node!r}")
     kind = node["kind"]
+    scope = ctx.component_scope
 
+    # ---- kinds shared by both dialects (rendered identically) ----
     if kind == "lit":
         return _literal(node.get("value"))
 
-    if kind == "name":
-        name = _ident(node.get("id"), "name")
-        if name not in scope.locals:
-            raise EmitError(
-                f"reference to unbound name {name!r} in component "
-                f"{scope.component.get('name')!r}"
-            )
-        return name
-
-    if kind == "config":
-        field = node.get("field")
-        if field not in scope.config_fields:
-            raise EmitError(
-                f"reference to undeclared config field {field!r} in component "
-                f"{scope.component.get('name')!r}"
-            )
-        return f"config.{_ident(field, 'config field')}"
-
-    if kind == "req":
-        name = node.get("name")
-        if name not in scope.requires:
-            raise EmitError(
-                f"reference to undeclared requirement {name!r} in component "
-                f"{scope.component.get('name')!r} (G1)"
-            )
-        # Committed-view access: resolved through the fiber's snapshot, so it
-        # stays readable during this component's own teardown (R3).
-        return f"ctx.{_ident(name, 'requirement')}"
-
-    # Dispatch on *shape*, not kind: `call` is spelled `target`/`method` in the
-    # component dialect and `callee`/`args` in the 2.0 one, and a v3-shaped call
-    # does reach component positions — the `Some(..)` the frontend injects for
-    # `T` -> `Opt[T]` is one. Keying on kind alone read `method` off a v3 call
-    # and reported the resulting `None` as a bad identifier. The v3 form falls
-    # through to the v3 renderer below, which owns it. (docs/conformance.md
-    # names this as the one place the two-renderer split fails on real input.)
-    if kind == "call" and "target" in node:
-        target = node.get("target")
-        method = _ident(node.get("method"), "method")
-        target_ts = _expr(target, scope)
-        if not (isinstance(target, dict) and target.get("kind") in _ATOMIC_KINDS):
-            target_ts = f"({target_ts})"
-        args = ", ".join(_expr(arg, scope) for arg in node.get("args") or [])
-        return f"{target_ts}.{method}({args})"
-
-    if kind == "host":
-        fn = node.get("fn")
-        if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
-            raise EmitError(f"invalid host builtin: {fn!r}")
-        args = ", ".join(_expr(arg, scope) for arg in node.get("args") or [])
-        return f"host.{fn}({args})"
-
     if kind == "fn":
-        return _fn_call(node, lambda arg: _expr(arg, scope))
+        return _fn_call(node, ctx)
 
-    if kind == "format":
+    if kind == "record":
+        fields = ", ".join(
+            f"{_ident(k, 'record field')}: {_expr(v, ctx)}"
+            for k, v in node.get("fields") or []
+        )
+        return "{" + fields + "}"
+
+    if kind == "list":
+        return "[" + ", ".join(_expr(item, ctx) for item in node.get("items") or []) + "]"
+
+    if kind == "adt":
+        # tagged ADT value (Result / user variant): `{ kind: "Ok", value: x }`
+        # or `{ kind: "Missing" }`. Opt is not tagged (value | undefined).
+        case = _string(node["case"])
+        args = node.get("args") or []
+        if args:
+            return f"{{ kind: {case}, value: {_expr(args[0], ctx)} }}"
+        return f"{{ kind: {case} }}"
+
+    if kind == "call":
+        # THE dangerous kind: `call` exists in both dialects with different
+        # shapes, so it is dispatched on SHAPE, never on kind. The component
+        # form carries `target`/`method` (a method call on a service); the 2.0
+        # form carries `callee`/`args` (a first-class call). A v3-shaped call
+        # reaches component positions too (the `Some(..)` the frontend injects
+        # for `T` -> `Opt[T]` is one). Keying on kind alone once read `method`
+        # off a v3 call and reported the resulting `None` as a bad identifier
+        # (docs/conformance.md names this as the split's real failure).
+        if "target" in node:
+            target = node.get("target")
+            method = _ident(node.get("method"), "method")
+            target_ts = _expr(target, ctx)
+            if not (isinstance(target, dict) and target.get("kind") in _ATOMIC_KINDS):
+                target_ts = f"({target_ts})"
+            args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
+            return f"{target_ts}.{method}({args})"
+        callee_node = node.get("callee")
+        callee = _expr(callee_node, ctx)
+        if not (isinstance(callee_node, dict) and callee_node.get("kind") in _V3_ATOMIC_KINDS):
+            callee = f"({callee})"
+        args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
+        return f"{callee}({args})"
+
+    # ---- component (v1) dialect kinds — each needs a component scope ----
+    if kind in _COMPONENT_ONLY_KINDS:
+        if scope is None:
+            raise EmitError(
+                f"{kind!r} expression is only valid inside a component or "
+                f"method body, but no component scope is in effect"
+            )
+        if kind == "name":
+            name = _ident(node.get("id"), "name")
+            if name not in scope.locals:
+                raise EmitError(
+                    f"reference to unbound name {name!r} in component "
+                    f"{scope.component.get('name')!r}"
+                )
+            return name
+        if kind == "config":
+            field = node.get("field")
+            if field not in scope.config_fields:
+                raise EmitError(
+                    f"reference to undeclared config field {field!r} in component "
+                    f"{scope.component.get('name')!r}"
+                )
+            return f"config.{_ident(field, 'config field')}"
+        if kind == "req":
+            name = node.get("name")
+            if name not in scope.requires:
+                raise EmitError(
+                    f"reference to undeclared requirement {name!r} in component "
+                    f"{scope.component.get('name')!r} (G1)"
+                )
+            # Committed-view access: resolved through the fiber's snapshot, so
+            # it stays readable during this component's own teardown (R3).
+            return f"ctx.{_ident(name, 'requirement')}"
+        if kind == "host":
+            fn = node.get("fn")
+            if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
+                raise EmitError(f"invalid host builtin: {fn!r}")
+            args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
+            return f"host.{fn}({args})"
+        # kind == "format"
         template = node.get("template")
         if not isinstance(template, str):
             raise EmitError(f"format template must be a string: {template!r}")
-        args = [_expr(arg, scope) for arg in node.get("args") or []]
+        args = [_expr(arg, ctx) for arg in node.get("args") or []]
         out = []
         pos = 0
         # v1/A4: split on placeholders and `$$` escapes first, then render
@@ -334,62 +369,135 @@ def _expr(node: object, scope: _Scope) -> str:
         out.append(_template_text(template[pos:]))
         return "`" + "".join(out) + "`"
 
-    if kind == "adt":
-        # tagged ADT value (Result / user variant): `{ kind: "Ok", value: x }`
-        # or `{ kind: "Missing" }`. Opt is not tagged (value | undefined). Same
-        # runtime shape the v3 fn-body emitter produces.
-        case = _string(node["case"])
-        args = node.get("args") or []
-        if args:
-            return f"{{ kind: {case}, value: {_expr(args[0], scope)} }}"
-        return f"{{ kind: {case} }}"
+    # ---- 2.0 dialect kinds ----
+    if kind == "var":
+        return _v3_var(node, ctx)
 
-    if kind == "record":
-        fields = ", ".join(
-            f"{_ident(k, 'record field')}: {_expr(v, scope)}"
-            for k, v in node.get("fields") or []
+    if kind == "bin":
+        if node.get("op") == "??":
+            return f"({_expr(node['left'], ctx)} ?? {_expr(node['right'], ctx)})"
+        op = _TS_V3_BIN_OPS.get(node.get("op"))
+        if op is None:
+            raise EmitError(f"unsupported binary operator {node.get('op')!r}")
+        return f"({_expr(node['left'], ctx)} {op} {_expr(node['right'], ctx)})"
+
+    if kind == "un":
+        operand = _expr(node.get("operand"), ctx)
+        if node.get("op") == "!":
+            return f"(!{operand})"
+        if node.get("op") == "-":
+            return f"(-{operand})"
+        raise EmitError(f"unsupported unary operator {node.get('op')!r}")
+
+    if kind == "field":
+        target_node = node.get("target")
+        target = _expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}.{_ident(node.get('name'), 'field')}"
+
+    if kind == "index":
+        target_node = node.get("target")
+        target = _expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}[{_expr(node['index'], ctx)}]"
+
+    if kind == "builtin":
+        target_node = node.get("target")
+        target = _expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        args = [_expr(a, ctx) for a in node.get("args") or []]
+        return _ts_builtin(node.get("method"), target, args)
+
+    if kind == "if":
+        return (
+            f"({_expr(node['cond'], ctx)} ? "
+            f"{_expr(node['then'], ctx)} : {_expr(node['else'], ctx)})"
         )
-        return "{" + fields + "}"
 
-    if kind == "list":
-        return "[" + ", ".join(_expr(item, scope) for item in node.get("items") or []) + "]"
+    if kind == "arrow":
+        # An arrow the checker typed carries its parameter types in the IR
+        # (docs/function-types.md), and they are emitted verbatim — this is a
+        # real TS signature, not an admission.
+        #
+        # An arrow with *no* expected type and no annotations is still on the
+        # checker's unchecked frontier (typecheck.py header), and there the
+        # parameter is written `any` deliberately: the compiler has no type,
+        # and a guess would be worse than the admission. `strict` rejects only
+        # an *implicit* any, so writing it is also what makes the file compile.
+        names = node.get("params") or []
+        declared = node.get("param_types") or []
+        declared = list(declared) + [None] * (len(names) - len(declared))
+        params = ", ".join(
+            f"{_ident(p, 'arrow parameter')}: "
+            f"{_ts_v3_type(t) if isinstance(t, str) and t not in ('Any', 'Never') else 'any'}"
+            for p, t in zip(names, declared))
+        return f"(({params}) => ({_expr(node['body'], ctx)}))"
 
-    # anything else is a pure 2.0 expression: the v3 renderer owns those
-    # kinds, and falls back here for the component-specific ones
-    ctx = _v3_context_for_components()
-    ctx.component_scope = scope
-    return _v3_expr(node, ctx)
+    if kind == "match":
+        return _v3_match_expr(node, ctx)
+
+    if kind == "interp":
+        parts = node.get("parts") or []
+        segs = ["`"]
+        for part_kind, value in parts:
+            if part_kind == "text":
+                segs.append(_template_text(value))
+            else:  # ["expr", ir_node] — a full expression
+                segs.append("${" + _expr(value, ctx) + "}")
+        segs.append("`")
+        return "".join(segs)
+
+    if kind == "optfield":
+        target_node = node.get("target")
+        target = _expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"{target}?.{_ident(node.get('name'), 'optional field')}"
+
+    if kind == "optcall":
+        target_node = node.get("target")
+        target = _expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        args = ", ".join(_expr(a, ctx) for a in node.get("args") or [])
+        return f"{target}?.{_ident(node.get('method'), 'optional method')}({args})"
+
+    raise EmitError(f"unsupported expression kind {kind!r}")
 
 
-def _method_body(steps: list, scope: _Scope, indent: str) -> list[str]:
+def _method_body(steps: list, ctx: "_Ctx", indent: str) -> list[str]:
     """Steps inside a provide-method body.
 
     These run while the component is ACTIVE; `effect` steps go through
     `ctx.effect` so their undos join the component fiber's accumulator.
     """
+    scope = ctx.component_scope
     lines: list[str] = []
     for step in steps:
         kind = step.get("step")
         if kind == "let":
             name = scope.bind(step["name"])
             keyword = "let" if step.get("mutable") else "const"
-            lines.append(f"{indent}{keyword} {name} = {_expr(step['value'], scope)}")
+            lines.append(f"{indent}{keyword} {name} = {_expr(step['value'], ctx)}")
         elif kind == "assign":
             lines.append(f"{indent}{_ident(step['name'], 'binding')} = "
-                         f"{_expr(step['value'], scope)}")
+                         f"{_expr(step['value'], ctx)}")
         elif kind == "return":
             # a void service operation returns nothing at all
             if step.get("expr") is None:
                 lines.append(f"{indent}return")
             else:
-                lines.append(f"{indent}return {_expr(step['expr'], scope)}")
+                lines.append(f"{indent}return {_expr(step['expr'], ctx)}")
         elif kind in ("effect", "let-effect"):
             bind = None
             if kind == "let-effect":
                 bind = scope.bind(step["bind"])
                 lines.append(f"{indent}let {bind}: any")
-            acquire = _expr(step["acquire"], scope)
-            undo = _expr(step["undo"], scope)
+            acquire = _expr(step["acquire"], ctx)
+            undo = _expr(step["undo"], ctx)
             lines.append(f"{indent}ctx.effect(() => {{")
             if bind is not None:
                 lines.append(f"{indent}  {bind} = {acquire}")
@@ -401,11 +509,11 @@ def _method_body(steps: list, scope: _Scope, indent: str) -> list[str]:
             if step.get("compensate") is not None:
                 # v1/A5: the compensation joins the fiber's accumulator
                 lines.append(f"{indent}ctx.effect(() => {{")
-                lines.append(f"{indent}  {_expr(step['expr'], scope)}")
-                lines.append(f"{indent}  return () => {_expr(step['compensate'], scope)}")
+                lines.append(f"{indent}  {_expr(step['expr'], ctx)}")
+                lines.append(f"{indent}  return () => {_expr(step['compensate'], ctx)}")
                 lines.append(f"{indent}}})")
             else:
-                lines.append(f"{indent}{_expr(step['expr'], scope)}")
+                lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         elif kind == "provide":
@@ -415,7 +523,8 @@ def _method_body(steps: list, scope: _Scope, indent: str) -> list[str]:
     return lines
 
 
-def _provide_impl(step: dict, scope: _Scope, services: dict, indent: str) -> list[str]:
+def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[str]:
+    scope = ctx.component_scope
     service_name = step.get("service")
     service = services.get(service_name)
     if service is None:
@@ -445,30 +554,31 @@ def _provide_impl(step: dict, scope: _Scope, services: dict, indent: str) -> lis
             for p, spec in zip(params, spec_params)
         )
         lines.append(f"{indent}{name}({sig}) {{")
-        lines.extend(_method_body(method.get("body") or [], body_scope, indent + "  "))
+        lines.extend(_method_body(method.get("body") or [], ctx.with_scope(body_scope), indent + "  "))
         lines.append(f"{indent}}},")
     return lines
 
 
-def _component_body(component: dict, services: dict, indent: str) -> list[str]:
+def _component_body(component: dict, services: dict, indent: str, doc_ctx: "_Ctx") -> list[str]:
     """The activation body, lowered into one ctx.effect generator."""
-    scope = _Scope(component)
+    ctx = doc_ctx.with_scope(_Scope(component))
     lines: list[str] = []
     for step in component.get("body") or []:
-        _component_step(step, component, services, scope, indent, lines)
+        _component_step(step, component, services, ctx, indent, lines)
     return lines
 
 
-def _component_step(step: dict, component: dict, services: dict, scope: _Scope,
+def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     indent: str, lines: list[str]) -> None:
     """One step of the activation body, appended to `lines`.
 
     Recursive because `if` branches hold ordinary body steps.
     """
+    scope = ctx.component_scope
     provides = component.get("provides") or {}
     kind = step.get("step")
     if kind in ("let-effect", "effect"):
-        acquire = _expr(step["acquire"], scope)
+        acquire = _expr(step["acquire"], ctx)
         if kind == "let-effect":
             bind = scope.bind(step["bind"])
             lines.append(f"{indent}const {bind} = {acquire}")
@@ -476,17 +586,17 @@ def _component_step(step: dict, component: dict, services: dict, scope: _Scope,
             lines.append(f"{indent}{acquire}")
         # `undo` may reference the binding; it types in teardown mode —
         # by construction it cannot register further effects.
-        undo = _expr(step["undo"], scope)
+        undo = _expr(step["undo"], ctx)
         lines.append(f"{indent}yield () => {undo}")
     elif kind == "emit":
-        lines.append(f"{indent}{_expr(step['expr'], scope)}")
+        lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         if step.get("compensate") is not None:
             # v1/A5: compensation accumulates LIFO like an inverse
-            lines.append(f"{indent}yield () => {_expr(step['compensate'], scope)}")
+            lines.append(f"{indent}yield () => {_expr(step['compensate'], ctx)}")
     elif kind == "await":
         # v1/A1: the await lands (inertia), then the yield closes the
         # iteration so a divert during the await skips every later step
-        lines.append(f"{indent}await {_expr(step['expr'], scope)}")
+        lines.append(f"{indent}await {_expr(step['expr'], ctx)}")
         lines.append(f"{indent}yield () => {{}}  // iteration boundary (A1)")
     elif kind == "provide":
         name = step.get("name")
@@ -508,25 +618,25 @@ def _component_step(step: dict, component: dict, services: dict, scope: _Scope,
         # revertible); yielding the wrapper slots it into this body
         # effect's LIFO sequence.
         lines.append(f"{indent}yield ctx.provide({_string(name)}, {{")
-        lines.extend(_provide_impl(step, scope, services, indent + "  "))
+        lines.extend(_provide_impl(step, ctx, services, indent + "  "))
         lines.append(f"{indent}}} satisfies {_ident(step['service'], 'service')})")
     elif kind == "if":
         # An activation guard (A8). Branches hold ordinary body steps, so a
         # `yield` inside one keeps its place in the accumulator's LIFO order —
         # being a generator body makes that work with no handling here.
-        lines.append(f"{indent}if ({_expr(step['cond'], scope)}) {{")
+        lines.append(f"{indent}if ({_expr(step['cond'], ctx)}) {{")
         for nested in step.get("then") or []:
-            _component_step(nested, component, services, scope, indent + "  ", lines)
+            _component_step(nested, component, services, ctx, indent + "  ", lines)
         if step.get("else"):
             lines.append(f"{indent}}} else {{")
             for nested in step["else"]:
-                _component_step(nested, component, services, scope, indent + "  ", lines)
+                _component_step(nested, component, services, ctx, indent + "  ", lines)
         lines.append(f"{indent}}}")
     elif kind == "fail":
         # A8: refusing activation is a throw out of the body. Whatever the
         # accumulator already holds is reverted by the runtime, so a partly
         # activated component still leaves no residue (R4).
-        lines.append(f"{indent}throw new Error({_expr(step['message'], scope)})")
+        lines.append(f"{indent}throw new Error({_expr(step['message'], ctx)})")
     elif kind == "return":
         raise EmitError("return steps are only allowed inside method bodies")
     else:
@@ -551,7 +661,7 @@ def _config_interface(component: dict) -> list[str]:
     return lines
 
 
-def _component(component: dict, services: dict) -> list[str]:
+def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     name = _ident(component.get("name"), "component")
     requires = component.get("requires") or {}
     provides = component.get("provides") or {}
@@ -619,7 +729,7 @@ def _component(component: dict, services: dict) -> list[str]:
     )
     generator = "async function*" if is_async else "function*"
     lines.append(f"    ctx.effect({generator} () {{")
-    lines.extend(_component_body(component, services, "      "))
+    lines.extend(_component_body(component, services, "      ", doc_ctx))
     lines.append(f"    }}, {_string(name + '.body')})")
     lines.append("  },")
     if isolate:
@@ -712,10 +822,23 @@ def _ts_v3_type(type_name: object) -> str:
     return _ident(name, "type name")
 
 
-class _TsV3Context:
-    """Names visible to lowered v3 expression emitters."""
+class _Ctx:
+    """The single rendering context threaded through `_expr` for both dialects.
 
-    def __init__(self, types: dict, functions: list, externs: list) -> None:
+    It carries the document-level 2.0 type context — the type/function/extern
+    names, the variant case names, and the shared match-temp counter — AND an
+    optional `component_scope`: the component `_Scope` in effect while
+    rendering a component or method body, or None in a pure 2.0 fn/test body.
+    The component-dialect kinds (`req`/`config`/`name`/`host`/`format`) resolve
+    against that scope; the 2.0 kinds ignore it.
+
+    `with_scope` returns a *view* that shares the type context and the counter
+    cell but rebinds `component_scope`, so entering a method or match-arm body
+    is cheap and never desynchronises the match-temp numbering.
+    """
+
+    def __init__(self, types: dict, functions: list, externs: list,
+                 component_scope=None, counter=None) -> None:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
@@ -724,15 +847,27 @@ class _TsV3Context:
             if spec.get("kind") == "variant":
                 for case in spec.get("cases") or []:
                     self.case_names.add(case.get("name"))
-        self._match_counter = 0
+        # A one-cell list so every derived view shares the same counter.
+        self._counter = counter if counter is not None else [0]
+        self.component_scope = component_scope
 
     def new_match_tmp(self) -> str:
         # `$` is not in revl's identifier alphabet, so this cannot collide.
-        self._match_counter += 1
-        return f"$revl_match_{self._match_counter}"
+        self._counter[0] += 1
+        return f"$revl_match_{self._counter[0]}"
+
+    def with_scope(self, scope) -> "_Ctx":
+        view = _Ctx.__new__(_Ctx)
+        view.types = self.types
+        view.function_names = self.function_names
+        view.extern_names = self.extern_names
+        view.case_names = self.case_names
+        view._counter = self._counter
+        view.component_scope = scope
+        return view
 
 
-def _v3_var(node: dict, ctx: _TsV3Context) -> str:
+def _v3_var(node: dict, ctx: "_Ctx") -> str:
     name = node.get("name")
     _ident(name, "name")
     if name in ctx.function_names or name in ctx.extern_names or name in ctx.case_names:
@@ -772,150 +907,7 @@ def _ts_builtin(method, target: str, args: list) -> str:
     raise EmitError(f"unknown builtin method {method!r}")
 
 
-def _v3_expr(node: object, ctx: _TsV3Context) -> str:
-    if not isinstance(node, dict) or "kind" not in node:
-        raise EmitError(f"malformed v3 expression: {node!r}")
-    kind = node["kind"]
-
-    # A component body mixes both dialects (`x ?? 0` is a pure `bin` whose
-    # left operand is a `req` call), so hand component-shaped nodes back to
-    # the component renderer *before* the 2.0 cases run. Kind alone is not
-    # enough: a `call` here may be either dialect, distinguished by `target`.
-    component_scope = getattr(ctx, "component_scope", None)
-    if component_scope is not None and _is_component_node(node):
-        return _expr(node, component_scope)
-
-    if kind == "lit":
-        return _literal(node.get("value"))
-
-    if kind == "var":
-        return _v3_var(node, ctx)
-
-    if kind == "fn":
-        return _fn_call(node, lambda arg: _v3_expr(arg, ctx))
-
-    if kind == "bin":
-        if node.get("op") == "??":
-            return f"({_v3_expr(node['left'], ctx)} ?? {_v3_expr(node['right'], ctx)})"
-        op = _TS_V3_BIN_OPS.get(node.get("op"))
-        if op is None:
-            raise EmitError(f"unsupported binary operator {node.get('op')!r}")
-        return f"({_v3_expr(node['left'], ctx)} {op} {_v3_expr(node['right'], ctx)})"
-
-    if kind == "un":
-        operand = _v3_expr(node.get("operand"), ctx)
-        if node.get("op") == "!":
-            return f"(!{operand})"
-        if node.get("op") == "-":
-            return f"(-{operand})"
-        raise EmitError(f"unsupported unary operator {node.get('op')!r}")
-
-    if kind == "call":
-        callee_node = node.get("callee")
-        callee = _v3_expr(callee_node, ctx)
-        if not (isinstance(callee_node, dict) and callee_node.get("kind") in _V3_ATOMIC_KINDS):
-            callee = f"({callee})"
-        args = ", ".join(_v3_expr(arg, ctx) for arg in node.get("args") or [])
-        return f"{callee}({args})"
-
-    if kind == "field":
-        target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
-            target = f"({target})"
-        return f"{target}.{_ident(node.get('name'), 'field')}"
-
-    if kind == "index":
-        target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
-            target = f"({target})"
-        return f"{target}[{_v3_expr(node['index'], ctx)}]"
-
-    if kind == "builtin":
-        target = _v3_expr(node.get("target"), ctx)
-        if not (isinstance(node.get("target"), dict) and node["target"].get("kind") in _V3_ATOMIC_KINDS):
-            target = f"({target})"
-        args = [_v3_expr(a, ctx) for a in node.get("args") or []]
-        return _ts_builtin(node.get("method"), target, args)
-
-    if kind == "if":
-        return (
-            f"({_v3_expr(node['cond'], ctx)} ? "
-            f"{_v3_expr(node['then'], ctx)} : {_v3_expr(node['else'], ctx)})"
-        )
-
-    if kind == "record":
-        fields = ", ".join(
-            f"{_ident(k, 'record field')}: {_v3_expr(v, ctx)}"
-            for k, v in node.get("fields") or []
-        )
-        return "{" + fields + "}"
-
-    if kind == "list":
-        return "[" + ", ".join(_v3_expr(item, ctx) for item in node.get("items") or []) + "]"
-
-    if kind == "arrow":
-        # An arrow the checker typed carries its parameter types in the IR
-        # (docs/function-types.md), and they are emitted verbatim — this is a
-        # real TS signature, not an admission.
-        #
-        # An arrow with *no* expected type and no annotations is still on the
-        # checker's unchecked frontier (typecheck.py header), and there the
-        # parameter is written `any` deliberately: the compiler has no type,
-        # and a guess would be worse than the admission. `strict` rejects only
-        # an *implicit* any, so writing it is also what makes the file compile.
-        names = node.get("params") or []
-        declared = node.get("param_types") or []
-        declared = list(declared) + [None] * (len(names) - len(declared))
-        params = ", ".join(
-            f"{_ident(p, 'arrow parameter')}: "
-            f"{_ts_v3_type(t) if isinstance(t, str) and t not in ('Any', 'Never') else 'any'}"
-            for p, t in zip(names, declared))
-        return f"(({params}) => ({_v3_expr(node['body'], ctx)}))"
-
-    if kind == "match":
-        return _v3_match_expr(node, ctx)
-
-    if kind == "interp":
-        parts = node.get("parts") or []
-        segs = ["`"]
-        for part_kind, value in parts:
-            if part_kind == "text":
-                segs.append(_template_text(value))
-            else:  # ["expr", ir_node] — a full expression
-                segs.append("${" + _v3_expr(value, ctx) + "}")
-        segs.append("`")
-        return "".join(segs)
-
-    if kind == "adt":
-        # tagged ADT value (Result / user variant): `{ kind: "Ok", value: x }`
-        # or `{ kind: "Missing" }`. Opt is not tagged (value | undefined).
-        case = _string(node["case"])
-        args = node.get("args") or []
-        if args:
-            return f"{{ kind: {case}, value: {_v3_expr(args[0], ctx)} }}"
-        return f"{{ kind: {case} }}"
-
-    if kind == "optfield":
-        target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
-            target = f"({target})"
-        return f"{target}?.{_ident(node.get('name'), 'optional field')}"
-
-    if kind == "optcall":
-        target_node = node.get("target")
-        target = _v3_expr(target_node, ctx)
-        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
-            target = f"({target})"
-        args = ", ".join(_v3_expr(a, ctx) for a in node.get("args") or [])
-        return f"{target}?.{_ident(node.get('method'), 'optional method')}({args})"
-
-    raise EmitError(f"unsupported v3 expression kind {kind!r}")
-
-
-def _v3_arm_body(arm: dict, ctx: _TsV3Context) -> str:
+def _v3_arm_body(arm: dict, ctx: "_Ctx") -> str:
     """Render one match arm's body with that arm's payload binding in scope.
 
     In a `fn` body nothing tracks bindings, but in a component/method body the
@@ -924,24 +916,21 @@ def _v3_arm_body(arm: dict, ctx: _TsV3Context) -> str:
     => v }` inside a provide-method reports `v` as unbound.
     """
     bind = arm.get("bind")
-    scope = getattr(ctx, "component_scope", None)
+    scope = ctx.component_scope
     if not bind or scope is None:
-        return _v3_expr(arm.get("body"), ctx)
+        return _expr(arm.get("body"), ctx)
     arm_scope = scope.child()
     # `.add` rather than `.bind`: the emitted arm is an IIFE parameter, which
     # shadows in TS exactly as the pattern binding shadows in revl, so this is
-    # not the rebinding that single-assignment forbids.
+    # not the rebinding that single-assignment forbids. `with_scope` shares the
+    # match-temp counter, so a nested match inside the arm keeps unique temps.
     arm_scope.locals.add(_ident(bind, "match bind"))
-    ctx.component_scope = arm_scope
-    try:
-        return _v3_expr(arm.get("body"), ctx)
-    finally:
-        ctx.component_scope = scope
+    return _expr(arm.get("body"), ctx.with_scope(arm_scope))
 
 
-def _v3_match_expr(node: dict, ctx: _TsV3Context) -> str:
+def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
     tmp = ctx.new_match_tmp()
-    scrutinee = _v3_expr(node.get("scrutinee"), ctx)
+    scrutinee = _expr(node.get("scrutinee"), ctx)
     arms = node.get("arms") or []
 
     # Opt is `value | undefined` (not tagged): Some/None discriminate on
@@ -997,11 +986,11 @@ def _v3_match_expr(node: dict, ctx: _TsV3Context) -> str:
 
 
 
-def _v3_stmt(node: dict, ctx: _TsV3Context, out: list[str], indent: int, *, test_mode: bool) -> None:
+def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: bool) -> None:
     step = node.get("step")
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
-        value = _v3_expr(node.get("value"), ctx)
+        value = _expr(node.get("value"), ctx)
         if step == "let":
             keyword = "let" if node.get("mutable") else "const"
             out.append(f"{'  ' * indent}{keyword} {name} = {value}")
@@ -1011,9 +1000,9 @@ def _v3_stmt(node: dict, ctx: _TsV3Context, out: list[str], indent: int, *, test
         if node.get("expr") is None:
             out.append(f"{'  ' * indent}return")
         else:
-            out.append(f"{'  ' * indent}return {_v3_expr(node['expr'], ctx)}")
+            out.append(f"{'  ' * indent}return {_expr(node['expr'], ctx)}")
     elif step == "if":
-        out.append(f"{'  ' * indent}if ({_v3_expr(node['cond'], ctx)}) {{")
+        out.append(f"{'  ' * indent}if ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("then") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         if node.get("else"):
@@ -1022,18 +1011,18 @@ def _v3_stmt(node: dict, ctx: _TsV3Context, out: list[str], indent: int, *, test
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "while":
-        out.append(f"{'  ' * indent}while ({_v3_expr(node['cond'], ctx)}) {{")
+        out.append(f"{'  ' * indent}while ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "for":
         bind = _ident(node.get("bind"), "loop binding")
-        out.append(f"{'  ' * indent}for (const {bind} of {_v3_expr(node['iterable'], ctx)}) {{")
+        out.append(f"{'  ' * indent}for (const {bind} of {_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{'  ' * indent}}}")
     elif step == "let_pattern":
-        value = _v3_expr(node.get("value"), ctx)
+        value = _expr(node.get("value"), ctx)
         names = [_ident(n, "binding") for n in node.get("names") or []]
         if node.get("pattern") == "record":
             out.append(f"{'  ' * indent}const {{ {', '.join(names)} }} = {value}")
@@ -1042,13 +1031,13 @@ def _v3_stmt(node: dict, ctx: _TsV3Context, out: list[str], indent: int, *, test
             parts = ", ".join(names + ([f"...{_ident(rest, 'binding')}"] if rest else []))
             out.append(f"{'  ' * indent}const [{parts}] = {value}")
     elif step == "expr":
-        out.append(f"{'  ' * indent}{_v3_expr(node['expr'], ctx)}")
+        out.append(f"{'  ' * indent}{_expr(node['expr'], ctx)}")
     elif step == "assert":
         if test_mode:
-            out.append(f"{'  ' * indent}expect({_v3_expr(node['expr'], ctx)}).toBeTruthy()")
+            out.append(f"{'  ' * indent}expect({_expr(node['expr'], ctx)}).toBeTruthy()")
         else:
             out.append(
-                f"{'  ' * indent}if (!({_v3_expr(node['expr'], ctx)})) "
+                f"{'  ' * indent}if (!({_expr(node['expr'], ctx)})) "
                 f'throw new Error("assertion failed")'
             )
     else:
@@ -1091,7 +1080,7 @@ def _emit_ts_types(types: dict) -> list[str]:
 
 
 def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]:
-    ctx = _TsV3Context(types, functions, externs)
+    ctx = _Ctx(types, functions, externs)
     lines: list[str] = []
     for fn in functions:
         name = _ident(fn.get("name"), "function name")
@@ -1139,7 +1128,7 @@ def _emit_ts_externs(externs: list) -> list[str]:
 
 
 def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> list[str]:
-    ctx = _TsV3Context(types, functions, externs)
+    ctx = _Ctx(types, functions, externs)
     lines: list[str] = []
     for test in tests:
         lines.append(f"it({_string(test.get('name'))}, () => {{")
@@ -1194,6 +1183,11 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
 
     services = ir.get("services") or {}
     components = ir.get("components") or []
+    # One document-level context threaded into every component body, so a
+    # component that spells a top-level call as a `fn` node resolves it, and a
+    # 2.0 expression mixed into the body renders against the same type context.
+    doc_ctx = _Ctx(ir.get("types") or {}, ir.get("functions") or [],
+                   ir.get("externs") or [])
 
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
@@ -1228,7 +1222,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         if component.get("name") in seen:
             raise EmitError(f"duplicate component name: {component.get('name')!r}")
         seen.add(component.get("name"))
-        out.extend(_component(component, services))
+        out.extend(_component(component, services, doc_ctx))
         out.append("")
 
     return "\n".join(out).rstrip() + "\n"
@@ -1245,6 +1239,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     tests = ir.get("tests") or []
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
+    # Document-level context for component bodies (see _emit_v1); pure fn/test
+    # bodies build their own below, matching the pre-refactor per-pass split.
+    doc_ctx = _Ctx(types, functions, externs)
 
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
@@ -1289,7 +1286,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         if component.get("name") in seen:
             raise EmitError(f"duplicate component name: {component.get('name')!r}")
         seen.add(component.get("name"))
-        out.extend(_component(component, services))
+        out.extend(_component(component, services, doc_ctx))
         out.append("")
 
     return "\n".join(out).rstrip() + "\n"
@@ -1380,19 +1377,14 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
 
     _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
-    # publish a v3 context for the whole document so component/method bodies
-    # can render pure 2.0 expressions (see _v3_context_for_components)
-    _ACTIVE_V3.append(_TsV3Context(ir.get("types") or {},
-                                   ir.get("functions") or [],
-                                   ir.get("externs") or []))
-    try:
-        if version in (1, 2):
-            return _emit_v1(ir, runtime_import=runtime_import)
-        if version == 3:
-            return _emit_v3(ir, runtime_import=runtime_import)
-        raise EmitError(f"unsupported ir_version: {version!r}")
-    finally:
-        _ACTIVE_V3.pop()
+    # The unified `_Ctx` carrying the document type context is built inside
+    # each _emit_* pass and threaded into every body (component and 2.0),
+    # replacing the former module-global context stack.
+    if version in (1, 2):
+        return _emit_v1(ir, runtime_import=runtime_import)
+    if version == 3:
+        return _emit_v3(ir, runtime_import=runtime_import)
+    raise EmitError(f"unsupported ir_version: {version!r}")
 
 
 def _main(argv: list[str]) -> int:
