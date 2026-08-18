@@ -455,6 +455,11 @@ class Program:
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
     fn_alias_scopes: dict[int, dict[str, set[str]]] = field(default_factory=dict)
+    # Provenance for non-component declarations: id(decl) -> source file.
+    # Components carry their own `source`; fns, externs and services do not,
+    # and a why-trace needs a file for every hop it names (why.py). Keyed by
+    # identity like `fn_scopes`, so merging modules preserves it for free.
+    decl_files: dict[int, str] = field(default_factory=dict)
 
 
 # `===` -> `==`, `!==` -> `!=`: both spellings, one meaning (structural,
@@ -1698,4 +1703,6 @@ def parse_file(path: str) -> Program:
     source = os.path.relpath(path)
     for component in program.components:
         component.source = source
+    for decl in (*program.fn_decls, *program.externs, *program.services):
+        program.decl_files[id(decl)] = source
     return program

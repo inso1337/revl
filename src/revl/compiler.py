@@ -276,6 +276,11 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             merged.fn_scopes[id(fn)] = callables
             merged.fn_alias_scopes[id(fn)] = alias_fns
 
+    # Declaration provenance for why-traces: every module the loader touched,
+    # so a trace hop into an imported fn names the file it was declared in.
+    for module in loader._cache.values():
+        merged.decl_files.update(module.program.decl_files)
+
     ambient = None
     if manifest is not None:
         running = manifest.get("manifest", manifest)

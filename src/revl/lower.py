@@ -16,6 +16,7 @@ from __future__ import annotations
 import keyword
 
 from .errors import RevlError
+from .why import CHAIN, SET, TraceStep, WhyTrace
 from .typecheck import (
     CASES_KEY,
     FNS_KEY,
@@ -149,6 +150,9 @@ class Env:
         # the same relation refined to *which* boundaries each one reaches:
         # name -> capability set (docs/capabilities.md)
         self.emitting_caps: dict[str, set] = {}
+        # why-trace support for the above (why.py); None when unavailable,
+        # in which case rejections carry no derivation but are unchanged
+        self.emission_evidence: "_EmissionEvidence | None" = None
         # component-body type environment: safe-name -> type, plus the
         # "config.<field>" and "req.<local>" markers infer_ir resolves
         self.type_env: dict[str, str] = {}
@@ -1369,7 +1373,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename)
     tests = _lower_tests(program, program.filename, types)
-    emitting_caps = _emitting_capabilities(fns, externs)
+    # One fixed point, two consumers: `emitting_caps` is what it computes
+    # (docs/capabilities.md), `witness` is why (why.py). Evidence never
+    # decides a rejection, it only explains one.
+    emission_evidence = _EmissionEvidence(program)
+    emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
 
     components = []
@@ -1379,7 +1387,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
             raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
         seen.add(comp.name)
         components.append(_lower_component(comp, services, program.filename, component_callables,
-                                           types, emitting_fns, emitting_caps))
+                                           types, emitting_fns, emitting_caps,
+                                           emission_evidence))
 
     manifest = _link(program, components, ambient.get("components") or [])
 
@@ -1887,14 +1896,20 @@ def _calls_in(node, found: set) -> None:
             _calls_in(value, found)
 
 
-def _emitting_fns(fns: list, externs: list) -> set:
+def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
     """Names whose call reaches an irreversible host effect: `emission`
     externs, and functions that reach one transitively. An `acquire` extern
-    is *revertible* (it carries an inverse), so it is deliberately not one."""
-    return set(_emitting_capabilities(fns, externs))
+    is *revertible* (it carries an inverse), so it is deliberately not one.
+
+    `witness` (optional, filled in place) records *why* each derived name is
+    in the set: `witness[caller] = callee`, the edge that put it there. The
+    verdict is unchanged either way — this is only the evidence the fixed
+    point would otherwise throw away (why.py)."""
+    return set(_emitting_capabilities(fns, externs, witness))
 
 
-def _emitting_capabilities(fns: list, externs: list) -> dict[str, set]:
+def _emitting_capabilities(fns: list, externs: list,
+                           witness: dict | None = None) -> dict[str, set]:
     """`_emitting_fns` refined from a boolean to a *set*: name -> the
     capabilities its call reaches (docs/capabilities.md).
 
@@ -1902,7 +1917,10 @@ def _emitting_capabilities(fns: list, externs: list) -> dict[str, set]:
     *is* the boundary — so `extern emission fn send` contributes `send`, and a
     `fn` contributes the union of what it calls, not its own name. The fixed
     point is the same least one `_emitting_fns` took, now over sets instead of
-    a flag, which is why a capability propagates through a chain of `fn`s."""
+    a flag, which is why a capability propagates through a chain of `fn`s.
+
+    `witness` is filled in place as the same walk proceeds — the set and the
+    derivation come from one traversal, so they cannot disagree."""
     caps: dict[str, set] = {ext["name"]: {ext["name"]}
                             for ext in externs if ext.get("class") == "emission"}
     calls: dict[str, set] = {}
@@ -1919,6 +1937,13 @@ def _emitting_capabilities(fns: list, externs: list) -> dict[str, set]:
             for callee in called:
                 reached |= caps.get(callee, set())
             if reached and not reached <= caps.get(name, set()):
+                if witness is not None and name not in caps:
+                    # of the callees that prove the point, take the one with
+                    # the shortest onward chain (ties by name): the author is
+                    # asked to read the shortest derivation, deterministically
+                    witness[name] = min(
+                        sorted(c for c in called if caps.get(c)),
+                        key=lambda callee: _witness_depth(callee, witness))
                 caps.setdefault(name, set()).update(reached)
                 changed = True
     return caps
@@ -1940,7 +1965,88 @@ def _capability_hint(service: str, method: str, declared, extra: list[str]) -> s
             f"capability (G4)")
 
 
-def _method_emissions(body: list, env: "Env") -> tuple[list[str], set]:
+def _witness_depth(name: str, witness: dict) -> int:
+    """Hops from `name` down to the emission that made it emitting. The
+    witness graph is acyclic by construction — an entry is only ever written
+    for a name that was *not* yet emitting, pointing at one that was — but
+    the guard keeps a malformed map from hanging the compiler."""
+    depth, seen = 0, {name}
+    while name in witness:
+        name = witness[name]
+        if name in seen:
+            break
+        seen.add(name)
+        depth += 1
+    return depth
+
+
+def _emission_chain(name: str, witness: dict) -> list[str]:
+    """`name` followed to the emission it reaches, e.g.
+    ["writeThrough", "audit_log", "audit_write"]."""
+    chain, seen = [name], {name}
+    while name in witness:
+        name = witness[name]
+        if name in seen:
+            break
+        seen.add(name)
+        chain.append(name)
+    return chain
+
+
+class _EmissionEvidence:
+    """The G4 fixed point's evidence: the witness edge behind each derived
+    emitting name, plus enough of the declaration table to give every hop in
+    a chain a source location.
+
+    Deliberately a companion of `_emitting_fns` rather than a change to it:
+    the set that decides the verdict stays exactly what it was."""
+
+    def __init__(self, program: Program) -> None:
+        self.witness: dict[str, str] = {}
+        self._files = getattr(program, "decl_files", None) or {}
+        self._fallback_file = program.filename
+        self._decls: dict[str, object] = {}
+        for decl in program.fn_decls:
+            self._decls.setdefault(decl.name, decl)
+        for decl in program.externs:
+            self._decls.setdefault(decl.name, decl)
+        self.emission_externs = {
+            decl.name for decl in program.externs
+            if decl.classification == "emission"
+        }
+
+    def locate(self, decl) -> tuple[str | None, int | None]:
+        if decl is None:
+            return (None, None)
+        return (self._files.get(id(decl)) or self._fallback_file or None,
+                getattr(decl, "line", None))
+
+    def capabilities_of(self, name: str) -> tuple:
+        """Which capabilities `name`'s emission reaches.
+
+        Empty today: G4's `emitting_fns` is a plain set, so "emission" is all
+        the analysis knows. This is the single seam for the capability-set
+        work — the moment a declaration carries a `capabilities` attribute
+        every why-trace starts showing it, in the rendering and in the JSON
+        alike, with no other edit (see `TraceStep.capabilities`)."""
+        return tuple(getattr(self._decls.get(name), "capabilities", ()) or ())
+
+    def step_for(self, name: str, last: bool) -> TraceStep:
+        decl = self._decls.get(name)
+        file, line = self.locate(decl)
+        emission = last or name in self.emission_externs
+        return TraceStep(name, "emission" if emission else "call", file, line,
+                         "emission" if emission else None,
+                         self.capabilities_of(name))
+
+    def chain_steps(self, name: str) -> list[TraceStep]:
+        chain = _emission_chain(name, self.witness)
+        return [self.step_for(hop, index == len(chain) - 1)
+                for index, hop in enumerate(chain)]
+
+
+def _method_emissions(body: list, env: "Env",
+                      steps_out: dict | None = None) -> tuple[list[str], set]:
     """What calling a provide-method irreversibly causes: `emit` steps and
     reachable emitting functions/externs. Teardown-position emissions count
     — calling the method schedules them.
@@ -1949,15 +2055,39 @@ def _method_emissions(body: list, env: "Env") -> tuple[list[str], set]:
     *set* of boundaries they cross (docs/capabilities.md). A call through a
     required key `db` is capability `db` — the key is composition-wide (G2
     makes it unique), so it names the same boundary to every reader; host code
-    is named by the `emission` extern it reaches."""
+    is named by the `emission` extern it reaches.
+
+    `steps_out` (optional, filled in place) maps each returned label to the
+    derivation behind it: a list of `TraceStep`s running from the callee the
+    method names down to the emission it reaches. Additive out-parameter for
+    the same reason `_emitting_fns` takes one — the labels, and so the
+    message, are byte-identical whether or not evidence is collected."""
     found: list[str] = []
     seen: set = set()
     caps: set = set()
 
-    def note(label: str) -> None:
+    def note(label: str, steps: list | None = None) -> None:
         if label not in seen:
             seen.add(label)
             found.append(label)
+            if steps_out is not None and steps is not None:
+                steps_out[label] = steps
+
+    def service_emission_step(local: str | None, method: str | None) -> list:
+        """The terminal step for `local.method`, an `emission fn` on the
+        service bound to `local`."""
+        service = env.services.get(env.requires.get(local) or "")
+        decl = service.methods.get(method) if service is not None else None
+        evidence = getattr(env, "emission_evidence", None)
+        # a MethodDecl has a line but no file of its own; its service does
+        file, _ = evidence.locate(service) if evidence is not None else (None, None)
+        line = getattr(decl, "line", None)
+        label = f"{local}.{method}"
+        detail = "emission" if service is None else f"emission `{service.name}.{method}`"
+        # same seam as `_EmissionEvidence.capabilities_of`, for the service
+        # side: whatever the operation declares it may reach, the trace shows
+        capabilities = tuple(getattr(decl, "capabilities", ()) or ())
+        return [TraceStep(label, "emission", file, line, detail, capabilities)]
 
     def walk(node):
         if isinstance(node, dict):
@@ -1965,7 +2095,8 @@ def _method_emissions(body: list, env: "Env") -> tuple[list[str], set]:
                 expr = node.get("expr") or {}
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":
-                    note(f"{target.get('name')}.{expr.get('method')}")
+                    note(f"{target.get('name')}.{expr.get('method')}",
+                         service_emission_step(target.get("name"), expr.get("method")))
                     caps.add(target.get("name"))
                 else:
                     note("a host emission")
@@ -1986,12 +2117,15 @@ def _method_emissions(body: list, env: "Env") -> tuple[list[str], set]:
                 decl = (service.methods.get(node.get("method"))
                         if service is not None else None)
                 if decl is not None and decl.emission:
-                    note(f"{target.get('name')}.{node.get('method')}")
+                    note(f"{target.get('name')}.{node.get('method')}",
+                         service_emission_step(target.get("name"), node.get("method")))
                     caps.add(target.get("name"))
             calls: set = set()
             _calls_in(node, calls)
             for name in sorted(calls & env.emitting_fns):
-                note(f"{name}()")
+                evidence = getattr(env, "emission_evidence", None)
+                note(f"{name}()",
+                     evidence.chain_steps(name) if evidence is not None else None)
                 caps.update(env.emitting_caps.get(name) or {"*"})
             for value in node.values():
                 walk(value)
@@ -2006,10 +2140,12 @@ def _method_emissions(body: list, env: "Env") -> tuple[list[str], set]:
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
-                     emitting_caps: dict | None = None) -> dict:
+                     emitting_caps: dict | None = None,
+                     emission_evidence: "_EmissionEvidence | None" = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
+    env.emission_evidence = emission_evidence
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
 
     # a config default must fit its declared field type (config typing);
@@ -2334,9 +2470,22 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # the G8 audit, which enumerates a caller's emissions by reading the
         # declarations of the methods it calls.
         if not decl.emission:
-            caused, _caps = _method_emissions(mbody, env)
+            caused_steps: dict[str, list] = {}
+            caused, _caps = _method_emissions(mbody, env, caused_steps)
             if caused:
                 evidence = ", ".join(f"`{item}`" for item in caused)
+                # the derivation for the *first* culprit: the message already
+                # names them all, and one worked example is what the author
+                # needs to see. The chain runs method -> ... -> emission.
+                chain = caused_steps.get(caused[0]) or []
+                why = None
+                if chain:
+                    head = TraceStep(method.name, "provide-method",
+                                     comp.source or filename, method.line,
+                                     f"provision `{stmt.key}`")
+                    why = WhyTrace(kind="emission-propagation",
+                                   subject=f"{svc.name}.{method.name}",
+                                   steps=[head, *chain], shape=CHAIN)
                 raise RevlError(
                     # the offending body lives in the component's own file,
                     # which is not the merged program filename
@@ -2348,6 +2497,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                          f"`{svc.name}`, or move the irreversible call out of this "
                          f"method (G4)",
                     code="G4", category="emission-propagation",
+                    why=why,
                 )
         elif decl.capabilities is not None:
             # the same upper bound, one refinement finer: `emission[db]` says
@@ -2575,6 +2725,16 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
     def _line(name: str) -> int:
         return lines.get(name, 1)
 
+    # why-trace locations: a locally compiled component knows its own file and
+    # declaration line; an *ambient* entry (read back from a running manifest)
+    # has a file but no line, so `line` stays None there rather than lying.
+    by_name = {entry["name"]: entry for entry in entries}
+
+    def _where(name: str) -> tuple[str | None, int | None]:
+        entry = by_name.get(name) or {}
+        file = entry.get("file") or program.filename or None
+        return (file, lines.get(name))
+
     def _realm(entry: dict, key: str) -> str:
         return (entry.get("isolate") or {}).get(key, SHARED_REALM)
 
@@ -2588,10 +2748,22 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             realm = _realm(entry, key)
             where = "" if realm == SHARED_REALM else f" in realm `{realm}`"
             if (key, realm) in provider_of:
+                first = provider_of[(key, realm)]
+                # both exhibits, both locations: the message names them, the
+                # trace says where to go and look (why.py)
+                detail = f"provides `{key}`{where}"
+                why = WhyTrace(
+                    kind="provision-conflict", subject=key, shape=SET,
+                    steps=[
+                        TraceStep(first, "provider", *_where(first), detail),
+                        TraceStep(entry["name"], "provider",
+                                  *_where(entry["name"]), detail),
+                    ])
                 raise RevlError(
                     program.filename, _line(entry["name"]),
                     f"provision conflict: key `{key}`{where} is provided "
                     f"by both {provider_of[(key, realm)]} and {entry['name']} (G2)",
+                    why=why,
                 )
             provider_of[(key, realm)] = entry["name"]
 
@@ -2599,14 +2771,25 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
     # matches the provider's — realm separation legitimately breaks cycles
     graph: dict[str, list[str]] = {entry["name"]: [] for entry in entries}
     indegree: dict[str, int] = {entry["name"]: 0 for entry in entries}
+    # which key carries each provider -> consumer edge, so a cycle can say
+    # *what* is being waited on at every hop and not just who waits
+    edge_key: dict[tuple[str, str], str] = {}
     for entry in entries:
         for key in entry["inject"]:
             provider = provider_of.get((key, _realm(entry, key)))
             if provider == entry["name"]:
-                raise RevlError(program.filename, _line(entry["name"]),
-                                f"component {entry['name']} requires a key it provides itself (`{key}`) (G3)")
+                name = entry["name"]
+                raise RevlError(
+                    program.filename, _line(name),
+                    f"component {name} requires a key it provides itself (`{key}`) (G3)",
+                    why=WhyTrace(
+                        kind="dependency-cycle", subject=name, shape=CHAIN,
+                        steps=[TraceStep(name, "component", *_where(name),
+                                         f"provides and requires `{key}`")]),
+                )
             if provider is not None:
                 graph[provider].append(entry["name"])
+                edge_key.setdefault((provider, entry["name"]), key)
                 indegree[entry["name"]] += 1
 
     state: dict[str, int] = {}
@@ -2618,8 +2801,18 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
         for succ in graph[name]:
             if state.get(succ) == 1:
                 cycle = stack[stack.index(succ):] + [succ]
+                # one step per hop: each names the key it provides onward, so
+                # the closing repeat shows the edge that shuts the loop
+                steps = [
+                    TraceStep(node, "component", *_where(node),
+                              (f"provides `{edge_key[(node, cycle[i + 1])]}`"
+                               if i + 1 < len(cycle) else None))
+                    for i, node in enumerate(cycle)
+                ]
                 raise RevlError(program.filename, _line(succ),
-                                "dependency cycle: " + " -> ".join(cycle) + " (G3)")
+                                "dependency cycle: " + " -> ".join(cycle) + " (G3)",
+                                why=WhyTrace(kind="dependency-cycle", subject=succ,
+                                             steps=steps, shape=CHAIN))
             if state.get(succ, 0) == 0:
                 visit(succ)
         stack.pop()
