@@ -322,7 +322,7 @@ _JAVA_V3_BIN_OPS = {
 _V3_ATOMIC_KINDS = {"var", "field", "index", "call", "lit"}
 # Kinds that render as a Java postfix-safe primary, so a `.method()` suffix can
 # be appended without wrapping them in parentheses. Wider than the set above
-# because `_v3_expr` also renders the v1 component dialect (`req`, `config`, ..).
+# because `_expr` also renders the v1 component dialect (`req`, `config`, ..).
 _V3_POSTFIX_SAFE_KINDS = _V3_ATOMIC_KINDS | {"name", "req", "config", "host", "fn"}
 _HOST_ROOTS = {"Pool", "Map", "Job"}
 
@@ -726,7 +726,7 @@ def _bind_local_arrow(
     for captured in value.get("captures") or []:
         _ident(captured, "arrow capture")
         snapshot = f"__revl_capture_{name}_{captured}"
-        source = _v3_expr({"kind": "var", "name": captured}, ctx, rename, env)
+        source = _expr({"kind": "var", "name": captured}, ctx, rename, env)
         out.append(f"{pad}final var {snapshot} = {source};")
         captures[captured] = snapshot
     ctx.arrows[name] = {"arrow": value, "captures": captures}
@@ -756,8 +756,8 @@ def _inline_arrow(
                 f"argument cannot be substituted twice without re-evaluating "
                 f"it — bind the argument to a `let` first"
             )
-        inner[param] = f"({_v3_expr(arg, ctx, rename, env)})"
-    return f"({_v3_expr(body, ctx, inner, env)})"
+        inner[param] = f"({_expr(arg, ctx, rename, env)})"
+    return f"({_expr(body, ctx, inner, env)})"
 
 
 def _v3_call(
@@ -773,7 +773,7 @@ def _v3_call(
     arrow = _arrow_callee(callee, ctx)
     if arrow is not None:
         return _inline_arrow(arrow, arg_nodes, ctx, rename, env)
-    args = [_v3_expr(a, ctx, rename, env) for a in arg_nodes]
+    args = [_expr(a, ctx, rename, env) for a in arg_nodes]
     if isinstance(callee, dict) and callee.get("kind") == "var":
         name = callee.get("name")
         if name in ctx.function_names or name in ctx.extern_names:
@@ -796,16 +796,36 @@ def _v3_call(
                 f"builtin Result constructor {name!r} is not portable to the Java backend yet"
             )
         return f"{name}({', '.join(args)})"
-    callee_s = _v3_expr(callee, ctx, rename, env)
+    callee_s = _expr(callee, ctx, rename, env)
     return f"{callee_s}.apply({', '.join(args)})"
 
 
-def _v3_expr(
+def _expr(
     node: object,
-    ctx: _V3Ctx,
+    ctx: "_V3Ctx | None" = None,
     rename: dict[str, str] | None = None,
     env: _Env | None = None,
 ) -> str:
+    """The single expression renderer for the Java backend.
+
+    It covers every IR kind this backend emits — both the v1 *component*
+    dialect (`req`, `config`, `host`, and the `target`/`method` shape of
+    `call`) and the 2.0 dialect (`callee`/`args` calls, `match`, `adt`,
+    `??`, arrows, …). Kinds that exist in both dialects (`call`) dispatch on
+    **shape** — the presence of a distinguishing key such as `callee` — never
+    on kind alone, so a component-shaped node can never be read as a 2.0 one.
+
+    `ctx` carries the 2.0 environment (declared types, functions/externs, ADT
+    case owners, local arrow bindings). Legacy v1 component/method bodies have
+    no such environment and call in with `ctx=None`; a throwaway empty context
+    stands in for them — those bodies only ever contain v1 kinds plus the
+    context-free 2.0 kinds (`bin`, `un`, `field`, `if`, …). `rename` maps a
+    binding to its Java spelling (e.g. `x` -> `this.x` for a provider field);
+    `env` is the component's requires/provides frame, threaded through for
+    callers that need it.
+    """
+    if ctx is None:
+        ctx = _V3Ctx({}, [], [])
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed v3 expression: {node!r}")
     kind = node["kind"]
@@ -819,7 +839,7 @@ def _v3_expr(
     if kind == "adt":
         case = node.get("case")
         _ident(case, "adt case")
-        args = ", ".join(_v3_expr(a, ctx, rename, env) for a in node.get("args") or [])
+        args = ", ".join(_expr(a, ctx, rename, env) for a in node.get("args") or [])
         if case in ctx.case_owners:
             variant = _ident(ctx.case_owners[case], "type name")
             return f"new {variant}.{case}({args})"
@@ -849,7 +869,7 @@ def _v3_expr(
         fn = node.get("fn")
         host, _, method = fn.partition(".")
         args = ", ".join(
-            _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
+            _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
         return f"{host}.{_host_method(method)}({args})"
 
@@ -859,20 +879,20 @@ def _v3_expr(
         target = node.get("target") or {}
         method = _ident(node.get("method"), "method")
         args = ", ".join(
-            _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
+            _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
-        recv = _v3_expr(target, ctx, rename, env)
+        recv = _expr(target, ctx, rename, env)
         return f"{recv}.{method}({args})"
 
     if kind == "format":
         template = node.get("template") or ""
-        args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
+        args = [_expr(a, ctx, rename, env) for a in node.get("args") or []]
         return _format_java(template, args)
 
     if kind == "fn":
         fn_name = _fn_name(node.get("name"))
         args = ", ".join(
-            _v3_expr(a, ctx, rename, env) for a in node.get("args") or []
+            _expr(a, ctx, rename, env) for a in node.get("args") or []
         )
         return f"{fn_name}({args})"
 
@@ -884,13 +904,13 @@ def _v3_expr(
             # `Optional.empty()`. `orElseGet` keeps `b` lazy — `??` must not
             # evaluate its right operand when `a` is present, and `orElse`
             # would evaluate it unconditionally.
-            left_opt = _v3_expr(node["left"], ctx, rename, env)
+            left_opt = _expr(node["left"], ctx, rename, env)
             if node["left"].get("kind") not in _V3_POSTFIX_SAFE_KINDS:
                 left_opt = f"({left_opt})"
-            right_opt = _v3_expr(node["right"], ctx, rename, env)
+            right_opt = _expr(node["right"], ctx, rename, env)
             return f"{left_opt}.orElseGet(() -> {right_opt})"
-        left = _v3_expr(node["left"], ctx, rename, env)
-        right = _v3_expr(node["right"], ctx, rename, env)
+        left = _expr(node["left"], ctx, rename, env)
+        right = _expr(node["right"], ctx, rename, env)
         if op in ("==", "==="):
             return f"java.util.Objects.equals({left}, {right})"
         if op in ("!=", "!=="):
@@ -901,53 +921,50 @@ def _v3_expr(
         return f"({left} {java_op} {right})"
 
     if kind == "un":
-        operand = _v3_expr(node.get("operand"), ctx, rename, env)
+        operand = _expr(node.get("operand"), ctx, rename, env)
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
-    if kind == "call":
-        return _v3_call(node, ctx, rename)
-
     if kind == "field":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx, rename, env)
+        target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
         return f"{target}.{_ident(node.get('name'), 'field')}"
 
     if kind == "index":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx, rename, env)
+        target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"{target}.get((int)({_v3_expr(node['index'], ctx, rename, env)}))"
+        return f"{target}.get((int)({_expr(node['index'], ctx, rename, env)}))"
 
     if kind == "builtin":
         target_node = node.get("target")
-        target = _v3_expr(target_node, ctx, rename, env)
+        target = _expr(target_node, ctx, rename, env)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        args = [_v3_expr(a, ctx, rename, env) for a in node.get("args") or []]
+        args = [_expr(a, ctx, rename, env) for a in node.get("args") or []]
         return _v3_builtin(node.get("method"), target, args)
 
     if kind == "len":
-        return _v3_len(_v3_expr(node.get("target"), ctx, rename, env))
+        return _v3_len(_expr(node.get("target"), ctx, rename, env))
 
     if kind == "if":
         return (
-            f"({_v3_expr(node['cond'], ctx, rename, env)} ? "
-            f"{_v3_expr(node['then'], ctx, rename, env)} : "
-            f"{_v3_expr(node['else'], ctx, rename, env)})"
+            f"({_expr(node['cond'], ctx, rename, env)} ? "
+            f"{_expr(node['then'], ctx, rename, env)} : "
+            f"{_expr(node['else'], ctx, rename, env)})"
         )
 
     if kind == "record":
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
         spec = ctx.types[type_name]
-        by_name = {k: _v3_expr(v, ctx, rename, env) for k, v in fields}
+        by_name = {k: _expr(v, ctx, rename, env) for k, v in fields}
         args = []
         for field_name in spec.get("fields") or {}:
             if field_name not in by_name:
@@ -957,7 +974,7 @@ def _v3_expr(
 
     if kind == "list":
         return "java.util.List.of(" + ", ".join(
-            _v3_expr(item, ctx, rename, env) for item in node.get("items") or []
+            _expr(item, ctx, rename, env) for item in node.get("items") or []
         ) + ")"
 
     if kind == "arrow":
@@ -977,7 +994,7 @@ def _v3_expr(
             if part_kind == "text":
                 segs.append(_string(value))
             else:  # ["expr", ir_node] — a full expression, stringified
-                segs.append(f"String.valueOf({_v3_expr(value, ctx, rename, env)})")
+                segs.append(f"String.valueOf({_expr(value, ctx, rename, env)})")
         if not segs:
             return '""'
         return " + ".join(segs)
@@ -997,7 +1014,7 @@ def _v3_match_expr(
     rename: dict[str, str] | None = None,
     env: _Env | None = None,
 ) -> str:
-    scrutinee = _v3_expr(node.get("scrutinee"), ctx, rename, env)
+    scrutinee = _expr(node.get("scrutinee"), ctx, rename, env)
     arms = node.get("arms") or []
 
     # `Some`/`None`/`Ok`/`Err` are built-in only when NOT shadowed by a user
@@ -1012,8 +1029,8 @@ def _v3_match_expr(
         none_arm = next((a for a in arms if a.get("pattern") == "None"), None)
         wild = next((a for a in arms if a.get("pattern") == "_"), None)
         some_bind = _ident(some_arm.get("bind"), "match bind") if some_arm and some_arm.get("bind") else "__revl_v"
-        some_body = _v3_expr((some_arm or wild).get("body"), ctx, rename, env)
-        none_body = _v3_expr((none_arm or wild).get("body"), ctx, rename, env)
+        some_body = _expr((some_arm or wild).get("body"), ctx, rename, env)
+        none_body = _expr((none_arm or wild).get("body"), ctx, rename, env)
         return (f"({scrutinee}).map({some_bind} -> ({some_body}))"
                 f".orElseGet(() -> ({none_body}))")
     if any(arm.get("pattern") in ("Ok", "Err") and _builtin(arm.get("pattern")) for arm in arms):
@@ -1024,7 +1041,7 @@ def _v3_match_expr(
         wildcard = None
         for arm in arms:
             pattern = arm.get("pattern")
-            body = _v3_expr(arm.get("body"), ctx, rename, env)
+            body = _expr(arm.get("body"), ctx, rename, env)
             if pattern == "_":
                 wildcard = f"            default -> {{ yield ({body}); }}"
                 continue
@@ -1047,7 +1064,7 @@ def _v3_match_expr(
     covered = {arm.get("pattern") for arm in arms}
     for arm in arms:
         pattern = arm.get("pattern")
-        body = _v3_expr(arm.get("body"), ctx, rename, env)
+        body = _expr(arm.get("body"), ctx, rename, env)
         if pattern == "_":
             wildcard = f"            default -> {{ yield ({body}); }}"
             continue
@@ -1139,7 +1156,7 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if step == "let" and _bind_local_arrow(ctx, name, raw, out, pad, None, None):
             return
         ctx.arrows.pop(name, None)  # the name no longer denotes an arrow
-        value = _v3_expr(raw, ctx)
+        value = _expr(raw, ctx)
         if step == "let":
             out.append(f"{pad}{_let_keyword(node, ctx)} {name} = {value};")
         else:
@@ -1148,9 +1165,9 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if node.get("expr") is None:
             out.append(f"{pad}return;")
         else:
-            out.append(f"{pad}return {_v3_expr(node['expr'], ctx)};")
+            out.append(f"{pad}return {_expr(node['expr'], ctx)};")
     elif step == "if":
-        out.append(f"{pad}if ({_v3_expr(node['cond'], ctx)}) {{")
+        out.append(f"{pad}if ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("then") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         if node.get("else"):
@@ -1159,19 +1176,19 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                 _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "while":
-        out.append(f"{pad}while ({_v3_expr(node['cond'], ctx)}) {{")
+        out.append(f"{pad}while ({_expr(node['cond'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "for":
         bind = _ident(node.get("bind"), "loop binding")
         ctx.arrows.pop(bind, None)
-        out.append(f"{pad}for (var {bind} : {_v3_expr(node['iterable'], ctx)}) {{")
+        out.append(f"{pad}for (var {bind} : {_expr(node['iterable'], ctx)}) {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
     elif step == "let_pattern":
-        value = _v3_expr(node.get("value"), ctx)
+        value = _expr(node.get("value"), ctx)
         tmp = f"__revl_destructure_{id(node)}"
         keyword = "var" if node.get("mutable") else "final var"
         out.append(f"{pad}{keyword} {tmp} = {value};")
@@ -1189,10 +1206,10 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
                     f"{pad}{keyword} {rest} = {tmp}.subList({len(names)}, {tmp}.size());"
                 )
     elif step == "expr":
-        out.append(f"{pad}{_v3_expr(node['expr'], ctx)};")
+        out.append(f"{pad}{_expr(node['expr'], ctx)};")
     elif step == "assert":
         out.append(
-            f"{pad}if (!({_v3_expr(node['expr'], ctx)})) "
+            f"{pad}if (!({_expr(node['expr'], ctx)})) "
             f'throw new AssertionError("assertion failed");'
         )
     else:
@@ -1357,56 +1374,6 @@ class _Env:
         self.name = component["name"]
         self.reqs: dict[str, str] = dict(component.get("requires") or {})
         self.provides: dict[str, str] = dict(component.get("provides") or {})
-
-
-def _expr(node: dict, env: _Env, rename: dict[str, str] | None = None,
-          v3_ctx: _V3Ctx | None = None) -> str:
-    rename = rename or {}
-    kind = node.get("kind")
-    if kind == "name":
-        original = node.get("id")
-        if rename and original in rename:
-            return rename[original]
-        return _ident(original, "binding")
-    if kind == "lit":
-        return _lit(node.get("value"))
-    if kind == "config":
-        return _ident(node.get("field"), "config field")
-    if kind == "host":
-        fn = node.get("fn")
-        host, _, method = fn.partition(".")
-        args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
-        return f"{host}.{_host_method(method)}({args})"
-    if kind == "req":
-        original = node.get("name")
-        if rename and original in rename:
-            return rename[original]
-        return _ident(original, "requirement")
-    if kind == "call" and "callee" in node:
-        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename, env)
-    if kind == "call":
-        target = node.get("target") or {}
-        method = _ident(node.get("method"), "method")
-        args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
-        if target.get("kind") == "req":
-            recv = _expr(target, env, rename, v3_ctx)
-        else:
-            recv = _expr(target, env, rename, v3_ctx)
-        return f"{recv}.{method}({args})"
-    if kind == "format":
-        template = node.get("template") or ""
-        args = [_expr(a, env, rename, v3_ctx) for a in node.get("args") or []]
-        return _format_java(template, args)
-    if kind == "fn":
-        fn_name = _fn_name(node.get("name"))
-        args = ", ".join(_expr(a, env, rename, v3_ctx) for a in node.get("args") or [])
-        return f"{fn_name}({args})"
-    if kind in {
-        "var", "bin", "un", "field", "index", "if", "record", "list",
-        "arrow", "match", "interp", "len", "builtin", "adt",
-    }:
-        return _v3_expr(node, v3_ctx or _V3Ctx({}, [], []), rename, env)
-    raise EmitError(f"unsupported expression node in Java backend: {kind!r}")
 
 
 def _format_java(template: str, args: list[str]) -> str:
@@ -1748,7 +1715,7 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
         rename = {b: f"this.{b}" for b in _binds(env.component)}
         # A required service is a field of the provider class, same as a bind.
         rename.update({local: f"this.{local}" for local in env.reqs})
-        value = _expr(steps[0]["expr"], env, rename)
+        value = _expr(steps[0]["expr"], None, rename, env)
         # A `void` service operation cannot `return <expr>;` in Java — run
         # the expression for its effect instead.
         if _method_return(env, key, method.get("name")) is None:
@@ -1760,16 +1727,16 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
 _V1_EXPR_KINDS = {"name", "lit", "config", "host", "req", "call", "format"}
 
 
-def _contains_v3_expr(node: object) -> bool:
+def _contains_expr(node: object) -> bool:
     if isinstance(node, dict):
         kind = node.get("kind")
         if kind == "call" and "callee" in node:
             return True
         if kind not in _V1_EXPR_KINDS:
             return True
-        return any(_contains_v3_expr(value) for value in node.values())
+        return any(_contains_expr(value) for value in node.values())
     if isinstance(node, list):
-        return any(_contains_v3_expr(value) for value in node)
+        return any(_contains_expr(value) for value in node)
     return False
 
 
@@ -1786,10 +1753,10 @@ def _component_needs_modern(component: dict) -> bool:
                 for stmt in method.get("body") or []:
                     if stmt.get("step") != "return":
                         return True
-                    if _contains_v3_expr(stmt.get("expr")):
+                    if _contains_expr(stmt.get("expr")):
                         return True
         for key in ("acquire", "undo", "expr", "compensate", "message", "cond", "value"):
-            if key in step and _contains_v3_expr(step[key]):
+            if key in step and _contains_expr(step[key]):
                 return True
     return False
 
@@ -1864,21 +1831,21 @@ def _method_body_lines(
                 lines.append("return;")
             elif returns_void:
                 # `void` methods run the expression for its effect.
-                lines.append(f"{_expr(stmt['expr'], env, rename, v3_ctx)};")
+                lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
                 lines.append("return;")
             else:
-                lines.append(f"return {_expr(stmt['expr'], env, rename, v3_ctx)};")
+                lines.append(f"return {_expr(stmt['expr'], v3_ctx, rename, env)};")
         elif step == "effect":
-            lines.append(f"{_expr(stmt['acquire'], env, rename, v3_ctx)};")
+            lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
             lines.append(
-                f"fx.track(Disposables.of(() -> {_expr(stmt['undo'], env, rename, v3_ctx)}));"
+                f"fx.track(Disposables.of(() -> {_expr(stmt['undo'], v3_ctx, rename, env)}));"
             )
         elif step == "emit":
-            lines.append(f"{_expr(stmt['expr'], env, rename, v3_ctx)};")
+            lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
                 lines.append(
                     f"fx.track(Disposables.of(() -> "
-                    f"{_expr(stmt['compensate'], env, rename, v3_ctx)}));"
+                    f"{_expr(stmt['compensate'], v3_ctx, rename, env)}));"
                 )
         elif step == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
@@ -1889,7 +1856,7 @@ def _method_body_lines(
             if step == "let" and _bind_local_arrow(v3_ctx, name, raw, lines, "", rename, env):
                 continue
             v3_ctx.arrows.pop(name, None)
-            value = _expr(raw, env, rename, v3_ctx)
+            value = _expr(raw, v3_ctx, rename, env)
             decl = _adt_binding_type(raw, v3_ctx) or "var"
             lines.append(f"{decl} {name} = {value};" if step == "let"
                          else f"{name} = {value};")
@@ -1903,15 +1870,15 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
     kind = step.get("step")
     if kind in ("let", "assign"):
         name = _ident(step.get("name"), "binding")
-        value = _expr(step.get("value"), env, None, v3_ctx)
+        value = _expr(step.get("value"), v3_ctx, None, env)
         if kind == "let":
             out.append(f"{pad}{_let_keyword(step, v3_ctx)} {name} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif kind == "expr":
-        out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
+        out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
     elif kind == "if":
-        out.append(f"{pad}if ({_expr(step['cond'], env, None, v3_ctx)}) {{")
+        out.append(f"{pad}if ({_expr(step['cond'], v3_ctx, None, env)}) {{")
         for child in step.get("then") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         if step.get("else"):
@@ -1920,18 +1887,18 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
                 _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "while":
-        out.append(f"{pad}while ({_expr(step['cond'], env, None, v3_ctx)}) {{")
+        out.append(f"{pad}while ({_expr(step['cond'], v3_ctx, None, env)}) {{")
         for child in step.get("body") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "for":
         bind = _ident(step.get("bind"), "loop binding")
-        out.append(f"{pad}for (var {bind} : {_expr(step['iterable'], env, None, v3_ctx)}) {{")
+        out.append(f"{pad}for (var {bind} : {_expr(step['iterable'], v3_ctx, None, env)}) {{")
         for child in step.get("body") or []:
             _emit_setup_stmt(env, v3_ctx, child, out, pad + "    ")
         out.append(f"{pad}}}")
     elif kind == "let_pattern":
-        value = _expr(step.get("value"), env, None, v3_ctx)
+        value = _expr(step.get("value"), v3_ctx, None, env)
         tmp = f"__revl_destructure_{id(step)}"
         keyword = "var" if step.get("mutable") else "final var"
         out.append(f"{pad}{keyword} {tmp} = {value};")
@@ -1950,7 +1917,7 @@ def _emit_setup_stmt(env: _Env, v3_ctx: _V3Ctx, step: dict, out: list[str], pad:
                 )
     elif kind == "assert":
         out.append(
-            f"{pad}if (!({_expr(step['expr'], env, None, v3_ctx)})) "
+            f"{pad}if (!({_expr(step['expr'], v3_ctx, None, env)})) "
             f'throw new AssertionError("assertion failed");'
         )
     else:
@@ -1973,19 +1940,19 @@ def _emit_component_stmts(
                 _emit_setup_stmt(env, v3_ctx, setup, out, pad)
             if kind == "let-effect":
                 bind = _ident(step["bind"], "binding")
-                out.append(f"{pad}var {bind} = {_expr(step['acquire'], env, None, v3_ctx)};")
+                out.append(f"{pad}var {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
-                out.append(f"{pad}{_expr(step['acquire'], env, None, v3_ctx)};")
+                out.append(f"{pad}{_expr(step['acquire'], v3_ctx, None, env)};")
             out.append(
                 f"{pad}fx.track(Disposables.of(() -> "
-                f"{_expr(step['undo'], env, None, v3_ctx)}));"
+                f"{_expr(step['undo'], v3_ctx, None, env)}));"
             )
         elif kind == "emit":
-            out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
+            out.append(f"{pad}{_expr(step['expr'], v3_ctx, None, env)};")
             if step.get("compensate") is not None:
                 out.append(
                     f"{pad}fx.track(Disposables.of(() -> "
-                    f"{_expr(step['compensate'], env, None, v3_ctx)}));"
+                    f"{_expr(step['compensate'], v3_ctx, None, env)}));"
                 )
         elif kind == "provide":
             key = step.get("name")
@@ -1999,7 +1966,7 @@ def _emit_component_stmts(
                 f"new {struct}({ctor_args})));"
             )
         elif kind == "if":
-            out.append(f"{pad}if ({_expr(step['cond'], env, None, v3_ctx)}) {{")
+            out.append(f"{pad}if ({_expr(step['cond'], v3_ctx, None, env)}) {{")
             _emit_component_stmts(
                 component, env, v3_ctx, cname, out, step.get("then") or [], pad + "    "
             )
@@ -2010,7 +1977,7 @@ def _emit_component_stmts(
                 )
             out.append(f"{pad}}}")
         elif kind == "fail":
-            message = _expr(step["message"], env, None, v3_ctx)
+            message = _expr(step["message"], v3_ctx, None, env)
             out.append(
                 f"{pad}throw new CordisException(String.valueOf({message}));"
             )
@@ -2034,7 +2001,7 @@ def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
     is the identity, so an expression the emitter cannot see to be
     asynchronous stays a plain expression statement.
     """
-    rendered = _expr(node, env, None, v3_ctx)
+    rendered = _expr(node, v3_ctx, None, env)
     if (isinstance(node, dict) and node.get("kind") == "host"
             and (node.get("fn") or "") in _HOST_AWAITABLE):
         return f"{rendered}.await()"
@@ -2245,16 +2212,16 @@ def _emit_component(
         kind = step.get("step")
         if kind == "let-effect":
             bind = _ident(step["bind"], "binding")
-            out.append(f"            {_host_of(component, step['bind'])} {bind} = {_expr(step['acquire'], env)};")
-            undo = _expr(step["undo"], env)
+            out.append(f"            {_host_of(component, step['bind'])} {bind} = {_expr(step['acquire'], None, None, env)};")
+            undo = _expr(step['undo'], None, None, env)
             out.append(f"            undos.add(Disposables.of(() -> {undo}));")
             disposers.append(bind)
         elif kind == "effect":
-            out.append(f"            {_expr(step['acquire'], env)};")
-            out.append(f"            undos.add(Disposables.of(() -> {_expr(step['undo'], env)}));")
+            out.append(f"            {_expr(step['acquire'], None, None, env)};")
+            out.append(f"            undos.add(Disposables.of(() -> {_expr(step['undo'], None, None, env)}));")
             disposers.append("effect")
         elif kind == "emit":
-            out.append(f"            {_expr(step['expr'], env)};")
+            out.append(f"            {_expr(step['expr'], None, None, env)};")
         elif kind == "provide":
             key = step.get("name")
             service = step.get("service")
