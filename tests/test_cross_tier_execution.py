@@ -115,3 +115,84 @@ def test_java_equality_goes_through_objects_equals():
     tier was already correct and should stay that way."""
     emitted = _emit("java", PROBES["structural equality"])
     assert "java.util.Objects.equals(" in emitted
+
+
+# ------------------------------------------------- pinned arithmetic divergences
+#
+# These are NOT the intended semantics. They are the current per-tier behaviour,
+# recorded so it cannot drift silently — the same baseline discipline
+# tests/test_conformance_validate.py uses: the test fails on new breakage *and*
+# on a pinned case that starts passing, so the list can only change deliberately.
+#
+# The root cause is one missing piece of information: an IR `bin` node carries
+# `op`, `left` and `right` and no type, so no backend can tell `Int / Int` from
+# `Float / Float`. Closing these properly means annotating the node — a change
+# to the IR contract, not a backend patch. See docs/contract-errata.md.
+
+DIVERGENCES = {
+    # typecheck.py types `Int / Int` as `Int`, so a tier returning 3.5 is
+    # unsound, not merely different. rust is the only one honouring the
+    # declared type.
+    "int division returns Int": (
+        'test "d" { assert 7 / 2 == 3 }',
+        {"py": "fail", "ts": "fail", "rust": "pass"},
+    ),
+    "negative int division truncates toward zero": (
+        'test "d" { assert (0 - 7) / 2 == 0 - 3 }',
+        {"py": "fail", "ts": "fail", "rust": "pass"},
+    ),
+    # python's `%` floors (-7 % 3 == 2); rust, java and JS truncate (== -1).
+    # Truncation is the majority and the one that keeps
+    # (a / b) * b + a % b == a, so python is the outlier to move.
+    "modulo truncates toward zero": (
+        'test "m" { assert (0 - 7) % 3 == 0 - 1 }',
+        {"py": "fail", "ts": "pass", "rust": "pass"},
+    ),
+    # TS numbers are f64, so Int arithmetic silently loses precision past 2^53.
+    # Unlike the others this needs BigInt, not a type annotation.
+    "Int keeps precision past 2^53": (
+        'test "p" { assert 9007199254740993 - 9007199254740992 == 1 }',
+        {"py": "pass", "ts": "fail", "rust": "pass"},
+    ),
+}
+
+
+def _observed(tier: str, source: str) -> str:
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    return status
+
+
+@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_pinned_divergence_has_not_drifted(tier: str, name: str):
+    source, pinned = DIVERGENCES[name]
+    observed = _observed(tier, source)
+    assert observed == pinned[tier], (
+        f"{tier} now {observed}es {name!r}, pinned as {pinned[tier]}. "
+        "If this was fixed on purpose, update DIVERGENCES and the entry in "
+        "docs/contract-errata.md rather than loosening the test."
+    )
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+def test_pinned_divergence_has_not_drifted_rust(name: str):
+    source, pinned = DIVERGENCES[name]
+    observed = _observed("rust", source)
+    assert observed == pinned["rust"], (
+        f"rust now {observed}es {name!r}, pinned as {pinned['rust']}")
+
+
+def test_str_ordering_agrees_everywhere():
+    """Not every operator diverges — `<` on Str is lexicographic by code point
+    on all three, including the case boundary. Recorded so the divergence list
+    above is not mistaken for 'arithmetic is broken generally'."""
+    source = 'test "a" { assert "a" < "b" }\ntest "b" { assert "Z" < "a" }'
+    for tier in FAST_TIERS:
+        status, message = _run(tier, source)
+        if status == "skip":
+            continue
+        assert status == "pass", f"{tier}: {message}"
