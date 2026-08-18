@@ -238,7 +238,14 @@ def _expr(node: object, scope: _Scope) -> str:
         # stays readable during this component's own teardown (R3).
         return f"ctx.{_ident(name, 'requirement')}"
 
-    if kind == "call":
+    # Dispatch on *shape*, not kind: `call` is spelled `target`/`method` in the
+    # component dialect and `callee`/`args` in the 2.0 one, and a v3-shaped call
+    # does reach component positions — the `Some(..)` the frontend injects for
+    # `T` -> `Opt[T]` is one. Keying on kind alone read `method` off a v3 call
+    # and reported the resulting `None` as a bad identifier. The v3 form falls
+    # through to the v3 renderer below, which owns it. (docs/conformance.md
+    # names this as the one place the two-renderer split fails on real input.)
+    if kind == "call" and "target" in node:
         target = node.get("target")
         method = _ident(node.get("method"), "method")
         target_ts = _expr(target, scope)
