@@ -239,6 +239,14 @@ class RustValidator(Validator):
 # java — offline, but needs a real JDK (macOS ships a javac shim that errors)
 # ---------------------------------------------------------------------------
 
+def _java_package(source: str) -> str | None:
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("package ") and stripped.endswith(";"):
+            return stripped[len("package "):-1].strip()
+    return None
+
+
 class JavaValidator(Validator):
     tier = "java"
     depth = "full typecheck (javac + cordis4j stubs)"
@@ -247,15 +255,35 @@ class JavaValidator(Validator):
 
     @staticmethod
     def _javac() -> str | None:
-        exe = shutil.which("javac")
-        if exe is None:
-            return None
+        """A `javac` that actually works.
+
+        macOS ships a `/usr/bin/javac` shim that is always on PATH and always
+        errors when no JDK is installed, so `shutil.which` alone finds a
+        binary that cannot compile anything. Probe each candidate and fall
+        back to the usual keg-only install locations, which are deliberately
+        *not* on PATH.
+        """
+        candidates = [shutil.which("javac")]
         try:
-            probe = subprocess.run([exe, "-version"], capture_output=True,
-                                   text=True, timeout=60)
+            home = subprocess.run(["/usr/libexec/java_home"], capture_output=True,
+                                  text=True, timeout=30)
+            if home.returncode == 0:
+                candidates.append(str(Path(home.stdout.strip()) / "bin" / "javac"))
         except (OSError, subprocess.TimeoutExpired):
-            return None
-        return exe if probe.returncode == 0 else None
+            pass
+        candidates += ["/opt/homebrew/opt/openjdk/bin/javac",
+                       "/usr/local/opt/openjdk/bin/javac"]
+        for exe in candidates:
+            if not exe or not Path(exe).exists():
+                continue
+            try:
+                probe = subprocess.run([exe, "-version"], capture_output=True,
+                                       text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if probe.returncode == 0:
+                return exe
+        return None
 
     def unavailable(self) -> str | None:
         if self._javac() is None:
@@ -273,10 +301,16 @@ class JavaValidator(Validator):
             names: dict[str, str] = {}
             files = []
             for index, (label, source) in enumerate(items):
-                # Every case emits `Components`, so each needs its own package.
-                package = f"case_{index}"
+                # Every case emits `Components`, so each arrives in its own
+                # package (see `_emit_kwargs`); the file must sit in a matching
+                # directory or javac rejects the declaration.
+                package = _java_package(source) or f"case_{index}"
                 directory = root / package
-                directory.mkdir()
+                if directory.exists():
+                    # Two cases in the same package would overwrite each other;
+                    # give this one its own root so both are really compiled.
+                    directory = root / f"case_{index}" / package
+                directory.mkdir(parents=True)
                 path = directory / "Components.java"
                 path.write_text(source, encoding="utf-8")
                 names[f"{package}/Components.java"] = label

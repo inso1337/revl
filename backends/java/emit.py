@@ -1911,10 +1911,17 @@ def emit(ir: dict, package_name: str = "revl") -> str:
 
 def _main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json>", file=sys.stderr)
+        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
         return 2
-    with open(argv[1], "r", encoding="utf-8") as handle:
-        ir = json.load(handle)
+    # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
+    # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
+    # such device or address` — the emitted-code tests were red in CI for that
+    # reason alone.
+    if argv[1] == "-":
+        ir = json.load(sys.stdin)
+    else:
+        with open(argv[1], "r", encoding="utf-8") as handle:
+            ir = json.load(handle)
     sys.stdout.write(emit(ir))
     return 0
 
