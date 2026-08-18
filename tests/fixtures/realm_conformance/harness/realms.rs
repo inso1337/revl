@@ -11,16 +11,16 @@
 //! S (separation): realm("shared") vs realm("other") are distinct realms ->
 //!   both active, and disposing one leaves the other untouched.
 
-use revl_scenarios::{shared_store_a, shared_store_b, shared_store_other};
+use revl_scenarios::{shared_store_a, shared_store_b, shared_store_other, _revl_isolate_ctx};
 
 #[test]
 fn h_same_realm_second_provider_is_refused() {
     let root = cordis::Context::new();
-    let a = root.plugin(shared_store_a(), ());
+    let a = _revl_isolate_ctx(&root, "shared_store_a").plugin(shared_store_a(), ());
     a.wait().unwrap();
     assert_eq!(a.state(), cordis::FiberState::Active, "first provider must activate");
 
-    let b = root.plugin(shared_store_b(), ());
+    let b = _revl_isolate_ctx(&root, "shared_store_b").plugin(shared_store_b(), ());
     let result = b.wait();
     assert!(
         result.is_err() || b.state() != cordis::FiberState::Active,
@@ -34,8 +34,8 @@ fn h_same_realm_second_provider_is_refused() {
 #[test]
 fn s_distinct_realms_are_separate_and_dispose_independent() {
     let root = cordis::Context::new();
-    let a = root.plugin(shared_store_a(), ());
-    let other = root.plugin(shared_store_other(), ());
+    let a = _revl_isolate_ctx(&root, "shared_store_a").plugin(shared_store_a(), ());
+    let other = _revl_isolate_ctx(&root, "shared_store_other").plugin(shared_store_other(), ());
     a.wait().unwrap();
     other.wait().unwrap();
     assert_eq!(a.state(), cordis::FiberState::Active);
