@@ -35,19 +35,12 @@ from validate import VALIDATORS  # noqa: E402
 # worked through — and the test also fails when a baselined case starts
 # passing, so the list can only shrink.
 KNOWN_FAILURES: dict[str, set[str]] = {
-    # Found the first time crates.io was reachable and all 47 rust cases went
-    # through `cargo check` together. Two of the three (`await`, method-time
-    # effect) fail on java as well, so the cause is likely shared and upstream
-    # of either renderer rather than two coincidences.
     # rust is at zero: the host-builtin contract (typecheck.py `_HOST_ARG_SIG`)
-    # closed both of its remaining cases.
+    # closed both of its remaining cases, and the `T` -> `Opt[T]` injection
+    # closed the third.
     "java": {
-        "method/emit as value",
-        "expr/template string",
         "expr/ADT construct + match",
         "fn/arrow lambda",
-        "type/record in signature",
-        "type/ADT in signature",
     },
 }
 
@@ -155,3 +148,45 @@ def test_python_validator_detects_an_uncaptured_binding():
         "            return bus.query(x)\n",
         "synthetic")
     assert unbound == ["f: bus"]
+
+
+def _java(source: str) -> str:
+    return conformance.emitter("java").emit(conformance.compile_source(source))
+
+
+def test_java_provider_class_captures_required_services():
+    """The Java instance of the rust/TypeScript `requires` bug.
+
+    The single-expression provider path emitted `bus.send(x)` inside the
+    provider class while `bus` only ever existed as a local of the plugin's
+    `apply` — a free name javac rejects with `cannot find symbol`. A required
+    service has to be captured the same way a `let-effect` bind already was:
+    a final field, filled in by the constructor.
+    """
+    out = _java("service Bus { emission fn send(n: Int) -> Int }\n"
+                "service S { emission fn f(x: Int) -> Int }\n"
+                "component C requires bus: Bus provides s: S {\n"
+                "  provide s { fn f(x) = emit bus.send(x) }\n"
+                "}")
+    assert "    private final Bus bus;" in out
+    assert "CS(Bus bus) {" in out
+    assert "this.bus = bus;" in out
+    assert "return this.bus.send(x);" in out
+    assert "new CS(bus)" in out
+
+
+def test_java_user_declared_types_survive_on_both_sides_of_a_signature():
+    """The service interface and its implementing class rendered a declared
+    type with two different functions: the interface kept the name, the
+    implementation collapsed it to `Object`, and javac reported the class as
+    not overriding the interface method. Both sides must spell it the same.
+    """
+    record = _java("type R = { a: Int }\nservice S { fn f(x: R) -> R }\n"
+                   "component C provides s: S { provide s { fn f(x) = x } }")
+    assert "    R f(R x);" in record
+    assert "public R f(R x)" in record
+
+    adt = _java("type O = Found(Int) | Missing\nservice S { fn f(x: O) -> O }\n"
+                "component C provides s: S { provide s { fn f(x) = x } }")
+    assert "    O f(O x);" in adt
+    assert "public O f(O x)" in adt
