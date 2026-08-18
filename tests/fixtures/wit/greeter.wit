@@ -1,0 +1,12 @@
+package example:greeter@1.0.0;
+
+/// The smallest useful interface: one operation that only reads, one that
+/// writes somewhere revl cannot see.
+interface greeter {
+  /// Build a greeting for a name. Computes a string and nothing else.
+  /// @revl:pure
+  greet: func(name: string) -> string;
+
+  /// Append the greeting to the host's log. Nothing here can be undone.
+  log-greeting: func(name: string, at-millis: u64);
+}

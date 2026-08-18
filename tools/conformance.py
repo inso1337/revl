@@ -1,6 +1,6 @@
 """Conformance matrix: every language construct against every backend.
 
-    python3 tools/conformance.py [--json] [--all]
+    python3 tools/conformance.py [--json] [--validate] [--check-toolchains]
 
 Backend divergence is this project's recurring bug class, and it is always
 the same shape: a construct lands, some emitters take it, one does not, and
@@ -290,6 +290,46 @@ def _validate(artifacts: dict[str, list[tuple[str, object]]]) -> dict:
     return out
 
 
+def _check_toolchains(*, as_json: bool = False) -> int:
+    """Which tiers can actually be validated — and is that all of them?
+
+    `--validate` degrades gracefully: a tier whose compiler is absent reports
+    `unavailable` and the run still exits 0. That is right for a laptop and
+    wrong for CI, where "no toolchain" means the job is misconfigured and the
+    tier's emitted code went unchecked while the build read green. This is the
+    same hazard as the wasm tier's tests skipping because nobody installed
+    wasmtime; it wants the same loud answer.
+
+    Exits non-zero if any tier's validator cannot run.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from validate import VALIDATORS  # noqa: PLC0415 — resolved next to this file
+
+    status = {}
+    for tier in TIERS:
+        validator = VALIDATORS[tier]
+        status[tier] = {"depth": validator.depth, "reason": validator.unavailable()}
+
+    missing = [t for t, v in status.items() if v["reason"]]
+    if as_json:
+        print(json.dumps({"toolchains": status, "missing": missing}, indent=2))
+    else:
+        print("validator toolchains:\n")
+        for tier in TIERS:
+            entry = status[tier]
+            if entry["reason"]:
+                print(f"  {tier:<11} UNAVAILABLE — {entry['reason']}")
+            else:
+                print(f"  {tier:<11} ready ({entry['depth']})")
+        if missing:
+            print(f"\n{len(missing)} tier(s) cannot be validated here: "
+                  f"{', '.join(missing)}.\nTheir emitted code would go "
+                  f"unchecked while the run still reported success.")
+        else:
+            print("\nall tiers validatable — no silent gaps")
+    return 1 if missing else 0
+
+
 def _matrix(report: dict, cell) -> None:
     width = max(len(row["case"]) for row in report["cases"]) + 2
     print(f"{'case'.ljust(width)}" + "".join(t[:6].ljust(8) for t in TIERS))
@@ -306,7 +346,14 @@ def main() -> int:
                         help="also compile/typecheck the emitted code with each "
                              "tier's real toolchain (slower; skips tiers whose "
                              "toolchain is absent, and says which)")
+    parser.add_argument("--check-toolchains", action="store_true",
+                        help="report which tiers' validators can run and exit "
+                             "non-zero if any cannot — for CI, where a missing "
+                             "toolchain is a broken job, not a fact of life")
     args = parser.parse_args()
+
+    if args.check_toolchains:
+        return _check_toolchains(as_json=args.json)
 
     report = run(validate=args.validate)
     if args.json:

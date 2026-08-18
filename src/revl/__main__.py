@@ -204,6 +204,33 @@ def _run_mcp(args) -> int:
     return 0
 
 
+def _run_import(args) -> int:
+    """`revl import wit` — the import codegen family (docs/import-wit.md)."""
+    from .import_wit import import_wit_file
+
+    try:
+        source = import_wit_file(args.file, backend=args.backend, pure=args.pure)
+    except OSError as error:
+        print(f"error: cannot read {args.file}: {error}", file=sys.stderr)
+        return 1
+    except RevlError as error:
+        if args.json_diagnostics:
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        try:
+            Path(args.output).write_text(source, encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+            return 1
+    else:
+        print(source, end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -259,6 +286,28 @@ def main(argv: list[str] | None = None) -> int:
                             help="host block backend for the generated externs")
     mcp_import.add_argument("-o", "--output", default=None, help="output path (default: stdout)")
 
+    imp = sub.add_parser("import",
+                         help="import an external interface definition as revl source")
+    imp_sub = imp.add_subparsers(dest="import_command", required=True)
+    imp_wit = imp_sub.add_parser(
+        "wit", help="turn a WIT world/interface into revl source (docs/import-wit.md)")
+    imp_wit.add_argument("file", help="a .wit file")
+    imp_wit.add_argument("--backend", default="wasm",
+                         choices=("wasm", "ts", "py", "rust"),
+                         help="host block backend for the generated extern stubs "
+                              "(default: wasm)")
+    imp_wit.add_argument(
+        "--pure", action="append", default=[], metavar="NAME",
+        help="assert that `<interface>.<func>` (or `<func>`) is reversible, so it "
+             "is emitted as a plain `fn` instead of `emission`. WIT makes no such "
+             "claim; this is your assertion and it is recorded in the output. "
+             "Repeatable")
+    imp_wit.add_argument("-o", "--output", default=None,
+                         help="output path (default: stdout)")
+    imp_wit.add_argument("--json-diagnostics", action="store_true",
+                         help="on rejection, print a structured diagnostic instead "
+                              "of the human rendering")
+
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime (hold + REPL, or --watch)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
@@ -284,6 +333,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "mcp":
         return _run_mcp(args)
+
+    if args.command == "import":
+        return _run_import(args)
 
     try:
         ir = compile_files(args.files)

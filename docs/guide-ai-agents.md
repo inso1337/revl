@@ -103,7 +103,7 @@ what it requires and provides; its body is *revertible effects*.
 ```revl
 service Cache {
   fn get(key: Str) -> Opt[Str]
-  fn put(key: Str, value: Str)
+  emission fn put(key: Str, value: Str)   // its body emits — see "rules that bite"
 }
 
 component UserCache requires db: Database provides cache: Cache {
@@ -221,6 +221,14 @@ compile runs before the transition, so the running system keeps serving), and
 `revl_unload` **proves** the component left nothing behind before you commit
 it to disk. See [docs/mcp-bridge.md](mcp-bridge.md).
 
+Where that is checked: the tool surface, its annotations and its structured
+rejections are gated by `tests/test_mcp.py`. Both properties above are gated
+by `tests/test_mcp_session.py`
+(`test_a_rejected_swap_leaves_the_running_system_serving`,
+`test_load_call_and_unload_with_no_residue`) — which needs the cordis-py
+runtime and **skips in CI**. Run it yourself with
+`sh backends/python/setup.sh` before relying on it.
+
 ## The check → run loop
 
 Close the generate→check→run loop inside one file:
@@ -267,4 +275,11 @@ The 2.0 syntax ships only if you write it well ([syntax-2.0.md](syntax-2.0.md)
 2.0+host-blocks}. First-pass compile rate is the metric. Treat the strata
 boundary as the signal it is: autopilot in stratum 1, deliberate in stratum 3,
 and let the exclusion diagnostics correct the rest in one shot.
+
+The corpus is committed under `bench/results/`, and
+`python3 bench/rescore.py --run all` recompiles it against the current
+checker and prints a failure taxonomy. Read that taxonomy before writing:
+its largest bucket has been "a `provide` method emits, but the service
+declared the operation plain `fn`" — the rule at the top of *Rules that
+bite*.
 

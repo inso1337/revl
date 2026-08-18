@@ -33,6 +33,62 @@ function log(channel: string, subject: string, detail = ''): void {
   console.log(`[${name}] ${channel.padEnd(6)}| ${String(subject).padEnd(16)}| ${detail}`.trimEnd())
 }
 
+// --- probes: parsed, not evaluated -----------------------------------------
+// A placement file is *data*, not a program, so a probe is dispatched from a
+// parse rather than handed to `new Function` (the JS `eval`). The admitted
+// grammar is the same one every other backend requires (src/revl/placement.py
+// ::_parse_probe, src/revl/_process_runner.py::_eval_probe): one method call
+// on one key this process holds, with literal arguments.
+
+const PROBE_RE = /^\s*([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\(([\s\S]*)\)\s*$/
+
+/** Scan a probe's argument list: string / number / true / false / null only. */
+function parseProbeArgs(src: string): unknown[] {
+  const args: unknown[] = []
+  let rest = src.trim()
+  while (rest.length > 0) {
+    if (rest[0] === "'" || rest[0] === '"') {
+      const quote = rest[0]
+      let i = 1
+      let text = ''
+      for (; i < rest.length && rest[i] !== quote; i++) {
+        if (rest[i] === '\\' && i + 1 < rest.length) i++
+        text += rest[i]
+      }
+      if (i >= rest.length) throw new Error(`unterminated string literal in probe args: ${src}`)
+      args.push(text)
+      rest = rest.slice(i + 1).trim()
+      if (rest.length > 0 && rest[0] !== ',') {
+        throw new Error(`probe arguments must be a comma-separated literal list: ${src}`)
+      }
+    } else {
+      const end = rest.indexOf(',')
+      const raw = (end < 0 ? rest : rest.slice(0, end)).trim()
+      if (raw === 'true' || raw === 'false') args.push(raw === 'true')
+      else if (raw === 'null') args.push(null)
+      else if (raw !== '' && !Number.isNaN(Number(raw))) args.push(Number(raw))
+      else throw new Error(`probe arguments must be literals, got ${JSON.stringify(raw)}`)
+      rest = end < 0 ? '' : rest.slice(end + 1).trim()
+    }
+    if (rest.startsWith(',')) rest = rest.slice(1).trim()
+  }
+  return args
+}
+
+function evalProbe(expr: string, scope: Record<string, unknown>): unknown {
+  const match = PROBE_RE.exec(expr)
+  if (!match) throw new Error('probe must be of the form key.method(arg, ...)')
+  const [, key, method, argSrc] = match
+  if (!(key in scope)) {
+    const held = Object.keys(scope).sort().join(', ') || 'none'
+    throw new Error(`'${key}' is not a key this process holds (holds: ${held})`)
+  }
+  const service = scope[key] as Record<string, unknown>
+  const target = service?.[method]
+  if (typeof target !== 'function') throw new Error(`'${key}' has no method '${method}'`)
+  return (target as (...a: unknown[]) => unknown).apply(service, parseProbeArgs(argSrc))
+}
+
 const mod = await import(pathToFileURL(path.resolve(spec.module)).href)
 const ctx = new Context()
 ctx.on('internal/status', (fiber: any, oldState: number) =>
@@ -63,7 +119,9 @@ for (const cname of spec.components as string[]) {
 // 3. serve keys other processes need
 let server: import('node:net').Server | undefined
 if (spec.serve) {
-  server = await serve(ctx, spec.serve.keys, spec.serve.socket)
+  // `methods` (key -> declared operations) is the stub's allowlist; fall back
+  // to the bare key list for a spec written before it existed.
+  server = await serve(ctx, spec.serve.methods ?? spec.serve.keys, spec.serve.socket)
   log('serve', spec.serve.keys.join(', '), `-> ${spec.serve.socket}`)
 }
 
@@ -73,9 +131,8 @@ for (const key of (spec.provides || []) as string[]) scope[key] = (ctx as any)[k
 for (const key of Object.keys(spec.proxies || {})) scope[key] = (ctx as any)[key]
 for (const expr of (spec.probe || []) as string[]) {
   try {
-    const fn = new Function(...Object.keys(scope), `return (${expr})`)
-    let value = fn(...Object.values(scope))
-    if (value && typeof value.then === 'function') value = await value
+    let value = evalProbe(expr, scope)
+    if (value && typeof (value as any).then === 'function') value = await value
     log('probe', expr, `=> ${value === undefined ? 'undefined' : JSON.stringify(value)}`)
   } catch (error) {
     log('probe', expr, `ERROR ${error}`)

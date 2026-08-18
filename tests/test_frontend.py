@@ -114,6 +114,20 @@ REJECTIONS = {
     "v2_optional_chain_nonoptional.rvl": "an optional access `?.` can only be followed by another `?.`",
     "t7_provide_param_annotation_mismatch.rvl": "parameter `sql` of `query` (from service `Db`) expects `Str`, got `Int`",
     "v2_nullish_mixed_with_or.rvl": "`||` cannot be mixed with `??` without parentheses",
+    # typing follow-ups: programs the checker used to accept and the strict
+    # tiers refuse (docs/v2.0-roadmap.md, "Typing follow-ups")
+    "t8_missing_return.rvl": "`budget` is declared to return `Int` but its body never returns a value",
+    "t9_return_path_incomplete.rvl": "`rank` is declared to return `Int` but control can reach the end of its body without a `return`",
+    "t10_call_arity.rvl": "`scale` takes 1 argument(s), 2 given",
+    "t11_field_through_opt.rvl": "field access `.name` on `Opt[Row]`: the optional wrapper has no such member",
+    "t12_str_index.rvl": "`Str` has no index operator — `[...]` indexes a `List` only",
+    "t13_unknown_match_case.rvl": "`Pending` is not a case of `Status` (cases: `Active`, `Retired`)",
+    "t14_optional_chain_on_nonoptional.rvl": "`?.` needs an optional on the left, got `Row`",
+    "t15_generic_call_site.rvl": "this function's return expects `Int`, got `Str`",
+    "t16_provide_method_missing_return.rvl": "`get` implements `Store.get`, which returns `Str`, but this body never returns a value",
+    "t17_arrow_body_unchecked.rvl": "field access `.name` on `Opt[Row]`",
+    "t18_type_alias_cycle.rvl": "type alias cycle: Handle -> Ref -> Handle",
+    "t19_union_type.rvl": "revl has no union types",
 }
 
 

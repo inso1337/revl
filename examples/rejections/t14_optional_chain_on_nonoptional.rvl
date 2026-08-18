@@ -1,0 +1,13 @@
+// REJECTED — `?.` on a value that is always present. The short-circuit has
+// nothing to short-circuit on, and the tiers that model `Opt` as a real
+// option type (rust `Option`, java `Optional`) cannot render it at all. This
+// is the mirror of `??` on a non-optional, which is already refused.
+//
+// expected error:
+//   `?.` needs an optional on the left, got `Row`
+
+type Row = { name: Str }
+
+fn label(r: Row) -> Opt[Str] {
+  return r?.name
+}

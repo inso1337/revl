@@ -1,0 +1,16 @@
+// REJECTED — an arrow body is an ordinary expression and is checked like one.
+// Arrow *parameters* are un-annotated, so they stay unknown, but a free
+// variable captured from the enclosing scope keeps its type: reaching through
+// an optional inside a lambda is the same portability bug it is outside one,
+// and skipping arrow bodies is what let it hide.
+//
+// expected error:
+//   field access `.name` on `Opt[Row]`: the optional wrapper has no such
+//   member — `T` flows into `Opt[T]`, never silently back out
+
+type Row = { name: Str }
+
+fn label(o: Opt[Row]) -> Int {
+  let get = (ignored) => o.name
+  return 1
+}

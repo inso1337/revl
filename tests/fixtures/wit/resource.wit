@@ -1,0 +1,12 @@
+// A refusal fixture: `resource` is a live handle with identity, which revl's
+// copy-semantics value model has no faithful spelling for.
+package example:files@0.1.0;
+
+interface filesystem {
+  resource descriptor {
+    constructor(path: string);
+    read: func(len: u64) -> list<u8>;
+  }
+
+  open: func(path: string) -> descriptor;
+}
