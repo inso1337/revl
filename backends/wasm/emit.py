@@ -361,6 +361,7 @@ class _ComponentEmitter:
         is a function too, so it gets the same fresh state.
         """
         self.v3._tmp = "__revl_tmp"
+        self.v3._reset_tmp_pool()
         self.v3._arrows = {}
         self.v3._arrow_counter = 0
         self.v3._match_counter = 0
@@ -572,6 +573,8 @@ class _ComponentEmitter:
         self.activation_locals = sorted(self.extra_locals)
         if self.func_uses_v3:
             self.activation_locals.append(self.v3._tmp)
+            # deeper scratch pointers minted by nested allocations in a segment
+            self.activation_locals.extend(sorted(self.v3._tmp_extra))
         return self._module(segments, inverses, provide_funcs)
 
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
@@ -687,6 +690,9 @@ class _ComponentEmitter:
                 header += f" (local ${extra} i32)"
             if self.func_uses_v3:
                 header += f" (local ${self.v3._tmp} i32)"
+                # deeper scratch pointers from nested allocations in the body
+                for extra in sorted(self.v3._tmp_extra):
+                    header += f" (local ${extra} i32)"
             body = "\n    ".join(body_lines) if body_lines else "nop"
             funcs.append(f"  {header}\n    {body})")
         missing = set(declared) - {m.get("name") for m in step.get("methods") or []}
@@ -895,6 +901,30 @@ class _V3Emitter:
         self.heap_start = 0
         self._anon = 0
         self._tmp = "__revl_tmp"
+        # A single scratch pointer clobbers itself when one allocation nests
+        # inside another (a record/list/variant used as a field, element, or
+        # payload of another one). Hand out a *distinct* scratch per active
+        # nesting depth instead: siblings reuse a name (safe — they don't
+        # overlap in time), a nested allocation gets a deeper one. Depth 0
+        # keeps the historical `__revl_tmp` name so non-nested output — and the
+        # goldens — stay byte-identical.
+        self._tmp_stack: list[str] = []
+        self._tmp_extra: set[str] = set()
+
+    def _reset_tmp_pool(self) -> None:
+        self._tmp_stack = []
+        self._tmp_extra = set()
+
+    def _acquire_tmp(self) -> str:
+        depth = len(self._tmp_stack)
+        name = self._tmp if depth == 0 else f"{self._tmp}_n{depth}"
+        if depth != 0:
+            self._tmp_extra.add(name)
+        self._tmp_stack.append(name)
+        return name
+
+    def _release_tmp(self) -> None:
+        self._tmp_stack.pop()
 
     # -- type layouts (documentation) ----------------------------------------
 
@@ -1348,8 +1378,26 @@ class _V3Emitter:
                 return expected
             return node.get("type")
         if kind == "match":
+            # The arm body may reference the arm's payload binding, so infer it
+            # in a scope that *knows* that binding's type — exactly as
+            # `_match_expr.arm_scope` does when lowering. Without this, a match
+            # with a payload bind used as an operand (`s + match x { J(v) => v,
+            # … }`, common inside a loop) raised "unbound name" during type
+            # inference even though it lowers fine.
+            layout = self._tagged_layout(self._infer_type(node.get("scrutinee"), scope))
             for arm in node.get("arms") or []:
-                return self._infer_type(arm.get("body"), scope, expected)
+                arm_scope = scope
+                bind = arm.get("bind")
+                if bind:
+                    payload_ty = arm.get("payload_type")
+                    if payload_ty in (None, "Any") and layout is not None:
+                        payload_ty = next(
+                            (p for c, p in layout if c == arm.get("pattern")), None)
+                    if payload_ty == "Any":
+                        payload_ty = None
+                    arm_scope = _Scope(dict(scope.slots), dict(scope.types))
+                    arm_scope.types[bind] = payload_ty or "Int"
+                return self._infer_type(arm.get("body"), arm_scope, expected)
             return expected
         if kind == "arrow":
             raise EmitError("arrow values are not lowerable on this tier — the wasm module has no closures")
@@ -1528,21 +1576,27 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: `??` needs an Opt value on its left, got {left_ty!r}"
             )
-        left = self._expr(left_node, scope, where, left_ty)
-        right = self._expr(right_node, scope, where, payload_ty)
-        if right.ty != payload_ty:
-            raise EmitError(
-                f"{where}: the `??` default is {right.ty!r} but the Opt carries "
-                f"{payload_ty!r}"
+        # Hold the Opt cell in a scratch that a nested allocation on either
+        # side (or an outer allocation this `??` is a sub-expression of) cannot
+        # clobber.
+        tmp = self._acquire_tmp()
+        try:
+            left = self._expr(left_node, scope, where, left_ty)
+            right = self._expr(right_node, scope, where, payload_ty)
+            if right.ty != payload_ty:
+                raise EmitError(
+                    f"{where}: the `??` default is {right.ty!r} but the Opt carries "
+                    f"{payload_ty!r}"
+                )
+            wat = (
+                f"{left.wat}\n      (local.set ${tmp})\n"
+                f"      (if (result i32)\n"
+                f"        (i32.eq (i32.load (local.get ${tmp})) (i32.const 1))\n"
+                f"        (then (i32.load (i32.add (local.get ${tmp}) (i32.const 4))))\n"
+                f"        (else {right.wat}))"
             )
-        tmp = self._tmp
-        wat = (
-            f"{left.wat}\n      (local.set ${tmp})\n"
-            f"      (if (result i32)\n"
-            f"        (i32.eq (i32.load (local.get ${tmp})) (i32.const 1))\n"
-            f"        (then (i32.load (i32.add (local.get ${tmp}) (i32.const 4))))\n"
-            f"        (else {right.wat}))"
-        )
+        finally:
+            self._release_tmp()
         return _E(wat, payload_ty)
 
     def _bin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
@@ -1773,25 +1827,32 @@ class _V3Emitter:
         raw_by_name: dict[str, Any] = {}
         for raw_name, raw_value in node.get("fields") or []:
             raw_by_name[_ident(raw_name, f"{where}: record field")] = raw_value
-        field_values: list[tuple[str, _E]] = []
-        for name, ftype in fields.items():
-            raw_value = raw_by_name.get(name)
-            if raw_value is None:
-                raise EmitError(f"{where}: record literal is missing field {name!r}")
-            value = self._expr(raw_value, scope, where, ftype)
-            if _is_unit_type(value.ty):
-                raise EmitError(f"{where}: record field {name!r} is void")
-            field_values.append((name, value))
-        lines = [f"(call $alloc (i32.const {4 * len(field_values)}))", f"(local.set ${self._tmp})"]
-        for position, (name, value) in enumerate(field_values):
-            offset = 4 * position
-            if offset:
-                lines.append(
-                    f"(i32.store (i32.add (local.get ${self._tmp}) (i32.const {offset})) {value.wat})"
-                )
-            else:
-                lines.append(f"(i32.store (local.get ${self._tmp}) {value.wat})")
-        lines.append(f"(local.get ${self._tmp})")
+        # Reserve this record's base-pointer slot *before* lowering the field
+        # values: a field that is itself an allocation must land on a deeper
+        # scratch, or it would overwrite our base pointer mid-construction.
+        tmp = self._acquire_tmp()
+        try:
+            field_values: list[tuple[str, _E]] = []
+            for name, ftype in fields.items():
+                raw_value = raw_by_name.get(name)
+                if raw_value is None:
+                    raise EmitError(f"{where}: record literal is missing field {name!r}")
+                value = self._expr(raw_value, scope, where, ftype)
+                if _is_unit_type(value.ty):
+                    raise EmitError(f"{where}: record field {name!r} is void")
+                field_values.append((name, value))
+            lines = [f"(call $alloc (i32.const {4 * len(field_values)}))", f"(local.set ${tmp})"]
+            for position, (name, value) in enumerate(field_values):
+                offset = 4 * position
+                if offset:
+                    lines.append(
+                        f"(i32.store (i32.add (local.get ${tmp}) (i32.const {offset})) {value.wat})"
+                    )
+                else:
+                    lines.append(f"(i32.store (local.get ${tmp}) {value.wat})")
+            lines.append(f"(local.get ${tmp})")
+        finally:
+            self._release_tmp()
         return _E("\n      ".join(lines), ty)
 
     # -- tagged unions (variants, Opt, Result): [i32 tag][i32 payload] --------
@@ -1803,20 +1864,26 @@ class _V3Emitter:
             raise EmitError(f"{where}: {ty!r} is not a tagged union")
         tag = self._tag_of(ty, case)
         payload_ty = next((p for c, p in layout if c == case), None)
-        lines = [
-            "(call $alloc (i32.const 8))",
-            f"(local.set ${self._tmp})",
-            f"(i32.store (local.get ${self._tmp}) (i32.const {tag}))",
-        ]
-        if payload_node is not None:
-            value = self._expr(payload_node, scope, where, payload_ty)
-            payload_wat = value.wat
-        else:
-            payload_wat = "(i32.const 0)"
-        lines.append(
-            f"(i32.store (i32.add (local.get ${self._tmp}) (i32.const 4)) {payload_wat})"
-        )
-        lines.append(f"(local.get ${self._tmp})")
+        # Acquire before lowering the payload: an allocated payload (a record,
+        # list, or nested variant) must not reuse this cell's base pointer.
+        tmp = self._acquire_tmp()
+        try:
+            lines = [
+                "(call $alloc (i32.const 8))",
+                f"(local.set ${tmp})",
+                f"(i32.store (local.get ${tmp}) (i32.const {tag}))",
+            ]
+            if payload_node is not None:
+                value = self._expr(payload_node, scope, where, payload_ty)
+                payload_wat = value.wat
+            else:
+                payload_wat = "(i32.const 0)"
+            lines.append(
+                f"(i32.store (i32.add (local.get ${tmp}) (i32.const 4)) {payload_wat})"
+            )
+            lines.append(f"(local.get ${tmp})")
+        finally:
+            self._release_tmp()
         return _E("\n      ".join(lines), ty)
 
     def _adt_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
@@ -1899,21 +1966,28 @@ class _V3Emitter:
         ty = self._list_type(node, scope, expected)
         elem_ty = _list_elem(ty)
         items = node.get("items") or []
-        values = [self._expr(item, scope, where, elem_ty) for item in items]
-        for value in values:
-            if _is_unit_type(value.ty):
-                raise EmitError(f"{where}: list element is void")
-        lines = [
-            f"(call $alloc (i32.const {4 * (len(values) + 1)}))",
-            f"(local.set ${self._tmp})",
-            f"(i32.store (local.get ${self._tmp}) (i32.const {len(values)}))",
-        ]
-        for position, value in enumerate(values):
-            offset = 4 + 4 * position
-            lines.append(
-                f"(i32.store (i32.add (local.get ${self._tmp}) (i32.const {offset})) {value.wat})"
-            )
-        lines.append(f"(local.get ${self._tmp})")
+        # A list of allocated elements (records, nested lists, …) needs a
+        # deeper scratch per element so an element's construction cannot
+        # overwrite this list's base pointer — acquire before lowering them.
+        tmp = self._acquire_tmp()
+        try:
+            values = [self._expr(item, scope, where, elem_ty) for item in items]
+            for value in values:
+                if _is_unit_type(value.ty):
+                    raise EmitError(f"{where}: list element is void")
+            lines = [
+                f"(call $alloc (i32.const {4 * (len(values) + 1)}))",
+                f"(local.set ${tmp})",
+                f"(i32.store (local.get ${tmp}) (i32.const {len(values)}))",
+            ]
+            for position, value in enumerate(values):
+                offset = 4 + 4 * position
+                lines.append(
+                    f"(i32.store (i32.add (local.get ${tmp}) (i32.const {offset})) {value.wat})"
+                )
+            lines.append(f"(local.get ${tmp})")
+        finally:
+            self._release_tmp()
         return _E("\n      ".join(lines), ty)
 
     def _interp_expr(self, node: dict, scope: _Scope, where: str) -> _E:
@@ -2164,8 +2238,13 @@ class _V3Emitter:
                               | set(self._for_temps) | arrow_locals)
         self._tmp = tmp
         decls.append(f"(local ${tmp} i32)")
+        self._reset_tmp_pool()
 
         body_lines = self._emit_stmts(fn.get("body") or [], scope, where, return_ty)
+        # deeper scratch pointers minted for nested allocations (see
+        # `_acquire_tmp`); wasm requires every local declared in the header
+        for extra in sorted(self._tmp_extra):
+            decls.append(f"(local ${extra} i32)")
         if body_lines:
             body = "\n    ".join(body_lines)
         elif not _is_unit_type(return_ty):
