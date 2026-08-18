@@ -110,6 +110,11 @@ def _java_type(name: object) -> str:
         if head == "Map":
             k, v = _split_generic(inner)
             return f"java.util.Map<{_java_type(k)}, {_java_type(v)}>"
+    # An unrecognised name is opaque in IR v1/v2 (there are no `type`
+    # declarations to resolve it against — `examples/user_cache.rvl` names a
+    # `Row` that is never declared), so it erases to `Object`. IR v3 declares
+    # its types and renders them by name; that is `_java_v3_type`'s job, and
+    # the two must never be mixed inside one signature.
     return "Object"
 
 
@@ -1285,6 +1290,8 @@ def _method_body(env: _Env, key: str, method: dict) -> str:
                 )
             return "return;"
         rename = {b: f"this.{b}" for b in _binds(env.component)}
+        # A required service is a field of the provider class, same as a bind.
+        rename.update({local: f"this.{local}" for local in env.reqs})
         value = _expr(steps[0]["expr"], env, rename)
         # A `void` service operation cannot `return <expr>;` in Java — run
         # the expression for its effect instead.
@@ -1681,7 +1688,16 @@ def _emit_component(
     types: dict | None = None,
     functions: list | None = None,
     externs: list | None = None,
+    *,
+    render_type=_java_type,
 ) -> list[str]:
+    """`render_type` MUST be the renderer that produced the service
+    interfaces this component's provider classes implement: `_java_type` for
+    IR v1/v2 (`_emit_service_interfaces`), `_java_v3_type` for IR v3
+    (`_emit_service_interfaces_v3`). Rendering a signature with one and its
+    override with the other is how `f(R)` came to be implemented by
+    `f(Object)`, which javac reports as the class not being abstract.
+    """
     if _component_needs_modern(component):
         return _emit_component_modern(component, services, types, functions, externs)
     env = _Env(component, services)
@@ -1693,10 +1709,23 @@ def _emit_component(
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"public static final class {struct} implements {service} {{")
+        # `requires` bindings are captured exactly like `let-effect` binds:
+        # a final field, assigned from the constructor. `apply` resolves them
+        # with `ctx.get(...)` into locals of its own, so a method body that
+        # reaches one had nothing in scope to name until the provider class
+        # held it too (the rust/TypeScript instances of this same bug).
+        for local, req_service in env.reqs.items():
+            out.append(f"    private final {req_service} {_ident(local, 'requirement')};")
         for b in _binds(component):
             out.append(f"    private final {_host_of(component, b)} {b};")
-        ctor_args = ", ".join(f"{_host_of(component, b)} {b}" for b in _binds(component))
+        ctor_args = ", ".join(
+            [f"{req_service} {_ident(local, 'requirement')}"
+             for local, req_service in env.reqs.items()]
+            + [f"{_host_of(component, b)} {b}" for b in _binds(component)]
+        )
         out.append(f"    {struct}({ctor_args}) {{")
+        for local in env.reqs:
+            out.append(f"        this.{local} = {local};")
         for b in _binds(component):
             out.append(f"        this.{b} = {b};")
         out.append("    }")
@@ -1708,10 +1737,10 @@ def _emit_component(
         for method in provide.get("methods") or []:
             mname = _ident(method.get("name"), "method")
             params = ", ".join(
-                f"{_java_type(_param_type(env, key, mname, p))} {p}"
+                f"{render_type(_param_type(env, key, mname, p))} {p}"
                 for p in method.get("params") or []
             )
-            ret = _java_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
+            ret = render_type(_method_return(env, key, mname)) if _method_return(env, key, mname) else "void"
             out.append(f"    public {ret} {mname}({params}) {{ {_method_body(env, key, method)} }}")
         out.append("}")
         out.append("")
@@ -1751,7 +1780,7 @@ def _emit_component(
             key = step.get("name")
             service = step.get("service")
             struct = f"{cname}{_camel(key)}"
-            ctor_args = ", ".join(b for b in _binds(component))
+            ctor_args = ", ".join(list(env.reqs) + list(_binds(component)))
             # The provision's disposable joins the teardown list — the
             # modern path tracks it via fx.track(ctx.provide(...)); dropping
             # it would leave the provision registered after unload.
@@ -1887,7 +1916,9 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if tests:
         out.extend(["    " + line if line else line for line in _emit_v3_tests(tests, types, functions, externs)])
     for component in components:
-        out.extend(["    " + line if line else line for line in _emit_component(component, services, types, functions, externs)])
+        out.extend(["    " + line if line else line for line in _emit_component(
+            component, services, types, functions, externs,
+            render_type=_java_v3_type)])
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
 
