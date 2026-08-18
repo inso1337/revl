@@ -1,0 +1,16 @@
+// REJECTED — a generic fn's result at a call site. `ident` is universally
+// quantified in `T`, so `ident("hello")` is a `Str`; the checker used to treat
+// every single-uppercase name as a wildcard and let the declared return flow
+// into any expected type unchecked. Type parameters are now unified against
+// the actual arguments at the call site (roadmap "Typing follow-ups" #6).
+//
+// expected error:
+//   this function's return expects `Int`, got `Str`
+
+fn ident(x: T) -> T {
+  return x
+}
+
+fn misuse() -> Int {
+  return ident("hello")
+}

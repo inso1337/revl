@@ -1,0 +1,18 @@
+// REJECTED — a field read *through* an optional. `return o` is already
+// refused (`Opt[Row]` into `Str`), but `o.name` used to escape to an unknown
+// type and then flow anywhere, which contradicts the headline guarantee that
+// `T` flows into `Opt[T]` but never silently back out. rust reports E0609
+// (no field `name` on `Option<Row>`) and javac "cannot find symbol".
+//
+// Legal spellings: `match` the optional, `o?.name` (which yields `Opt[Str]`),
+// or `o?.name ?? "anonymous"`.
+//
+// expected error:
+//   field access `.name` on `Opt[Row]`: the optional wrapper has no such
+//   member — `T` flows into `Opt[T]`, never silently back out
+
+type Row = { name: Str }
+
+fn label(o: Opt[Row]) -> Str {
+  return o.name
+}
