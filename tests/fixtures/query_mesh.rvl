@@ -1,0 +1,75 @@
+// Fixture for tests/test_query.py — a composition deep enough to have
+// questions worth asking. Four components in a chain
+//
+//     Journal -> Store -> Api -> Dashboard
+//
+// so a withdrawal cascades two levels past its first dependent, and an
+// emission at the far end (`host_write`) is reached from the near end only
+// transitively: Dashboard emits `rep.publish`, which emits `kv.set`, which
+// emits `ledger.append`, which emits the extern. Announcer reaches the same
+// extern the other way — through the pure stratum, `shout` -> `host_write`.
+
+service Ledger {
+  emission fn append(line: Str) -> Str
+}
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  emission fn set(k: Str, v: Str)
+}
+
+service Report {
+  emission fn publish(title: Str)
+  fn status() -> Str
+}
+
+service Voice {
+  emission fn say(line: Str) -> Str
+}
+
+extern emission fn host_write(line: Str) -> Str
+  = @py { return line }
+
+extern pure fn host_fmt(line: Str) -> Str
+  = @py { return line }
+
+pub fn render(line: Str) -> Str { return host_fmt(line) }
+pub fn shout(line: Str) -> Str { return host_write(render(line)) }
+
+component Journal provides ledger: Ledger {
+  provide ledger {
+    fn append(line) = emit host_write(line)
+  }
+}
+
+component Store requires ledger: Ledger provides kv: Kv {
+  let cells = effect Map.new() undo cells.drop()
+  provide kv {
+    fn get(k) = cells.get(k)
+    fn set(k, v) {
+      effect cells.insert(k, v)
+      undo   cells.remove(k)
+      emit ledger.append(v)
+    }
+  }
+}
+
+component Api requires kv: Kv provides rep: Report {
+  provide rep {
+    fn publish(title) { emit kv.set("report", title) }
+    fn status() = "ok"
+  }
+}
+
+component Dashboard requires rep: Report {
+  emit rep.publish("boot") compensate rep.publish("rollback")
+  await Job.run("dashboard")
+}
+
+// reaches the same emission extern through the pure stratum instead of
+// through the service seam — the `fn` transitivity case
+component Announcer provides voice: Voice {
+  provide voice {
+    fn say(line) = shout(line)
+  }
+}

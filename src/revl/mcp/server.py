@@ -12,6 +12,9 @@ Tools
   revl_audit       manifest + G8 boundary surface of a composition
   revl_tools       project a composition's provided services to MCP tools
   revl_grammar     the language surface, small enough to put in a prompt
+  revl_query_*     ask the composition a question instead of reading a dump
+                   (emitters / withdraw / dependents / reach / drift —
+                   docs/queries.md, defined in query_tools.py)
 
 Transport is newline-delimited JSON-RPC on stdin/stdout (the MCP stdio
 convention); no third-party dependency, consistent with the rest of the
@@ -26,6 +29,7 @@ import sys
 from ..compiler import compile_files, compile_source
 from ..diagnostics import GUARANTEES, report
 from ..errors import RevlError
+from .query_tools import QUERY_TOOLS
 from .schema import tools_from_ir
 from .session import Session, SessionError
 
@@ -480,6 +484,10 @@ TOOLS = [
         "handler": _tool_grammar,
     },
 ]
+
+# composition queries (docs/queries.md) — defined next door so this module
+# stays the protocol layer and the query surface can grow on its own
+TOOLS.extend(QUERY_TOOLS)
 
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
