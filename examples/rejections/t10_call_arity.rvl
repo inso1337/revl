@@ -1,0 +1,15 @@
+// REJECTED — a call supplying the wrong number of arguments. revl has no
+// default, optional, or variadic parameters, so arity is exact. rust reports
+// E0061 and javac "method scale in class Components cannot be applied to
+// given types"; python raises only at run time.
+//
+// expected error:
+//   `scale` takes 1 argument(s), 2 given
+
+fn scale(a: Int) -> Int {
+  return a * 2
+}
+
+fn caller() -> Int {
+  return scale(1, 2)
+}

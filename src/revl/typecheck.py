@@ -14,9 +14,12 @@ Design (see the "type safety" milestone discussion):
   grammar and keep it).
 - Opt discipline: `T` is accepted where `Opt[T]` is expected (injection);
   `Opt[T]` where `T` is expected is an error with an unwrap hint.
-- Generics: `Never` (empty list) and `Any` are wildcards; single-uppercase
-  type names (declared type parameters) are treated as wildcards — full
-  instantiation is deferred.
+- Generics: `Never` (empty list) and `Any` are wildcards. A single-uppercase
+  name in a `fn` signature that is not a declared type is that fn's implicit
+  type parameter; it is marked when the signature table is built, is a wildcard
+  only inside that fn's own body, and is unified against the actual arguments
+  at every call site. A single-uppercase name that *is* declared (`type S = A |
+  B`) is an ordinary nominal type and is checked as one.
 
 Two expression dialects are covered:
 - `infer_ast`   — parser AST (Expr*) used by pure fn bodies (stratum 1);
@@ -85,11 +88,108 @@ def check_type_wellformed(filename: str, line: int, type_name: str | None) -> No
         check_type_wellformed(filename, line, arg)
 
 
+# ------------------------------------------------- type parameters
+#
+# revl has no type-parameter syntax yet, so a `fn` signature declares one
+# implicitly: a single-uppercase name that is not a declared type (`fn id(x: T)
+# -> T`). Marking those names *once*, when the signature table is built, is
+# what lets the rest of the checker stop guessing:
+#
+#   - a marked name (`?T`) is a wildcard inside the fn's own body, where it is
+#     genuinely universally quantified, and is unified against the actual
+#     argument at every call site;
+#   - an unmarked single-uppercase name is an ordinary nominal type and is
+#     checked like any other, so `type S = A | B` is no longer silently
+#     unchecked everywhere merely for being one letter long.
+#
+# The marker never leaves the checker: the IR carries the author's spelling,
+# and `render_type` strips it before any diagnostic is rendered.
+
+_TPARAM = "?"
+
+
+def is_tparam_name(name: str, declared: dict) -> bool:
+    """Would `name`, written in a fn signature, be an implicit type parameter?"""
+    return len(name) == 1 and name.isupper() and name not in declared
+
+
+def collect_tparams(type_names, declared: dict) -> set[str]:
+    """Implicit type parameters mentioned anywhere in these declared types."""
+    found: set[str] = set()
+
+    def walk(name: str | None) -> None:
+        if not name:
+            return
+        head, args = parse_type(name)
+        if head and not args and is_tparam_name(head, declared):
+            found.add(head)
+        for arg in args:
+            walk(arg)
+
+    for name in type_names:
+        walk(name)
+    return found
+
+
+def mark_tparams(type_name: str | None, tparams: set[str]) -> str | None:
+    """Rewrite `T` -> `?T` inside a declared type, recursing into arguments."""
+    if not type_name or not tparams:
+        return type_name
+    head, args = parse_type(type_name)
+    if head and not args:
+        return _TPARAM + head if head in tparams else head
+    inner = ", ".join(mark_tparams(a, tparams) or a for a in args)
+    return f"{head}[{inner}]"
+
+
+def render_type(type_name: str | None) -> str | None:
+    """The author's spelling of a checker-internal type, for diagnostics."""
+    return type_name.replace(_TPARAM, "") if type_name else type_name
+
+
+def unify(param: str | None, actual: str | None, subst: dict) -> bool:
+    """Match a (marked) parameter type against an argument type, growing
+    `subst`. Returns False only on a *definite* conflict; unknowns pass."""
+    if param is None or actual is None:
+        return True
+    head, args = parse_type(param)
+    if head and head.startswith(_TPARAM) and not args:
+        if _is_wildcard(actual):
+            return True  # nothing to learn from an unknown argument
+        prior = subst.get(head)
+        if prior is None:
+            subst[head] = actual
+            return True
+        widened = join(prior, actual)
+        if widened is None:
+            return False
+        subst[head] = widened
+        return True
+    ahead, aargs = parse_type(actual)
+    if head == "Opt" and args and ahead != "Opt":
+        return unify(args[0], actual, subst)  # T -> Opt[T] injection
+    if head == ahead and len(args) == len(aargs):
+        return all(unify(p, a, subst) for p, a in zip(args, aargs))
+    return compatible(param, actual)
+
+
+def substitute(type_name: str | None, subst: dict) -> str | None:
+    """Apply a unifier; type parameters it did not bind keep their marker
+    (and so stay wildcards downstream, exactly as before)."""
+    if not type_name or not subst:
+        return type_name
+    head, args = parse_type(type_name)
+    if head and not args:
+        return subst.get(head, head)
+    inner = ", ".join(substitute(a, subst) or a for a in args)
+    return f"{head}[{inner}]"
+
+
 def _is_wildcard(name: str | None) -> bool:
     return (
         name is None
         or name in ("Any", "Never")
-        or (len(name) == 1 and name.isupper())  # declared type parameter
+        or name.startswith(_TPARAM)  # implicit fn type parameter
     )
 
 
@@ -132,10 +232,34 @@ def mismatch(filename: str, line: int, where: str,
     if ahead == "Opt" and ehead != "Opt":
         hint = ("unwrap the optional first: `match` on it, or use `??` "
                 "to supply a fallback (syntax-2.0 §2)")
+    expected, actual = render_type(expected), render_type(actual)
     return RevlError(filename, line,
                      f"{where} expects `{expected}`, got `{actual}`", hint,
                      code="T1", category="type-mismatch",
                      expected=expected, actual=actual)
+
+
+def opt_escape_error(filename: str, line: int, what: str, target: str,
+                     inner: str | None, alt: str | None = None) -> RevlError:
+    """`Opt[T]` reached through as if it were `T`.
+
+    The README's headline guarantee is that `T` flows into `Opt[T]` but never
+    silently back out. Rejecting `return o` while accepting `o.n` would let the
+    inner type escape one step later, so every *access* through an optional is
+    refused here too."""
+    target = render_type(target)
+    inner_s = render_type(inner) or "the wrapped value"
+    hint = (f"unwrap it first — `match` on the optional, or `??` to supply a "
+            f"fallback — then {what} on the `{inner_s}`")
+    if alt:
+        hint += f"; or write `{alt}` to short-circuit and get an `Opt[...]` back"
+    hint += " (syntax-2.0 §2)"
+    return RevlError(
+        filename, line,
+        f"{what} on `{target}`: the optional wrapper has no such member — "
+        f"`T` flows into `Opt[T]`, never silently back out",
+        hint=hint, code="T1", category="null-safety",
+    )
 
 
 def null_error(filename: str, line: int) -> RevlError:
@@ -154,12 +278,12 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
                 filename: str | None, line: int):
     if op in ("==", "!=", "===", "!=="):
         if filename and lt and rt and not (compatible(lt, rt) or compatible(rt, lt)):
-            raise mismatch(filename, line, f"`{op}` comparison between `{lt}` and", rt, lt)
+            raise mismatch(filename, line, f"`{op}` comparison between `{render_type(lt)}` and", rt, lt)
         return "Bool"
     if op in ("<", "<=", ">", ">="):
         for t in (lt, rt):
             if filename and t and parse_type(t)[0] not in _NUMERIC | {"Str"}:
-                raise RevlError(filename, line, f"`{op}` cannot order `{t}` values")
+                raise RevlError(filename, line, f"`{op}` cannot order `{render_type(t)}` values")
         return "Bool"
     if op in ("&&", "||"):
         for t in (lt, rt):
@@ -177,7 +301,7 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
             # Opt as Option/Optional cannot even render it
             raise RevlError(
                 filename, line,
-                f"`??` needs an optional on the left, got `{lt}`",
+                f"`??` needs an optional on the left, got `{render_type(lt)}`",
                 hint="`a ?? b` supplies a fallback when `a` is absent — a "
                      "non-optional is always present, so the fallback is dead "
                      "(syntax-2.0 §2)",
@@ -274,10 +398,10 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     if filename and target_type is not None:
         if family == "sized" and thead not in _SIZED_HEADS:
             raise RevlError(filename, line,
-                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{target_type}`")
+                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
         if family in ("List", "Str") and thead != family:
             raise RevlError(filename, line,
-                            f"builtin `{method}` needs a {family} receiver, got `{target_type}`")
+                            f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
     elem = targs[0] if thead == "List" and targs else None
     for spec, actual in zip(params, arg_types):
         expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
@@ -295,7 +419,8 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     operator/branch/argument mismatches raise; without it, never raises."""
     from .parser import (
         ExprArrow, ExprBin, ExprCall, ExprField, ExprIf, ExprIndex,
-        ExprList, ExprLit, ExprMatch, ExprRecord, ExprUn, ExprVar, Interp, Lit,
+        ExprList, ExprLit, ExprMatch, ExprOptCall, ExprOptField, ExprRecord,
+        ExprUn, ExprVar, Interp, Lit,
     )
 
     line = getattr(expr, "line", 0)
@@ -319,7 +444,17 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     if isinstance(expr, ExprVar):
         if expr.name == "None":
             return "Opt[Any]"
-        return tenv.get(expr.name)
+        if expr.name in tenv:
+            return tenv[expr.name]
+        # a bare nullary user-ADT constructor is a value of its ADT (`let s =
+        # FirstTime`). Typing it here is what lets `match FirstTime { ... }`
+        # reach the case/exhaustiveness checks instead of degrading to unknown.
+        # Opt/Result constructors are excluded: they are not nullary values.
+        case = (types.get(CASES_KEY) or {}).get(expr.name)
+        if (case is not None and case.get("payload") is None
+                and not str(case.get("adt", "")).startswith(("Opt", "Result"))):
+            return case["adt"]
+        return None
     if isinstance(expr, ExprBin):
         lt = infer_ast(expr.left, tenv, types, filename)
         rt = infer_ast(expr.right, tenv, types, filename)
@@ -335,7 +470,11 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         return t
     if isinstance(expr, ExprField):
         target = infer_ast(expr.target, tenv, types, filename)
-        thead, _ = parse_type(target)
+        thead, targs = parse_type(target)
+        if filename and thead == "Opt":
+            raise opt_escape_error(filename, line, f"field access `.{expr.name}`",
+                                   target, targs[0] if targs else None,
+                                   alt=f"?.{expr.name}")
         if expr.name == "length" and (thead in _SIZED_HEADS):
             return "Int"
         spec = types.get(target or "")
@@ -343,14 +482,73 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             fields = spec.get("fields", {})
             if filename and expr.name not in fields:
                 raise RevlError(filename, line,
-                                f"`{target}` has no field `{expr.name}` "
+                                f"`{render_type(target)}` has no field `{expr.name}` "
                                 f"(fields: {', '.join(sorted(fields)) or 'none'})")
             return fields.get(expr.name)
         return None
+    if isinstance(expr, (ExprOptField, ExprOptCall)):
+        # `a?.b` short-circuits on absence, so it *requires* an optional on the
+        # left and always yields an optional on the right. On a non-optional it
+        # is dead syntax the strict tiers cannot render (Rust/Java have no
+        # `?.` on a plain value); the result staying `Opt[...]` is what keeps
+        # the inner type from escaping the wrapper.
+        target = infer_ast(expr.target, tenv, types, filename)
+        thead, targs = parse_type(target)
+        member = expr.name if isinstance(expr, ExprOptField) else expr.method
+        if filename and target and not _is_wildcard(target) and thead != "Opt":
+            raise RevlError(
+                filename, line,
+                f"`?.` needs an optional on the left, got `{render_type(target)}`",
+                hint=f"`{render_type(target)}` is always present, so the short-circuit is "
+                     f"dead — write `.{member}` (syntax-2.0 §2)",
+                code="T1", category="type-mismatch",
+            )
+        if thead != "Opt":
+            return None
+        inner = targs[0] if targs else None
+        if isinstance(expr, ExprOptCall):
+            args = [infer_ast(a, tenv, types, filename) for a in expr.args]
+            result = builtin_check(expr.method, inner, args, filename, line)
+        else:
+            spec = types.get(inner or "")
+            ihead, _ = parse_type(inner)
+            if inner == "Opt" or ihead == "Opt":
+                result = None
+            elif member == "length" and ihead in _SIZED_HEADS:
+                result = "Int"
+            elif spec is not None and spec.get("kind") == "record":
+                fields = spec.get("fields", {})
+                if filename and member not in fields:
+                    raise RevlError(filename, line,
+                                    f"`{render_type(inner)}` has no field `{member}` "
+                                    f"(fields: {', '.join(sorted(fields)) or 'none'})")
+                result = fields.get(member)
+            else:
+                result = None
+        if result is None:
+            return None
+        # already-optional inner results are not double-wrapped
+        return result if parse_type(result)[0] == "Opt" else f"Opt[{result}]"
     if isinstance(expr, ExprIndex):
         target = infer_ast(expr.target, tenv, types, filename)
         it = infer_ast(expr.index, tenv, types, filename)
         thead, targs = parse_type(target)
+        if filename and thead == "Opt":
+            raise opt_escape_error(filename, line, "index `[...]`", target,
+                                   targs[0] if targs else None)
+        if filename and thead == "Str":
+            # `Str` is not indexable: the spec's string surface is `charAt` /
+            # `charCodeAt` / `slice` (docs/stdlib-2.0.md). Rust indexes bytes
+            # (E0277 for an integer index) and Java has no operator at all, so
+            # `s[0]` is not portable even where Python and TS accept it.
+            raise RevlError(
+                filename, line,
+                "`Str` has no index operator — `[...]` indexes a `List` only",
+                hint="use `s.charAt(i)` for the character (or `s.slice(i, j)` "
+                     "for a substring, `s.charCodeAt(i)` for the code point) "
+                     "— docs/stdlib-2.0.md",
+                code="T1", category="type-mismatch",
+            )
         if filename and it and thead in ("List", "Str") and it != "Int":
             raise mismatch(filename, line, "index", "Int", it)
         if thead == "List":
@@ -364,7 +562,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         b = infer_ast(expr.otherwise, tenv, types, filename)
         if filename and a and b and join(a, b) is None:
             raise RevlError(filename, line,
-                            f"ternary branches disagree: `{a}` vs `{b}`")
+                            f"ternary branches disagree: `{render_type(a)}` vs `{render_type(b)}`")
         return join(a, b)
     if isinstance(expr, ExprList):
         item = None
@@ -395,12 +593,39 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                 return case["adt"]
             sig = (types.get(FNS_KEY) or {}).get(name)
             if sig is not None:
+                params = sig["params"]
                 if filename:
-                    for i, (p, a) in enumerate(zip(sig["params"], arg_types)):
-                        if p and a and not compatible(p, a):
-                            raise mismatch(filename, line,
-                                           f"argument {i + 1} of `{name}(...)`", p, a)
-                return sig["returns"]
+                    if len(expr.args) != len(params):
+                        rendered = ", ".join(render_type(p) or "_"
+                                             for p in params) or "no arguments"
+                        raise RevlError(
+                            filename, line,
+                            f"`{name}` takes {len(params)} argument(s), "
+                            f"{len(expr.args)} given",
+                            hint=f"`{name}` is declared `({rendered})` — revl has no "
+                                 "default, optional, or variadic parameters, so every "
+                                 "call supplies exactly the declared arity",
+                            code="T1", category="type-mismatch",
+                        )
+                if not sig.get("tparams"):
+                    if filename:
+                        for i, (p, a) in enumerate(zip(params, arg_types)):
+                            if p and a and not compatible(p, a):
+                                raise mismatch(filename, line,
+                                               f"argument {i + 1} of `{name}(...)`", p, a)
+                    return sig["returns"]
+                # generic: instantiate the signature against this call's
+                # arguments rather than letting every `T` position pass
+                subst: dict = {}
+                for i, (p, a) in enumerate(zip(params, arg_types)):
+                    if unify(p, a, subst):
+                        continue
+                    if not filename:
+                        return None
+                    bound = substitute(p, subst)
+                    raise mismatch(filename, line,
+                                   f"argument {i + 1} of `{name}(...)`", bound, a)
+                return substitute(sig["returns"], subst)
         if isinstance(expr.callee, ExprField):
             target_t = infer_ast(expr.callee.target, tenv, types, filename)
             return builtin_check(expr.callee.name, target_t, arg_types, filename, line)
@@ -425,6 +650,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             result = t if result is None else join(result, t)
         return result
     if isinstance(expr, ExprArrow):
+        # An arrow's own parameters are un-annotated, so its result is unknown
+        # — but its *body* is an ordinary expression over the enclosing scope,
+        # and skipping it let every check above leak: `(x) => s[0]` and
+        # `(x) => o.name` were accepted inside an arrow and refused outside it.
+        # Parameters shadow into the unknown; free variables keep their types.
+        inner = dict(tenv)
+        for param in expr.params:
+            inner.pop(param, None)
+        infer_ast(expr.body, inner, types, filename)
         return None
     return None
 
@@ -537,8 +771,32 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
                     return decl.returns
         return None
     if kind == "fn":
-        sig = (types.get(FNS_KEY) or {}).get(node.get("name"))
-        return sig["returns"] if sig else None
+        name = node.get("name")
+        sig = (types.get(FNS_KEY) or {}).get(name)
+        if sig is None:
+            return None
+        args = node.get("args") or []
+        if filename and len(args) != len(sig["params"]):
+            rendered = ", ".join(render_type(p) or "_"
+                                 for p in sig["params"]) or "no arguments"
+            raise RevlError(
+                filename, line,
+                f"`{name}` takes {len(sig['params'])} argument(s), {len(args)} given",
+                hint=f"`{name}` is declared `({rendered})` — revl has no default, "
+                     "optional, or variadic parameters, so every call supplies "
+                     "exactly the declared arity",
+                code="T1", category="type-mismatch",
+            )
+        subst: dict = {}
+        for i, (p, a) in enumerate(zip(sig["params"], args)):
+            at = infer_ir(a, tenv, types, services, filename, line)
+            if unify(p, at, subst):
+                continue
+            if filename:
+                raise mismatch(filename, line, f"argument {i + 1} of `{name}(...)`",
+                               substitute(p, subst), at)
+            return None
+        return substitute(sig["returns"], subst)
     if kind == "builtin":
         target_t = infer_ir(node.get("target"), tenv, types, services, filename, line)
         args = [infer_ir(a, tenv, types, services, filename, line) for a in node.get("args") or []]
@@ -555,6 +813,12 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return "Int"
     if kind == "field":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
+        thead, targs = parse_type(target)
+        if filename and thead == "Opt":
+            raise opt_escape_error(filename, line,
+                                   f"field access `.{node.get('name')}`", target,
+                                   targs[0] if targs else None,
+                                   alt=f"?.{node.get('name')}")
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
             return spec.get("fields", {}).get(node.get("name"))
@@ -562,6 +826,18 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
     if kind == "index":
         target = infer_ir(node.get("target"), tenv, types, services, filename, line)
         thead, targs = parse_type(target)
+        if filename and thead == "Opt":
+            raise opt_escape_error(filename, line, "index `[...]`", target,
+                                   targs[0] if targs else None)
+        if filename and thead == "Str":
+            raise RevlError(
+                filename, line,
+                "`Str` has no index operator — `[...]` indexes a `List` only",
+                hint="use `s.charAt(i)` for the character (or `s.slice(i, j)` "
+                     "for a substring, `s.charCodeAt(i)` for the code point) "
+                     "— docs/stdlib-2.0.md",
+                code="T1", category="type-mismatch",
+            )
         if thead == "List":
             return targs[0] if targs else None
         if thead == "Str":

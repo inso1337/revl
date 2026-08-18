@@ -70,23 +70,39 @@ This goes in the compiler spec, not the runtimes.
 ## Typing gaps (fenced, not closed)
 
 The checker is sound where types are known and silent where they are not (the
-gradual frontier of the sound-typing milestone). The two silent gaps below are
-known soundness holes rather than mere unknowns, so each is loud here with its
+gradual frontier of the sound-typing milestone). The gaps below are known
+soundness holes rather than mere unknowns, so each is loud here with its
 trigger and blast radius, the way the cordis-rs A1 divergence is. Everything
-else the checker does not type (arrows, un-annotated positions) infers to an
-unknown and is left alone by design.
+else the checker does not type infers to an unknown and is left alone by
+design.
 
-- **Generic instantiation is deferred** (frontier, tracked): a single-uppercase
-  type name (`T`, `E`) is a wildcard everywhere (`_is_wildcard`, `typecheck.py`)
-  and is never unified against the actual argument at a call site. Trigger: a
-  generic fn whose return mentions a type parameter, e.g. `fn id(x: T) -> T {
-  return x }` then `id("hello")` used where an `Int` is expected. Blast radius:
-  the declared return flows into any expected type unchecked, so a generic fn's
-  result is effectively untyped at the call site (`id("hello")` satisfies an
-  `Int` position). Bounded: only functions carrying single-uppercase type
-  parameters; fully monomorphic code is checked. Closing it needs explicit
-  type-parameter syntax in the parser plus a call-site unification pass (roadmap
-  "Typing follow-ups").
+**Closed since the last revision** (roadmap "Typing follow-ups"; rejection
+files `t8`–`t17`). One of these — generic instantiation — was fenced here; the
+rest were *not*, which is the failure mode this section exists to prevent: a
+review found six programs the checker accepted and the strict tiers refuse,
+none of them named by any fence. Each closure is verified against `javac
+--release 21` and the emitted Rust.
+
+- a declared return not produced on every path — in a `fn` and in a `provide`
+  method alike (rust E0308, java "missing return statement"; python silently
+  returned `None`, and python is the reference backend);
+- a call with the wrong arity (rust E0061, java "cannot be applied to given
+  types"), in `fn`, component and `test` bodies;
+- any access *through* an `Opt` — `.field`, `[i]`, a stdlib method — plus `?.`
+  on a non-optional and `?.` typed as the inner rather than `Opt[inner]` (rust
+  E0609, java "cannot find symbol"). This one contradicted the README's
+  headline claim outright: `return o` was refused while `o.name` escaped to an
+  unknown and then flowed anywhere;
+- `Str` indexing (rust E0277, java "cannot find symbol" — the emitter renders
+  `.get(i)` on a `String`); the specified surface is `charAt` / `charCodeAt` /
+  `slice`;
+- a `match` arm naming something that is not a case of the scrutinee's ADT
+  (java "cannot find symbol", rust `EmitError`);
+- generic instantiation at the call site (below).
+
+Arrow bodies are now checked against their enclosing scope, which is where the
+first four used to hide. Do not re-fence any of these; each has an executable
+rejection.
 
 - **Host-object methods are untyped** (by design, host provenance): a value of
   host provenance (a `let` bound to `Map.new()` / `Pool.open(...)`, or a
@@ -100,6 +116,43 @@ unknown and is left alone by design.
   surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are typed and
   their misuse is refused, in `fn` bodies and (as of the setup op sweep) in
   component effect blocks alike.
+
+- **Arrow *values* have no type** (frontier, narrowed): an arrow's parameters
+  are un-annotated and no arrow type is reconstructed, so the arrow itself, and
+  anything obtained by calling one, infers to an unknown. Trigger: `let f = (x)
+  => "s"` then `f(1)` in an `Int` position. Blast radius: the call's result
+  flows anywhere unchecked, and the arrow's arity is not checked at the call
+  site. Narrowed, not open: the arrow's *body* is now type-checked against the
+  enclosing scope, so a captured variable misused inside a lambda (`(x) =>
+  o.name` on an `Opt`, `(x) => s[0]`, a wrong-arity call) is refused exactly as
+  it is outside one. Closing the rest needs arrow-parameter annotations in the
+  grammar.
+
+- **Type parameters are implicit, so they cannot be spelled or constrained**
+  (frontier, tracked): instantiation itself is closed — a single-uppercase name
+  in a `fn` signature that is not a declared type is that fn's type parameter,
+  is a wildcard only inside that fn's own body, and is unified against the
+  actual arguments at every call site (`collect_tparams` / `unify`,
+  `typecheck.py`), so `fn id(x: T) -> T` then `id("hello")` no longer satisfies
+  an `Int` position. What is *not* closed is the declaration form. There is no
+  `[T]` syntax, so: (a) the rule is positional-by-spelling — a one-letter
+  signature type is generic whether or not the author meant it, and a typo'd
+  one-letter name silently becomes a type parameter rather than an error;
+  (b) parameters cannot be bounded or shared across signatures; (c) only `fn`
+  and `extern` signatures quantify — a one-letter name in a record field or an
+  ADT payload is an ordinary opaque nominal type, like any other undeclared
+  name (undeclared multi-letter names such as the `Row` in `-> List[Row]` are
+  deliberately opaque, since service returns are host-shaped). Closing it needs
+  explicit type-parameter syntax in the parser.
+
+- **A `match` over an untypable scrutinee stays best-effort** (frontier,
+  unchanged): case-name and exhaustiveness checks need the scrutinee's ADT.
+  When it is not recoverable — a host-valued local, an arrow result — both
+  checks are skipped and the Python emitter adds a runtime fallback. Trigger:
+  `match store.lookup(k) { ... }` on a host object. Blast radius: a missing or
+  misspelled case in that one `match` reaches the tiers. Narrowed: a bare
+  nullary constructor now types as its ADT, so `match FirstTime { ... }` is
+  checked; only genuinely unknown scrutinees are silent.
 
 ## Contract rejection coverage (the executable spec)
 
@@ -126,3 +179,11 @@ sampled.
   `tests/test_frontend.py` (`test_a3_host_colliding_names_are_renamed`,
   `test_a4_literal_dollars_are_escaped`, `test_a5_compensate_lowering`).
 - **A7** is advisory; its enforcement is G4 itself (`g4_unmarked_emission.rvl`).
+- **T1–T17** are the type-soundness refusals. `t8`–`t17` were added with the
+  typing follow-ups above and are deliberately paired: each rejection file
+  states the tier error it prevents, and `tests/test_typesafety.py` asserts
+  both the refusal *and* the legal spellings it must not touch (a `fn`
+  returning nothing needs no `return`; `if`/`else` where both arms return is
+  fine; `o?.name`, `o?.name ?? d` and a `match` unwrap all stay accepted;
+  `xs[0]`, `s.charAt(0)` and a `_` arm stay accepted). A soundness check with
+  no false-positive test is a check nobody can safely tighten later.
