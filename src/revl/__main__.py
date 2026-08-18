@@ -205,11 +205,17 @@ def _run_mcp(args) -> int:
 
 
 def _run_import(args) -> int:
-    """`revl import wit` — the import codegen family (docs/import-wit.md)."""
-    from .import_wit import import_wit_file
-
+    """`revl import {wit,openapi}` — the import codegen family
+    (docs/import-wit.md, docs/import-openapi.md)."""
     try:
-        source = import_wit_file(args.file, backend=args.backend, pure=args.pure)
+        if args.import_command == "openapi":
+            from .import_openapi import import_openapi_file
+            source = import_openapi_file(args.file, backend=args.backend,
+                                         service=args.service, pure=args.pure,
+                                         emission=args.emission)
+        else:
+            from .import_wit import import_wit_file
+            source = import_wit_file(args.file, backend=args.backend, pure=args.pure)
     except OSError as error:
         print(f"error: cannot read {args.file}: {error}", file=sys.stderr)
         return 1
@@ -305,6 +311,32 @@ def main(argv: list[str] | None = None) -> int:
     imp_wit.add_argument("-o", "--output", default=None,
                          help="output path (default: stdout)")
     imp_wit.add_argument("--json-diagnostics", action="store_true",
+                         help="on rejection, print a structured diagnostic instead "
+                              "of the human rendering")
+
+    imp_api = imp_sub.add_parser(
+        "openapi",
+        help="turn an OpenAPI 3.x document into revl source (docs/import-openapi.md)")
+    imp_api.add_argument("file", help="a .json (or .yaml, if PyYAML is importable) OpenAPI 3.x document")
+    imp_api.add_argument("--backend", default="ts", choices=("ts", "py", "rust"),
+                         help="host block backend for the generated extern stubs "
+                              "(default: ts)")
+    imp_api.add_argument("--service", default=None,
+                         help="generated service name (default: from `info.title`)")
+    imp_api.add_argument(
+        "--pure", action="append", default=[], metavar="OP",
+        help="assert that an operation whose verb HTTP does not call safe (a "
+             "`POST /search`, say) changes nothing, so it is emitted as a plain "
+             "`fn` instead of `emission`. Name it by generated name, "
+             "`operationId`, or \"POST /search\". Repeatable")
+    imp_api.add_argument(
+        "--emission", action="append", default=[], metavar="OP",
+        help="assert that a safe-by-spec operation (a `GET` that writes) is "
+             "irreversible after all, overriding the verb. Named the same way. "
+             "Repeatable")
+    imp_api.add_argument("-o", "--output", default=None,
+                         help="output path (default: stdout)")
+    imp_api.add_argument("--json-diagnostics", action="store_true",
                          help="on rejection, print a structured diagnostic instead "
                               "of the human rendering")
 
