@@ -73,16 +73,22 @@ def _extern_reachability(ir: dict) -> dict[str, set]:
 
 def _boundary(ir: dict) -> dict:
     """G8: the enumerable boundary surface per component — every emission
-    call site (including teardown-position ones), compensation counts,
+    call site (including teardown-position ones), the capabilities each of
+    those call sites may cross (docs/capabilities.md), compensation counts,
     iteration boundaries, and reachable host code (externs, transitively
-    through functions)."""
+    through functions).
+
+    The capability map is what turns "this component emits" into "this
+    component reaches *these* boundaries": each emission is annotated with the
+    scope its declaration carries, and `*` is an unscoped `emission` — an
+    operation whose declaration makes no promise about where it goes."""
     reach = _extern_reachability(ir)
     externs = reach["__externs__"]
     extern_class = {ext["name"]: ext for ext in ir.get("externs") or []}
 
     report: dict[str, dict] = {}
     for comp in ir.get("components") or []:
-        stats = {"emissions": set(), "compensated": 0, "awaits": 0}
+        stats = {"emissions": set(), "compensated": 0, "awaits": 0, "capabilities": {}}
 
         def walk_expr(node, comp=comp, stats=stats):
             if isinstance(node, dict):
@@ -91,7 +97,12 @@ def _boundary(ir: dict) -> dict:
                     service = (comp.get("requires") or {}).get(target.get("name"))
                     spec = (((ir.get("services") or {}).get(service) or {}).get("methods") or {}).get(node.get("method")) or {}
                     if spec.get("emission"):
-                        stats["emissions"].add(f"{target['name']}.{node['method']}")
+                        label = f"{target['name']}.{node['method']}"
+                        stats["emissions"].add(label)
+                        # `*` = declared bare `emission`: no promise about where
+                        declared = spec.get("capabilities")
+                        stats["capabilities"][label] = (
+                            sorted(declared) if declared is not None else ["*"])
                 for value in node.values():
                     walk_expr(value)
             elif isinstance(node, list):
@@ -123,6 +134,7 @@ def _boundary(ir: dict) -> dict:
 
         report[comp["name"]] = {
             "emissions": sorted(stats["emissions"]),
+            "capabilities": dict(sorted(stats["capabilities"].items())),
             "compensated": stats["compensated"],
             "awaits": stats["awaits"],
             "externs": [
@@ -383,8 +395,21 @@ def main(argv: list[str] | None = None) -> int:
             if stats["emissions"] or stats["awaits"] or host:
                 detail = []
                 if stats["emissions"]:
-                    detail.append(f"emissions: {', '.join(stats['emissions'])}"
+                    caps = stats.get("capabilities") or {}
+
+                    def _scoped(label: str) -> str:
+                        scope = caps.get(label) or ["*"]
+                        return (f"{label} [{', '.join(scope)}]"
+                                if scope != ["*"] else label)
+
+                    # the union is the G8 answer to "where can this component
+                    # reach"; `*` in it means some dependency's declaration
+                    # makes no promise, which is the thing worth seeing
+                    reach = sorted({c for scope in caps.values() for c in scope})
+                    detail.append(f"emissions: {', '.join(_scoped(e) for e in stats['emissions'])}"
                                   f" ({stats['compensated']} compensated)")
+                    if reach:
+                        detail.append(f"capabilities: {', '.join(reach)}")
                 if stats["awaits"]:
                     detail.append(f"iteration boundaries: {stats['awaits']}")
                 if host:

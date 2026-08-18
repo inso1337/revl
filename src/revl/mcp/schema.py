@@ -125,6 +125,9 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
     # the declaration is authoritative: the checker refuses a provider whose
     # body exceeds it, so `emission` is exactly the operation's contract
     emission = bool(op.get("emission"))
+    # a capability-scoped `emission[db]` is a *checked* upper bound on where
+    # this operation may reach; `None` is bare `emission` — "any capability"
+    scope = op.get("capabilities")
     uses_extern = observed["uses_extern"]
     params = op.get("params") or []
     properties, required = {}, []
@@ -141,6 +144,12 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
         reached = ", ".join(sorted(observed["emissions"])) or "host code"
         behaviour = ("Emission: crosses the system boundary and cannot be reverted "
                      f"(reaches {reached}).")
+        if scope:
+            behaviour += (" Capability-scoped: the compiler refused any provider "
+                          f"emitting outside [{', '.join(scope)}].")
+        else:
+            behaviour += (" Unscoped: the declaration names no capability, so it "
+                          "promises nothing about where the emission goes.")
     else:
         behaviour = ("Read-only: the compiler refused any unreverted mutation here, "
                      "and a service declaration bounds what its providers may do — "
@@ -176,6 +185,9 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
             "service": service_name,
             "operation": op_name,
             "classification": "emission" if emission else "checked",
+            # `["*"]` is bare `emission` — any capability. A named list is an
+            # upper bound the checker enforces (docs/capabilities.md).
+            "capabilities": list(scope) if scope else (["*"] if emission else []),
             "async": bool(op.get("async")),
             "commutative": bool(op.get("commutative")),
             "annotationsDerivedFrom": "compiler",
@@ -184,9 +196,15 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
                 # upper bound — a plain operation reaches neither of these
                 "reachesEmission": sorted(observed["emissions"]),
                 "reachesHostCode": sorted(observed["externs"]),
+                # the boundaries this body actually crosses — a subset of the
+                # declared `capabilities` above, which the checker enforces
+                "reachesCapabilities": sorted(observed["capabilities"]),
                 "boundedByDeclaration": True,
             },
             "guarantee": (
+                f"G4 — an emission bounded to [{', '.join(scope)}]: no provider "
+                f"of this operation can reach any other boundary"
+                if emission and scope else
                 "G4 — an emission is the language's admission of irreversibility"
                 if emission else
                 "G4 — every mutation in this operation carries a tracked inverse"
@@ -254,9 +272,12 @@ def _extern_reachability(ir: dict, externs: dict) -> dict[str, set]:
 def _method_effects(body: list, component: dict, services: dict,
                     externs: dict, reach: dict[str, set]) -> dict:
     """What a provide-method's *implementation* actually reaches: emissions
-    on required services (declared or via `emit` steps) and host code."""
+    on required services (declared or via `emit` steps), host code, and the
+    *capabilities* those crossings name (docs/capabilities.md) — a required
+    key for a service emission, the extern itself for host code."""
     emissions: set = set()
     extern_names: set = set()
+    capabilities: set = set()
 
     def walk_expr(node):
         if isinstance(node, dict):
@@ -268,6 +289,7 @@ def _method_effects(body: list, component: dict, services: dict,
                     .get(node.get("method")) or {}
                 if spec.get("emission"):
                     emissions.add(f"{target['name']}.{node['method']}")
+                    capabilities.add(target["name"])
             if node.get("kind") == "fn":
                 name = node.get("name")
                 if name in externs:
@@ -286,6 +308,7 @@ def _method_effects(body: list, component: dict, services: dict,
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":
                     emissions.add(f"{target.get('name')}.{expr.get('method')}")
+                    capabilities.add(target.get("name"))
                 else:
                     emissions.add("host emission")
             walk_expr(step)
@@ -294,9 +317,13 @@ def _method_effects(body: list, component: dict, services: dict,
     # a host extern that is not `pure` writes to the outside world
     writes_host = any((externs.get(name) or {}).get("class") in ("emission", "acquire")
                       for name in extern_names)
+    # an `emission` extern *is* the boundary, so it names its own capability
+    capabilities |= {name for name in extern_names
+                     if (externs.get(name) or {}).get("class") == "emission"}
     return {
         "emissions": emissions,
         "externs": extern_names,
+        "capabilities": capabilities,
         "uses_extern": bool(extern_names),
         "writes_host": writes_host,
     }

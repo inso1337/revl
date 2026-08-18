@@ -4,7 +4,8 @@ Grammar (v0 subset — see DESIGN.md §3):
 
     program    := (service | component)*
     service    := 'service' IDENT '{' methoddecl* '}'
-    methoddecl := ['emission'] 'fn' IDENT '(' [tparam (',' tparam)*] ')' ['->' type]
+    methoddecl := modifier* 'fn' IDENT '(' [tparam (',' tparam)*] ')' ['->' type]
+    modifier   := 'emission' ['[' IDENT (',' IDENT)* ']'] | 'async' | 'commutative'
     tparam     := IDENT ':' type
     type       := IDENT ['[' type (',' type)* ']']
     component  := 'component' IDENT ['requires' binds] ['provides' binds] '{' body '}'
@@ -40,6 +41,11 @@ class MethodDecl:
     line: int
     async_: bool = False       # `async fn` service operation (§5)
     commutative: bool = False  # Def. 39 order-independence opt-in
+    # capability-scoped emission (docs/capabilities.md): `emission[db, log]`
+    # bounds *where* a provider may emit. `None` is bare `emission` — "any
+    # capability" — which is what every pre-capability source means, so
+    # existing programs keep their meaning.
+    capabilities: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -637,6 +643,35 @@ class Parser:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line)
 
+    def _capability_list(self) -> tuple[str, ...]:
+        """`[a, b]` after `emission` — the boundaries this operation may cross.
+
+        Names are wiring names, not types: a requirement/provision key or an
+        `emission` extern (docs/capabilities.md). They are not resolved here —
+        a service is written before its providers exist — the G4 check in
+        lower.py compares them against what a provider's body actually reaches.
+        """
+        line = self.expect("[").line
+        names: list[str] = []
+        while not self.at("]"):
+            names.append(self.expect("ident", what="a capability name").value)
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        if not names:
+            raise self.err(
+                line,
+                "`emission[]` names no capability, so it forbids every emission",
+                hint="an operation that may not emit is a plain `fn` — drop the "
+                     "`emission` modifier instead (G4)",
+            )
+        seen: set[str] = set()
+        for cap in names:
+            if cap in seen:
+                raise self.err(line, f"duplicate capability `{cap}` in `emission[...]`")
+            seen.add(cap)
+        return tuple(names)
+
     def service(self, commutative: bool = False) -> ServiceDecl:
         line = self.expect("kw", "service").line
         name = self.expect("ident").value
@@ -644,6 +679,7 @@ class Parser:
         methods: dict[str, MethodDecl] = {}
         while not self.at("}"):
             emission = False
+            capabilities: tuple[str, ...] | None = None
             async_ = False
             method_commutative = False
             mline = self.peek().line
@@ -651,6 +687,12 @@ class Parser:
                 modifier = self.next().value
                 if modifier == "emission":
                     emission = True
+                    # `emission[db, log]`: the bracket is revl's existing
+                    # parameterisation bracket (`List[Row]`, `Map[Str, Int]`),
+                    # so this reads as "emission, parameterised by the
+                    # boundaries it may cross". Bare `emission` stays "any".
+                    if self.at("["):
+                        capabilities = self._capability_list()
                 elif modifier == "async":
                     async_ = True
                 else:
@@ -673,7 +715,8 @@ class Parser:
             if mname in methods:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
             methods[mname] = MethodDecl(
-                mname, params, returns, emission, mline, async_=async_, commutative=method_commutative,
+                mname, params, returns, emission, mline, async_=async_,
+                commutative=method_commutative, capabilities=capabilities,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)

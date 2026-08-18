@@ -248,6 +248,7 @@ revl 2.0 — surface summary (full spec: docs/syntax-2.0.md)
 
 service S { fn f(a: Str) -> Int          // checked operation
             emission fn g(a: Str) -> Int // crosses the boundary
+            emission[db] fn p(a: Str)    // ... only through `db`
             async fn h() -> Str }
 
 component C requires k: S provides j: T {
@@ -326,7 +327,8 @@ TOOLS = [
     {
         "name": "revl_audit",
         "description": "The G8 boundary surface of a composition: which emissions "
-                       "each component can perform, which are compensated, its "
+                       "each component can perform, the capabilities each of those "
+                       "may cross (`*` = unscoped), which are compensated, its "
                        "iteration boundaries, and the host code it reaches.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
