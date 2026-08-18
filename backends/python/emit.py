@@ -533,14 +533,37 @@ _PY_BIN_OPS = {
 }
 
 
+def _split_fn_type(name: str) -> tuple[list[str], str] | None:
+    """`"(Int, Str) -> Bool"` -> `(["Int", "Str"], "Bool")`, else None.
+
+    A function type (docs/function-types.md) is the one surface type that is
+    not spelled `Head[Args]`, so it is recognised before the generic path.
+    """
+    if not name.startswith("("):
+        return None
+    depth = 0
+    for i, ch in enumerate(name):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                rest = name[i + 1:].lstrip()
+                if not rest.startswith("->"):
+                    return None
+                inner = name[1:i].strip()
+                return (_split_types(inner) if inner else []), rest[2:].strip()
+    return None
+
+
 def _split_types(inner: str) -> list[str]:
     parts: list[str] = []
     depth = 0
     current: list[str] = []
     for ch in inner:
-        if ch == "[":
+        if ch in "[(":
             depth += 1
-        elif ch == "]":
+        elif ch in "])":
             depth -= 1
         if ch == "," and depth == 0:
             parts.append("".join(current).strip())
@@ -554,6 +577,14 @@ def _split_types(inner: str) -> list[str]:
 
 def _py_type(type_name: str) -> str:
     type_name = type_name.strip()
+    fn = _split_fn_type(type_name)
+    if fn is not None:
+        # a function type `(Int, Str) -> Bool` (docs/function-types.md).
+        # Python function values are plain callables, so the annotation is the
+        # only thing that carries the signature here.
+        params, returns = fn
+        rendered = ", ".join(_py_type(p) for p in params)
+        return f"Callable[[{rendered}], {_py_type(returns)}]"
     if "[" in type_name:
         base = type_name[: type_name.index("[")]
         inner = type_name[type_name.index("[") + 1: type_name.rindex("]")]
@@ -1058,7 +1089,7 @@ def emit(ir: dict) -> str:
             out.add(0)
     if types:
         out.add(0, "from dataclasses import dataclass")
-        out.add(0, "from typing import Any, Optional, Union")
+        out.add(0, "from typing import Any, Callable, Optional, Union")
         out.add(0)
         out.extend(_emit_types(types))
     if functions:

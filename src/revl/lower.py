@@ -28,6 +28,7 @@ from .typecheck import (
     mark_tparams,
     check_type_wellformed,
     compatible,
+    format_type,
     host_check,
     infer_ast,
     infer_ir,
@@ -281,7 +282,7 @@ def _resolve_type_aliases(program: Program, filename: str) -> None:
     def expand(type_name: str, stack: tuple) -> str:
         head, args = parse_type(type_name)
         if args:
-            return f"{head}[{', '.join(expand(a, stack) for a in args)}]"
+            return format_type(head, [expand(a, stack) for a in args])
         if head not in aliases:
             return head
         if head in stack:
@@ -302,7 +303,7 @@ def _resolve_type_aliases(program: Program, filename: str) -> None:
             return type_name
         head, args = parse_type(type_name)
         if args:
-            return f"{head}[{', '.join(subst(a) for a in args)}]"
+            return format_type(head, [subst(a) for a in args])
         return resolved.get(head, head)
 
     # every declaration site that carries a type annotation; kept in step with
@@ -333,8 +334,89 @@ def _resolve_type_aliases(program: Program, filename: str) -> None:
             for method in stmt.methods:
                 method.param_types = [subst(t) for t in method.param_types]
                 method.returns = subst(method.returns)
+                _subst_body_annotations(method.body, subst)
+    for fn in program.fn_decls:
+        _subst_body_annotations(fn.body, subst)
+    for test in program.tests:
+        _subst_body_annotations(test.body, subst)
 
     program.type_decls = [d for d in program.type_decls if d.name not in aliases]
+
+
+def _subst_body_annotations(stmts: list, subst) -> None:
+    """Expand type aliases in the annotations a *body* can carry.
+
+    `let g: Handler = …` and `(v: Handler) => …` are type annotations like any
+    other, but they live inside statements rather than at a declaration site,
+    so the declaration sweep above cannot reach them — and an alias that
+    survived here would reach the checker as an undeclared type name."""
+    def walk_expr(expr) -> None:
+        if isinstance(expr, ExprArrow):
+            expr.param_types = [subst(t) for t in expr.param_types]
+            walk_expr(expr.body)
+        elif isinstance(expr, ExprBin):
+            walk_expr(expr.left)
+            walk_expr(expr.right)
+        elif isinstance(expr, ExprUn):
+            walk_expr(expr.operand)
+        elif isinstance(expr, ExprCall):
+            walk_expr(expr.callee)
+            for arg in expr.args:
+                walk_expr(arg)
+        elif isinstance(expr, (ExprField, ExprOptField)):
+            walk_expr(expr.target)
+        elif isinstance(expr, ExprOptCall):
+            walk_expr(expr.target)
+            for arg in expr.args:
+                walk_expr(arg)
+        elif isinstance(expr, ExprIndex):
+            walk_expr(expr.target)
+            walk_expr(expr.index)
+        elif isinstance(expr, ExprIf):
+            walk_expr(expr.cond)
+            walk_expr(expr.then)
+            walk_expr(expr.otherwise)
+        elif isinstance(expr, ExprRecord):
+            for _, value in expr.fields:
+                walk_expr(value)
+        elif isinstance(expr, ExprList):
+            for item in expr.items:
+                walk_expr(item)
+        elif isinstance(expr, ExprMatch):
+            walk_expr(expr.scrutinee)
+            for _, _, body in expr.arms:
+                walk_expr(body)
+        elif isinstance(expr, Interp):
+            for kind, part in expr.parts:
+                if kind == "expr":
+                    walk_expr(part)
+
+    def walk_stmt(stmt) -> None:
+        if isinstance(stmt, LetStmt):
+            stmt.type = subst(stmt.type)
+            walk_expr(stmt.value)
+        elif isinstance(stmt, (LetPatternStmt, AssignStmt)):
+            walk_expr(stmt.value)
+        elif isinstance(stmt, (ExprStmt, AssertStmt, FailStmt, AwaitStmt)):
+            walk_expr(stmt.expr)
+        elif isinstance(stmt, ReturnStmt):
+            if stmt.expr is not None:
+                walk_expr(stmt.expr)
+        elif isinstance(stmt, IfStmt):
+            walk_expr(stmt.cond)
+            for child in list(stmt.then) + list(stmt.otherwise or []):
+                walk_stmt(child)
+        elif isinstance(stmt, WhileStmt):
+            walk_expr(stmt.cond)
+            for child in stmt.body:
+                walk_stmt(child)
+        elif isinstance(stmt, ForStmt):
+            walk_expr(stmt.iterable)
+            for child in stmt.body:
+                walk_stmt(child)
+
+    for stmt in stmts:
+        walk_stmt(stmt)
 
 
 def _validate_declared_types(program: Program, filename: str) -> None:
@@ -688,6 +770,18 @@ def _case_table(types: dict) -> dict:
     return cases
 
 
+def _arrow_param_types(expr) -> list:
+    """An arrow's parameter types, one per parameter (None where unknown).
+
+    The checker writes what it resolved back onto the AST node
+    (`typecheck.py::_resolve_arrow`), so this is either the author's `(v: Int)`
+    annotations, the types the expected function type supplied, or Nones when
+    the arrow is still on the unchecked frontier."""
+    written = list(getattr(expr, "param_types", None) or [])
+    written += [None] * (len(expr.params) - len(written))
+    return written[:len(expr.params)]
+
+
 def _expr_static_type(expr, type_env: dict, types: dict) -> str | None:
     """Best-effort static type of a pure expression.
 
@@ -1029,9 +1123,19 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             scope[stmt.name] = "host"
         else:
             scope[stmt.name] = stmt.mutable
-        inferred = infer_ast(stmt.value, type_env, types, filename)
-        if inferred is not None:
-            type_env[stmt.name] = inferred
+        declared = getattr(stmt, "type", None)
+        if declared is not None:
+            # `let g: (Int) -> Int = v => v + 1` — the annotation is the
+            # checking position for the right-hand side, which is what gives an
+            # un-annotated arrow its parameter and return types.
+            check_type_wellformed(filename, stmt.line, declared)
+            check_ast(stmt.value, declared, type_env, types, filename,
+                      f"`let {stmt.name}: {render_type(declared)}`")
+            type_env[stmt.name] = declared
+        else:
+            inferred = infer_ast(stmt.value, type_env, types, filename)
+            if inferred is not None:
+                type_env[stmt.name] = inferred
         body.append({"step": "let", "name": stmt.name,
                      "value": _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types),
                      "mutable": stmt.mutable})
@@ -1051,8 +1155,15 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             # `x += e` desugars to `x = x + e`; the parser only composes the
             # operator, so lowering never has to remember it beyond this point.
             value = ExprBin(stmt.op[:-1], ExprVar(stmt.name, stmt.line), stmt.value, stmt.line)
-        inferred = infer_ast(value, type_env, types, filename)
         declared = type_env.get(stmt.name)
+        if isinstance(value, ExprArrow) and declared:
+            # reassigning a `var` of function type: the arrow needs the
+            # declaration as its *checking* position, exactly as at the `let`.
+            # Inference alone returns nothing for an un-annotated arrow, so the
+            # comparison below would pass anything (docs/function-types.md).
+            check_ast(value, declared, type_env, types, filename,
+                      f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)")
+        inferred = infer_ast(value, type_env, types, filename)
         if declared and inferred and not compatible(declared, inferred):
             raise mismatch(filename, stmt.line,
                            f"assignment to `{stmt.name}` (a `{render_type(declared)}` variable)",
@@ -1389,12 +1500,23 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     if isinstance(expr, ExprArrow):
         inner = dict(scope)
         inner_type_env = dict(type_env)
-        for param in expr.params:
+        param_types = _arrow_param_types(expr)
+        for param, ptype in zip(expr.params, param_types):
             inner[param] = False
-            inner_type_env.pop(param, None)
+            if ptype:
+                inner_type_env[param] = ptype
+            else:
+                inner_type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
-        return {"kind": "arrow", "params": expr.params, "captures": captures,
+        node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": _lower_pure_expr(expr.body, inner, callables, alias_fns, filename, inner_type_env, types)}
+        # IR v3: an arrow that the checker typed carries its signature, so a
+        # backend can declare it instead of guessing (docs/function-types.md).
+        # Both keys are absent together when the arrow is still untyped.
+        if any(p is not None for p in param_types) or expr.returns:
+            node["param_types"] = param_types
+            node["returns"] = expr.returns
+        return node
     if isinstance(expr, ExprMatch):
         scrutinee_type = _expr_static_type(expr.scrutinee, type_env, types)
         _check_match_exhaustiveness(expr, type_env, types, filename)
@@ -1906,9 +2028,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
                           for e in expr.items]}
     if isinstance(expr, ExprArrow):
-        return {"kind": "arrow", "params": expr.params,
+        node = {"kind": "arrow", "params": expr.params,
                 "body": _lower_component_pure_expr(expr.body, env, scope, callables,
                                                    pure_only)}
+        param_types = _arrow_param_types(expr)
+        if any(p is not None for p in param_types) or expr.returns:
+            node["param_types"] = param_types
+            node["returns"] = expr.returns
+        return node
     if isinstance(expr, ExprOptField):
         return {
             "kind": "optfield",
@@ -2580,6 +2707,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 value = _lower_expr(mstmt.value, env, mode="setup")
                 method_locals[mstmt.name] = safe
                 env.params[mstmt.name] = safe  # visible to later statements
+                if mstmt.type is not None:
+                    # a `let x: T` annotation in a provide-method body. It is
+                    # recorded rather than ignored so `infer_ir` sees it, but
+                    # this is stratum 3: the value is *not* checked against it
+                    # (docs/function-types.md §limits).
+                    check_type_wellformed(filename, mstmt.line, mstmt.type)
+                    env.type_env[safe] = mstmt.type
                 mbody.append({"step": "let", "name": safe, "value": value,
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):

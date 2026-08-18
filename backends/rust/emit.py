@@ -94,6 +94,45 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+def _is_fn_type(name: object) -> bool:
+    """Is this surface type a function type, `(P, ...) -> R`?
+
+    A function type is the one surface spelling that is not `Head[Args]`
+    (docs/function-types.md), so it can be recognised without a full parse:
+    a leading parenthesised group whose closing paren is followed by `->`.
+    """
+    if not isinstance(name, str) or not name.strip().startswith("("):
+        return False
+    name = name.strip()
+    depth = 0
+    for i, ch in enumerate(name):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                return name[i + 1:].lstrip().startswith("->")
+    return False
+
+
+_FN_TYPE_REFUSAL = (
+    "a declared function type ({name}) is not lowerable on the Rust tier. "
+    "Rust has no single type for \"a callable\": a parameter wants `impl "
+    "Fn(..)`, a return wants `impl Fn(..)` tied to one concrete closure, and a "
+    "struct field or a `Vec` element wants `Box<dyn Fn(..)>` with an explicit "
+    "lifetime — three different lowerings whose choice depends on the position "
+    "and on whether the value escapes. revl does not carry that distinction, "
+    "so the emitter cannot pick one without guessing. Arrows bound to a local "
+    "`let` and called in the same function still lower (rustc infers the "
+    "closure type); it is only a function type *written in a declaration* that "
+    "is refused. See docs/function-types.md."
+)
+
+
+def _reject_fn_type(name: object) -> None:
+    if _is_fn_type(name):
+        raise EmitError(_FN_TYPE_REFUSAL.format(name=name))
+
 def _rust_type(name: object, types: dict | None = None) -> str:
     """Surface type -> Rust type. Unknown named types map to cordis `Value`.
 
@@ -102,6 +141,7 @@ def _rust_type(name: object, types: dict | None = None) -> str:
     """
     if not isinstance(name, str) or not name:
         return "Value"
+    _reject_fn_type(name)
     if name in TYPE_MAP:
         return TYPE_MAP[name]
     types = types or {}
@@ -126,9 +166,9 @@ def _rust_type(name: object, types: dict | None = None) -> str:
 def _split_generic(inner: str) -> list[str]:
     parts, depth, start = [], 0, 0
     for i, ch in enumerate(inner):
-        if ch == "[":
+        if ch in "[(":
             depth += 1
-        elif ch == "]":
+        elif ch in "])":
             depth -= 1
         elif ch == "," and depth == 0:
             parts.append(inner[start:i].strip())
