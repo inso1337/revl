@@ -38,6 +38,7 @@ GUARANTEES = {
     "A8": "mid-body failure reverts and contains (L-Raise)",
     "T1": "declared types are checked",
     "T2": "absence is Opt[T]; `null` has no type",
+    "T3": "a hole is an obligation: it checks, but it never runs (docs/holes.md)",
 }
 
 # how to satisfy each guarantee — the one-line rewrite `revl explain <code>`
@@ -72,6 +73,10 @@ FIXES = {
     "T1": "make the types agree at the call site, or change the declaration",
     "T2": "revl has no `null` — model absence as `Opt[T]` and unwrap with `??`, "
           "`?.` or `match`",
+    # `hole` arrived with the typed-holes feature; this table is kept total by
+    # test_explain_every_guarantee_has_a_fix, which is what caught its absence.
+    "T3": "fill the hole in — a draft compiles, but it cannot be admitted into "
+          "a running composition; `revl compile` lists every open obligation",
 }
 
 
@@ -148,6 +153,31 @@ def classify(error: RevlError) -> dict:
     if why is not None:
         record["why"] = why.to_json()
     return record
+
+
+def obligations(holes: list[dict]) -> dict:
+    """Open typed holes as an agent-consumable document (docs/holes.md).
+
+    Severity is `obligation`, not `error`: the draft compiled. It is the
+    admission gate that says no while any of these is open, and an agent
+    should treat the list as its remaining work, not as a rejection.
+    """
+    return {
+        "ok": True,
+        "holes": [
+            {
+                "severity": "obligation",
+                "code": "T3",
+                "category": "hole",
+                "file": hole.get("file"),
+                "line": hole.get("line"),
+                "expected": hole.get("type"),
+                "message": hole.get("message"),
+                "guarantee": GUARANTEES["T3"],
+            }
+            for hole in holes
+        ],
+    }
 
 
 def report(error: RevlError) -> dict:

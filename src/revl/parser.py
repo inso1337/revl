@@ -259,6 +259,7 @@ class FnDecl:
     public: bool
     line: int
     verified: bool = False
+    source: str = ""  # provenance: the file this fn was parsed from
 
 
 # pure-expression AST (§3.2 — the TS-subset stratum)
@@ -358,6 +359,26 @@ class ExprMatch:
     scrutinee: object
     arms: list  # [(pattern_name | "_", bind_name | None, body_expr)]
     line: int
+
+
+@dataclass
+class ExprHole:
+    """`hole`, `hole "why"`, `hole[T]`, `hole[T] "why"` — docs/holes.md.
+
+    A placeholder that *has a type* and no implementation. `type` is the
+    author's `hole[T]` annotation, if written; `resolved` is the expected
+    type the bidirectional checker supplied from context (declared return,
+    service signature, parameter). Exactly one of the two must be known by
+    the time the hole is lowered — a hole never guesses its own type.
+    """
+    message: str | None
+    type: str | None
+    line: int
+    resolved: str | None = None
+
+    @property
+    def known_type(self) -> str | None:
+        return self.type or self.resolved
 
 
 # fn-body statements
@@ -1123,7 +1144,8 @@ class Parser:
         while not self.at("}"):
             body.append(self.fn_stmt())
         self.expect("}")
-        return FnDecl(name, params, returns, body, public, line, verified)
+        return FnDecl(name, params, returns, body, public, line, verified,
+                      source=self.filename)
 
     def test_decl(self) -> TestDecl:
         line = self.expect("kw", "test").line
@@ -1453,6 +1475,28 @@ class Parser:
                  "`match` or `??` before the next access",
         )
 
+    def _hole_expr(self) -> ExprHole:
+        """`hole` [`[` Type `]`] [StringLit] — docs/holes.md.
+
+        The type rides in `[...]` rather than after a `:` for two reasons.
+        `[]` is already revl's type-application bracket (`List[Row]`,
+        §2), so `hole[Db]` reads as a type position on sight; and a `:`
+        ascription would be genuinely ambiguous with the TS ternary the
+        language admits verbatim (`c ? hole "x" : y` — §3.2). The message
+        is a juxtaposed string literal, matching `test "name"`; nothing
+        else in the grammar juxtaposes a string, so it cannot be misread.
+        """
+        line = self.expect("kw", "hole").line
+        type_name = None
+        if self.at("["):
+            self.next()
+            type_name = self.type_()
+            self.expect("]")
+        message = None
+        if self.peek().kind == "string":
+            message = self.next().value
+        return ExprHole(message, type_name, line)
+
     def _match_expr(self) -> ExprMatch:
         """`match <expr> { arm ("," arm)* [","] "}"` — syntax-2.0 §3.3."""
         line = self.expect("kw", "match").line
@@ -1505,6 +1549,8 @@ class Parser:
                 self.next()
                 return ExprArrow([tok.value], self.pure_expr(), tok.line)
             return ExprVar(tok.value, tok.line)
+        if tok.kind == "kw" and tok.value == "hole":
+            return self._hole_expr()
         if tok.kind == "kw" and tok.value == "config":
             # `config` is a keyword for the declaration block, but in pure
             # expression position it heads `config.<field>` access (component
@@ -1705,4 +1751,6 @@ def parse_file(path: str) -> Program:
         component.source = source
     for decl in (*program.fn_decls, *program.externs, *program.services):
         program.decl_files[id(decl)] = source
+    for fn in program.fn_decls:
+        fn.source = source
     return program

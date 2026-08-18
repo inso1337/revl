@@ -918,10 +918,50 @@ def _uses_builtin_result(ir: dict) -> bool:
     return walk(ir.get("components")) or walk(ir.get("functions")) or walk(ir.get("tests"))
 
 
+# ------------------------------------------------------------ typed holes
+
+def _refuse_holes(ir: dict) -> None:
+    """A typed hole is an unmet obligation, not code (docs/holes.md).
+
+    Emitting one would put a placeholder into Python and make CPython the
+    thing that complains — in its own vocabulary, about a line revl wrote.
+    revl already knows the draft is unfinished, so the refusal belongs
+    here, before a single character is emitted.
+    """
+    found: list = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "hole":
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for section in ("components", "functions", "tests", "externs"):
+        walk(ir.get(section))
+    if not found:
+        return
+    where = ", ".join(
+        f"{h.get('file') or '?'}:{h.get('line') or '?'} "
+        f"(expects `{h.get('type')}`)" for h in found[:3])
+    if len(found) > 3:
+        where += f", and {len(found) - 3} more"
+    raise EmitError(
+        f"refusing to emit Python: this document still has {len(found)} typed "
+        f"hole(s) — {where}. A hole type-checks so the surrounding draft can "
+        f"be checked, but it has no implementation and there is nothing to "
+        f"lower. Fill every hole, then emit (docs/holes.md)."
+    )
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
+    _refuse_holes(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 

@@ -30,6 +30,7 @@ import types
 from pathlib import Path
 
 from .compiler import compile_files
+from .holes import refuse_admission
 from .errors import RevlError
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java")
@@ -408,6 +409,7 @@ class _Driver:
         print("\n== change detected — recompile ==")
         try:
             ir = compile_files(files)
+            refuse_admission(ir)  # a hole may not reach a live generation
         except RevlError as exc:
             for i, text in enumerate(str(exc).splitlines()):
                 self._log("reject", "REJECTED" if i == 0 else "", text)
@@ -458,6 +460,9 @@ def run_command(args) -> int:
 
     try:
         ir = compile_files(args.files)
+        # booting is admission: a draft with open obligations may not become a
+        # running composition, however it was compiled (docs/holes.md)
+        refuse_admission(ir)
         config = _load_config(getattr(args, "config", None))
     except RevlError as exc:
         print(f"error: {exc}", file=sys.stderr)
