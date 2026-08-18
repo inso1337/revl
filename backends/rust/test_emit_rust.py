@@ -83,6 +83,63 @@ def test_v2_realms_emit_isolate_and_intercept():
     assert "self.ctx.effect" in src
 
 
+def test_realm_lowering_is_a_deterministic_collision_free_registry():
+    """The realm-label lowering must be a fixed compile-time registry, not a
+    runtime hash. `DefaultHasher` is unstable across Rust releases and its
+    64-bit output can collide with cordis-rs's monotonic scope counter; the
+    registry tags each distinct label into the reserved top-bit region of the
+    u64 scope space, which the counter (starts at 1, +1 per isolate) cannot
+    reach, and gives every distinct label a distinct index."""
+    ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
+    src = emit.emit(ir)
+
+    # The unstable/collision-prone scheme is gone for good.
+    assert "DefaultHasher" not in src
+    assert ".hash(" not in src
+
+    # Reserved high region, disjoint from the framework counter.
+    assert "const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;" in src
+    # Each distinct label => a distinct index in a compile-time match.
+    assert '"tenant_a" => 0,' in src
+    assert '"tenant_b" => 1,' in src
+    assert "cordis::Isolation::from_raw(REVL_REALM_TAG | index)" in src
+
+    # Byte-for-byte stable build-to-build: the same source lowers identically.
+    assert src == emit.emit(compile_files([str(ROOT / "examples" / "tenants.rvl")]))
+
+
+def test_realm_registry_maps_equal_labels_together_and_distinct_apart():
+    """Determinism at the semantic level: equal label strings collapse to one
+    index (same realm), distinct labels get distinct indices (distinct
+    realms), regardless of how many components mention each label."""
+    ir = compile_source(
+        """
+        service Kv { fn get(k: Str) -> Opt[Str] }
+        component AStore provides kv: Kv {
+          isolate kv in realm("a")
+          let s = effect Map.new() undo s.drop()
+          provide kv { fn get(k) = s.get(k) }
+        }
+        component AApp requires kv: Kv {
+          isolate kv in realm("a")
+          effect kv.get("x") undo kv.get("x")
+        }
+        component BApp requires kv: Kv {
+          isolate kv in realm("b")
+          effect kv.get("x") undo kv.get("x")
+        }
+        """
+    )
+    src = emit.emit(ir)
+    # Two components name realm("a") but there is exactly one registry entry
+    # for it, so both lower to the identical Isolation (same realm).
+    assert src.count('"a" => 0,') == 1
+    assert '"b" => 1,' in src
+    # Equal labels share one call value; the distinct label differs.
+    assert src.count('_revl_realm("a")') == 2
+    assert src.count('_revl_realm("b")') == 1
+
+
 def test_v3_types_functions_match_emit():
     ir = compile_source(
         """
@@ -430,7 +487,7 @@ def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
         (here / "scenarios" / "scenarios.rs").read_text(encoding="utf-8"), encoding="utf-8")
     result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "5 passed" in result.stdout
+    assert "7 passed" in result.stdout
 
 
 @needs_cargo

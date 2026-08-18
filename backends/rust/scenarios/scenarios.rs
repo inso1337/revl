@@ -18,7 +18,8 @@
 //!   no torn state: never a `do:` without its `undo:` after disposal.
 
 use revl_scenarios::Probe;
-use revl_scenarios::{boundary, fails_after, kv_consumer, kv_provider, two_steps};
+use revl_scenarios::{boundary, fails_after, kv_consumer, kv_provider, realm_store_t, two_steps};
+use revl_scenarios::{Kv, _revl_realm};
 use std::sync::{Arc, Mutex};
 
 struct Recorder {
@@ -140,4 +141,57 @@ fn a1_concurrent_divert_leaves_no_torn_state() {
             }
         }
     }
+}
+
+#[test]
+fn realm_label_lowering_is_stable_and_collision_free() {
+    // The emitted lowering `_revl_realm` must map a label string to a STABLE
+    // cordis Isolation: equal strings to one identity, distinct strings to
+    // distinct identities, and never onto cordis's monotonic scope counter.
+    const REALM_TAG: u64 = 0x8000_0000_0000_0000;
+
+    // Deterministic, value-stable: the same label lowers identically.
+    assert_eq!(_revl_realm("t"), _revl_realm("t"), "equal labels = one identity");
+    assert_ne!(_revl_realm("t"), _revl_realm("other"), "distinct labels = distinct identity");
+
+    // Disjoint from the framework counter: realm labels live in the reserved
+    // top-bit region; cordis mints scopes from 1 upward in the low region.
+    assert_ne!(_revl_realm("t").as_raw() & REALM_TAG, 0, "realm labels are top-bit tagged");
+    let root = cordis::Context::new();
+    for _ in 0..8 {
+        let framework = root.new_isolation();
+        assert_eq!(framework.as_raw() & REALM_TAG, 0, "counter stays in the low region");
+        assert_ne!(framework, _revl_realm("t"), "no framework scope equals a realm label");
+    }
+}
+
+#[test]
+fn realm_labels_share_within_and_separate_across() {
+    // The realm contract (docs/design-v2-realms.md) driven on the REAL
+    // cordis-rs runtime: an emitted provider provides `kv` isolated in
+    // realm("t"); a context branch keyed on the same label resolves it (equal
+    // labels = same realm), a branch on a different label does not (distinct
+    // labels = distinct realms). Uses the same `_revl_realm` lowering the
+    // emitted plugin uses, so the provide side and the probe side agree only
+    // if the lowering is deterministic.
+    let (root, log) = root_with_probe();
+    let store = root.plugin(realm_store_t(), ());
+    store.wait().unwrap();
+    assert!(marks(&log).contains(&"store_t:up".to_string()), "provider must activate");
+
+    // Same label => same isolation slot: the provision is visible.
+    let same = root.isolate_with("kv", _revl_realm("t"));
+    let seen = same.get_unchecked::<Box<dyn Kv>>("kv").unwrap();
+    assert!(
+        seen.is_some(),
+        "a branch naming realm(\"t\") must see the realm(\"t\") provision (equal labels = same realm)"
+    );
+
+    // Different label => disjoint slot: the provision is invisible.
+    let other = root.isolate_with("kv", _revl_realm("other"));
+    let unseen = other.get_unchecked::<Box<dyn Kv>>("kv").unwrap();
+    assert!(
+        unseen.is_none(),
+        "a branch naming realm(\"other\") must NOT see the realm(\"t\") provision (distinct labels = distinct realms)"
+    );
 }

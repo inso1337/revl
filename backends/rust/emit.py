@@ -1181,17 +1181,57 @@ def _emit_component_auto(component: dict, services: dict, ir: dict | None = None
     return _emit_component_new(component, services, ir)
 
 
-def _revl_realm_helper() -> list[str]:
-    return [
-        "fn _revl_realm(label: &str) -> cordis::Isolation {",
-        "    use std::collections::hash_map::DefaultHasher;",
-        "    use std::hash::{Hash, Hasher};",
-        "    let mut hasher = DefaultHasher::new();",
-        "    label.hash(&mut hasher);",
-        "    cordis::Isolation::from_raw(hasher.finish())",
-        "}",
-        "",
+def _collect_realm_labels(components: list) -> list[str]:
+    """Every distinct realm-label string the program isolates on, sorted.
+
+    Sorting makes index assignment a pure function of the label *set*, so the
+    same source lowers to the same Isolation values on every build.
+    """
+    labels: set[str] = set()
+    for component in components:
+        for realm in (component.get("isolate") or {}).values():
+            labels.add(realm)
+    return sorted(labels)
+
+
+def _revl_realm_helper(components: list) -> list[str]:
+    """Lower each distinct realm label to a STABLE, DETERMINISTIC Isolation
+    from a reserved high region of the u64 scope space.
+
+    cordis-rs mints framework scope labels from a monotonic counter that
+    starts at 1 and increments by 1 (`RootInner::scope`,
+    cordis-rs-0.3.0/src/context.rs:86-88), so every framework label lands in
+    the low range [1, 2^63). We tag realm labels with the top bit set, which
+    that counter cannot reach without 2^63 allocations — provably disjoint
+    from framework labels (the collision `Isolation::from_raw`'s own docs
+    warn about, context.rs:20-25). Distinct labels get distinct indices, so
+    equal strings share a realm and no two realms ever collide. Unlike the
+    former `DefaultHasher`, this registry is fixed build-to-build and depends
+    on no std hashing internals.
+    """
+    labels = _collect_realm_labels(components)
+    lines = [
+        "pub fn _revl_realm(label: &str) -> cordis::Isolation {",
+        "    // Top bit reserved for realm labels: disjoint from cordis-rs's",
+        "    // monotonic scope counter (starts at 1, +1 each isolate()).",
+        "    const REVL_REALM_TAG: u64 = 0x8000_0000_0000_0000;",
+        "    let index: u64 = match label {",
     ]
+    for i, label in enumerate(labels):
+        lines.append(f"        {_string(label)} => {i},")
+    lines.append(
+        '        other => panic!("revl: realm label {other:?} missing from '
+        'compile-time registry"),'
+    )
+    lines.extend(
+        [
+            "    };",
+            "    cordis::Isolation::from_raw(REVL_REALM_TAG | index)",
+            "}",
+            "",
+        ]
+    )
+    return lines
 
 
 
@@ -2344,7 +2384,7 @@ def _emit_components(ir: dict, components: list) -> list[str]:
     if _uses_stdlib(ir):
         out.extend(_stdlib_helper_traits())
     if _needs_realm_helper(components):
-        out.extend(_revl_realm_helper())
+        out.extend(_revl_realm_helper(components))
     for component in components:
         out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     out.extend(_emit_bridge(ir))
