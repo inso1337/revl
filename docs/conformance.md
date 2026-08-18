@@ -1,12 +1,37 @@
 # Conformance: every construct against every tier
 
-**Run it:** `python3 tools/conformance.py [--json]` · 48 cases × 5 emitters,
-no toolchain required (every emitter is pure Python).
+**Run it:** `python3 tools/conformance.py [--json] [--validate]` · 50 cases ×
+5 emitters. The default sweep needs no toolchain (every emitter is pure
+Python); `--validate` additionally hands each tier's output to that tier's
+real compiler.
 
 `tests/test_cross_tier.py` holds a floor for a handful of constructs known to
 be portable. This walks the *whole* surface and reports what each tier does
 with each construct, so a gap is data rather than something discovered by a
 user targeting a tier by hand.
+
+## Two questions, not one
+
+The matrix asks **did the emitter produce code?** and, under `--validate`,
+**does that code hold up in the real toolchain?** They are different
+questions, and for a long time only the first was asked — see "What the
+second question found" below.
+
+| tier | validator | depth |
+|---|---|---|
+| python | `compile()` + a `symtable` scope walk | syntax + unbound names |
+| typescript | `tsc` through the compiler API | full typecheck |
+| rust | `cargo check` over a single generated crate | full typecheck |
+| java | `javac` against the checked-in cordis4j stubs | full typecheck |
+| wasm | `wasmtime compile` | module validation (types, locals) |
+
+A tier whose toolchain is missing reports **`unavailable` with the reason**,
+never `ok`. "Nothing checked it" and "it passed" must not render as the same
+cell, since conflating them is what hid the bugs below. rust needs crates.io
+reachable (cordis-rs resolves from the index) and java needs a real JDK; both
+run in CI.
+
+## Emit sweep
 
 Counts below are from the run at the commit that closed the first sweep.
 **python and typescript are at zero; every remaining refusal on rust, java
@@ -66,19 +91,42 @@ Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:
   type was inferred, and an arm without a payload type not consulting the
   variant layout.
 
-## Known blind spot of this matrix
+## What the second question found
 
-It checks that an emitter **does not raise** — never that its output
-compiles or runs. A tier can therefore report `ok` and still emit broken
-code. The instance that proved it: the **rust backend did not capture
-`requires` bindings into the provider struct** on its pure path, so a
-component with no effects emitted Rust referencing a free variable. It
-reported `ok` here for months and was caught only because an agent compiled
-the output by hand. Now fixed, with a regression test that asserts the
-struct field, the `self.` reference and the construction — but the blind
-spot itself remains: closing it means compiling or executing emitted code
-per tier, which the wasm tier already does on wasmtime and the rust tier
-does under `cargo` when a network is available.
+The blind spot was documented here before it was closed, with a known
+instance: the **rust backend did not capture `requires` bindings into the
+provider struct**, so a component with no effects emitted Rust referencing a
+free variable. It reported `ok` for months and was caught only because an
+agent compiled the output by hand.
+
+The first validated run found three more, all in TypeScript, all invisible to
+an emit-only sweep and all live in a tier the matrix called clean:
+
+- **Required services were never declared on `Context`.** The emitter
+  augmented cordis's `Context` with a component's *provisions* only, so
+  `ctx.bus.send(x)` — the emission path, on six of the fifty cases — hit a
+  `Context` with no `bus`. This is the **same bug as the rust one in a
+  different spelling**: both tiers rendered a required binding they had never
+  brought into scope. Fixed by augmenting with requirements as well; keys
+  repeated across emitted files merge, since identical interface members do.
+- **The A1 iteration boundary emitted `yield null`.** cordis types a yielded
+  value as `Disposable<T> = () => T`, and `null` is not one. Fixed by
+  yielding a no-op disposer, which is the same semantics — a boundary has
+  nothing to revert — and typechecks.
+- **Arrow parameters were implicitly `any`**, which `strict` rejects. They
+  are now explicitly `any`: arrows are in the checker's *enumerated*
+  unchecked remainder, so the compiler has no type to emit, and an admission
+  beats a guess. Inferring them is a typing-frontier item, not a codegen one.
+
+The residue is honest rather than zero:
+
+- python's validator reaches syntax and unbound names, not types — the tier
+  emits untyped Python, so there is nothing deeper to check.
+- wasm validates modules; it does not drive the component protocol. The wasm
+  suite executes emitted components separately.
+- rust and java are wired and skip loudly off-CI.
+- Validation proves the output *compiles*, still not that it *behaves*.
+  Cross-tier `test` execution (`revl test --backend`) is the next rung.
 
 ## What this says about the architecture
 
