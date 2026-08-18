@@ -285,11 +285,37 @@ class JavaValidator(Validator):
                 return exe
         return None
 
+    RELEASE = "21"
+
+    @classmethod
+    def _major(cls, javac: str) -> int | None:
+        """javac's major version, or None if it cannot be parsed."""
+        try:
+            probe = subprocess.run([javac, "-version"], capture_output=True,
+                                   text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        text = (probe.stdout + probe.stderr).strip()
+        for token in text.replace("javac", "").split():
+            head = token.split(".")[0]
+            if head.isdigit():
+                return int(head)
+        return None
+
     def unavailable(self) -> str | None:
-        if self._javac() is None:
+        javac = self._javac()
+        if javac is None:
             return "no working javac (a JDK, not the macOS shim)"
         if not self.STUBS.is_dir():
             return "backends/java/stubs missing"
+        # The emitted java uses language features from the release the backend
+        # targets (switch patterns, records). An older javac rejects
+        # `--release 21` outright, and reporting that as 47 failing cases would
+        # be a lie about the emitter: nothing was checked.
+        major = self._major(javac)
+        if major is not None and major < int(self.RELEASE):
+            return (f"javac {major} is older than the java {self.RELEASE} the "
+                    f"backend targets (`--release {self.RELEASE}` is rejected)")
         return None
 
     def check(self, items):
@@ -317,7 +343,7 @@ class JavaValidator(Validator):
                 files.append(str(path))
 
             result = subprocess.run(
-                [javac, "--release", "21", "-d", str(out)]
+                [javac, "--release", self.RELEASE, "-d", str(out)]
                 + [str(s) for s in sorted(self.STUBS.rglob("*.java"))] + files,
                 capture_output=True, text=True, timeout=_TIMEOUT,
             )
