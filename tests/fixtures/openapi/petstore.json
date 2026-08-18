@@ -1,0 +1,241 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Pet Store", "version": "1.4.0" },
+  "servers": [{ "url": "https://api.example.com/v1" }],
+  "paths": {
+    "/pets": {
+      "parameters": [
+        {
+          "name": "trace",
+          "in": "query",
+          "schema": { "type": "boolean" }
+        }
+      ],
+      "get": {
+        "operationId": "listPets",
+        "summary": "List every pet, newest first.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "format": "int32" }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Status" }
+          },
+          {
+            "name": "sku",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Sku" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "one page of pets",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PetPage" }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createPet",
+        "summary": "Add a pet to the store.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Pet" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the pet as stored",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Pet" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pets/{petId}": {
+      "get": {
+        "summary": "Fetch one pet.",
+        "parameters": [
+          {
+            "name": "petId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the pet",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Pet" }
+              }
+            }
+          },
+          "404": { "description": "no such pet" }
+        }
+      },
+      "delete": {
+        "summary": "Remove a pet from the store.",
+        "parameters": [
+          {
+            "name": "petId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "gone" }
+        }
+      }
+    },
+    "/pets/{petId}/logbook": {
+      "get": {
+        "operationId": "readLogbook",
+        "summary": "Read the logbook — the server records every read.",
+        "x-revl-emission": true,
+        "parameters": [
+          {
+            "name": "petId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the log lines",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "operationId": "searchPets",
+        "summary": "A read expressed as a POST because the query is large.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                  "query": { "type": "string" },
+                  "tags": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Pet" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Sku": { "type": "string" },
+      "Status": {
+        "type": "string",
+        "enum": ["available", "pending", "sold"]
+      },
+      "Cat": {
+        "type": "object",
+        "required": ["species", "indoor"],
+        "properties": {
+          "species": { "type": "string" },
+          "indoor": { "type": "boolean" }
+        }
+      },
+      "Dog": {
+        "type": "object",
+        "required": ["species", "breed"],
+        "properties": {
+          "species": { "type": "string" },
+          "breed": { "type": "string" }
+        }
+      },
+      "Animal": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/Cat" },
+          { "$ref": "#/components/schemas/Dog" }
+        ],
+        "discriminator": {
+          "propertyName": "species",
+          "mapping": {
+            "cat": "#/components/schemas/Cat",
+            "dog": "#/components/schemas/Dog"
+          }
+        }
+      },
+      "Pet": {
+        "type": "object",
+        "required": ["id", "name", "status"],
+        "properties": {
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "kind": { "$ref": "#/components/schemas/Animal" },
+          "tag": { "type": "string", "nullable": true },
+          "weightKg": { "type": "number" },
+          "photoUrls": { "type": "array", "items": { "type": "string" } },
+          "labels": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "address": {
+            "type": "object",
+            "required": ["city"],
+            "properties": {
+              "city": { "type": "string" },
+              "postcode": { "type": "string" }
+            }
+          },
+          "companion": { "$ref": "#/components/schemas/Pet" }
+        }
+      },
+      "PetPage": {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Pet" }
+          },
+          "next": { "type": "string", "nullable": true }
+        }
+      }
+    }
+  }
+}
