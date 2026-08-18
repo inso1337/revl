@@ -1,0 +1,12 @@
+// A lifecycle test may only load components declared in the document.
+service Store { fn get(key: Str) -> Str }
+
+component Kv provides kv: Store {
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(key) = m.get(key) }
+}
+
+lifecycle test "loads a ghost" {
+  load Ghost
+  assert no_residue
+}

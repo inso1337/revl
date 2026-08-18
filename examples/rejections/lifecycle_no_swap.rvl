@@ -1,0 +1,16 @@
+// `swap C -> C2` (the roadmap's sketch for this form) cannot exist: G2
+// forbids two components in one document from providing the same key.
+service Store { fn get(key: Str) -> Str }
+
+component Kv provides kv: Store {
+  config { url: Str }
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(key) = m.get(key) }
+}
+
+lifecycle test "swaps a provider" {
+  load Kv with { url: "a" }
+  swap Kv -> Kv2
+  unload Kv
+  assert no_residue
+}

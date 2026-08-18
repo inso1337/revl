@@ -15,6 +15,10 @@ control, quotas, §6.3).
 Two prelude statements, following syntax-2.0's reserved shapes:
 
 ```revl
+service Kv {
+  fn set(key: Str, value: Str) -> Int
+}
+
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
   intercept kv with { quota: 5, paths: ["a", "b"] }

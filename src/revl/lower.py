@@ -41,6 +41,7 @@ from .parser import (
     AssertStmt,
     AssignStmt,
     AwaitStmt,
+    CallStmt,
     ComponentDecl,
     EffectStmt,
     EmitExpr,
@@ -72,16 +73,19 @@ from .parser import (
     LetEffect,
     LetPatternStmt,
     LetStmt,
+    LoadStmt,
     ListPattern,
     Lit,
     Postfix,
     Program,
     ProvideStmt,
     RecordPattern,
+    ResidueStmt,
     ReturnStmt,
     ServiceDecl,
     TestDecl,
     TypeDecl,
+    UnloadStmt,
     WhileStmt,
 )
 
@@ -982,8 +986,9 @@ def _lower_externs(program: Program, filename: str) -> list:
     return externs
 
 
-def _lower_tests(program: Program, filename: str, types: dict) -> list:
-    """Lower `test` blocks to IR v3 test units (syntax-2.0 §7).
+def _lower_tests(program: Program, filename: str, types: dict,
+                 services: dict | None = None) -> list:
+    """Lower `test` and `lifecycle test` blocks to IR v3 test units (§7/§7.1).
 
     `types` (the case/signature table) is threaded through so a `test` body is
     the same expression scope a `fn` body is: nullary user-ADT constructors
@@ -998,6 +1003,14 @@ def _lower_tests(program: Program, filename: str, types: dict) -> list:
         if decl.name in seen:
             raise RevlError(filename, decl.line, f"duplicate test `{decl.name}`")
         seen.add(decl.name)
+        if decl.lifecycle:
+            tests.append({
+                "name": decl.name,
+                "lifecycle": True,
+                "body": _lower_lifecycle_body(decl, program, services or {}, filename,
+                                              callables, types),
+            })
+            continue
         scope: dict[str, bool] = {}
         type_env: dict[str, str] = {}
         body: list[dict] = []
@@ -1097,6 +1110,169 @@ def _lower_fault_tests(program: Program, components: list, filename: str) -> lis
             unit["config"] = dict(decl.config)
         units.append(unit)
     return units
+
+def _lower_lifecycle_body(decl: TestDecl, program: Program, services: dict, filename: str,
+                          callables: set, types: dict) -> list:
+    """Lower a `lifecycle test` body (syntax-2.0 §7.1).
+
+    The body is a *linear script* over a live composition, so the checker can
+    track exactly what is loaded and what keys are provided at every point —
+    every diagnostic below is a compile error, not a runtime surprise.
+
+    G2 (provision disjointness) is what makes this tractable and is also the
+    reason there is no `swap C -> C2` statement: two components may not
+    provide the same key in one document, so a replacement *provider* is not
+    expressible; a replacement *instance* is `unload C` then `load C with
+    { ... }`, which this statement set already spells.
+    """
+    components = {comp.name: comp for comp in program.components}
+    loaded: dict[str, ComponentDecl] = {}    # component name -> decl
+    provided: dict[str, str] = {}            # provision key -> component name
+    scope: dict[str, bool] = {}
+    type_env: dict[str, str] = {}
+    body: list[dict] = []
+
+    def _known() -> str:
+        return ", ".join(f"`{name}`" for name in sorted(components)) or "<none>"
+
+    for stmt in decl.body:
+        if isinstance(stmt, LoadStmt):
+            comp = components.get(stmt.component)
+            if comp is None:
+                raise RevlError(filename, stmt.line,
+                                f"unknown component `{stmt.component}`",
+                                hint=f"a lifecycle test loads components declared in this "
+                                     f"document: {_known()}")
+            if stmt.component in loaded:
+                raise RevlError(
+                    filename, stmt.line,
+                    f"`{stmt.component}` is already loaded",
+                    hint="one instance per component at a time — `unload` it first; two live "
+                         "providers of one key is exactly what G2 forbids (§7.1)",
+                )
+            config = _lower_lifecycle_config(stmt, comp, filename, scope, callables,
+                                             type_env, types)
+            for key, _svc, _line in comp.provides:
+                provided[key] = comp.name
+            loaded[comp.name] = comp
+            body.append({"step": "load", "component": comp.name, "config": config})
+        elif isinstance(stmt, UnloadStmt):
+            if stmt.component not in loaded:
+                if stmt.component not in components:
+                    raise RevlError(filename, stmt.line,
+                                    f"unknown component `{stmt.component}`",
+                                    hint=f"declared components: {_known()}")
+                raise RevlError(filename, stmt.line,
+                                f"`{stmt.component}` is not loaded at this point")
+            comp = loaded.pop(stmt.component)
+            for key, _svc, _line in comp.provides:
+                provided.pop(key, None)
+            body.append({"step": "unload", "component": comp.name})
+        elif isinstance(stmt, CallStmt):
+            body.append(_lower_lifecycle_call(stmt, provided, components, services, filename,
+                                              scope, callables, type_env, types))
+        elif isinstance(stmt, ResidueStmt):
+            body.append({"step": "assert_no_residue"})
+        elif isinstance(stmt, AssertStmt):
+            expr = stmt.expr
+            if isinstance(expr, ExprVar) and expr.name not in scope:
+                raise RevlError(
+                    filename, stmt.line,
+                    f"unknown lifecycle assertion `{expr.name}`",
+                    hint="the lifecycle assertion is `assert no_residue` (§7.1); anything else "
+                         "after `assert` is a Bool expression over this test's `let` bindings",
+                )
+            _bool_cond(expr, type_env, types, filename, "assert")
+            body.append({"step": "assert",
+                         "expr": _lower_pure_expr(expr, scope, callables, {}, filename,
+                                                  type_env, types)})
+        else:  # pragma: no cover — the lifecycle grammar produces nothing else
+            raise RevlError(filename, getattr(stmt, "line", decl.line),
+                            "unexpected statement in a lifecycle test body")
+
+    return body
+
+
+def _lower_lifecycle_config(stmt: LoadStmt, comp: ComponentDecl, filename: str, scope: dict,
+                            callables: set, type_env: dict, types: dict) -> dict:
+    """Check and lower `load C with { field: expr, ... }` against C's `config`."""
+    fields = {cfg.name: cfg for cfg in comp.config}
+    given: dict[str, dict] = {}
+    for name, value, line in stmt.config:
+        cfg = fields.get(name)
+        if cfg is None:
+            known = ", ".join(f"`{f}`" for f in fields) or "<none>"
+            raise RevlError(filename, line,
+                            f"`{name}` is not a config field of {comp.name}",
+                            hint=f"config fields of {comp.name}: {known}")
+        if name in given:
+            raise RevlError(filename, line, f"duplicate config field `{name}`")
+        check_ast(value, cfg.type, type_env, types, filename,
+                  f"config field `{name}` of {comp.name}")
+        given[name] = _lower_pure_expr(value, scope, callables, {}, filename, type_env, types)
+    missing = [cfg.name for cfg in comp.config if cfg.default is None and cfg.name not in given]
+    if missing:
+        listed = ", ".join(f"`{name}`" for name in missing)
+        raise RevlError(filename, stmt.line,
+                        f"`load {comp.name}` is missing required config {listed}",
+                        hint=f"write `load {comp.name} with {{ {missing[0]}: ... }}`")
+    return given
+
+
+def _lower_lifecycle_call(stmt: CallStmt, provided: dict, components: dict, services: dict,
+                          filename: str, scope: dict, callables: set,
+                          type_env: dict, types: dict) -> dict:
+    """Check and lower `call key.op(args)` / `let x = call key.op(args)`.
+
+    A lifecycle test drives the composition from *outside* it — it is not a
+    provider — so G4's `emit` marker does not apply here: the bound G4
+    enforces is a service declaration bounding *its providers*, and a test has
+    no declaration to exceed (§7.1).
+    """
+    owner = provided.get(stmt.key)
+    if owner is None:
+        keys = sorted({key for comp in components.values() for key, _s, _l in comp.provides})
+        if stmt.key in keys:
+            raise RevlError(
+                filename, stmt.line,
+                f"no provider for key `{stmt.key}` at this point",
+                hint="load the component that provides it before calling through the key",
+            )
+        listed = ", ".join(f"`{key}`" for key in keys) or "<none>"
+        raise RevlError(filename, stmt.line,
+                        f"unknown provision key `{stmt.key}`",
+                        hint=f"keys provided in this document: {listed}")
+    comp = components[owner]
+    service_name = next(svc for key, svc, _line in comp.provides if key == stmt.key)
+    svc = services.get(service_name)
+    if svc is None:  # pragma: no cover — checked when the component was lowered
+        raise RevlError(filename, stmt.line, f"unknown service `{service_name}`")
+    method = svc.methods.get(stmt.method)
+    if method is None:
+        listed = ", ".join(f"`{name}`" for name in svc.methods) or "<none>"
+        raise RevlError(filename, stmt.line,
+                        f"`{stmt.key}.{stmt.method}` is not an operation of service "
+                        f"{service_name}",
+                        hint=f"operations of {service_name}: {listed}")
+    if len(stmt.args) != len(method.params):
+        raise RevlError(filename, stmt.line,
+                        f"`{stmt.key}.{stmt.method}` takes {len(method.params)} "
+                        f"argument(s), {len(stmt.args)} given")
+    args = []
+    for arg, (pname, ptype) in zip(stmt.args, method.params):
+        check_ast(arg, ptype, type_env, types, filename,
+                  f"`{stmt.key}.{stmt.method}` argument `{pname}`")
+        args.append(_lower_pure_expr(arg, scope, callables, {}, filename, type_env, types))
+    node = {"step": "call", "key": stmt.key, "method": stmt.method, "args": args}
+    if stmt.bind is not None:
+        if stmt.bind in scope:
+            raise RevlError(filename, stmt.line,
+                            f"`{stmt.bind}` is already declared in this lifecycle test")
+        scope[stmt.bind] = False
+        if method.returns:
+            type_env[stmt.bind] = method.returns
+        node["bind"] = stmt.bind
+    return node
 
 
 def _bool_cond(expr, type_env: dict, types: dict, filename: str, where: str) -> None:
@@ -1641,7 +1817,6 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename)
-    tests = _lower_tests(program, program.filename, types)
     # One fixed point, two consumers: `emitting_caps` is what it computes
     # (docs/capabilities.md), `witness` is why (why.py). Evidence never
     # decides a rejection, it only explains one.
@@ -1665,6 +1840,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     fault_tests = _lower_fault_tests(program, components, program.filename)
 
     manifest = _link(program, components, ambient.get("components") or [])
+
+    # lifecycle tests are lowered last: they check against the component
+    # declarations, so a broken component must report itself first
+    tests = _lower_tests(program, program.filename, types, services)
 
     uses_components_2 = any(
         isinstance(stmt, (FailStmt, IfStmt))

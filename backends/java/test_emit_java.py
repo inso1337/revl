@@ -167,8 +167,28 @@ def test_await_lowers_to_async_plugin():
     assert "import io.cordis4j.core.AsyncPlugin;" in src
     assert "public static final class MigratorPlugin implements AsyncPlugin" in src
     assert "public Disposable apply(Context ctx) throws Exception" in src
-    assert 'Job.run("migrations");' in src
+    assert 'Job.run("migrations").await();' in src
     assert "UnsupportedOperationException" not in src
+
+
+def test_await_joins_the_job_handle_it_starts():
+    """A1: "evaluate expr, await its result" — not "evaluate expr".
+
+    The step used to lower to a bare `Job.run("migrations");`. That starts the
+    job and drops the handle, so activation returns with the job still in
+    flight; the iteration boundary the runtime may divert at never closes.
+    Rust never had the bug because its `Job::run` is an `async fn` and the
+    step lowers to `.await`; Java has no await operator, so the join has to be
+    emitted.
+    """
+    src = emit.emit(_ir("migrator"))
+    assert 'Job.run("migrations");' not in src, "the handle is dropped, not awaited"
+    assert 'Job.run("migrations").await();' in src
+    # ...and there has to be a handle to join in the first place.
+    assert "public static Job run(String name)" in src
+    assert "public String await()" in src
+    assert "public static long pending()" in src
+    assert "public static void run(String name)" not in src
 
 
 def test_component_if_setup_and_fail_emit_real_java():
@@ -439,6 +459,58 @@ def test_java_runs_runtime_scenarios_on_stub_runtime(tmp_path):
     )
     assert run.returncode == 0, run.stderr + run.stdout
     assert "SCENARIOS_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_activation_leaves_no_job_pending(tmp_path):
+    """The A1 boundary must *close*: run the plugin, count the residue.
+
+    `Job.pending()` counts handles still in flight. A component whose body is
+    `await Job.run(...)` must leave zero of them once `apply` returns — if the
+    step only evaluates the call, the handle is dropped and the count is one.
+    This is the runtime half of `test_await_joins_the_job_handle_it_starts`;
+    the string assertion alone could not tell a joined handle from a leaked
+    one.
+    """
+    ir = compile_source(
+        """
+        service S { fn f(x: Int) -> Int }
+        component Boot provides s: S {
+          await Job.run("boot")
+          provide s { fn f(x) = x }
+        }
+        """
+    )
+    out = _javac_compile(tmp_path, emit.emit(ir))
+    runner = tmp_path / "RunAwait.java"
+    runner.write_text(
+        "public class RunAwait {\n"
+        "    public static void main(String[] args) throws Exception {\n"
+        "        io.cordis4j.core.Context ctx = new io.cordis4j.core.Context();\n"
+        "        revl.Components.Job.reset();\n"
+        "        var d = new revl.Components.BootPlugin().apply(ctx);\n"
+        "        long pending = revl.Components.Job.pending();\n"
+        "        if (pending != 0L) {\n"
+        "            System.err.println(\"left \" + pending + \" job(s) pending\");\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        d.dispose();\n"
+        "        System.out.println(\"NO_PENDING_JOBS\");\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    compile_runner = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_runner.returncode == 0, compile_runner.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "RunAwait"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "NO_PENDING_JOBS" in run.stdout
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")

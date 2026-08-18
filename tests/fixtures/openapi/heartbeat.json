@@ -1,0 +1,36 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Heartbeat", "version": "1.0.0" },
+  "servers": [{ "url": "https://probe.example.com" }],
+  "paths": {
+    "/status": {
+      "get": {
+        "summary": "Report the current status. Reads a cached value.",
+        "responses": {
+          "200": {
+            "description": "the current status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "checkedAt"],
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "checkedAt": { "type": "string" },
+                    "detail": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Force a fresh check. Enqueues work on the server.",
+        "responses": {
+          "202": { "description": "accepted" }
+        }
+      }
+    }
+  }
+}

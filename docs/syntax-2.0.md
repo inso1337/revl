@@ -46,7 +46,7 @@ functions, services. Components are never imported: they are *composed*, by
 the linker, over a manifest. This keeps the two composition mechanisms from
 blurring: `use` is compile-time and pure; the manifest is runtime and stateful.
 
-```revl
+```revl sketch
 use "./tokens.rvl" { Token, TokenKind, keyword_set }
 use "./util/strings.rvl" as strings
 
@@ -88,9 +88,13 @@ type Outcome = Ok(Row) | NotFound | Invalid(Str)        // ADT (payloads)
 ### 3.1 Functions
 
 ```revl
+type Row = { id: Int, name: Str, active: Bool }        // as §2
+
 pub fn score(items: List[Row]) -> Int {
-  let active = items.filter(r => r.active)     // TS arrow lambdas, verbatim
-  return active.length
+  let is_active = r => r.active               // TS arrow lambdas, verbatim
+  var n = 0
+  for (r of items) { if (is_active(r)) n += 1 }
+  return n
 }
 
 fn classify(n: Int) -> Str {
@@ -120,7 +124,7 @@ there is no syntactic path from a `fn` body to an effect.
 - **`match`, not `switch`.** TS `switch` has fallthrough and no binding;
   revl's eliminator is different in meaning, so it looks different:
 
-```revl
+```revl fragment
 match lookup(key) {
   Ok(row)      => row.name,
   NotFound     => "-",
@@ -154,6 +158,9 @@ masochism, and models write loops fluently. revl 2.0 admits **function-local
 mutation** — unobservable from outside, so functions remain pure in meaning:
 
 ```revl
+type TokenKind = Ident | Keyword | IntLit | StrLit
+type Token = { kind: TokenKind, text: Str }
+
 fn count_idents(tokens: List[Token]) -> Int {
   var n = 0                                   // var: local, mutable
   for (tok of tokens) {                       // TS for-of, verbatim
@@ -164,7 +171,7 @@ fn count_idents(tokens: List[Token]) -> Int {
 
 fn skip_ws(source: Str, start: Int) -> Int {
   var i = start
-  while (i < source.length && source[i] == " ") i += 1
+  while (i < source.length && source.charAt(i) == " ") i += 1
   return i
 }
 ```
@@ -184,6 +191,12 @@ Stratum 3 is revl 1.x, deliberately untouched — these keywords are the
 semantic speed bumps and *must not* look like anything in the corpus:
 
 ```revl
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+service Database { emission fn execute(sql: Str) -> Int }
+
 component UserCache requires db: Database provides cache: Cache {
   config { ttl: Int = 300 }
 
@@ -207,7 +220,7 @@ component UserCache requires db: Database provides cache: Cache {
 
 - **Block effect form**, for acquisitions that take several pure steps:
 
-```revl
+```revl fragment
 let conn = effect {
   let url = normalize(config.url)
   Pool.open(url, config.pool_size)              // last expression = value
@@ -268,7 +281,7 @@ canonical emission that *returns* data (an LLM completion, an HTTP GET).
 It is now also a prefix in value position, so the marker stays at the call
 site (G4's actual point) while the value flows:
 
-```revl
+```revl fragment
 provide evolve {
   fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
 }
@@ -285,7 +298,7 @@ effect … undo …` still means the acquisition (the parser branches on the
 `effect` keyword). `var` plus assignment is available where a method
 accumulates, and A3 host-name renaming applies:
 
-```revl
+```revl fragment
 provide greet {
   fn hello(name) {
     let prefix = "hi, "
@@ -368,7 +381,7 @@ extern emission fn send(sock: Socket, data: Bytes)
 
 ## 7. `verified` and `test` — the self-checking loop
 
-```revl
+```revl sketch
 verified fn parse_int(s: Str) -> Opt[Int] { ... }   // totality-checked:
                                                      // structural recursion /
                                                      // bounded loops only
@@ -387,12 +400,188 @@ test "put then get roundtrips" {
   (`verified effect` requires the checker to find or generate the
   `undo ∘ do = id` witness over the declared value model).
 
+### 7.1 `lifecycle test` — the paradigm's own guarantee, asserted in-language
+
+A plain `test` block is stratum-1: pure statements over pure functions. That
+leaves the one property revl exists to provide — that composition is
+*revertible* — expressible only in each backend's own host test suite. A
+`lifecycle test` closes that: it is a script over a **live composition**.
+
+```revl fragment
+lifecycle test "cache reverts cleanly" {
+  load PgDatabase with { url: "postgres://primary:5432/app" }
+  load UserCache
+  call cache.put("k", "v")
+  let hit = call cache.get("k")
+  assert hit == Some("v")
+  unload UserCache
+  unload PgDatabase
+  assert no_residue
+}
+```
+
+**`lifecycle` is a modifier, not a new top-level form.** The precedent is
+`verified fn`: an adjective that changes what a body may contain without
+changing what the declaration *is*. A lifecycle test is still a named,
+runnable unit that `revl test` executes and reports; only its body's stratum
+differs (3, components and effects — not 1, pure expressions). The grammar
+delta is therefore one token in one position, which is what the §8
+prompt-size requirement demands.
+
+`lifecycle` is a **contextual** keyword: it is recognized only immediately
+before `test` at top level and remains an ordinary identifier everywhere
+else. So are `load`, `unload` and `call` inside a lifecycle body, and
+`no_residue` after `assert`. Nothing is added to the lexer's keyword set — no
+existing program can stop compiling because of this feature, and the
+self-hosted lexer's token stream (§11) is unchanged.
+
+#### Grammar
+
+```
+decl     := ... | ['lifecycle'] test
+test     := 'test' STRING '{' (lcstmt | stmt)* '}'
+lcstmt   := 'load' IDENT ['with' '{' (IDENT ':' expr)* '}']   // instantiate
+          | 'unload' IDENT                                     // revert
+          | ['let' IDENT '='] 'call' IDENT '.' IDENT '(' expr* ')'
+          | 'assert' 'no_residue'
+          | 'assert' expr
+```
+
+Six statements, no new expression forms. `stmt` (the pure statement set) is
+*not* admitted in a lifecycle body and `lcstmt` is not admitted in a pure
+one — each is refused by name, not by a parse error:
+
+```
+`load` is only allowed in a `lifecycle test` body
+  a plain `test` block is pure (syntax-2.0 §7); write `lifecycle test "name"
+  { ... }` to drive a composition (§7.1)
+```
+
+#### Semantics, statement by statement
+
+A lifecycle body is *linear*, so the checker tracks exactly which components
+are live and which keys are provided at every point. Every rule below is a
+compile error, not a runtime surprise.
+
+- **`load C with { field: expr, … }`** — instantiate `C` and settle the
+  composition. The `with` clause is checked against `C`'s `config` block:
+  unknown field, duplicate field, missing required field, and type mismatch
+  are all rejected. `with { }` may be omitted when `C` has no required
+  config. Loading is *not* activation: a component whose `requires` are unmet
+  stays PENDING (R2), and only becomes ACTIVE when a provider arrives —
+  `load UserCache` before `load PgDatabase` is legal and does nothing until
+  the database lands.
+- **`unload C`** — dispose the instance, running its accumulated inverses
+  newest-first (R1) and withdrawing its provisions (R5). Unloading a
+  component that is not loaded is a compile error.
+- **`call key.op(args)`** / **`let x = call key.op(args)`** — invoke an
+  operation through a *provision key*, not through a component: consumers in
+  revl bind to services, and so does the test. The key must be provided by a
+  component that is loaded at that point, `op` must be an operation of that
+  key's service, and arity and argument types are checked against the service
+  declaration. The binding form names the result and is single-assignment;
+  its type is the operation's declared return type, so `assert` over it is
+  type-checked like any other expression. An `async fn` operation is awaited
+  by the driver — the test does not spell `await`, because the boundary
+  reading of `await` belongs to activation bodies only (§5).
+  **No `emit` marker is required to call an emission operation.** G4's rule
+  (§4b.1) is that *a service declaration is an upper bound on its providers*;
+  a lifecycle test is not a provider, it is the top of the composition — the
+  same position `demo.py` occupies — so there is no declaration for it to
+  exceed and nothing for a marker to bound.
+- **`assert no_residue`** — see below.
+- **`assert <expr>`** — an ordinary Bool expression over the test's `let`
+  bindings, checked exactly as in a `fn` body. A bare word that is not a
+  binding is reported as an unknown *lifecycle assertion*, since that is what
+  it almost always is.
+
+#### What `no_residue` means
+
+It is R4 from docs/backend-ir.md §Required semantics — *"after unloading
+everything, the host runtime holds no bindings, listeners, or effects from
+the composition (assert via the runtime's introspection)"* — taken verbatim
+from the suite that defines residue-freedom for the reference tier,
+`backends/python/tests/test_semantics.py::test_r4_no_residue_after_unloading_
+everything`. The emitted assertion snapshots the same four quantities that
+test does, at the top of the lifecycle test, and compares at the assertion
+point:
+
+| quantity | cordis-py introspection |
+|---|---|
+| listeners | `root.events._hooks` (non-empty counts) |
+| effects | `root.fiber._disposables.length` |
+| provisions | `root.reflect.store` |
+| plugin runtimes | `root.registry.size` |
+
+**And a second half, because R4 alone cannot fail.** R5 is the reason: the
+emitted module hand-rolls no teardown at all — every inverse goes through the
+runtime's revertible `provide`/`set` and the effect protocol — so for *any*
+component the compiler accepts, the runtime's own introspection always
+returns to baseline. An assertion that cannot fail is not an assertion. The
+falsifiable half of residue-freedom is R1's: *unloading runs the accumulated
+undos, including those accumulated by provide-method calls while active.*
+So `no_residue` also requires that every host resource acquired during the
+test was released by the end — no `Pool.open` without a `close`, no `Map.new`
+without a `drop` — read off the host-builtin trace (`runtime.set_trace`), the
+same signal the R1 suite asserts ordering on.
+
+Together the two halves catch the two ways a composition leaks:
+
+- *the test left something loaded* — R4 fires (`provisions: [] -> ['db']`);
+- *an `undo` is not the inverse of its acquisition* — R1 fires
+  (`pool#1 (open() with no close())`).
+
+The second is the interesting one, and it is why this form earns its place:
+G4 requires an acquisition to *carry* an `undo`, but nothing in the type
+system knows whether that undo undoes anything — `verified effect` (§7)
+would, and is not implemented. `examples/lifecycle_leak.rvl` is a component
+that passes every static check and leaks a connection pool on every unload;
+the assertion catches it.
+
+The resource half is necessarily tier-specific: it is stated over the
+reference tier's host-builtin vocabulary (`Pool`/`Map` in
+docs/backend-ir.md §Host builtins). Another tier implementing lifecycle tests
+states it over its own, against the same R1/R4 clauses.
+
+#### There is no `swap`
+
+The roadmap sketch for this form included `swap C -> C2`. It cannot exist:
+G2 forbids two components in one document from providing the same key, so a
+replacement *provider* for a key is not expressible in the document a
+lifecycle test lives in — and if the two are in different realms (§4) they
+are not replacements for one consumer either. What the demo actually swaps is
+a replacement *instance*: `unload C` then `load C with { … }`, which this
+statement set already spells, and whose R2 reactivation is exactly what the
+test then asserts on (`examples/lifecycle_cache.rvl`, "a reloaded cache
+starts empty"). `swap` is refused *by name* rather than as a parse error, so
+the sketch that motivated this form fails with its own explanation.
+
+#### Portability
+
+`lifecycle test` lowers on the **reference tier only** (cordis-py). The other
+four emitters refuse it by name:
+
+```
+lifecycle test 'cache reverts cleanly' is not lowerable on the cordis-rs tier:
+  it drives a live composition (load/call/unload) and asserts R4
+  residue-freedom through the host runtime's introspection, which only the
+  reference tier implements — run it with `revl test --backend py`
+```
+
+This is a boundary, not a gap: the driver needs the host runtime's
+introspection, and each tier's is different. A refusal by name is deliberate
+— a construct silently dropped by one renderer and honored by another is this
+project's recurring bug class. In the IR a lifecycle test is an ordinary
+`ir_version: 3` entry in `tests` carrying `"lifecycle": true`, so a pure
+`test` document is byte-identical to what it was before this feature.
+
 ## 8. Grammar deltas (summary)
 
 ```
 program     := use* decl*
 use         := 'use' STRING ('{' IDENT (',' IDENT)* '}' | 'as' IDENT)
-decl        := ['pub'] (typedecl | fndecl | service | component | extern | test)
+decl        := ['pub'] (typedecl | fndecl | service | component | extern)
+             | ['lifecycle'] test                              (§7.1)
 typedecl    := 'type' IDENT generics? '=' (record | variant ('|' variant)*)
 fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
 component   := (unchanged from 1.x) + blockeffect + fail
@@ -400,6 +589,7 @@ extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr] hostbod
 hostbody    := '=' '@' IDENT '{' <verbatim host text, brace-balanced> '}'
 expr        := TS-expression-subset  (see §3.2/§3.3)  + 'match' + block-expr
 stmt        := let | var | assign(var-only) | if | for-of | while | return | expr-stmt(calls)
+lcstmt      := load | unload | call | 'assert' ('no_residue' | expr)   (§7.1)
 ```
 
 The full grammar remains small enough to include, in its entirety, in a
@@ -438,7 +628,7 @@ Mechanical, one release:
 With strata 1–2, the compiler becomes expressible as what it structurally
 already is — a pipeline of components with pure interiors:
 
-```revl
+```revl sketch
 component Lexer provides tokens: TokenStream {
   provide tokens { fn lex(source) = lex_impl(source) }   // lex_impl: pub fn
 }

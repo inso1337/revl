@@ -98,7 +98,7 @@ The expected type comes from context wherever context has one:
 
 Where context has **no** type, the hole must say so itself:
 
-```revl
+```revl reject
 fn f() -> Int {
   let x = hole "…"       // rejected: nothing here says what `x` must be
   let y = hole[Str] "…"  // fine
