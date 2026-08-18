@@ -1,0 +1,51 @@
+package example:catalog@0.3.0;
+
+/// A stock-keeping unit as the catalog stores it.
+record item {
+  id: u64,
+  name: string,
+  price: f64,
+  tags: list<string>,
+}
+
+enum availability {
+  in-stock,
+  back-order,
+  discontinued,
+}
+
+/// What a lookup can come back with.
+variant lookup {
+  found(item),
+  ambiguous(list<string>),
+  missing,
+}
+
+/// An alias, to check it is inlined rather than turned into a variant.
+type sku = string;
+
+interface catalog {
+  /// Look an item up by its SKU. A pure query over the catalog snapshot.
+  /// @revl:pure
+  find: func(id: sku) -> lookup;
+
+  /// How many of these are there? Absent when the SKU is unknown.
+  stock: func(id: sku) -> option<availability>;
+
+  /// Take one off the shelf. Irreversible from revl's side.
+  reserve: func(id: sku, quantity: u32) -> result<item, string>;
+
+  /// Drop the whole catalog.
+  clear: func();
+}
+
+world store {
+  export catalog;
+  import wasi:clocks/monotonic-clock@0.2.0;
+
+  /// The host hands the component a way to write an audit line.
+  import audit: func(message: string);
+
+  /// Put stock back on the shelf.
+  export restock: func(id: sku, quantity: u32) -> result<_, string>;
+}
