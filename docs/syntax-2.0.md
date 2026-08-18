@@ -403,7 +403,7 @@ leaves the one property revl exists to provide — that composition is
 *revertible* — expressible only in each backend's own host test suite. A
 `lifecycle test` closes that: it is a script over a **live composition**.
 
-```revl
+```revl fragment
 lifecycle test "cache reverts cleanly" {
   load PgDatabase with { url: "postgres://primary:5432/app" }
   load UserCache
