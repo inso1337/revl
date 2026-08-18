@@ -208,7 +208,7 @@ command behind it is the failure mode this project keeps hitting:
 
 | suite | command | collected |
 |---|---|---|
-| frontend (typing, strata, stdlib, MCP-session, self-evolution, cross-tier, emitted-code validation, plan/queries/holes/replay/capabilities/why-traces/fault-tests/lifecycle) | `pytest tests/ -q` | 968 |
+| frontend (typing, strata, stdlib, MCP-session, self-evolution, cross-tier, emitted-code validation, self-hosted lexer/parser, plan/queries/holes/replay/capabilities/why-traces/fault-tests/lifecycle) | `pytest tests/ -q` | 1146 |
 | wasm tier | `pytest tests/test_wasm_backend.py backends/wasm/test_v3_emit.py -q` | 42 |
 | java tier | `pytest backends/java/test_emit_java.py -q` | 29 |
 | rust tier | `pytest backends/rust/test_emit_rust.py -q` | 26 |
@@ -314,6 +314,7 @@ or **[docs/vision.md](docs/vision.md)** for what this is *for*.
 - [fault-tests.md](docs/fault-tests.md) — L-Raise / no-residue as a language form
 - [replay.md](docs/replay.md) — backwards replay over the accumulator
 - [contract-errata.md](docs/contract-errata.md) — known runtime divergences, per tier
+- [selfhost-findings.md](docs/selfhost-findings.md) — the self-hosted front end as a differential oracle: what it found, and what writing revl in revl actually cost
 
 **Working in a live system**
 - [plan.md](docs/plan.md) — a dry run for admission

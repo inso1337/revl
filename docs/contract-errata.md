@@ -236,22 +236,27 @@ rejection.
   it is outside one. Closing the rest needs arrow-parameter annotations in the
   grammar.
 
-- **Type parameters are implicit, so they cannot be spelled or constrained**
-  (frontier, tracked): instantiation itself is closed — a single-uppercase name
-  in a `fn` signature that is not a declared type is that fn's type parameter,
-  is a wildcard only inside that fn's own body, and is unified against the
-  actual arguments at every call site (`collect_tparams` / `unify`,
-  `typecheck.py`), so `fn id(x: T) -> T` then `id("hello")` no longer satisfies
-  an `Int` position. What is *not* closed is the declaration form. There is no
-  `[T]` syntax, so: (a) the rule is positional-by-spelling — a one-letter
-  signature type is generic whether or not the author meant it, and a typo'd
-  one-letter name silently becomes a type parameter rather than an error;
-  (b) parameters cannot be bounded or shared across signatures; (c) only `fn`
-  and `extern` signatures quantify — a one-letter name in a record field or an
+- **Type parameters cannot be bounded, and the implicit spelling still
+  applies** (frontier, narrowed): instantiation is closed — a type parameter is
+  a wildcard only inside its own fn's body and is unified against the actual
+  arguments at every call site (`collect_tparams` / `unify`, `typecheck.py`),
+  so `fn id(x: T) -> T` then `id("hello")` no longer satisfies an `Int`
+  position. The **declaration form is closed too** as of `4725770`:
+  `fn id[T](x: T) -> T` and the `extern` counterpart declare parameters by
+  name, a strict superset of the implicit single-uppercase heuristic
+  (docs/generics.md). What remains open:
+
+  (a) the implicit rule is still positional-by-spelling and still on — a
+  one-letter signature type is generic whether or not the author meant it, so a
+  typo'd one-letter name becomes a type parameter rather than an error. The
+  explicit `[T]` list lets an author say what they mean; it does not let them
+  turn the heuristic off. (b) Parameters cannot be bounded, or shared across
+  signatures. (c) Only `fn` and `extern` quantify — service `provide`-methods
+  are checked through a separate path and are not in the shared signature
+  table, so they take no list, and a one-letter name in a record field or an
   ADT payload is an ordinary opaque nominal type, like any other undeclared
   name (undeclared multi-letter names such as the `Row` in `-> List[Row]` are
-  deliberately opaque, since service returns are host-shaped). Closing it needs
-  explicit type-parameter syntax in the parser.
+  deliberately opaque, since service returns are host-shaped).
 
 - **Type aliases are transparent, and the alias/variant line is drawn where
   TypeScript's own is** (closed, recorded because the rule is subtle): `type X
