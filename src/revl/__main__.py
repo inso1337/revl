@@ -259,6 +259,25 @@ def _run_plan(args) -> int:
     return 0 if result["admissible"] else 1
 
 
+def _run_query(args, ir: dict) -> int:
+    """`revl query <question> <target> <files...>` — the composition query
+    layer (docs/queries.md). A miss (unknown component/service/key) is a
+    non-zero exit with the known names, not a crash."""
+    from .query import QUERIES, render
+
+    handler = QUERIES[args.query_command]
+    if args.query_command == "drift":
+        result = handler(ir, args.target, gains=args.gains, losses=args.loses)
+    else:
+        result = handler(ir, args.target)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render(result))
+    return 0 if result.get("ok") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -284,6 +303,34 @@ def main(argv: list[str] | None = None) -> int:
                           help="a running component withdrawn in this admission "
                                "(renames); repeatable")
     plan_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+
+
+    query = sub.add_parser(
+        "query", help="ask the composition a question (docs/queries.md)")
+    query_sub = query.add_subparsers(dest="query_command", required=True)
+    for name, metavar, helptext in (
+        ("emits-to", "TARGET",
+         "who emits to a service key, `key.method`, service or extern?"),
+        ("withdraw", "COMPONENT",
+         "what breaks if this component is withdrawn (the reactive cascade)?"),
+        ("depends-on", "TARGET", "who depends on a provision key or service?"),
+        ("reaches", "COMPONENT",
+         "the transitive boundary surface of one component"),
+        ("drift", "SERVICE",
+         "which providers and call sites a service interface change implicates"),
+    ):
+        sub_cmd = query_sub.add_parser(name, help=helptext)
+        sub_cmd.add_argument("target", metavar=metavar)
+        sub_cmd.add_argument("files", nargs="+")
+        sub_cmd.add_argument("--json", action="store_true",
+                             help="machine-readable output")
+        if name == "drift":
+            sub_cmd.add_argument("--gains", action="append", default=[],
+                                 metavar="METHOD",
+                                 help="a method the service would gain (repeatable)")
+            sub_cmd.add_argument("--loses", action="append", default=[],
+                                 metavar="METHOD",
+                                 help="a method the service would lose (repeatable)")
 
     fmt = sub.add_parser("fmt", help="format .rvl sources (migration §9)")
     fmt.add_argument(
@@ -390,6 +437,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "test":
         return test_command(ir, args.backend)
+
+    if args.command == "query":
+        return _run_query(args, ir)
 
     if args.command == "audit":
         boundary = _boundary(ir)
