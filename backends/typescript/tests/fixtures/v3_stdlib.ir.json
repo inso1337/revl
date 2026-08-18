@@ -1,0 +1,637 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "types": {
+    "Row": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "id": "Int",
+        "name": "Str"
+      }
+    }
+  },
+  "functions": [
+    {
+      "name": "strLen",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "length",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "pushed",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Int]"
+        },
+        {
+          "name": "x",
+          "type": "Int"
+        }
+      ],
+      "returns": "List[Int]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "push",
+            "target": {
+              "kind": "var",
+              "name": "xs"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "x"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "sliced",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Int]"
+        }
+      ],
+      "returns": "List[Int]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "slice",
+            "target": {
+              "kind": "var",
+              "name": "xs"
+            },
+            "args": [
+              {
+                "kind": "lit",
+                "value": 1
+              },
+              {
+                "kind": "lit",
+                "value": 3
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "concatLists",
+      "params": [
+        {
+          "name": "a",
+          "type": "List[Int]"
+        },
+        {
+          "name": "b",
+          "type": "List[Int]"
+        }
+      ],
+      "returns": "List[Int]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "concat",
+            "target": {
+              "kind": "var",
+              "name": "a"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "b"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "splitOn",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "sep",
+          "type": "Str"
+        }
+      ],
+      "returns": "List[Str]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "split",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "sep"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "joinWith",
+      "params": [
+        {
+          "name": "xs",
+          "type": "List[Str]"
+        },
+        {
+          "name": "sep",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "join",
+            "target": {
+              "kind": "var",
+              "name": "xs"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "sep"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "repeated",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "repeat",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "n"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "indexOfSub",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "sub",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "indexOf",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "sub"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "charAtOf",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "i",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "charAt",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "i"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "codeAtOf",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        },
+        {
+          "name": "i",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "charCodeAt",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "i"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "greetN",
+      "params": [
+        {
+          "name": "name",
+          "type": "Str"
+        },
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "interp",
+            "parts": [
+              [
+                "text",
+                "hi "
+              ],
+              [
+                "expr",
+                {
+                  "kind": "var",
+                  "name": "name"
+                }
+              ],
+              [
+                "text",
+                "#"
+              ],
+              [
+                "expr",
+                {
+                  "kind": "var",
+                  "name": "n"
+                }
+              ],
+              [
+                "text",
+                "!"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "optName",
+      "params": [
+        {
+          "name": "row",
+          "type": "Opt[Row]"
+        }
+      ],
+      "returns": "Opt[Str]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "optfield",
+            "target": {
+              "kind": "var",
+              "name": "row"
+            },
+            "name": "name"
+          }
+        }
+      ]
+    },
+    {
+      "name": "optCode",
+      "params": [
+        {
+          "name": "s",
+          "type": "Opt[Str]"
+        }
+      ],
+      "returns": "Opt[Int]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "optcall",
+            "target": {
+              "kind": "var",
+              "name": "s"
+            },
+            "method": "charCodeAt",
+            "args": [
+              {
+                "kind": "lit",
+                "value": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "unwrapOr",
+      "params": [
+        {
+          "name": "o",
+          "type": "Opt[Int]"
+        },
+        {
+          "name": "d",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "var",
+              "name": "o"
+            },
+            "arms": [
+              {
+                "pattern": "Some",
+                "bind": "v",
+                "body": {
+                  "kind": "var",
+                  "name": "v"
+                }
+              },
+              {
+                "pattern": "None",
+                "bind": null,
+                "body": {
+                  "kind": "var",
+                  "name": "d"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "adder",
+      "params": [],
+      "returns": "(Int) -> Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "arrow",
+            "params": [
+              "y"
+            ],
+            "param_types": [
+              "Int"
+            ],
+            "body": {
+              "kind": "bin",
+              "op": "+",
+              "left": {
+                "kind": "var",
+                "name": "y"
+              },
+              "right": {
+                "kind": "lit",
+                "value": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "okOf",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Result[Int, Str]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "adt",
+            "case": "Ok",
+            "args": [
+              {
+                "kind": "var",
+                "name": "n"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "errOf",
+      "params": [
+        {
+          "name": "m",
+          "type": "Str"
+        }
+      ],
+      "returns": "Result[Int, Str]",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "adt",
+            "case": "Err",
+            "args": [
+              {
+                "kind": "var",
+                "name": "m"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "resultFold",
+      "params": [
+        {
+          "name": "r",
+          "type": "Result[Int, Str]"
+        }
+      ],
+      "returns": "Int",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "var",
+              "name": "r"
+            },
+            "arms": [
+              {
+                "pattern": "Ok",
+                "bind": "v",
+                "body": {
+                  "kind": "var",
+                  "name": "v"
+                }
+              },
+              {
+                "pattern": "Err",
+                "bind": "e",
+                "body": {
+                  "kind": "un",
+                  "op": "-",
+                  "operand": {
+                    "kind": "builtin",
+                    "method": "length",
+                    "target": {
+                      "kind": "var",
+                      "name": "e"
+                    },
+                    "args": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  }
+}
