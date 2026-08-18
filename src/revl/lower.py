@@ -24,6 +24,7 @@ from .typecheck import (
     _SIZED_HEADS,
     check_ast,
     collect_tparams,
+    validate_explicit_tparams,
     render_type,
     mark_tparams,
     check_type_wellformed,
@@ -719,18 +720,24 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
     """{name: {"params": [type...], "returns": type|None, "tparams": set}} for
     fns + externs.
 
-    Each signature's implicit type parameters (single-uppercase names that are
-    not declared types) are marked here, once, so the rest of the checker can
-    tell a universally quantified `T` from a nominal type that merely has a
-    one-letter name. Marked types never reach the IR — this table is the
-    checker's view, and `_lower_fns`/`_lower_externs` emit the author's
-    spelling."""
+    Each signature's type parameters are marked here, once, so the rest of the
+    checker can tell a universally quantified `T` from a nominal type that
+    merely has a one-letter name. Both forms feed the same set: implicit
+    single-uppercase names, and any explicit `fn id[T](...)` names the decl
+    carries (validated for shadowing here — see `validate_explicit_tparams`).
+    Marked types never reach the IR — this table is the checker's view, and
+    `_lower_fns`/`_lower_externs` emit the author's spelling, byte-identical
+    whether a parameter was implicit or explicit."""
     declared = {name: spec for name, spec in (types or {}).items()
                 if not name.startswith("__")}
     sigs: dict = {}
     for decl in list(program.fn_decls) + list(program.externs):
         raw_params = [p.type for p in decl.params]
-        tparams = collect_tparams(raw_params + [decl.returns], declared)
+        explicit = validate_explicit_tparams(
+            getattr(decl, "type_params", ()) or (), declared,
+            program.filename, decl.line)
+        tparams = collect_tparams(raw_params + [decl.returns], declared,
+                                  explicit=explicit)
         sigs[decl.name] = {
             "params": [mark_tparams(t, tparams) for t in raw_params],
             "returns": mark_tparams(decl.returns, tparams),
