@@ -254,6 +254,14 @@ Example:
 
 When a compile fails, read the *hint*; it usually states the exact rewrite.
 
+Three rejections are the verdict of a search over the whole composition — the
+G4 emission fixed point, a G3 dependency cycle, a G2 provision conflict — and
+those carry the derivation with them: the call chain, the cycle path, both
+providers, each with a source location. It renders under the hint, and rides
+in the structured diagnostic (and every MCP rejection) under `why`. See
+[why-traces.md](why-traces.md). `revl explain <code>` turns any code back into
+the guarantee it enforces and the rewrite that satisfies it.
+
 ## Common failure modes (check before you write)
 
 1. Did you write `null`? → `None` / `Opt[T]` / `match`.
