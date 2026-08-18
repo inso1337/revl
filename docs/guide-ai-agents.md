@@ -87,7 +87,7 @@ type Outcome = Ok(Row) | NotFound | Invalid(Str)
 - `match` over an ADT is **exhaustiveness-checked**: omit a case and it won't
   compile, and the error names the missing case. Use `_` for "everything else".
 
-```revl
+```revl fragment
 return match outcome {
   Ok(row)      => row.name,
   NotFound     => "-",
@@ -101,6 +101,10 @@ This is the paradigm — deliberately **not** TS syntax. A component declares
 what it requires and provides; its body is *revertible effects*.
 
 ```revl
+service Database {
+  emission fn execute(sql: Str) -> Int    // crosses the system boundary
+}
+
 service Cache {
   fn get(key: Str) -> Opt[Str]
   emission fn put(key: Str, value: Str)   // its body emits — see "rules that bite"
@@ -176,13 +180,13 @@ single most common rejection when a component writes anywhere.
 
 **`emit` yields a value.** Use it in value position when you need the result:
 
-```revl
+```revl fragment
 fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
 ```
 
 **Method bodies take plain bindings.** Name intermediates instead of nesting:
 
-```revl
+```revl fragment
 provide greet {
   fn hello(name) {
     let prefix = "hi, "        // plain value binding

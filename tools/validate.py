@@ -156,16 +156,95 @@ class TypeScriptValidator(Validator):
 
 
 # ---------------------------------------------------------------------------
-# rust — needs the crates.io index to resolve cordis-rs
+# rust — resolves cordis-rs offline first, from the local cargo registry
 # ---------------------------------------------------------------------------
+#
+# "No network" is not the same question as "can cordis-rs be resolved?". A
+# machine with a warm ~/.cargo resolves it fine with no route to the index,
+# and this validator used to answer `unavailable` there — reporting the rust
+# tier as unchecked on exactly the machines that could check it.
+#
+# The policy below is the one `backends/rust/test_emit_rust.py` already runs
+# (`_cargo` / `_is_offline_resolve_failure`), kept deliberately identical:
+# resolve `--offline` first, fall back to the networked resolve ONLY when the
+# offline attempt failed for a *resolution* reason, and never let a compile
+# error be reclassified as retryable. Laundering a real failure into
+# "unavailable" is the one outcome worse than a false red.
+
+_CRATES_IO: bool | None = None
+
 
 def _crates_io_reachable() -> bool:
-    import socket
-    try:
-        socket.create_connection(("static.crates.io", 443), timeout=5).close()
-        return True
-    except OSError:
+    """Whether the index can be reached. Cached: probed once per run."""
+    global _CRATES_IO
+    if _CRATES_IO is None:
+        import socket  # noqa: PLC0415
+
+        try:
+            socket.create_connection(("index.crates.io", 443), timeout=5).close()
+            _CRATES_IO = True
+        except OSError:
+            _CRATES_IO = False
+    return _CRATES_IO
+
+
+# Phrases cargo uses when an *offline resolve* could not find a crate. They are
+# emitted before any compilation starts, which is what makes them safe to
+# distinguish from a real build failure.
+_OFFLINE_RESOLVE_MARKERS = (
+    "you're using offline mode",
+    "without the offline flag",
+    "--offline was specified",
+    "registry index was not found",
+    "no matching package",
+    "failed to select a version",
+)
+
+# Phrases that mean cargo got far enough to actually build something. If any
+# appears, the result is real and must be surfaced as-is.
+_REAL_FAILURE_MARKERS = (
+    "error[e",
+    "could not compile",
+    "test result: failed",
+    "panicked at",
+)
+
+
+def _is_offline_resolve_failure(proc: subprocess.CompletedProcess) -> bool:
+    blob = ((proc.stderr or "") + (proc.stdout or "")).lower()
+    if any(m in blob for m in _REAL_FAILURE_MARKERS):
         return False
+    return any(m in blob for m in _OFFLINE_RESOLVE_MARKERS)
+
+
+_NO_REGISTRY = ("cordis-rs is not in the local cargo registry and "
+                "index.crates.io is unreachable — run cargo once with network "
+                "to populate ~/.cargo")
+
+
+def _cargo(subcommand: str, cwd: Path,
+           *extra: str) -> tuple[subprocess.CompletedProcess | None, str | None]:
+    """`cargo <subcommand>` — offline first, networked resolve as fallback.
+
+    Returns `(completed, reason)`. `reason` is non-None only when the crate
+    could not be resolved at all (empty registry *and* no index); every other
+    outcome — including a genuine compile error — comes back as a real
+    `CompletedProcess` for the caller to read.
+    """
+    offline = subprocess.run(
+        ["cargo", subcommand, "--offline", *extra], cwd=cwd, text=True,
+        capture_output=True, timeout=_TIMEOUT,
+    )
+    if offline.returncode == 0 or not _is_offline_resolve_failure(offline):
+        return offline, None
+    # The crates are not in the local registry. Only now is the network worth
+    # the wait; without it there is nothing to resolve against.
+    if not _crates_io_reachable():
+        return None, _NO_REGISTRY
+    return subprocess.run(
+        ["cargo", subcommand, *extra], cwd=cwd, text=True,
+        capture_output=True, timeout=_TIMEOUT,
+    ), None
 
 
 class RustValidator(Validator):
@@ -175,9 +254,32 @@ class RustValidator(Validator):
     def unavailable(self) -> str | None:
         if shutil.which("cargo") is None:
             return "cargo not on PATH"
-        if not _crates_io_reachable():
-            return "crates.io unreachable (cordis-rs is resolved from the index)"
-        return None
+        # Ask the resolver, not the network: `generate-lockfile` runs the same
+        # resolution `check` needs and compiles nothing, so a warm cache
+        # answers in milliseconds and a cold one with no index says so.
+        return self._resolve_reason()
+
+    _RESOLVE_REASON: str | None = ""  # "" = not probed yet
+
+    @classmethod
+    def _resolve_reason(cls) -> str | None:
+        if cls._RESOLVE_REASON != "":
+            return cls._RESOLVE_REASON
+        sys.path.insert(0, str(ROOT / "tools"))
+        from conformance import emitter  # noqa: PLC0415 — avoids a cycle at import
+
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "src").mkdir()
+            (crate / "src" / "lib.rs").write_text("", encoding="utf-8")
+            (crate / "Cargo.toml").write_text(
+                emitter("rust").cargo_toml("revl_conformance"), encoding="utf-8")
+            completed, reason = _cargo("generate-lockfile", crate)
+        if reason is None and completed is not None and completed.returncode != 0:
+            detail = (completed.stderr or "").strip().splitlines()
+            reason = f"cargo could not resolve cordis-rs: {detail[-1] if detail else '?'}"
+        cls._RESOLVE_REASON = reason
+        return reason
 
     def check(self, items):
         sys.path.insert(0, str(ROOT / "tools"))
@@ -202,10 +304,12 @@ class RustValidator(Validator):
             (source_dir / "lib.rs").write_text(
                 "".join(f"pub mod {m};\n" for m in modules), encoding="utf-8")
 
-            result = subprocess.run(
-                ["cargo", "check", "--message-format=json", "--quiet"],
-                cwd=crate, capture_output=True, text=True, timeout=_TIMEOUT,
-            )
+            result, reason = _cargo(
+                "check", crate, "--message-format=json", "--quiet")
+        if reason is not None:
+            # unavailable() cleared this path, so reaching it means the
+            # registry went away mid-run. Say so; never report it as 47 fails.
+            raise RuntimeError(reason)
 
         failures: dict[str, list[str]] = {}
         for line in result.stdout.splitlines():

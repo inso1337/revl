@@ -181,14 +181,53 @@ The residue is honest rather than zero:
   emits untyped Python, so there is nothing deeper to check.
 - wasm validates modules; it does not drive the component protocol. The wasm
   suite executes emitted components separately.
-- rust needs crates.io reachable — specifically `index.crates.io` and
-  `static.crates.io`, which are *different hosts* from `crates.io` itself. A
-  network that serves the website and the `cargo search` API can still fail
-  every resolve, which is exactly how this tier went unvalidated. The
-  validator skips with that reason rather than reporting clean.
+- rust needs cordis-rs to *resolve*, which is not the same question as
+  "is the network up". The validator resolves `--offline` first, so a machine
+  with a warm `~/.cargo` validates the tier with no route to the index at all;
+  it falls back to a networked resolve only when the offline attempt failed
+  for a *resolution* reason, and never reclassifies a compile error as
+  retryable. Only when both fail does it report unavailable, with that reason,
+  rather than reporting clean. (It used to probe `static.crates.io` and call
+  the tier unavailable when the probe failed — which meant a laptop on a plane
+  with every crate already cached reported the rust tier as unchecked. The
+  hosts are also not `crates.io`: `index.crates.io` and `static.crates.io` are
+  different hosts, so a network that serves the website and the `cargo search`
+  API can still fail every resolve.) The policy is shared with
+  `backends/rust/test_emit_rust.py`, which pins it in
+  `test_offline_fallback_never_launders_a_real_failure`.
 - Validation proves the output *compiles*, still not that it *behaves*.
   Cross-tier `test` execution landed with it: `revl test --backend …|--all`
   runs the same `test` blocks through every tier whose toolchain is present.
+
+## Doc examples are compiled
+
+`tests/test_doc_examples.py` extracts every ```` ```revl ```` block from
+`README.md` and `docs/**.md` and puts it through the frontend. It exists
+because the docs rotted silently: when the G4 emission rule landed, the
+flagship `UserCache` example stopped compiling in three documents at once —
+one of them contradicting a rule stated seventy lines below it — and no test
+noticed for as long as it took someone to paste a snippet and watch it fail.
+
+A doc snippet is often not a program, so a block declares what it is in its
+fence, and **every kind gets a real check** — there is no marker that means
+"skip me":
+
+| fence | what it claims | what is checked |
+|---|---|---|
+| ` ```revl ` | a complete program | must compile |
+| ` ```revl fragment ` | a component body, method body, statement or expression | must be valid revl syntax in at least one scaffold; must *not* compile standalone (then it is a program — drop the marker) |
+| ` ```revl sketch ` | elided pseudocode (`...`) or proposed syntax | must **not** compile; when the feature lands the gate says so and the block gets promoted |
+| ` ```revl reject ` | code the compiler must refuse | must fail to compile |
+| ` ```revl reject T1 ` | ...for a specific reason | must fail with that `revl.diagnostics` code |
+
+Pick the weakest marker that is true. If a block is meant to be a working
+example, the fix is the snippet — not the marker. Every failure reprints this
+table, so an author who trips the gate does not have to come find it.
+
+The one thing the gate cannot catch is a rotted program mis-marked
+`fragment`: a fragment is checked for syntax, not for types, because its free
+names have meaning only in the surrounding prose. That is why the marker
+vocabulary is four words long and why each one is loud in review.
 
 ## What this says about the architecture
 
