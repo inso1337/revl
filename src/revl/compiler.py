@@ -299,6 +299,13 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                 entry for entry in (running.get("components") or [])
                 if entry.get("name") not in dropped
             ],
+            # key -> service, so the admission gate (§5) can tell which running
+            # components consume/provide a redeclared service. The manifest's
+            # `inject`/`provides` are bare key lists; the service each key
+            # carries lives on the full IR document's `components`, whose
+            # `provides` is a {key: service} map. When only a bare manifest was
+            # supplied this stays empty and the gate stays conservative.
+            "provision_services": _provision_services(manifest),
         }
     document = check_and_lower(merged, ambient)
     if manifest is not None:
@@ -315,3 +322,20 @@ def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:
     if not loader.has_source(path) and not os.path.exists(path):
         raise RevlError(path, 1, f"file not found: {path}")
     return loader.load(path)
+
+
+def _provision_services(manifest: dict) -> dict[str, str]:
+    """Map every provision key in the running document to the service it
+    carries, for the admission gate's consumer/provider-relative drift check.
+
+    The full IR document's `components` carry `provides` as a {key: service}
+    map (unlike the manifest projection, whose `provides` is a bare key list).
+    A caller that supplied only the manifest projection has no such map, so the
+    result is empty and the gate treats every key as unresolved."""
+    mapping: dict[str, str] = {}
+    for comp in manifest.get("components") or []:
+        provides = comp.get("provides")
+        if isinstance(provides, dict):
+            for key, service in provides.items():
+                mapping[key] = service
+    return mapping
