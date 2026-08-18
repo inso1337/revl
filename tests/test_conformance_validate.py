@@ -28,11 +28,36 @@ import conformance  # noqa: E402
 from validate import VALIDATORS  # noqa: E402
 
 
+# Emitted code that its own toolchain rejects *today*. Every entry is a real
+# emitter bug, found the first time that tier was validated against a compiler
+# rather than merely run (docs/conformance.md). They are baselined so this
+# suite fails on *new* breakage instead of being switched off while they are
+# worked through — and the test also fails when a baselined case starts
+# passing, so the list can only shrink.
+KNOWN_FAILURES: dict[str, set[str]] = {
+    "java": {
+        "component/await (A1 boundary)",
+        "method/method-time effect",
+        "method/emit as value",
+        "expr/template string",
+        "expr/nullish ??",
+        "expr/ADT construct + match",
+        "expr/Opt Some/None",
+        "fn/arrow lambda",
+        "type/List service",
+        "type/Opt service",
+        "type/record in signature",
+        "type/ADT in signature",
+        "type/Map service",
+    },
+}
+
+
 @pytest.fixture(scope="module")
 def artifacts() -> dict[str, list[tuple[str, object]]]:
     """Every case emitted once, per tier, shared across the tier tests."""
     collected: dict[str, list[tuple[str, object]]] = {t: [] for t in conformance.TIERS}
-    for group, name, source in conformance.CASES:
+    for index, (group, name, source) in enumerate(conformance.CASES):
         label = f"{group}/{name}"
         try:
             ir = conformance.compile_source(source)
@@ -40,7 +65,8 @@ def artifacts() -> dict[str, list[tuple[str, object]]]:
             continue
         for tier in conformance.TIERS:
             try:
-                collected[tier].append((label, conformance.emitter(tier).emit(ir)))
+                collected[tier].append((label, conformance.emitter(tier).emit(
+                    ir, **conformance._emit_kwargs(tier, index))))
             except Exception:  # noqa: BLE001 — a refusal has nothing to validate
                 pass
     return collected
@@ -57,9 +83,18 @@ def test_emitted_code_survives_its_toolchain(tier, artifacts):
     assert results, f"{tier}: nothing was validated"
     failures = {label: detail for label, (status, detail) in results.items()
                 if status != "ok"}
-    assert not failures, (
+    known = KNOWN_FAILURES.get(tier, set())
+
+    regressions = {label: detail for label, detail in failures.items()
+                   if label not in known}
+    assert not regressions, (
         f"{tier} emitted code its own toolchain rejects ({validator.depth}):\n"
-        + "\n".join(f"  {label}: {detail}" for label, detail in failures.items()))
+        + "\n".join(f"  {label}: {detail}" for label, detail in regressions.items()))
+
+    repaired = sorted(known - set(failures))
+    assert not repaired, (
+        f"{tier}: these are in KNOWN_FAILURES but now pass — delete them from "
+        f"the baseline so it cannot rot:\n" + "\n".join(f"  {c}" for c in repaired))
 
 
 # --- regressions for what the first validated run found ----------------------

@@ -857,6 +857,12 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             )
             ret = (_rust_type(_method_return(env, key, original_mname), env.types)
                    if _method_return(env, key, original_mname) else "()")
+            # A provide-method body is rendered by the v3 renderer, which
+            # needs the parameter types to tell a string `+` from a numeric one.
+            env.v3_ctx().var_types = {
+                p: _param_type(env, key, original_mname, p)
+                for p in method.get("params") or []
+            }
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
                 _method_body_lines(env, method, out, indent=2)
@@ -988,6 +994,12 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             )
             ret = (_rust_type(_method_return(env, key, mname), env.types)
                    if _method_return(env, key, mname) else "()")
+            # A provide-method body is rendered by the v3 renderer, which
+            # needs the parameter types to tell a string `+` from a numeric one.
+            env.v3_ctx().var_types = {
+                p: _param_type(env, key, mname, p)
+                for p in method.get("params") or []
+            }
             out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {_method_body(env, method)} }}")
         out.append("}")
         out.append("")
@@ -1140,6 +1152,34 @@ _V3_HOST_ROOTS = set(_HOST_STUBS)
 _V3_BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 
 
+def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
+    """Is this expression certainly a `Str`?
+
+    Deliberately conservative — it answers "certainly yes" or "unknown", never
+    guesses. A false positive would render a numeric `+` as a `format!` and
+    produce a `String` where an `i64` is expected, so the only sources trusted
+    here are a string literal, a template, a binding whose declared or
+    inferred type is `Str`, and a `+` over those.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        return isinstance(node.get("value"), str)
+    if kind == "interp":
+        return True
+    if kind in ("name", "var"):
+        return ctx.var_types.get(node.get("id") or node.get("name")) == "Str"
+    if kind == "bin" and node.get("op") == "+":
+        return _v3_is_str(node.get("left"), ctx) or _v3_is_str(node.get("right"), ctx)
+    return False
+
+
+def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
+    """The surface type of an expression when it is knowable, else None."""
+    return "Str" if _v3_is_str(node, ctx) else None
+
+
 class _V3Ctx:
     """Names visible to lowered IR v3 expression/statement emitters."""
 
@@ -1147,6 +1187,11 @@ class _V3Ctx:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # Binding -> surface type, seeded from declared signatures and from
+        # `let` right-hand sides. Rust is the only tier that needs this: `+`
+        # on strings has ownership rules (`String + &str` only), so the
+        # renderer must know when a `+` is a concatenation. See `_v3_is_str`.
+        self.var_types: dict[str, str | None] = {}
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
@@ -1277,6 +1322,16 @@ def _v3_expr(node: dict, ctx: _V3Ctx) -> str:
             if node["left"].get("kind") not in _V3_ATOMIC_KINDS:
                 left = f"({left})"
             return f"{left}.unwrap_or_else(|| {_v3_expr(node['right'], ctx)})"
+        if node.get("op") == "+" and (
+                _v3_is_str(node.get("left"), ctx) or _v3_is_str(node.get("right"), ctx)):
+            # Rust's `+` on strings takes `String + &str` only: `&str + String`
+            # and `String + String` are both errors, and which one a revl `+`
+            # becomes depends on where each side came from. `format!` accepts
+            # every combination and always yields `String`, which is what `Str`
+            # lowers to. (Both spellings shipped broken until `cargo check` ran
+            # over the emitted code — docs/conformance.md.)
+            return (f'format!("{{}}{{}}", {_v3_expr(node["left"], ctx)}, '
+                    f'{_v3_expr(node["right"], ctx)})')
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
@@ -1543,7 +1598,10 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
+        inferred = _v3_infer_type(node.get("value"), ctx)
         value = _v3_expr(node.get("value"), ctx)
+        if inferred is not None:
+            ctx.var_types[node.get("name")] = inferred
         if step == "let":
             keyword = "let mut" if node.get("mutable") else "let"
             out.append(f"{pad}{keyword} {name} = {value};")
@@ -1618,6 +1676,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     out: list[str] = []
     for fn in functions:
         name = _ident(fn.get("name"), "function name")
+        ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: {_rust_type(p.get('type'), types)}"
             for p in fn.get("params") or []
@@ -2123,10 +2182,17 @@ def cargo_toml(name: str = "revl_components") -> str:
 
 def _main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json>", file=sys.stderr)
+        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
         return 2
-    with open(argv[1], "r", encoding="utf-8") as handle:
-        ir = json.load(handle)
+    # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
+    # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
+    # such device or address` — the emitted-code tests were red in CI for that
+    # reason alone.
+    if argv[1] == "-":
+        ir = json.load(sys.stdin)
+    else:
+        with open(argv[1], "r", encoding="utf-8") as handle:
+            ir = json.load(handle)
     sys.stdout.write(emit(ir))
     return 0
 

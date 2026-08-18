@@ -212,13 +212,24 @@ CASES: list[tuple[str, str, str]] = [
 
 
 
+def _emit_kwargs(tier: str, index: int) -> dict:
+    """Per-tier emitter options needed to validate many cases side by side.
+
+    Only java needs one: every case emits a class named `Components`, so a
+    single `javac` invocation over all of them would see 47 duplicates of
+    `revl.Components` rather than 47 programs. `package_name` is a normal
+    emitter parameter, so what gets validated is still real emitter output.
+    """
+    return {"package_name": f"case_{index}"} if tier == "java" else {}
+
+
 def run(all_cases: bool = False, validate: bool = False) -> dict:
     report: dict = {"cases": [], "frontend_rejected": [], "gaps": {}}
     # Emitted artifacts per tier, kept for the validation pass: emitting twice
     # would be wasteful and could not be trusted to produce the same text.
     artifacts: dict[str, list[tuple[str, object]]] = {t: [] for t in TIERS}
 
-    for group, name, source in CASES:
+    for index, (group, name, source) in enumerate(CASES):
         label = f"{group}/{name}"
         try:
             ir = compile_source(source)
@@ -230,7 +241,8 @@ def run(all_cases: bool = False, validate: bool = False) -> dict:
         row = {"case": label, "ir_version": ir.get("ir_version"), "tiers": {}}
         for tier in TIERS:
             try:
-                artifacts[tier].append((label, emitter(tier).emit(ir)))
+                artifacts[tier].append(
+                    (label, emitter(tier).emit(ir, **_emit_kwargs(tier, index))))
                 row["tiers"][tier] = "ok"
             except Exception as exc:  # noqa: BLE001 — any refusal is the datum
                 message = str(exc).splitlines()[0]

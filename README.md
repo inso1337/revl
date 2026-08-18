@@ -53,12 +53,15 @@ component UserCache requires db: Database provides cache: Cache {
   language constructs through all five backends and reports what each does;
   `docs/conformance.md` records the result and separates a *deliberate* tier
   limit (an extern with no body for that backend; `Str` on the i32-only wasm
-  tier) from a real gap. Every real gap is currently closed. `--validate`
+  tier) from a real gap — every gap in *emitting* is closed. `--validate`
   asks the second question — it hands each tier's output to that tier's real
   compiler (`tsc`, `cargo check`, `javac`, `wasmtime`, and a scope walk for
   python), because "the emitter did not raise" never implied "the code
-  compiles": that gap hid a rust bug for months and a TypeScript twin of it
-  until the first validated run.
+  compiles": that gap hid a rust bug for months, a TypeScript twin of it, and
+  13 java cases that emit code `javac` rejects. python, typescript and wasm
+  validate clean; the java findings are baselined in
+  `tests/test_conformance_validate.py` so the suite fails on new breakage
+  instead of being switched off.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
   cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)

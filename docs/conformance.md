@@ -118,13 +118,33 @@ an emit-only sweep and all live in a tier the matrix called clean:
   unchecked remainder, so the compiler has no type to emit, and an admission
   beats a guess. Inferring them is a typing-frontier item, not a codegen one.
 
+Then a JDK was installed and the java tier was validated for the first time.
+It emits 47 of 50 cases and **13 of those do not compile** — `long` where a
+`String` is expected, unresolved symbols, `unexpected type` on generics, and a
+provider that does not implement its own interface for record/ADT parameters.
+The tier's own suite is green, because it asserts on emitted *strings* plus a
+javac gate over four hand-picked examples; nothing walked the surface. They
+are baselined in `tests/test_conformance_validate.py` — new breakage fails,
+and a baselined case that starts passing also fails, so the list can only
+shrink.
+
+The rust tier's one *known* failure is fixed here too, and it is the same
+shape as the others: revl's `+` on strings lowered to Rust's `+`, which
+accepts `String + &str` and rejects both `&str + String` and `String +
+String`. It now lowers to `format!`, which accepts every combination. Only
+`cargo check` in CI could see it — see "what is still not checked" below.
+
 The residue is honest rather than zero:
 
 - python's validator reaches syntax and unbound names, not types — the tier
   emits untyped Python, so there is nothing deeper to check.
 - wasm validates modules; it does not drive the component protocol. The wasm
   suite executes emitted components separately.
-- rust and java are wired and skip loudly off-CI.
+- rust cannot be validated on a machine without crates.io: `cordis-rs`
+  resolves from the index, and neither a mirror nor a git dependency helps
+  (its own `serde`/`indexmap`/`libloading` come from the registry too). The
+  validator skips with that reason and CI is the only place it runs — which
+  is why a rust-only bug can still reach `main`.
 - Validation proves the output *compiles*, still not that it *behaves*.
   Cross-tier `test` execution (`revl test --backend`) is the next rung.
 

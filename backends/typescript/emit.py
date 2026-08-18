@@ -1253,10 +1253,17 @@ def _main(argv: list[str]) -> int:
         runtime_import = args[1]
         args = args[2:]
     if len(args) != 1:
-        print("usage: python3 emit.py [--runtime <path>] <ir.json>", file=sys.stderr)
+        print("usage: python3 emit.py [--runtime <path>] <ir.json|->", file=sys.stderr)
         return 2
-    with open(args[0], "r", encoding="utf-8") as handle:
-        ir = json.load(handle)
+    # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
+    # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
+    # such device or address` — the emitted-code tests were red in CI for that
+    # reason alone.
+    if args[0] == "-":
+        ir = json.load(sys.stdin)
+    else:
+        with open(args[0], "r", encoding="utf-8") as handle:
+            ir = json.load(handle)
     sys.stdout.write(emit(ir, runtime_import=runtime_import))
     return 0
 

@@ -1,0 +1,73 @@
+#!/bin/sh
+# revl pre-commit: run the checks that have actually broken CI.
+#
+# Install (once per clone):   git config core.hooksPath tools/hooks
+# Skip for one commit:        git commit --no-verify
+#
+# Kept under ~20s on purpose. A hook people wait a minute for is a hook people
+# turn off. Anything slower belongs in CI.
+
+set -e
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+fail=0
+step() {
+    printf '  %-36s' "$1"
+    shift
+    if out=$("$@" 2>&1); then
+        echo "ok"
+    else
+        echo "FAILED"
+        echo "$out" | tail -25 | sed 's/^/      /'
+        fail=1
+    fi
+}
+
+echo "pre-commit:"
+
+# The frontend suite, which includes tests/test_conformance_validate.py: every
+# tier's emitted code is handed to that tier's real compiler. That is the check
+# that catches "the emitter did not raise, but its output does not compile".
+if [ -x .venv/bin/pytest ]; then
+    step "frontend + emitted-code validation" .venv/bin/pytest tests/ -q
+elif command -v pytest >/dev/null 2>&1; then
+    step "frontend + emitted-code validation" pytest tests/ -q
+else
+    echo "  frontend                           SKIPPED (no pytest)"
+fi
+
+# The TypeScript backend suite runs tsc over emitted code and shells out to the
+# emitters. CI was red for hours on a failure only this suite sees.
+if [ -d backends/typescript/node_modules ]; then
+    step "typescript backend (vitest)" sh -c \
+        'cd backends/typescript && npx vitest run --silent'
+else
+    echo "  typescript backend                 SKIPPED (npm install not run)"
+fi
+
+# Emitters are pure Python and the matrix needs no toolchain, so this always
+# runs: it catches a backend that stops emitting a construct entirely.
+step "conformance matrix (emit)" python3 tools/conformance.py
+
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "pre-commit failed. Fix the above, or commit with --no-verify."
+    exit 1
+fi
+
+# Say what could not be checked here rather than implying it passed. The rust
+# tier resolves cordis-rs from crates.io; where that is unreachable the cargo
+# tests skip, and only CI covers them.
+if ! python3 - <<'PY' 2>/dev/null
+import socket, sys
+try:
+    socket.create_connection(("static.crates.io", 443), timeout=3).close()
+except OSError:
+    sys.exit(1)
+PY
+then
+    echo "  note: crates.io unreachable — rust cargo checks are CI-only here."
+fi
+
+echo "pre-commit: ok"
