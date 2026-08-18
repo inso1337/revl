@@ -252,14 +252,35 @@ python -m revl run app.rvl --watch           # recompile on edit; a rejected cha
 python -m revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
 ```
 
+```bash
+python -m revl compile app.rvl --json-diagnostics  # structured rejections for CI
+python -m revl run app.rvl --placement map.toml    # split across processes/languages
+python -m revl mcp serve                           # the compiler as an MCP server
+python -m revl mcp schema app.rvl                  # provided services -> MCP tools
+python -m revl mcp import tools.json               # an MCP server -> revl source
+python3 tools/conformance.py                       # every construct x every backend
+```
+
 `run` needs the cordis-py runtime (`backends/python/setup.sh`); `--backend`
-selects the tier (only `py` is runnable today).
+selects the tier. `--placement` composes py / node / rust / java in one
+lifecycle (docs/interop-bridge.md), and `mcp serve` additionally holds a
+composition **in memory** so an agent can load, call, swap and prove
+no-residue without touching the filesystem (docs/mcp-bridge.md).
 
 ## Backends
 
-- **cordis-py** (Python) — the reference backend, on a hardened lifecycle runtime.
+- **cordis-py** (Python) — the reference backend, on a hardened lifecycle
+  runtime. The tier every construct is checked against first.
 - **cordis** (TypeScript) — v4.
-- **cordis-wasm** — the sandboxed substrate, where confinement becomes physical.
+- **cordis-rs** (Rust) and **cordis4j** (Java) — both consume *and* serve
+  across a process seam, reactively (peer death becomes withdrawal).
+- **cordis-wasm** — the sandboxed substrate, where confinement becomes
+  physical. Deliberately i32-only at the service boundary.
+
+What each tier can and cannot express is measured, not asserted:
+`tools/conformance.py` runs every construct through all five and
+[docs/conformance.md](conformance.md) records the result, separating a
+deliberate limit from a gap.
 
 ## Further reading
 
@@ -267,4 +288,10 @@ selects the tier (only `py` is runnable today).
 - [docs/syntax-2.0.md](syntax-2.0.md) — the full-language spec.
 - [docs/stdlib-2.0.md](stdlib-2.0.md) — the stdlib surface.
 - [docs/v2.0-roadmap.md](v2.0-roadmap.md) — status and remaining frontier.
+- [docs/conformance.md](conformance.md) — what each backend can express.
+- [docs/mcp-bridge.md](mcp-bridge.md) — the agent boundary and the live session.
+- [docs/interop-bridge.md](interop-bridge.md) — splitting a composition across
+  languages and processes.
+- [docs/backend-ir-v3.md](backend-ir-v3.md) — the contract, if you are writing
+  a backend.
 

@@ -155,6 +155,72 @@ extern pure fn sha256(data: Bytes) -> Str
 `pure` / `acquire` (needs `undo`) / `emission` (may have `compensate`).
 Unclassified → no compile.
 
+## Rules that bite (learned the hard way)
+
+These are the refusals most likely to stop a generated component. Each was
+added because real code got them wrong.
+
+**A service declaration bounds its providers.** If a method's body reaches an
+emission — directly, through an `emission` extern, or through a function that
+does — the *service* must declare it:
+
+```revl
+service Cache {
+  fn get(k: Str) -> Opt[Str]
+  emission fn put(k: Str, v: Str)   // its body emits, so the interface says so
+}
+```
+
+A provider may be purer than declared, never less pure. Skipping this is the
+single most common rejection when a component writes anywhere.
+
+**`emit` yields a value.** Use it in value position when you need the result:
+
+```revl
+fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+```
+
+**Method bodies take plain bindings.** Name intermediates instead of nesting:
+
+```revl
+provide greet {
+  fn hello(name) {
+    let prefix = "hi, "        // plain value binding
+    return prefix + name
+  }
+}
+```
+
+`let x = effect … undo …` still means the acquisition. In a component
+*activation* body a plain binding is refused — that body records effects.
+
+**`??` needs an optional on its left.** `a ?? b` on a non-optional is a type
+error: the fallback would be dead.
+
+**A void operation ends with a bare `return`** (or omits the return type and
+returns nothing).
+
+**`match` works in component and method bodies**, not only in `fn` bodies.
+
+## Driving a running system (MCP)
+
+`python -m revl mcp serve` exposes the compiler over MCP, and the loop it
+enables is the point: a draft component never has to touch the filesystem.
+
+| tool | use |
+|---|---|
+| `revl_check` | does this compile? structured diagnostics if not |
+| `revl_admit` | may it enter **this running composition**? |
+| `revl_load` / `revl_call` | boot it in memory and actually call it |
+| `revl_swap` / `revl_rollback` | replace a generation, or undo that |
+| `revl_unload` | tear down and prove no residue (R4) |
+| `revl_grammar` | the language surface, prompt-sized |
+
+Two properties worth relying on: a **rejected candidate cannot deploy** (the
+compile runs before the transition, so the running system keeps serving), and
+`revl_unload` **proves** the component left nothing behind before you commit
+it to disk. See [docs/mcp-bridge.md](mcp-bridge.md).
+
 ## The check → run loop
 
 Close the generate→check→run loop inside one file:

@@ -49,6 +49,11 @@ component UserCache requires db: Database provides cache: Cache {
   `destructiveHint` are **derived from the compiler** — including from the
   method body, so a tool cannot describe itself as harmless when it emits.
   See [docs/mcp-bridge.md](docs/mcp-bridge.md).
+- **Conformance is measured, not asserted.** `tools/conformance.py` emits 48
+  language constructs through all five backends and reports what each does;
+  `docs/conformance.md` records the result and separates a *deliberate* tier
+  limit (an extern with no body for that backend; `Str` on the i32-only wasm
+  tier) from a real gap. Every real gap is currently closed.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
   cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)
@@ -97,11 +102,16 @@ claim is checked by running the emitted code, not by argument: the test
 suite compiles revl sources for `fib` (loop form) and the Collatz
 step-counter, executes the **emitted Python**, and asserts `fib(10) = 55`
 and `collatz(27) = 111`; the same sources lower through the TypeScript
-emitter. Suites at this commit: 189 passing frontend tests (incl. the
-17-test sound-typing group, 7-test strata-composition, 6-test stdlib
-groups, and the new §3.2 group covering `??` / `?.` / `${a.b}`),
-21 python-backend, 24 ts-backend, plus the wasm demo, live hot-swap demo,
-and the cordisc cross-check.
+emitter.
+
+**Suites** (run them; the numbers move): 254 frontend tests including the
+sound-typing, strata-composition, stdlib, MCP-session, self-evolution and
+cross-tier groups; 38 typescript, 21 python, 16 rust and 21 java backend
+tests; 28 wasm tests executed on real wasmtime; plus the live hot-swap demo,
+the self-evolution demo and the cordisc cross-check. Some suites skip rather
+than fail when a toolchain is absent — the rust cargo tests need crates.io
+reachable, the wasm tests need `wasmtime` on `PATH`, the java tests need a
+JDK — and each says which half is missing.
 
 ### The acceptance benchmark (syntax-2.0 §10)
 

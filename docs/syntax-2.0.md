@@ -228,6 +228,91 @@ let conn = effect {
   the dynamic `realm(config.tenant)` form remains reserved (instance-parametric
   components).
 
+## 4b. Rules the implementation added
+
+These are not in the original proposal — each was forced by building
+something real, and each is now enforced. They belong with §4 because they
+are all about how a component's boundary is declared.
+
+### 4b.1 A service declaration is an upper bound on its providers (G4)
+
+A service operation declared plain may not reach an emission in *any*
+provider's body — directly, through an `emission` extern, or through a
+function that transitively reaches one:
+
+```
+`Cache.put` is declared plain, but this implementation reaches `db.execute`
+  a service declaration bounds what its providers may do — mark it
+  `emission fn put(...)` in service `Cache`, or move the irreversible call
+  out of this method (G4)
+```
+
+The bound is one-directional: a provider may be **purer** than declared
+(declared `emission`, body doesn't emit — the consumer already assumed the
+worst), never less pure. That direction is the sound one because consumers
+bind to the *service*, not to a component, and providers hot-swap
+underneath them.
+
+It also repairs `revl audit`: G8 enumerates a caller's emissions by reading
+the declarations of the operations it calls, so an under-declared operation
+made every consumer's audit incomplete — not merely misleading.
+
+### 4b.2 `emit` is also an expression
+
+`emit` began as a statement, which discarded its value — fatal for the
+canonical emission that *returns* data (an LLM completion, an HTTP GET).
+It is now also a prefix in value position, so the marker stays at the call
+site (G4's actual point) while the value flows:
+
+```revl
+provide evolve {
+  fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+}
+```
+
+Legal on a service emission or on an `emission` extern (both are boundary
+crossings); `emit` on anything else is refused. The statement form still
+takes an optional `compensate`.
+
+### 4b.3 Provide-method bodies take plain bindings
+
+`let x = <expr>` names an intermediate value in a method body; `let x =
+effect … undo …` still means the acquisition (the parser branches on the
+`effect` keyword). `var` plus assignment is available where a method
+accumulates, and A3 host-name renaming applies:
+
+```revl
+provide greet {
+  fn hello(name) {
+    let prefix = "hi, "
+    return prefix + name
+  }
+}
+```
+
+A component **activation** body still refuses a plain binding: it records
+effects, and a plain value there has nothing to revert (G6). The diagnostic
+points at the effect form.
+
+### 4b.4 `match` works in component and method bodies
+
+The ADT eliminator is no longer confined to `fn` bodies, so a component
+consuming a `Result` or user variant does not have to call out to a
+function. Same node, same exhaustiveness check.
+
+### 4b.5 A bare `return`
+
+`fn f(x) { return }` is the natural body of a service operation declared
+with no return type. A bare `return` in a *typed* operation is refused with
+its own message.
+
+### 4b.6 `??` requires an optional on the left
+
+`a ?? b` supplies a fallback when `a` is absent, so a non-optional left
+operand makes the fallback dead code. It is now a type error — three
+backends could not render it (rust would emit `unwrap_or_else` on an `i64`,
+java `orElseGet` on a `long`), and python silently accepted it.
+
 ## 5. Services 2.0
 
 ```revl

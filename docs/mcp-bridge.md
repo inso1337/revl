@@ -1,7 +1,10 @@
 # revl ⇄ MCP — the agent boundary
 
-**Status:** implemented (`revl mcp {serve,schema,import}`) · tests:
-`tests/test_mcp.py`
+**Status:** implemented — `revl mcp {serve,schema,import}`, plus a live
+in-memory session (`revl_load`/`revl_call`/`revl_swap`/`revl_rollback`/
+`revl_unload`/`revl_state`). Tests: `tests/test_mcp.py` (projection and
+protocol) and `tests/test_mcp_session.py` (in-memory compilation and the
+live session; skips without the cordis-py runtime).
 
 An AI agent meets a revl system in three roles, and all three are *boundary*
 phenomena — which is why none of them needed a language feature:
