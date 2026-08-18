@@ -204,12 +204,16 @@ Found by executing the same source on every tier
 (`tests/test_cross_tier_execution.py`), which is also where each is pinned so
 it cannot drift silently. **These are not fixed.**
 
-- **`Int / Int` is not `Int` on python or TypeScript.** `typecheck.py` types
-  it `Int` (`_binop_type`, the `lt == "Int" and rt == "Int"` branch), and
-  `7 / 2` evaluates to `3.5` on both — a **soundness break**, not a
-  preference: the checker's declared type and the runtime value disagree.
-  rust is the only tier honouring it. java is untested locally (no JDK) and
-  uses `/` on `long`, so it should be integral like rust.
+- ✅ **`Int / Int` is not `Int`** — *closed, and closed the other way round
+  from how it first looked.* The checker typed it `Int` while python and
+  TypeScript produced `3.5`, so the declared type and the runtime value
+  disagreed. The fix was not to make those two truncate: §0 says `/` is
+  spelled as TypeScript spells it and therefore means what TypeScript means,
+  and `7 / 2` is `3.5`. They were faithful; the checker was wrong, and rust
+  was the tier out of step with the syntax. `Int / Int` now types as `Float`,
+  integer division has named operations (`div_trunc` / `div_floor` /
+  `div_euclid`), and `mod` gives the Euclidean remainder. See
+  docs/arithmetic.md.
 - **`%` disagrees on negatives.** python floors (`-7 % 3 == 2`); rust, java
   and JS truncate (`== -1`). Truncation is the majority *and* the pairing
   that keeps `(a / b) * b + a % b == a`, so python is the outlier to move —
@@ -219,14 +223,15 @@ it cannot drift silently. **These are not fixed.**
   and rust is `i64`. Unlike the other two this needs `BigInt`, not a type
   annotation.
 
-**One root cause for the first two.** An IR `bin` node carries `op`, `left`
-and `right` and *no type*, so no backend can distinguish `Int / Int` from
-`Float / Float`. A runtime dispatch would work on python (where `int` and
-`float` are distinct at runtime) and cannot work on TypeScript, where both are
-`number` — `7.0 / 2.0` would be truncated wrongly. Closing this means
-annotating the node with its operand type, which changes the IR contract and
-therefore belongs to a deliberate `ir_version` decision rather than a backend
-patch.
+**The root cause is closed.** An IR `bin` node used to carry `op`, `left` and
+`right` and *no type*, so no backend could distinguish `Int / Int` from
+`Float / Float` — a runtime dispatch works on python, where `int` and `float`
+are distinct, and cannot work on TypeScript, where both are `number`. `/` and
+`%` now carry an `operands` field (`"Int"` / `"Float"`) when the checker can
+determine it. The annotation is additive and v1 documents are untouched, so
+the frozen-reference invariant holds.
+
+`%` and the `Int` width remain open, and are the two decisions left.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins

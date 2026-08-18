@@ -904,6 +904,19 @@ def _ts_builtin(method, target: str, args: list) -> str:
         return f"{target}.charAt({args[0]})"
     if method == "charCodeAt":
         return f"{target}.charCodeAt({args[0]})"
+    # Integer division and modulo (docs/arithmetic.md). JS `/` is true
+    # division and `%` takes the dividend's sign, so every one of these is
+    # built rather than inherited.
+    if method == "div_trunc":
+        return f"Math.trunc({target} / {args[0]})"
+    if method == "div_floor":
+        return f"Math.floor({target} / {args[0]})"
+    if method == "div_euclid":
+        return (f"({args[0]} > 0 ? Math.floor({target} / {args[0]}) "
+                f": -Math.floor({target} / -{args[0]}))")
+    if method == "mod":
+        return (f"((({target} % {args[0]}) + Math.abs({args[0]})) "
+                f"% Math.abs({args[0]}))")
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":

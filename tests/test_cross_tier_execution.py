@@ -130,20 +130,11 @@ def test_java_equality_goes_through_objects_equals():
 # to the IR contract, not a backend patch. See docs/contract-errata.md.
 
 DIVERGENCES = {
-    # typecheck.py types `Int / Int` as `Int`, so a tier returning 3.5 is
-    # unsound, not merely different. rust is the only one honouring the
-    # declared type.
-    "int division returns Int": (
-        'test "d" { assert 7 / 2 == 3 }',
-        {"py": "fail", "ts": "fail", "rust": "pass"},
-    ),
-    "negative int division truncates toward zero": (
-        'test "d" { assert (0 - 7) / 2 == 0 - 3 }',
-        {"py": "fail", "ts": "fail", "rust": "pass"},
-    ),
-    # python's `%` floors (-7 % 3 == 2); rust, java and JS truncate (== -1).
-    # Truncation is the majority and the one that keeps
-    # (a / b) * b + a % b == a, so python is the outlier to move.
+    # python's `%` still floors (-7 % 3 == 2) where rust, java and JS truncate
+    # (== -1). Unlike division this is NOT settled: §0 says `%` should mean
+    # what TypeScript means (truncated), so python is the outlier to move —
+    # but that changes existing programs, so it stays pinned until decided.
+    # Anyone who wants a defined answer today has `mod` (docs/arithmetic.md).
     "modulo truncates toward zero": (
         'test "m" { assert (0 - 7) % 3 == 0 - 1 }',
         {"py": "fail", "ts": "pass", "rust": "pass"},
@@ -196,3 +187,52 @@ def test_str_ordering_agrees_everywhere():
         if status == "skip":
             continue
         assert status == "pass", f"{tier}: {message}"
+
+
+# ---------------------------------------------- named integer arithmetic
+#
+# `/` is true division on every tier now (§0: it is spelled as TypeScript
+# spells it, so it means what TypeScript means). Integer division has its own
+# names, and each has ONE definition that every tier computes rather than
+# inheriting its host's convention. The negatives are the whole point — that
+# is where C, python and the mathematics all disagree.
+
+INTEGER_ARITHMETIC = """
+test "div_trunc rounds toward zero"      { assert (0 - 7).div_trunc(2) == 0 - 3 }
+test "div_trunc on positives"            { assert 7.div_trunc(2) == 3 }
+test "div_floor rounds toward -infinity" { assert (0 - 7).div_floor(2) == 0 - 4 }
+test "div_euclid, negative dividend"     { assert (0 - 7).div_euclid(2) == 0 - 4 }
+test "div_euclid, negative divisor"      { assert (0 - 7).div_euclid(0 - 2) == 4 }
+test "mod is never negative"             { assert (0 - 7).mod(3) == 2 }
+test "mod ignores the divisor's sign"    { assert 7.mod(0 - 3) == 1 }
+test "mod on positives"                  { assert 7.mod(3) == 1 }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_named_integer_arithmetic_agrees(tier: str):
+    status, message = _run(tier, INTEGER_ARITHMETIC)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_named_integer_arithmetic_agrees_slow(tier: str):
+    status, message = _run(tier, INTEGER_ARITHMETIC)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+def test_true_division_yields_float_everywhere():
+    """`Int / Int` is Float, so declaring the result `Int` is a type error.
+    This is the fix for what used to be a soundness break: the checker said
+    `Int` and two of three tiers produced 3.5."""
+    from revl.errors import RevlError
+    with pytest.raises(RevlError) as failure:
+        compile_source("pub fn d() -> Int { return 7 / 2 }", "div.rvl")
+    assert "Float" in str(failure.value)
+    compile_source("pub fn d() -> Float { return 7 / 2 }", "div.rvl")

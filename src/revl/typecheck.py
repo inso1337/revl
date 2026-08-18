@@ -461,6 +461,17 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
         for t in (lt, rt):
             if filename and t and t not in _NUMERIC:
                 raise mismatch(filename, line, f"operand of `{op}`", "Int", t)
+        if op == "/":
+            # `/` is TRUE division and yields Float even on two Ints, because
+            # §0 governs: `/` is spelled exactly as TypeScript spells it, and
+            # in TypeScript `7 / 2` is 3.5. Typing it `Int` was the reason
+            # python and TypeScript "disagreed" with rust — they were being
+            # faithful to the syntax and the checker was not.
+            # Integer division has its own spellings (docs/arithmetic.md):
+            # `div_trunc`, `div_floor`, `div_euclid`.
+            if lt in _NUMERIC and rt in _NUMERIC:
+                return "Float"
+            return None
         if lt == "Float" or rt == "Float":
             return "Float"
         if lt == "Int" and rt == "Int":
@@ -481,6 +492,13 @@ _BUILTIN_SIG = {
     "split": ("Str", ["Str"], "List[Str]"),
     "join": ("List", ["Str"], "Str"),
     "repeat": ("Str", ["Int"], "Str"),
+    # Integer division and modulo, named rather than defaulted (§0 keeps `/`
+    # and `%` meaning what TypeScript means by them; these say what they do).
+    # docs/arithmetic.md gives the definitions and the divergence they close.
+    "div_trunc": ("Int", ["Int"], "Int"),
+    "div_floor": ("Int", ["Int"], "Int"),
+    "div_euclid": ("Int", ["Int"], "Int"),
+    "mod": ("Int", ["Int"], "Int"),
 }
 
 
@@ -538,7 +556,7 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         if family == "sized" and thead not in _SIZED_HEADS:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
-        if family in ("List", "Str") and thead != family:
+        if family in ("List", "Str", "Int") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
     elem = targs[0] if thead == "List" and targs else None

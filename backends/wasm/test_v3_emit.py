@@ -252,7 +252,7 @@ def test_v3_variant_result_opt_run_on_wasmtime(tmp_path):
 # Turing-complete on wasm (fib loop-form + Collatz, the README's examples).
 _LOOP_SRC = """
 fn fib(n: Int) -> Int { var a = 0  var b = 1  var i = 0  while (i < n) { let t = a + b  a = b  b = t  i += 1 }  return a }
-fn collatz(n: Int) -> Int { var c = 0  var m = n  while (m != 1) { if (m % 2 == 0) { m = m / 2 } else { m = 3 * m + 1 }  c += 1 }  return c }
+fn collatz(n: Int) -> Int { var c = 0  var m = n  while (m != 1) { if (m % 2 == 0) { m = m.div_trunc(2) } else { m = 3 * m + 1 }  c += 1 }  return c }
 fn sum_demo() -> Int { let xs = [3, 5, 8, 1]  var s = 0  for (x of xs) { s += x }  return s }
 fn nested() -> Int { let rows = [2, 3]  var total = 0  for (r of rows) { var k = 0  while (k < r) { total += 1  k += 1 } }  return total }
 """
