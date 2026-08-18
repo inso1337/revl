@@ -85,6 +85,7 @@ from .parser import (
     ResidueStmt,
     ReturnStmt,
     ServiceDecl,
+    SpawnExpr,
     TestDecl,
     TypeDecl,
     UnloadStmt,
@@ -1874,6 +1875,17 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
 
+    # instance-parametric components: one registry shared across the lowering
+    # of every component, so `spawn C` can resolve C's config/provisions and
+    # the linker can learn which components are runtime templates and what the
+    # spawn (instance) graph is (docs/design-v2-instances.md).
+    spawn_reg: dict = {
+        "by_name": {c.name: c for c in program.components},
+        "edges": [],        # (spawner, target) — the instance graph
+        "templates": set(),  # components that are spawn targets (excluded from static composition)
+        "sites": [],        # G4 spawn-boundary obligations, checked after lowering
+    }
+
     components = []
     seen = set()
     for comp in program.components:
@@ -1882,14 +1894,20 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         seen.add(comp.name)
         lowered_comp = _lower_component(comp, services, program.filename,
                                         component_callables, types, emitting_fns,
-                                        emitting_caps, emission_evidence)
+                                        emitting_caps, emission_evidence, spawn_reg)
         if comp.source:
             _retarget_holes(lowered_comp, comp.source)
         components.append(lowered_comp)
 
+    # G4/G6 across the spawn boundary: a spawner's declared emission upper
+    # bound must cover what its spawned instances emit (decision 8). Checked
+    # here, after every component's emission surface is known.
+    _check_spawn_emission_bounds(components, services, spawn_reg, program.filename)
+
     fault_tests = _lower_fault_tests(program, components, program.filename)
 
-    manifest = _link(program, components, ambient.get("components") or [])
+    manifest = _link(program, components, ambient.get("components") or [],
+                     templates=spawn_reg["templates"])
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
@@ -1924,6 +1942,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         return False
 
     uses_v3 = uses_v3 or any(_has_builtin(comp.get("body")) for comp in components)
+    # instance-parametric components are a v3 feature: a `spawn` node in any
+    # body bumps the version so a consumer predating the feature refuses the
+    # document rather than mis-composing a runtime template as a static entry
+    # (docs/design-v2-instances.md)
+    uses_v3 = uses_v3 or bool(spawn_reg["templates"])
 
     result = {
         "ir_version": IR_VERSION_V3 if uses_v3 else (IR_VERSION_V2 if uses_v2 else IR_VERSION),
@@ -2962,12 +2985,16 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
                      emitting_caps: dict | None = None,
-                     emission_evidence: "_EmissionEvidence | None" = None) -> dict:
+                     emission_evidence: "_EmissionEvidence | None" = None,
+                     spawn_reg: dict | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
+    # instance-parametric components: the registry of spawn targets, edges,
+    # templates and G4 spawn-boundary sites (docs/design-v2-instances.md)
+    env.spawn_reg = spawn_reg
 
     # a config default must fit its declared field type (config typing);
     # a `null` default is the documented optional exception and is allowed
@@ -3043,6 +3070,14 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 "acquisition after `provide` — an effect acquired after a provision "
                 "would be reverted while dependents can still call the service",
                 hint="move acquisitions above the `provide` block (linker rule A2)",
+            )
+        if isinstance(stmt, EffectStmt) and isinstance(stmt.acquire, SpawnExpr):
+            # a spawn's inverse is the instance's own teardown, which needs a
+            # handle to name — so a spawn must be bound (decision 2)
+            raise RevlError(
+                filename, stmt.line,
+                "`spawn` must be bound to a handle: "
+                f"`let s = effect spawn {stmt.acquire.component} … undo s.dispose()`",
             )
         if isinstance(stmt, LetEffect):
             if stmt.setup:
@@ -3204,7 +3239,38 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
-            if isinstance(mstmt, EffectStmt):
+            if isinstance(mstmt, LetEffect):
+                # item zero (docs/design-v2-instances.md): a spawn inside a
+                # provide-method is a request-scoped instance. It gets its own
+                # nested teardown scope (its child fiber), so `s.dispose()`
+                # reclaims it when the instance dies, not when the component
+                # tears down. Only `spawn` may be acquired here in phase 1 —
+                # a general method-body acquisition is a separate feature.
+                if not isinstance(mstmt.acquire, SpawnExpr):
+                    raise RevlError(
+                        filename, mstmt.line,
+                        "only `spawn` may be acquired inside a provide-method body",
+                        hint="a request-scoped instance gets a nested teardown "
+                             "scope; other acquisitions belong in the activation "
+                             "body (docs/design-v2-instances.md)")
+                if mstmt.bind in env.params or mstmt.bind in method_locals:
+                    raise RevlError(filename, mstmt.line,
+                                    f"`{mstmt.bind}` is already bound in `{method.name}`")
+                safe = _safe_name(mstmt.bind,
+                                  set(env.params.values()) | set(method_locals.values()))
+                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                method_locals[mstmt.bind] = safe
+                env.params[mstmt.bind] = safe  # visible to later statements
+                undo = _lower_expr(mstmt.undo, env, mode="undo")
+                mbody.append({"step": "let-effect", "bind": safe,
+                              "acquire": acquire, "undo": undo})
+            elif isinstance(mstmt, EffectStmt):
+                if isinstance(mstmt.acquire, SpawnExpr):
+                    raise RevlError(
+                        filename, mstmt.line,
+                        "`spawn` must be bound to a handle: "
+                        f"`let s = effect spawn {mstmt.acquire.component} … undo s.dispose()`",
+                    )
                 mbody.append({
                     "step": "effect",
                     "acquire": _lower_expr(mstmt.acquire, env, mode="setup"),
@@ -3399,6 +3465,66 @@ def _is_emission_call(node: dict, env: Env) -> bool:
     return decl is not None and decl.emission
 
 
+def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
+    """Lower `spawn <Component> with { ... }` to the frozen spawn IR node
+    (docs/design-v2-instances.md).
+
+    An instance is an acquisition: the node rides in the `acquire` slot of a
+    `let-effect` step, the handle is that step's `bind`, and the teardown is
+    its `undo`.  Instance identity + local realm are carried by `realms` — the
+    keys the target provides, each isolated into a *fresh* local realm at spawn
+    time so any number of instances coexist without a G2 collision (decision 3,
+    5).  The target is a *template*: it never joins the static composition, so
+    its provisions never enter the link-time G2/G3 table (decision 5/6)."""
+    reg = getattr(env, "spawn_reg", None)
+    if reg is None or expr.component not in reg["by_name"]:
+        raise RevlError(
+            env.filename, expr.line,
+            f"`spawn {expr.component}` names an unknown component",
+            hint="a spawn target is a component declared in this composition "
+                 "(docs/design-v2-instances.md); a running/ambient component "
+                 "cannot be spawned in phase 1",
+        )
+    if mode != "setup":
+        # spawn is only meaningful as an acquisition; `undo`/`emit` positions
+        # have no handle to bind and no teardown to invert
+        raise RevlError(
+            env.filename, expr.line,
+            "`spawn` is only valid as an acquisition — `let s = effect spawn "
+            f"{expr.component} … undo s.dispose()`",
+        )
+    target = reg["by_name"][expr.component]
+    tconfig = {f.name: f for f in target.config}
+    lowered_cfg: dict[str, dict] = {}
+    for field, vexpr in expr.config.items():
+        if field not in tconfig:
+            raise RevlError(
+                env.filename, expr.line,
+                f"`{field}` is not a config field of {expr.component}",
+                hint="spawn config carries the target's declared `config { }` fields",
+            )
+        lowered_cfg[field] = _lower_expr(vexpr, env, "setup")
+    for f in target.config:
+        if f.default is None and f.name not in expr.config:
+            raise RevlError(
+                env.filename, expr.line,
+                f"spawn {expr.component} is missing required config field `{f.name}`",
+                hint=f"provide it: `spawn {expr.component} with {{ {f.name}: … }}`",
+            )
+    realms = sorted(key for key, _svc, _line in target.provides)
+    reg["edges"].append((env.component.name, expr.component))
+    reg["templates"].add(expr.component)
+    return {
+        "kind": "spawn",
+        "component": expr.component,
+        "config": lowered_cfg,
+        # each provided key gets its own fresh LOCAL realm at runtime; this is
+        # how per-instance non-collision is carried into every tier's IR
+        "realms": realms,
+        "line": expr.line,
+    }
+
+
 def _lower_expr(expr, env: Env, mode: str):
     """mode: 'setup' | 'undo' | 'emit'.
 
@@ -3408,6 +3534,8 @@ def _lower_expr(expr, env: Env, mode: str):
     leaves no room for a marker (DESIGN §3.5 note; the compensate slot
     arrives with IR v1/A5).
     """
+    if isinstance(expr, SpawnExpr):
+        return _lower_spawn(expr, env, mode)
     if isinstance(expr, Lit):
         if expr.value is None:
             raise null_error(env.filename, expr.line)
@@ -3523,10 +3651,20 @@ def _node_desc(node: dict) -> str:
 
 # ---------------------------------------------------------------- linker
 
-def _link(program: Program, components: list[dict], ambient_components: list[dict]) -> dict:
+def _link(program: Program, components: list[dict], ambient_components: list[dict],
+          templates: set | None = None) -> dict:
     """G2/G3 over the union of ambient (running) and new components, and the
     composition manifest (cordisc-compatible schema: components with
-    name/file/inject/provides, plus loadOrder)."""
+    name/file/inject/provides, plus loadOrder).
+
+    `templates` names components that are *spawn targets* — runtime instances,
+    not static composition members (docs/design-v2-instances.md). They are
+    excluded from `entries`, so their provisions never enter the link-time
+    G2/G3 table and they take no place in `loadOrder`: at runtime each is
+    instantiated into its own fresh local realm by `spawn`, disjoint by
+    construction (decision 5/6). Non-spawning programs have no templates, so
+    the manifest is byte-identical to before."""
+    templates = templates or set()
     lines = {comp["name"]: decl.line for comp, decl in zip(components, program.components)}
 
     entries: list[dict] = []
@@ -3543,6 +3681,11 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             entry["intercept"] = dict(amb["intercept"])
         entries.append(entry)
     for comp in components:
+        if comp["name"] in templates:
+            # a spawn target is instantiated at runtime, not composed: its
+            # provisions live in fresh per-instance local realms, so it never
+            # participates in the static G2/G3 table or loadOrder (decision 5/6)
+            continue
         entry = {
             "name": comp["name"],
             "file": comp.get("source", ""),
@@ -3666,4 +3809,146 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             if indegree[succ] == 0:
                 ready.append(succ)
 
-    return {"components": entries, "loadOrder": order}
+    manifest = {"components": entries, "loadOrder": order}
+    if templates:
+        # G8: the instance dimension is dynamic. These components are not
+        # statically composed — each is instantiated `× dynamic` times at
+        # runtime — so they carry no loadOrder position; the audit reports
+        # them separately (docs/design-v2-instances.md, decision 7).
+        manifest["templates"] = sorted(templates)
+    return manifest
+
+
+# ------------------------------------------------------------------ spawn G4
+
+def _find_spawn_nodes(node) -> "list[dict]":
+    """Every `spawn` acquire node reachable in a lowered body subtree."""
+    out: list[dict] = []
+    if isinstance(node, dict):
+        if node.get("kind") == "spawn":
+            out.append(node)
+        for value in node.values():
+            out.extend(_find_spawn_nodes(value))
+    elif isinstance(node, list):
+        for value in node:
+            out.extend(_find_spawn_nodes(value))
+    return out
+
+
+def _collect_emit_caps(node, caps: set) -> None:
+    """The capabilities an `emit` step in a lowered body crosses. A req-keyed
+    emission is capability = the key (G2 names the boundary); any host emission
+    is the unnameable `*` (no `emission[...]` list can name it)."""
+    if isinstance(node, dict):
+        if node.get("step") == "emit":
+            expr = node.get("expr") or {}
+            target = expr.get("target") or {}
+            if target.get("kind") == "req":
+                caps.add(target.get("name"))
+            else:
+                caps.add("*")
+        for value in node.values():
+            _collect_emit_caps(value, caps)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_emit_caps(value, caps)
+
+
+def _spawn_emission_surface(components: list[dict], services: dict) -> dict[str, set]:
+    """Per-component upper bound on what activating an instance of it can emit.
+
+    A conservative, sound over-approximation (decision 8): the union of every
+    emission method declared by the services it provides (uncapped -> `*`), its
+    own `emit` steps, and — by fixpoint over the spawn graph — everything its
+    own spawned children can emit. Never under-approximates, so the bound it
+    enforces on a spawner can only be tighter than the truth, never looser."""
+    surface: dict[str, set] = {}
+    for comp in components:
+        caps: set = set()
+        for _key, svcname in (comp.get("provides") or {}).items():
+            svc = services.get(svcname)
+            if svc is None:
+                continue
+            for m in svc.methods.values():
+                if m.emission:
+                    caps.update({"*"} if m.capabilities is None else set(m.capabilities))
+        _collect_emit_caps(comp.get("body") or [], caps)
+        surface[comp["name"]] = caps
+    # the transitive closure over the spawn graph is applied by the caller,
+    # which holds the edge list
+    return surface
+
+
+def _check_spawn_emission_bounds(components: list[dict], services: dict,
+                                 spawn_reg: dict, filename: str) -> None:
+    """G4/G6 across the spawn boundary (decision 8): a spawner's declared
+    emission bound must cover what its spawned instances emit, so emissions
+    cannot escape their bound by being moved into a spawned child.
+
+    Only *bounded* spawn sites are constrained — a spawn inside a provide-method
+    whose service declares `plain` or `emission[caps]`. A spawn in an activation
+    body has no emission clause to widen (as body-level `emit` has none), so it
+    is unconstrained here, exactly as today."""
+    if not spawn_reg.get("edges"):
+        return
+    surface = _spawn_emission_surface(components, services)
+    # fold the spawn graph into each surface (transitive closure)
+    edges = spawn_reg["edges"]
+    changed = True
+    while changed:
+        changed = False
+        for parent, child in edges:
+            before = len(surface.get(parent, set()))
+            surface.setdefault(parent, set()).update(surface.get(child, set()))
+            if len(surface[parent]) != before:
+                changed = True
+
+    lines = spawn_reg.get("lines") or {}
+    for comp in components:
+        for step in comp.get("body") or []:
+            if step.get("step") != "provide":
+                continue
+            key = step.get("name")
+            svc = services.get((comp.get("provides") or {}).get(key) or "")
+            if svc is None:
+                continue
+            for method in step.get("methods") or []:
+                decl = svc.methods.get(method.get("name"))
+                if decl is None:
+                    continue
+                for spawn in _find_spawn_nodes(method.get("body") or []):
+                    target = spawn.get("component")
+                    tsurf = surface.get(target, set())
+                    if not tsurf:
+                        continue
+                    line = spawn.get("line", step.get("line", 1))
+                    where = f"{svc.name}.{method.get('name')}"
+                    if not decl.emission:
+                        evidence = ", ".join(f"`{c}`" for c in sorted(tsurf))
+                        raise RevlError(
+                            comp.get("source") or filename, line,
+                            f"`{where}` is declared plain, but it spawns "
+                            f"`{target}`, which emits through {evidence}",
+                            hint="a spawner's emission bound must cover its "
+                                 "instances' — declare `emission fn "
+                                 f"{method.get('name')}(...)` on service `{svc.name}`, "
+                                 "or move the spawn out of this method (G4)",
+                            code="G4", category="emission-propagation",
+                        )
+                    if decl.capabilities is not None:
+                        extra = sorted(tsurf - set(decl.capabilities))
+                        if extra:
+                            declared = ", ".join(decl.capabilities) or "no capabilities"
+                            offending = ", ".join(
+                                "an unnameable host boundary" if c == "*" else f"`{c}`"
+                                for c in extra)
+                            raise RevlError(
+                                comp.get("source") or filename, line,
+                                f"`{where}` is declared `emission[{declared}]`, but it "
+                                f"spawns `{target}`, which emits through {offending}",
+                                hint="a spawner's emission bound must cover its "
+                                     f"instances' — widen `emission[...]` on service "
+                                     f"`{svc.name}` to include {offending}, or move the "
+                                     "spawn out of this method (G4)",
+                                code="G4", category="emission-capability",
+                            )
