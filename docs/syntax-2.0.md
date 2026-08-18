@@ -46,7 +46,7 @@ functions, services. Components are never imported: they are *composed*, by
 the linker, over a manifest. This keeps the two composition mechanisms from
 blurring: `use` is compile-time and pure; the manifest is runtime and stateful.
 
-```revl
+```revl sketch
 use "./tokens.rvl" { Token, TokenKind, keyword_set }
 use "./util/strings.rvl" as strings
 
@@ -88,9 +88,13 @@ type Outcome = Ok(Row) | NotFound | Invalid(Str)        // ADT (payloads)
 ### 3.1 Functions
 
 ```revl
+type Row = { id: Int, name: Str, active: Bool }        // as §2
+
 pub fn score(items: List[Row]) -> Int {
-  let active = items.filter(r => r.active)     // TS arrow lambdas, verbatim
-  return active.length
+  let is_active = r => r.active               // TS arrow lambdas, verbatim
+  var n = 0
+  for (r of items) { if (is_active(r)) n += 1 }
+  return n
 }
 
 fn classify(n: Int) -> Str {
@@ -120,7 +124,7 @@ there is no syntactic path from a `fn` body to an effect.
 - **`match`, not `switch`.** TS `switch` has fallthrough and no binding;
   revl's eliminator is different in meaning, so it looks different:
 
-```revl
+```revl fragment
 match lookup(key) {
   Ok(row)      => row.name,
   NotFound     => "-",
@@ -154,6 +158,9 @@ masochism, and models write loops fluently. revl 2.0 admits **function-local
 mutation** — unobservable from outside, so functions remain pure in meaning:
 
 ```revl
+type TokenKind = Ident | Keyword | IntLit | StrLit
+type Token = { kind: TokenKind, text: Str }
+
 fn count_idents(tokens: List[Token]) -> Int {
   var n = 0                                   // var: local, mutable
   for (tok of tokens) {                       // TS for-of, verbatim
@@ -164,7 +171,7 @@ fn count_idents(tokens: List[Token]) -> Int {
 
 fn skip_ws(source: Str, start: Int) -> Int {
   var i = start
-  while (i < source.length && source[i] == " ") i += 1
+  while (i < source.length && source.charAt(i) == " ") i += 1
   return i
 }
 ```
@@ -184,6 +191,12 @@ Stratum 3 is revl 1.x, deliberately untouched — these keywords are the
 semantic speed bumps and *must not* look like anything in the corpus:
 
 ```revl
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+service Database { emission fn execute(sql: Str) -> Int }
+
 component UserCache requires db: Database provides cache: Cache {
   config { ttl: Int = 300 }
 
@@ -207,7 +220,7 @@ component UserCache requires db: Database provides cache: Cache {
 
 - **Block effect form**, for acquisitions that take several pure steps:
 
-```revl
+```revl fragment
 let conn = effect {
   let url = normalize(config.url)
   Pool.open(url, config.pool_size)              // last expression = value
@@ -264,7 +277,7 @@ canonical emission that *returns* data (an LLM completion, an HTTP GET).
 It is now also a prefix in value position, so the marker stays at the call
 site (G4's actual point) while the value flows:
 
-```revl
+```revl fragment
 provide evolve {
   fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
 }
@@ -281,7 +294,7 @@ effect … undo …` still means the acquisition (the parser branches on the
 `effect` keyword). `var` plus assignment is available where a method
 accumulates, and A3 host-name renaming applies:
 
-```revl
+```revl fragment
 provide greet {
   fn hello(name) {
     let prefix = "hi, "
@@ -364,7 +377,7 @@ extern emission fn send(sock: Socket, data: Bytes)
 
 ## 7. `verified` and `test` — the self-checking loop
 
-```revl
+```revl sketch
 verified fn parse_int(s: Str) -> Opt[Int] { ... }   // totality-checked:
                                                      // structural recursion /
                                                      // bounded loops only
@@ -611,7 +624,7 @@ Mechanical, one release:
 With strata 1–2, the compiler becomes expressible as what it structurally
 already is — a pipeline of components with pure interiors:
 
-```revl
+```revl sketch
 component Lexer provides tokens: TokenStream {
   provide tokens { fn lex(source) = lex_impl(source) }   // lex_impl: pub fn
 }
