@@ -34,8 +34,27 @@ backends/python/.venv/bin/python demo/live.py --script
 
 `--script` is the CI mode: it performs the edits itself (writing files from
 `demo/variants/` over `demo/components/pg_database.rvl` and restoring the
-original on the way out) and asserts nineteen properties about what happened.
-Set `NO_COLOR=1` for plain output.
+original on the way out) and asserts twenty-one properties about what
+happened. Set `NO_COLOR=1` for plain output.
+
+### Host-side plumbing (`demo/hostruntime.py`)
+
+Three things the demo needs from the host runtime, all of which used to be
+awkward:
+
+* **`bind_runtime(module)`** — emitted modules open with `from runtime import
+  …`. That text is frozen (byte-identical emitted output is a project
+  invariant), so the host parameterizes the *name*, not the generated
+  source: binding `sys.modules["runtime"]` makes emitted code resolve against
+  whichever runtime the host chose, with no `sys.path` ordering trick.
+* **`watch(runtime, observer)` / `runtime.add_trace(cb)`** — tracing is
+  multi-observer. `set_trace` still exists and still owns its single slot
+  (every existing driver keeps working, and `set_trace(None)` still clears
+  it), but subscribers added with `add_trace` are independent and coexist.
+  The demo uses two: the log and a `HostMeter`, and asserts both saw the
+  identical stream.
+* **`HostMeter`** — the second observer: counts host operations by kind and
+  keeps each component's resolved configuration.
 
 ### What to do in interactive mode
 
@@ -60,6 +79,7 @@ Every line is `elapsed | seq | channel | subject | detail`.
 | `load` | the host admitting a component, with its signature: what it requires, what it provides. |
 | `fiber` | the runtime's lifecycle state machine — `PENDING → LOADING → ACTIVE → UNLOADING → DISPOSED`, the paper's Figure 2. |
 | `host` | operations on host resources (`pool#1`, `map#2`). **This is the residue channel**: everything opened here must be closed by the end. |
+| `config` | a component's **resolved** configuration — what it actually ran with once defaults were applied, not what the host passed in. |
 | `call` | ordinary traffic through a provided service. |
 | `swap` | swap orchestration by the host. |
 | `check` | an assertion, PASS or FAIL. |
