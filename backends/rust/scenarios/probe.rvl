@@ -60,6 +60,17 @@ component RealmStoreT requires probe: Probe provides kv: Kv {
   }
 }
 
+// Reactive realm linking: a consumer that requires `kv` isolated in the SAME
+// realm("t") as RealmStoreT. Placed on its own isolated branch, it must
+// reactively activate when RealmStoreT provides `kv` in realm("t") — the bug
+// this scenario pins is the consumer hanging Pending forever because the
+// emitter used to isolate INSIDE the plugin body, after the Inject gate was
+// already evaluated on the un-isolated root context.
+component RealmKvConsumerT requires kv: Kv, probe: Probe {
+  isolate kv in realm("t")
+  effect probe.mark("consumer_t:up") undo probe.mark("consumer_t:down")
+}
+
 // A second, DISTINCT realm label. Its presence registers "other" in the
 // compile-time realm registry so scenarios.rs can probe cross-realm
 // separation; the two labels ("t", "other") must lower to distinct Isolations.

@@ -1054,12 +1054,14 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     out.append(f"        cordis::{inject},")
     out.append(closure)
     out.extend(_emit_config_application(component, config_ty, indent=3))
-    if isolate:
-        for key, realm in isolate.items():
-            out.append(
-                f"            let ctx = ctx.isolate_with({_string(key)}, "
-                f"_revl_realm({_string(realm)}));"
-            )
+    # Realm isolation is NOT applied here. cordis evaluates a plugin's reactive
+    # `Inject` gate against the context the plugin is registered on, before this
+    # closure ever runs — so isolating `ctx` inside the body cannot scope the
+    # gate, and an isolated `requires kv in realm("t")` would hang Pending
+    # forever (the fiber's `meta.isolates` never carries the realm). Isolation
+    # is instead applied at plug time via `_revl_isolate_ctx` below, mirroring
+    # the python/typescript backends' `plug()` helper. `ctx` is therefore
+    # already the isolated context here, so provides/requires resolve in-realm.
     for local, service in env.reqs.items():
         out.append(f"            let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
     for step in component.get("body") or []:
@@ -2326,6 +2328,29 @@ def _emit_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
 
+    # component name -> context isolated for that component's realm placements.
+    # cordis fixes a fiber's isolation scope at plug time (its `Inject` gate is
+    # evaluated against this context, before the plugin body runs), so every
+    # plug site must isolate the context HERE rather than inside the plugin
+    # body. This mirrors the python/typescript `plug()` helper and is what
+    # lets an isolated `requires kv in realm("t")` reactively link to an
+    # isolated provider in the same realm instead of hanging Pending.
+    out.append("pub fn _revl_isolate_ctx(ctx: &cordis::Context, name: &str) -> cordis::Context {")
+    out.append("    match name {")
+    for component in components:
+        isolate = component.get("isolate") or {}
+        if not isolate:
+            continue
+        snake = _snake(component["name"])
+        expr = "ctx"
+        for key, realm in isolate.items():
+            expr += f".isolate_with({_string(key)}, _revl_realm({_string(realm)}))"
+        out.append(f'        "{snake}" => {expr},')
+    out.append("        _ => ctx.clone(),")
+    out.append("    }")
+    out.append("}")
+    out.append("")
+
     # component name -> loaded Fiber, building the typed config from the
     # placement spec's `config` object (keyed by component name).
     out.append("pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value) "
@@ -2336,6 +2361,9 @@ def _emit_bridge(ir: dict) -> list[str]:
         pascal = component["name"]
         fields = component.get("config") or []
         out.append(f'        "{snake}" => {{')
+        # Isolate the registration context so the fiber carries the realm
+        # scope its reactive gate and provisions resolve against.
+        out.append(f'            let ctx = _revl_isolate_ctx(ctx, "{snake}");')
         if fields:
             out.append(f'            let _c = config.get("{pascal}").cloned().unwrap_or(serde_json::Value::Null);')
             out.append(f"            Some(ctx.plugin({snake}(), {pascal}Config {{")
