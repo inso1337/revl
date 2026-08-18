@@ -152,7 +152,8 @@ The residue is honest rather than zero:
   every resolve, which is exactly how this tier went unvalidated. The
   validator skips with that reason rather than reporting clean.
 - Validation proves the output *compiles*, still not that it *behaves*.
-  Cross-tier `test` execution (`revl test --backend`) is the next rung.
+  Cross-tier `test` execution landed with it: `revl test --backend …|--all`
+  runs the same `test` blocks through every tier whose toolchain is present.
 
 ## What this says about the architecture
 

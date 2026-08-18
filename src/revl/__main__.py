@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import types
 from pathlib import Path
 
 from .compiler import compile_files
@@ -14,6 +13,7 @@ from .diagnostics import report
 from .errors import RevlError
 from .fmt import migrate_source
 from .run import KNOWN_BACKENDS, run_command
+from .test import test_command
 
 
 def _fn_call_names(node, out: set) -> None:
@@ -135,56 +135,6 @@ def _boundary(ir: dict) -> dict:
     return report
 
 
-def _run_tests(ir: dict) -> int:
-    """Emit the IR to cordis-py and run its `test` units in-process."""
-    tests = ir.get("tests") or []
-    if not tests:
-        print("no tests to run")
-        return 0
-
-    backend_dir = str(Path(__file__).resolve().parents[2] / "backends" / "python")
-    if backend_dir not in sys.path:
-        sys.path.insert(0, backend_dir)
-    import emit  # noqa: PLC0415 — backend import happens after path setup
-
-    module = types.ModuleType("revl_test_module")
-    # Register the module before exec: the emitter renders record types as
-    # @dataclass, and dataclasses._process_class resolves each field via
-    # sys.modules[cls.__module__]. cls.__module__ is this module's name, so an
-    # unregistered module makes that lookup return None and raises
-    # AttributeError on any file that declares a record type (CPython 3.12+).
-    sys.modules[module.__name__] = module
-    source = emit.emit(ir)
-    try:
-        exec(compile(source, "<revl-test>", "exec"), module.__dict__)
-    finally:
-        sys.modules.pop(module.__name__, None)
-    entries = getattr(module, "REVL_TESTS", None) or []
-    if not entries:
-        print("no tests emitted by the backend")
-        return 0
-
-    failures = 0
-    for name, test_fn in entries:
-        try:
-            test_fn()
-        except AssertionError as error:
-            failures += 1
-            message = str(error).strip() or "assertion failed"
-            print(f"FAIL {name}: {message}")
-        except Exception as error:  # noqa: BLE001 — test runner reports every failure
-            failures += 1
-            print(f"FAIL {name}: {type(error).__name__}: {error}")
-        else:
-            print(f"PASS {name}")
-
-    if failures:
-        print(f"{failures} of {len(entries)} test(s) failed", file=sys.stderr)
-        return 1
-    print(f"{len(entries)} test(s) passed")
-    return 0
-
-
 def _run_fmt(args: argparse.Namespace) -> int:
     """`revl fmt --migrate`: rewrite 1.x `$` interpolation to 2.0 templates."""
     if args.output and len(args.files) != 1:
@@ -286,6 +236,10 @@ def main(argv: list[str] | None = None) -> int:
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
+    test.add_argument("--backend", default="py",
+                      choices=("py", "ts", "rust", "java", "wasm", "all"),
+                      help="tier to run the `test` blocks on (default: py); "
+                           "`all` runs every tier whose toolchain is present")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -341,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.command == "test":
-        return _run_tests(ir)
+        return test_command(ir, args.backend)
 
     if args.command == "audit":
         boundary = _boundary(ir)
