@@ -212,6 +212,13 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             seen_components[comp.name] = module.path
             merged.components.append(comp)
             emitted_ids.add(id(comp))
+        # fault tests name a component, and components are never imported, so
+        # they ride with the composition's own modules rather than with the
+        # pure-declaration closure that carries plain `test` blocks
+        for fault in module.program.fault_tests:
+            if id(fault) not in emitted_ids:
+                merged.fault_tests.append(fault)
+                emitted_ids.add(id(fault))
 
     # Directly imported services enter the composition service table. Alias
     # imports do not: a service is referred to by its interface name, not a

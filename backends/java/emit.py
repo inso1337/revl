@@ -2365,12 +2365,30 @@ def _refuse_holes(ir: dict) -> None:
         f"lower. Fill every hole, then emit (docs/holes.md)."
     )
 
+# A `fault test` is executed by driving a real activation and inspecting the
+# runtime's residue afterwards (docs/fault-tests.md).  The cordis4j tier
+# has no such driver, so it is refused loudly instead of being dropped on the
+# floor: a silently-missing fault test is a guarantee nobody is checking.
+def _refuse_fault_tests(ir) -> None:
+    fault_tests = (ir or {}).get("fault_tests") or []
+    if not fault_tests:
+        return
+    names = ", ".join(repr(unit.get("name")) for unit in fault_tests)
+    raise EmitError(
+        f"fault tests do not lower to the cordis4j tier ({names}) — `fault test` runs "
+        f"on the python reference tier only (docs/fault-tests.md). Compile "
+        f"this document with --backend py, or move the fault tests to a "
+        f"module that is not emitted for this tier."
+    )
+
 
 def emit(ir: dict, package_name: str = "revl") -> str:
     """Emit one Java source file for an IR document (ir_version 1, 2, or 3)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
+
+    _refuse_fault_tests(ir)
     version = ir.get("ir_version")
     if version == 1:
         return _emit_v1(ir, package_name)

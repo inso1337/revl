@@ -463,6 +463,24 @@ class TestDecl:
 
 
 @dataclass
+class FaultTestDecl:
+    """`fault test "name" for C { fail at step N  assert no residue }`.
+
+    A declarable L-Raise (A8) experiment: activate `component` with a failure
+    injected at one point of its activation body, then assert on what the
+    paradigm promises about the wreckage.  See docs/fault-tests.md.
+    """
+
+    name: str
+    component: str
+    config: dict            # component config for the activation under test
+    at_step: int | None     # 1-based index into the component's body steps
+    at_effect: str | None   # `let effect NAME` binding (resolved to an index)
+    asserts: list           # [(kind, line)] — kind from _FAULT_ASSERTS
+    line: int
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -472,6 +490,7 @@ class Program:
     uses: list[UseDecl] = field(default_factory=list)
     externs: list[ExternDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
+    fault_tests: list[FaultTestDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -594,6 +613,14 @@ class Parser:
                 program.fn_decls.append(self.fn_decl(False))
             elif self.at("kw", "test"):
                 program.tests.append(self.test_decl())
+            elif self.at("ident", "fault") and self.toks[self.pos + 1].kind == "kw" \
+                    and self.toks[self.pos + 1].value == "test":
+                # `fault` is a *contextual* keyword: it only heads a
+                # declaration when immediately followed by `test`, so adding
+                # this form cannot break a program that already uses `fault`
+                # as an ordinary identifier (and the self-hosted lexer's
+                # KEYWORDS table needs no sync).
+                program.fault_tests.append(self.fault_test_decl())
             else:
                 tok = self.peek()
                 raise self.err(tok.line, f"expected a top-level declaration, found {tok.value!r}")
@@ -1159,6 +1186,130 @@ class Parser:
             body.append(self.fn_stmt())
         self.expect("}")
         return TestDecl(name, body, line)
+
+    # -- fault tests (docs/fault-tests.md) ---------------------------------
+
+    def fault_test_decl(self) -> FaultTestDecl:
+        """fault test STR for IDENT [with { k: lit, … }] { fail at …  assert … }
+
+        Everything after `fault test` is contextual: `for` and `with` are
+        existing keywords; `at`, `step`, `no`, `residue`, `emissions`,
+        `inverses`, `lifo`, `failed`, `siblings` and `unaffected` are plain
+        identifiers matched by spelling, so no new reserved word lands in the
+        language.
+        """
+        line = self.next().line              # `fault`
+        self.expect("kw", "test")
+        name_tok = self.expect("string", what="a fault-test name")
+        name = name_tok.value
+        if not name:
+            raise self.err(name_tok.line, "a fault test name cannot be empty")
+        self.expect("kw", "for", what="`for <component>` after the fault test name")
+        component = self.expect("ident", what="a component name").value
+
+        config: dict = {}
+        if self.at("kw", "with"):
+            self.next()
+            self.expect("{")
+            while not self.at("}"):
+                fline = self.peek().line
+                key = self.expect("ident", what="a config field name").value
+                if key in config:
+                    raise self.err(fline, f"duplicate config field `{key}` in fault test `{name}`")
+                self.expect(":")
+                config[key] = self.literal()
+                if self.at(","):
+                    self.next()
+            self.expect("}")
+
+        self.expect("{")
+        at_step: int | None = None
+        at_effect: str | None = None
+        asserts: list = []
+        while not self.at("}"):
+            tok = self.peek()
+            if tok.kind == "kw" and tok.value == "fail":
+                if at_step is not None or at_effect is not None:
+                    raise self.err(tok.line,
+                                   f"fault test `{name}` already has an injection point")
+                self.next()
+                self._expect_word("at", "`at` after `fail`")
+                at_step, at_effect = self._fault_injection_point()
+            elif tok.kind == "kw" and tok.value == "assert":
+                self.next()
+                asserts.append((self._fault_assertion(), tok.line))
+            else:
+                raise self.err(
+                    tok.line,
+                    f"expected `fail at …` or `assert …` in a fault test, found {tok.value!r}",
+                )
+        self.expect("}")
+        if at_step is None and at_effect is None:
+            raise self.err(line, f"fault test `{name}` has no `fail at …` injection point",
+                           hint="a fault test must say where the activation dies, e.g. "
+                                "`fail at step 2` or `fail at effect pool`")
+        if not asserts:
+            raise self.err(line, f"fault test `{name}` asserts nothing",
+                           hint="add at least one of `assert failed`, `assert no residue`, "
+                                "`assert inverses lifo`, `assert no emissions`, "
+                                "`assert siblings unaffected`")
+        return FaultTestDecl(name, component, config, at_step, at_effect, asserts, line)
+
+    def _expect_word(self, word: str, what: str) -> None:
+        """Consume a contextual keyword spelled as a bare identifier."""
+        tok = self.peek()
+        if tok.kind != "ident" or tok.value != word:
+            got = repr(tok.value) if tok.value is not None else "end of file"
+            raise self.err(tok.line, f"expected {what}, found {got}")
+        self.next()
+
+    def _fault_injection_point(self) -> tuple:
+        tok = self.peek()
+        if tok.kind == "ident" and tok.value == "step":
+            self.next()
+            index = self.expect("int", what="a 1-based body step index")
+            if index.value < 1:
+                raise self.err(index.line, "`fail at step` is 1-based; step 0 does not exist")
+            return index.value, None
+        if tok.kind == "kw" and tok.value == "effect":
+            self.next()
+            named = self.peek()
+            if named.kind not in ("ident", "string"):
+                raise self.err(named.line,
+                               f"expected an effect binding name, found {named.value!r}")
+            self.next()
+            return None, named.value
+        raise self.err(tok.line,
+                       f"expected `step <n>` or `effect <name>` after `fail at`, found {tok.value!r}")
+
+    def _fault_assertion(self) -> str:
+        tok = self.peek()
+        if tok.kind == "ident" and tok.value == "failed":
+            self.next()
+            return "failed"
+        if tok.kind == "ident" and tok.value == "no":
+            self.next()
+            what = self.peek()
+            if what.kind == "ident" and what.value in ("residue", "emissions"):
+                self.next()
+                return "no-residue" if what.value == "residue" else "no-emissions"
+            raise self.err(what.line,
+                           f"expected `residue` or `emissions` after `no`, found {what.value!r}")
+        if tok.kind == "ident" and tok.value == "inverses":
+            self.next()
+            self._expect_word("lifo", "`lifo` after `inverses`")
+            return "inverses-lifo"
+        if tok.kind == "ident" and tok.value == "siblings":
+            self.next()
+            self._expect_word("unaffected", "`unaffected` after `siblings`")
+            return "siblings-unaffected"
+        raise self.err(
+            tok.line,
+            f"unknown fault-test assertion {tok.value!r}",
+            hint="fault tests assert on the activation's wreckage, not on values: "
+                 "`failed`, `no residue`, `inverses lifo`, `no emissions`, "
+                 "`siblings unaffected`",
+        )
 
     def fn_stmt(self):
         tok = self.peek()
