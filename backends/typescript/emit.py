@@ -1033,11 +1033,35 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
     elif step == "expr":
         out.append(f"{'  ' * indent}{_expr(node['expr'], ctx)}")
     elif step == "assert":
-        if test_mode:
-            out.append(f"{'  ' * indent}expect({_expr(node['expr'], ctx)}).toBeTruthy()")
+        # `expect(x).toBeTruthy()` and a bare `throw` both discard the operand
+        # values the emitter already has. An in-file `test` almost always
+        # asserts a comparison, so lower equality to vitest's own matcher
+        # (which prints a diff) and put both sides in the thrown message
+        # otherwise. Mirrors _emit_assert in the python backend.
+        expr = node["expr"]
+        pad = "  " * indent
+        equality = expr.get("kind") == "bin" and expr.get("op") in (
+            "==", "===", "!=", "!==")
+        if test_mode and equality:
+            left = _expr(expr["left"], ctx)
+            right = _expr(expr["right"], ctx)
+            negate = ".not" if expr["op"] in ("!=", "!==") else ""
+            out.append(f"{pad}expect({left}){negate}.toStrictEqual({right})")
+        elif test_mode:
+            out.append(f"{pad}expect({_expr(expr, ctx)}).toBeTruthy()")
+        elif expr.get("kind") == "bin" and expr.get("op") in (
+                "==", "===", "!=", "!==", "<", ">", "<=", ">="):
+            op = _TS_V3_BIN_OPS[expr["op"]]
+            left = _expr(expr["left"], ctx)
+            right = _expr(expr["right"], ctx)
+            shown = json.dumps(f"{left} {op} {right}")
+            out.append(f"{pad}{{ const l = {left}, r = {right};")
+            out.append(f"{pad}  if (!(l {op} r)) throw new Error({shown} + "
+                       f'"\\n  left  = " + JSON.stringify(l) + '
+                       f'"\\n  right = " + JSON.stringify(r)) }}')
         else:
             out.append(
-                f"{'  ' * indent}if (!({_expr(node['expr'], ctx)})) "
+                f"{pad}if (!({_expr(expr, ctx)})) "
                 f'throw new Error("assertion failed")'
             )
     else:
