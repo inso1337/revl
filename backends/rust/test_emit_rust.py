@@ -138,13 +138,28 @@ def test_component_await_uses_plugin_async():
     assert 'Job::run(String::from("x")).await;' in src
 
 
-# cordis-rs is a crates.io dependency (see emit.cargo_toml). We deliberately
-# do NOT pass `--offline`: a fresh CI runner has no crates.io index or crate
-# cached, so an offline resolve fails with "no matching package named
-# cordis-rs". Letting cargo hit the network resolves + downloads cordis-rs
-# 0.3 (and its transitive deps) once, then caches it for the rest of the run.
+# cordis-rs, serde and serde_json are crates.io dependencies (see
+# emit.cargo_toml), and two environments both have to work:
+#
+#   * CI — a fresh runner with an empty registry: the crates must be fetched,
+#     so an unconditional `--offline` would fail with "no matching package
+#     named `cordis-rs`" and the whole cargo half would go red on day one.
+#   * dev / sandbox — no network but a warm ~/.cargo registry: the crates are
+#     already local, so an offline resolve succeeds in seconds.
+#
+# Dropping `--offline` altogether made the second environment spend ~30s per
+# test retrying HTTPS before failing (a full suite run took 21m50s and left
+# nine red herrings), and the reflex fix — skip every cargo test when
+# index.crates.io is unreachable — is quiet but verifies *nothing* offline.
+#
+# So: resolve offline first, and fall back to the networked resolve ONLY when
+# the offline attempt failed for a *resolution* reason (crate absent from the
+# local cache). A compile error or a failing `#[test]` is a real result and is
+# returned untouched — the fallback must never launder a genuine failure.
+
+
 def _crates_io_reachable() -> bool:
-    """Whether cordis-rs can be resolved. Cached: probed once per run."""
+    """Whether the index can be reached. Cached: probed once per run."""
     global _CRATES_IO
     if _CRATES_IO is None:
         import socket
@@ -159,24 +174,115 @@ def _crates_io_reachable() -> bool:
 
 _CRATES_IO: bool | None = None
 
-# Every cargo-gated test resolves cordis-rs from crates.io. Gating on `cargo`
-# alone made a sandbox without network spend ~130s per test on connection
-# retries and then fail — noise that hides real breakage. Probe once and skip
-# with a reason that says which half is missing.
-needs_cargo = pytest.mark.skipif(
-    shutil.which("cargo") is None or not _crates_io_reachable(),
-    reason="needs cargo and crates.io reachable (cordis-rs is resolved from the index)",
+# Phrases cargo uses when an *offline resolve* could not find a crate. They
+# are emitted before any compilation starts, which is what makes them safe to
+# distinguish from a real build failure.
+_OFFLINE_RESOLVE_MARKERS = (
+    "you're using offline mode",
+    "without the offline flag",
+    "--offline was specified",
+    "registry index was not found",
+    "no matching package",
+    "failed to select a version",
 )
+
+# Phrases that mean cargo got far enough to actually build or run something.
+# If any appears, the result is real and must be surfaced as-is.
+_REAL_FAILURE_MARKERS = (
+    "error[e",
+    "could not compile",
+    "test result: failed",
+    "panicked at",
+)
+
+
+def _is_offline_resolve_failure(proc: subprocess.CompletedProcess) -> bool:
+    blob = ((proc.stderr or "") + (proc.stdout or "")).lower()
+    if any(m in blob for m in _REAL_FAILURE_MARKERS):
+        return False
+    return any(m in blob for m in _OFFLINE_RESOLVE_MARKERS)
+
+
+def _cargo(subcommand: str, cwd: Path, *extra: str) -> subprocess.CompletedProcess:
+    """`cargo <subcommand>` — offline first, networked resolve as fallback."""
+    offline = subprocess.run(
+        ["cargo", subcommand, "--offline", *extra], cwd=cwd, text=True,
+        capture_output=True, timeout=600,
+    )
+    if offline.returncode == 0 or not _is_offline_resolve_failure(offline):
+        return offline
+    # The crates are not in the local registry. Only now is the network worth
+    # the wait; without it there is nothing to resolve against, so skip with a
+    # reason rather than burn ~30s per test on connection retries.
+    if not _crates_io_reachable():
+        pytest.skip(
+            "cordis-rs is not in the local cargo registry and index.crates.io "
+            "is unreachable — run once with network to populate ~/.cargo"
+        )
+    return subprocess.run(
+        ["cargo", subcommand, *extra], cwd=cwd, text=True,
+        capture_output=True, timeout=600,
+    )
+
+
+# Gate on the toolchain only. Crate availability is handled per-invocation by
+# `_cargo` above, so a warm offline cache runs the tests for real.
+needs_cargo = pytest.mark.skipif(
+    shutil.which("cargo") is None, reason="cargo not installed"
+)
+
+
+def test_offline_fallback_never_launders_a_real_failure():
+    """`_cargo` retries over the network only for *resolution* failures.
+
+    This is the safety property of the offline-first path: if a compile
+    error, a failing `#[test]` or a panic were ever classified as
+    "retry with network", a genuine breakage would silently become a skip on
+    an offline machine. Pinned here so the classifier cannot drift.
+    """
+    def out(text: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=text)
+
+    # --- resolution failures: safe to retry -------------------------------
+    assert _is_offline_resolve_failure(out(
+        "error: no matching package named `cordis-rs` found\n"
+        "location searched: registry `crates-io`\n"
+        "As a reminder, you're using offline mode (--offline) which can "
+        "sometimes cause surprising resolution failures."))
+    assert _is_offline_resolve_failure(out(
+        "error: failed to select a version for the requirement "
+        "`cordis-rs = \"^0.3\"`\n"
+        "you may wish to retry without the offline flag."))
+    assert _is_offline_resolve_failure(out(
+        "error: registry index was not found in any configuration"))
+
+    # --- real results: must be surfaced untouched -------------------------
+    assert not _is_offline_resolve_failure(out(
+        "error[E0308]: mismatched types\nerror: could not compile `revl_check`"))
+    assert not _is_offline_resolve_failure(out(
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored"))
+    assert not _is_offline_resolve_failure(out(
+        "thread 'main' panicked at src/lib.rs:12:5"))
+    # a compile error that happens to mention offline mode is still an error
+    assert not _is_offline_resolve_failure(out(
+        "error[E0433]: failed to resolve\n"
+        "note: you're using offline mode (--offline)"))
+
+
+@needs_cargo
+def test_cargo_check_surfaces_a_real_compile_error(tmp_path):
+    """End-to-end companion to the classifier test: broken Rust must come
+    back as a compile error from `_cargo_check`, never as a skip."""
+    result = _cargo_check(tmp_path, 'pub fn broken() -> i32 { "not an int" }\n')
+    assert result.returncode != 0
+    assert "E0308" in result.stderr, result.stderr
 
 
 def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
-    return subprocess.run(
-        ["cargo", "check"], cwd=tmp_path, text=True,
-        capture_output=True, timeout=600,
-    )
+    return _cargo("check", tmp_path)
 
 
 @needs_cargo
@@ -260,10 +366,7 @@ def test_cargo_test_runs_emitted_stdlib_semantics(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
-    result = subprocess.run(
-        ["cargo", "test"], cwd=tmp_path, text=True,
-        capture_output=True, timeout=600,
-    )
+    result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
     assert "1 passed" in result.stdout
 
@@ -325,10 +428,7 @@ def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "scenarios.rs").write_text(
         (here / "scenarios" / "scenarios.rs").read_text(encoding="utf-8"), encoding="utf-8")
-    result = subprocess.run(
-        ["cargo", "test"], cwd=tmp_path, text=True,
-        capture_output=True, timeout=600,
-    )
+    result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
     assert "5 passed" in result.stdout
 

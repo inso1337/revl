@@ -4,7 +4,10 @@ Run with:
     .venv/bin/pytest backends/wasm/test_v3_emit.py -q
 """
 
+import functools
 import importlib.util
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -15,6 +18,48 @@ ROOT = BACKEND.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
+
+
+# --- wasmtime gate -----------------------------------------------------------
+# The runtime-execution tests below are the only thing standing between this
+# tier's claims (variants/Opt/Result lowering, native loops, Turing-complete
+# functions, inlined closures) and a silent regression. They used to skip
+# whenever `wasmtime` was absent - including in CI, which never installed it,
+# so the whole runtime half of the tier was unguarded while reading green.
+#
+# CI now installs a pinned wasmtime AND sets REVL_REQUIRE_WASMTIME=1: with the
+# flag set a missing runtime is a hard failure instead of a quiet skip. Local
+# dev without the flag keeps the plain skip.
+_REQUIRE_WASMTIME = os.environ.get("REVL_REQUIRE_WASMTIME", "").strip().lower() not in (
+    "", "0", "false", "no",
+)
+
+
+def _wasmtime_or_fail() -> str:
+    """Path to `wasmtime`, or skip/fail depending on REVL_REQUIRE_WASMTIME."""
+    found = shutil.which("wasmtime")
+    if found:
+        return found
+    if _REQUIRE_WASMTIME:
+        pytest.fail(
+            "wasmtime is not on PATH, so this tier's runtime coverage cannot "
+            "run. REVL_REQUIRE_WASMTIME is set, which means this environment "
+            "(CI) is expected to provide it - failing instead of skipping "
+            "silently.",
+            pytrace=False,
+        )
+    pytest.skip("wasmtime not installed (set REVL_REQUIRE_WASMTIME=1 to make this a failure)")
+
+
+def _needs_wasmtime(fn):
+    """Decorator form of `_wasmtime_or_fail` for whole-test gating."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        _wasmtime_or_fail()
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _emitter():
@@ -158,7 +203,7 @@ def test_v3_variant_result_opt_emit():
     assert "(i32.eq (i32.load (local.get $msc_1)) (i32.const" in wat
 
 
-@pytest.mark.skipif(__import__("shutil").which("wasmtime") is None, reason="wasmtime not installed")
+@_needs_wasmtime
 def test_v3_variant_result_opt_run_on_wasmtime(tmp_path):
     """Not just emitted — construct + match execute on the real substrate:
     user variants, Result (Ok/Err discriminated), and Opt."""
@@ -197,7 +242,7 @@ def test_v3_loops_emit():
     assert "(loop" in wat and "(br_if 1)" in wat and "(br 0)" in wat
 
 
-@pytest.mark.skipif(__import__("shutil").which("wasmtime") is None, reason="wasmtime not installed")
+@_needs_wasmtime
 def test_v3_loops_run_on_wasmtime(tmp_path):
     """fib/Collatz (while) and for-of execute on the real substrate — the
     Turing-completeness the README demonstrates, now on wasm too."""
@@ -230,10 +275,8 @@ fn greet_len() -> Int { let s = "bob"  return greet(s).length() }
 
 
 def test_v3_str_template_and_intra_call_run_on_wasmtime(tmp_path):
-    import shutil, subprocess
-    if shutil.which("wasmtime") is None:
-        import pytest as _pt
-        _pt.skip("wasmtime not installed")
+    import subprocess
+    _wasmtime_or_fail()
     emit = _emitter()
     wat = tmp_path / "t.wat"
     wat.write_text(emit.emit(compile_source(_STR_TPL_SRC))["functions"], encoding="utf-8")
@@ -245,10 +288,8 @@ def test_v3_str_template_and_intra_call_run_on_wasmtime(tmp_path):
 
 def test_v3_int_interpolation_runs_on_wasmtime(tmp_path):
     """`${intExpr}` stringifies via an itoa helper (`$int_to_str`)."""
-    import shutil, subprocess
-    if shutil.which("wasmtime") is None:
-        import pytest as _pt
-        _pt.skip("wasmtime not installed")
+    import subprocess
+    _wasmtime_or_fail()
     emit = _emitter()
     wat = tmp_path / "i.wat"
     # return each char code of `${n}` so we can assert the exact digits
@@ -285,10 +326,8 @@ fn capture_by_value() -> Int { var n = 1  let f = y => y + n  n = 100  return f(
 
 
 def test_v3_local_arrows_run_on_wasmtime(tmp_path):
-    import shutil, subprocess
-    if shutil.which("wasmtime") is None:
-        import pytest as _pt
-        _pt.skip("wasmtime not installed")
+    import subprocess
+    _wasmtime_or_fail()
     emit = _emitter()
     wat = tmp_path / "a.wat"
     wat.write_text(emit.emit(compile_source(_ARROW_SRC))["functions"], encoding="utf-8")
