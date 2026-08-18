@@ -14,20 +14,31 @@ each process declares its `backend`:
     components = ["UserCache"]
     probe = ["cache.put('alice', '42')", "cache.get('alice')"]
 
-The conductor compiles the `.rvl`, works out the seams from the IR (which key
-each process provides, which it requires from another), assigns a Unix socket
-per provider, and spawns one runner per process wired so a key required across
-a process boundary is served on one side and proxied on the other. This is the
-manifest-driven form of what demo/bridge_pypy.py did by hand (docs/interop-
-bridge.md §5: the broker is a placement map plus per-backend proxy/stub).
+The conductor compiles the `.rvl`, checks that the runtimes the placement asks
+for are actually installed (the preflight — a missing runtime is one
+diagnostic here, not one traceback per child), works out the seams from the IR
+(which key each process provides, which it requires from another), assigns a
+Unix socket per provider, and spawns one runner per process wired so a key
+required across a process boundary is served on one side and proxied on the
+other. This is the manifest-driven form of what demo/bridge_pypy.py did by
+hand (docs/interop-bridge.md §5: the broker is a placement map plus per-backend
+proxy/stub).
+
+Each seam is described to *both* sides from the IR: the consumer's spec carries
+the proxy's method list, the provider's carries the same list as the stub's
+allowlist, so the served surface is exactly the operations the `service`
+declares (G8; docs/interop-bridge.md §3 "Trust model" for what that does and
+does not buy).
 
 Backends and their runners:
 - py   -> src/revl/_process_runner.py            (cordis-py; reactive)
 - node -> backends/typescript/placement_runner.ts (cordis-ts; reactive)
-- rust -> backends/rust/placement_runner          (cordis-rs; consumer-only
-          first cut, user_cache composition; hand-written Database proxy)
-- java -> backends/java/placement/PlacementRunner  (cordis4j stub; generic
-          reflection proxy; crossing verified, reactive withdrawal is a follow-up)
+- rust -> backends/rust/placement_runner          (cordis-rs; reactive; the
+          proxy/stub/dispatch table is emitted per composition by
+          backends/rust/emit.py, so it both consumes and serves)
+- java -> backends/java/placement/{Real,}PlacementRunner (real cordis4j on a
+          JDK 21 when present — reactive, generic reflection proxy — else the
+          in-repo stub runtime, which crosses but does not withdraw)
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -80,6 +92,64 @@ def _parse_probe(expr: str) -> dict:
     arg_str = arg_str.strip()
     args = [a.strip().strip("'\"") for a in arg_str.split(",")] if arg_str else []
     return {"key": key, "method": method, "args": args}
+
+
+# --------------------------------------------------------------------------
+# preflight: fail with a diagnostic instead of spawning children that die
+# --------------------------------------------------------------------------
+
+
+def _cordis_py_installed() -> bool:
+    """Is cordis-py importable by the interpreter that will run py processes?
+
+    Named (rather than inlined) so a test can force the missing case: py
+    children are spawned as ``sys.executable -m revl._process_runner``, so the
+    conductor's own import environment is exactly the children's."""
+    try:
+        return importlib.util.find_spec("cordis") is not None
+    except (ImportError, ValueError):  # pragma: no cover — a broken install
+        return False
+
+
+def _rerun_hint(files, placement_path: str, once: bool) -> str:
+    """The same command, under the backend venv — copy-pasteable verbatim."""
+    venv = _BACKENDS_DIR / "python" / ".venv" / "bin" / "python"
+    parts = [str(venv), "-m", "revl", "run", *[str(f) for f in files],
+             "--placement", placement_path]
+    if once:
+        parts.append("--once")
+    return " ".join(parts)
+
+
+def _preflight(backends_used: set[str], files, placement_path: str, once: bool) -> str | None:
+    """The runtime check `revl run` does, done once before anything is spawned.
+
+    Without it a missing runtime surfaces as one raw traceback per child
+    process (`ModuleNotFoundError` from the runner), which says nothing about
+    how to fix it. Returns an error message, or None when every backend the
+    placement asks for can actually start."""
+    if "py" in backends_used and not _cordis_py_installed():
+        backend_dir = _BACKENDS_DIR / "python"
+        return ("the cordis-py runtime is not installed ('cordis' missing).\n"
+                f"       py-placed processes are spawned as {sys.executable},\n"
+                "       which has no cordis — each would die with ModuleNotFoundError.\n"
+                f"       set it up:  sh {backend_dir / 'setup.sh'}\n"
+                f"       then run it under that interpreter:  {_rerun_hint(files, placement_path, once)}")
+    if "node" in backends_used:
+        if shutil.which("node") is None:
+            return ("node is not on PATH, but this placement puts a process on the node backend.\n"
+                    "       install Node (>= 22, for --experimental-strip-types), then re-run.")
+        if not (_TS_DIR / "node_modules" / "cordis").is_dir():
+            return ("the cordis-ts runtime is not installed (backends/typescript/node_modules/cordis missing).\n"
+                    f"       set it up:  (cd {_TS_DIR} && npm install)")
+    if "java" in backends_used and shutil.which("java") is None and _find_jdk21() is None:
+        return ("java is not on PATH, but this placement puts a process on the java backend.\n"
+                "       install a JDK (21 for the reactive cordis4j runtime, 17 for the stub),\n"
+                "       or point JAVA21_HOME at one.")
+    if "rust" in backends_used and shutil.which("cargo") is None:
+        return ("cargo is not on PATH, but this placement puts a process on the rust backend.\n"
+                "       install a Rust toolchain (https://rustup.rs), then re-run.")
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -151,7 +221,6 @@ def _build_rust(ir: dict, tmp: Path) -> str:
 
 def _find_jdk21() -> str | None:
     """bin dir of a JDK 21 (real cordis4j needs 21), or None."""
-    import shutil  # noqa: PLC0415
     home = os.environ.get("JAVA21_HOME")
     if home and (Path(home) / "bin" / "java").exists():
         return str(Path(home) / "bin")
@@ -255,6 +324,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         print(f"error: components not placed in any process: {', '.join(unplaced)}", file=sys.stderr)
         return 1
 
+    # runtimes before processes: an unrunnable backend is a diagnostic here,
+    # not a traceback per child a second later (an unknown backend name is
+    # reported by the spec loop below, so it is not preflighted).
+    backends_used = {pconf.get("backend", "py") for pconf in processes.values()} & set(KNOWN_BACKENDS)
+    problem = _preflight(backends_used, files, placement_path, once)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 3
+
     def merged(cnames, which):  # union of components' provides/requires (key -> service)
         out: dict[str, str] = {}
         for cname in cnames:
@@ -271,8 +349,16 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         key_service.update(comp.get("requires") or {})
     load_order = (ir.get("manifest") or {}).get("loadOrder") or [c["name"] for c in ir["components"]]
 
+    # 0700 by construction (mkdtemp), so the sockets under it are reachable
+    # by this user only; removed again in the `finally` below.
     tmp = Path(tempfile.mkdtemp(prefix="revl_placement_"))
     sockets = {p: str(tmp / f"{p}.sock") for p in processes}
+
+    def abort(message: str, code: int = 1) -> int:
+        """Report and bail out without leaving the placement dir behind."""
+        print(f"error: {message}", file=sys.stderr)
+        shutil.rmtree(tmp, ignore_errors=True)
+        return code
 
     # base specs (backend-neutral)
     specs: dict[str, dict] = {}
@@ -280,9 +366,8 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     for pname, pconf in processes.items():
         backend = pconf.get("backend", "py")
         if backend not in KNOWN_BACKENDS:
-            print(f"error: process {pname!r} has unsupported backend {backend!r} "
-                  f"({', '.join(KNOWN_BACKENDS)})", file=sys.stderr)
-            return 1
+            return abort(f"process {pname!r} has unsupported backend {backend!r} "
+                         f"({', '.join(KNOWN_BACKENDS)})")
         backends[pname] = backend
         proxies: dict[str, dict] = {}
         for key, service in requires[pname].items():
@@ -290,8 +375,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 continue
             host = owner.get(key)
             if host is None:
-                print(f"error: key {key!r} required by {pname!r} is provided by no process", file=sys.stderr)
-                return 1
+                return abort(f"key {key!r} required by {pname!r} is provided by no process")
             proxies[key] = {"socket": sockets[host], "methods": methods.get(service, []), "service": service}
         serve_keys = [k for k in provides[pname] if any(k in requires[q] and q != pname for q in processes)]
         spec = {
@@ -305,7 +389,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             "probe": pconf.get("probe") or [],
         }
         if serve_keys:
-            spec["serve"] = {"socket": sockets[pname], "keys": serve_keys}
+            # `methods` is the stub's allowlist: the operations the *service
+            # declaration* admits for each exported key, read off the IR. The
+            # stub refuses anything else, so the served surface is exactly the
+            # enumerable one (G8), matching what the proxy side forwards.
+            spec["serve"] = {
+                "socket": sockets[pname],
+                "keys": serve_keys,
+                "methods": {k: methods.get(provides[pname][k], []) for k in serve_keys},
+            }
         specs[pname] = spec
 
     # per-backend build steps (once)
@@ -330,8 +422,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         if any(b == "rust" for b in backends.values()):
             rust_bin = _build_rust(ir, tmp)
     except (RevlError, RuntimeError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return abort(str(exc))
 
     # per-backend spec adaptation + spawn command + stop mode
     def command_for(pname: str, spec_file: Path) -> tuple[list, dict | None, str]:
@@ -349,7 +440,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
 
     import revl  # noqa: PLC0415
     src_dir = str(Path(revl.__file__).resolve().parents[1])
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join([src_dir, os.environ.get("PYTHONPATH", "")])}
+    # keep the inherited PYTHONPATH, but drop empty entries: an empty entry is
+    # the *current directory* on the child's sys.path, which would let a stray
+    # module in CWD shadow a real one.
+    inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([src_dir, *inherited])}
 
     for pname, spec in specs.items():
         backend = backends[pname]
@@ -417,4 +512,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         for stale in cleanup:
             if os.path.exists(stale):
                 os.unlink(stale)
+        # the placement dir holds only sockets and spec files, both dead once
+        # the children are; leaving it behind leaked a 0700 tmpdir per run.
+        shutil.rmtree(tmp, ignore_errors=True)
     return rc

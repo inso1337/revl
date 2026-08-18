@@ -16,13 +16,47 @@ fully loaded; `[name] DOWN` marks a clean teardown.
 
 from __future__ import annotations
 
+import ast
 import asyncio
-import builtins
 import json
 import signal
 import sys
 import types
 from pathlib import Path
+
+
+def _eval_probe(expr: str, namespace: dict):
+    """Evaluate one probe: `key.method(literal, ...)` — and nothing else.
+
+    A placement file is *data*, not a program. Probes are therefore parsed and
+    dispatched, never `eval`'d: the admitted grammar is exactly the one the
+    rust backend already required (`placement.py::_parse_probe`) — one method
+    call on one key this process holds, with literal arguments
+    (`ast.literal_eval`). No builtins, no imports, no attribute chains, no
+    expressions. Anything else is refused with a message naming the form.
+    """
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"cannot parse probe (expected key.method(arg, ...)): {exc}") from exc
+    call = tree.body
+    if (not isinstance(call, ast.Call)
+            or not isinstance(call.func, ast.Attribute)
+            or not isinstance(call.func.value, ast.Name)
+            or call.keywords):
+        raise ValueError("probe must be of the form key.method(arg, ...)")
+    key, method = call.func.value.id, call.func.attr
+    if key not in namespace:
+        held = ", ".join(sorted(namespace)) or "none"
+        raise ValueError(f"{key!r} is not a key this process holds (holds: {held})")
+    try:
+        args = [ast.literal_eval(arg) for arg in call.args]
+    except ValueError as exc:
+        raise ValueError(f"probe arguments must be literals ({exc})") from exc
+    target = getattr(namespace[key], method, None)
+    if not callable(target):
+        raise ValueError(f"{key!r} has no method {method!r}")
+    return target(*args)
 
 
 def _load_module(files: list[str]) -> types.ModuleType:
@@ -86,7 +120,9 @@ async def run(spec: dict) -> None:
     server = None
     serve = spec.get("serve")
     if serve:
-        server = await bridge.serve(root, serve["keys"], serve["socket"])
+        # `methods` (key -> declared operations) is the stub's allowlist; fall
+        # back to the bare key list for a spec written before it existed.
+        server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve["socket"])
         log("serve", ", ".join(serve["keys"]), f"-> {serve['socket']}")
 
     # 4. probes: call provided services (may cross a seam), print results
@@ -95,7 +131,7 @@ async def run(spec: dict) -> None:
         namespace[key] = root.get(key)
     for expr in spec.get("probe") or []:
         try:
-            value = eval(expr, {"__builtins__": builtins}, namespace)  # noqa: S307
+            value = _eval_probe(expr, namespace)
             if hasattr(value, "__await__"):
                 value = await value
             await _flush()
