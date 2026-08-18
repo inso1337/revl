@@ -108,6 +108,27 @@ _BUILTIN_METHODS = {
 }
 
 
+# Integer division and modulo are undefined at zero, and every tier says so
+# differently — python raises, rust and wasm trap, java throws, and TypeScript
+# used to hand back Infinity. A *literal* zero divisor is never a program
+# anyone meant to write, so it does not need to reach any of them.
+_DIVIDES_BY = ("div_trunc", "div_floor", "div_euclid", "mod")
+
+
+def _refuse_zero_divisor(method: str, args, filename: str, line: int) -> None:
+    from .parser import ExprLit as _Lit
+
+    if method not in _DIVIDES_BY or not args:
+        return
+    divisor = args[0]
+    if isinstance(divisor, _Lit) and divisor.value == 0:
+        raise RevlError(
+            filename, line,
+            f"`{method}` by a literal zero is undefined",
+            hint="integer division and modulo have no value at zero; guard the "
+                 "divisor (`if (b == 0) { ... }`) or use a non-zero constant")
+
+
 def _is_host_valued(expr, scope) -> bool:
     """A receiver holding a HOST object (Map.new(), Pool.open(...), or a let
     bound to one): its methods belong to the host stub, not the stdlib
@@ -1670,6 +1691,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 raise RevlError(filename, expr.line,
                                 f"builtin `{method}` takes {arity} argument(s), "
                                 f"{len(expr.args)} given")
+            _refuse_zero_divisor(method, expr.args, filename, expr.line)
             return {"kind": "builtin", "method": method,
                     "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                     "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}

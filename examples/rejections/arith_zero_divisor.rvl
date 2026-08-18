@@ -1,0 +1,14 @@
+// REJECTED — integer division and modulo have no value at zero.
+// Every tier says so differently: python raises, rust and wasm trap, java
+// throws, and TypeScript used to hand back Infinity — a value, where the
+// checker had declared `Int`. A *literal* zero divisor is never a program
+// anyone meant to write, so it is refused before it can reach any of them.
+// A computed divisor still needs a guard; see docs/arithmetic.md.
+//
+// expected error:
+//   `mod` by a literal zero is undefined
+//   integer division and modulo have no value at zero; guard the divisor
+
+fn bucket(key: Int) -> Int {
+  return key.mod(0)
+}
