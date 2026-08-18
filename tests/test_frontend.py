@@ -128,6 +128,14 @@ REJECTIONS = {
     "t17_arrow_body_unchecked.rvl": "field access `.name` on `Opt[Row]`",
     "t18_type_alias_cycle.rvl": "type alias cycle: Handle -> Ref -> Handle",
     "t19_union_type.rvl": "revl has no union types",
+    # lifecycle tests (docs/syntax-2.0.md §7.1)
+    "lifecycle_unknown_component.rvl": "unknown component `Ghost`",
+    "lifecycle_double_load.rvl": "`Kv` is already loaded",
+    "lifecycle_unknown_assertion.rvl": "unknown lifecycle assertion `no_leaks`",
+    "lifecycle_unknown_operation.rvl": "`kv.put` is not an operation of service Store",
+    "lifecycle_stmt_in_pure_test.rvl": "`load` is only allowed in a `lifecycle test` body",
+    "lifecycle_config_unknown_field.rvl": "`sixe` is not a config field of Kv",
+    "lifecycle_no_swap.rvl": "there is no `swap` statement",
 }
 
 

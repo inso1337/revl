@@ -1,0 +1,15 @@
+// One live instance per component: two would be two providers of one key,
+// which is exactly what G2 forbids.
+service Store { fn get(key: Str) -> Str }
+
+component Kv provides kv: Store {
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(key) = m.get(key) }
+}
+
+lifecycle test "loads twice" {
+  load Kv
+  load Kv
+  unload Kv
+  assert no_residue
+}
