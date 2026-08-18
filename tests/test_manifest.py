@@ -119,8 +119,11 @@ def _admit_source(source: str, running: dict):
 def test_boundary_report():
     ir = compile_files([str(EXAMPLES / "user_cache.rvl"), ])
     boundary = _boundary(ir)
-    assert boundary["PgDatabase"] == {"emissions": [], "compensated": 0, "awaits": 0, "externs": []}
+    assert boundary["PgDatabase"] == {"emissions": [], "capabilities": {},
+                                     "compensated": 0, "awaits": 0, "externs": []}
     assert boundary["UserCache"]["emissions"] == ["db.execute"]
+    # `Database.execute` is declared bare `emission`, so its scope is "any"
+    assert boundary["UserCache"]["capabilities"] == {"db.execute": ["*"]}
 
 
 def test_audit_cli_json(capsys):
