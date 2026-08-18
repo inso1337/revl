@@ -36,7 +36,7 @@ service Database {
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
-  fn put(key: Str, value: Str)
+  emission fn put(key: Str, value: Str)         // its body emits, so the interface says so
 }
 
 component UserCache requires db: Database provides cache: Cache {
@@ -64,7 +64,10 @@ Reading it:
 - `let store = effect Map.new() undo store.drop()` — acquire a map, remember
   how to drop it. On teardown, `store.drop()` runs.
 - `provide cache { ... }` — publish the `cache` key. `put` mutates the store
-  (effect + undo) and *emits* a log write.
+  (effect + undo) and *emits* a log write. Because its body reaches an
+  emission, the *service* declares it `emission fn`: a declaration is an upper
+  bound on its providers, so a plain `fn` may never be implemented by a body
+  that emits.
 - `` `...${key}` `` is the 2.0 template-string interpolation (1.x `"$key"` is
   gone — `revl fmt --migrate` rewrites old sources).
 
@@ -262,18 +265,39 @@ python3 tools/conformance.py                       # every construct x every bac
 ```
 
 `run` needs the cordis-py runtime (`backends/python/setup.sh`); `--backend`
-selects the tier. `--placement` composes py / node / rust / java in one
-lifecycle (docs/interop-bridge.md), and `mcp serve` additionally holds a
-composition **in memory** so an agent can load, call, swap and prove
-no-residue without touching the filesystem (docs/mcp-bridge.md).
+selects the tier, and `revl test --all` is gated by
+`tests/test_cross_tier.py`.
+
+Two of these are worth being precise about, because they are the project's
+easiest place to overclaim:
+
+- **`--placement`** is designed to compose py / node / rust / java in one
+  lifecycle ([interop-bridge.md](interop-bridge.md)). What is *tested* is the
+  static half — `tests/test_distribute.py` asserts the transport-safety
+  verdict `revl audit` reports for each service. A four-language composition
+  actually running is exercised by the `demo/bridge_py*.py` scripts, which no
+  test and no CI job runs. Treat it as demonstrated, not gated.
+- **`mcp serve`** holds a composition **in memory** so an agent can load,
+  call, swap and prove no-residue without touching the filesystem
+  ([mcp-bridge.md](mcp-bridge.md)). The tool surface, its annotations and its
+  structured rejections are gated by `tests/test_mcp.py` (33 tests). The live
+  session — actually booting a composition through those tools — is
+  `tests/test_mcp_session.py`, which needs the cordis-py runtime and
+  therefore **skips in CI**.
 
 ## Backends
 
 - **cordis-py** (Python) — the reference backend, on a hardened lifecycle
   runtime. The tier every construct is checked against first.
 - **cordis** (TypeScript) — v4.
-- **cordis-rs** (Rust) and **cordis4j** (Java) — both consume *and* serve
-  across a process seam, reactively (peer death becomes withdrawal).
+- **cordis-rs** (Rust) and **cordis4j** (Java) — spikes. Each tier's emitted
+  code is run against its real runtime
+  (`backends/rust/test_emit_rust.py::test_runtime_scenarios_on_real_cordis_rs`,
+  `backends/java/test_emit_java.py::test_runtime_scenarios_on_real_cordis4j`),
+  and both skip without their toolchain. Consuming *and* serving across a
+  process seam, with peer death becoming withdrawal, is the design
+  ([interop-bridge.md](interop-bridge.md)) and is demonstrated by the
+  `demo/bridge_*` scripts — it is not covered by a test.
 - **cordis-wasm** — the sandboxed substrate, where confinement becomes
   physical. Deliberately i32-only at the service boundary.
 
