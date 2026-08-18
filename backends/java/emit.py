@@ -95,6 +95,23 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+# Java generics cannot hold primitives: `Optional<long>` is not a type. Every
+# type argument must be the boxed form, while the same revl type in a plain
+# parameter or return position stays primitive.
+_BOXED = {
+    "long": "Long",
+    "double": "Double",
+    "boolean": "Boolean",
+    "void": "Void",
+}
+
+
+def _java_type_arg(name: object) -> str:
+    """A revl type as a Java *type argument* (boxed where primitive)."""
+    rendered = _java_type(name)
+    return _BOXED.get(rendered, rendered)
+
+
 def _java_type(name: object) -> str:
     if not isinstance(name, str) or not name:
         return "Object"
@@ -104,12 +121,12 @@ def _java_type(name: object) -> str:
     if generic:
         head, inner = generic.group(1), generic.group(2)
         if head == "List":
-            return f"java.util.List<{_java_type(inner)}>"
+            return f"java.util.List<{_java_type_arg(inner)}>"
         if head == "Opt":
-            return f"java.util.Optional<{_java_type(inner)}>"
+            return f"java.util.Optional<{_java_type_arg(inner)}>"
         if head == "Map":
             k, v = _split_generic(inner)
-            return f"java.util.Map<{_java_type(k)}, {_java_type(v)}>"
+            return f"java.util.Map<{_java_type_arg(k)}, {_java_type_arg(v)}>"
     return "Object"
 
 

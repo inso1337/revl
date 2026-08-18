@@ -712,8 +712,14 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         elif expected_return:
             raise RevlError(filename, stmt.line,
                             f"bare `return` in a function declared to return `{expected_return}`")
-        body.append({"step": "return",
-                     "expr": None if stmt.expr is None else _lower_pure_expr(stmt.expr, scope, callables, alias_fns, filename, type_env, types)})
+        lowered = (None if stmt.expr is None else
+                   _lower_pure_expr(stmt.expr, scope, callables, alias_fns,
+                                    filename, type_env, types))
+        if lowered is not None and expected_return:
+            lowered = _inject_opt(expected_return,
+                                  infer_ast(stmt.expr, type_env, types, filename),
+                                  lowered)
+        body.append({"step": "return", "expr": lowered})
     elif isinstance(stmt, IfStmt):
         then: list[dict] = []
         _bool_cond(stmt.cond, type_env, types, filename, "if")
@@ -1038,6 +1044,31 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                     value, scope, callables, alias_fns, filename, type_env, types)])
         return {"kind": "interp", "parts": parts}
     raise RevlError(filename, getattr(expr, "line", 1), "unexpected expression in fn body")
+
+
+def _inject_opt(expected: str | None, actual: str | None, node: dict) -> dict:
+    """Materialize the `T` -> `Opt[T]` injection the checker accepts.
+
+    `compatible` lets a `T` stand where an `Opt[T]` is declared (typecheck.py,
+    "Opt discipline"), but accepting the *type* is only half of it: the value
+    still has to become an optional. Nothing did that, so a method declared
+    `-> Opt[Int]` returning `1` emitted `Option<i64> { 1 }` on rust and
+    `Optional<Long> { return 1L; }` on java — both rejected by their
+    compilers. python and TypeScript never noticed, which is why it survived:
+    the injection is invisible on an untyped tier.
+
+    Done here rather than in each backend because the frontend is the single
+    IR producer, and because deciding it in a backend needs the very type
+    information the emitters do not carry.
+    """
+    if actual is None:
+        return node
+    ehead, eargs = parse_type(expected)
+    if ehead != "Opt" or not eargs:
+        return node
+    if parse_type(actual)[0] == "Opt":
+        return node          # already an optional; injecting would double-wrap
+    return {"kind": "call", "callee": {"kind": "var", "name": "Some"}, "args": [node]}
 
 
 def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
@@ -1954,6 +1985,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     if actual and not compatible(decl.returns, actual):
                         raise mismatch(filename, mstmt.line,
                                        f"`{method.name}` returns", decl.returns, actual)
+                    lowered_return = _inject_opt(decl.returns, actual, lowered_return)
                 mbody.append({"step": "return", "expr": lowered_return})
                 returned = True
             else:  # pragma: no cover

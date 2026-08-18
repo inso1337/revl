@@ -39,25 +39,25 @@ KNOWN_FAILURES: dict[str, set[str]] = {
     # through `cargo check` together. Two of the three (`await`, method-time
     # effect) fail on java as well, so the cause is likely shared and upstream
     # of either renderer rather than two coincidences.
+    # Both survivors are the same root cause: host builtins (`Job`, `Map`)
+    # have no declared signatures, so the frontend cannot check an argument
+    # against them and the typed tiers reject what python and TypeScript
+    # happily accept. See docs/conformance.md.
     "rust": {
         "component/await (A1 boundary)",
         "method/method-time effect",
-        "expr/Opt Some/None",
     },
     "java": {
+        # the shared host-builtin pair, as above
         "component/await (A1 boundary)",
         "method/method-time effect",
+        # java-only, still open
         "method/emit as value",
         "expr/template string",
-        "expr/nullish ??",
         "expr/ADT construct + match",
-        "expr/Opt Some/None",
         "fn/arrow lambda",
-        "type/List service",
-        "type/Opt service",
         "type/record in signature",
         "type/ADT in signature",
-        "type/Map service",
     },
 }
 

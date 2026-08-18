@@ -129,10 +129,45 @@ and a baselined case that starts passing also fails, so the list can only
 shrink.
 
 Once crates.io was reachable, all 47 rust cases went through `cargo check`
-together for the first time: **44 pass, 3 do not** — and two of the three
-(`await`, method-time effect) are failing on java as well, so the cause is
-likely shared and upstream of either renderer rather than two coincidences.
-They are baselined alongside java's.
+together for the first time: 44 passed, 3 did not — and all three were
+failing on java too, which is what identified them as shared causes rather
+than three coincidences. Chasing them found three bugs and closed five more
+java cases as a side effect:
+
+- **The `T` -> `Opt[T]` injection was never materialized.** `compatible()`
+  lets a `T` stand where `Opt[T]` is declared, but nothing turned the *value*
+  into an optional, so a method declared `-> Opt[Int]` returning `1` emitted
+  `Option<i64> { 1 }` and `Optional<Long> { return 1L; }`. Fixed in the
+  frontend (`_inject_opt` in lower.py), not per backend: the frontend is the
+  single IR producer, and a backend deciding this would need type information
+  the emitters do not carry. Untyped tiers never noticed — the injection is
+  invisible on python and TypeScript, which is exactly why it survived.
+- **Java put primitives in generic positions.** `Opt[Int]` rendered as
+  `Optional<long>`, which is not a Java type. Type *arguments* are now boxed
+  (`Optional<Long>`) while the same revl type stays primitive in parameter
+  and return position. This one fix closed five cases: `Opt`, `List` and
+  `Map` services, `??`, and `Some`/`None`.
+- **The two-renderer `call` ambiguity fired for real.** The injected `Some(..)`
+  is v3-shaped (`callee`/`args`) and lands in component positions, where the
+  TypeScript v1 renderer read `method` off it, got Python's `None`, and
+  reported it as a bad identifier. Dispatch now keys on *shape*, as this
+  document already prescribed.
+
+**What remains is one shared cause, not two bugs.** `component/await` and
+`method/method-time effect` fail on rust and java for the same reason: host
+builtins (`Job`, `Map`) have **no declared signatures**, so the frontend
+cannot check an argument against them. `await Job.run(1)` passes an `Int`
+where the java and rust host stubs take a name (`String`), and
+`m.insert(x, x)` uses `Int` keys against a `String`-keyed map. python and
+TypeScript accept both because their hosts are untyped.
+
+Fixing it is a language decision, not a codegen one, and the tiers disagree
+today: `docs/backend-ir-v1.md` specifies `Job.run(name)`, while the wasm tier
+is i32-only and `examples/pulse.rvl` calls `Job.run(1)`. Typing the host
+boundary — and rejecting a mismatch, the way service declarations already
+bound their providers — would settle it, at the cost of breaking whichever
+spelling loses. That is the open question, and it belongs on the G8 boundary
+surface where the rest of the host contract lives.
 
 The rust failure CI *did* catch is fixed here, and it is the same shape as
 the others: revl's `+` on strings lowered to Rust's `+`, which
