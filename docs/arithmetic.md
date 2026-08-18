@@ -86,6 +86,36 @@ carry an `operands` field (`"Int"` or `"Float"`) when the checker can
 determine it. Only those two operators carry it — a comparison or a boolean
 gains nothing from it, and the IR should not grow a field it does not use.
 
+
+## Division by zero
+
+Integer division and modulo have no value at zero, and every tier said so
+differently: python raises, rust and wasm trap, java throws, and TypeScript
+handed back `Infinity`/`NaN` — a *value*, where the checker had declared
+`Int`. That is the same class of unsoundness as lowering structural `==` to
+JS `===`, and it is closed the same way: TypeScript's integer operations go
+through guarded helpers that throw, so all five tiers now fault.
+
+A **literal** zero divisor never reaches any of them — the checker refuses it
+(`examples/rejections/arith_zero_divisor.rvl`), because it is not a program
+anyone meant to write:
+
+```revl reject
+fn bucket(key: Int) -> Int {
+  return key.mod(0)
+}
+```
+
+A *computed* divisor still faults at runtime; guard it if the program should
+survive. `tests/test_cross_tier_execution.py` asserts that every tier faults
+rather than inventing a value.
+
+Note that `/` is a different question, because it is true division on `Float`.
+IEEE 754 defines `x / 0.0` as ±infinity, which is a value, not a fault — and
+python is the outlier there, raising where JS and rust follow IEEE. That
+divergence is recorded but not closed: it is a decision about whether revl's
+`Float` is IEEE, which is a bigger question than division.
+
 ## Still open
 
 - **`%` on negatives diverges between tiers today.** python floors where
@@ -98,6 +128,9 @@ gains nothing from it, and the IR should not grow a field it does not use.
   on python, faults on rust, and silently loses precision on TypeScript past
   2^53. A language offering compile-time guarantees should not leave silent
   wraparound to the host.
-- **Division by zero is unspecified.** python raises, rust panics, and
-  TypeScript yields `Infinity` — a silent non-value that propagates. `fail`
-  (L-Raise) is the obvious answer and the language already has it.
+- **A total, value-returning form.** `checked_div_*` returning
+  `Result[Int, _]` would let a program handle a zero divisor without faulting.
+  `fail` cannot serve here: it is a component construct (A8) and is refused in
+  a pure `fn`, so making division "fail" would mean either extending `fail`
+  into the pure stratum — which costs totality, the property `verified` rests
+  on — or a `Result` form. The second is the better shape; neither is built.

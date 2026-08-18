@@ -236,3 +236,38 @@ def test_true_division_yields_float_everywhere():
         compile_source("pub fn d() -> Int { return 7 / 2 }", "div.rvl")
     assert "Float" in str(failure.value)
     compile_source("pub fn d() -> Float { return 7 / 2 }", "div.rvl")
+
+
+# ------------------------------------------------- division by zero
+#
+# Integer division and modulo have no value at zero. A *literal* zero is
+# refused by the checker (examples/rejections/arith_zero_divisor.rvl); a
+# computed one has to fault at runtime, and the point is that every tier
+# faults rather than one of them inventing a value. TypeScript used to return
+# Infinity/NaN here — a value where the checker had declared `Int`, the same
+# class of unsoundness as lowering structural `==` to JS `===`.
+
+ZERO_DIVISOR = """
+pub fn zero() -> Int { return 0 }
+test "integer division by zero has no value" { assert 7.div_trunc(zero()) == 0 }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_integer_division_by_zero_faults(tier: str):
+    status, message = _run(tier, ZERO_DIVISOR)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not fault on a zero divisor ({status}) — a tier that "
+        f"returns a value here is unsound, not lenient: {message}")
+
+
+def test_typescript_guards_the_divisor():
+    """The guard travels with the module, and every named integer operation
+    routes through it rather than through a bare `/`."""
+    emitted = _emit("typescript", INTEGER_ARITHMETIC)
+    assert "function revlNonZero" in emitted
+    for helper in ("revlDivTrunc", "revlDivFloor", "revlDivEuclid", "revlMod"):
+        assert f"function {helper}" in emitted, helper
+    assert "revl: division by zero" in emitted

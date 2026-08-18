@@ -94,6 +94,7 @@ REJECTIONS = {
     "v2_extern_unclassified.rvl": "unclassified extern",
     "v2_extern_acquire_no_undo.rvl": "acquire extern `listen` must declare `undo` (G4)",
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
+    "arith_zero_divisor.rvl": "`mod` by a literal zero is undefined",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
     "t1_service_arg_type.rvl": "`db.query` argument `sql` expects `Str`, got `Int`",

@@ -904,19 +904,14 @@ def _ts_builtin(method, target: str, args: list) -> str:
         return f"{target}.charAt({args[0]})"
     if method == "charCodeAt":
         return f"{target}.charCodeAt({args[0]})"
-    # Integer division and modulo (docs/arithmetic.md). JS `/` is true
-    # division and `%` takes the dividend's sign, so every one of these is
-    # built rather than inherited.
-    if method == "div_trunc":
-        return f"Math.trunc({target} / {args[0]})"
-    if method == "div_floor":
-        return f"Math.floor({target} / {args[0]})"
-    if method == "div_euclid":
-        return (f"({args[0]} > 0 ? Math.floor({target} / {args[0]}) "
-                f": -Math.floor({target} / -{args[0]}))")
-    if method == "mod":
-        return (f"((({target} % {args[0]}) + Math.abs({args[0]})) "
-                f"% Math.abs({args[0]}))")
+    # Integer division and modulo (docs/arithmetic.md). JS `/` is true division
+    # and `%` takes the dividend's sign, so every one of these is built rather
+    # than inherited — through helpers, so the divisor is evaluated once and a
+    # zero divisor throws instead of yielding Infinity/NaN. Returning Infinity
+    # where the checker declared `Int` is the same class of unsoundness the
+    # `===`-for-equality bug was.
+    if method in _TS_INT_ARITH:
+        return f"{_TS_INT_ARITH[method]}({target}, {args[0]})"
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
@@ -1089,6 +1084,43 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             )
     else:
         raise EmitError(f"unsupported fn statement step {step!r}")
+
+
+_TS_INT_ARITH = {
+    "div_trunc": "revlDivTrunc",
+    "div_floor": "revlDivFloor",
+    "div_euclid": "revlDivEuclid",
+    "mod": "revlMod",
+}
+
+_REVL_INT_ARITH_HELPER = """function revlNonZero(b: number): number {
+  if (b === 0) throw new Error('revl: division by zero')
+  return b
+}
+function revlDivTrunc(a: number, b: number): number {
+  return Math.trunc(a / revlNonZero(b))
+}
+function revlDivFloor(a: number, b: number): number {
+  return Math.floor(a / revlNonZero(b))
+}
+function revlDivEuclid(a: number, b: number): number {
+  return revlNonZero(b) > 0 ? Math.floor(a / b) : -Math.floor(a / -b)
+}
+function revlMod(a: number, b: number): number {
+  const m = Math.abs(revlNonZero(b))
+  return ((a % m) + m) % m
+}"""
+
+
+def _uses_int_arith(node) -> bool:
+    """Does anything in this IR call a named integer division or modulo?"""
+    if isinstance(node, dict):
+        if node.get("method") in _TS_INT_ARITH:
+            return True
+        return any(_uses_int_arith(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_int_arith(v) for v in node)
+    return False
 
 
 _TS_EQUALITY_OPS = ("==", "===", "!=", "!==")
@@ -1342,6 +1374,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
 
     if _uses_equality(ir):
         out.append(_REVL_EQ_HELPER)
+        out.append("")
+    if _uses_int_arith(ir):
+        out.append(_REVL_INT_ARITH_HELPER)
         out.append("")
 
     if types:
