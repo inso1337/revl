@@ -55,6 +55,7 @@ fn keywords() -> List[Str] {
     "effect", "undo", "emit", "emission", "provide", "fn", "return",
     "true", "false", "null",
     "isolate", "intercept", "realm", "in", "with",
+    "spawn",
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
     "hole",

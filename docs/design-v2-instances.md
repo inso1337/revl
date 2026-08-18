@@ -1,6 +1,12 @@
 # Instance-parametric components (design)
 
-Status: **draft — open questions unresolved.** Nothing here is implemented.
+Status: **phase 1 implemented on the cordis-py reference tier.** The frontend
+(parser, lower, typecheck), the cordis-py runtime and emitter, and an executed
+test are in the tree; the frozen IR, grammar and resolved G-rules are recorded
+in "Phase 1 — frozen" at the end of this document. The six open questions below
+are the design record that phase 1 resolves; the resolutions (not the original
+recommendations) are what shipped. Phases 2–5 (the other four tiers) and the
+held IR-cleanup wave build on the frozen forms below.
 
 ## The problem
 
@@ -216,3 +222,243 @@ free on Java. The expensive form is global realms — the one already shipped.**
 ## Inputs still outstanding
 
 None blocking. The remaining gate is a decision on question 2 (addressing).
+
+---
+
+# Phase 1 — frozen
+
+This section is normative for phases 2–5 (the other four tiers) and the held
+IR-cleanup wave. It records what shipped on cordis-py.
+
+## The grammar — exactly one new form
+
+`spawn` is an expression, legal **only** as the acquisition of an effect
+binding. No other production changed. `spawn` and (existing) `with` are the
+only keywords involved; a spawn's `undo` is required, exactly as for any
+acquisition.
+
+```text
+spawnexpr := 'spawn' IDENT [ 'with' '{' (IDENT ':' expr (',' IDENT ':' expr)*)? '}' ]
+leteffect := 'let' IDENT '=' 'effect' spawnexpr 'undo' expr
+```
+
+So the surface form is:
+
+```text
+let s = effect spawn Worker with { tag: "a" } undo s.dispose()
+```
+
+The handle `s` is a host-frontier value (type `Instance[Worker]`, advisory)
+whose one operation is `.dispose()` — the acquisition's inverse. A spawn must
+be bound (there must be a handle to name in `undo`); a bare `effect spawn …` is
+rejected. A spawn is legal in a component activation body **or** in a
+provide-method body (the request-scoped case, item zero).
+
+A complete, compiling example (this exact program is executed by
+`tests/test_instances_exec.py`):
+
+```revl
+service Counter { fn value() -> Int }
+
+service Super { async fn retire_a() -> Int }
+
+component Worker provides counter: Counter {
+  config { tag: Str }
+  let m = effect Map.new() undo m.drop()
+  provide counter { fn value() = 0 }
+}
+
+component Supervisor provides super: Super {
+  let w1 = effect spawn Worker with { tag: "a" } undo w1.dispose()
+  let w2 = effect spawn Worker with { tag: "b" } undo w2.dispose()
+  provide super {
+    async fn retire_a() {
+      await w1.dispose()
+      return 1
+    }
+  }
+}
+```
+
+## The frozen IR — the checkpoint deliverable
+
+Instantiation is an acquisition, so **there is no new IR step kind.** A spawn is
+a `let-effect` step whose `acquire` is a `spawn` expression node. The handle is
+the step's `bind`; the teardown is the step's `undo`. Instance identity and the
+per-instance local realm are carried entirely by `realms` on the spawn node.
+
+The `spawn` acquire node:
+
+```json
+{
+  "kind": "spawn",
+  "component": "Worker",
+  "config": { "tag": { "kind": "lit", "value": "a" } },
+  "realms": ["counter"],
+  "line": 14
+}
+```
+
+- `component` — the target component's name (a template; see below).
+- `config` — field name → lowered pure-expression node, resolved in the
+  spawner's scope against the target's declared `config { }` fields (unknown
+  fields and missing required fields are rejected at lower time).
+- `realms` — the sorted list of keys the target **provides**. At runtime each is
+  isolated into a *fresh local realm* (unlabelled `isolate`, a distinct
+  identity per spawn), so two instances of one component never collide on a
+  provision — disjoint by construction, no config value known at link time.
+- `line` — source line, for diagnostics.
+
+The enclosing step is an unchanged `let-effect`:
+
+```json
+{
+  "step": "let-effect",
+  "bind": "w1",
+  "acquire": { "kind": "spawn", "component": "Worker", "config": { ... }, "realms": ["counter"], "line": 14 },
+  "undo": { "kind": "call", "target": { "kind": "name", "id": "w1" }, "method": "dispose", "args": [] }
+}
+```
+
+**A spawn present anywhere bumps the document to `ir_version` 3**, so a consumer
+predating the feature refuses the whole document rather than mis-composing a
+template as a static entry.
+
+**Manifest.** A spawn target is a *template*: a runtime instance, never a static
+composition member. Templates are excluded from `manifest.components` (the
+G2/G3 table) and from `manifest.loadOrder`, and are listed in a new
+`manifest.templates` (present only when non-empty, so non-spawning programs are
+byte-identical). Templates are still emitted in `ir.components` as plugin dicts
+(a template must exist to be spawned). Every other tier reads `realms` off the
+spawn node and `templates` off the manifest; nothing else is required.
+
+## The runtime model (cordis-py reference)
+
+`runtime.spawn(ctx, component, config, realms)`:
+
+1. `scoped = ctx`; for each key in `realms`, `scoped = scoped.isolate(key)` with
+   **no label** — a fresh local realm per spawn.
+2. `fiber = scoped.plugin(component, config)` — the instance is a *child fiber
+   of its spawner*, nested under the spawner's context. This is verified: the
+   child's parent chain is `scoped → spawner-ctx → root`.
+3. return a `SpawnHandle(fiber)`.
+
+`SpawnHandle.dispose()` unloads the child fiber (running the instance's LIFO
+teardown) and is **idempotent**. Because the instance is its own child fiber, it
+is its own nested teardown scope (item zero): `s.dispose()` reclaims it *now*,
+independent of the spawner. The spawner's own inverse (`yield lambda:
+s.dispose()`, or the frame-adopted safety net for a method-body spawn) is a
+harmless no-op once the instance is already gone — so an un-disposed instance
+still cannot outlive its spawner, but a request-scoped instance is reclaimed the
+moment the request ends.
+
+**On "the core runtime change" (item zero).** The nested teardown scope is the
+child fiber. cordis-py already has the primitive (a fiber unloads independently
+of its parent); the change is that spawn *uses* it — it plugs a child fiber and
+returns a disposable handle, rather than running the instance's effects inline
+and adopting them flatly into the spawner's `Frame` (which is what would leak).
+No new `Frame` subclass was needed; the sub-scope is a sub-fiber.
+
+## The resolved G-rules (file:line)
+
+Every change is inert for non-spawning programs (no template ⇒ no exclusion, no
+version bump, no new check), and goldens stay byte-identical.
+
+- **Grammar / parser.** `spawn` keyword (`src/revl/lexer.py`, synced to
+  `selfhost/lexer.rvl`); `SpawnExpr` node and `spawn` in the acquisition
+  position (`src/revl/parser.py`, `effect_form` / `spawn_expr`).
+- **Lower — spawn node.** `_lower_spawn` (`src/revl/lower.py`), dispatched from
+  `_lower_expr`; unbound-spawn rejection in `_lower_component`; method-body
+  spawn (item zero) in `_lower_provide`'s method loop (`let-effect` step).
+- **Typecheck.** `infer_ir` yields `Instance[C]` for a spawn node
+  (`src/revl/typecheck.py`); `.dispose()` on the handle rides the existing
+  host-frontier method-call path (`_lower_postfix`), the same one `p.close()`
+  uses.
+- **G2 (disjointness), decision 5.** Structural, not table-based: a template
+  provides only into its own fresh local realm and is *excluded* from the
+  link-time `provider_of` table (`_link`, the `templates` skip in
+  `src/revl/lower.py`). An instance can never provide into its parent's realm —
+  there is no surface form for it, and the runtime always isolates each provided
+  key.
+- **G3 (acyclicity), decision 6.** Quantified over the *instance* graph. The
+  instance graph is a **tree by construction** — every spawn mints a fresh child
+  — so spawn edges never form an instance cycle, and a `Session` spawning a
+  `Session` is allowed. It is a self-edge on the type graph, but a template is
+  not a static entry, so the categorical self-provision rejection in `_link`
+  never sees it. Real dependency cycles among *statically composed* components
+  are caught exactly as before.
+- **G4/G6 across the spawn boundary, decision 8.**
+  `_check_spawn_emission_bounds` (`src/revl/lower.py`), run after all components
+  are lowered. A spawn inside a provide-method declared `plain` (or
+  `emission[caps]`) is rejected when the target's emission surface is non-empty
+  (or not ⊆ caps). The surface is a sound, conservative over-approximation: the
+  union of the target's provided-service emission capabilities, its own `emit`
+  steps, and — by fixpoint over the spawn graph — its own children's surfaces.
+  A body-level spawn has no emission clause to widen, exactly as body-level
+  `emit` has none, so it is unconstrained here.
+- **G7 (LIFO teardown).** Unchanged in rule; already dynamic at the effect
+  level. Per-instance LIFO is the child fiber's own unload; verified by the
+  executed test.
+- **G8 (enumerable boundary), decision 7.** The instance dimension is reported
+  as dynamic: `revl audit` prints an "instance-parametric components (×
+  dynamic)" section from `manifest.templates` (`src/revl/__main__.py`). The
+  emission/capability *sets* are syntactic and instance-independent, so they are
+  reported per template as before.
+- **Hierarchical realm resolution, decision 9 — see the honest note below.**
+
+## Where the design doc was wrong, and what phase 1 does instead
+
+- **Item zero over-stated the runtime change.** It called a nested `Frame` "the
+  core runtime change." No `Frame` change was needed on cordis-py: the nested
+  teardown scope is a child fiber, a primitive the runtime already has. The
+  change is that spawn plugs a child fiber instead of adopting inline. Phase 2
+  tiers must each provide an equivalent *nested* scope (a sub-fiber / fork), not
+  a flat adoption — that is the real portable obligation.
+
+- **Decision 9 (hierarchical realm resolution in the checker) is a
+  prerequisite that phase 1 did not need to exercise, and here is why.** The
+  audit's H6 mismatch (checker flat, runtime hierarchical) bites only when a
+  *static entry* is plugged onto a non-root context. Phase 1 never does that:
+  spawn targets are **templates excluded from the static manifest**, not static
+  entries composed under a spawner. The instance's realm resolution is
+  hierarchical *at runtime* (cordis `_effective_isolate` walks the parent
+  chain), and the checker deliberately does not reason about instances
+  statically (decision 1 — instances are not globally addressable, hence not in
+  the static table). So the flat `_realm` in `_link` stays correct for phase 1,
+  and the goldens stay byte-identical. The hierarchical-checker work becomes
+  real in phase 2 only if a future model lets a component be *both* statically
+  composed *and* spawnable (see below); phase 1 forbids that, which is what
+  dissolves the H6 gap rather than papering over it.
+
+- **A component cannot be both statically composed and a spawn template
+  (phase-1 restriction).** Being named by any `spawn C` makes C a template,
+  fully excluded from static composition. This is the clean model — it is what
+  makes the recursive-self-spawn / self-provision paradox disappear — but it is
+  a restriction, and lifting it (a component with one static instance *and*
+  runtime instances) is the natural phase-2 question. It needs exactly the
+  hierarchical `_realm` decision 9 asks for, plus a provide-realm/require-realm
+  split on the entry.
+
+- **G4 surface is conservative.** The spawn-boundary bound uses the target's
+  *declared* provided-service emission capabilities as an upper bound, which can
+  over-constrain a spawner (it must cover capabilities the child could emit
+  through even if a given run never triggers them). This is sound (never misses
+  an escaping emission) and matches the existing "a service declaration is an
+  upper bound on its providers" principle; a precise per-call analysis is a
+  later refinement, not a soundness fix.
+
+- **Self-spawn compiles but can diverge at runtime.** `G3` over the instance
+  graph is about acyclicity, not termination: a `Session` that unconditionally
+  spawns a `Session` is statically well-formed and will recurse without bound at
+  runtime unless its own config gates it. That is the same status as unbounded
+  recursion in any language — a runtime property, not a static one.
+
+## Not in phase 1
+
+Hot-swap of a component with live instances (question 6) is still undefined —
+`compiler.py` replacement is by declaration name, and "replace `Session`" with N
+live instances has no chosen semantics. Phase 1 neither uses nor breaks it: a
+template is not in the manifest a hot-swap admits against. The other four tiers
+(TS, rust, java, wasm) are phase 2+; cordis-wasm additionally needs the ~10-line
+per-fiber realm-prefix runtime change recorded in
+`docs/notes/runtime-parity-local-realms.md`.

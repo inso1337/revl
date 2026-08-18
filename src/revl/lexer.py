@@ -12,6 +12,8 @@ KEYWORDS = {
     "true", "false", "null",
     # v2: realms & interception
     "isolate", "intercept", "realm", "in", "with",
+    # instance-parametric components (docs/design-v2-instances.md)
+    "spawn",
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",

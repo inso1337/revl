@@ -589,6 +589,19 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  boundary: {'; '.join(detail)}")
             else:
                 print("  boundary: none — fully revertible (G8)")
+        templates = manifest.get("templates") or []
+        if templates:
+            # G8: the instance dimension is dynamic (docs/design-v2-instances.md,
+            # decision 7). These are spawn targets — runtime instances, not
+            # static composition members — so their multiplicity is `× dynamic`.
+            print("\ninstance-parametric components (× dynamic — spawned at runtime, "
+                  "each in its own local realm):")
+            for name in templates:
+                stats = boundary.get(name) or {}
+                emissions = stats.get("emissions") or []
+                surface = (f"emissions: {', '.join(emissions)}"
+                           if emissions else "no emissions")
+                print(f"  {name} × dynamic  ({surface})")
         if declared_externs:
             print("\nexterns (verbatim host code — unchecked inside, typed at the boundary):")
             for ext in declared_externs:

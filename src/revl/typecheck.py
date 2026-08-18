@@ -1112,6 +1112,13 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         return tenv.get(node.get("name"))
     if kind == "config":
         return tenv.get(f"config.{node.get('field')}")
+    if kind == "spawn":
+        # a spawn expression yields an instance handle; the type names the
+        # component instantiated (docs/design-v2-instances.md). It is a
+        # host-frontier value — its one operation, `.dispose()`, is the
+        # acquisition's inverse — so the type is advisory, like any acquired
+        # value's, and is never structurally compared.
+        return f"Instance[{node.get('component')}]"
     if kind == "call":
         target = node.get("target")
         if isinstance(target, dict) and target.get("kind") == "req":
