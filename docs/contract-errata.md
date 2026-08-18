@@ -198,6 +198,40 @@ This goes in the compiler spec, not the runtimes.
   by default, rust and java behind `REVL_CROSS_TIER_SLOW=1`, with cheap static
   guards for all three lowerings.
 
+## Arithmetic divergences (open, pinned — one root cause)
+
+Found by executing the same source on every tier
+(`tests/test_cross_tier_execution.py`), which is also where each is pinned so
+it cannot drift silently. **These are not fixed.**
+
+- **`Int / Int` is not `Int` on python or TypeScript.** `typecheck.py` types
+  it `Int` (`_binop_type`, the `lt == "Int" and rt == "Int"` branch), and
+  `7 / 2` evaluates to `3.5` on both — a **soundness break**, not a
+  preference: the checker's declared type and the runtime value disagree.
+  rust is the only tier honouring it. java is untested locally (no JDK) and
+  uses `/` on `long`, so it should be integral like rust.
+- **`%` disagrees on negatives.** python floors (`-7 % 3 == 2`); rust, java
+  and JS truncate (`== -1`). Truncation is the majority *and* the pairing
+  that keeps `(a / b) * b + a % b == a`, so python is the outlier to move —
+  but moving it changes existing programs, so it is a decision, not a patch.
+- **`Int` loses precision past 2^53 on TypeScript.** JS numbers are f64, so
+  `9007199254740993 - 9007199254740992` is `0`. python is arbitrary-precision
+  and rust is `i64`. Unlike the other two this needs `BigInt`, not a type
+  annotation.
+
+**One root cause for the first two.** An IR `bin` node carries `op`, `left`
+and `right` and *no type*, so no backend can distinguish `Int / Int` from
+`Float / Float`. A runtime dispatch would work on python (where `int` and
+`float` are distinct at runtime) and cannot work on TypeScript, where both are
+`number` — `7.0 / 2.0` would be truncated wrongly. Closing this means
+annotating the node with its operand type, which changes the IR contract and
+therefore belongs to a deliberate `ir_version` decision rather than a backend
+patch.
+
+Not everything diverges: `<` on `Str` is lexicographic by code point on every
+tier, including across the case boundary, and is asserted alongside the pins
+so this section is not read as "arithmetic is broken generally".
+
 ## Typing gaps (fenced, not closed)
 
 The checker is sound where types are known and silent where they are not (the
