@@ -55,6 +55,27 @@ class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
 
 
+def _is_fn_type(name: object) -> bool:
+    """Is this surface type a function type, `(P, ...) -> R`?
+
+    A function type is the one surface spelling that is not `Head[Args]`
+    (docs/function-types.md), so it can be recognised without a full parse.
+    """
+    if not isinstance(name, str) or not name.strip().startswith("("):
+        return False
+    name = name.strip()
+    depth = 0
+    for i, ch in enumerate(name):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                return name[i + 1:].lstrip().startswith("->")
+    return False
+
+
+
 def _ident(name: Any, what: str) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"{what} {name!r} is not a usable identifier")
@@ -912,11 +933,26 @@ class _V3Emitter:
     def _check_type(self, ty: str | None, where: str) -> None:
         if ty in (None, "Unit", "Int", "Bool", "Str", "Bytes"):
             return
+        if _is_fn_type(ty):
+            raise EmitError(
+                f"{where}: a declared function type ({ty}) is not lowerable on "
+                "this tier — the emitted module is wasm MVP with no closures "
+                "and no function references, so a function value has no "
+                "representation. Arrows called where they are bound still "
+                "lower: they are inlined at the call site "
+                "(`_inline_arrow`). See docs/function-types.md."
+            )
         if _is_list_type(ty):
             self._check_type(_list_elem(ty), f"{where}: list element")
             return
         spec = self.all_types.get(ty)
         if spec is not None and spec.get("kind") == "record":
+            # only function-typed fields are inspected here: the rest of the
+            # record surface is checked where the field is actually read, and
+            # widening this into a full field sweep is a separate change
+            for fname, ftype in (spec.get("fields") or {}).items():
+                if _is_fn_type(ftype):
+                    self._check_type(ftype, f"{where}: field {fname!r} of {ty!r}")
             return
         # tagged unions (user variants, Opt, Result) lower to a 2-word
         # [i32 tag][i32 payload] cell — the payload is always one i32 (an Int/

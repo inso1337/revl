@@ -101,6 +101,46 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+def _is_fn_type(name: object) -> bool:
+    """Is this surface type a function type, `(P, ...) -> R`?
+
+    A function type is the one surface spelling that is not `Head[Args]`
+    (docs/function-types.md), so it can be recognised without a full parse:
+    a leading parenthesised group whose closing paren is followed by `->`.
+    """
+    if not isinstance(name, str) or not name.strip().startswith("("):
+        return False
+    name = name.strip()
+    depth = 0
+    for i, ch in enumerate(name):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                return name[i + 1:].lstrip().startswith("->")
+    return False
+
+
+_FN_TYPE_REFUSAL = (
+    "a declared function type ({name}) is not lowerable on the Java tier. A "
+    "Java lambda needs a *nominal* target type, and the JDK's functional "
+    "interfaces are neither generic over arity nor usable with primitives "
+    "without boxing: `(Int) -> Int` is `IntUnaryOperator`, `(Int, Str) -> "
+    "Bool` has no JDK interface at all, and arity 3+ needs a generated one per "
+    "shape. Generating those interfaces is a coherent design; guessing one is "
+    "not. Arrows bound to a local `let` and called in the same body still "
+    "lower — they are beta-reduced at the call site (see \"arrows\" below) — "
+    "so this refusal is only for a function type *written in a declaration*. "
+    "See docs/function-types.md."
+)
+
+
+def _reject_fn_type(name: object) -> None:
+    if _is_fn_type(name):
+        raise EmitError(_FN_TYPE_REFUSAL.format(name=name))
+
+
 # Java generics cannot hold primitives: `Optional<long>` is not a type. Every
 # type argument must be the boxed form, while the same revl type in a plain
 # parameter or return position stays primitive.
@@ -121,6 +161,7 @@ def _java_type_arg(name: object) -> str:
 def _java_type(name: object) -> str:
     if not isinstance(name, str) or not name:
         return "Object"
+    _reject_fn_type(name)
     if name in TYPE_MAP:
         return TYPE_MAP[name]
     generic = re.match(r"^(\w+)\[(.+)\]$", name)
@@ -144,9 +185,9 @@ def _java_type(name: object) -> str:
 def _split_generic(inner: str) -> list[str]:
     parts, depth, start = [], 0, 0
     for i, ch in enumerate(inner):
-        if ch == "[":
+        if ch in "[(":
             depth += 1
-        elif ch == "]":
+        elif ch in "])":
             depth -= 1
         elif ch == "," and depth == 0:
             parts.append(inner[start:i].strip())
@@ -283,9 +324,9 @@ def _split_v3_types(inner: str) -> list[str]:
     depth = 0
     current: list[str] = []
     for ch in inner:
-        if ch == "[":
+        if ch in "[(":
             depth += 1
-        elif ch == "]":
+        elif ch in "])":
             depth -= 1
         if ch == "," and depth == 0:
             parts.append("".join(current).strip())
@@ -304,6 +345,7 @@ def _java_v3_type(name: object, *, boxed: bool = False) -> str:
     if not isinstance(name, str) or not name.strip():
         return "Object"
     name = name.strip()
+    _reject_fn_type(name)
     if name in TYPE_MAP:
         java_type = TYPE_MAP[name]
         if not boxed:
