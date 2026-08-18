@@ -128,8 +128,14 @@ are baselined in `tests/test_conformance_validate.py` — new breakage fails,
 and a baselined case that starts passing also fails, so the list can only
 shrink.
 
-The rust tier's one *known* failure is fixed here too, and it is the same
-shape as the others: revl's `+` on strings lowered to Rust's `+`, which
+Once crates.io was reachable, all 47 rust cases went through `cargo check`
+together for the first time: **44 pass, 3 do not** — and two of the three
+(`await`, method-time effect) are failing on java as well, so the cause is
+likely shared and upstream of either renderer rather than two coincidences.
+They are baselined alongside java's.
+
+The rust failure CI *did* catch is fixed here, and it is the same shape as
+the others: revl's `+` on strings lowered to Rust's `+`, which
 accepts `String + &str` and rejects both `&str + String` and `String +
 String`. It now lowers to `format!`, which accepts every combination. Only
 `cargo check` in CI could see it — see "what is still not checked" below.
@@ -140,11 +146,11 @@ The residue is honest rather than zero:
   emits untyped Python, so there is nothing deeper to check.
 - wasm validates modules; it does not drive the component protocol. The wasm
   suite executes emitted components separately.
-- rust cannot be validated on a machine without crates.io: `cordis-rs`
-  resolves from the index, and neither a mirror nor a git dependency helps
-  (its own `serde`/`indexmap`/`libloading` come from the registry too). The
-  validator skips with that reason and CI is the only place it runs — which
-  is why a rust-only bug can still reach `main`.
+- rust needs crates.io reachable — specifically `index.crates.io` and
+  `static.crates.io`, which are *different hosts* from `crates.io` itself. A
+  network that serves the website and the `cargo search` API can still fail
+  every resolve, which is exactly how this tier went unvalidated. The
+  validator skips with that reason rather than reporting clean.
 - Validation proves the output *compiles*, still not that it *behaves*.
   Cross-tier `test` execution (`revl test --backend`) is the next rung.
 
