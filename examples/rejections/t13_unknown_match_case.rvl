@@ -1,0 +1,18 @@
+// REJECTED — a match arm naming something that is not a case of the
+// scrutinee's ADT. Patterns are case names or `_`; a bare name is not a
+// binding pattern (syntax-2.0 §3.3), so `Pending` here is simply a typo that
+// python and TypeScript would never take while javac refuses the emitted
+// `case` label ("cannot find symbol") and the rust emitter raises EmitError.
+//
+// expected error:
+//   `Pending` is not a case of `Status` (cases: `Active`, `Retired`)
+
+type Status = Active | Retired
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    Retired => 2,
+    Pending => 3,
+  }
+}
