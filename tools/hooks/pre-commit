@@ -53,11 +53,19 @@ fi
 
 # The TypeScript backend suite runs tsc over emitted code and shells out to the
 # emitters. CI was red for hours on a failure only this suite sees.
-if [ -d backends/typescript/node_modules ] || [ -d "$main_root/backends/typescript/node_modules" ]; then
+# vitest must resolve node_modules from the directory it runs in, so unlike
+# pytest this cannot fall back to the main checkout: running main's suite
+# would test main's sources, not the ones being committed. A worktree without
+# node_modules therefore skips — with the fix, because the previous version
+# of this check failed instead and blocked every worktree commit outright.
+if [ -d backends/typescript/node_modules ]; then
     step "typescript backend (vitest)" sh -c \
         'cd backends/typescript && npx vitest run --silent'
 else
-    echo "  typescript backend                 SKIPPED (npm install not run)"
+    echo "  typescript backend                 SKIPPED (no node_modules here)"
+    if [ -d "$main_root/backends/typescript/node_modules" ] && [ "$main_root" != "$root" ]; then
+        echo "      to check it: ln -s $main_root/backends/typescript/node_modules backends/typescript/node_modules"
+    fi
 fi
 
 # Emitters are pure Python and the matrix needs no toolchain, so this always
