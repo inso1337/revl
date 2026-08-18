@@ -1,4 +1,27 @@
-# revl
+<div align="center">
+
+<img src="assets/banner.svg" alt="revl — the agent-first programming language" width="820">
+
+<p>
+  <a href="https://github.com/inso1337/revl/actions/workflows/ci.yml"><img src="https://github.com/inso1337/revl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/runtimes-5-2dd4bf" alt="5 runtimes">
+  <img src="https://img.shields.io/badge/emitted%20code-validated%20by%20real%20compilers-2dd4bf" alt="validated by real compilers">
+  <img src="https://img.shields.io/badge/agent--native-MCP-a78bfa" alt="MCP native">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
+</p>
+
+<p>
+  <b><a href="#quickstart">Quickstart</a></b> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="DESIGN.md">Design</a> ·
+  <a href="docs/vision.md">Vision</a> ·
+  <a href="docs/guide-ai-agents.md">For agents</a>
+</p>
+
+</div>
+
+---
 
 A research language for **spatiotemporal composability**: components that can
 be loaded, unloaded, and hot-swapped in a running system, where "unloading
@@ -36,6 +59,22 @@ component UserCache requires db: Database provides cache: Cache {
   }
 }
 ```
+
+## Architecture
+
+<div align="center">
+
+<img src="assets/architecture.svg" alt="one checked front-end, five hardened runtimes" width="880">
+
+</div>
+
+One front-end parses, checks and links `.rvl` source into a single IR, enforcing
+guarantees **G1–G8** before any code is emitted. Five emitters lower that one IR
+to five runtimes — and the same compiler runs behind an MCP server, so an AI
+agent proposing a component talks to the *admission gate*, not the filesystem.
+The claim that all five tiers agree is not asserted; it is
+[measured](docs/conformance.md), by handing each emitter's output to that tier's
+real compiler.
 
 - Undeclared access won't compile. Mutations without an inverse (or an
   explicit `emit` admission of irreversibility) won't compile. Dependency
@@ -124,6 +163,26 @@ code transitively. The expression layer is **type-safe and null-safe**
 (see above); the remaining typing frontier and everything else in flight
 is tracked in the [2.0 roadmap](docs/v2.0-roadmap.md).
 
+## The toolchain is the developer surface
+
+revl treats its author — increasingly an AI agent — as a first-class user, so
+the compiler exposes far more than *compile / don't compile*. Each of these is
+reachable from the CLI and, where it makes sense, as an MCP tool.
+
+| capability | what it answers | docs |
+|---|---|---|
+| **`revl plan`** | *before* a hot-swap: which provisions appear/withdraw, which running components get diverted, teardown order, how the emission surface changes | [plan.md](docs/plan.md) |
+| **`revl query`** | who emits to `X`? what breaks if I withdraw `C`? what does a component reach? — each result says whether it is exact or a conservative over-approximation | [queries.md](docs/queries.md) |
+| **Typed holes** | `hole[T]` type-checks so the rest of a draft still checks, is reported as an obligation, and can never be admitted or emitted | [holes.md](docs/holes.md) |
+| **Backwards replay** | step an activation back over its own accumulator; R4 no-residue survives the round-trip. Only the revertible-effect model makes this cheap | [replay.md](docs/replay.md) |
+| **Capability-scoped emissions** | `emission[db]` bounds *which* boundary a provider may cross, not just whether it emits — a tighter contract for agent-authored code | [capabilities.md](docs/capabilities.md) |
+| **Why-traces** | a G2/G3/G4 rejection ships the derivation, not just the verdict (`put → writeThrough → audit.log`); `revl explain <code>` prints the fix | [why-traces.md](docs/why-traces.md) |
+| **Fault tests** | `fault test { fail at step 2; assert no residue }` — the paradigm's L-Raise guarantee as a declarable assertion | [fault-tests.md](docs/fault-tests.md) |
+| **Lifecycle tests** | `lifecycle test` — assert no-residue over a *live* composition from inside the language | [syntax-2.0.md](docs/syntax-2.0.md) §7.1 |
+| **Function types** | `(Int, Str) -> Bool` — arrows leave the unchecked frontier where a type is known | [function-types.md](docs/function-types.md) |
+| **Importers** | `revl import openapi` / `revl import wit` — an external contract becomes a typed service | [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) |
+| **MCP server** | `revl mcp serve` — the whole compiler as an agent admission gate; `revl mcp schema` derives tool safety hints from the *body* | [mcp-bridge.md](docs/mcp-bridge.md) |
+
 ### Turing-complete, demonstrated by execution
 
 2.0's pure stratum is Turing-complete (`var` + `while` + recursion), and the
@@ -149,7 +208,7 @@ command behind it is the failure mode this project keeps hitting:
 
 | suite | command | collected |
 |---|---|---|
-| frontend (typing, strata, stdlib, MCP-session, self-evolution, cross-tier, emitted-code validation) | `pytest tests/ -q` | 292 |
+| frontend (typing, strata, stdlib, MCP-session, self-evolution, cross-tier, emitted-code validation, plan/queries/holes/replay/capabilities/why-traces/fault-tests/lifecycle) | `pytest tests/ -q` | 968 |
 | wasm tier | `pytest tests/test_wasm_backend.py backends/wasm/test_v3_emit.py -q` | 42 |
 | java tier | `pytest backends/java/test_emit_java.py -q` | 29 |
 | rust tier | `pytest backends/rust/test_emit_rust.py -q` | 26 |
@@ -238,6 +297,46 @@ done since the rule landed.** Treat the re-score as a regression measurement
 of the corpus, not as a current model capability figure.
 <!-- BENCH-RESULTS:END -->
 
+## Documentation
+
+Start with **[DESIGN.md](DESIGN.md)** for the guarantees and the checked table,
+or **[docs/vision.md](docs/vision.md)** for what this is *for*.
+
+**Language**
+- [syntax-2.0.md](docs/syntax-2.0.md) — the full 2.0 language reference
+- [stdlib-2.0.md](docs/stdlib-2.0.md) — the specified stdlib surface
+- [function-types.md](docs/function-types.md) · [holes.md](docs/holes.md) · [capabilities.md](docs/capabilities.md) — newer type-system surface
+- [design-v2-realms.md](docs/design-v2-realms.md) · [design-v2-instances.md](docs/design-v2-instances.md) — realms, interception, instances
+
+**Testing & guarantees**
+- [conformance.md](docs/conformance.md) — every construct against every tier, and how emitted code is validated
+- [fault-tests.md](docs/fault-tests.md) — L-Raise / no-residue as a language form
+- [replay.md](docs/replay.md) — backwards replay over the accumulator
+- [contract-errata.md](docs/contract-errata.md) — known runtime divergences, per tier
+
+**Working in a live system**
+- [plan.md](docs/plan.md) — a dry run for admission
+- [queries.md](docs/queries.md) — ask the composition questions
+- [why-traces.md](docs/why-traces.md) — derivations behind a rejection
+
+**Agents & interop**
+- [guide-ai-agents.md](docs/guide-ai-agents.md) — the agent-facing guide
+- [mcp-bridge.md](docs/mcp-bridge.md) — the compiler as an MCP server
+- [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) — importers
+- [interop-bridge.md](docs/interop-bridge.md) — cross-tier interop
+
+**Internals**
+- [backend-ir-v1.md](docs/backend-ir-v1.md) · [backend-ir-v3.md](docs/backend-ir-v3.md) — the IR contract
+- [v2.0-roadmap.md](docs/v2.0-roadmap.md) — what's done and what's in flight
+
+## Quickstart
+
 ```bash
 uv venv && uv pip install -e ".[test]" && .venv/bin/pytest tests/
+```
+
+```bash
+python -m revl compile examples/user_cache.rvl   # source → checked IR → emitted component
+python -m revl audit    examples/user_cache.rvl   # the G8 boundary surface
+python -m revl mcp serve                          # the compiler as an agent admission gate
 ```
