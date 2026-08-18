@@ -211,6 +211,7 @@ enables is the point: a draft component never has to touch the filesystem.
 |---|---|
 | `revl_check` | does this compile? structured diagnostics if not |
 | `revl_admit` | may it enter **this running composition**? |
+| `revl_plan` | and then what? the delta a swap would produce, without applying it ([docs/plan.md](plan.md)) |
 | `revl_load` / `revl_call` | boot it in memory and actually call it |
 | `revl_swap` / `revl_rollback` | replace a generation, or undo that |
 | `revl_unload` | tear down and prove no residue (R4) |

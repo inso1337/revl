@@ -231,6 +231,34 @@ def _run_import(args) -> int:
     return 0
 
 
+def _run_plan(args) -> int:
+    """`revl plan` — what admitting these files would do (docs/plan.md).
+
+    Exit status follows the gate, not the planner: 0 when the candidate is
+    admissible, 1 when it is not. A plan is still printed either way, so a
+    rejection tells you both why and what you were about to do.
+    """
+    from .plan import plan as build_plan, render
+
+    running = None
+    if args.manifest:
+        try:
+            with open(args.manifest, encoding="utf-8") as handle:
+                running = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read {args.manifest}: {error}", file=sys.stderr)
+            return 1
+        if not isinstance(running, dict):
+            print(f"error: {args.manifest}: expected a compiled IR document (an object)",
+                  file=sys.stderr)
+            return 1
+
+    result = build_plan(files=list(args.files), manifest=running,
+                        replacing=tuple(args.replacing))
+    print(json.dumps(result, indent=2) if args.json else render(result))
+    return 0 if result["admissible"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -245,6 +273,17 @@ def main(argv: list[str] | None = None) -> int:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+
+    plan_cmd = sub.add_parser(
+        "plan", help="dry run for admission: the delta a swap would produce, without applying it")
+    plan_cmd.add_argument("files", nargs="+")
+    plan_cmd.add_argument("--manifest", default=None,
+                          help="compiled IR document of the RUNNING composition "
+                               "(as written by `revl compile -o`); omit for a cold start")
+    plan_cmd.add_argument("--replacing", action="append", default=[], metavar="NAME",
+                          help="a running component withdrawn in this admission "
+                               "(renames); repeatable")
+    plan_cmd.add_argument("--json", action="store_true", help="machine-readable output")
 
     fmt = sub.add_parser("fmt", help="format .rvl sources (migration §9)")
     fmt.add_argument(
@@ -336,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "import":
         return _run_import(args)
+
+    if args.command == "plan":
+        return _run_plan(args)
 
     try:
         ir = compile_files(args.files)
