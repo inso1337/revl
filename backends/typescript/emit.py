@@ -433,7 +433,7 @@ def _component_step(step: dict, component: dict, services: dict, scope: _Scope,
         # v1/A1: the await lands (inertia), then the yield closes the
         # iteration so a divert during the await skips every later step
         lines.append(f"{indent}await {_expr(step['expr'], scope)}")
-        lines.append(f"{indent}yield null  // iteration boundary (A1)")
+        lines.append(f"{indent}yield () => {{}}  // iteration boundary (A1)")
     elif kind == "provide":
         name = step.get("name")
         if name not in provides:
@@ -793,7 +793,13 @@ def _v3_expr(node: object, ctx: _TsV3Context) -> str:
         return "[" + ", ".join(_v3_expr(item, ctx) for item in node.get("items") or []) + "]"
 
     if kind == "arrow":
-        params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
+        # Arrow parameters are explicitly `any`, not implicitly: the checker
+        # enumerates arrows in its unchecked remainder (typecheck.py header),
+        # so the compiler has no type to emit here and a guess would be worse
+        # than an admission. `strict` rejects only an *implicit* any, so
+        # writing it is also what makes the emitted file compile.
+        params = ", ".join(f"{_ident(p, 'arrow parameter')}: any"
+                           for p in node.get("params") or [])
         return f"(({params}) => ({_v3_expr(node['body'], ctx)}))"
 
     if kind == "match":
@@ -1075,6 +1081,38 @@ def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> 
     return lines
 
 
+def _context_augmentation(components: list) -> list[str]:
+    """Typed committed-view access: `ctx.<key>` for every key the file touches.
+
+    Provisions *and* requirements. A component reads a required service as
+    `ctx.<key>` exactly as it reads one it provides, and cordis's `Context`
+    has no such member until something declares it — so augmenting with
+    provisions alone typechecks a component that happens to provide what it
+    needs and rejects every real consumer. That is the TypeScript instance of
+    the rust `requires` bug (docs/conformance.md); both were invisible to an
+    emit-only sweep. Repeating a key across emitted files is safe: identical
+    interface members merge.
+    """
+    keys: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            if key in keys and keys[key] != service:
+                raise EmitError(f"provision key {key!r} bound to two services (G2)")
+            keys[key] = service
+    for component in components:
+        for key, service in (component.get("requires") or {}).items():
+            if key in keys and keys[key] != service:
+                raise EmitError(
+                    f"service key {key!r} is required as {service!r} but "
+                    f"provided as {keys[key]!r}")
+            keys[key] = service
+    if not keys:
+        return []
+    return (["declare module 'cordis' {", "  interface Context {"]
+            + [f"    {key}: {service}" for key, service in keys.items()]
+            + ["  }", "}", ""])
+
+
 def _emit_v1(ir: dict, *, runtime_import: str) -> str:
     """Emit a v1/v2 component module (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
@@ -1111,23 +1149,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         out.append("}")
         out.append("")
 
-    # Typed committed-view access: ctx.<key> for every provision in the doc.
-    provided: dict[str, str] = {}
-    for component in components:
-        for key, service in (component.get("provides") or {}).items():
-            if key in provided and provided[key] != service:
-                raise EmitError(
-                    f"provision key {key!r} bound to two services (G2)"
-                )
-            provided[key] = service
-    if provided:
-        out.append("declare module 'cordis' {")
-        out.append("  interface Context {")
-        for key, service in provided.items():
-            out.append(f"    {key}: {service}")
-        out.append("  }")
-        out.append("}")
-        out.append("")
+    out.extend(_context_augmentation(components))
 
     seen = set()
     for component in components:
@@ -1188,23 +1210,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         out.append("}")
         out.append("")
 
-    # Typed committed-view access: ctx.<key> for every provision in the doc.
-    provided: dict[str, str] = {}
-    for component in components:
-        for key, service in (component.get("provides") or {}).items():
-            if key in provided and provided[key] != service:
-                raise EmitError(
-                    f"provision key {key!r} bound to two services (G2)"
-                )
-            provided[key] = service
-    if provided:
-        out.append("declare module 'cordis' {")
-        out.append("  interface Context {")
-        for key, service in provided.items():
-            out.append(f"    {key}: {service}")
-        out.append("  }")
-        out.append("}")
-        out.append("")
+    out.extend(_context_augmentation(components))
 
     seen = set()
     for component in components:

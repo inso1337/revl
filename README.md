@@ -49,11 +49,16 @@ component UserCache requires db: Database provides cache: Cache {
   `destructiveHint` are **derived from the compiler** — including from the
   method body, so a tool cannot describe itself as harmless when it emits.
   See [docs/mcp-bridge.md](docs/mcp-bridge.md).
-- **Conformance is measured, not asserted.** `tools/conformance.py` emits 48
+- **Conformance is measured, not asserted.** `tools/conformance.py` emits 50
   language constructs through all five backends and reports what each does;
   `docs/conformance.md` records the result and separates a *deliberate* tier
   limit (an extern with no body for that backend; `Str` on the i32-only wasm
-  tier) from a real gap. Every real gap is currently closed.
+  tier) from a real gap. Every real gap is currently closed. `--validate`
+  asks the second question — it hands each tier's output to that tier's real
+  compiler (`tsc`, `cargo check`, `javac`, `wasmtime`, and a scope walk for
+  python), because "the emitter did not raise" never implied "the code
+  compiles": that gap hid a rust bug for months and a TypeScript twin of it
+  until the first validated run.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
   cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)
@@ -104,9 +109,9 @@ step-counter, executes the **emitted Python**, and asserts `fib(10) = 55`
 and `collatz(27) = 111`; the same sources lower through the TypeScript
 emitter.
 
-**Suites** (run them; the numbers move): 254 frontend tests including the
-sound-typing, strata-composition, stdlib, MCP-session, self-evolution and
-cross-tier groups; 38 typescript, 21 python, 16 rust and 21 java backend
+**Suites** (run them; the numbers move): 281 frontend tests including the
+sound-typing, strata-composition, stdlib, MCP-session, self-evolution,
+cross-tier and emitted-code-validation groups; 38 typescript, 21 python, 16 rust and 21 java backend
 tests; 28 wasm tests executed on real wasmtime; plus the live hot-swap demo,
 the self-evolution demo and the cordisc cross-check. Some suites skip rather
 than fail when a toolchain is absent — the rust cargo tests need crates.io

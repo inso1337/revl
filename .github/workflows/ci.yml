@@ -54,7 +54,18 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[test]"
-      - run: pytest backends/wasm/test_v3_emit.py -q
+      # the wasmtime-gated tests (WAT validation, emitted-component execution)
+      # used to skip silently here: the runtime was never installed. Pin a
+      # release so the wasm tier's runtime coverage is real, not implied.
+      - name: Install wasmtime (pinned)
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
+          mkdir -p /tmp/wasmtime
+          tar -C /tmp/wasmtime -xJf /tmp/wasmtime.tar.xz
+          echo "/tmp/wasmtime/wasmtime-v47.0.3-x86_64-linux" >> "$GITHUB_PATH"
+      # the tier's runtime tests live partly in tests/test_wasm_backend.py
+      # (the frontend half of the wasm backend) — run both files here.
+      - run: pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q
 
   backend-rust:
     runs-on: ubuntu-latest

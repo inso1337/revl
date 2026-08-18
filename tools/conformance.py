@@ -211,8 +211,13 @@ CASES: list[tuple[str, str, str]] = [
 ]
 
 
-def run(all_cases: bool = False) -> dict:
+
+def run(all_cases: bool = False, validate: bool = False) -> dict:
     report: dict = {"cases": [], "frontend_rejected": [], "gaps": {}}
+    # Emitted artifacts per tier, kept for the validation pass: emitting twice
+    # would be wasteful and could not be trusted to produce the same text.
+    artifacts: dict[str, list[tuple[str, object]]] = {t: [] for t in TIERS}
+
     for group, name, source in CASES:
         label = f"{group}/{name}"
         try:
@@ -225,7 +230,7 @@ def run(all_cases: bool = False) -> dict:
         row = {"case": label, "ir_version": ir.get("ir_version"), "tiers": {}}
         for tier in TIERS:
             try:
-                emitter(tier).emit(ir)
+                artifacts[tier].append((label, emitter(tier).emit(ir)))
                 row["tiers"][tier] = "ok"
             except Exception as exc:  # noqa: BLE001 — any refusal is the datum
                 message = str(exc).splitlines()[0]
@@ -233,26 +238,71 @@ def run(all_cases: bool = False) -> dict:
                 report["gaps"].setdefault(tier, []).append(
                     {"case": label, "message": message})
         report["cases"].append(row)
+
+    if validate:
+        report["validation"] = _validate(artifacts)
     return report
+
+
+def _validate(artifacts: dict[str, list[tuple[str, object]]]) -> dict:
+    """Hand each tier's emitted artifacts to that tier's real toolchain.
+
+    A tier whose toolchain is missing reports `unavailable` with the reason —
+    never `ok`. "Nothing checked it" and "it passed" are different answers and
+    this matrix exists because conflating them hid a bug for months.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from validate import VALIDATORS  # noqa: PLC0415 — resolved next to this file
+
+    out: dict = {}
+    for tier in TIERS:
+        validator = VALIDATORS[tier]
+        entry: dict = {"depth": validator.depth, "results": {}}
+        reason = validator.unavailable()
+        if reason:
+            entry["status"] = "unavailable"
+            entry["reason"] = reason
+        else:
+            try:
+                results = validator.check(artifacts[tier])
+            except Exception as exc:  # noqa: BLE001 — a broken harness is a datum too
+                entry["status"] = "error"
+                entry["reason"] = str(exc).splitlines()[0]
+            else:
+                entry["results"] = {label: {"status": status, "detail": detail}
+                                    for label, (status, detail) in results.items()}
+                failures = [k for k, v in results.items() if v[0] != "ok"]
+                entry["status"] = "fail" if failures else "ok"
+                entry["failures"] = failures
+        out[tier] = entry
+    return out
+
+
+def _matrix(report: dict, cell) -> None:
+    width = max(len(row["case"]) for row in report["cases"]) + 2
+    print(f"{'case'.ljust(width)}" + "".join(t[:6].ljust(8) for t in TIERS))
+    print("-" * (width + 8 * len(TIERS)))
+    for row in report["cases"]:
+        cells = "".join(cell(row, t).ljust(8) for t in TIERS)
+        print(f"{row['case'].ljust(width)}{cells}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--validate", action="store_true",
+                        help="also compile/typecheck the emitted code with each "
+                             "tier's real toolchain (slower; skips tiers whose "
+                             "toolchain is absent, and says which)")
     args = parser.parse_args()
 
-    report = run()
+    report = run(validate=args.validate)
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
 
-    width = max(len(row["case"]) for row in report["cases"]) + 2
-    print(f"{'case'.ljust(width)}" + "".join(t[:6].ljust(8) for t in TIERS))
-    print("-" * (width + 8 * len(TIERS)))
-    for row in report["cases"]:
-        cells = "".join(("ok" if row["tiers"][t] == "ok" else "FAIL").ljust(8)
-                        for t in TIERS)
-        print(f"{row['case'].ljust(width)}{cells}")
+    print("emit — did the backend produce code?\n")
+    _matrix(report, lambda row, t: "ok" if row["tiers"][t] == "ok" else "FAIL")
 
     if report["frontend_rejected"]:
         print("\nrejected by the frontend (language-level, not a backend gap):")
@@ -265,7 +315,44 @@ def main() -> int:
         print(f"  {tier:<11} {len(items)}")
         for item in items:
             print(f"      {item['case']}: {item['message'][:90]}")
-    return 0
+
+    if not args.validate:
+        print("\n(emit only — pass --validate to also compile the emitted code)")
+        return 0
+
+    validation = report["validation"]
+
+    def cell(row, tier):
+        entry = validation[tier]
+        if entry["status"] in ("unavailable", "error"):
+            return "-"
+        result = entry["results"].get(row["case"])
+        if result is None:
+            return "."          # the emitter refused; nothing to validate
+        return "ok" if result["status"] == "ok" else "FAIL"
+
+    print("\n\nvalidate — does that code hold up in the real toolchain?")
+    print("  ok = accepted   FAIL = rejected   . = not emitted   - = no toolchain\n")
+    _matrix(report, cell)
+
+    print("\nper tier:")
+    for tier in TIERS:
+        entry = validation[tier]
+        checked = len(entry["results"])
+        if entry["status"] == "unavailable":
+            print(f"  {tier:<11} unavailable — {entry['reason']}")
+            continue
+        if entry["status"] == "error":
+            print(f"  {tier:<11} HARNESS ERROR — {entry['reason']}")
+            continue
+        failures = entry.get("failures") or []
+        print(f"  {tier:<11} {checked - len(failures)}/{checked} accepted "
+              f"({entry['depth']})")
+        for label in failures:
+            detail = entry["results"][label]["detail"]
+            print(f"      {label}: {detail[:120]}")
+
+    return 1 if any(validation[t]["status"] in ("fail", "error") for t in TIERS) else 0
 
 
 if __name__ == "__main__":
