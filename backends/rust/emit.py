@@ -1730,6 +1730,19 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"{target}.revl_join(&{args[0]})"
     if method == "repeat":
         return f"{target}.revl_repeat({args[0]})"
+    # Integer division and modulo (docs/arithmetic.md). Rust `/` already
+    # truncates and carries div_euclid/rem_euclid in std (stable since 1.38);
+    # div_floor is spelled out rather than using the much newer
+    # `i64::div_floor`, so the emitted crate does not need a recent toolchain.
+    if method == "div_trunc":
+        return f"(({target}) / ({args[0]}))"
+    if method == "div_floor":
+        return (f"{{ let (a, b) = (({target}), ({args[0]})); let q = a / b; "
+                f"if a % b != 0 && ((a < 0) != (b < 0)) {{ q - 1 }} else {{ q }} }}")
+    if method == "div_euclid":
+        return f"(({target}).div_euclid({args[0]}))"
+    if method == "mod":
+        return f"(({target}).rem_euclid({args[0]}).abs())"
     raise EmitError(f"unknown builtin method {method!r}")
 
 

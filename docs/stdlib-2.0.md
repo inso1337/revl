@@ -21,6 +21,10 @@ revl refuses.)
 | `split(sep)` | 1 | Str | pieces between separators; `""` → 1-char strings; trailing empties kept | inline dispatch | `x.split(sep)` |
 | `join(sep)` | 1 | List[Str] | elements joined by sep | `sep.join(x)` | `x.join(sep)` |
 | `repeat(n)` | 1 | Str | n copies concatenated | `x * n` | `x.repeat(n)` |
+| `div_trunc(b)` | 1 | Int | integer division rounding toward zero | built | `Math.trunc(a / b)` |
+| `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
+| `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
+| `mod(b)` | 1 | Int | Euclidean remainder, always in [0, \|b\|) | `a % abs(b)` | built |
 
 - `push`/`concat` are **persistent** (value semantics) — consistent with
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:
@@ -63,3 +67,7 @@ that tier.
 self-hosted checker. Extend the table here first, per the house rule:
 spec, then checker, then all emitters, then tests. (`split`/`join`/
 `repeat` graduated to the table above for the self-hosted lexer.)
+
+
+Integer division and modulo are specified in **docs/arithmetic.md**, including
+why `/` is true division and `%` keeps TypeScript's truncated remainder.

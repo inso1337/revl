@@ -101,6 +101,10 @@ _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
     "charCodeAt": 1, "indexOf": 1, "concat": 1,
     "split": 1, "join": 1, "repeat": 1,
+    # Integer division and modulo. `/` and `%` keep the meaning TypeScript
+    # gives them (§0); these name what they do, so no tier has to guess and
+    # none can quietly pick its host's convention (docs/arithmetic.md).
+    "div_trunc": 1, "div_floor": 1, "div_euclid": 1, "mod": 1,
 }
 
 
@@ -1562,6 +1566,12 @@ def _retarget_holes(node, source: str) -> None:
             _retarget_holes(value, source)
 
 
+# Operators whose meaning depends on whether the operands are Int or Float.
+# Only these carry an `operands` annotation, so the IR does not grow a field
+# on every comparison and boolean for no reason.
+_TYPED_ARITH_OPS = ("/", "%")
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
@@ -1615,9 +1625,24 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                             hint="declare it with `let`/`var` or add it as a parameter (G1)")
         return {"kind": "var", "name": expr.name}
     if isinstance(expr, ExprBin):
-        return {"kind": "bin", "op": expr.op,
+        node = {"kind": "bin", "op": expr.op,
                 "left": _lower_pure_expr(expr.left, scope, callables, alias_fns, filename, type_env, types),
                 "right": _lower_pure_expr(expr.right, scope, callables, alias_fns, filename, type_env, types)}
+        # `/` and `%` mean different things on Int and Float, and a backend
+        # cannot tell them apart from the node alone: python and TypeScript
+        # both render `7 / 2` as 3.5 while rust renders 3, and neither is
+        # wrong given what it was told. Carrying the *operand* type (not the
+        # result) is what makes the arithmetic specifiable at all — see
+        # docs/arithmetic.md. Inference runs without a filename so an
+        # undetermined operand is an absent annotation, never an error.
+        if expr.op in _TYPED_ARITH_OPS:
+            left_type = infer_ast(expr.left, type_env, types, None)
+            right_type = infer_ast(expr.right, type_env, types, None)
+            if left_type == "Int" and right_type == "Int":
+                node["operands"] = "Int"
+            elif "Float" in (left_type, right_type):
+                node["operands"] = "Float"
+        return node
     if isinstance(expr, ExprUn):
         return {"kind": "un", "op": expr.op,
                 "operand": _lower_pure_expr(expr.operand, scope, callables, alias_fns, filename, type_env, types)}

@@ -517,6 +517,18 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
         return f"(long) String.valueOf({target}).charAt((int)({args[0]}))"
     if method == "concat":
         return f"revlConcat({target}, {args[0]})"
+    # Integer division and modulo (docs/arithmetic.md). Java `/` truncates and
+    # `Math.floorDiv`/`floorMod` give the rest; `floorMod` against |b| is the
+    # Euclidean remainder, which is non-negative for either sign of b.
+    if method == "div_trunc":
+        return f"(({target}) / ({args[0]}))"
+    if method == "div_floor":
+        return f"Math.floorDiv({target}, {args[0]})"
+    if method == "div_euclid":
+        return (f"(({args[0]}) > 0 ? Math.floorDiv({target}, {args[0]}) "
+                f": -Math.floorDiv({target}, -({args[0]})))")
+    if method == "mod":
+        return f"Math.floorMod({target}, Math.abs({args[0]}))"
     if method == "indexOf":
         return f"revlIndexOf({target}, {args[0]})"
     if method == "split":

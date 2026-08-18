@@ -16,7 +16,7 @@ fn pick(n: Int) -> Outcome {
 }
 
 fn halfOrNothing(k: Int) -> Opt[Int] {
-  if (k > 1) { return Some(k / 2) }
+  if (k > 1) { return Some(k.div_trunc(2)) }
   return None
 }
 

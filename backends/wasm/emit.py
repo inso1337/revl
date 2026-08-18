@@ -1097,6 +1097,9 @@ class _V3Emitter:
             self._helper_str_slice(),
             self._helper_str_char_at(),
             self._helper_str_char_code_at(),
+            self._helper_int_div_floor(),
+            self._helper_int_div_euclid(),
+            self._helper_int_mod(),
             self._helper_list_push(),
             self._helper_list_concat(),
             self._helper_list_slice(),
@@ -1196,6 +1199,42 @@ class _V3Emitter:
         (br $loop)))
     (i32.const 1))"""
 
+
+    def _helper_int_div_floor(self) -> str:
+        # wasm i32.div_s truncates; step the quotient down when the operands
+        # have opposite signs and the division was inexact.
+        return """  (func $int_div_floor (param $a i32) (param $b i32) (result i32)
+    (local $q i32)
+    (local.set $q (i32.div_s (local.get $a) (local.get $b)))
+    (if (result i32)
+      (i32.and
+        (i32.ne (i32.rem_s (local.get $a) (local.get $b)) (i32.const 0))
+        (i32.ne (i32.lt_s (local.get $a) (i32.const 0))
+                (i32.lt_s (local.get $b) (i32.const 0))))
+      (then (i32.sub (local.get $q) (i32.const 1)))
+      (else (local.get $q))))"""
+
+    def _helper_int_div_euclid(self) -> str:
+        return """  (func $int_div_euclid (param $a i32) (param $b i32) (result i32)
+    (if (result i32) (i32.gt_s (local.get $b) (i32.const 0))
+      (then (call $int_div_floor (local.get $a) (local.get $b)))
+      (else (i32.sub (i32.const 0)
+              (call $int_div_floor (local.get $a)
+                (i32.sub (i32.const 0) (local.get $b)))))))"""
+
+    def _helper_int_mod(self) -> str:
+        # Euclidean remainder: always in [0, |b|), for either sign of b.
+        return """  (func $int_mod (param $a i32) (param $b i32) (result i32)
+    (local $ab i32)
+    (local $m i32)
+    (local.set $ab
+      (if (result i32) (i32.lt_s (local.get $b) (i32.const 0))
+        (then (i32.sub (i32.const 0) (local.get $b)))
+        (else (local.get $b))))
+    (local.set $m (i32.rem_s (local.get $a) (local.get $ab)))
+    (if (result i32) (i32.lt_s (local.get $m) (i32.const 0))
+      (then (i32.add (local.get $m) (local.get $ab)))
+      (else (local.get $m))))"""
 
     def _helper_str_slice(self) -> str:
         return """  (func $str_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
@@ -1750,6 +1789,18 @@ class _V3Emitter:
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Int")
             return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_code_at)", "Int")
+        if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
+            # Integer division and modulo (docs/arithmetic.md). i32.div_s
+            # already truncates; the other three go through helpers so every
+            # tier computes the same thing rather than inheriting a host rule.
+            target = self._expr(target_node, scope, where, "Int")
+            arg = self._expr(args[0], scope, where, "Int")
+            if method == "div_trunc":
+                return _E(f"(i32.div_s {target.wat} {arg.wat})", "Int")
+            call = {"div_floor": "$int_div_floor",
+                    "div_euclid": "$int_div_euclid",
+                    "mod": "$int_mod"}[method]
+            return _E(f"(call {call} {target.wat} {arg.wat})", "Int")
         if method == "indexOf":
             raise EmitError(f"{where}: indexOf is not lowerable on this tier yet")
         raise EmitError(f"{where}: unsupported builtin method {method!r}")

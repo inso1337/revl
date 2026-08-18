@@ -112,6 +112,19 @@ def _render_builtin(method, target: str, args: list) -> str:
         return f"{args[0]}.join({target})"
     if method == "repeat":
         return f"({target} * {args[0]})"
+    # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
+    # and its `%` takes the divisor's sign, so div_floor is native and the
+    # Euclidean remainder is `a % abs(b)`; truncation has to be built.
+    if method == "div_trunc":
+        return (f"(lambda _a, _b: abs(_a) // abs(_b) if (_a < 0) == (_b < 0) "
+                f"else -(abs(_a) // abs(_b)))({target}, {args[0]})")
+    if method == "div_floor":
+        return f"({target} // {args[0]})"
+    if method == "div_euclid":
+        return (f"(lambda _a, _b: _a // _b if _b > 0 else -(_a // -_b))"
+                f"({target}, {args[0]})")
+    if method == "mod":
+        return f"({target} % abs({args[0]}))"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
