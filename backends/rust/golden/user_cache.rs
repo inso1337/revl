@@ -41,20 +41,127 @@ impl Map {
     }
 }
 
-/// revl host object: a deterministic in-memory database fake.
+/// revl host object: a bounded connection pool over a deterministic
+/// in-memory database (no driver dependency).  Semantics are shared
+/// across tiers — backends/python/runtime.py, `.. _pool-job-semantics:`:
+/// `size` connections numbered 1..size, acquire/release accounting,
+/// statements borrow a connection for their duration, `close` releases
+/// everything, and exhaustion / use-after-close panic.
 pub struct Pool {
-    _url: String,
-    _size: i64,
+    url: String,
+    size: i64,
+    state: std::sync::Mutex<PoolState>,
+}
+struct PoolState {
+    idle: Vec<i64>,
+    in_use: Vec<i64>,
+    closed: bool,
 }
 impl Pool {
     pub fn open(url: String, size: i64) -> Self {
-        Self { _url: url, _size: size }
+        if size < 1 {
+            panic!("pool size must be an integer >= 1 (got {})", size);
+        }
+        Self {
+            url,
+            size,
+            state: std::sync::Mutex::new(PoolState {
+                idle: (1..=size).collect(),
+                in_use: Vec::new(),
+                closed: false,
+            }),
+        }
     }
-    pub fn close(&self) {}
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+    pub fn capacity(&self) -> i64 {
+        if self.state.lock().unwrap().closed { 0i64 } else { self.size }
+    }
+    pub fn in_use(&self) -> i64 {
+        self.state.lock().unwrap().in_use.len() as i64
+    }
+    pub fn available(&self) -> i64 {
+        self.state.lock().unwrap().idle.len() as i64
+    }
+    // NB: never panic while the guard is held — a panic under the
+    // lock poisons the Mutex, and every later call would then fail
+    // with a PoisonError instead of the intended message (which is
+    // not what the other tiers do: there the pool stays usable).
+    fn borrow_conn(&self, op: &str) -> i64 {
+        let outcome = {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                Err(format!("pool.{} after close/drop — use-after-free", op))
+            } else if state.idle.is_empty() {
+                Err(format!(
+                    "pool.{} exhausted (size={}, in_use={})",
+                    op,
+                    self.size,
+                    state.in_use.len()
+                ))
+            } else {
+                let conn = state.idle.remove(0);
+                state.in_use.push(conn);
+                Ok(conn)
+            }
+        };
+        match outcome {
+            Ok(conn) => conn,
+            Err(message) => panic!("{}", message),
+        }
+    }
+    fn give_back(&self, conn: i64) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(pos) = state.in_use.iter().position(|c| *c == conn) {
+            state.in_use.remove(pos);
+        }
+        state.idle.push(conn);
+        state.idle.sort_unstable();
+    }
+    pub fn acquire(&self) -> i64 {
+        self.borrow_conn("acquire")
+    }
+    pub fn release(&self, conn: i64) {
+        let outcome = {
+            let state = self.state.lock().unwrap();
+            if state.closed {
+                Err(String::from("pool.release after close/drop — use-after-free"))
+            } else if !state.in_use.contains(&conn) {
+                Err(format!("pool.release conn={} is not checked out", conn))
+            } else {
+                Ok(())
+            }
+        };
+        if let Err(message) = outcome {
+            panic!("{}", message);
+        }
+        self.give_back(conn);
+    }
+    pub fn close(&self) {
+        let already_closed = {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                true
+            } else {
+                state.in_use.clear();
+                state.idle.clear();
+                state.closed = true;
+                false
+            }
+        };
+        if already_closed {
+            panic!("pool.close after close/drop — use-after-free");
+        }
+    }
     pub fn query(&self, _sql: String) -> Vec<Value> {
-        vec![Value::new(String::from("fake-row"))]
+        let conn = self.borrow_conn("query");
+        self.give_back(conn);
+        Vec::new()
     }
     pub fn execute(&self, _sql: String) -> i64 {
+        let conn = self.borrow_conn("execute");
+        self.give_back(conn);
         1i64
     }
 }

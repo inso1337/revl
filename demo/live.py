@@ -41,12 +41,14 @@ COMPONENTS = DEMO / "components"
 VARIANTS = DEMO / "variants"
 SERVICES_FILE = COMPONENTS / "services.rvl"
 
-for path in (str(ROOT / "src"), str(BACKEND)):
+for path in (str(ROOT / "src"), str(BACKEND), str(DEMO)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
 import emit as emitter  # noqa: E402  (backends/python/emit.py)
 import runtime as runtime_mod  # noqa: E402  (backends/python/runtime.py)
+
+from hostruntime import HostMeter, bind_runtime, watch  # noqa: E402  (demo/hostruntime.py)
 
 from revl import RevlError, compile_files  # noqa: E402
 
@@ -93,6 +95,7 @@ CHANNELS = {
     "load": "35",  # magenta— host admits a component
     "fiber": "33",  # yellow — runtime lifecycle transitions
     "host": "32",  # green  — host resources (pool/map): the residue we track
+    "config": "36",  # cyan   — a component's RESOLVED configuration (after defaults)
     "call": "34",  # blue   — traffic through provided services
     "swap": "35",  # magenta— swap orchestration
     "check": "1",  # bold   — assertions
@@ -110,6 +113,7 @@ class Log:
         self.host: list[str] = []  # raw runtime.set_trace strings, in order
         self.fibers: list[tuple[str, str, str]] = []  # (name, old, new)
         self.live_resources: dict[str, str] = {}  # pool#1 -> "open postgres://…"
+        self.resolved_config: dict[str, str] = {}  # PgDatabase -> "{pool_size=10, …}"
 
     # -- emission ----------------------------------------------------------
 
@@ -140,11 +144,17 @@ class Log:
     # -- wiring into the runtime ------------------------------------------
 
     def on_host_event(self, event: str) -> None:
-        """runtime.set_trace callback: one string per host-builtin operation."""
+        """runtime trace observer: one string per host-builtin operation, plus
+        one `<Component>.config {...}` line per component that resolved a
+        configuration (what it *actually* ran with, defaults included)."""
         self.host.append(event)
         head, _, rest = event.partition(" ")
         subject, _, op = head.rpartition(".")
         subject = subject or head
+        if op == "config":
+            self.resolved_config[subject] = rest
+            self.line("config", subject, rest)
+            return
         detail = f"{op} {rest}".strip()
         if op in ("open", "new"):
             self.live_resources[subject] = detail
@@ -220,7 +230,18 @@ class Composition:
         self.running_ir: dict | None = None  # the admitted composition (manifest + services)
         self.generation = 0
 
-        runtime_mod.set_trace(log.on_host_event)
+        # The emitted modules open with `from runtime import …`.  Binding the
+        # name here (rather than relying on sys.path order) is the demo's
+        # "parameterized runtime import": the host decides which runtime the
+        # generated source resolves against, and the generated source itself
+        # is byte-identical either way.
+        self.unbind_runtime = bind_runtime(runtime_mod)
+
+        # Two observers, coexisting — this used to be impossible: `set_trace`
+        # had one slot, so a second watcher silently displaced the first.
+        self.untrace_log = runtime_mod.add_trace(log.on_host_event)
+        self.meter = HostMeter()
+        self.untrace_meter = runtime_mod.add_trace(self.meter)
         self.root.on("internal/status", log.on_fiber_event)
 
         self.baseline_hooks = self._hook_snapshot()
@@ -427,9 +448,24 @@ class Composition:
             not self.log.live_resources,
             f"live host resources: {self.log.live_resources or '{}'} (every pool closed, every map dropped)",
         )
+        checks.that(
+            "two-observers",
+            self.meter.events == self.log.host,
+            f"the second trace observer saw all {len(self.meter.events)} events the log did "
+            f"({self.meter.summary()})",
+        )
+        checks.that(
+            "resolved-config",
+            self.log.resolved_config == self.meter.configs and bool(self.meter.configs),
+            f"resolved configuration observed for {sorted(self.meter.configs)}",
+        )
+        for name, resolved in sorted(self.meter.configs.items()):
+            self.log.note(f"{name} ran with {resolved}")
         tail = strip_serials(self.log.host)[-6:]
         self.log.note(f"final host-operation tail: {tail}")
-        runtime_mod.set_trace(None)
+        self.untrace_meter()
+        self.untrace_log()
+        self.unbind_runtime()
 
 
 # --------------------------------------------------------------------------
@@ -477,7 +513,10 @@ async def run_script() -> int:
         provided = {
             key: c["name"] for c in ir["components"] for key in c["provides"]
         }
-        checks.that("link", provided == {"db": "PgDatabase", "cache": "UserCache"},
+        # a superset check: demo/components/ also carries evolve.rvl, whose
+        # components provide four more keys
+        checks.that("link",
+                    provided.get("db") == "PgDatabase" and provided.get("cache") == "UserCache",
                     f"provider map {provided}")
         checks.that(
             "activation",
