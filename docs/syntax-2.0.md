@@ -257,6 +257,10 @@ It also repairs `revl audit`: G8 enumerates a caller's emissions by reading
 the declarations of the operations it calls, so an under-declared operation
 made every consumer's audit incomplete — not merely misleading.
 
+The bound refines from a flag to a **set** with `emission[db, bus] fn …`,
+which says *where* a provider may cross rather than only that it does; bare
+`emission` stays "any capability". See docs/capabilities.md.
+
 ### 4b.2 `emit` is also an expression
 
 `emit` began as a statement, which discarded its value — fatal for the

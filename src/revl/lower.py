@@ -146,6 +146,9 @@ class Env:
         # names whose call reaches an irreversible host effect (set by
         # check_and_lower once externs/fns are lowered)
         self.emitting_fns: set = set()
+        # the same relation refined to *which* boundaries each one reaches:
+        # name -> capability set (docs/capabilities.md)
+        self.emitting_caps: dict[str, set] = {}
         # component-body type environment: safe-name -> type, plus the
         # "config.<field>" and "req.<local>" markers infer_ir resolves
         self.type_env: dict[str, str] = {}
@@ -1366,7 +1369,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename)
     tests = _lower_tests(program, program.filename, types)
-    emitting_fns = _emitting_fns(fns, externs)
+    emitting_caps = _emitting_capabilities(fns, externs)
+    emitting_fns = set(emitting_caps)
 
     components = []
     seen = set()
@@ -1375,7 +1379,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
             raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
         seen.add(comp.name)
         components.append(_lower_component(comp, services, program.filename, component_callables,
-                                           types, emitting_fns))
+                                           types, emitting_fns, emitting_caps))
 
     manifest = _link(program, components, ambient.get("components") or [])
 
@@ -1415,6 +1419,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                         "params": [{"name": p, "type": t} for p, t in m.params],
                         "returns": m.returns,
                         "emission": m.emission,
+                        # only a *scoped* emission carries the key: bare
+                        # `emission` means "any capability", and its absence
+                        # is exactly that (so no pre-capability IR changes)
+                        **({"capabilities": list(m.capabilities)}
+                           if m.capabilities is not None else {}),
                         **({"async": True} if m.async_ else {}),
                         **({"commutative": True} if m.commutative else {}),
                     }
@@ -1453,6 +1462,8 @@ def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
             0,
             async_=bool(mspec.get("async")),
             commutative=bool(mspec.get("commutative")),
+            capabilities=(tuple(mspec["capabilities"])
+                          if mspec.get("capabilities") is not None else None),
         )
     return ServiceDecl(name, methods, 0, commutative=bool(spec.get("commutative")))
 
@@ -1462,7 +1473,8 @@ def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
         return (
             svc.commutative,
             {
-                m.name: (tuple(m.params), m.returns, m.emission, m.async_, m.commutative)
+                m.name: (tuple(m.params), m.returns, m.emission, m.async_,
+                         m.commutative, m.capabilities)
                 for m in svc.methods.values()
             },
         )
@@ -1879,30 +1891,68 @@ def _emitting_fns(fns: list, externs: list) -> set:
     """Names whose call reaches an irreversible host effect: `emission`
     externs, and functions that reach one transitively. An `acquire` extern
     is *revertible* (it carries an inverse), so it is deliberately not one."""
-    emitting = {ext["name"] for ext in externs if ext.get("class") == "emission"}
-    bodies = {fn["name"]: fn for fn in fns}
+    return set(_emitting_capabilities(fns, externs))
+
+
+def _emitting_capabilities(fns: list, externs: list) -> dict[str, set]:
+    """`_emitting_fns` refined from a boolean to a *set*: name -> the
+    capabilities its call reaches (docs/capabilities.md).
+
+    A host capability is named by the `emission` extern itself — that extern
+    *is* the boundary — so `extern emission fn send` contributes `send`, and a
+    `fn` contributes the union of what it calls, not its own name. The fixed
+    point is the same least one `_emitting_fns` took, now over sets instead of
+    a flag, which is why a capability propagates through a chain of `fn`s."""
+    caps: dict[str, set] = {ext["name"]: {ext["name"]}
+                            for ext in externs if ext.get("class") == "emission"}
     calls: dict[str, set] = {}
-    for name, fn in bodies.items():
+    for fn in fns:
         called: set = set()
         _calls_in(fn.get("body") or [], called)
-        calls[name] = called
+        calls[fn["name"]] = called
 
     changed = True
     while changed:  # least fixed point over the call graph
         changed = False
         for name, called in calls.items():
-            if name not in emitting and called & emitting:
-                emitting.add(name)
+            reached: set = set()
+            for callee in called:
+                reached |= caps.get(callee, set())
+            if reached and not reached <= caps.get(name, set()):
+                caps.setdefault(name, set()).update(reached)
                 changed = True
-    return emitting
+    return caps
 
 
-def _method_emissions(body: list, env: "Env") -> list[str]:
+def _capability_hint(service: str, method: str, declared, extra: list[str]) -> str:
+    """The repair for a provider that exceeds its declared capability set."""
+    nameable = [cap for cap in extra if cap != "*"]
+    if not nameable:  # nothing to widen *to* — the boundary has no name
+        return (f"only a named boundary can be granted — give the emission a "
+                f"capability (a required key or an `emission` extern) or declare "
+                f"`emission fn {method}(...)` without a scope in service "
+                f"`{service}` (G4)")
+    widened = list(declared) + [cap for cap in nameable if cap not in declared]
+    return (f"a capability-scoped emission bounds *where* a provider may cross "
+            f"the boundary — widen the declaration to "
+            f"`emission[{', '.join(widened)}] fn {method}(...)` in service "
+            f"`{service}`, or route this emission through a declared "
+            f"capability (G4)")
+
+
+def _method_emissions(body: list, env: "Env") -> tuple[list[str], set]:
     """What calling a provide-method irreversibly causes: `emit` steps and
     reachable emitting functions/externs. Teardown-position emissions count
-    — calling the method schedules them."""
+    — calling the method schedules them.
+
+    Returns `(evidence, capabilities)`: the human-readable call sites, and the
+    *set* of boundaries they cross (docs/capabilities.md). A call through a
+    required key `db` is capability `db` — the key is composition-wide (G2
+    makes it unique), so it names the same boundary to every reader; host code
+    is named by the `emission` extern it reaches."""
     found: list[str] = []
     seen: set = set()
+    caps: set = set()
 
     def note(label: str) -> None:
         if label not in seen:
@@ -1916,8 +1966,18 @@ def _method_emissions(body: list, env: "Env") -> list[str]:
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":
                     note(f"{target.get('name')}.{expr.get('method')}")
+                    caps.add(target.get("name"))
                 else:
                     note("a host emission")
+                    # every host emission reaches a named `emission` extern
+                    # (`_is_emission_call` admits nothing else); `*` is the
+                    # unreachable-in-practice fallback, and it is deliberately
+                    # a capability no `emission[...]` list can name, so an
+                    # unnameable boundary fails the bound rather than passing it
+                    reached: set = set()
+                    _calls_in(expr, reached)
+                    if not reached & env.emitting_fns:
+                        caps.add("*")
             # an emission may also appear in value position (`let r = emit …`)
             target = node.get("target")
             if node.get("kind") == "call" and isinstance(target, dict) \
@@ -1927,10 +1987,12 @@ def _method_emissions(body: list, env: "Env") -> list[str]:
                         if service is not None else None)
                 if decl is not None and decl.emission:
                     note(f"{target.get('name')}.{node.get('method')}")
+                    caps.add(target.get("name"))
             calls: set = set()
             _calls_in(node, calls)
             for name in sorted(calls & env.emitting_fns):
                 note(f"{name}()")
+                caps.update(env.emitting_caps.get(name) or {"*"})
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -1938,14 +2000,16 @@ def _method_emissions(body: list, env: "Env") -> list[str]:
                 walk(value)
 
     walk(body)
-    return found
+    return found, caps
 
 
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
-                     emitting_fns: set | None = None) -> dict:
+                     emitting_fns: set | None = None,
+                     emitting_caps: dict | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
+    env.emitting_caps = emitting_caps or {}
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
 
     # a config default must fit its declared field type (config typing);
@@ -2270,7 +2334,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # the G8 audit, which enumerates a caller's emissions by reading the
         # declarations of the methods it calls.
         if not decl.emission:
-            caused = _method_emissions(mbody, env)
+            caused, _caps = _method_emissions(mbody, env)
             if caused:
                 evidence = ", ".join(f"`{item}`" for item in caused)
                 raise RevlError(
@@ -2284,6 +2348,29 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                          f"`{svc.name}`, or move the irreversible call out of this "
                          f"method (G4)",
                     code="G4", category="emission-propagation",
+                )
+        elif decl.capabilities is not None:
+            # the same upper bound, one refinement finer: `emission[db]` says
+            # *where* a provider may cross, so the body's capability set must
+            # be a subset. A provider using fewer capabilities is purer than
+            # declared, which is the sound direction (docs/capabilities.md).
+            caused, used = _method_emissions(mbody, env)
+            extra = sorted(used - set(decl.capabilities))
+            if extra:
+                declared = ", ".join(decl.capabilities)
+                offending = ", ".join(
+                    "an unnameable host boundary" if cap == "*" else f"`{cap}`"
+                    for cap in extra)
+                evidence = ", ".join(f"`{item}`" for item in caused)
+                raise RevlError(
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` is declared "
+                    f"`emission[{declared}]`, but this implementation emits "
+                    f"through {offending}"
+                    + (f" (reaching {evidence})" if evidence else ""),
+                    hint=_capability_hint(svc.name, method.name,
+                                          decl.capabilities, extra),
+                    code="G4", category="emission-capability",
                 )
 
         methods.append({"name": method.name, "params": safe_params, "body": mbody})
