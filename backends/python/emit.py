@@ -847,9 +847,40 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     elif step == "expr":
         out.add(indent, _expr(node["expr"]))
     elif step == "assert":
-        out.add(indent, f"assert {_expr(node['expr'])}")
+        _emit_assert(node["expr"], out, indent)
     else:
         raise EmitError(f"unsupported fn statement step {step!r}")
+
+
+_ASSERT_COMPARISONS = ("==", "===", "!=", "!==", "<", ">", "<=", ">=")
+
+
+def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
+    """`assert a == b`, with both operand values in the failure message.
+
+    A bare `assert` carries no message, so the runner has nothing to print but
+    "assertion failed" (src/revl/test.py) — the least useful thing a test
+    framework can say, and it costs whoever wrote the test a debugging session
+    to recover what the emitter already knew. An in-file `test` block almost
+    always asserts a comparison, so that case binds each side to a temporary
+    (evaluated exactly once, which a naive re-render would not guarantee) and
+    reports both values alongside the expression as emitted. Anything else
+    keeps the plain form.
+    """
+    if expr.get("kind") == "bin" and expr.get("op") in _ASSERT_COMPARISONS:
+        op = _PY_BIN_OPS[expr["op"]]
+        left = _expr(expr["left"])
+        right = _expr(expr["right"])
+        out.add(indent, f"_revl_lhs = {left}")
+        out.add(indent, f"_revl_rhs = {right}")
+        # the shown text is a repr, never an f-string, so quotes and braces in
+        # the rendered source cannot break out of the literal
+        shown = repr(f"{left} {op} {right}")
+        out.add(indent, f"assert _revl_lhs {op} _revl_rhs, {shown}"
+                        " + '\\n  left  = ' + repr(_revl_lhs)"
+                        " + '\\n  right = ' + repr(_revl_rhs)")
+        return
+    out.add(indent, f"assert {_expr(expr)}")
 
 
 def _emit_functions(functions: list) -> "_Lines":

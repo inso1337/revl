@@ -9,7 +9,7 @@ export function add(a: number, b: number): number {
 }
 
 it("add works", () => {
-    expect((add(1, 2) === 3)).toBeTruthy()
+    expect(add(1, 2)).toStrictEqual(3)
 })
 
 it("bool works", () => {
