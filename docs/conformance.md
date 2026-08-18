@@ -70,13 +70,15 @@ Starting from 12/5/5/32 (ts/rust/java/wasm) plus two frontend gaps:
 
 It checks that an emitter **does not raise** — never that its output
 compiles or runs. A tier can therefore report `ok` and still emit broken
-code. One live instance: the **rust backend does not capture `requires`
-bindings into the provider struct**, so a provide-method calling a required
-service emits Rust that references a field that does not exist. Pre-existing
-and unrelated to this sweep, invisible here, and caught only because an
-agent compiled the output by hand. Closing that blind spot means compiling
-or executing emitted code per tier — which the wasm tier already does on
-wasmtime, and the rust tier does under `cargo` when a network is available.
+code. The instance that proved it: the **rust backend did not capture
+`requires` bindings into the provider struct** on its pure path, so a
+component with no effects emitted Rust referencing a free variable. It
+reported `ok` here for months and was caught only because an agent compiled
+the output by hand. Now fixed, with a regression test that asserts the
+struct field, the `self.` reference and the construction — but the blind
+spot itself remains: closing it means compiling or executing emitted code
+per tier, which the wasm tier already does on wasmtime and the rust tier
+does under `cargo` when a network is available.
 
 ## What this says about the architecture
 

@@ -143,6 +143,32 @@ def test_component_await_uses_plugin_async():
 # cached, so an offline resolve fails with "no matching package named
 # cordis-rs". Letting cargo hit the network resolves + downloads cordis-rs
 # 0.3 (and its transitive deps) once, then caches it for the rest of the run.
+def _crates_io_reachable() -> bool:
+    """Whether cordis-rs can be resolved. Cached: probed once per run."""
+    global _CRATES_IO
+    if _CRATES_IO is None:
+        import socket
+
+        try:
+            socket.create_connection(("index.crates.io", 443), timeout=3).close()
+            _CRATES_IO = True
+        except OSError:
+            _CRATES_IO = False
+    return _CRATES_IO
+
+
+_CRATES_IO: bool | None = None
+
+# Every cargo-gated test resolves cordis-rs from crates.io. Gating on `cargo`
+# alone made a sandbox without network spend ~130s per test on connection
+# retries and then fail — noise that hides real breakage. Probe once and skip
+# with a reason that says which half is missing.
+needs_cargo = pytest.mark.skipif(
+    shutil.which("cargo") is None or not _crates_io_reachable(),
+    reason="needs cargo and crates.io reachable (cordis-rs is resolved from the index)",
+)
+
+
 def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
@@ -153,20 +179,20 @@ def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_against_cordis_rs(tmp_path):
     result = _cargo_check(tmp_path, emit.emit(_ir("user_cache")))
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_v2_realms(tmp_path):
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     result = _cargo_check(tmp_path, emit.emit(ir))
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_v3_types_functions_match(tmp_path):
     ir = compile_source(
         """
@@ -217,7 +243,7 @@ test "stdlib parity with the python backend" {
 """
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_stdlib_builtins_on_str_and_list(tmp_path):
     """Review finding: slice/indexOf/concat previously failed to compile for
     one of {Str, List} each; indexing failed for both (i64 vs usize)."""
@@ -226,7 +252,7 @@ def test_cargo_check_compiles_stdlib_builtins_on_str_and_list(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_test_runs_emitted_stdlib_semantics(tmp_path):
     """Not just compiles: the emitted #[test] executes the spec's semantics
     (persistent push, -1 when absent, char-based string positions)."""
@@ -242,7 +268,7 @@ def test_cargo_test_runs_emitted_stdlib_semantics(tmp_path):
     assert "1 passed" in result.stdout
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_method_level_compensate(tmp_path):
     """Review finding: `emit ... compensate` in a provide method referenced
     `*_undo` clones that were only generated when compensate was absent.
@@ -267,7 +293,7 @@ def test_cargo_check_compiles_method_level_compensate(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_braces_in_templates(tmp_path):
     """Review finding: literal `{`/`}` in a template reached `format!`
     unescaped and broke the format string."""
@@ -283,7 +309,7 @@ def test_cargo_check_compiles_braces_in_templates(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
     """The A1/G7 exit criterion: emitted components driven by the real
     cordis-rs runtime. Fixtures in scenarios/probe.rvl, assertions in
@@ -307,7 +333,7 @@ def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
     assert "5 passed" in result.stdout
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_v3_host_await_fail_block_effect(tmp_path):
     ir = {
         "ir_version": 3,
@@ -367,7 +393,7 @@ def test_cargo_check_compiles_v3_host_await_fail_block_effect(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@needs_cargo
 def test_cargo_check_compiles_method_body_bindings(tmp_path):
     """A provide-method that names intermediates — the shape every other tier
     accepted while the Rust backend refused it."""
@@ -501,3 +527,25 @@ def test_optional_chaining_reports_the_tier_limit_not_a_generic_message():
                           "target": {"kind": "var", "name": "x"}}}]}]}]}]}
     with pytest.raises(emit.EmitError, match="optional chaining"):
         emit.emit(ir)
+
+
+def test_provider_struct_captures_required_services():
+    """A provide-method calling a required service needs that service as a
+    struct field. The effectful path always captured `requires`; the pure
+    path did not, so a component with no effects emitted Rust referencing a
+    free variable. The conformance matrix could not see it — it only checks
+    that the emitter does not raise, never that the output compiles."""
+    ir = compile_source(
+        "service Bus { fn ping(n: Int) -> Int }\n"
+        "service S { fn g(n: Int) -> Int }\n"
+        "component C requires bus: Bus provides s: S {\n"
+        "  provide s { fn g(n) = bus.ping(n) }\n"
+        "}"
+    )
+    out = emit.emit(ir)
+    assert "struct CS {\n    bus: Arc<Box<dyn Bus>>,\n}" in out
+    assert "fn g(&self, n: i64) -> i64 { self.bus.ping(n) }" in out
+    assert "Box::new(CS { bus: bus.clone() })" in out
+    # no free reference to the binding survives in the impl
+    impl = out.split("impl S for CS {")[1].split("}")[0]
+    assert "bus." not in impl.replace("self.bus.", "")
