@@ -199,6 +199,134 @@ _HOST_CALLABLES = {"Map", "Pool", "Job"}
 _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 
 
+# Builtin heads a `type X = Y` right-hand side may name. `Any`/`Never` are the
+# type algebra's wildcards; the rest are the declared builtin surface.
+_ALIASABLE_BUILTINS = _BUILTIN_NONRECORD | {"Any", "Never"}
+
+
+def _alias_target(decl: TypeDecl, declared: set[str]) -> str | None:
+    """The type `type X = Y` aliases, or None when the decl is a real variant.
+
+    `type X = Y` is TypeScript's alias spelling, and syntax-2.0's governing
+    principle is that no construct may exist in both languages with silently
+    different meaning. So the split follows TypeScript's own:
+
+    - Where TypeScript *compiles* it — `Y` names an existing type — revl means
+      what TypeScript means: a transparent alias. `type Sku = Str` used to
+      declare a one-case variant whose case was named `Str`, which made the
+      author's own alias unusable (`f("abc")` was refused for a `Sku`
+      parameter) while `return Str` was accepted as a case constructor.
+    - Where TypeScript *rejects* it — `Y` is undeclared (TS2304) — revl is free
+      to mean something else, because there is no shared meaning to diverge
+      from. `type Status = Pending` keeps its one-case-variant reading, which
+      is how an opaque nominal is spelled today.
+
+    A payload makes it a newtype (`type W = Wrap(Int)`), never an alias.
+    """
+    if decl.fields or len(decl.cases) != 1:
+        return None
+    case = decl.cases[0]
+    if case.payload is not None:
+        return None
+    head, args = parse_type(case.name)
+    if args:
+        return case.name  # a type application; the parser only builds these here
+    if head in _ALIASABLE_BUILTINS or head in declared:
+        return case.name
+    return None
+
+
+def _resolve_type_aliases(program: Program, filename: str) -> None:
+    """Erase transparent type aliases from the program, in place.
+
+    Aliases are substituted at every declaration site and their declarations
+    dropped, so nothing downstream — the type table, the checker, the IR, the
+    backends — ever sees the alias name. That is what `transparent` means, and
+    it is the reading TypeScript has: `Sku` and `Str` are interchangeable in
+    both directions. A *nominal* alias would be a distinct type needing
+    construction syntax revl does not have, and would re-commit the very sin
+    this fixes (both languages compiling `type X = Y` with different meanings).
+    """
+    declared = {d.name for d in program.type_decls}
+    aliases: dict[str, TypeDecl] = {}
+    for decl in program.type_decls:
+        target = _alias_target(decl, declared)
+        if target is None:
+            continue
+        if decl.params:
+            raise RevlError(
+                filename, decl.line,
+                f"type alias `{decl.name}` cannot declare type parameters",
+                hint="an alias is substituted verbatim, so it has nothing to "
+                     "instantiate — drop the parameters, or declare a variant "
+                     "with named cases (syntax-2.0 §2)",
+            )
+        # an alias is a declaration, so its right-hand side is checked here
+        # rather than only where the alias happens to be used
+        check_type_wellformed(filename, decl.line, target)
+        aliases[decl.name] = decl
+    if not aliases:
+        return
+
+    def expand(type_name: str, stack: tuple) -> str:
+        head, args = parse_type(type_name)
+        if args:
+            return f"{head}[{', '.join(expand(a, stack) for a in args)}]"
+        if head not in aliases:
+            return head
+        if head in stack:
+            chain = " -> ".join(stack[stack.index(head):] + (head,))
+            raise RevlError(
+                filename, aliases[head].line,
+                f"type alias cycle: {chain}",
+                hint="an alias is substituted verbatim, so a cycle has no "
+                     "expansion — break it, or declare one of them as a variant",
+            )
+        return expand(_alias_target(aliases[head], declared), stack + (head,))
+
+    resolved = {name: expand(_alias_target(decl, declared), (name,))
+                for name, decl in aliases.items()}
+
+    def subst(type_name):
+        if not type_name:
+            return type_name
+        head, args = parse_type(type_name)
+        if args:
+            return f"{head}[{', '.join(subst(a) for a in args)}]"
+        return resolved.get(head, head)
+
+    # every declaration site that carries a type annotation; kept in step with
+    # `_validate_declared_types` below, which enumerates the same surface
+    for fn in program.fn_decls:
+        for p in fn.params:
+            p.type = subst(p.type)
+        fn.returns = subst(fn.returns)
+    for ext in program.externs:
+        for p in ext.params:
+            p.type = subst(p.type)
+        ext.returns = subst(ext.returns)
+    for svc in program.services:
+        for m in svc.methods.values():
+            m.params = [(pname, subst(ptype)) for pname, ptype in m.params]
+            m.returns = subst(m.returns)
+    for decl in program.type_decls:
+        for fld in decl.fields:
+            fld.type = subst(fld.type)
+        for case in decl.cases:
+            case.payload = subst(case.payload)
+    for comp in program.components:
+        for cfg in comp.config:
+            cfg.type = subst(cfg.type)
+        for stmt in comp.body:
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            for method in stmt.methods:
+                method.param_types = [subst(t) for t in method.param_types]
+                method.returns = subst(method.returns)
+
+    program.type_decls = [d for d in program.type_decls if d.name not in aliases]
+
+
 def _validate_declared_types(program: Program, filename: str) -> None:
     """Reject malformed type annotations (bare builtin generics like `Opt`,
     `List[]`) at every declaration site before checking begins — otherwise a
@@ -1230,6 +1358,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     # types and signatures are built first so component lowering can
     # type-check service/fn call sites (the sound-typing milestone)
+    _resolve_type_aliases(program, program.filename)
     _validate_declared_types(program, program.filename)
     types = _lower_type_decls(program, program.filename)
     types[FNS_KEY] = _signature_table(program, types)

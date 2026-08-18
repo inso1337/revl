@@ -126,6 +126,8 @@ REJECTIONS = {
     "t15_generic_call_site.rvl": "this function's return expects `Int`, got `Str`",
     "t16_provide_method_missing_return.rvl": "`get` implements `Store.get`, which returns `Str`, but this body never returns a value",
     "t17_arrow_body_unchecked.rvl": "field access `.name` on `Opt[Row]`",
+    "t18_type_alias_cycle.rvl": "type alias cycle: Handle -> Ref -> Handle",
+    "t19_union_type.rvl": "revl has no union types",
 }
 
 
