@@ -104,3 +104,45 @@ def test_selfhosted_lexer_in_file_tests_pass():
     for entry in tests:
         fn = entry[-1] if isinstance(entry, tuple) else entry
         fn()
+
+
+def test_selfhosted_keyword_set_matches_reference():
+    """Close the class, not just the instance.
+
+    `hole` was in the reference KEYWORDS and absent from the revl lexer's
+    `keywords()`, and the corpus test above did not catch it — no corpus
+    file uses `hole`, so the two lexers agreed on every input they were
+    ever asked about. A differential oracle only covers what the corpus
+    exercises; a set that must stay equal should be compared as a set.
+    """
+    from revl.lexer import KEYWORDS
+
+    emitted = set(_exec_emitted("kw")["keywords"]())
+    assert emitted == set(KEYWORDS), {
+        "missing from selfhost": sorted(set(KEYWORDS) - emitted),
+        "extra in selfhost": sorted(emitted - set(KEYWORDS)),
+    }
+
+
+# Interpolation forms the corpus never exercises. The revl lexer used to
+# accept only `${ident}` and returned an `error` token for everything else,
+# while the reference captures the body as raw brace-balanced source for the
+# parser to re-parse (§3.2). Same class of miss as `hole` above: legal input
+# nobody happened to lex.
+TEMPLATE_CASES = [
+    "`sum is ${a + b}!`",
+    "`hi ${name}`",
+    "`n=${r.count}`",
+    "`rec ${ {a: 1} }`",
+    "`multi\n${x}\nline`",
+    "`plain`",
+    "`$ bare`",
+    "`${f(1, 2)}`",
+]
+
+
+@pytest.mark.parametrize("src", TEMPLATE_CASES)
+def test_selfhosted_lexer_templates_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "template_case.rvl"))
