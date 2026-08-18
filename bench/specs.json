@@ -16,7 +16,7 @@
     {
       "id": "03-user-cache",
       "name": "Write-through cache with audit log",
-      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  emission fn put(key: Str, value: Str)\n}",
       "brief": "Write a component UserCache that requires db: Database and provides cache: Cache. It keeps entries in a host Map. put must (a) insert into the map with a matching removal undo, and (b) emit an INSERT into cache_log on the database, interpolating the key into the SQL."
     },
     {
@@ -88,19 +88,19 @@
     {
       "id": "15-search-index",
       "name": "Search index with journal",
-      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Index {\n  fn lookup(q: Str) -> Opt[Str]\n  fn add(id: Str)\n}",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Index {\n  fn lookup(q: Str) -> Opt[Str]\n  emission fn add(id: Str)\n}",
       "brief": "Write a component SearchIndex that requires db: Database and provides index: Index. Back it with a host Map. add inserts the id into the map (undo removes) and emits an INSERT into index_journal with the id interpolated; lookup reads from the map."
     },
     {
       "id": "16-notifier",
       "name": "Notifier with compensation",
-      "services": "service Mailer {\n  emission fn send(to: Str, body: Str)\n}\n\nservice Notify {\n  fn ping(user: Str)\n}",
+      "services": "service Mailer {\n  emission fn send(to: Str, body: Str)\n}\n\nservice Notify {\n  emission fn ping(user: Str)\n}",
       "brief": "Write a component Notifier that requires mail: Mailer and provides notify: Notify. ping emits a send to the user (body of your choice, interpolate the user) compensated by a send to \"ops\" describing the retraction."
     },
     {
       "id": "17-billing-ledger",
       "name": "Billing ledger with reversal entries",
-      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Billing {\n  fn charge(acct: Str, cents: Str)\n}",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Billing {\n  emission fn charge(acct: Str, cents: Str)\n}",
       "brief": "Write a component BillingLedger that requires db: Database and provides billing: Billing. charge emits an INSERT of the charge into ledger, compensated by an INSERT of the matching reversal entry (never a DELETE — ledgers are append-only)."
     },
     {
@@ -130,7 +130,7 @@
     {
       "id": "22-cascade",
       "name": "Three-layer cascade",
-      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}\n\nservice Api {\n  fn fetch(user: Str) -> Opt[Str]\n}",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Cache {\n  fn get(key: Str) -> Opt[Str]\n  emission fn put(key: Str, value: Str)\n}\n\nservice Api {\n  fn fetch(user: Str) -> Opt[Str]\n}",
       "brief": "Write three components in one file: PgDatabase provides db: Database (Pool-backed, config url with a default pool size); UserCache requires db and provides cache: Cache (Map-backed write-through with an audit emission on put); ApiFront requires cache and provides api: Api, where fetch reads the user's entry from the cache."
     },
     {
@@ -160,7 +160,7 @@
     {
       "id": "27-inventory",
       "name": "Inventory reservations",
-      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Inventory {\n  fn reserve(sku: Str, n: Str)\n  fn reserved(sku: Str) -> Opt[Str]\n}",
+      "services": "service Database {\n  fn query(sql: Str) -> List[Row]\n  emission fn execute(sql: Str) -> Int\n}\n\nservice Inventory {\n  emission fn reserve(sku: Str, n: Str)\n  fn reserved(sku: Str) -> Opt[Str]\n}",
       "brief": "Write a component InventoryKeeper that requires db: Database and provides inv: Inventory. Back reservations with a host Map: reserve inserts the quantity under the sku (undo removes) and emits an INSERT into reservation_journal; reserved reads the map."
     },
     {
@@ -172,7 +172,7 @@
     {
       "id": "29-mesh",
       "name": "KV + auditor mesh",
-      "services": "service Kv {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}\n\nservice Audited {\n  fn put_audited(key: Str, value: Str)\n}\n\nservice Mailer {\n  emission fn send(to: Str, body: Str)\n}",
+      "services": "service Kv {\n  fn get(key: Str) -> Opt[Str]\n  fn put(key: Str, value: Str)\n}\n\nservice Audited {\n  emission fn put_audited(key: Str, value: Str)\n}\n\nservice Mailer {\n  emission fn send(to: Str, body: Str)\n}",
       "brief": "Write two components: MemKv provides kv: Kv (Map-backed), and Auditor requires kv: Kv and mail: Mailer, provides audited: Audited. put_audited writes through to kv.put and emits a mail.send to \"audit\" describing the write (interpolate the key)."
     },
     {

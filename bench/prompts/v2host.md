@@ -33,6 +33,10 @@ extern emission fn send(sock: Socket, data: Str)
   the place full host fluency is wanted.
 - Call an `extern pure fn` from anywhere an ordinary `fn` is callable
   (including component expression positions).
+- An `extern emission fn` is irreversible like a service emission: it is called
+  with `emit`, and any `provide` method that reaches one (directly, or through
+  a `fn` that calls it) requires the service to declare that operation
+  `emission fn`.
 
 **Guidance for this task:** when the task involves host-level computation
 (hashing, encoding, time, randomness, parsing beyond the stdlib), prefer a
