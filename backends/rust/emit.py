@@ -618,6 +618,7 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
 
 def _method_body(env: _Env, method: dict) -> str:
     rename = {b: f"self.{b}" for b in _binds(env.component)}
+    rename.update({local: f"self.{local}" for local in env.reqs})
     return _pure_method_statements(env, method, rename)
 
 
@@ -968,6 +969,10 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         out.append(f"struct {struct} {{")
         for b in _binds(component):
             out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b)}>,")
+        # a provide-method may call a required service, so the provider owns
+        # the same bindings the effectful path captures (java does this too)
+        for local, req_service in env.reqs.items():
+            out.append(f"    {local}: Arc<Box<dyn {req_service}>>,")
         out.append("}")
         out.append(f"impl {service} for {struct} {{")
         provide = next(
@@ -1102,7 +1107,10 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         key = step.get("name")
         service = step.get("service")
         struct = f"{env.name}{_camel(key)}"
-        fields = ", ".join(f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component))
+        fields = ", ".join(
+            [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
+            + [f"{local}: {local}.clone()" for local in env.reqs]
+        )
         out.append(f"{pad}let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
         out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
     else:
