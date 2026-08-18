@@ -58,6 +58,12 @@ def _emitted_lex_src():
     return _exec_emitted("x")["lex_src"]
 
 
+def _esc(s: str) -> str:
+    """Mirror of `esc` in selfhost/lexer.rvl — a part payload containing the
+    "|" join separator (e.g. `${a || b}`) would otherwise be unrecoverable."""
+    return s.replace("%", "%%").replace("|", "%p")
+
+
 def _canon_reference(tokens):
     """Reference tokens -> the (kind, text, line) shape the revl lexer
     produces (ints as digits, template parts serialized, eof text "")."""
@@ -69,7 +75,7 @@ def _canon_reference(tokens):
             out.append(("int", str(t.value), t.line))
         elif t.kind == "template":
             parts = "|".join(
-                ("t:" + s) if k == "text" else ("v:" + s) for k, s in t.value)
+                ("t:" if k == "text" else "v:") + _esc(s) for k, s in t.value)
             out.append(("template", parts, t.line))
         elif t.kind == "hostbody":
             pytest.skip("corpus file contains a host body (not yet lexed)")
