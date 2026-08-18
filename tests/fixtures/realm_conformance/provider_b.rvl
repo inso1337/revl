@@ -1,0 +1,27 @@
+// Realm conformance gate — provider fixture A.
+//
+// A lone provider of the coeffect key `kv`, isolated into realm("shared").
+// It is compiled as its OWN unit: revl's linker rejects two same-realm
+// providers of one key at admission (G2, examples/rejections/
+// v2_same_realm_conflict.rvl), so to exercise the RUNTIME's enforcement the
+// two providers must reach the runtime without being co-linked. The bodies
+// are stateless and i32-only so the one fixture lowers on every tier,
+// including the i32-only cordis-wasm substrate.
+//
+// Contract (docs/design-v2-realms.md):
+//   "A realm label is a static string literal. Equal strings = same realm"
+//   "G2 becomes per-(key, realm): ... the same realm is the conflict, and
+//    the error names the realm."
+
+service Kv {
+  fn get(k: Int) -> Int
+  fn set(k: Int, v: Int)
+}
+
+component SharedStoreB provides kv: Kv {
+  isolate kv in realm("shared")
+  provide kv {
+    fn get(k) = 0
+    fn set(k, v) { }
+  }
+}
