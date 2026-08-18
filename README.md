@@ -14,6 +14,10 @@ What this is *for* — and the honest scope of the "future of programming" claim
 — is [docs/vision.md](docs/vision.md).
 
 ```revl
+service Database {
+  emission fn execute(sql: Str) -> Int    // crosses the system boundary
+}
+
 service Cache {
   fn get(key: Str) -> Opt[Str]
   emission fn put(key: Str, value: Str)   // its body emits, so the interface says so
