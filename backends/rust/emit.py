@@ -1917,17 +1917,21 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 
 
 def _emit_v3_types(types: dict) -> list[str]:
+    # PartialEq is not decoration: revl has one equality and it is
+    # structural (syntax-2.0 §3.4), so `{a: 1} == {a: 1}` must compile and
+    # be true here as it is on python. Without the derive, rustc refuses
+    # the comparison outright (E0369) and legal revl fails on this tier.
     out: list[str] = []
     for name, spec in types.items():
         name = _ident(name, "type name")
         if spec.get("kind") == "record":
-            out.append("#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]")
+            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
                 out.append(f"    {_ident(field, 'record field')}: {_rust_type(ftype, types)},")
             out.append("}")
         elif spec.get("kind") == "variant":
-            out.append("#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]")
+            out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append('#[serde(tag = "$kind", content = "$value")]')
             out.append(f"pub enum {name} {{")
             for case in spec.get("cases") or []:

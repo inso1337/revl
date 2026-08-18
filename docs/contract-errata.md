@@ -166,6 +166,38 @@ This goes in the compiler spec, not the runtimes.
   `backends/java/test_emit_java.py::test_global_realm_divergence_characterized`
   pins the current behavior so it cannot regress silently.
 
+## Semantic divergences (closed, recorded so they cannot regress)
+
+- **`==` was not structural on every tier**, though syntax-2.0 §3.4 says revl
+  has one equality, that it is structural, and — in as many words — that
+  because the parser canonicalizes `===`→`==` in the IR, "no backend can
+  diverge". Two tiers did.
+
+  - **typescript** lowered `==` to JS `===`, which is *identity* for objects
+    and arrays. `{a: 1} == {a: 1}` and `[1, 2] == [1, 2]` were `true` on
+    python and `false` here: a silent wrong answer, not a refusal, on a tier
+    the README calls the portability proof. Now lowered through a `revlEq`
+    helper emitted with the module (key order irrelevant, arrays and objects
+    never equal, `NaN`/`-0` falling through to `===` so they behave as they do
+    on the reference tier).
+  - **rust** derived only `Clone` on v3 records and variants, so `==` on a
+    record did not compile at all (rustc E0369). Legal revl, refused by one
+    tier. `PartialEq` is now derived alongside `Clone` and `Debug`.
+  - **java** was already correct — `java.util.Objects.equals` on emitted
+    records, whose `equals` is structural by construction — and is the
+    precedent the other two now follow. **wasm** is unaffected: its values are
+    i32 and compound equality is a documented tier limit.
+
+  How it survived: `tests/test_cross_tier.py` checks that every emitter
+  *accepts* a construct, which catches a tier that refuses and cannot catch a
+  tier that accepts and then means something else. This is the project's own
+  recurring lesson one level up — "the emitter did not raise" never implied
+  "the code is right", and "every emitter agreed on a shape" never implied
+  "every tier agrees on a value". `tests/test_cross_tier_execution.py` closes
+  the class by *running* the probe on each tier; python and TypeScript execute
+  by default, rust and java behind `REVL_CROSS_TIER_SLOW=1`, with cheap static
+  guards for all three lowerings.
+
 ## Typing gaps (fenced, not closed)
 
 The checker is sound where types are known and silent where they are not (the

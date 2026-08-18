@@ -376,6 +376,16 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     if kind == "bin":
         if node.get("op") == "??":
             return f"({_expr(node['left'], ctx)} ?? {_expr(node['right'], ctx)})"
+        # revl has ONE equality and it is structural (syntax-2.0 §3.4). JS `===`
+        # is identity for objects and arrays, so lowering to it made
+        # `{a: 1} == {a: 1}` and `[1] == [1]` false on this tier and true on
+        # python — a silent wrong answer, not a refusal. Java already did this
+        # correctly via `Objects.equals`; `revlEq` is the same idea.
+        if node.get("op") in _TS_EQUALITY_OPS:
+            left = _expr(node["left"], ctx)
+            right = _expr(node["right"], ctx)
+            call = f"revlEq({left}, {right})"
+            return call if node["op"] in ("==", "===") else f"(!{call})"
         op = _TS_V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
@@ -1068,6 +1078,46 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
         raise EmitError(f"unsupported fn statement step {step!r}")
 
 
+_TS_EQUALITY_OPS = ("==", "===", "!=", "!==")
+
+# Structural equality, matching python's `==` on dicts/lists and java's
+# `Objects.equals`. Key order is irrelevant (as in python), arrays and objects
+# never compare equal to each other, and NaN/-0 fall through to `===` so they
+# behave exactly as they do on the reference tier.
+_REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+    return false
+  }
+  const arrA = Array.isArray(a), arrB = Array.isArray(b)
+  if (arrA !== arrB) return false
+  if (arrA && arrB) {
+    const xs = a as unknown[], ys = b as unknown[]
+    return xs.length === ys.length && xs.every((x, i) => revlEq(x, ys[i]))
+  }
+  const ka = Object.keys(a as object), kb = Object.keys(b as object)
+  if (ka.length !== kb.length) return false
+  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)
+    && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+}"""
+
+
+def _uses_equality(node) -> bool:
+    """Does anything in this IR compare with `==`/`!=`?
+
+    Emitting the helper unconditionally would leave a dead function in every
+    module, which `tsc` is entitled to complain about; scanning is cheap and
+    keeps the output honest about what it needs.
+    """
+    if isinstance(node, dict):
+        if node.get("kind") == "bin" and node.get("op") in _TS_EQUALITY_OPS:
+            return True
+        return any(_uses_equality(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_equality(v) for v in node)
+    return False
+
+
 def _emit_ts_types(types: dict) -> list[str]:
     lines: list[str] = []
     for name, spec in types.items():
@@ -1276,6 +1326,10 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     if tests:
         out.append("import { expect, it } from 'vitest'")
     out.append("")
+
+    if _uses_equality(ir):
+        out.append(_REVL_EQ_HELPER)
+        out.append("")
 
     if types:
         out.extend(_emit_ts_types(types))

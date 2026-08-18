@@ -3,6 +3,23 @@
 import type { Context } from 'cordis'
 import { host } from '../../runtime.ts'
 
+function revlEq(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
+    return false
+  }
+  const arrA = Array.isArray(a), arrB = Array.isArray(b)
+  if (arrA !== arrB) return false
+  if (arrA && arrB) {
+    const xs = a as unknown[], ys = b as unknown[]
+    return xs.length === ys.length && xs.every((x, i) => revlEq(x, ys[i]))
+  }
+  const ka = Object.keys(a as object), kb = Object.keys(b as object)
+  if (ka.length !== kb.length) return false
+  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)
+    && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+}
+
 export interface Row {
   id: number
   name: string
@@ -38,7 +55,7 @@ export function classify(n: number): string {
     if ((n < 0)) {
       return "neg"
     }
-    return ((n === 0) ? "zero" : "pos")
+    return (revlEq(n, 0) ? "zero" : "pos")
 }
 
 export function first(xs: number[]): number {
