@@ -139,7 +139,7 @@ fn describe(outcome: Outcome) -> Str {
 
 ### Modules (§1)
 
-```revl
+```revl sketch
 use "./tokens.rvl" { Token, TokenKind, keyword_set }
 use "./util/strings.rvl" as strings
 
@@ -155,7 +155,7 @@ Import cycles between modules are a compile error.
 The core from [DESIGN.md](../DESIGN.md) §3, plus 2.0's two additions:
 
 - **Block effect form** — acquisitions with several pure setup steps:
-```revl
+```revl fragment
 let pool = effect {
   let url = normalize(config.url)
   Pool.open(url, config.pool_size)          // last expression = the acquisition
@@ -163,7 +163,7 @@ let pool = effect {
 ```
 - **`fail`** — deliberate L-Raise from an activation body (reverts what's
   accumulated, lands FAILED):
-```revl
+```revl fragment
 if (config.replicas < 1) fail "at least one replica required"
 ```
 

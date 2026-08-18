@@ -19,7 +19,7 @@ returned.
 
 ## 1. The type
 
-```revl
+```revl sketch
 (Int, Str) -> Bool        // takes an Int and a Str, returns a Bool
 (Int) -> Int              // one parameter
 () -> Int                 // no parameters
@@ -135,7 +135,7 @@ is *deliberately* left there rather than given a guessed type.
 A call whose callee has a function type is checked like any other call: arity
 first, then arguments, and it has the declared return type.
 
-```revl
+```revl reject
 fn d() -> Int {
   let g: (Int) -> Int = v => v
   return g(1, 2)   // `g` is a `(Int) -> Int` and takes 1 argument(s), 2 given
@@ -150,7 +150,7 @@ the call site.
 Parameters are **contravariant**, results **covariant**, and arity is part of
 the type:
 
-```revl
+```revl sketch
 fn f(g: (Int) -> Float) -> Float { return g(1) }
 
 f((v: Float) => v)   // ok — a function accepting Float accepts an Int too

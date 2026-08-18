@@ -23,12 +23,14 @@ one Java source file (service interfaces + plugin classes).
   types/functions/match/externs are emitted; version 4 is rejected.
 - **Host objects** (`Pool`/`Map`/`Job`) are emitted as a minimal working Java
   runtime in the generated file. `Pool` is a functional placeholder, `Map` is
-  a real `HashMap<String, String>`, and `Job.run` is a no-op placeholder.
+  a real `HashMap<String, String>`, and `Job.run(name)` returns an awaitable
+  handle (`Job.pending()` counts the ones still in flight).
 - **Effectful provide-method bodies** are lowered into the component
   `Context.EffectScope`.
-- **`await` steps** lower to a blocking call inside an `AsyncPlugin`
-  (`ctx.pluginAsync`); the emitted class implements
-  `io.cordis4j.core.AsyncPlugin` and `apply` declares `throws Exception`.
+- **`await` steps** *join* the handle they start — `Job.run("x").await();`,
+  not a bare `Job.run("x");` — inside an `AsyncPlugin` (`ctx.pluginAsync`);
+  the emitted class implements `io.cordis4j.core.AsyncPlugin` and `apply`
+  declares `throws Exception`.
 - **`if` guards, block-effect `setup`, and `fail`** are lowered to Java
   control flow, setup statements before acquisition, and
   `io.cordis4j.core.CordisException` respectively.

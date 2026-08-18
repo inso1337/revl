@@ -74,6 +74,14 @@ _HOST_STUBS = {
     },
 }
 
+# Host builtins whose result is an asynchronous handle. An `await` step over
+# one must *join* it (A1: "evaluate expr, await its result, discard the
+# value") rather than merely evaluate the call — abandoning the handle leaves
+# the job in flight past activation. Rust gets this for free, because its
+# `Job::run` is an `async fn` and the step lowers to `.await`; Java has no
+# await operator, so the join is explicit.
+_HOST_AWAITABLE = {"Job.run"}
+
 # revl host-method names that are Java reserved words must be renamed at both
 # the call site and the runtime-class definition (`Map.new()` is a parse
 # error — `new` cannot be a method name).
@@ -1616,11 +1624,19 @@ def _emit_job_runtime() -> list[str]:
     pending -> done after exactly ``TICKS`` cooperative scheduler turns, or
     pending -> cancelled, after which awaiting raises.  No timers, so the
     behaviour is deterministic under test.
+
+    `Job.run(name)` hands back a *handle*, per the v1 contract
+    (docs/backend-ir-v1.md, "Host builtins"): an `await` step is only
+    meaningful if there is something to join. The old shape returned
+    `void`, so the emitted `Job.run("x");` could not be joined even in
+    principle and every awaited job stayed in flight past activation.
+    `pending()` makes that residue countable.
     """
     return [
         "// host object runtime (Job) — a cancellable asynchronous unit of work.",
         "// Semantics are shared across tiers: backends/python/runtime.py,",
-        "// section `.. _pool-job-semantics:`.",
+        "// section `.. _pool-job-semantics:`. `Job.run(name) -> handle`;",
+        "// an `await` step joins it, so activation leaves nothing pending.",
         "public static final class Job {",
         "    /** scheduler turns of simulated work (same number on every tier) */",
         "    public static final int TICKS = 5;",
@@ -1999,13 +2015,30 @@ def _emit_component_stmts(
                 f"{pad}throw new CordisException(String.valueOf({message}));"
             )
         elif kind == "await":
-            out.append(f"{pad}{_expr(step['expr'], env, None, v3_ctx)};")
+            out.append(f"{pad}{_await_join(step['expr'], env, v3_ctx)};")
         elif kind == "return":
             raise EmitError("return steps are only allowed inside method bodies")
         else:
             _emit_setup_stmt(env, v3_ctx, step, out, pad)
 
 
+
+
+def _await_join(node: dict, env: _Env, v3_ctx: _V3Ctx | None = None) -> str:
+    """An A1 `await` step: evaluate, **join** the result, discard the value.
+
+    Emitting the call alone is not an await. `Job.run("x");` starts the job
+    and drops the handle on the floor, so activation returns with the job
+    still pending — the boundary the paper (§4.3.2) says the runtime may
+    divert at never actually closes. Awaiting something that is not a handle
+    is the identity, so an expression the emitter cannot see to be
+    asynchronous stays a plain expression statement.
+    """
+    rendered = _expr(node, env, None, v3_ctx)
+    if (isinstance(node, dict) and node.get("kind") == "host"
+            and (node.get("fn") or "") in _HOST_AWAITABLE):
+        return f"{rendered}.await()"
+    return rendered
 
 
 def _emit_component_modern(
@@ -2423,6 +2456,26 @@ def _refuse_fault_tests(ir) -> None:
         f"module that is not emitted for this tier."
     )
 
+def _refuse_lifecycle_tests(tests: list) -> None:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
+
+    A lifecycle test is not a pure test unit: it loads components into a live
+    context, calls through provision keys, unloads them, and asserts
+    residue-freedom by reading the *host runtime's* introspection (R1/R4,
+    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
+    Refuse by name — a construct that is silently dropped by one renderer and
+    present in another is this project's recurring bug class.
+    """
+    for test in tests or []:
+        if test.get("lifecycle"):
+            raise EmitError(
+                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis4j'} tier: "
+                "it drives a live composition (load/call/unload) and asserts R4 "
+                "residue-freedom through the host runtime's introspection, which only the "
+                "reference tier implements — run it with `revl test --backend py` "
+                "(docs/syntax-2.0.md §7.1)"
+            )
+
 
 def emit(ir: dict, package_name: str = "revl") -> str:
     """Emit one Java source file for an IR document (ir_version 1, 2, or 3)."""
@@ -2431,6 +2484,8 @@ def emit(ir: dict, package_name: str = "revl") -> str:
     _refuse_holes(ir)
 
     _refuse_fault_tests(ir)
+
+    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1:
         return _emit_v1(ir, package_name)

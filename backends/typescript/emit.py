@@ -1349,6 +1349,26 @@ def _refuse_fault_tests(ir) -> None:
         f"module that is not emitted for this tier."
     )
 
+def _refuse_lifecycle_tests(tests: list) -> None:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
+
+    A lifecycle test is not a pure test unit: it loads components into a live
+    context, calls through provision keys, unloads them, and asserts
+    residue-freedom by reading the *host runtime's* introspection (R1/R4,
+    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
+    Refuse by name — a construct that is silently dropped by one renderer and
+    present in another is this project's recurring bug class.
+    """
+    for test in tests or []:
+        if test.get("lifecycle"):
+            raise EmitError(
+                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis (TS)'} tier: "
+                "it drives a live composition (load/call/unload) and asserts R4 "
+                "residue-freedom through the host runtime's introspection, which only the "
+                "reference tier implements — run it with `revl test --backend py` "
+                "(docs/syntax-2.0.md §7.1)"
+            )
+
 
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
@@ -1357,6 +1377,8 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     _refuse_holes(ir)
 
     _refuse_fault_tests(ir)
+
+    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     # publish a v3 context for the whole document so component/method bodies
     # can render pure 2.0 expressions (see _v3_context_for_components)

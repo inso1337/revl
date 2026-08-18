@@ -5,8 +5,15 @@ touches the filesystem: an agent can check, admit, load, call and tear down
 code that has no file. Second — the load-bearing one — that a *rejected*
 candidate cannot deploy, and the composition it failed to replace keeps
 answering.
+
+Only the second half needs a runtime. The in-memory compilation tests below
+are pure frontend and must run everywhere, so the cordis-py gate is a marker
+on the live-session tests (`@needs_runtime`) rather than a module-level
+`importorskip` — that form aborts *collection* of the whole file and took the
+runtime-free tests down with it.
 """
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -98,8 +105,17 @@ component Watcher requires cache: Cache provides log: Log {
 
 
 # --------------------------------------------------------------- live session
+#
+# Everything below actually loads code into a cordis-py Context. Gate it per
+# test, not per module: `pytest.importorskip` at module scope skips the file
+# during collection, so the runtime-free tests above never even get counted.
 
-pytest.importorskip("cordis", reason="the session tools need the cordis-py runtime")
+needs_runtime = pytest.mark.skipif(
+    importlib.util.find_spec("cordis") is None,
+    reason="the session tools need the cordis-py runtime — install it with "
+           "`sh backends/python/setup.sh`, then run this file under "
+           "`backends/python/.venv/bin/pytest`",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +127,7 @@ def _fresh_session():
         server_mod.SESSION.unload()
 
 
+@needs_runtime
 def test_load_call_and_unload_with_no_residue():
     loaded = _call("revl_load", {"source": CACHE})
     assert loaded["ok"] is True
@@ -124,6 +141,7 @@ def test_load_call_and_unload_with_no_residue():
     assert all(unloaded["checks"].values())
 
 
+@needs_runtime
 def test_swap_replaces_the_running_generation():
     _call("revl_load", {"source": CACHE})
     swapped = _call("revl_swap", {"source": CACHE.replace("fn size() = 0",
@@ -132,6 +150,7 @@ def test_swap_replaces_the_running_generation():
     assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 42
 
 
+@needs_runtime
 def test_a_rejected_swap_leaves_the_running_system_serving():
     _call("revl_load", {"source": CACHE})
     rejected = _call("revl_swap", {"source": CACHE.replace("fn size() = 0",
@@ -142,6 +161,7 @@ def test_a_rejected_swap_leaves_the_running_system_serving():
     assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 0
 
 
+@needs_runtime
 def test_rollback_restores_the_previous_generation():
     _call("revl_load", {"source": CACHE})
     _call("revl_swap", {"source": CACHE.replace("fn size() = 0", "fn size() = 42")})
@@ -149,6 +169,7 @@ def test_rollback_restores_the_previous_generation():
     assert _call("revl_call", {"key": "cache", "method": "size"})["result"] == 0
 
 
+@needs_runtime
 def test_state_reports_what_is_running():
     assert _call("revl_state", {})["loaded"] is False
     _call("revl_load", {"source": CACHE})
@@ -157,6 +178,7 @@ def test_state_reports_what_is_running():
     assert state["loadOrder"] == ["MemCache"]
 
 
+@needs_runtime
 def test_calling_before_loading_is_a_clean_error():
     payload = _call("revl_call", {"key": "cache", "method": "size"})
     assert payload["ok"] is False
@@ -204,6 +226,7 @@ def _lookup() -> object:
                                "args": ["k"]})["result"]
 
 
+@needs_runtime
 def test_a_three_link_chain_loads_in_dependency_order_and_answers():
     loaded = _call("revl_load",
                    {"source": CHAIN_SERVICES + CHAIN_DB + CHAIN_CACHE + CHAIN_API})
@@ -212,6 +235,7 @@ def test_a_three_link_chain_loads_in_dependency_order_and_answers():
     assert _lookup() == "v1:miss"
 
 
+@needs_runtime
 def test_swapping_the_middle_link_is_visible_through_the_chain():
     _call("revl_load", {"source": CHAIN_SERVICES + CHAIN_DB + CHAIN_CACHE + CHAIN_API})
     swapped = _call("revl_swap",
@@ -221,6 +245,7 @@ def test_swapping_the_middle_link_is_visible_through_the_chain():
     assert _lookup() == "v1:default"
 
 
+@needs_runtime
 def test_a_running_chain_can_grow_a_new_component():
     _call("revl_load", {"source": CHAIN_SERVICES + CHAIN_DB + CHAIN_CACHE_V2 + CHAIN_API})
     grown = _call("revl_swap", {"source": CHAIN_SERVICES + CHAIN_DB + CHAIN_CACHE_V2
@@ -230,6 +255,7 @@ def test_a_running_chain_can_grow_a_new_component():
     assert grown["providedKeys"] == ["api", "cache", "db", "log"]
 
 
+@needs_runtime
 def test_a_broken_middle_link_cannot_deploy_into_a_chain():
     _call("revl_load", {"source": CHAIN_SERVICES + CHAIN_DB + CHAIN_CACHE_V2 + CHAIN_API})
     broken = CHAIN_CACHE_V2.replace('fn get(k) = db.get(k) ?? Some("default")',
@@ -241,6 +267,7 @@ def test_a_broken_middle_link_cannot_deploy_into_a_chain():
     assert _lookup() == "v1:default"  # the whole chain keeps serving
 
 
+@needs_runtime
 def test_the_whole_chain_unloads_without_residue():
     _call("revl_load", {"source": CHAIN_SERVICES + CHAIN_DB + CHAIN_CACHE_V2
                         + CHAIN_API + CHAIN_LOG})

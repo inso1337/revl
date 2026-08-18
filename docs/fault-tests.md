@@ -3,7 +3,7 @@
 A `fault test` is a component author's way of asserting the paradigm's own
 failure guarantee, in source, next to the component it is about.
 
-```revl
+```revl fragment
 fault test "db dies mid-activation" for Store {
   fail at step 3
   assert failed
