@@ -139,6 +139,52 @@ REJECTIONS = {
     "lifecycle_no_swap.rvl": "there is no `swap` statement",
 }
 
+# ------------------------------------------------------------------ coverage
+# The rejection suite is the checker's *definition* of sound: for every
+# guarantee/amendment the checker can refuse there is a program above that it
+# must refuse. Six rules have no entry here *because a source program cannot
+# violate them at compile time* — they are guaranteed by construction, by a
+# lowering transform, or by another guarantee. Verified empirically (each was
+# probed with a candidate rejection that did not — and provably cannot —
+# refuse for the stated reason); recorded so the coverage claim is complete,
+# not sampled. See DESIGN.md §4 and docs/contract-errata.md "Contract
+# rejection coverage".
+#
+#   G5  teardown cannot register effects — BY CONSTRUCTION. `undo`/`compensate`
+#       bodies are pure expressions typed in `teardown` mode; `effect`/`emit`
+#       are statements only well-typed in `setup` mode (DESIGN.md §5). There is
+#       no syntactic slot for an acquisition during teardown — `effect` in an
+#       `undo` is a parse error, not a G5 diagnostic. A boundary-crossing
+#       emission reached from an `undo` stays fully enumerable (G8): the audit
+#       walk in `revl.__main__._boundary` recurses teardown-position call
+#       sites, so nothing about teardown escapes the boundary surface. The
+#       residue G5 guards against is a runtime/library concern (the cordis-TS
+#       `assertActive` bug in docs/contract-errata.md), not a source program.
+#   G7  derived teardown is LIFO-complete — BY LOWERING (DESIGN.md guarantee
+#       table: "by lowering, Thm. 16", the same non-compile category as G5).
+#       Teardown is compiler-derived; it cannot be written incorrectly, so
+#       there is no program to refuse. The property is exercised by the runtime
+#       scenarios in backends/rust/scenarios/ and backends/java/scenarios/. The
+#       one checker-side lever — totality of a `verified fn` that could feed a
+#       derived teardown — is already covered by v2_verified_direct_recursion.rvl
+#       (diagnostics.classify buckets "verified fn ... is not total" under G7).
+#   A3  host-safe identifiers — LOWERING TRANSFORM. Names colliding with host
+#       keywords are *renamed* (`class`->`class_`, `frame`->`frame_`), never
+#       rejected. Positive test: test_a3_host_colliding_names_are_renamed.
+#       (`config`/`await` reject as revl's *own* reserved words — unrelated to
+#       A3 host safety.)
+#   A4  `format` escaping — LOWERING TRANSFORM. Literal `$N` lowers to `$$N`;
+#       there is nothing to refuse. Positive tests:
+#       test_a4_literal_dollars_are_escaped, test_plain_string_dollar_is_literal.
+#   A5  compensation accompanies an emission — BY CONSTRUCTION. `compensate` is
+#       an *optional* slot (DESIGN.md §3.5: an emission "may declare" one) that
+#       the grammar binds only to an `emit`, and `emit` requires an `emission`
+#       (G4). There is no "compensation required but missing" program. Positive
+#       test: test_a5_compensate_lowering.
+#   A7  emission flags — ADVISORY to backends; enforcement is G4 itself
+#       (docs/contract-errata.md A7). Covered by g4_unmarked_emission.rvl and
+#       g4_emission_not_declared.rvl.
+
 
 def test_every_rejection_file_is_covered():
     on_disk = {p.name for p in (EXAMPLES / "rejections").glob("*.rvl")}
