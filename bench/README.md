@@ -19,7 +19,10 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   variant (extern host blocks).
 - `run.py` — orchestrator: prompt → model → extract code → compile with the
   real checker → on error, feed the compiler message back and retry (up to
-  `--max-iters`, default 3).
+  `--max-iters`, default 3). **Costs real money.**
+- `rescore.py` — recompiles the *already committed* generations against the
+  current checker. No model, no provider, no cost. This is how a language
+  change is measured against a fixed corpus.
 - `results/<label>/` — per-attempt `.rvl` files, `results.jsonl`,
   `summary.md`. Committed runs are the record; the directory is not
   gitignored on purpose.
@@ -50,6 +53,29 @@ Useful flags:
 Cost: with DeepSeek V4 Pro the full matrix (~90–150 calls) lands around
 **$0.50**. Runtime is dominated by model latency, roughly 10–30 minutes.
 
+## Re-scoring without spending anything
+
+```bash
+python3 bench/rescore.py                       # typed run, attempt-1
+python3 bench/rescore.py --run all             # both model runs
+python3 bench/rescore.py --compiler-root DIR   # score a pinned export instead
+```
+
+It prints, per run: per-variant first-pass compile counts, a failure taxonomy
+bucketed by the compiler's own diagnostic code/category, and the list of
+failing cells. Every table names the compiler sha it was measured at, so a
+published number can be traced back to a commit. `--json` writes per-cell
+records for further analysis.
+
+The headline is `attempt-1` only — the file the model produced before it ever
+saw a compiler message. Later attempts are the error-feedback loop.
+
+Note what a re-score can and cannot say. It measures **the corpus against a
+compiler**, so it is the right tool for "did this language change break
+previously-accepted code?". It is *not* a current model-capability figure: the
+generations were produced against older prompts and an older checker, and no
+prompt fix can retroactively improve them. Only a fresh `run.py` does that.
+
 ## Reading the results
 
 `summary.md` per run reports, per variant: first-pass compile rate,
@@ -68,3 +94,11 @@ Caveats worth keeping in mind:
   is exactly the controlled comparison §10 wants.
 - One model ≠ "several models". Re-run with `-m`/`-P` per model cline can
   reach and compare summaries.
+- A spec is only meaningful if it is *satisfiable* under the current checker.
+  Seven specs (`03`, `15`, `16`, `17`, `22`, `27`, `29`) pinned an operation as
+  plain `fn` while the brief instructed the model to emit inside it; when G4
+  gained its upper-bound direction (a service declaration bounds what its
+  providers may do) those specs became impossible to satisfy without
+  contradicting the "use these interfaces verbatim" instruction. They now
+  declare `emission fn`. When a language rule changes, re-check the specs
+  against it — a benchmark that cannot be passed measures nothing.

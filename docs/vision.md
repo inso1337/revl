@@ -44,6 +44,24 @@ component owned, which `dlopen`/`dlclose` cannot promise):
 One `.rvl` source, one IR, five emitters. The [2.0 roadmap](v2.0-roadmap.md)
 tracks per-tier coverage.
 
+Where each "what it proves" is actually proved — a claim in this project gets
+a command or it gets softened:
+
+| tier | gate | note |
+|---|---|---|
+| cordis-py | `cd backends/python && .venv/bin/pytest -q` | R1–R5 against the real runtime; needs `setup.sh` |
+| cordis (TS) | `cd backends/typescript && npm ci && npx vitest run` | same IR, second host |
+| cordis-wasm | `pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q` | executes on real `wasmtime`; skips without it |
+| cordis-rs, cordis4j | `pytest backends/rust/test_emit_rust.py backends/java/test_emit_java.py -q` | needs cargo + a JDK; skips loudly otherwise |
+
+What every tier can and cannot *express* is measured by
+`python3 tools/conformance.py` and recorded in
+[conformance.md](conformance.md); `--validate` additionally hands each tier's
+output to that tier's real compiler. Composing tiers across a process seam
+(`--placement`, [interop-bridge.md](interop-bridge.md)) is demonstrated by the
+`demo/bridge_*` scripts and not covered by a test — only the static
+transport-safety verdict is (`tests/test_distribute.py`).
+
 ## The honest scope — what this does *not* claim
 
 - **Not a general-purpose application language.** revl writes *components*;
