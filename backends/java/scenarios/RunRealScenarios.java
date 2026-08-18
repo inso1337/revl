@@ -34,6 +34,15 @@ public final class RunRealScenarios {
         }
     }
 
+    private static void expectNoPendingJobs(String scenario) {
+        long pending = revl.Components.Job.pending();
+        if (pending != 0L) {
+            System.err.println(scenario + ": " + pending + " job(s) still pending — "
+                + "the `await` step evaluated the call without joining the handle");
+            System.exit(1);
+        }
+    }
+
     private static Context freshRoot() {
         LOG.clear();
         Context root = Contexts.create();
@@ -92,10 +101,17 @@ public final class RunRealScenarios {
 
         // A1 boundary shape through the real async path.
         root = freshRoot();
+        revl.Components.Job.reset();
         d = root.pluginAsync(new revl.Components.BoundaryPlugin());
         expect("boundary activation", "do:a", "do:b", "emit:post");
+        // Crossing the boundary means *joining* the handle: the emitter used
+        // to lower the step to a bare `Job.run("boundary");`, which starts the
+        // job and drops the handle, so activation returned with the job still
+        // in flight on cordis4j. Job.pending() makes that residue countable.
+        expectNoPendingJobs("boundary activation");
         d.dispose();
         expect("boundary teardown", "do:a", "do:b", "emit:post", "undo:b", "undo:a");
+        expectNoPendingJobs("boundary teardown");
 
         System.out.println("REAL_SCENARIOS_OK");
     }
