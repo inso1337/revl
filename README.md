@@ -58,10 +58,10 @@ component UserCache requires db: Database provides cache: Cache {
   compiler (`tsc`, `cargo check`, `javac`, `wasmtime`, and a scope walk for
   python), because "the emitter did not raise" never implied "the code
   compiles": that gap hid a rust bug for months, a TypeScript twin of it, and
-  13 java cases that emit code `javac` rejects. python, typescript and wasm
-  validate clean; the java findings are baselined in
-  `tests/test_conformance_validate.py` so the suite fails on new breakage
-  instead of being switched off.
+  16 cases that emit code their own compiler rejects (13 java, 3 rust).
+  python, typescript and wasm validate clean; the rest are baselined in
+  `tests/test_conformance_validate.py`, which fails on new breakage *and* on
+  a baselined case that starts passing, so the list can only shrink.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
   cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)

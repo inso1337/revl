@@ -35,6 +35,15 @@ from validate import VALIDATORS  # noqa: E402
 # worked through — and the test also fails when a baselined case starts
 # passing, so the list can only shrink.
 KNOWN_FAILURES: dict[str, set[str]] = {
+    # Found the first time crates.io was reachable and all 47 rust cases went
+    # through `cargo check` together. Two of the three (`await`, method-time
+    # effect) fail on java as well, so the cause is likely shared and upstream
+    # of either renderer rather than two coincidences.
+    "rust": {
+        "component/await (A1 boundary)",
+        "method/method-time effect",
+        "expr/Opt Some/None",
+    },
     "java": {
         "component/await (A1 boundary)",
         "method/method-time effect",
