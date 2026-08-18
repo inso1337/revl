@@ -532,3 +532,156 @@ def test_provide_method_with_no_declared_return_needs_none():
                         "component M provides sink: Sink {\n"
                         "  provide sink { fn ping(key) { let n = key } }\n}")
     assert ir["components"][0]["name"] == "M"
+
+
+# ---- `type X = Y` is a transparent alias ----------------------------------
+#
+# It used to parse as a one-case variant whose single case was named `Y`, so
+# `type Sku = Str` made the author's own alias unusable (`f("abc")` refused for
+# a `Sku` parameter) while `return Str` was accepted as a case constructor.
+#
+# syntax-2.0's governing principle is that no construct may exist in both
+# languages with silently different meaning, so the split follows TypeScript's
+# own (verified against tsc --strict):
+#   `type Sku = string`             tsc: compiles, transparent both ways
+#   `type Sku = Ident`   (undecl.)  tsc: error TS2304 "Cannot find name"
+#   `type K = Ident | Keyword`      tsc: error TS2304
+# Where TypeScript compiles it, revl now means the same thing. Where
+# TypeScript rejects it, revl keeps its variant reading — there is no shared
+# meaning to diverge from.
+
+def test_alias_accepts_its_target_type():
+    ir = compile_source('type Sku = Str\n'
+                        'fn f(s: Sku) -> Sku { return s }\n'
+                        'fn g() -> Sku { return f("abc") }')
+    assert len(ir["functions"]) == 2
+
+
+def test_alias_is_transparent_in_both_directions():
+    # `Str` flows into a `Sku` position and back out, exactly as in TypeScript
+    ir = compile_source("type Sku = Str\n"
+                        "fn out(s: Sku) -> Str { return s }\n"
+                        "fn into(s: Str) -> Sku { return s }")
+    assert [f["returns"] for f in ir["functions"]] == ["Str", "Str"]
+
+
+def test_alias_name_is_no_longer_a_case_constructor():
+    # the second half of the bug: `Str` resolved as the variant's nullary case
+    err = _err("type Sku = Str\nfn g() -> Sku { return Str }")
+    assert "`Str` is not declared in this function" in err
+
+
+def test_alias_does_not_weaken_checking():
+    err = _err("type Sku = Str\nfn f(s: Sku) -> Int { return s }")
+    assert "this function's return expects `Int`, got `Str`" in err
+
+
+def test_alias_targets_records_variants_and_applications():
+    ir = compile_source("""
+type Row = { id: Int }
+type Status = Active | Retired
+type RowAlias = Row
+type StatusAlias = Status
+type Rows = List[Row]
+type MaybeRow = Row?
+fn a(r: RowAlias) -> Int { return r.id }
+fn b(s: StatusAlias) -> Int { return match s { Active => 1, Retired => 2 } }
+fn c(rs: Rows) -> Int { return rs[0].id }
+fn d(m: MaybeRow) -> Opt[Row] { return m }
+""")
+    assert len(ir["functions"]) == 4
+
+
+def test_alias_resolves_transitively_and_under_constructors():
+    ir = compile_source("type Sku = Str\ntype Code = Sku\n"
+                        "fn f(xs: List[Code]) -> Str { return xs[0] }")
+    assert ir["functions"][0]["params"] == [{"name": "xs", "type": "List[Str]"}]
+
+
+def test_alias_is_erased_from_the_ir_at_every_declaration_site():
+    # transparency means the alias never reaches the type table, the IR or a
+    # backend — an emitted `Sku` would name a type no tier defines
+    import json
+    ir = compile_source("""
+type Sku = Str
+type Row = { id: Int, sku: Sku }
+service Catalog { fn lookup(sku: Sku) -> Opt[Row] }
+fn tag(s: Sku) -> Str { return s }
+component Store provides catalog: Catalog {
+  config { prefix: Sku = "sku-" }
+  provide catalog { fn lookup(sku: Sku) -> Opt[Row] { return None } }
+}
+""")
+    assert "Sku" not in json.dumps(ir)
+    assert ir["types"]["Row"]["fields"]["sku"] == "Str"
+    assert ir["services"]["Catalog"]["methods"]["lookup"]["params"][0]["type"] == "Str"
+    assert ir["functions"][0]["params"][0]["type"] == "Str"
+    assert ir["components"][0]["config"][0]["type"] == "Str"
+
+
+def test_alias_cycle_is_refused():
+    err = _err("type Handle = Ref\ntype Ref = Handle\nfn f(h: Handle) -> Int { return 1 }")
+    assert "type alias cycle: Handle -> Ref -> Handle" in err
+
+
+def test_union_type_is_refused_with_a_naming_diagnostic():
+    err = _err("type Row = { id: Int }\ntype Payload = List[Row] | Str\n"
+               "fn f(p: Payload) -> Int { return 1 }")
+    assert "revl has no union types" in err
+
+
+def test_alias_cannot_carry_type_parameters():
+    err = _err("type P[T] = List[T]\nfn f(p: P) -> Int { return 1 }")
+    assert "type alias `P` cannot declare type parameters" in err
+
+
+def test_alias_target_is_wellformed_checked_at_the_declaration():
+    # not merely where the alias is used
+    err = _err("type Bad = Opt\nfn f(x: Int) -> Int { return x }")
+    assert "`Opt` takes 1 type argument(s), got 0" in err
+
+
+# false positives: every legal spelling the alias rule must not touch
+
+def test_genuine_enum_still_works():
+    ir = compile_source("type TokenKind = Ident | Keyword | IntLit\n"
+                        "fn f(t: TokenKind) -> Int {\n"
+                        "  return match t { Ident => 1, Keyword => 2, IntLit => 3 } }")
+    assert ir["types"]["TokenKind"]["kind"] == "variant"
+
+
+def test_adt_with_payloads_and_shadowed_builtin_cases_still_works():
+    # the documented idiom where user cases shadow built-in `Ok`/`Err`
+    ir = compile_source("""
+type Row = { id: Int }
+type Outcome = Ok(Row) | NotFound | Invalid(Str)
+fn f(o: Outcome) -> Int {
+  return match o { Ok(r) => r.id, NotFound => 0, Invalid(s) => s.length }
+}""")
+    assert [c["name"] for c in ir["types"]["Outcome"]["cases"]] == \
+        ["Ok", "NotFound", "Invalid"]
+
+
+def test_single_case_newtype_with_a_payload_is_not_an_alias():
+    ir = compile_source("type Wrapper = Wrap(Int)\n"
+                        "fn f(w: Wrapper) -> Int { return match w { Wrap(n) => n } }")
+    assert ir["types"]["Wrapper"]["kind"] == "variant"
+
+
+def test_single_nullary_undeclared_case_stays_an_opaque_nominal():
+    # `type Status = Pending` is how an opaque nominal is spelled, and is
+    # exactly where TypeScript errors — so revl keeps its own meaning
+    ir = compile_source("type Status = Pending\n"
+                        "fn f(s: Status) -> Int { return match s { Pending => 1 } }")
+    assert ir["types"]["Status"]["kind"] == "variant"
+
+
+def test_alias_does_not_collide_with_implicit_type_parameters():
+    # a one-letter *alias* resolves to its target; a one-letter *undeclared*
+    # name in a signature stays that fn's type parameter
+    err = _err('type S = Str\nfn f(x: S) -> S { return x }\n'
+               'fn g() -> Int { return f("a") }')
+    assert "this function's return expects `Int`, got `Str`" in err
+    ir = compile_source('type S = Str\nfn f(x: S) -> S { return x }\n'
+                        'fn g() -> Str { return f("a") }')
+    assert ir["functions"][0]["returns"] == "Str"

@@ -98,7 +98,16 @@ none of them named by any fence. Each closure is verified against `javac
   `slice`;
 - a `match` arm naming something that is not a case of the scrutinee's ADT
   (java "cannot find symbol", rust `EmitError`);
-- generic instantiation at the call site (below).
+- generic instantiation at the call site (below);
+- **`type X = Y` silently meaning something other than an alias.** It parsed as
+  a one-case variant whose single case was named `Y`, so `type Sku = Str` made
+  the author's own alias unusable (`f("abc")` was refused for a `Sku`
+  parameter) while `fn g() -> Sku { return Str }` was accepted, `Str` having
+  resolved as that variant's nullary case constructor. This was the governing
+  principle's own failure case — `type X = Y` is TypeScript's alias spelling
+  and revl gave it a different meaning with no diagnostic — and a live trap for
+  importers, since a WIT `type sku = string` transcribed naively was quietly
+  wrong. Now a transparent alias; see below for where the line falls.
 
 Arrow bodies are now checked against their enclosing scope, which is where the
 first four used to hide. Do not re-fence any of these; each has an executable
@@ -145,6 +154,34 @@ rejection.
   deliberately opaque, since service returns are host-shaped). Closing it needs
   explicit type-parameter syntax in the parser.
 
+- **Type aliases are transparent, and the alias/variant line is drawn where
+  TypeScript's own is** (closed, recorded because the rule is subtle): `type X
+  = Y` is an alias exactly when `Y` names an existing type — a builtin, a
+  declared record/variant/alias, a type application (`List[Row]`), or the `T?`
+  sugar. It is then substituted at every declaration site and its declaration
+  erased, so no alias name reaches the type table, the IR or a backend. When
+  `Y` is *undeclared*, the one-case-variant reading stands: `type Status =
+  Pending` is still how an opaque nominal is spelled, and a payload always
+  makes a newtype (`type W = Wrap(Int)`), never an alias.
+
+  The split is not arbitrary — it is TypeScript's, verified against `tsc
+  --strict`: `type Sku = string` compiles and is transparent in both
+  directions, while `type Sku = Ident` and `type K = Ident | Keyword` with
+  undeclared names are hard errors (TS2304). So revl now agrees with
+  TypeScript everywhere TypeScript compiles, and is free to mean its own thing
+  only where TypeScript refuses — which is exactly what the governing
+  principle asks for. Transparent rather than nominal for the same reason: a
+  nominal alias would need construction syntax revl does not have, and would
+  re-commit the sin by giving TypeScript's spelling a different meaning.
+
+  Consequences worth knowing: an alias cannot carry type parameters (there is
+  nothing to instantiate), an alias cycle is refused rather than looped on, and
+  `List[Row] | Str` is refused with "revl has no union types" — `|` separates
+  variant *cases*, which are constructor names, not types. The interaction with
+  implicit type parameters resolves in the alias's favour and does so before
+  the signature table is built: `type S = Str` makes `S` mean `Str`, while an
+  undeclared one-letter name in a signature is still that fn's type parameter.
+
 - **A `match` over an untypable scrutinee stays best-effort** (frontier,
   unchanged): case-name and exhaustiveness checks need the scrutinee's ADT.
   When it is not recoverable — a host-valued local, an arrow result — both
@@ -179,7 +216,7 @@ sampled.
   `tests/test_frontend.py` (`test_a3_host_colliding_names_are_renamed`,
   `test_a4_literal_dollars_are_escaped`, `test_a5_compensate_lowering`).
 - **A7** is advisory; its enforcement is G4 itself (`g4_unmarked_emission.rvl`).
-- **T1–T17** are the type-soundness refusals. `t8`–`t17` were added with the
+- **T1–T19** are the type-soundness refusals. `t8`–`t19` were added with the
   typing follow-ups above and are deliberately paired: each rejection file
   states the tier error it prevents, and `tests/test_typesafety.py` asserts
   both the refusal *and* the legal spellings it must not touch (a `fn`
