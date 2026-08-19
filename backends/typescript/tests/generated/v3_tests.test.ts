@@ -21,13 +21,24 @@ function revlEq(a: unknown, b: unknown): boolean {
     && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
 }
 
-export function add(a: number, b: number): number {
+function revlShow(v: unknown): string {
+  if (typeof v === 'bigint') return v.toString()
+  if (typeof v === 'number') return String(v)
+  if (Array.isArray(v)) return '[' + v.map(revlShow).join(', ') + ']'
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return '{' + Object.keys(o).map((k) => JSON.stringify(k) + ': ' + revlShow(o[k])).join(', ') + '}'
+  }
+  return JSON.stringify(v) ?? String(v)
+}
+
+export function add(a: bigint, b: bigint): bigint {
     return (a + b)
 }
 
 it("add works", () => {
-    { const l = add(1, 2), r = 3;
-      expect(revlEq(l, r), "add(1, 2) == 3" + "\n  left  = " + JSON.stringify(l) + "\n  right = " + JSON.stringify(r)).toBe(true) }
+    { const l = add(1n, 2n), r = 3n;
+      expect(revlEq(l, r), "add(1n, 2n) == 3n" + "\n  left  = " + revlShow(l) + "\n  right = " + revlShow(r)).toBe(true) }
 })
 
 it("bool works", () => {

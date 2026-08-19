@@ -221,10 +221,12 @@ it cannot drift silently. **These are not fixed.**
   `div_euclid`, and both identities are asserted by execution over sixteen
   sign combinations. python builds the truncated form; every other tier had
   it natively.
-- **`Int` loses precision past 2^53 on TypeScript.** JS numbers are f64, so
-  `9007199254740993 - 9007199254740992` is `0`. python is arbitrary-precision
-  and rust is `i64`. Unlike the other two this needs `BigInt`, not a type
-  annotation.
+- **`Int` lost precision past 2^53 on TypeScript** (closed). JS numbers are
+  f64, so `9007199254740993 - 9007199254740992` was `0`. python is
+  arbitrary-precision and rust is `i64`. Unlike the other two this needed
+  `BigInt`, not a type annotation — `Int` now maps to `bigint` on that tier,
+  which imposes the 64-bit bound and traps on overflow the way python does.
+  docs/arithmetic.md records the Int/Float boundary rules the port settled.
 
 **The root cause is closed.** An IR `bin` node used to carry `op`, `left` and
 `right` and *no type*, so no backend could distinguish `Int / Int` from
@@ -234,7 +236,9 @@ are distinct, and cannot work on TypeScript, where both are `number`. `/` and
 determine it. The annotation is additive and v1 documents are untouched, so
 the frozen-reference invariant holds.
 
-`%` and the `Int` width remain open, and are the two decisions left.
+`%` and the `Int` width are both settled now (docs/arithmetic.md): `%` is
+the truncated remainder, and `Int` is 64-bit two's complement with a
+trapping overflow on every tier but wasm, which is still `i32`.
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins

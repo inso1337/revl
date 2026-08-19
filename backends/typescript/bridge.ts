@@ -50,7 +50,40 @@ function isNativeAdt(o: Record<string, unknown>): boolean {
   return typeof o.kind === 'string' && Object.keys(o).every((k) => k === 'kind' || k === 'value')
 }
 
+/** `Int` is a `bigint` on this tier, and the wire says `Int` crosses as a JSON
+ *  *number* (docs/interop-bridge.md, "Canonical value encoding"). JSON.stringify
+ *  THROWS on a bigint, so it has to convert here — and it refuses rather than
+ *  rounding when the value is outside the range a JSON number holds exactly.
+ *  Rounding at a seam is the silent precision loss this tier's BigInt port
+ *  exists to remove; a 64-bit `Int` that does not fit the wire is a limit of
+ *  the wire, and it should say so rather than hand over a different number. */
+function bigintToWire(v: bigint): number {
+  if (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER)) {
+    throw new RangeError(
+      `revl: Int ${v} is outside the range a JSON number represents exactly ` +
+        `(docs/interop-bridge.md encodes Int as a number)`,
+    )
+  }
+  return Number(v)
+}
+
+/** Bigints in an outbound argument, and nothing else. The request path does
+ *  not run the ADT codec below — changing that is a cross-language decision,
+ *  not this tier's — so this only replaces a guaranteed throw. */
+function encodeBigInts(v: unknown): unknown {
+  if (typeof v === 'bigint') return bigintToWire(v)
+  if (Array.isArray(v)) return v.map(encodeBigInts)
+  if (v && typeof v === 'object' && !(v instanceof Map)) {
+    const o = v as Record<string, unknown>
+    const rec: Record<string, unknown> = {}
+    for (const k of Object.keys(o)) rec[k] = encodeBigInts(o[k])
+    return rec
+  }
+  return v
+}
+
 export function encodeValue(v: unknown): unknown {
+  if (typeof v === 'bigint') return bigintToWire(v)
   if (Array.isArray(v)) return v.map(encodeValue)
   if (v && typeof v === 'object' && !(v instanceof Map)) {
     const o = v as Record<string, unknown>
@@ -83,7 +116,7 @@ export function decodeValue(v: unknown): unknown {
 }
 
 function syncCall(socketPath: string, key: string, method: string, args: unknown[]): unknown {
-  const request = JSON.stringify({ key, method, args })
+  const request = JSON.stringify({ key, method, args: args.map(encodeBigInts) })
   const out = execFileSync(process.execPath, ['-e', CLIENT_SRC], {
     env: { ...process.env, BRIDGE_SOCK: socketPath, BRIDGE_REQ: request },
     encoding: 'utf8',

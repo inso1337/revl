@@ -18,7 +18,9 @@ const generated = join(backend, 'tests', 'generated', 'conformance.ts')
 
 beforeEach(() => resetHost())
 
-async function withCalc(config?: { limit?: number }) {
+// `Int` is a bigint on this tier (docs/arithmetic.md), so the config field,
+// every argument and every result below is one.
+async function withCalc(config?: { limit?: bigint }) {
   const ctx = new Context()
   const store = await ctx.plugin(Memory)
   const calc = await ctx.plugin(Guarded, config ?? {})
@@ -28,7 +30,7 @@ async function withCalc(config?: { limit?: number }) {
 describe('gap 2 — calling a top-level fn from a component body', () => {
   it('lowers the `fn` call node and calls the emitted function', async () => {
     const { ctx, dispose } = await withCalc()
-    expect(ctx.calc.twice(21)).toBe(42)
+    expect(ctx.calc.twice(21n)).toBe(42n)
     await dispose()
   })
 
@@ -73,7 +75,7 @@ describe('gap 2 — calling a top-level fn from a component body', () => {
 
 describe('gap 5a — `if` / `fail` steps in a component body', () => {
   it('activates when the guard passes', async () => {
-    const { ctx, dispose } = await withCalc({ limit: 10 })
+    const { ctx, dispose } = await withCalc({ limit: 10n })
     expect(ctx.calc).toBeDefined()
     await dispose()
   })
@@ -81,7 +83,7 @@ describe('gap 5a — `if` / `fail` steps in a component body', () => {
   it('refuses activation when the guard fails, and provides nothing', async () => {
     const ctx = new Context()
     const store = await ctx.plugin(Memory)
-    const guarded = ctx.plugin(Guarded, { limit: 0 })
+    const guarded = ctx.plugin(Guarded, { limit: 0n })
     await guarded.await().catch(() => undefined)
 
     // The body threw before reaching `ctx.provide`, so the key never appeared.
@@ -93,7 +95,7 @@ describe('gap 5a — `if` / `fail` steps in a component body', () => {
 
   it('emits the guard as a real branch rather than unconditional code', () => {
     const source = readFileSync(generated, 'utf-8')
-    expect(source).toContain('if ((config.limit < 1)) {')
+    expect(source).toContain('if ((config.limit < 1n)) {')
     expect(source).toContain('throw new Error("limit must be positive")')
   })
 })
@@ -101,32 +103,32 @@ describe('gap 5a — `if` / `fail` steps in a component body', () => {
 describe('gap 5b — `??` in a component body', () => {
   it('takes the left operand when the required service returns a value', async () => {
     const { ctx, dispose } = await withCalc()
-    expect(ctx.calc.orZero(8)).toBe(4)
+    expect(ctx.calc.orZero(8n)).toBe(4n)
     await dispose()
   })
 
   it('falls back when the required service returns None', async () => {
     const { ctx, dispose } = await withCalc()
-    expect(ctx.calc.orZero(0)).toBe(0)
+    expect(ctx.calc.orZero(0n)).toBe(0n)
     await dispose()
   })
 
   it('renders the component-dialect call on the left of the coalesce', () => {
     const source = readFileSync(generated, 'utf-8')
-    expect(source).toContain('return (ctx.store.lookup(k) ?? 0)')
+    expect(source).toContain('return (ctx.store.lookup(k) ?? 0n)')
   })
 })
 
 describe('gap 3 — `match` in a method body', () => {
   it('binds the payload of the matched arm', async () => {
     const { ctx, dispose } = await withCalc()
-    expect(ctx.calc.classify(7)).toBe(7)
+    expect(ctx.calc.classify(7n)).toBe(7n)
     await dispose()
   })
 
   it('takes the payload-free arm', async () => {
     const { ctx, dispose } = await withCalc()
-    expect(ctx.calc.classify(-1)).toBe(0)
+    expect(ctx.calc.classify(-1n)).toBe(0n)
     await dispose()
   })
 })
@@ -134,13 +136,13 @@ describe('gap 3 — `match` in a method body', () => {
 describe('gap 4 — a bare `return` for a void operation', () => {
   it('returns nothing at all', async () => {
     const { ctx, dispose } = await withCalc()
-    expect(ctx.calc.touch(1)).toBeUndefined()
+    expect(ctx.calc.touch(1n)).toBeUndefined()
     await dispose()
   })
 
   it('emits `return` with no value', () => {
     const source = readFileSync(generated, 'utf-8')
-    expect(source).toMatch(/touch\(x: number\) \{\n\s+return\n/)
+    expect(source).toMatch(/touch\(x: bigint\) \{\n\s+return\n/)
   })
 })
 

@@ -264,8 +264,9 @@ def test_typescript_emits_real_parameter_types_for_a_typed_arrow():
     out = _emitter("typescript").emit(compile_source(
         "fn apply_(g: (Int) -> Int, x: Int) -> Int { return g(x) }\n"
         "fn demo(n: Int) -> Int { return apply_(v => v + 1, n) }\n"))
-    assert "((v: number) =>" in out
-    assert "g: ((a0: number) => number)" in out
+    # `Int` is `bigint` on this tier (docs/arithmetic.md).
+    assert "((v: bigint) =>" in out
+    assert "g: ((a0: bigint) => bigint)" in out
 
 
 def test_typescript_still_writes_any_for_an_arrow_with_no_type():
@@ -280,7 +281,7 @@ def test_typescript_renders_a_function_typed_record_field():
     out = _emitter("typescript").emit(compile_source(
         "type Handler = { run: (Int) -> Str }\n"
         "fn f(h: Handler) -> Str { let r: (Int) -> Str = h.run  return r(1) }"))
-    assert "run: ((a0: number) => string)" in out
+    assert "run: ((a0: bigint) => string)" in out
 
 
 def test_python_renders_a_function_typed_record_field_as_callable():

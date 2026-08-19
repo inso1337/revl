@@ -21,7 +21,7 @@ function revlEq(a: unknown, b: unknown): boolean {
 }
 
 export interface Row {
-  id: number
+  id: bigint
   name: string
 }
 
@@ -47,22 +47,22 @@ export function greet(name: string): string {
   return "hello " + name
 }
 
-export function add(a: number, b: number): number {
+export function add(a: bigint, b: bigint): bigint {
     return (a + b)
 }
 
-export function classify(n: number): string {
-    if ((n < 0)) {
+export function classify(n: bigint): string {
+    if ((n < 0n)) {
       return "neg"
     }
-    return (revlEq(n, 0) ? "zero" : "pos")
+    return (revlEq(n, 0n) ? "zero" : "pos")
 }
 
-export function first(xs: number[]): number {
+export function first(xs: bigint[]): bigint {
     return xs[0]
 }
 
-export function makeRow(id: number, name: string): Row {
+export function makeRow(id: bigint, name: string): Row {
     return {id: id, name: name}
 }
 
@@ -96,14 +96,14 @@ export function negate(b: boolean): boolean {
     return (!b)
 }
 
-export function neg(n: number): number {
+export function neg(n: bigint): bigint {
     return (-n)
 }
 
-export function list(): number[] {
-    return [1, 2, 3]
+export function list(): bigint[] {
+    return [1n, 2n, 3n]
 }
 
-export function choose(b: boolean): number {
-    return (b ? 1 : 2)
+export function choose(b: boolean): bigint {
+    return (b ? 1n : 2n)
 }
