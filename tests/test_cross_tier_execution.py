@@ -53,7 +53,10 @@ test "inequality is the negation" { assert { id: 1, name: "a" } != { id: 2, name
 """,
 }
 
-FAST_TIERS = ("py", "ts")
+# go joins the fast set: the v3 tier is dependency-free Go, so `go test`
+# needs no network and runs in about a second — unlike cargo, which resolves
+# cordis-rs from the index.
+FAST_TIERS = ("py", "ts", "go")
 SLOW_TIERS = ("rust", "java")
 
 
@@ -130,11 +133,14 @@ def test_java_equality_goes_through_objects_equals():
 # to the IR contract, not a backend patch. See docs/contract-errata.md.
 
 DIVERGENCES = {
-    # TS numbers are f64, so Int arithmetic silently loses precision past 2^53.
-    # Unlike the others this needs BigInt, not a type annotation.
+    # `Int` has no stated width, and the tiers do not agree on one: python is
+    # arbitrary precision, rust/java/go are 64-bit, wasm is *i32*, and
+    # TypeScript is f64 — exact only to 2^53. TS is the one that loses
+    # precision silently here, and it needs BigInt rather than a type
+    # annotation. This is the open decision recorded in docs/arithmetic.md.
     "Int keeps precision past 2^53": (
         'test "p" { assert 9007199254740993 - 9007199254740992 == 1 }',
-        {"py": "pass", "ts": "fail", "rust": "pass"},
+        {"py": "pass", "ts": "fail", "rust": "pass", "go": "pass", "java": "pass"},
     ),
 }
 
@@ -365,3 +371,29 @@ def test_wasm_refuses_float_by_name():
     with pytest.raises((RevlError, Exception)) as failure:
         module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
     assert "Float" in str(failure.value)
+
+
+def test_go_equality_is_not_native_comparison():
+    """Go `==` is a *compile error* on slices ("slice can only be compared to
+    nil"), so a record holding a List cannot use it at all, and comparable
+    structs compare field-wise rather than structurally through references.
+    Non-scalars route through revlEq; scalars keep the native operator so the
+    common case costs nothing."""
+    emitted = _emit("go", PROBES["structural equality"])
+    assert "func revlEq(a, b any) bool" in emitted, emitted
+    assert "reflect.DeepEqual" in emitted
+
+
+def test_go_float_literals_are_typed():
+    """Go folds *untyped constant* arithmetic at arbitrary precision, so a bare
+    `0.1 + 0.2` equals exactly `0.3` at compile time — not IEEE 754 binary64.
+    Typing each literal forces ordinary float64 arithmetic."""
+    emitted = _emit("go", IEEE_FLOAT)
+    assert "float64(0.1)" in emitted, emitted
+
+
+def test_go_true_division_goes_through_a_function():
+    """Go rejects a *constant* `1.0 / 0.0` at compile time where IEEE defines
+    +Inf, and `/` on two int64 is integer division. The helper is both fixes."""
+    emitted = _emit("go", IEEE_FLOAT)
+    assert "func revlDiv(a, b float64) float64" in emitted

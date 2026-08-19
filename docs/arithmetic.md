@@ -89,12 +89,41 @@ than inheriting a host rule:
 | rust | native `/` | built | `div_euclid` | `rem_euclid().abs()` |
 | java | native `/` | `Math.floorDiv` | built | `Math.floorMod(a, abs(b))` |
 | wasm | native `i32.div_s` | `$int_div_floor` | `$int_div_euclid` | `$int_mod` |
+| go | native `/` | `revlDivFloor` | `revlDivEuclid` | `revlMod` |
 
 All eight identities in `tests/test_cross_tier_execution.py`
 (`INTEGER_ARITHMETIC`) are asserted by **executing** the emitted code, not by
 comparing emitter output — python and TypeScript on every run, rust and java
 behind `REVL_CROSS_TIER_SLOW=1`, and the wasm helpers verified on real
 `wasmtime`.
+
+
+### What the Go tier needed
+
+Go arrived after this was specified, which made it a fair test of whether the
+spec was written down well enough to port to. Four things it did not get for
+free, each the same family as a bug already closed on another tier:
+
+- **`==` is a compile error on slices** ("slice can only be compared to nil"),
+  so a record holding a `List` cannot use it at all, and comparable structs
+  compare field-wise. Non-scalars route through `revlEq`
+  (`reflect.DeepEqual`); scalars keep the native operator, so the common case
+  costs nothing. `DeepEqual` compares `float64` with `==`, so NaN stays
+  unequal to itself as IEEE requires.
+- **`/` on two `int64` is integer division**, and a *constant* `1.0 / 0.0` is
+  a **compile error** where IEEE defines `+Inf`. Both are fixed by routing
+  through `revlDiv(a, b float64)`: a call is not a constant expression, so it
+  is an ordinary runtime float division.
+- **Untyped constant arithmetic is arbitrary precision.** `0.1 + 0.2` folds to
+  exactly `0.3` at compile time and compares equal to it — which is *not*
+  IEEE 754 binary64. Every float literal is emitted as `float64(...)` to force
+  ordinary float arithmetic. This one is unique to Go so far, and it is the
+  kind of divergence only execution finds.
+- The four named integer operations, of which `div_trunc` is native (Go `/`
+  truncates) and `%` was already correct.
+
+Integer division by zero panics, which is the uniform fault the other tiers
+give.
 
 ## What makes this expressible: the IR carries operand types
 
@@ -186,9 +215,10 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
 
 ## Still open
 
-- **`Int` has no stated width, and overflow is unspecified.** `MAX + 1` grows
-  on python, faults on rust, and silently loses precision on TypeScript past
-  2^53. A language offering compile-time guarantees should not leave silent
+- **`Int` has no stated width, and overflow is unspecified.** The tiers do not
+  agree: python is arbitrary precision, rust/java/go are 64-bit, **wasm is
+  i32**, and TypeScript is f64 — exact only to 2^53. `MAX + 1` grows on
+  python, faults on rust, and silently loses precision on TypeScript. A language offering compile-time guarantees should not leave silent
   wraparound to the host.
 - **A total, value-returning form.** `checked_div_*` returning
   `Result[Int, _]` would let a program handle a zero divisor without faulting.
