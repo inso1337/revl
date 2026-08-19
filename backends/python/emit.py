@@ -294,6 +294,20 @@ class _ComponentEmitter:
             target = self._expr(expr.get("target"), where)
             args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
             return f"(None if ({target}) is None else ({target}).{method}({args}))"
+        if kind == "spawn":
+            # instance-parametric components (docs/design-v2-instances.md):
+            # `spawn(ctx, <Component>, {config}, (realms,))` plugs a fresh child
+            # instance, each provided key isolated into its own local realm. The
+            # target is a module-level plugin dict emitted like any component.
+            self.uses.add("spawn")
+            target = expr.get("component")
+            if not isinstance(target, str) or not target.isidentifier():
+                raise EmitError(f"{where}: bad spawn component {target!r}")
+            cfg = "{" + ", ".join(
+                f"{k!r}: {self._expr(v, where)}"
+                for k, v in (expr.get("config") or {}).items()) + "}"
+            realms = tuple(expr.get("realms") or ())
+            return f"spawn(ctx, {target}, {cfg}, {realms!r})"
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
     # -- steps --------------------------------------------------------------

@@ -33,9 +33,9 @@ from typing import Any, Callable, Optional
 
 __all__ = [
     "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
-    "JobHandle", "Map", "Pool", "PoolError", "add_trace", "arm_fault_probe",
-    "disarm_fault_probe", "fmt", "plug", "realm_label",
-    "remove_trace", "resolved_config", "set_trace", "trace_observers",
+    "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "add_trace",
+    "arm_fault_probe", "disarm_fault_probe", "fmt", "plug", "realm_label",
+    "remove_trace", "resolved_config", "set_trace", "spawn", "trace_observers",
 ]
 
 
@@ -78,6 +78,62 @@ def plug(ctx, component: dict, config=None):
     for key, realm in (component.get("isolate") or {}).items():
         scoped = scoped.isolate(key, realm_label(realm))
     return scoped.plugin(component, config)
+
+
+# ---------------------------------------------------------------------------
+# instance-parametric components (docs/design-v2-instances.md)
+# ---------------------------------------------------------------------------
+
+
+class SpawnHandle:
+    """The value a `spawn` acquisition binds: a live component instance, torn
+    down by its own `.dispose()`.
+
+    The instance is a child fiber of its spawner — its own nested teardown
+    scope (item zero). `dispose()` unloads that fiber, running the instance's
+    LIFO teardown *now*, independent of the spawner: a request-scoped instance
+    is reclaimed when the request ends, never deferred to the component's
+    teardown. Disposal is idempotent, so the spawner's own inverse
+    (`yield lambda: s.dispose()`, or the frame-adopted safety net for a
+    method-body spawn) is a harmless no-op once the instance is already gone."""
+
+    __slots__ = ("_fiber", "component", "_disposed")
+
+    def __init__(self, fiber, component: str) -> None:
+        self._fiber = fiber
+        self.component = component
+        self._disposed = False
+
+    def dispose(self):
+        """Unload the instance's fiber (its LIFO teardown). Returns the
+        runtime's awaitable so a caller in an async context can `await` the
+        reclamation; the emitted inverse is drained through the effect
+        protocol, which already awaits an awaitable disposer."""
+        if self._disposed:
+            return None
+        self._disposed = True
+        return self._fiber.dispose()
+
+    def get(self, key: str):
+        """Read a provision the instance published, in *its* local realm.
+        Only the spawner (which holds this handle) can reach it — a sibling
+        instance, isolated into a different local realm, cannot (supervision-
+        tree addressing, decision 1/2)."""
+        return self._fiber.ctx.get(key)
+
+
+def spawn(ctx, component: dict, config, realms):
+    """Instantiate `component` at runtime as a child of the spawner, each key
+    it provides isolated into a *fresh* LOCAL realm (unlabeled `ctx.isolate`,
+    which mints a distinct identity per call). Two instances of one component
+    therefore never collide on a provision — disjoint by construction, no
+    config value known at link time (decision 3/5). Returns a
+    :class:`SpawnHandle`."""
+    scoped = ctx
+    for key in realms or ():
+        scoped = scoped.isolate(key)  # no label -> a fresh local realm per spawn
+    fiber = scoped.plugin(component, dict(config or {}))
+    return SpawnHandle(fiber, component.get("name"))
 
 
 # ---------------------------------------------------------------------------
