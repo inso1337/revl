@@ -85,6 +85,20 @@ class _Lines:
         return "\n".join(self._lines)
 
 
+def _uses_bounded_int(node) -> bool:
+    """Does this IR do Int `+`, `-` or `*`? The bound check is emitted only
+    where it is needed, so modules that never do Int arithmetic are
+    unchanged."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int"):
+            return True
+        return any(_uses_bounded_int(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_bounded_int(v) for v in node)
+    return False
+
+
 def _uses_true_division(node) -> bool:
     """Does anything in this IR divide with `/`? The IEEE helper is emitted
     only where it is used, so modules that never divide stay unchanged."""
@@ -772,6 +786,14 @@ def _expr(node: dict) -> str:
             lhs = _expr(node["left"])
             rhs = _expr(node["right"])
             return f"({rhs} if {lhs} is None else {lhs})"
+        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int":
+            # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md).
+            # python is arbitrary precision, so it is the tier that has to
+            # *impose* the bound rather than detect it — without this, a
+            # program that overflows on every other tier quietly succeeds here,
+            # which is the reference tier disagreeing with all five others.
+            return (f"_revl_i64({_expr(node['left'])} {node['op']} "
+                    f"{_expr(node['right'])})")
         if node["op"] == "/":
             # true division, IEEE at zero (docs/arithmetic.md)
             return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
@@ -1319,6 +1341,18 @@ def emit(ir: dict) -> str:
     if lifecycle:
         out.add(0, "import asyncio as _revl_asyncio")
         out.add(0, "import inspect as _revl_inspect")
+        out.add(0)
+    if _uses_bounded_int(ir):
+        out.add(0, "_REVL_I64_MIN = -(2 ** 63)")
+        out.add(0, "_REVL_I64_MAX = 2 ** 63 - 1")
+        out.add(0)
+        out.add(0, "def _revl_i64(v):")
+        out.add(0, '    """Int is bounded 64-bit and overflow traps. python is '
+                   'arbitrary"""')
+        out.add(0, '    """precision, so the bound is imposed here."""')
+        out.add(0, "    if v < _REVL_I64_MIN or v > _REVL_I64_MAX:")
+        out.add(0, "        raise OverflowError('revl: Int overflow')")
+        out.add(0, "    return v")
         out.add(0)
     if _uses_true_division(ir):
         # `/` is IEEE true division (docs/arithmetic.md): a zero divisor gives

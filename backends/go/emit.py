@@ -856,6 +856,7 @@ class _V3GoCtx:
         self.needs_reflect = False      # structural `==` on a non-scalar
         self.needs_float_div = False    # `/` (true division, IEEE at zero)
         self.needs_int_arith = False    # div_floor / div_euclid / mod
+        self.needs_overflow = False     # trapping + - * on Int
         for name, spec in self.types.items():
             if spec.get("kind") == "record":
                 key = tuple(sorted((spec.get("fields") or {}).keys()))
@@ -1087,6 +1088,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                 ctx.needs_reflect = True
                 call = f"revlEq({left}, {right})"
                 return call if op in ("==", "===") else f"(!{call})"
+        if op in ("+", "-", "*") and node.get("operands") == "Int":
+            # Int overflow traps (docs/arithmetic.md). Go has no checked
+            # arithmetic in the standard library, so the helpers detect it.
+            ctx.needs_overflow = True
+            helper = {"+": "revlAdd", "-": "revlSub", "*": "revlMul"}[op]
+            return f"{helper}({left}, {right})"
         if op == "/":
             # `/` is true division and yields Float (docs/arithmetic.md). Go
             # `/` on two int64 is integer division, and a *constant* `1.0/0.0`
@@ -1749,6 +1756,34 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         # at compile time, where IEEE defines +Inf. Through a call it is an
         # ordinary runtime float division, which is what revl specifies.
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_overflow:
+        out.append("func revlAdd(a, b int64) int64 {")
+        out.append("\ts := a + b")
+        out.append("\tif (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn s")
+        out.append("}")
+        out.append("")
+        out.append("func revlSub(a, b int64) int64 {")
+        out.append("\td := a - b")
+        out.append("\tif (b < 0 && d < a) || (b > 0 && d > a) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn d")
+        out.append("}")
+        out.append("")
+        out.append("func revlMul(a, b int64) int64 {")
+        out.append("\tif a == 0 || b == 0 {")
+        out.append("\t\treturn 0")
+        out.append("\t}")
+        out.append("\tp := a * b")
+        out.append("\tif p/b != a {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn p")
+        out.append("}")
         out.append("")
     if ctx.needs_int_arith:
         out.append("func revlDivFloor(a, b int64) int64 {")

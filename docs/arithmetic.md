@@ -170,7 +170,53 @@ a digit follows, so a method call on an integer is never mistaken for one:
   code that assumes a total order — sorting, binary search — is wrong on Float
   unless it excludes NaN first.
 
-### Division by zero
+#
+## `Int` is 64-bit two's complement, and overflow traps
+
+Silent wraparound is the failure mode revl exists to remove, so `Int` has a
+stated width and a stated behaviour at the edge of it: **64-bit two's
+complement, and arithmetic that leaves the range faults.** It never wraps and
+never silently widens.
+
+The width costs nothing on the tiers that can express it — rust already mapped
+`Int` to `i64`, java to `long`, go to `int64`. Only the *check* costs
+anything, and measured on a dependent scalar chain it is about **9%**
+(0.98 → 1.07 ns/iter); on a vectorisable reduction it is much worse, because
+the check defeats auto-vectorisation. revl components index, count and size
+things — the scalar case — so this is the right default, and a future
+`Int32` is the answer for numeric kernels rather than making the default
+unsafe.
+
+| tier | how it traps |
+|---|---|
+| python | `_revl_i64` bound check — python is arbitrary precision, so it *imposes* the bound rather than detecting it |
+| rust | `checked_add` / `checked_sub` / `checked_mul` (rust's own default only checks in debug builds) |
+| java | `Math.addExact` / `subtractExact` / `multiplyExact` |
+| go | `revlAdd` / `revlSub` / `revlMul` — Go has no checked arithmetic in std |
+
+Every one raises the same text, `revl: Int overflow`, so one guarantee does
+not read as four different bugs.
+
+### Two tiers cannot hold this yet
+
+Recorded rather than pretended, each with the port it needs:
+
+- **typescript** maps `Int` to `number`, an IEEE double exact only to 2^53. It
+  cannot represent a 64-bit `Int` at all — `9223372036854775807` is not a
+  value it has. Closing it means moving `Int` to `BigInt`, which touches every
+  literal, every arithmetic site and every interop point on that tier.
+- **wasm** is `i32` throughout its emitter — narrower than every other tier,
+  and previously undocumented. WebAssembly has **native `i64`**; the i32 is
+  expedience, not a platform constraint. The port is not a find-and-replace,
+  because that emitter uses i32 for both *values* and *linear-memory
+  addresses*, and only the values move: pointers stay i32 on wasm32, and
+  record/list/variant slots widen from 4 bytes to 8.
+
+Both are asserted as pins in `tests/test_cross_tier_execution.py`, so neither
+can drift further and neither can be quietly "fixed" without updating the
+record.
+
+## Division by zero
 
 IEEE defines it as a *value*, not a fault: `1.0 / 0.0` is `+infinity`,
 `-1.0 / 0.0` is `-infinity`, and `0.0 / 0.0` is `NaN`. Python raises

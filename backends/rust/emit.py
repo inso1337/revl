@@ -1593,6 +1593,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
         left = _render_expr(node["left"], ctx, rename)
         right = _render_expr(node["right"], ctx, rename)
+        if node.get("op") in ("+", "-", "*") and node.get("operands") == "Int":
+            # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md):
+            # silent wraparound is the failure mode revl exists to remove, and
+            # rust only checks in debug builds by default.
+            m = {"+": "checked_add", "-": "checked_sub", "*": "checked_mul"}[node["op"]]
+            return (f'({left}).{m}({right}).expect("revl: Int overflow")')
         if node.get("op") == "/" and node.get("operands") == "Int":
             # `/` is true division and yields Float (docs/arithmetic.md), but
             # rust `/` on two i64 is integer division — it would compute 3 for

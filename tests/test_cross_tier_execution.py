@@ -397,3 +397,74 @@ def test_go_true_division_goes_through_a_function():
     +Inf, and `/` on two int64 is integer division. The helper is both fixes."""
     emitted = _emit("go", IEEE_FLOAT)
     assert "func revlDiv(a, b float64) float64" in emitted
+
+
+# ------------------------------------------------- Int is bounded, and traps
+#
+# `Int` is 64-bit two's complement and overflow TRAPS. Silent wraparound is
+# precisely the failure mode revl exists to remove — a guarantee that holds
+# only in debug builds (rust's default) is not a guarantee.
+#
+# Two tiers cannot express this yet and are pinned rather than pretended:
+#   * typescript maps Int to `number` (f64), exact only to 2^53, so it cannot
+#     represent a 64-bit Int at all. Needs BigInt.
+#   * wasm is i32 throughout the emitter — narrower than every other tier.
+#     WebAssembly has native i64; the i32 is expedience, not a constraint.
+# Both are recorded in docs/arithmetic.md with the port each needs.
+
+INT_IN_RANGE = """
+test "small arithmetic"   { assert 2 + 2 == 4 }
+test "near the bound"     { assert 9223372036854775807 - 1 == 9223372036854775806 }
+test "multiplication"     { assert 1000000 * 1000000 == 1000000000000 }
+test "negative bound"     { assert (0 - 9223372036854775807) + 1 == 0 - 9223372036854775806 }
+"""
+
+INT_OVERFLOW = """
+pub fn big() -> Int { return 9223372036854775807 }
+pub fn one() -> Int { return 1 }
+test "overflow must not produce a value" { assert big() + one() == 0 }
+"""
+
+# tiers that can represent a 64-bit Int today
+BOUNDED_TIERS = ("py", "go")
+BOUNDED_SLOW = ("rust", "java")
+
+
+@pytest.mark.parametrize("tier", BOUNDED_TIERS)
+def test_int_in_range_arithmetic(tier: str):
+    status, message = _run(tier, INT_IN_RANGE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.parametrize("tier", BOUNDED_TIERS)
+def test_int_overflow_traps(tier: str):
+    """A tier that *returns* here has silently wrapped, which is the whole
+    thing this guarantee exists to prevent."""
+    status, message = _run(tier, INT_OVERFLOW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on Int overflow ({status}) — it wrapped or grew: "
+        f"{message}")
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_int_overflow_traps_slow(tier: str):
+    status, message = _run(tier, INT_OVERFLOW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", f"{tier} did not trap on Int overflow: {message}"
+
+
+def test_every_bounded_tier_uses_the_same_trap_message():
+    """One guarantee should not read as three different bugs."""
+    for backend, needle in (("rust", 'expect("revl: Int overflow")'),
+                            ("go", 'panic("revl: Int overflow")'),
+                            ("python", "revl: Int overflow"),
+                            ("java", "Math.addExact")):
+        emitted = _emit(backend, INT_OVERFLOW)
+        assert needle in emitted, (backend, emitted[:400])
