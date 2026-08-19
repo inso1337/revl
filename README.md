@@ -191,13 +191,15 @@ a Rust component provides, and neither shares an address space. `revl run
 --placement` spreads a composition over per-tier processes and wires each seam
 with a generated proxy/stub pair.
 
-- **Four tiers, symmetric and reactive.** `py ↔ node (TypeScript) ↔ rust ↔
-  java` compose in one lifecycle: every tier both *consumes* and *serves*
+- **Five tiers, symmetric and reactive.** `py ↔ node (TypeScript) ↔ rust ↔
+  java ↔ go` compose in one lifecycle: every tier both *consumes* and *serves*
   across a seam, and every tier turns a provider's death into a reactive
   withdrawal (R2/R3) rather than an exception. Verified end-to-end with `revl
-  run --placement … --once`. (Java is reactive on a real JDK 21 runtime, a stub
-  otherwise. **wasm** is sandboxed and **Go** is a compile/execute target — so
-  neither is a bridge participant yet.)
+  run --placement … --once` — including a Go↔Python round-trip whose values are
+  byte-compatible on the wire, and a Go consumer that withdraws reactively when
+  its provider is killed (`tests/test_placement_go.py`). (Java is reactive on a
+  real JDK 21 runtime, a stub otherwise. **wasm** is the one tier still outside
+  the bridge — it is sandboxed, with its own confinement model.)
 - **Values cross by construction, not by a wire schema.** A revl value is a
   record / ADT / `Opt[T]` — value semantics, no object identity, no cycles — so
   it serializes across a seam without a marshalling spec. A service that would
