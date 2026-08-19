@@ -2569,6 +2569,15 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
     the interop-bridge file (proxy/stub/dispatch + runner entry points). Emitted
     as two logical files concatenated with a form-feed sentinel the build step
     splits on, so each carries its own import block."""
+    # The bridge references the live stc-go component scaffolding (service
+    # interfaces, keys, Load helpers). A v3 document with any top-level pure
+    # declaration routes emit() to the pure typed-core path (no stc component),
+    # so the bridge would not link — the go tier bridges v1/v2 services only.
+    has_top_level = bool(ir.get("functions") or ir.get("types")
+                         or ir.get("externs") or ir.get("tests"))
+    if ir.get("ir_version") == 3 and (not ir.get("components") or has_top_level):
+        raise EmitError("placement on the go backend needs v1/v2 services; this "
+                        "composition is v3 typed-core (no live stc-go component)")
     module = emit(ir, package)
     bridge_lines = _emit_go_bridge(ir)
     if not bridge_lines:
