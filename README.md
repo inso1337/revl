@@ -354,14 +354,15 @@ design, the guarantees, and every runtime it targets come from that ecosystem.
 - [*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper) — the paper revl formalizes as a type system
 - [Cordis](https://github.com/cordiverse/cordis) — the reference library and the TypeScript runtime (npm [`cordis`](https://www.npmjs.com/package/cordis))
 
-**The five runtime targets.** One revl source lowers to five community ports
-of Cordis; revl exists because these do.
+**The runtime targets.** One revl source lowers to community ports of the
+same spatiotemporal-composability paradigm; revl exists because these do.
 
 - [cordis-py](https://github.com/geohotstan/cordis-py) — the Python reference runtime
 - [Cordis](https://github.com/cordiverse/cordis) (TypeScript) — the portability tier
 - [cordis-rs](https://docs.rs/cordis-rs) ([source](https://github.com/dshbox/cordis-rs)) — the Rust runtime
 - [cordis4j](https://github.com/1na-ko/cordis4j) — the JVM runtime
 - [Wasmtime](https://github.com/bytecodealliance/wasmtime) (Bytecode Alliance) — the sandbox the wasm tier is validated and executed on
+- [stc-go](https://github.com/0xdenny218/stc-go) — a Go implementation of the paradigm; the newest tier (emitted components run under `go test`, not yet in the conformance matrix)
 
 **Toolchains & libraries** used to build, emit, and test.
 
