@@ -88,7 +88,7 @@ than inheriting a host rule:
 | typescript | `Math.trunc` | `Math.floor` | built | built |
 | rust | native `/` | built | `div_euclid` | `rem_euclid().abs()` |
 | java | native `/` | `Math.floorDiv` | built | `Math.floorMod(a, abs(b))` |
-| wasm | native `i32.div_s` | `$int_div_floor` | `$int_div_euclid` | `$int_mod` |
+| wasm | native `i64.div_s` | `$int_div_floor` | `$int_div_euclid` | `$int_mod` |
 | go | native `/` | `revlDivFloor` | `revlDivEuclid` | `revlMod` |
 
 All eight identities in `tests/test_cross_tier_execution.py`
@@ -193,28 +193,61 @@ unsafe.
 | rust | `checked_add` / `checked_sub` / `checked_mul` (rust's own default only checks in debug builds) |
 | java | `Math.addExact` / `subtractExact` / `multiplyExact` |
 | go | `revlAdd` / `revlSub` / `revlMul` — Go has no checked arithmetic in std |
+| wasm | `$int_add` / `$int_sub` / `$int_mul` — wasm has no checked arithmetic either, so the sign test is emitted and the fault is `unreachable` |
 
-Every one raises the same text, `revl: Int overflow`, so one guarantee does
-not read as four different bugs.
+Every hosted tier raises the same text, `revl: Int overflow`, so one guarantee
+does not read as four different bugs. **wasm is the exception, and only on the
+message:** a wasm trap carries no payload, so the tier can fault but cannot
+say why in revl's words. It is the same limit that already applies to its
+division-by-zero fault, and it is a property of the instruction set rather
+than of the lowering.
 
-### Two tiers cannot hold this yet
+### One tier cannot hold this yet
 
-Recorded rather than pretended, each with the port it needs:
+Recorded rather than pretended, with the port it needs:
 
 - **typescript** maps `Int` to `number`, an IEEE double exact only to 2^53. It
   cannot represent a 64-bit `Int` at all — `9223372036854775807` is not a
   value it has. Closing it means moving `Int` to `BigInt`, which touches every
   literal, every arithmetic site and every interop point on that tier.
-- **wasm** is `i32` throughout its emitter — narrower than every other tier,
-  and previously undocumented. WebAssembly has **native `i64`**; the i32 is
-  expedience, not a platform constraint. The port is not a find-and-replace,
-  because that emitter uses i32 for both *values* and *linear-memory
-  addresses*, and only the values move: pointers stay i32 on wasm32, and
-  record/list/variant slots widen from 4 bytes to 8.
 
-Both are asserted as pins in `tests/test_cross_tier_execution.py`, so neither
-can drift further and neither can be quietly "fixed" without updating the
-record.
+It is asserted as a pin in `tests/test_cross_tier_execution.py`, so it cannot
+drift further and cannot be quietly "fixed" without updating the record.
+
+### What the wasm port took
+
+wasm was the other entry on that list — `i32` throughout its emitter, narrower
+than every other tier and, until recently, undocumented. WebAssembly has
+**native `i64`**, so the i32 was expedience rather than a platform constraint,
+and it is closed: `Int` is i64 there now, and overflow traps.
+
+The port was not a find-and-replace, because that emitter uses i32 for two
+different things and only one of them moved:
+
+- **values** — arithmetic, Int comparisons, Int literals, and every Int-typed
+  parameter, local, result and global — are i64;
+- **linear-memory addresses** stay i32, because wasm32 addressing is 32-bit.
+  So do `Bool`, the string byte-length and list-count prefixes, the variant
+  tag, and the loop cursors. `_wasm_ty` in `backends/wasm/emit.py` is the
+  single place that decides which of the two a given revl type is.
+
+Memory layout paid the rest of the cost. A record field, a list element and a
+variant's payload used to be a 4-byte slot at `4 * index`; each is now an
+8-byte slot at `8 * index`, always written and read as a whole i64 — a pointer
+or Bool is zero-extended into the slot and wrapped back out. Uniform width is
+what lets `$list_push`/`$list_concat`/`$list_slice` move elements without
+knowing the element type, and reading a slot whose type the emitter could not
+pin down returns the value that was written rather than half of it.
+
+The coeffect and provision ABI moved with it: a service declared over `Int` is
+`(param i64) (result i64)`, because truncating at a component boundary would
+be precisely the silent narrowing this guarantee exists to remove. The one id
+that stays i32 is `Job.run`'s interned job tag, which is a compile-time
+discriminant and not an `Int` the program can observe.
+
+The claims are executed, not asserted about text:
+`backends/wasm/test_v3_emit.py` runs the full range, the trapping cases, the
+four named divisions and the pairing law on real `wasmtime`.
 
 ## Division by zero
 
@@ -228,10 +261,12 @@ are: integer division at zero has no value, and float division does.
 
 ### The wasm tier refuses Float
 
-wasm values are i32 on this tier, so `Float` is a **deliberate limit** with a
-named refusal (`type 'Float' is not lowerable — this tier supports Int/Bool`),
-not a silent approximation. That means `/` is unavailable there too, since it
-yields Float. `div_trunc`, `div_floor`, `div_euclid` and `mod` all work.
+This tier lowers `Int` and `Bool` and nothing else numeric, so `Float` is a
+**deliberate limit** with a named refusal (`type 'Float' is not lowerable —
+this tier supports Int/Bool`), not a silent approximation. It is a limit of the
+emitter, not of WebAssembly, which has `f64`. That means `/` is unavailable
+there too, since it yields Float. `div_trunc`, `div_floor`, `div_euclid` and
+`mod` all work, at the full 64-bit range.
 
 ## Division by zero
 
@@ -261,11 +296,17 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
 
 ## Still open
 
-- **`Int` has no stated width, and overflow is unspecified.** The tiers do not
-  agree: python is arbitrary precision, rust/java/go are 64-bit, **wasm is
-  i32**, and TypeScript is f64 — exact only to 2^53. `MAX + 1` grows on
-  python, faults on rust, and silently loses precision on TypeScript. A language offering compile-time guarantees should not leave silent
-  wraparound to the host.
+- **TypeScript is still not 64-bit.** `Int` has a stated width everywhere
+  else — python imposes the bound, rust/java/go/wasm are all 64-bit and all
+  fault at the edge — but TypeScript maps it to f64, exact only to 2^53, so
+  `MAX + 1` silently loses precision there. Closing it means `BigInt`.
+- **An `Int` literal outside the range is not diagnosed.** The checker accepts
+  `9223372036854775808`, and the tiers then disagree about it: python reads it
+  at arbitrary precision, so `0 - 9223372036854775808` is exactly `Int.MIN` and
+  passes the bound check, while wasm reads it as an i64 bit pattern — already
+  `Int.MIN` — so negating it overflows and *traps*. The bound belongs in the
+  checker, where it would be one diagnostic instead of a behaviour per tier; it
+  is also why `Int.MIN` has no spelling in the surface today.
 - **A total, value-returning form.** `checked_div_*` returning
   `Result[Int, _]` would let a program handle a zero divisor without faulting.
   `fail` cannot serve here: it is a component construct (A8) and is refused in

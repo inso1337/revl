@@ -133,11 +133,11 @@ def test_java_equality_goes_through_objects_equals():
 # to the IR contract, not a backend patch. See docs/contract-errata.md.
 
 DIVERGENCES = {
-    # `Int` has no stated width, and the tiers do not agree on one: python is
-    # arbitrary precision, rust/java/go are 64-bit, wasm is *i32*, and
-    # TypeScript is f64 — exact only to 2^53. TS is the one that loses
-    # precision silently here, and it needs BigInt rather than a type
-    # annotation. This is the open decision recorded in docs/arithmetic.md.
+    # `Int` is 64-bit on every tier that can express it — python imposes the
+    # bound, rust/java/go/wasm are all 64-bit — and TypeScript is the one that
+    # cannot: it maps Int to f64, exact only to 2^53, so it loses precision
+    # silently here and needs BigInt rather than a type annotation. This is the
+    # one remaining open decision recorded in docs/arithmetic.md.
     "Int keeps precision past 2^53": (
         'test "p" { assert 9007199254740993 - 9007199254740992 == 1 }',
         {"py": "pass", "ts": "fail", "rust": "pass", "go": "pass", "java": "pass"},
@@ -360,8 +360,9 @@ def test_ieee_float_semantics_slow(tier: str):
 
 
 def test_wasm_refuses_float_by_name():
-    """The wasm tier is i32-only, so `Float` is a *deliberate* limit — it must
-    refuse with a reason rather than emit something that quietly is not IEEE.
+    """The wasm tier lowers Int/Bool and nothing else numeric, so `Float` is a
+    *deliberate* limit — it must refuse with a reason rather than emit
+    something that quietly is not IEEE.
     """
     from revl.errors import RevlError
     import importlib.util as _il
@@ -405,12 +406,21 @@ def test_go_true_division_goes_through_a_function():
 # precisely the failure mode revl exists to remove — a guarantee that holds
 # only in debug builds (rust's default) is not a guarantee.
 #
-# Two tiers cannot express this yet and are pinned rather than pretended:
-#   * typescript maps Int to `number` (f64), exact only to 2^53, so it cannot
-#     represent a 64-bit Int at all. Needs BigInt.
-#   * wasm is i32 throughout the emitter — narrower than every other tier.
-#     WebAssembly has native i64; the i32 is expedience, not a constraint.
-# Both are recorded in docs/arithmetic.md with the port each needs.
+# One tier cannot express this yet and is pinned rather than pretended:
+# typescript maps Int to `number` (f64), exact only to 2^53, so it cannot
+# represent a 64-bit Int at all. It needs BigInt, and that is recorded in
+# docs/arithmetic.md.
+#
+# wasm was the other one, and no longer is: its emitter was i32 throughout,
+# and `Int` values there are i64 now with `$int_add`/`$int_sub`/`$int_mul`
+# testing for overflow and trapping. It has no in-language test runner (see
+# `revl.test.run_wasm` — `test` blocks are host-side on that tier), so it
+# cannot join the executed matrix above; the equivalent claims are executed
+# against real wasmtime in `backends/wasm/test_v3_emit.py`
+# (`test_v3_int_is_64_bit_on_wasmtime`,
+# `test_v3_int_overflow_traps_on_wasmtime`,
+# `test_v3_named_integer_arithmetic_runs_on_wasmtime`). The static guard below
+# keeps that from being a claim nobody checks from here.
 
 INT_IN_RANGE = """
 test "small arithmetic"   { assert 2 + 2 == 4 }
@@ -468,3 +478,30 @@ def test_every_bounded_tier_uses_the_same_trap_message():
                             ("java", "Math.addExact")):
         emitted = _emit(backend, INT_OVERFLOW)
         assert needle in emitted, (backend, emitted[:400])
+
+
+def test_wasm_int_is_i64_and_checks_the_bound():
+    """wasm is a bounded tier now, so the emitted module must carry the check.
+
+    It is the one tier that cannot carry the *message*: a wasm trap has no
+    payload, so `unreachable` is the whole fault. That is a property of the
+    instruction set, and it is why this tier is asserted here on the shape of
+    the check rather than on the text — with the behaviour itself executed on
+    real wasmtime in `backends/wasm/test_v3_emit.py`."""
+    spec = importlib.util.spec_from_file_location(
+        "emit_wasm_bounded", ROOT / "backends" / "wasm" / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    emitted = module.emit(compile_source(
+        "pub fn big() -> Int { return 9223372036854775807 }\n"
+        "pub fn plus(a: Int, b: Int) -> Int { return a + b }\n",
+        "cross_tier_exec.rvl"))["functions"]
+    # the literal is a 64-bit value, not a 32-bit one
+    assert "(i64.const 9223372036854775807)" in emitted
+    assert '(param $p_a i64) (param $p_b i64) (result i64)' in emitted
+    # `+` does not lower to a bare add: it goes through the checked helper,
+    # and the helper faults rather than wrapping
+    assert "(call $int_add)" in emitted
+    assert "(func $int_add (param $a i64) (param $b i64) (result i64)" in emitted
+    assert "unreachable" in emitted
+    assert "(i32.add)" not in emitted
