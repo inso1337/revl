@@ -342,3 +342,33 @@ python -m revl compile examples/user_cache.rvl   # source → checked IR → emi
 python -m revl audit    examples/user_cache.rvl   # the G8 boundary surface
 python -m revl mcp serve                          # the compiler as an agent admission gate
 ```
+
+
+## Acknowledgments
+
+revl stands on open-source work by others, with gratitude.
+
+**The paradigm.** revl is the language-level realization of Cordis — the
+design, the guarantees, and every runtime it targets come from that ecosystem.
+
+- [*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper) — the paper revl formalizes as a type system
+- [Cordis](https://github.com/cordiverse/cordis) — the reference library and the TypeScript runtime (npm [`cordis`](https://www.npmjs.com/package/cordis))
+
+**The five runtime targets.** One revl source lowers to five community ports
+of Cordis; revl exists because these do.
+
+- [cordis-py](https://github.com/geohotstan/cordis-py) — the Python reference runtime
+- [Cordis](https://github.com/cordiverse/cordis) (TypeScript) — the portability tier
+- [cordis-rs](https://docs.rs/cordis-rs) ([source](https://github.com/dshbox/cordis-rs)) — the Rust runtime
+- [cordis4j](https://github.com/1na-ko/cordis4j) — the JVM runtime
+- [Wasmtime](https://github.com/bytecodealliance/wasmtime) (Bytecode Alliance) — the sandbox the wasm tier is validated and executed on
+
+**Toolchains & libraries** used to build, emit, and test.
+
+- [Hatchling](https://github.com/pypa/hatch) — Python build backend · [pytest](https://github.com/pytest-dev/pytest) — the frontend and cross-tier suites
+- [TypeScript](https://github.com/microsoft/TypeScript) — the TS tier's typechecker (validation gate) · [Vitest](https://github.com/vitest-dev/vitest) — the TS backend suite
+- [Serde](https://github.com/serde-rs/serde) / [serde_json](https://github.com/serde-rs/json) — cross-tier value marshalling on the Rust tier
+
+## License
+
+[MIT](LICENSE).
