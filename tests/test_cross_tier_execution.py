@@ -132,15 +132,39 @@ def test_java_equality_goes_through_objects_equals():
 # `Float / Float`. Closing these properly means annotating the node — a change
 # to the IR contract, not a backend patch. See docs/contract-errata.md.
 
+# "Int keeps precision past 2^53" used to live here, pinned `ts: "fail"`
+# because that tier mapped `Int` to `number` — an f64, exact only to 2^53, on
+# which `9007199254740993 - 9007199254740992` is `0`. TypeScript now maps `Int`
+# to `bigint`, so it is asserted positively in INT_IN_RANGE below instead of
+# being pinned. An entry leaves this table only by the tier conforming.
+
 DIVERGENCES = {
-    # `Int` has no stated width, and the tiers do not agree on one: python is
-    # arbitrary precision, rust/java/go are 64-bit, wasm is *i32*, and
-    # TypeScript is f64 — exact only to 2^53. TS is the one that loses
-    # precision silently here, and it needs BigInt rather than a type
-    # annotation. This is the open decision recorded in docs/arithmetic.md.
-    "Int keeps precision past 2^53": (
-        'test "p" { assert 9007199254740993 - 9007199254740992 == 1 }',
-        {"py": "pass", "ts": "fail", "rust": "pass", "go": "pass", "java": "pass"},
+    # revl widens `Int` to `Float` implicitly (`compatible("Float", "Int")` is
+    # true), and the IR records *nothing* where it happens: a `call` argument, a
+    # `record` field, a `let` value and a `list` element all arrive as a bare
+    # `lit`/`var` with no declared type on the node. Only the `bin` node says
+    # what its operands are, and the arithmetic case is closed by that — `1.5 +
+    # 2` is right on every tier.
+    #
+    # The rest cannot be closed by a backend, for the same reason `Int / Int`
+    # could not be before `operands` existed: the information is not in the
+    # document. The tiers that type Int and Float apart therefore split — rust
+    # refuses (E0308, a loud compile error) and TypeScript accepts and then
+    # computes the wrong answer, because `3n === 3` is false. python, go and
+    # java have a host rule that absorbs it (arbitrary-precision numbers,
+    # untyped constants, JLS 5.1.2 long->double).
+    #
+    # The fix is a frontend one and has a precedent: make the widening explicit
+    # in the IR — a marker on the coercion site, the way `operands` made `/`
+    # specifiable — or refuse the implicit widening outright. Pinned here so it
+    # cannot drift while that is decided.
+    #
+    # java is recorded from its emitted source (`ident(3L)` into a `double`
+    # parameter, JLS 5.1.2) and is not asserted: no test parametrizes java.
+    "Int widens into a Float position": (
+        'pub fn ident(x: Float) -> Float { return x }\n'
+        'test "w" { assert ident(3) == 3.0 }',
+        {"py": "pass", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
     ),
 }
 
@@ -405,18 +429,20 @@ def test_go_true_division_goes_through_a_function():
 # precisely the failure mode revl exists to remove — a guarantee that holds
 # only in debug builds (rust's default) is not a guarantee.
 #
-# Two tiers cannot express this yet and are pinned rather than pretended:
-#   * typescript maps Int to `number` (f64), exact only to 2^53, so it cannot
-#     represent a 64-bit Int at all. Needs BigInt.
+# One tier cannot express this yet and is recorded rather than pretended:
 #   * wasm is i32 throughout the emitter — narrower than every other tier.
 #     WebAssembly has native i64; the i32 is expedience, not a constraint.
-# Both are recorded in docs/arithmetic.md with the port each needs.
+# It is recorded in docs/arithmetic.md with the port it needs. typescript used
+# to sit beside it (Int was `number`, an f64 exact only to 2^53); it now maps
+# Int to `bigint` and imposes the 64-bit bound the way python does, so it joins
+# BOUNDED_TIERS below.
 
 INT_IN_RANGE = """
 test "small arithmetic"   { assert 2 + 2 == 4 }
 test "near the bound"     { assert 9223372036854775807 - 1 == 9223372036854775806 }
 test "multiplication"     { assert 1000000 * 1000000 == 1000000000000 }
 test "negative bound"     { assert (0 - 9223372036854775807) + 1 == 0 - 9223372036854775806 }
+test "precision past 2^53" { assert 9007199254740993 - 9007199254740992 == 1 }
 """
 
 INT_OVERFLOW = """
@@ -426,7 +452,7 @@ test "overflow must not produce a value" { assert big() + one() == 0 }
 """
 
 # tiers that can represent a 64-bit Int today
-BOUNDED_TIERS = ("py", "go")
+BOUNDED_TIERS = ("py", "ts", "go")
 BOUNDED_SLOW = ("rust", "java")
 
 
@@ -465,6 +491,7 @@ def test_every_bounded_tier_uses_the_same_trap_message():
     for backend, needle in (("rust", 'expect("revl: Int overflow")'),
                             ("go", 'panic("revl: Int overflow")'),
                             ("python", "revl: Int overflow"),
+                            ("typescript", "throw new RangeError('revl: Int overflow')"),
                             ("java", "Math.addExact")):
         emitted = _emit(backend, INT_OVERFLOW)
         assert needle in emitted, (backend, emitted[:400])

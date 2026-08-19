@@ -85,7 +85,7 @@ than inheriting a host rule:
 | python | built (`//` floors) | native `//` | built | `a % abs(b)` |
 
 `%` itself is built on python for the same reason — its native `%` floors.
-| typescript | `Math.trunc` | `Math.floor` | built | built |
+| typescript | native `/` (BigInt truncates) | built | built | built |
 | rust | native `/` | built | `div_euclid` | `rem_euclid().abs()` |
 | java | native `/` | `Math.floorDiv` | built | `Math.floorMod(a, abs(b))` |
 | wasm | native `i32.div_s` | `$int_div_floor` | `$int_div_euclid` | `$int_mod` |
@@ -190,6 +190,7 @@ unsafe.
 | tier | how it traps |
 |---|---|
 | python | `_revl_i64` bound check — python is arbitrary precision, so it *imposes* the bound rather than detecting it |
+| typescript | `revlI64` bound check — `Int` is `BigInt`, which is also arbitrary precision, so this tier imposes the bound too |
 | rust | `checked_add` / `checked_sub` / `checked_mul` (rust's own default only checks in debug builds) |
 | java | `Math.addExact` / `subtractExact` / `multiplyExact` |
 | go | `revlAdd` / `revlSub` / `revlMul` — Go has no checked arithmetic in std |
@@ -197,14 +198,10 @@ unsafe.
 Every one raises the same text, `revl: Int overflow`, so one guarantee does
 not read as four different bugs.
 
-### Two tiers cannot hold this yet
+### One tier cannot hold this yet
 
-Recorded rather than pretended, each with the port it needs:
+Recorded rather than pretended, with the port it needs:
 
-- **typescript** maps `Int` to `number`, an IEEE double exact only to 2^53. It
-  cannot represent a 64-bit `Int` at all — `9223372036854775807` is not a
-  value it has. Closing it means moving `Int` to `BigInt`, which touches every
-  literal, every arithmetic site and every interop point on that tier.
 - **wasm** is `i32` throughout its emitter — narrower than every other tier,
   and previously undocumented. WebAssembly has **native `i64`**; the i32 is
   expedience, not a platform constraint. The port is not a find-and-replace,
@@ -212,9 +209,65 @@ Recorded rather than pretended, each with the port it needs:
   addresses*, and only the values move: pointers stay i32 on wasm32, and
   record/list/variant slots widen from 4 bytes to 8.
 
-Both are asserted as pins in `tests/test_cross_tier_execution.py`, so neither
-can drift further and neither can be quietly "fixed" without updating the
-record.
+It is asserted as a pin in `tests/test_cross_tier_execution.py`, so it cannot
+drift further and cannot be quietly "fixed" without updating the record.
+
+**typescript used to sit here** and no longer does. It mapped `Int` to
+`number`, an IEEE double exact only to 2^53, so `9223372036854775807` was not
+a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
+`bigint` on that tier. What that touched, and the boundary rules it settled:
+
+- every `Int` literal is a BigInt literal (`123n`); a `Float` literal stays
+  `1.5`, and the frontend already lexes the two to distinct python types so
+  they never blur;
+- BigInt and number **do not mix** in JS (`1n + 1` throws `TypeError`), so
+  every operation is rendered consistently typed from the IR's `operands`
+  annotation — `Int` arithmetic in bigint, `Float` arithmetic in number;
+- `/` yields `Float` even on two `Int`s, so both operands convert
+  (`Number(a) / Number(b)`) and it stays IEEE: a zero divisor gives
+  ±`Infinity`/`NaN`, never the `RangeError` BigInt `/` would raise. `Number()`
+  rounds above 2^53, which is inherent to a binary64 result — the same
+  rounding rust's `as f64` does;
+- `div_trunc` is native (BigInt `/` truncates toward zero) and `%` is already
+  the truncated remainder on bigint; `div_floor`, `div_euclid` and `mod` are
+  built, and all four route through a guard so a zero divisor throws;
+- the stdlib boundary converts in both directions: `length()`, `indexOf()` and
+  `charCodeAt()` are `Int` and the JS APIs answer `number`, so they come back
+  through `BigInt(...)`; `xs[i]`, `slice`, `charAt` and `repeat` take an `Int`
+  the JS side needs as a `number`, so they go in through `Number(...)`;
+- `JSON.stringify` **throws** on a BigInt, so the assert diagnostics and the
+  host's resolved-config trace render values themselves — a bigint as its
+  digits, with no `n` suffix, which is the text every other tier writes for
+  the same number;
+- `revlEq` needed nothing: `===` is value equality between bigints and never
+  conflates one with a `number`, so an `Int` and a `Float` cannot compare
+  equal by accident.
+
+### `Int` widens into `Float`, and the IR does not say where
+
+`compatible("Float", "Int")` is true, so `1.5 + 2` and `ident(3)` (for
+`fn ident(x: Float) -> Float`) both type-check. The `bin` node carries
+`operands`, so the *arithmetic* case is specifiable and every tier gets it
+right. Nothing else is: a `call` argument, a `record` field, a `let` value and
+a `list` element all reach a backend as a bare `lit`/`var` with no declared
+type on the node, which is the same shape of gap `operands` was created to
+close for `/`.
+
+The tiers that keep `Int` and `Float` apart therefore split, and not in the
+same direction:
+
+| tier | `ident(3)` |
+|---|---|
+| python | `3` and `3.0` are both numbers — absorbs it |
+| go | `3` is an untyped constant — absorbs it |
+| java | `long` -> `double` is an implicit widening (JLS 5.1.2) — absorbs it |
+| rust | `ident(3i64)` against `f64` is **E0308**, a compile error |
+| typescript | `ident(3n)` against `number`; `3n === 3` is false, so it is a **wrong answer** |
+
+A refusal is survivable and a wrong answer is not, so this is pinned in
+`tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to be
+rediscovered. The fix is a frontend one, with the precedent above: make the
+coercion explicit in the IR, or refuse the implicit widening.
 
 ## Division by zero
 
@@ -261,11 +314,10 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
 
 ## Still open
 
-- **`Int` has no stated width, and overflow is unspecified.** The tiers do not
-  agree: python is arbitrary precision, rust/java/go are 64-bit, **wasm is
-  i32**, and TypeScript is f64 — exact only to 2^53. `MAX + 1` grows on
-  python, faults on rust, and silently loses precision on TypeScript. A language offering compile-time guarantees should not leave silent
-  wraparound to the host.
+- **`Int` is 64-bit on every tier but wasm**, which is still `i32` (see
+  above). python and TypeScript are arbitrary-precision hosts and impose the
+  bound; rust, java and go carry it natively. The remaining gap is the wasm
+  widening, not the specification.
 - **A total, value-returning form.** `checked_div_*` returning
   `Result[Int, _]` would let a program handle a zero divisor without faulting.
   `fail` cannot serve here: it is a component construct (A8) and is refused in
