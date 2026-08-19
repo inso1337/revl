@@ -71,6 +71,13 @@ _PRIM = {
     "Unit": "",
 }
 
+# When rendering an ir_version-3 document that contains a component, the
+# integer width converges with the pure v3 tier (int64) so the shared stdlib
+# preamble (revlListLen &c., which return int64) type-checks against emitted
+# method bodies. ir_version 1/2 keep `int`, byte-for-byte with the frozen
+# scenarios. Set per emit() call; never read outside a single call.
+_V3_MODE = False
+
 
 def _go_type(t) -> str:
     """Map a revl type name to a Go type (value position)."""
@@ -78,13 +85,20 @@ def _go_type(t) -> str:
         return ""
     t = str(t).strip()
     if t in _PRIM:
+        if t == "Int" and _V3_MODE:
+            return "int64"
         return _PRIM[t]
     if t.startswith("List[") and t.endswith("]"):
         return "[]" + _go_type(t[5:-1])
     if t.startswith("Opt[") and t.endswith("]"):
-        # value position: Opt lowers to the bare type; the (T, bool) tuple
-        # only appears in a method's return signature (see _go_return).
-        return _go_type(t[4:-1])
+        # Value/parameter position: Opt lowers to a pointer `*T` (nil == None),
+        # which carries the presence bit a bare `T` cannot. The (T, bool) tuple
+        # form is return-position only (see _go_return); no scenario uses an
+        # Opt value/param, so this pointer form is corpus-only.
+        return "*" + _go_type(t[4:-1])
+    if t.startswith("Map[") and t.endswith("]"):
+        k, v = _v3_split_generic(t[4:-1])
+        return "map[%s]%s" % (_go_type(k), _go_type(v))
     if t == "Row":
         return "Row"
     # Unknown / user type: pass through as an exported identifier.
@@ -98,7 +112,27 @@ def _go_return(t):
     t = str(t).strip()
     if t.startswith("Opt[") and t.endswith("]"):
         return "(%s, bool)" % _go_type(t[4:-1])
+    if t.startswith("Result[") and t.endswith("]"):
+        # Result[T, E] -> (T, E, bool): the bool is the ok-flag. Ok(v) spreads
+        # to `v, zeroE, true`; Err(e) to `zeroT, e, false`. No scenario returns
+        # Result, so this branch is corpus-only (byte-identical preserved).
+        ok, err = _v3_split_generic(t[7:-1])
+        return "(%s, %s, bool)" % (_go_type(ok), _go_type(err))
     return _go_type(t)
+
+
+def _go_zero(surface) -> str:
+    """A Go zero value for a surface type — used to pad Opt/Result spreads."""
+    gt = _go_type(surface)
+    if gt in ("int", "int64", "float64"):
+        return "0"
+    if gt == "string":
+        return '""'
+    if gt == "bool":
+        return "false"
+    if gt.startswith("[]") or gt.startswith("map["):
+        return "nil"
+    return gt + "{}"
 
 
 # --------------------------------------------------------------------------
@@ -115,6 +149,9 @@ class _Env:
         self.config_fields = set(config_fields)
         self.params = set(params or [])
         self.receiver = receiver
+        # surface types of locals/params, for stdlib-method dispatch and the
+        # `??` / ternary result-type inference.
+        self.var_types: dict[str, str | None] = {}
 
     def name_ref(self, ident: str) -> str:
         if ident in self.params:
@@ -154,12 +191,25 @@ def _req_field(name: str) -> str:
     return _lower_camel(name)
 
 
-def _expr(node, env: _Env) -> str:
+def _expr(node, env: _Env, expected=None) -> str:
+    """Render one expression in a component/method body.
+
+    Post-D1 convergence: this is the single expression renderer for the stc-go
+    tier. It resolves names through `env` (params / struct fields / config /
+    reqs) and handles the full surface expression set — bin/un/if/list/index/
+    stdlib-builtin/Opt-Result construction — mirroring the pure v3 renderer
+    (`_go_v3_expr`) but in the environment-aware, tuple-Opt world of a live
+    component. `expected` is the surface type the value flows into (a method's
+    declared return type, a let's inferred type), used for `??`/ternary result
+    typing.
+    """
     if not isinstance(node, dict):
         raise EmitError("expr must be an object: %r" % (node,))
     kind = node.get("kind")
     if kind == "name":
         return env.name_ref(node["id"])
+    if kind == "var":  # pure-tier name shape, seen inside v3 documents
+        return env.name_ref(node.get("name") or node.get("id"))
     if kind == "config":
         return env.config_ref(node["field"])
     if kind == "req":
@@ -171,6 +221,18 @@ def _expr(node, env: _Env) -> str:
         args = ", ".join(_expr(a, env) for a in node.get("args", []))
         return "%s(%s)" % (go, args)
     if kind == "call":
+        # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
+        callee = node.get("callee")
+        if callee is not None:
+            nm = callee.get("name") or callee.get("id")
+            if nm in ("Some", "None", "Ok", "Err"):
+                raise EmitError(
+                    "Opt/Result construction is only supported in return "
+                    "position on the cordis-go tier (got a bare value)"
+                )
+            src = _expr(callee, env)
+            args = ", ".join(_expr(a, env) for a in node.get("args", []))
+            return "%s(%s)" % (src, args)
         target = _expr(node["target"], env)
         meth = _camel(node["method"])
         args = ", ".join(_expr(a, env) for a in node.get("args", []))
@@ -185,7 +247,139 @@ def _expr(node, env: _Env) -> str:
         return "true" if node.get("value") else "false"
     if kind == "lit":
         return _go_literal(node.get("value"))
+    if kind == "bin":
+        op = node.get("op")
+        if op == "??":
+            # Opt[T] ?? T -> unwrap the (value, ok) tuple inline. The Opt is a
+            # multi-value expression (a service/host call), so bind it first.
+            gt = (_go_type(expected) if expected
+                  else _go_type(_comp_infer(node.get("right"), env)) or "any")
+            left = _expr(node["left"], env)
+            right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
+            return ("func() %s { _v, _ok := %s; if _ok { return _v }; "
+                    "return %s }()" % (gt, left, right))
+        go_op = _V3_GO_BIN_OPS.get(op)
+        if go_op is None:
+            raise EmitError("unsupported binary operator: %r" % (op,))
+        return "(%s %s %s)" % (_expr(node["left"], env), go_op,
+                               _expr(node["right"], env))
+    if kind == "un":
+        operand = _expr(node.get("operand"), env)
+        if node.get("op") == "!":
+            return "(!%s)" % operand
+        if node.get("op") == "-":
+            return "(-%s)" % operand
+        raise EmitError("unsupported unary operator: %r" % (node.get("op"),))
+    if kind == "if":  # ternary
+        gt = (_go_type(expected) if expected
+              else _go_type(_comp_infer(node.get("then"), env))
+              or _go_type(_comp_infer(node.get("else"), env)) or "any")
+        cond = _expr(node.get("cond"), env)
+        then = _expr(node.get("then"), env, expected)
+        els = _expr(node.get("else"), env, expected)
+        return ("func() %s { if %s { return %s }; return %s }()"
+                % (gt, cond, then, els))
+    if kind == "list":
+        elem = None
+        if isinstance(expected, str) and expected.startswith("List[") and expected.endswith("]"):
+            elem = expected[5:-1]
+        items = node.get("items") or []
+        if elem is None and items:
+            elem = _comp_infer(items[0], env)
+        go_elem = _go_type(elem) if elem else "any"
+        rendered = ", ".join(_expr(it, env) for it in items)
+        return "[]%s{%s}" % (go_elem, rendered)
+    if kind == "index":
+        return "%s[%s]" % (_expr(node.get("target"), env),
+                           _expr(node.get("index"), env))
+    if kind == "builtin":
+        target_node = node.get("target")
+        target = _expr(target_node, env)
+        args = [_expr(a, env) for a in node.get("args") or []]
+        return _comp_builtin(node.get("method"),
+                             _comp_infer(target_node, env), target, args)
     raise EmitError("unsupported expr kind: %r" % (kind,))
+
+
+def _comp_infer(node, env: _Env):
+    """Best-effort surface type of a component-body expression, else None."""
+    if not isinstance(node, dict):
+        return None
+    k = node.get("kind")
+    if k == "lit":
+        v = node.get("value")
+        if isinstance(v, bool):
+            return "Bool"
+        if isinstance(v, int):
+            return "Int"
+        if isinstance(v, float):
+            return "Float"
+        if isinstance(v, str):
+            return "Str"
+        return None
+    if k == "int":
+        return "Int"
+    if k == "bool":
+        return "Bool"
+    if k in ("str", "format"):
+        return "Str"
+    if k in ("name", "var"):
+        return env.var_types.get(node.get("id") or node.get("name"))
+    if k == "list":
+        items = node.get("items") or []
+        el = _comp_infer(items[0], env) if items else None
+        return "List[%s]" % (el or "Int")
+    if k == "index":
+        tt = _comp_infer(node.get("target"), env)
+        if isinstance(tt, str) and tt.startswith("List[") and tt.endswith("]"):
+            return tt[5:-1]
+        return None
+    if k == "bin":
+        op = node.get("op")
+        if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
+            return "Bool"
+        return _comp_infer(node.get("left"), env) or _comp_infer(node.get("right"), env)
+    if k == "un":
+        return "Bool" if node.get("op") == "!" else _comp_infer(node.get("operand"), env)
+    if k == "builtin":
+        return _v3_builtin_ret_type(node.get("method"), _comp_infer(node.get("target"), env))
+    return None
+
+
+# stdlib helpers referenced by component method bodies live in the shared v3
+# preamble; using any one flags the preamble + its imports into the module.
+_COMP_NEEDS_STDLIB = False
+
+
+def _comp_builtin(method, recv_surface, target, args):
+    """Map a `.length()/.push()/…` stdlib call to a revl* helper (Go)."""
+    global _COMP_NEEDS_STDLIB
+    _COMP_NEEDS_STDLIB = True
+    is_str = (recv_surface == "Str")
+    if method == "length":
+        return ("revlStrLen(%s)" if is_str else "revlListLen(%s)") % target
+    if method == "push":
+        return "revlListPush(%s, %s)" % (target, args[0])
+    if method == "concat":
+        return (("revlStrConcat(%s, %s)" if is_str else "revlListConcat(%s, %s)")
+                % (target, args[0]))
+    if method == "slice":
+        return (("revlStrSlice(%s, %s, %s)" if is_str else "revlListSlice(%s, %s, %s)")
+                % (target, args[0], args[1]))
+    if method == "indexOf":
+        return (("revlStrIndexOf(%s, %s)" if is_str else "revlListIndexOf(%s, %s)")
+                % (target, args[0]))
+    if method == "split":
+        return "revlStrSplit(%s, %s)" % (target, args[0])
+    if method == "join":
+        return "revlJoin(%s, %s)" % (target, args[0])
+    if method == "repeat":
+        return "revlStrRepeat(%s, %s)" % (target, args[0])
+    if method == "charAt":
+        return "revlStrCharAt(%s, %s)" % (target, args[0])
+    if method == "charCodeAt":
+        return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    raise EmitError("unknown stdlib method: %r" % (method,))
 
 
 def _format(template: str, args: list[str]) -> str:
@@ -308,7 +502,10 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
         out.append(sig)
         env = _Env(binds, reqs, _config_fields_flag(has_config),
                    params=m.get("params", []), receiver="s")
-        _emit_method_body(m.get("body", []), env, out, 1)
+        for pn in m.get("params", []):
+            env.var_types[pn] = ptypes.get(pn)
+        _emit_method_body(m.get("body", []), env, out, 1,
+                          ret_surface=decl.get("returns"))
         out.append("}")
         out.append("")
 
@@ -319,12 +516,24 @@ def _config_fields_flag(has_config):
     return set()
 
 
-def _emit_method_body(body, env: _Env, out, indent):
+def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
     pad = "\t" * indent
     for step in body:
         s = step.get("step")
         if s == "return":
-            out.append("%sreturn %s" % (pad, _expr(step["expr"], env)))
+            _emit_return(step.get("expr"), ret_surface, env, out, pad)
+        elif s in ("let", "var"):
+            name = _safe_local(step["name"])
+            surface = _comp_infer(step.get("value"), env)
+            if surface is not None:
+                env.var_types[step["name"]] = surface
+            out.append("%s%s := %s" % (pad, name, _expr(step["value"], env, surface)))
+            out.append("%s_ = %s" % (pad, name))
+        elif s == "assign":
+            name = _safe_local(step["name"])
+            out.append("%s%s = %s" % (pad, name,
+                                      _expr(step["value"], env,
+                                            env.var_types.get(step["name"]))))
         elif s == "effect":
             _emit_effect_step(step, env, out, indent)
         elif s == "emit":
@@ -333,6 +542,62 @@ def _emit_method_body(body, env: _Env, out, indent):
             raise EmitError("let-effect not allowed inside a provide method")
         else:
             raise EmitError("unsupported method step: %r" % (s,))
+
+
+def _construction_case(node):
+    """(case, arg_nodes) when node builds Some/None/Ok/Err, else None."""
+    if not isinstance(node, dict):
+        return None
+    k = node.get("kind")
+    if k == "adt" and node.get("case") in ("Some", "None", "Ok", "Err"):
+        return node["case"], node.get("args") or []
+    if k == "call":
+        callee = node.get("callee") or {}
+        nm = callee.get("name") or callee.get("id")
+        if nm in ("Some", "None", "Ok", "Err"):
+            return nm, node.get("args") or []
+    if k in ("var", "name"):
+        nm = node.get("name") or node.get("id")
+        if nm == "None":
+            return "None", []
+    return None
+
+
+def _emit_return(expr, ret_surface, env: _Env, out, pad):
+    """Emit a `return`, spreading an Opt/Result construction into the tuple
+    convention (Opt[T] -> `v, ok`; Result[T,E] -> `v, e, ok`)."""
+    if expr is None:
+        out.append("%sreturn" % pad)
+        return
+    cc = _construction_case(expr)
+    rs = ret_surface.strip() if isinstance(ret_surface, str) else ""
+    if cc and rs.startswith("Opt[") and cc[0] in ("Some", "None"):
+        inner = rs[4:-1]
+        if cc[0] == "Some":
+            out.append("%sreturn %s, true" % (pad, _expr(cc[1][0], env, inner)))
+        else:
+            out.append("%sreturn %s, false" % (pad, _go_zero(inner)))
+        return
+    if cc and rs.startswith("Result[") and cc[0] in ("Ok", "Err"):
+        ok, err = _v3_split_generic(rs[7:-1])
+        if cc[0] == "Ok":
+            out.append("%sreturn %s, %s, true"
+                       % (pad, _expr(cc[1][0], env, ok), _go_zero(err)))
+        else:
+            out.append("%sreturn %s, %s, false"
+                       % (pad, _go_zero(ok), _expr(cc[1][0], env, err)))
+        return
+    if rs.startswith("Opt[") and isinstance(expr, dict) \
+            and expr.get("kind") not in ("call", "host"):
+        # Returning an Opt-valued expression (a `*T` pointer — e.g. an Opt
+        # parameter) into the (T, bool) return convention: deref-or-default.
+        # A call/host already yields the (T, bool) tuple, so it returns direct.
+        inner = rs[4:-1]
+        out.append("%sif _o := %s; _o != nil { return *_o, true }"
+                   % (pad, _expr(expr, env, ret_surface)))
+        out.append("%sreturn %s, false" % (pad, _go_zero(inner)))
+        return
+    out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
 
 def _emit_effect_step(step, env: _Env, out, indent):
@@ -474,6 +739,39 @@ def _emit_component(comp, services, out):
                                services, binds, reqs, has_config, out)
 
 
+def _collect_host_calls(node, acc):
+    """Record (receiver, method) of every `host` expr not covered by the fixed
+    host runtime (Pool / Map)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "host":
+            recv, _, meth = str(node.get("fn", "")).partition(".")
+            if recv and recv not in ("Pool", "Map"):
+                acc.add((recv, meth))
+        for v in node.values():
+            _collect_host_calls(v, acc)
+    elif isinstance(node, list):
+        for x in node:
+            _collect_host_calls(x, acc)
+
+
+def _emit_host_stubs(ir) -> list[str]:
+    """Deterministic stubs for host receivers this document references beyond
+    Pool/Map (e.g. an awaited `Job.run`). Emitted only when referenced, so the
+    Pool/Map-only scenarios stay byte-identical."""
+    acc: set = set()
+    _collect_host_calls(ir, acc)
+    if not acc:
+        return []
+    out = ["// ---- generated host stubs (hosts beyond the fixed runtime) ----------"]
+    for recv, meth in sorted(acc):
+        out.append("func %s(_args ...any) any {" % (_camel(recv) + _camel(meth)))
+        out.append("\thostRecord(%s)" % _go_string("%s.%s" % (recv, meth)))
+        out.append("\treturn nil")
+        out.append("}")
+        out.append("")
+    return out
+
+
 def _host_type_of_acquire(acquire):
     if acquire.get("kind") == "host":
         recv = acquire["fn"].split(".")[0]
@@ -481,37 +779,73 @@ def _host_type_of_acquire(acquire):
     return "any"
 
 
-def _emit_component_step(comp, step, services, env: _Env, out):
+def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
     s = step.get("step")
     cname = _camel(comp["name"])
+    pad = "\t" * indent
+    inner = pad + "\t"
     if s == "let-effect":
         bind = step["bind"]
         host = _host_type_of_acquire(step["acquire"])
         acquire = _expr(step["acquire"], env)
         undo = step.get("undo")
-        out.append("\t\t\tvar %s *%s" % (_bind_field(bind), host))
-        out.append("\t\t\tif err := ctx.Effect(func() stc.Inverse {")
-        out.append("\t\t\t\t%s = %s" % (_bind_field(bind), acquire))
+        out.append("%svar %s *%s" % (pad, _bind_field(bind), host))
+        out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+        # A block-effect setup (`effect { let k = 1  Map.new() } undo …`)
+        # runs its statements before the acquire, inside the effect closure.
+        for setup_step in step.get("setup") or []:
+            _emit_method_body([setup_step], env, out, indent + 1)
+        out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
         if undo is not None:
-            out.append("\t\t\t\treturn func() error { %s; return nil }" % _expr(undo, env))
+            out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
         else:
-            out.append("\t\t\t\treturn nil")
-        out.append("\t\t\t}); err != nil {")
-        out.append("\t\t\t\treturn nil, err")
-        out.append("\t\t\t}")
+            out.append("%sreturn nil" % inner)
+        out.append("%s}); err != nil {" % pad)
+        out.append("%sreturn nil, err" % inner)
+        out.append("%s}" % pad)
     elif s == "effect":
         # bare effect step at component top level
         acquire = _expr(step["acquire"], env)
         undo = step.get("undo")
-        out.append("\t\t\tif err := ctx.Effect(func() stc.Inverse {")
-        out.append("\t\t\t\t%s" % acquire)
+        out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+        out.append("%s%s" % (inner, acquire))
         if undo is not None:
-            out.append("\t\t\t\treturn func() error { %s; return nil }" % _expr(undo, env))
+            out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
         else:
-            out.append("\t\t\t\treturn nil")
-        out.append("\t\t\t}); err != nil {")
-        out.append("\t\t\t\treturn nil, err")
-        out.append("\t\t\t}")
+            out.append("%sreturn nil" % inner)
+        out.append("%s}); err != nil {" % pad)
+        out.append("%sreturn nil, err" % inner)
+        out.append("%s}" % pad)
+    elif s == "await":
+        # cordis-go's Apply runs synchronously; an awaited host call is just a
+        # blocking call whose result is discarded (the A1 ordering boundary is
+        # the statement position, preserved here).
+        out.append("%s%s" % (pad, _expr(step["expr"], env)))
+    elif s == "emit":
+        # `emit X compensate Y`: perform the emission, register the
+        # compensation as the effect's inverse so it runs on unwind.
+        emit_call = _expr(step["expr"], env)
+        comp_node = step.get("compensate")
+        if comp_node is not None:
+            out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+            out.append("%s%s" % (inner, emit_call))
+            out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(comp_node, env)))
+            out.append("%s}); err != nil {" % pad)
+            out.append("%sreturn nil, err" % inner)
+            out.append("%s}" % pad)
+        else:
+            out.append("%s%s" % (pad, emit_call))
+    elif s == "if":
+        out.append("%sif %s {" % (pad, _expr(step.get("cond"), env)))
+        for sub in step.get("then") or []:
+            _emit_component_step(comp, sub, services, env, out, indent + 1)
+        if step.get("else"):
+            out.append("%s} else {" % pad)
+            for sub in step["else"]:
+                _emit_component_step(comp, sub, services, env, out, indent + 1)
+        out.append("%s}" % pad)
+    elif s == "fail":
+        out.append("%sreturn nil, fmt.Errorf(%s)" % (pad, _expr(step.get("message"), env)))
     elif s == "provide":
         pname = step["name"]
         svc = step["service"]
@@ -528,11 +862,11 @@ def _emit_component_step(comp, step, services, env: _Env, out):
             fields.append("%s: %s" % (_bind_field(b), _bind_field(b)))
         for r in (comp.get("requires", {}) or {}).keys():
             fields.append("%s: %s" % (_req_field(r), _req_field(r)))
-        out.append("\t\t\t_impl%s := &%s{%s}" % (_camel(pname), struct, ", ".join(fields)))
-        out.append("\t\t\tif _, err := ctx.Provide(%s, %s(_impl%s)); err != nil {" %
-                   (_key_var(pname), _camel(svc), _camel(pname)))
-        out.append("\t\t\t\treturn nil, err")
-        out.append("\t\t\t}")
+        out.append("%s_impl%s := &%s{%s}" % (pad, _camel(pname), struct, ", ".join(fields)))
+        out.append("%sif _, err := ctx.Provide(%s, %s(_impl%s)); err != nil {" %
+                   (pad, _key_var(pname), _camel(svc), _camel(pname)))
+        out.append("%sreturn nil, err" % inner)
+        out.append("%s}" % pad)
     elif s == "intercept":
         # handled at load site (metadata); no-op in Apply
         pass
@@ -1161,12 +1495,24 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         names = node.get("params") or []
         declared = list(node.get("param_types") or [])
         declared += [None] * (len(names) - len(declared))
+        # Untyped lambda parameters (`v => v + 1`) would default to `any`, on
+        # which arithmetic will not type-check. Recover a type from how the
+        # parameter is used in the body before falling back.
+        for pi, (pname, ptype) in enumerate(zip(names, declared)):
+            if ptype is None:
+                declared[pi] = _infer_arrow_param(pname, node.get("body"), ctx)
+        # Bind inferred param surface types so the body renders against them.
+        saved = dict(ctx.var_types)
+        for pname, ptype in zip(names, declared):
+            if ptype is not None:
+                ctx.var_types[pname] = ptype
         params = ", ".join(
             f"{_v3_ident(p, 'arrow parameter')} {_go_v3_type(t, ctx.types) or 'any'}"
             for p, t in zip(names, declared)
         )
         body = _go_v3_expr(node.get("body"), ctx)
         body_t = _go_v3_type(_go_v3_infer_type(node.get("body"), ctx), ctx.types)
+        ctx.var_types = saved
         ret = f" {body_t}" if body_t else ""
         return f"func({params}){ret} {{ return {body} }}"
 
@@ -1201,6 +1547,40 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                                args=node.get("args") or [])
 
     raise EmitError(f"unsupported v3 expression kind {kind!r} in Go backend")
+
+
+def _infer_arrow_param(name, body, ctx):
+    """Recover an untyped lambda parameter's surface type from its first use in
+    the body (the other side of a binary op, an index/builtin receiver)."""
+    found = []
+
+    def walk(node):
+        if found or not isinstance(node, dict):
+            return
+        if node.get("kind") == "bin":
+            for a, b in ((node.get("left"), node.get("right")),
+                         (node.get("right"), node.get("left"))):
+                if isinstance(a, dict) and a.get("kind") in ("var", "name") \
+                        and (a.get("name") or a.get("id")) == name:
+                    other = _go_v3_infer_type(b, ctx)
+                    if other:
+                        found.append(other)
+                        return
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                walk(v)
+
+    def walk_any(node):
+        if isinstance(node, list):
+            for x in node:
+                walk_any(x)
+        elif isinstance(node, dict):
+            walk(node)
+            for v in node.values():
+                walk_any(v)
+
+    walk_any(body)
+    return found[0] if found else None
 
 
 def _go_v3_builtin(ctx, method, target_node, target, args):
@@ -1369,7 +1749,15 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         value = _go_v3_expr(node.get("value"), ctx, inferred)
-        out.append(f"{pad}{name} := {value}")
+        # A bare integer/float literal binding defaults to Go `int`/`float64`
+        # via `:=`, which then mismatches the int64/float64 the tier uses for
+        # Int/Float. Pin the type so later arithmetic against typed values (a
+        # function parameter, a loop element) stays well-typed.
+        go_t = _go_v3_type(inferred, ctx.types) if inferred else ""
+        if go_t in ("int64", "float64"):
+            out.append(f"{pad}var {name} {go_t} = {value}")
+        else:
+            out.append(f"{pad}{name} := {value}")
         out.append(f"{pad}_ = {name}")
     elif step == "assign":
         name = _v3_ident(node.get("name"), "binding")
@@ -1837,8 +2225,34 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         if comp.get("spawn") is not None or comp.get("instance") is not None:
             raise EmitError("spawn/instance-parametric IR is out of scope")
 
-    if ver == 3:
+    # ir_version-3 routing:
+    #   * No component, or any top-level pure declaration (functions / types /
+    #     externs / tests) present -> the pure typed-core path (`_emit_v3_go`):
+    #     ordinary Go, no stc runtime (the v3_* fixtures, and the pure-fn /
+    #     record / ADT / test corpus cases whose component is incidental).
+    #   * A component and NOTHING top-level -> a live stc-go component whose
+    #     method/step bodies use v3 expressions; the stc-go path below renders
+    #     them with the converged expression renderer.
+    has_top_level = bool(ir.get("functions") or ir.get("types")
+                         or ir.get("externs") or ir.get("tests"))
+    if ver == 3 and (not ir.get("components") or has_top_level):
         return _emit_v3_go(ir, package)
+
+    global _V3_MODE, _COMP_NEEDS_STDLIB
+    _V3_MODE = (ver == 3)
+    _COMP_NEEDS_STDLIB = False
+
+    # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
+    # block and preamble are assembled. For ir_version 1/2 no v3 feature is
+    # exercised, so the flag stays False and the output is byte-identical to
+    # the frozen scenarios.
+    body: list[str] = []
+    body.extend(_emit_services(ir.get("services", {})))
+    _emit_keys(ir, body)
+    _emit_realm_helper(ir, body)
+    for comp in ir.get("components", []):
+        _emit_component(comp, ir.get("services", {}), body)
+    _emit_load_helpers(ir, body)
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -1848,6 +2262,9 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("import (")
     out.append('\t"fmt"')
     out.append('\t"sync"')
+    if _COMP_NEEDS_STDLIB:
+        out.append('\t"strings"')
+        out.append('\t"unicode/utf8"')
     out.append("")
     out.append('\tstc "github.com/0xdenny218/stc-go"')
     out.append(")")
@@ -1855,15 +2272,12 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("var _ = fmt.Sprintf")
     out.append("")
     out.append(_HOST_RUNTIME)
+    if _COMP_NEEDS_STDLIB:
+        out.append(_V3_STDLIB_PREAMBLE)
 
-    out.extend(_emit_services(ir.get("services", {})))
-    _emit_keys(ir, out)
-    _emit_realm_helper(ir, out)
+    out.extend(body)
 
-    for comp in ir.get("components", []):
-        _emit_component(comp, ir.get("services", {}), out)
-
-    _emit_load_helpers(ir, out)
+    out.extend(_emit_host_stubs(ir))
 
     return "\n".join(out) + "\n"
 
