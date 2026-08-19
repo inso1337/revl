@@ -362,7 +362,7 @@ same spatiotemporal-composability paradigm; revl exists because these do.
 - [Cordis](https://github.com/cordiverse/cordis) (TypeScript) — the portability tier
 - [cordis-rs](https://docs.rs/cordis-rs) ([source](https://github.com/dshbox/cordis-rs)) — the Rust runtime
 - [cordis4j](https://github.com/1na-ko/cordis4j) — the JVM runtime
-- [Wasmtime](https://github.com/bytecodealliance/wasmtime) (Bytecode Alliance) — the sandbox the wasm tier is validated and executed on
+- [cordis-wasm](https://github.com/inso1337/cordis-wasm) — the wasm substrate tier (first-party), running on [Wasmtime](https://github.com/bytecodealliance/wasmtime) (Bytecode Alliance), the sandbox it is validated and executed on
 - [stc-go](https://github.com/0xdenny218/stc-go) — a Go implementation of the paradigm; the newest tier (emitted components run under `go test`, not yet in the conformance matrix)
 
 **Toolchains & libraries** used to build, emit, and test.
