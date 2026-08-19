@@ -10,7 +10,7 @@ each process declares its `backend`:
     components = ["PgDatabase"]          # backend defaults to "py"
 
     [processes.consumer]
-    backend = "rust"                     # or "py" | "node" | "java"
+    backend = "rust"                     # or "py" | "node" | "java" | "go"
     components = ["UserCache"]
     probe = ["cache.put('alice', '42')", "cache.get('alice')"]
 
@@ -39,6 +39,9 @@ Backends and their runners:
 - java -> backends/java/placement/{Real,}PlacementRunner (real cordis4j on a
           JDK 21 when present — reactive, generic reflection proxy — else the
           in-repo stub runtime, which crosses but does not withdraw)
+- go   -> backends/go/placement_runner (cordis-go; reactive; the
+          proxy/stub/dispatch table is emitted per composition by
+          backends/go/emit.py, so it both consumes and serves)
 """
 
 from __future__ import annotations
@@ -58,12 +61,14 @@ from pathlib import Path
 from .compiler import compile_files
 from .errors import RevlError
 
-KNOWN_BACKENDS = ("py", "node", "rust", "java")
+KNOWN_BACKENDS = ("py", "node", "rust", "java", "go")
 
 _BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
 _TS_DIR = _BACKENDS_DIR / "typescript"
 _RUST_RUNNER = _BACKENDS_DIR / "rust" / "placement_runner"
 _JAVA_DIR = _BACKENDS_DIR / "java"
+_GO_DIR = _BACKENDS_DIR / "go"
+_GO_RUNNER = _GO_DIR / "placement_runner"
 _PROBE_RE = re.compile(r"^\s*(\w+)\.(\w+)\((.*)\)\s*$")
 
 
@@ -149,6 +154,9 @@ def _preflight(backends_used: set[str], files, placement_path: str, once: bool) 
     if "rust" in backends_used and shutil.which("cargo") is None:
         return ("cargo is not on PATH, but this placement puts a process on the rust backend.\n"
                 "       install a Rust toolchain (https://rustup.rs), then re-run.")
+    if "go" in backends_used and shutil.which("go") is None:
+        return ("go is not on PATH, but this placement puts a process on the go backend.\n"
+                "       install a Go toolchain (>= 1.25, https://go.dev/dl), then re-run.")
     return None
 
 
@@ -217,6 +225,34 @@ def _build_rust(ir: dict, tmp: Path) -> str:
     if build.returncode:
         raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
     return str(_RUST_RUNNER / "target" / "debug" / "revl_placement_runner")
+
+
+def _build_go(ir: dict, tmp: Path) -> str:
+    """Emit the go runner's `emitted` package (the ordinary module + the interop
+    bridge: proxy/stub/dispatch + runner entry points) from the running IR, then
+    `go build`. Regenerating per composition is what makes the go runner general
+    — cordis-go services are static Go interfaces, so generality is codegen, not
+    a runtime-generic proxy (the same shape the rust runner takes)."""
+    spec = importlib.util.spec_from_file_location("revl_go_emit", _GO_DIR / "emit.py")
+    emit_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit_module)
+    try:
+        source = emit_module.emit_placement(ir, "emitted")
+    except Exception as exc:  # noqa: BLE001 — surface emit failures as one diagnostic
+        raise RuntimeError(f"go emit failed:\n{exc}") from exc
+    # emit_placement concatenates gen.go and bridge_gen.go with a form-feed
+    # sentinel so each file carries its own import block.
+    module_src, bridge_src = source.split("\f", 1)
+    emitted = _GO_RUNNER / "emitted"
+    emitted.mkdir(parents=True, exist_ok=True)
+    (emitted / "gen.go").write_text(module_src, encoding="utf-8")
+    (emitted / "bridge_gen.go").write_text(bridge_src, encoding="utf-8")
+    binary = _GO_RUNNER / "revl_placement_runner"
+    build = subprocess.run(["go", "build", "-o", str(binary), "."],
+                           cwd=str(_GO_RUNNER), capture_output=True, text=True)
+    if build.returncode:
+        raise RuntimeError(f"go build (go runner) failed:\n{build.stderr.strip()}")
+    return str(binary)
 
 
 def _find_jdk21() -> str | None:
@@ -403,7 +439,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     # per-backend build steps (once)
     cleanup: list[str] = []
     java_mode = "stub"
-    java_out = java21_bin = cordis_classes = rust_bin = None
+    java_out = java21_bin = cordis_classes = rust_bin = go_bin = None
     try:
         if any(b == "node" for b in backends.values()):
             ts_module = _emit_ts_module(ir, tmp)
@@ -421,6 +457,8 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 java_out = _build_java(ir, tmp)
         if any(b == "rust" for b in backends.values()):
             rust_bin = _build_rust(ir, tmp)
+        if any(b == "go" for b in backends.values()):
+            go_bin = _build_go(ir, tmp)
     except (RevlError, RuntimeError, OSError) as exc:
         return abort(str(exc))
 
@@ -431,6 +469,8 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             return ["node", str(_TS_DIR / "placement_runner.ts"), str(spec_file)], None, "term"
         if backend == "rust":
             return [rust_bin, str(spec_file)], None, "stdin"
+        if backend == "go":
+            return [go_bin, str(spec_file)], None, "term"
         if backend == "java":
             if java_mode == "real":
                 cp = f"{cordis_classes}{os.pathsep}{java_out}"
@@ -450,6 +490,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         backend = backends[pname]
         if backend == "rust":
             spec["components"] = [_snake(c) for c in spec["components"]]
+            spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
+        elif backend == "go":
+            # go keeps PascalCase component names (RevlLoad switches on them);
+            # only probes are structured rather than eval'd strings.
             spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
         elif backend == "java":
             spec["module"] = "revl.Components"

@@ -1,0 +1,5 @@
+# The emitted module (gen.go + bridge_gen.go) is generated per composition by
+# backends/go/emit.py at `revl run --placement` build time; never committed.
+/emitted/*.go
+# The compiled runner binary.
+/revl_placement_runner
