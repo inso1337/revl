@@ -4,23 +4,23 @@ import type { Context } from 'cordis'
 import { host } from '../../runtime.ts'
 
 export interface Row {
-  id: number
+  id: bigint
   name: string
 }
 
-export function strLen(s: string): number {
-    return s.length
+export function strLen(s: string): bigint {
+    return BigInt(s.length)
 }
 
-export function pushed(xs: number[], x: number): number[] {
+export function pushed(xs: bigint[], x: bigint): bigint[] {
     return [...xs, x]
 }
 
-export function sliced(xs: number[]): number[] {
+export function sliced(xs: bigint[]): bigint[] {
     return xs.slice(1, 3)
 }
 
-export function concatLists(a: number[], b: number[]): number[] {
+export function concatLists(a: bigint[], b: bigint[]): bigint[] {
     return a.concat(b)
 }
 
@@ -32,23 +32,23 @@ export function joinWith(xs: string[], sep: string): string {
     return xs.join(sep)
 }
 
-export function repeated(s: string, n: number): string {
-    return s.repeat(n)
+export function repeated(s: string, n: bigint): string {
+    return s.repeat(Number(n))
 }
 
-export function indexOfSub(s: string, sub: string): number {
-    return s.indexOf(sub)
+export function indexOfSub(s: string, sub: string): bigint {
+    return BigInt(s.indexOf(sub))
 }
 
-export function charAtOf(s: string, i: number): string {
-    return s.charAt(i)
+export function charAtOf(s: string, i: bigint): string {
+    return s.charAt(Number(i))
 }
 
-export function codeAtOf(s: string, i: number): number {
-    return s.charCodeAt(i)
+export function codeAtOf(s: string, i: bigint): bigint {
+    return BigInt(s.charCodeAt(Number(i)))
 }
 
-export function greetN(name: string, n: number): string {
+export function greetN(name: string, n: bigint): string {
     return `hi ${name}#${n}!`
 }
 
@@ -56,11 +56,11 @@ export function optName(row: Row | undefined): string | undefined {
     return row?.name
 }
 
-export function optCode(s: string | undefined): number | undefined {
-    return s?.charCodeAt(0)
+export function optCode(s: string | undefined): bigint | undefined {
+    return ((v: number | undefined) => v === undefined ? undefined : BigInt(v))(s?.charCodeAt(0))
 }
 
-export function unwrapOr(o: number | undefined, d: number): number {
+export function unwrapOr(o: bigint | undefined, d: bigint): bigint {
     return (($revl_match_1) => {
   if ($revl_match_1 !== undefined) return ((v) => (v))($revl_match_1)
   if ($revl_match_1 === undefined) return (d)
@@ -68,25 +68,25 @@ export function unwrapOr(o: number | undefined, d: number): number {
 })(o)
 }
 
-export function adder(): ((a0: number) => number) {
-    return ((y: number) => ((y + 1)))
+export function adder(): ((a0: bigint) => bigint) {
+    return ((y: bigint) => ((y + 1n)))
 }
 
-export function okOf(n: number): { kind: "Ok"; value: number } | { kind: "Err"; value: string } {
+export function okOf(n: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
     return { kind: "Ok", value: n }
 }
 
-export function errOf(m: string): { kind: "Ok"; value: number } | { kind: "Err"; value: string } {
+export function errOf(m: string): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
     return { kind: "Err", value: m }
 }
 
-export function resultFold(r: { kind: "Ok"; value: number } | { kind: "Err"; value: string }): number {
+export function resultFold(r: { kind: "Ok"; value: bigint } | { kind: "Err"; value: string }): bigint {
     return (($revl_match_2) => {
   switch ($revl_match_2.kind) {
     case "Ok":
       return ((v) => (v))($revl_match_2.value)
     case "Err":
-      return ((e) => ((-e.length)))($revl_match_2.value)
+      return ((e) => ((-BigInt(e.length))))($revl_match_2.value)
     default:
       throw new TypeError("non-exhaustive match")
   }

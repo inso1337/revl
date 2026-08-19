@@ -56,7 +56,8 @@ describe('Pool — real bounded capacity', () => {
   it('borrows silently for a statement, so existing traces are unchanged', () => {
     const pool = host.Pool.open('pg://x', 1)
     expect(pool.query('SELECT 1')).toEqual([])
-    expect(pool.execute('INSERT')).toBe(1)
+    // rows affected is a revl `Int`, so the host answers a bigint
+    expect(pool.execute('INSERT')).toBe(1n)
     expect([pool.inUse(), pool.available()]).toEqual([0, 1])
     expect(hostLog).toEqual([
       'pool#1(pg://x).open size=1',

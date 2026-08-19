@@ -49,7 +49,14 @@ JS_RESERVED = {
     "while", "with", "yield",
 }
 
-TYPE_MAP = {"Str": "string", "Int": "number", "Bool": "boolean", "Float": "number"}
+# `Int` is 64-bit two's complement (docs/arithmetic.md) and a JS `number` is an
+# IEEE double, exact only to 2^53 — it cannot represent `9223372036854775807`
+# at all. `Int` is therefore `bigint`, which is arbitrary precision, so this
+# tier *imposes* the 64-bit bound (`revlI64`) exactly as python does.
+# `Float` is IEEE 754 binary64 and stays `number`: a different type, and the
+# two never mix in JS (`1n + 1` throws), so every operation is rendered
+# consistently typed from the IR's `operands` annotation.
+TYPE_MAP = {"Str": "string", "Int": "bigint", "Bool": "boolean", "Float": "number"}
 
 # Members cordis's Context already owns; a provision key colliding with one
 # would shadow framework API (or be refused by the runtime). The host knows
@@ -153,11 +160,33 @@ def _literal(value: object) -> str:
         return "true"
     if value is False:
         return "false"
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        # An `Int` literal is a BigInt literal. The frontend lexes `1.5`/`1e10`
+        # to a python float and `123` to a python int (lexer.py), so the two
+        # literal types stay distinguishable all the way down and `123` never
+        # renders as a `number` that silently loses precision past 2^53.
+        return f"{value}n"
+    if isinstance(value, float):
+        # A `Float` literal stays IEEE 754 binary64. `json.dumps` keeps the
+        # decimal point (`2.0`, not `2`), which is what stops a whole-valued
+        # Float literal from being read back as an integer.
         return json.dumps(value)
     if isinstance(value, str):
         return _string(value)
     raise EmitError(f"unsupported literal: {value!r}")
+
+
+def _float_literal(value: object) -> "str | None":
+    """A numeric literal rendered as a JS `number`, or None if not numeric.
+
+    `Int` widens to `Float` in revl (`1.5 + 2` type-checks), and the IR does
+    not say *which* operand widened — only that the operation is a Float one.
+    Rendering an int-valued literal in a Float position as `2` rather than `2n`
+    is what keeps that common case free of a conversion nobody wrote.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return json.dumps(value)
 
 
 def _json(value: object) -> str:
@@ -232,6 +261,61 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
         )
     args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
     return f"{name}({args})"
+
+
+def _is_float_expr(node: object) -> bool:
+    """Is this expression *syntactically* certain to be a `number`?
+
+    Only what the node itself proves: a Float literal, a `/` (true division
+    always yields Float), or a Float-annotated arithmetic node. Everything else
+    answers False, which costs a `Number(...)` that is the identity on a value
+    that was already a `number`. The emitter has no type environment, so this
+    is deliberately a proof, not an inference.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        value = node.get("value")
+        return isinstance(value, float) and not isinstance(value, bool)
+    if kind == "bin":
+        return node.get("op") == "/" or node.get("operands") == "Float"
+    if kind == "un":
+        return node.get("op") == "-" and _is_float_expr(node.get("operand"))
+    return False
+
+
+def _float_operand(node: object, ctx: "_Ctx") -> str:
+    """Render *node* so the result is a JS `number`.
+
+    Two things arrive in a Float position: an actual Float, and an `Int` that
+    revl widened into it (`compatible("Float", "Int")` is true, so `1.5 + 2`
+    type-checks). BigInt and number do not mix in JS — `1n + 1` is a TypeError
+    — so the Int side has to convert, and the IR says the *operation* is a
+    Float one without saying which side widened.
+
+    A numeric literal is re-rendered as a `number` (`2`, not `2n`); anything
+    already provably Float is left alone; everything else goes through
+    `Number()`, which is exactly the identity on a `number`.
+    """
+    if isinstance(node, dict) and node.get("kind") == "lit":
+        rendered = _float_literal(node.get("value"))
+        if rendered is not None:
+            return rendered
+    rendered = _expr(node, ctx)
+    return rendered if _is_float_expr(node) else f"Number({rendered})"
+
+
+def _int_as_number(node: object, ctx: "_Ctx") -> str:
+    """Render an `Int`-typed expression as the JS `number` an index/count API
+    needs. `xs[i]`, `slice`, `charAt` and `repeat` all take a `number` on the
+    host side while revl types the argument `Int`, so the conversion belongs
+    here rather than in every caller."""
+    if isinstance(node, dict) and node.get("kind") == "lit":
+        value = node.get("value")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return json.dumps(value)
+    return f"Number({_expr(node, ctx)})"
 
 
 def _expr(node: object, ctx: "_Ctx") -> str:
@@ -389,7 +473,34 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         op = _TS_V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
-        return f"({_expr(node['left'], ctx)} {op} {_expr(node['right'], ctx)})"
+        operands = node.get("operands")
+        if op == "/":
+            # `/` is TRUE division and yields Float even on two Ints
+            # (docs/arithmetic.md), so both sides become `number` whatever they
+            # were. That keeps it IEEE: a zero divisor gives Infinity/NaN — a
+            # *value*, never a throw — where BigInt `/` would raise RangeError.
+            # `Number()` on a bigint past 2^53 rounds; that is inherent to a
+            # binary64 result and is the same rounding rust's `as f64` does.
+            return (f"({_float_operand(node['left'], ctx)} / "
+                    f"{_float_operand(node['right'], ctx)})")
+        if operands == "Float":
+            # A Float operation: every operand is a `number`, including an Int
+            # that widened into it.
+            return (f"({_float_operand(node['left'], ctx)} {op} "
+                    f"{_float_operand(node['right'], ctx)})")
+        left, right = _expr(node["left"], ctx), _expr(node["right"], ctx)
+        if op in ("+", "-", "*") and operands == "Int":
+            # Int is bounded 64-bit and overflow TRAPS (docs/arithmetic.md).
+            # BigInt is arbitrary precision, so — exactly like python — this
+            # tier has to *impose* the bound rather than detect it; without the
+            # check a program that faults on rust/java/go would quietly grow a
+            # 65-bit value here.
+            return f"revlI64({left} {op} {right})"
+        # `%` on two bigints is already the TRUNCATED remainder (sign of the
+        # dividend), which is what `%` means (§0), and it throws RangeError on
+        # a zero divisor — the fault every tier gives for integer remainder at
+        # zero, where the old `number` lowering returned NaN.
+        return f"({left} {op} {right})"
 
     if kind == "un":
         operand = _expr(node.get("operand"), ctx)
@@ -411,15 +522,28 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"{target}[{_expr(node['index'], ctx)}]"
+        # The index is an `Int` (bigint) and JS indexes with a `number`; TS
+        # refuses a bigint index outright ("cannot be used as an index type").
+        return f"{target}[{_int_as_number(node['index'], ctx)}]"
+
+    if kind == "len":
+        # `xs.length` in field position (lower.py emits `len` rather than
+        # `field` when the receiver is a sized type). revl types it `Int`, and
+        # the JS `.length` is a `number`, so it converts at the boundary.
+        target_node = node.get("target")
+        target = _expr(target_node, ctx)
+        if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
+            target = f"({target})"
+        return f"BigInt({target}.length)"
 
     if kind == "builtin":
         target_node = node.get("target")
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        args = [_expr(a, ctx) for a in node.get("args") or []]
-        return _ts_builtin(node.get("method"), target, args)
+        arg_nodes = list(node.get("args") or [])
+        args = [_expr(a, ctx) for a in arg_nodes]
+        return _ts_builtin(node.get("method"), target, args, arg_nodes, ctx)
 
     if kind == "if":
         return (
@@ -472,8 +596,20 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        args = ", ".join(_expr(a, ctx) for a in node.get("args") or [])
-        return f"{target}?.{_ident(node.get('method'), 'optional method')}({args})"
+        method = node.get("method")
+        arg_nodes = list(node.get("args") or [])
+        int_args = _TS_INT_ARG_BUILTINS.get(method, ())
+        args = ", ".join(
+            _int_as_number(a, ctx) if index in int_args else _expr(a, ctx)
+            for index, a in enumerate(arg_nodes))
+        call = f"{target}?.{_ident(method, 'optional method')}({args})"
+        if method in _TS_INT_RESULT_BUILTINS:
+            # `?.` short-circuits to `undefined`, and `BigInt(undefined)`
+            # throws — so the Int conversion cannot wrap the whole chain, only
+            # the result when there is one. revl types this `Opt[Int]`.
+            return ("((v: number | undefined) => v === undefined ? undefined : BigInt(v))"
+                    f"({call})")
+        return call
 
     raise EmitError(f"unsupported expression kind {kind!r}")
 
@@ -756,7 +892,8 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
 # ---------------------------------------------------------------------------
 
 _TS_V3_TYPE = {
-    "Int": "number",
+    # Int is `bigint` — see TYPE_MAP for why. Float is a separate type.
+    "Int": "bigint",
     "Float": "number",
     "Bool": "boolean",
     "Str": "string",
@@ -891,19 +1028,27 @@ def _v3_var(node: dict, ctx: "_Ctx") -> str:
     return name
 
 
-def _ts_builtin(method, target: str, args: list) -> str:
+def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -> str:
     """The stdlib surface (docs/stdlib-2.0.md) as idiomatic TS; `push` and
-    `concat` are persistent (value semantics), matching the py backend."""
+    `concat` are persistent (value semantics), matching the py backend.
+
+    This is the tier's widest Int boundary. revl types `length`, `indexOf` and
+    `charCodeAt` as `Int` while the underlying JS APIs answer `number`, and
+    types the index arguments of `slice`, `charAt` and `repeat` as `Int` while
+    JS needs a `number`. Neither direction is implicit in JS, so both convert
+    here — `BigInt(...)` on the way out, `Number(...)` on the way in.
+    """
     if method == "length":
-        return f"{target}.length"
+        return f"BigInt({target}.length)"
     if method == "push":
         return f"[...{target}, {args[0]}]"
     if method == "slice":
-        return f"{target}.slice({args[0]}, {args[1]})"
+        return (f"{target}.slice({_int_as_number(arg_nodes[0], ctx)}, "
+                f"{_int_as_number(arg_nodes[1], ctx)})")
     if method == "charAt":
-        return f"{target}.charAt({args[0]})"
+        return f"{target}.charAt({_int_as_number(arg_nodes[0], ctx)})"
     if method == "charCodeAt":
-        return f"{target}.charCodeAt({args[0]})"
+        return f"BigInt({target}.charCodeAt({_int_as_number(arg_nodes[0], ctx)}))"
     # Integer division and modulo (docs/arithmetic.md). JS `/` is true division
     # and `%` takes the dividend's sign, so every one of these is built rather
     # than inherited — through helpers, so the divisor is evaluated once and a
@@ -915,13 +1060,13 @@ def _ts_builtin(method, target: str, args: list) -> str:
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
-        return f"{target}.indexOf({args[0]})"
+        return f"BigInt({target}.indexOf({args[0]}))"
     if method == "split":
         return f"{target}.split({args[0]})"
     if method == "join":
         return f"{target}.join({args[0]})"
     if method == "repeat":
-        return f"{target}.repeat({args[0]})"
+        return f"{target}.repeat({_int_as_number(arg_nodes[0], ctx)})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -1073,8 +1218,8 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             shown = json.dumps(f"{left} {expr['op']} {right}")
             out.append(f"{pad}{{ const l = {left}, r = {right};")
             out.append(f"{pad}  expect(revlEq(l, r), {shown} + "
-                       f'"\\n  left  = " + JSON.stringify(l) + '
-                       f'"\\n  right = " + JSON.stringify(r)).toBe({want}) }}')
+                       f'"\\n  left  = " + revlShow(l) + '
+                       f'"\\n  right = " + revlShow(r)).toBe({want}) }}')
         elif test_mode:
             out.append(f"{pad}expect({_expr(expr, ctx)}).toBeTruthy()")
         elif expr.get("kind") == "bin" and expr.get("op") in (
@@ -1085,8 +1230,8 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             shown = json.dumps(f"{left} {op} {right}")
             out.append(f"{pad}{{ const l = {left}, r = {right};")
             out.append(f"{pad}  if (!(l {op} r)) throw new Error({shown} + "
-                       f'"\\n  left  = " + JSON.stringify(l) + '
-                       f'"\\n  right = " + JSON.stringify(r)) }}')
+                       f'"\\n  left  = " + revlShow(l) + '
+                       f'"\\n  right = " + revlShow(r)) }}')
         else:
             out.append(
                 f"{pad}if (!({_expr(expr, ctx)})) "
@@ -1103,21 +1248,54 @@ _TS_INT_ARITH = {
     "mod": "revlMod",
 }
 
-_REVL_INT_ARITH_HELPER = """function revlNonZero(b: number): number {
-  if (b === 0) throw new Error('revl: division by zero')
+# Builtin methods whose named argument positions revl types `Int` while the JS
+# API takes a `number`, and builtins revl types `Int` while the JS API answers
+# a `number`. `_ts_builtin` spells each conversion out per method; these tables
+# are the same facts in the form the `?.` path needs.
+_TS_INT_ARG_BUILTINS = {"slice": (0, 1), "charAt": (0,), "charCodeAt": (0,),
+                        "repeat": (0,)}
+_TS_INT_RESULT_BUILTINS = {"length", "indexOf", "charCodeAt"}
+
+# Int is 64-bit two's complement and overflow traps (docs/arithmetic.md).
+# BigInt is arbitrary precision, so this tier imposes the bound the way python
+# does — the message is the one every bounded tier raises, so one guarantee
+# does not read as six different bugs.
+_REVL_I64_HELPER = """const REVL_I64_MIN = -(2n ** 63n)
+const REVL_I64_MAX = 2n ** 63n - 1n
+function revlI64(v: bigint): bigint {
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  return v
+}"""
+
+# The named integer operations (docs/arithmetic.md), on bigint. BigInt `/`
+# already truncates toward zero, so `div_trunc` is native here; `%` on bigint
+# already takes the dividend's sign, which is what the truncated remainder
+# means. Only `div_floor`, `div_euclid` and `mod` are built.
+#
+# The divisor is guarded so a zero divisor throws rather than yielding a value:
+# integer division has none at zero, and the checker has declared `Int`.
+# `revlI64` re-imposes the bound because the one overflowing quotient,
+# `-(2n ** 63n) / -1n`, is exactly the value that leaves the range.
+_REVL_INT_ARITH_HELPER = """function revlNonZero(b: bigint): bigint {
+  if (b === 0n) throw new Error('revl: division by zero')
   return b
 }
-function revlDivTrunc(a: number, b: number): number {
-  return Math.trunc(a / revlNonZero(b))
+function revlDivTrunc(a: bigint, b: bigint): bigint {
+  return revlI64(a / revlNonZero(b))
 }
-function revlDivFloor(a: number, b: number): number {
-  return Math.floor(a / revlNonZero(b))
+function revlDivFloor(a: bigint, b: bigint): bigint {
+  const d = revlNonZero(b)
+  const q = a / d
+  return a % d !== 0n && (a < 0n) !== (d < 0n) ? revlI64(q - 1n) : revlI64(q)
 }
-function revlDivEuclid(a: number, b: number): number {
-  return revlNonZero(b) > 0 ? Math.floor(a / b) : -Math.floor(a / -b)
+function revlDivEuclid(a: bigint, b: bigint): bigint {
+  const d = revlNonZero(b)
+  const q = a / d
+  if (a % d >= 0n) return revlI64(q)
+  return d > 0n ? revlI64(q - 1n) : revlI64(q + 1n)
 }
-function revlMod(a: number, b: number): number {
-  const m = Math.abs(revlNonZero(b))
+function revlMod(a: bigint, b: bigint): bigint {
+  const m = revlNonZero(b) < 0n ? -b : b
   return ((a % m) + m) % m
 }"""
 
@@ -1133,12 +1311,79 @@ def _uses_int_arith(node) -> bool:
     return False
 
 
+def _uses_bounded_int(node) -> bool:
+    """Does this IR do Int `+`, `-` or `*`? The bound check travels with the
+    module only where it is needed, matching the python backend."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int"):
+            return True
+        return any(_uses_bounded_int(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_bounded_int(v) for v in node)
+    return False
+
+
+# `JSON.stringify` THROWS on a BigInt ("Do not know how to serialize a
+# BigInt"), and the assert diagnostics render both operand values — so on this
+# tier a failing assertion over `Int` would have reported a TypeError from the
+# reporter instead of the values that disagreed. This renders revl values
+# directly: a bigint as its digits (no `n`, matching every other tier's
+# rendering of the same number), and NaN/Infinity as themselves rather than as
+# the `null` JSON.stringify turns them into.
+_REVL_SHOW_HELPER = """function revlShow(v: unknown): string {
+  if (typeof v === 'bigint') return v.toString()
+  if (typeof v === 'number') return String(v)
+  if (Array.isArray(v)) return '[' + v.map(revlShow).join(', ') + ']'
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    return '{' + Object.keys(o).map((k) => JSON.stringify(k) + ': ' + revlShow(o[k])).join(', ') + '}'
+  }
+  return JSON.stringify(v) ?? String(v)
+}"""
+
+
+def _revl_helpers(ir: dict) -> list[str]:
+    """The helper functions this document actually needs, in dependency order.
+
+    Emitting them unconditionally would leave dead functions in every module;
+    scanning is cheap and keeps the output honest about what it uses. `revlI64`
+    comes first because the named integer operations call it.
+    """
+    out: list[str] = []
+    if _uses_equality(ir):
+        out.extend([_REVL_EQ_HELPER, ""])
+    if _uses_assert(ir):
+        out.extend([_REVL_SHOW_HELPER, ""])
+    if _uses_bounded_int(ir) or _uses_int_arith(ir):
+        out.extend([_REVL_I64_HELPER, ""])
+    if _uses_int_arith(ir):
+        out.extend([_REVL_INT_ARITH_HELPER, ""])
+    return out
+
+
+def _uses_assert(node) -> bool:
+    """Does this IR carry an `assert` step? Only those render values."""
+    if isinstance(node, dict):
+        if node.get("step") == "assert":
+            return True
+        return any(_uses_assert(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_assert(v) for v in node)
+    return False
+
+
 _TS_EQUALITY_OPS = ("==", "===", "!=", "!==")
 
 # Structural equality, matching python's `==` on dicts/lists and java's
 # `Objects.equals`. Key order is irrelevant (as in python), arrays and objects
 # never compare equal to each other, and NaN/-0 fall through to `===` so they
 # behave exactly as they do on the reference tier.
+#
+# `Int` is a bigint, and `===` is already the right comparison for one: it is
+# value equality between bigints (`1n === 1n`) and never conflates one with a
+# `number` (`1n === 1` is false), so an `Int` and a `Float` do not compare
+# equal by accident. Nested bigints reach the same leaf through the recursion.
 _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {
@@ -1328,6 +1573,12 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         "",
     ]
 
+    # A v1/v2 component body carries ordinary expressions too (`if (config.limit
+    # < 1)`, Int arithmetic in a method body), so it needs the same helpers a
+    # 2.0 document does — without this a v1 module referencing `revlI64` or
+    # `revlEq` would emit a call to a function that is not there.
+    out.extend(_revl_helpers(ir))
+
     # Service interfaces (coeffect interfaces, DESIGN.md §3.1).
     for sname, service in services.items():
         _ident(sname, "service")
@@ -1384,12 +1635,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         out.append("import { expect, it } from 'vitest'")
     out.append("")
 
-    if _uses_equality(ir):
-        out.append(_REVL_EQ_HELPER)
-        out.append("")
-    if _uses_int_arith(ir):
-        out.append(_REVL_INT_ARITH_HELPER)
-        out.append("")
+    out.extend(_revl_helpers(ir))
 
     if types:
         out.extend(_emit_ts_types(types))

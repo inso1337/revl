@@ -365,7 +365,8 @@
             "right": {
               "kind": "lit",
               "value": 2
-            }
+            },
+            "operands": "Int"
           }
         }
       ]
@@ -460,16 +461,18 @@
                 },
                 "args": [
                   {
-                    "kind": "bin",
-                    "op": "/",
-                    "left": {
+                    "kind": "builtin",
+                    "method": "div_trunc",
+                    "target": {
                       "kind": "var",
                       "name": "k"
                     },
-                    "right": {
-                      "kind": "lit",
-                      "value": 2
-                    }
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": 2
+                      }
+                    ]
                   }
                 ]
               }

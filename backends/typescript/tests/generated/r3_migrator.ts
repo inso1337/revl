@@ -18,14 +18,14 @@ declare module 'cordis' {
 export interface PgDatabaseConfig {
   url: string
   /** default: 10 */
-  pool_size?: number
+  pool_size?: bigint
 }
 export const PgDatabase = {
   name: "PgDatabase",
   inject: [],
   provide: ["db"],
   apply(ctx: Context, rawConfig: PgDatabaseConfig) {
-    const config = host.applyConfigDefaults("PgDatabase", rawConfig, { url: { required: true }, pool_size: { default: 10 } }) as Required<PgDatabaseConfig>
+    const config = host.applyConfigDefaults("PgDatabase", rawConfig, { url: { required: true }, pool_size: { default: 10n } }) as Required<PgDatabaseConfig>
     ctx.effect(function* () {
       const pool = host.Pool.open(config.url, config.pool_size)
       yield () => pool.close()

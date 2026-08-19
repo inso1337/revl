@@ -75,7 +75,7 @@ check('R2', cache.state === FiberState.PENDING,
   'UserCache deactivated when its requirement was withdrawn')
 
 note('demo  | swap provider: load PgDatabase (replica), second instance')
-const replica = ctx.plugin(PgDatabase, { url: 'pg://replica', pool_size: 4 })
+const replica = ctx.plugin(PgDatabase, { url: 'pg://replica', pool_size: 4n })
 await replica
 await cache.await()
 

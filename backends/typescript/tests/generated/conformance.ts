@@ -3,11 +3,41 @@
 import type { Context } from 'cordis'
 import { host } from '../../runtime.ts'
 
+const REVL_I64_MIN = -(2n ** 63n)
+const REVL_I64_MAX = 2n ** 63n - 1n
+function revlI64(v: bigint): bigint {
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  return v
+}
+
+function revlNonZero(b: bigint): bigint {
+  if (b === 0n) throw new Error('revl: division by zero')
+  return b
+}
+function revlDivTrunc(a: bigint, b: bigint): bigint {
+  return revlI64(a / revlNonZero(b))
+}
+function revlDivFloor(a: bigint, b: bigint): bigint {
+  const d = revlNonZero(b)
+  const q = a / d
+  return a % d !== 0n && (a < 0n) !== (d < 0n) ? revlI64(q - 1n) : revlI64(q)
+}
+function revlDivEuclid(a: bigint, b: bigint): bigint {
+  const d = revlNonZero(b)
+  const q = a / d
+  if (a % d >= 0n) return revlI64(q)
+  return d > 0n ? revlI64(q - 1n) : revlI64(q + 1n)
+}
+function revlMod(a: bigint, b: bigint): bigint {
+  const m = revlNonZero(b) < 0n ? -b : b
+  return ((a % m) + m) % m
+}
+
 export type Outcome =
-  { kind: "Found"; value: number }
+  { kind: "Found"; value: bigint }
   | { kind: "Missing" }
 
-export function Found(value: number): Outcome {
+export function Found(value: bigint): Outcome {
   return { kind: "Found", value }
 }
 
@@ -20,34 +50,34 @@ export function shout(s: string): string {
   return s.toUpperCase()
 }
 
-export function double(n: number): number {
-    return (n * 2)
+export function double(n: bigint): bigint {
+    return revlI64(n * 2n)
 }
 
-export function pick(n: number): Outcome {
-    if ((n > 0)) {
+export function pick(n: bigint): Outcome {
+    if ((n > 0n)) {
       return { kind: "Found", value: n }
     }
     return { kind: "Missing" }
 }
 
-export function halfOrNothing(k: number): number | undefined {
-    if ((k > 1)) {
-      return ((value) => value)((k / 2))
+export function halfOrNothing(k: bigint): bigint | undefined {
+    if ((k > 1n)) {
+      return ((value) => value)(revlDivTrunc(k, 2n))
     }
     return undefined
 }
 
 export interface Store {
-  lookup(k: number): number | undefined
+  lookup(k: bigint): bigint | undefined
 }
 
 export interface Calc {
-  twice(x: number): number
-  orZero(k: number): number
-  classify(x: number): number
+  twice(x: bigint): bigint
+  orZero(k: bigint): bigint
+  classify(x: bigint): bigint
   loud(s: string): string
-  touch(x: number): void
+  touch(x: bigint): void
 }
 
 declare module 'cordis' {
@@ -64,7 +94,7 @@ export const Memory = {
   apply(ctx: Context) {
     ctx.effect(function* () {
       yield ctx.provide("store", {
-        lookup(k: number) {
+        lookup(k: bigint) {
           return halfOrNothing(k)
         },
       } satisfies Store)
@@ -74,33 +104,33 @@ export const Memory = {
 
 export interface GuardedConfig {
   /** default: 10 */
-  limit?: number
+  limit?: bigint
 }
 export const Guarded = {
   name: "Guarded",
   inject: ["store"],
   provide: ["calc"],
   apply(ctx: Context, rawConfig: GuardedConfig) {
-    const config = host.applyConfigDefaults("Guarded", rawConfig, { limit: { default: 10 } }) as Required<GuardedConfig>
+    const config = host.applyConfigDefaults("Guarded", rawConfig, { limit: { default: 10n } }) as Required<GuardedConfig>
     ctx.effect(function* () {
-      if ((config.limit < 1)) {
+      if ((config.limit < 1n)) {
         throw new Error("limit must be positive")
       }
       yield ctx.provide("calc", {
-        twice(x: number) {
+        twice(x: bigint) {
           return double(x)
         },
-        orZero(k: number) {
-          return (ctx.store.lookup(k) ?? 0)
+        orZero(k: bigint) {
+          return (ctx.store.lookup(k) ?? 0n)
         },
-        classify(x: number) {
+        classify(x: bigint) {
           const o = pick(x)
           return (($revl_match_1) => {
   switch ($revl_match_1.kind) {
     case "Found":
       return ((v) => (v))($revl_match_1.value)
     case "Missing":
-      return (0)
+      return (0n)
     default:
       throw new TypeError("non-exhaustive match")
   }
@@ -109,7 +139,7 @@ export const Guarded = {
         loud(s: string) {
           return shout(s)
         },
-        touch(x: number) {
+        touch(x: bigint) {
           return
         },
       } satisfies Calc)
