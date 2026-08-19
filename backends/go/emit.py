@@ -853,6 +853,9 @@ class _V3GoCtx:
         # feature flags set during rendering / used at module assembly
         self.needs_fmt = False
         self.used_stdlib = False
+        self.needs_reflect = False      # structural `==` on a non-scalar
+        self.needs_float_div = False    # `/` (true division, IEEE at zero)
+        self.needs_int_arith = False    # div_floor / div_euclid / mod
         for name, spec in self.types.items():
             if spec.get("kind") == "record":
                 key = tuple(sorted((spec.get("fields") or {}).keys()))
@@ -879,7 +882,8 @@ class _V3GoCtx:
 
 
 def _v3_builtin_ret_type(method, recv_type):
-    if method in ("length", "indexOf", "charCodeAt"):
+    if method in ("length", "indexOf", "charCodeAt",
+                  "div_trunc", "div_floor", "div_euclid", "mod"):
         return "Int"
     if method in ("charAt", "repeat", "join"):
         return "Str"
@@ -941,7 +945,9 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             if lt == "Str" or rt == "Str":
                 return "Str"
             return lt or rt
-        if op in ("-", "*", "/", "%"):
+        if op == "/":
+            return "Float"  # true division (docs/arithmetic.md)
+        if op in ("-", "*", "%"):
             return "Int"
         return None
     if kind == "un":
@@ -969,6 +975,11 @@ _V3_GO_BIN_OPS = {
 
 _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
 
+# Types Go can compare with `==` without it being either wrong or a compile
+# error. Everything else (records, lists, ADTs, Opt/Result) goes through
+# revlEq.
+_GO_SCALARS = {"Int", "Float", "Str", "Bool"}
+
 
 def _go_v3_lit(node: dict) -> str:
     value = node.get("value")
@@ -985,7 +996,12 @@ def _go_v3_lit(node: dict) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
-        return repr(value)
+        # `float64(...)`, not a bare literal. Go evaluates *untyped constant*
+        # arithmetic at arbitrary precision, so `0.1 + 0.2` folds to exactly
+        # 0.3 at compile time and compares equal to it — which is not IEEE 754
+        # binary64, the semantics revl specifies (docs/arithmetic.md). Typing
+        # the literal forces ordinary float64 arithmetic.
+        return f"float64({value!r})"
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 
@@ -1057,7 +1073,30 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         go_op = _V3_GO_BIN_OPS.get(op)
         if go_op is None:
             raise EmitError(f"unsupported v3 binary operator {op!r}")
-        return f"({_go_v3_expr(node['left'], ctx)} {go_op} {_go_v3_expr(node['right'], ctx)})"
+        left = _go_v3_expr(node["left"], ctx)
+        right = _go_v3_expr(node["right"], ctx)
+        if op in ("==", "===", "!=", "!=="):
+            # revl has ONE equality and it is structural (syntax-2.0 §3.4).
+            # Go `==` is value equality for comparable structs but a *compile
+            # error* on slices ("slice can only be compared to nil"), so a
+            # record holding a List is not comparable at all. Scalars keep the
+            # native operator; everything else goes through revlEq.
+            lt = _go_v3_infer_type(node.get("left"), ctx)
+            rt = _go_v3_infer_type(node.get("right"), ctx)
+            if not (lt in _GO_SCALARS and rt in _GO_SCALARS):
+                ctx.needs_reflect = True
+                call = f"revlEq({left}, {right})"
+                return call if op in ("==", "===") else f"(!{call})"
+        if op == "/":
+            # `/` is true division and yields Float (docs/arithmetic.md). Go
+            # `/` on two int64 is integer division, and a *constant* `1.0/0.0`
+            # is a compile error where IEEE defines +Inf — the helper makes it
+            # a runtime float division, which is both.
+            ctx.needs_float_div = True
+            if node.get("operands") == "Int":
+                return f"revlDiv(float64({left}), float64({right}))"
+            return f"revlDiv({left}, {right})"
+        return f"({left} {go_op} {right})"
 
     if kind == "un":
         operand = _go_v3_expr(node.get("operand"), ctx)
@@ -1184,6 +1223,17 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
+    # Integer division and modulo (docs/arithmetic.md). Go `/` truncates and
+    # `%` takes the dividend's sign, which is what revl specifies, so
+    # div_trunc is native; the other three are helpers so every tier computes
+    # the same thing.
+    if method == "div_trunc":
+        return f"({target} / {args[0]})"
+    if method in ("div_floor", "div_euclid", "mod"):
+        ctx.needs_int_arith = True
+        helper = {"div_floor": "revlDivFloor", "div_euclid": "revlDivEuclid",
+                  "mod": "revlMod"}[method]
+        return f"{helper}({target}, {args[0]})"
     raise EmitError(f"unknown v3 builtin method {method!r}")
 
 
@@ -1672,6 +1722,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         imports.append('\t"testing"')
     if ctx.needs_fmt:
         imports.append('\t"fmt"')
+    if ctx.needs_reflect:
+        imports.append('\t"reflect"')
     if ctx.used_stdlib:
         imports.append('\t"strings"')
         imports.append('\t"unicode/utf8"')
@@ -1685,6 +1737,46 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("import (")
         out.extend(sorted(imports))
         out.append(")")
+        out.append("")
+    if ctx.needs_reflect:
+        # Structural equality. Go `==` is a compile error on slices, so a
+        # record holding a List cannot use it at all; DeepEqual compares
+        # float64 with `==`, so NaN stays unequal to itself as IEEE requires.
+        out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
+        out.append("")
+    if ctx.needs_float_div:
+        # A function, not an expression: Go rejects a *constant* `1.0 / 0.0`
+        # at compile time, where IEEE defines +Inf. Through a call it is an
+        # ordinary runtime float division, which is what revl specifies.
+        out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_int_arith:
+        out.append("func revlDivFloor(a, b int64) int64 {")
+        out.append("\tq := a / b")
+        out.append("\tif a%b != 0 && ((a < 0) != (b < 0)) {")
+        out.append("\t\tq--")
+        out.append("\t}")
+        out.append("\treturn q")
+        out.append("}")
+        out.append("")
+        out.append("func revlDivEuclid(a, b int64) int64 {")
+        out.append("\tif b > 0 {")
+        out.append("\t\treturn revlDivFloor(a, b)")
+        out.append("\t}")
+        out.append("\treturn -revlDivFloor(a, -b)")
+        out.append("}")
+        out.append("")
+        out.append("func revlMod(a, b int64) int64 {")
+        out.append("\tm := b")
+        out.append("\tif m < 0 {")
+        out.append("\t\tm = -m")
+        out.append("\t}")
+        out.append("\tr := a % m")
+        out.append("\tif r < 0 {")
+        out.append("\t\tr += m")
+        out.append("\t}")
+        out.append("\treturn r")
+        out.append("}")
         out.append("")
     if used_opt:
         out.append(_V3_OPT_PREAMBLE)

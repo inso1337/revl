@@ -392,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
     test.add_argument("--backend", default="py",
-                      choices=("py", "ts", "rust", "java", "wasm", "all"),
+                      choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "
                            "`all` runs every tier whose toolchain is present")
 

@@ -213,6 +213,39 @@ def run_rust(ir: dict) -> tuple[str, str]:
     return ("pass", "cargo test: all emitted tests passed" + note)
 
 
+def run_go(ir: dict) -> tuple[str, str]:
+    """Emit a throwaway module and run its ``Test*`` funcs under ``go test``.
+
+    The v3 tier is ordinary Go with no dependencies, so unlike rust this needs
+    no network — a bare `go.mod` is enough, and the tier is as cheap to execute
+    as python and TypeScript.
+    """
+    go = shutil.which("go")
+    if go is None:
+        return ("skip", "go not installed")
+    note = _fault_note(ir, "go")
+    try:
+        emit = _emitter("go")
+        source = emit.emit(_without_fault_tests(ir))
+        if isinstance(source, dict):  # some emitters return a file map
+            source = next(iter(source.values()))
+    except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        return ("fail", f"emitter refused: {error}")
+    with tempfile.TemporaryDirectory(prefix="revl_test_go_") as tmpd:
+        tmp = Path(tmpd)
+        (tmp / "gen_test.go").write_text(source, encoding="utf-8")
+        (tmp / "go.mod").write_text("module revltest\n\ngo 1.25\n", encoding="utf-8")
+        result = subprocess.run([go, "test", "./..."], cwd=tmp,
+                                capture_output=True, text=True, timeout=600,
+                                env={**os.environ, "GOFLAGS": "-mod=mod"})
+        output = (result.stdout + result.stderr).strip()
+    if output:
+        print(output)
+    if result.returncode != 0:
+        return ("fail", f"go test exited {result.returncode}")
+    return ("pass", "go test: all emitted tests passed" + note)
+
+
 def _java_tool(name: str) -> str | None:
     """A toolchain binary that actually works (macOS ships a `javac` shim
     that errors when no JDK is installed)."""
@@ -301,6 +334,7 @@ RUNNERS: dict[str, callable] = {
     "rust": run_rust,
     "java": run_java,
     "wasm": run_wasm,
+    "go": run_go,
 }
 
 _TAG = {"pass": "ok", "skip": "skipped", "fail": "FAIL"}
