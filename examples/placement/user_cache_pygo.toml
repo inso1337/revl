@@ -1,0 +1,14 @@
+# Python provider, Go (cordis-go) consumer. `revl run --placement` builds the
+# go runner and wires the `db` seam over a Unix socket: UserCache runs on Go and
+# proxies `db` to PgDatabase on Python, so `cache.put`'s `emit db.execute(...)`
+# crosses the seam into the provider process.
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+components = ["PgDatabase"]
+
+[processes.consumer]
+backend = "go"
+components = ["UserCache"]
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]
