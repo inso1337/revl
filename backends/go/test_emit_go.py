@@ -88,9 +88,113 @@ def test_spawn_ir_is_rejected():
         emit.emit({"ir_version": 2, "components": [{"name": "X", "spawn": {}}]})
 
 
-def test_ir_version_gate():
+def test_spawn_ir_is_rejected_under_v3():
+    # spawn/instance-parametric IR also lives under ir_version 3, but is a
+    # separate feature out of scope here — it must still be refused by name.
     with pytest.raises(emit.EmitError):
-        emit.emit({"ir_version": 3, "components": []})
+        emit.emit({"ir_version": 3, "components": [{"name": "X", "spawn": {}}]})
+
+
+def test_ir_version_gate():
+    # v1/v2/v3 are accepted; anything else is refused.
+    with pytest.raises(emit.EmitError):
+        emit.emit({"ir_version": 4, "components": []})
+
+
+# --------------------------------------------------------------------------
+# ir_version 3 (pure / typed-core tier) — the executable target lives under
+# backends/go/v3/ and runs on real Go (`go test`); these assert the emitter's
+# shape and that the checked-in Go is a current, reproducible emit.
+# --------------------------------------------------------------------------
+
+V3_FIXTURES = ROOT / "backends" / "typescript" / "tests" / "fixtures"
+V3_TESTS = V3_FIXTURES / "v3_tests.ir.json"
+V3_TYPES_FUNCTIONS = V3_FIXTURES / "v3_types_functions.ir.json"
+V3_STDLIB = V3_FIXTURES / "v3_stdlib.ir.json"
+
+# The checked-in Go is gofmt'd; a fresh emit is not. gofmt only moves
+# whitespace (it never reorders or rewrites tokens), so comparisons here strip
+# ALL whitespace — a real structural drift still shows, but `interface {` vs
+# gofmt's `interface{` does not.
+_ws = lambda s: "".join(s.split())
+
+
+def _has(src, needle):
+    assert _ws(needle) in _ws(src), f"missing (ws-insensitive): {needle!r}"
+
+
+def test_v3_tests_emit_shapes():
+    src = emit.emit(_load(V3_TESTS), package="tests")
+    assert "ir_version 3" in src
+    assert "package tests" in src
+    _has(src, "func add(a int64, b int64) int64")
+    # `test` block -> real Go test; the receiver is renamed so a user binding
+    # named `t` cannot shadow *testing.T.
+    _has(src, "func TestAddWorks(revlT *testing.T)")
+    _has(src, "revlT.Fatalf")
+
+
+def test_v3_types_functions_emit_shapes():
+    src = emit.emit(_load(V3_TYPES_FUNCTIONS), package="types_functions")
+    _has(src, "type Row struct {")
+    # user ADT -> sealed interface + case structs + type-switch match
+    _has(src, "type Outcome interface { isOutcome() }")
+    _has(src, "type OutcomeOk struct { Value Row }")
+    _has(src, "switch _m := outcome.(type) {")
+    _has(src, "case OutcomeOk:")
+    # if-expression -> IIFE; list literal element type
+    _has(src, "func() int64 {")
+    _has(src, "[]int64{1, 2, 3}")
+    # extern (falls back to @ts body, valid Go here)
+    _has(src, "func greet(name string) string")
+
+
+def test_v3_stdlib_emit_shapes():
+    src = emit.emit(_load(V3_STDLIB), package="stdlib")
+    # Opt/Result as generic sealed interfaces
+    _has(src, "type RevlOpt[T any] interface { isRevlOpt() }")
+    _has(src, "type RevlResult[T any, E any] interface { isRevlResult() }")
+    # optfield/optcall -> revlOptMap over the payload
+    _has(src, "revlOptMap(row, func(_x Row) string { return _x.name })")
+    _has(src, "revlOptMap(s, func(_x string) int64 { return revlStrCharCodeAt(_x, 0) })")
+    # stdlib builtins dispatch Str vs List
+    _has(src, "revlStrLen(s)")
+    _has(src, "revlListPush(xs, x)")
+    # template -> fmt.Sprintf; arrow -> Go closure; Result construction
+    _has(src, 'fmt.Sprintf("hi %v#%v!", name, n)')
+    _has(src, "func(y int64) int64 { return (y + 1) }")
+    _has(src, "RevlOk[int64, string]{Value: n}")
+
+
+def _gofmt(src: str) -> str | None:
+    """gofmt `src`, or None when gofmt is unavailable. gofmt also strips the
+    redundant parens the expression renderer emits around `if`/`for`
+    conditions, so this is what makes the checked-in file byte-reproducible."""
+    import shutil
+    import subprocess
+    if shutil.which("gofmt") is None:
+        return None
+    proc = subprocess.run(
+        ["gofmt"], input=src, capture_output=True, text=True)
+    assert proc.returncode == 0, f"gofmt rejected the emit:\n{proc.stderr}"
+    return proc.stdout
+
+
+@pytest.mark.parametrize("ir_path,pkg,rel", [
+    (V3_TESTS, "tests", "v3/tests/gen_test.go"),
+    (V3_TYPES_FUNCTIONS, "types_functions", "v3/types_functions/gen.go"),
+    (V3_STDLIB, "stdlib", "v3/stdlib/gen.go"),
+])
+def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
+    """The committed v3 Go is byte-identical to gofmt(emit(ir)) — this is the
+    reproducibility gate regen.sh guarantees."""
+    formatted = _gofmt(emit.emit(_load(ir_path), package=pkg))
+    committed = (HERE / rel).read_text(encoding="utf-8")
+    if formatted is None:  # no gofmt: fall back to a whitespace-insensitive check
+        assert _ws(emit.emit(_load(ir_path), package=pkg)) == _ws(committed), (
+            f"{rel} is stale — run backends/go/regen.sh")
+        return
+    assert formatted == committed, f"{rel} is stale — run backends/go/regen.sh"
 
 
 @pytest.mark.parametrize("ir_path,pkg", [
