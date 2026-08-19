@@ -180,12 +180,18 @@ export class PoolHandle {
     }
   }
 
-  execute(sql: any): number {
+  /** Rows affected. This is the one documented host builtin whose result a
+   * revl program reads as an `Int` (`emission fn execute(sql: Str) -> Int` in
+   * examples/user_cache.rvl), and `Int` is 64-bit — `bigint` on this tier
+   * (docs/arithmetic.md). `acquire`/`capacity`/`inUse`/`available` stay
+   * `number`: they are harness introspection, not part of the v0 host stdlib
+   * surface in docs/backend-ir.md, and no revl program sees them. */
+  execute(sql: any): bigint {
     const conn = this.borrow('execute')
     try {
       record(`${this.label}.execute(${sql})`)
       this.statements.push(String(sql))
-      return 1
+      return 1n
     } finally {
       this.giveBack(conn)
     }
@@ -364,9 +370,15 @@ function applyConfigDefaults(
     }
   }
   resolvedConfig.set(component, config)
+  // `JSON.stringify` THROWS on a BigInt, and an `Int` config field is a bigint
+  // on this tier — so the trace line has to render one itself. Digits with no
+  // `n` suffix and no quotes: the same text python/rust/java/go write for the
+  // same value, which is what keeps the cross-tier trace comparison honest.
+  const show = (value: unknown) =>
+    typeof value === 'bigint' ? value.toString() : JSON.stringify(value)
   const body = Object.keys(config)
     .sort()
-    .map((key) => `${key}=${JSON.stringify(config[key])}`)
+    .map((key) => `${key}=${show(config[key])}`)
     .join(', ')
   const tail = defaulted.length ? ` [defaults: ${defaulted.sort().join(', ')}]` : ''
   record(`${component}.config {${body}}${tail}`)

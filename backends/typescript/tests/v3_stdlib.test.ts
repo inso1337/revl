@@ -39,66 +39,67 @@ import {
 
 describe('v3 stdlib builtins — value correctness', () => {
   it('computes each stdlib method', () => {
-    expect(strLen('abcd')).toBe(4)
-    expect(sliced([10, 20, 30, 40])).toEqual([20, 30])
-    expect(concatLists([1, 2], [3, 4])).toEqual([1, 2, 3, 4])
+    expect(strLen('abcd')).toBe(4n)
+    expect(sliced([10n, 20n, 30n, 40n])).toEqual([20n, 30n])
+    expect(concatLists([1n, 2n], [3n, 4n])).toEqual([1n, 2n, 3n, 4n])
     expect(splitOn('a,b,c', ',')).toEqual(['a', 'b', 'c'])
     expect(joinWith(['a', 'b', 'c'], '-')).toBe('a-b-c')
-    expect(repeated('ab', 3)).toBe('ababab')
-    expect(indexOfSub('hello', 'l')).toBe(2)
-    expect(charAtOf('hello', 1)).toBe('e')
-    expect(codeAtOf('A', 0)).toBe(65)
+    expect(repeated('ab', 3n)).toBe('ababab')
+    expect(indexOfSub('hello', 'l')).toBe(2n)
+    expect(charAtOf('hello', 1n)).toBe('e')
+    expect(codeAtOf('A', 0n)).toBe(65n)
   })
 
   it('push and concat are PERSISTENT (value semantics — input not mutated)', () => {
-    const xs = [1, 2]
-    expect(pushed(xs, 3)).toEqual([1, 2, 3])
-    expect(xs, 'push must not mutate its argument').toEqual([1, 2])
+    const xs = [1n, 2n]
+    expect(pushed(xs, 3n)).toEqual([1n, 2n, 3n])
+    expect(xs, 'push must not mutate its argument').toEqual([1n, 2n])
 
-    const a = [1, 2]
-    const b = [3, 4]
+    const a = [1n, 2n]
+    const b = [3n, 4n]
     concatLists(a, b)
-    expect(a).toEqual([1, 2])
-    expect(b).toEqual([3, 4])
+    expect(a).toEqual([1n, 2n])
+    expect(b).toEqual([3n, 4n])
   })
 })
 
 describe('v3 interp — template output', () => {
   it('interleaves text and expression segments', () => {
-    expect(greetN('ada', 7)).toBe('hi ada#7!')
+    // a bigint interpolates without the `n` suffix — `${7n}` is "7"
+    expect(greetN('ada', 7n)).toBe('hi ada#7!')
   })
 })
 
 describe('v3 Opt round-trips — optfield / optcall / Some-None match', () => {
   it('optfield short-circuits on undefined and reads through a value', () => {
-    expect(optName({ id: 1, name: 'ada' })).toBe('ada')
+    expect(optName({ id: 1n, name: 'ada' })).toBe('ada')
     expect(optName(undefined)).toBeUndefined()
   })
 
   it('optcall short-circuits on undefined and calls through a value', () => {
-    expect(optCode('A')).toBe(65)
+    expect(optCode('A')).toBe(65n)
     expect(optCode(undefined)).toBeUndefined()
   })
 
   it('Opt-match selects Some vs None (the value|undefined branch)', () => {
-    expect(unwrapOr(9, -1)).toBe(9)
-    expect(unwrapOr(undefined, -1)).toBe(-1)
+    expect(unwrapOr(9n, -1n)).toBe(9n)
+    expect(unwrapOr(undefined, -1n)).toBe(-1n)
     // 0 is a value, not None: the branch keys on `!== undefined`, not truthiness.
-    expect(unwrapOr(0, -1)).toBe(0)
+    expect(unwrapOr(0n, -1n)).toBe(0n)
   })
 })
 
 describe('v3 arrow closures', () => {
   it('returns a callable closure that computes over its param', () => {
-    expect(adder()(41)).toBe(42)
+    expect(adder()(41n)).toBe(42n)
   })
 })
 
 describe('v3 adt construction + tagged match round-trip', () => {
   it('constructs Ok/Err and folds each back through a match', () => {
-    expect(okOf(7)).toEqual({ kind: 'Ok', value: 7 })
+    expect(okOf(7n)).toEqual({ kind: 'Ok', value: 7n })
     expect(errOf('bad')).toEqual({ kind: 'Err', value: 'bad' })
-    expect(resultFold(okOf(7))).toBe(7)
-    expect(resultFold(errOf('bad'))).toBe(-3) // -('bad'.length)
+    expect(resultFold(okOf(7n))).toBe(7n)
+    expect(resultFold(errOf('bad'))).toBe(-3n) // -('bad'.length)
   })
 })
