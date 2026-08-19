@@ -520,10 +520,163 @@ class WasmValidator(Validator):
         return results
 
 
+# ---------------------------------------------------------------------------
+# go — offline-first `go build` against pinned stc-go (the go.mod pin the
+# scenarios already carry). `go build` is a full compile, which for Go is a
+# full typecheck — the same depth as the rust/java tiers.
+# ---------------------------------------------------------------------------
+
+_GO_SCENARIOS = ROOT / "backends" / "go" / "scenarios"
+
+
+def _go_require_line() -> str | None:
+    """The `require github.com/0xdenny218/stc-go <pin>` line from the pinned
+    scenarios go.mod — the single source of truth for the stc-go version."""
+    gomod = _GO_SCENARIOS / "go.mod"
+    if not gomod.is_file():
+        return None
+    for line in gomod.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("require ") and "stc-go" in stripped:
+            return stripped
+    return None
+
+
+def _go_package(source: str) -> str | None:
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("package "):
+            return stripped[len("package "):].split()[0].strip()
+    return None
+
+
+def _proxy_reachable() -> bool:
+    import socket  # noqa: PLC0415
+
+    try:
+        socket.create_connection(("proxy.golang.org", 443), timeout=5).close()
+        return True
+    except OSError:
+        return False
+
+
+class GoValidator(Validator):
+    tier = "go"
+    depth = "compilation (go build against pinned stc-go)"
+
+    MODULE = "revl_go_conformance"
+
+    def _module_skeleton(self, root: Path) -> None:
+        """go.mod (module + pinned stc-go require) and the pinned go.sum."""
+        require = _go_require_line() or (
+            "require github.com/0xdenny218/stc-go "
+            "v0.6.1-0.20260818143352-b3d6788a428e")
+        (root / "go.mod").write_text(
+            f"module {self.MODULE}\n\ngo 1.25.0\n\n{require}\n", encoding="utf-8")
+        gosum = _GO_SCENARIOS / "go.sum"
+        if gosum.is_file():
+            shutil.copyfile(gosum, root / "go.sum")
+
+    def _go_build(self, cwd: Path):
+        """`go build ./...`, offline first then a networked retry only if the
+        module is not already cached. Returns (CompletedProcess|None, reason)."""
+        env = dict(os.environ)
+        offline = subprocess.run(
+            ["go", "build", "./..."], cwd=cwd, text=True, capture_output=True,
+            timeout=_TIMEOUT, env={**env, "GOFLAGS": "-mod=mod", "GOPROXY": "off"},
+        )
+        blob = (offline.stderr or "") + (offline.stdout or "")
+        download_failed = ("cannot find module" in blob
+                           or "missing go.sum entry" in blob
+                           or "GOPROXY=off" in blob
+                           or "no required module provides" in blob)
+        if offline.returncode == 0 or not download_failed:
+            return offline, None
+        # The module is not cached; only now is the network worth the wait.
+        if not _proxy_reachable():
+            return None, ("stc-go is not in the local module cache and "
+                          "proxy.golang.org is unreachable — run `go build` "
+                          "once with network to populate the module cache")
+        return subprocess.run(
+            ["go", "build", "./..."], cwd=cwd, text=True, capture_output=True,
+            timeout=_TIMEOUT, env=env,
+        ), None
+
+    _RESOLVE_REASON: str | None = ""  # "" = not probed yet
+
+    @classmethod
+    def _resolve_reason(cls) -> str | None:
+        if cls._RESOLVE_REASON != "":
+            return cls._RESOLVE_REASON
+        self = cls()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._module_skeleton(root)
+            pkg = root / "probe"
+            pkg.mkdir()
+            (pkg / "probe.go").write_text(
+                'package probe\n\nimport stc "github.com/0xdenny218/stc-go"\n\n'
+                "var _ = stc.NewKey[any]\n", encoding="utf-8")
+            _, reason = self._go_build(root)
+        cls._RESOLVE_REASON = reason
+        return reason
+
+    def unavailable(self) -> str | None:
+        if shutil.which("go") is None:
+            return "go not on PATH"
+        # A resolve probe compiles nothing of the corpus but confirms the
+        # pinned stc-go is obtainable; a cold cache with no network says so
+        # rather than reporting 45 phantom build failures.
+        return self._resolve_reason()
+
+    def check(self, items):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._module_skeleton(root)
+            names: dict[str, str] = {}
+            for index, (label, source) in enumerate(items):
+                package = _go_package(source) or f"case_{index}"
+                directory = root / package
+                if directory.exists():
+                    directory = root / f"case_{index}" / package
+                directory.mkdir(parents=True)
+                (directory / "gen.go").write_text(source, encoding="utf-8")
+                names[package] = label
+
+            result, reason = self._go_build(root)
+        if reason is not None:
+            # unavailable() cleared this path; reaching it means the cache went
+            # away mid-run. Say so — never report it as N build failures.
+            raise RuntimeError(reason)
+
+        failures: dict[str, list[str]] = {}
+        # `go build` errors read `<package>/gen.go:line:col: message`.
+        for line in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines():
+            stripped = line.strip()
+            if ".go:" not in stripped:
+                continue
+            path = stripped.split(":", 1)[0]
+            package = path.split("/", 1)[0]
+            if package in names:
+                failures.setdefault(package, []).append(
+                    stripped.split(":", 3)[-1].strip() if stripped.count(":") >= 3
+                    else stripped)
+
+        results = {label: ((FAIL, "; ".join(failures[pkg][:3])) if pkg in failures
+                           else (OK, ""))
+                   for pkg, label in names.items()}
+        if result.returncode != 0 and not failures:
+            detail = (result.stderr or "go build failed").strip().splitlines()
+            note = detail[-1] if detail else "go build failed"
+            results = {label: (FAIL, f"build-level: {note}") for label in results.values()}
+        return results
+
+
 VALIDATORS: dict[str, Validator] = {
     "python": PythonValidator(),
     "typescript": TypeScriptValidator(),
     "rust": RustValidator(),
     "java": JavaValidator(),
     "wasm": WasmValidator(),
+    "go": GoValidator(),
 }
