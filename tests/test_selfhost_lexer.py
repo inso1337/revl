@@ -73,6 +73,10 @@ def _canon_reference(tokens):
             out.append(("eof", "", t.line))
         elif t.kind == "int":
             out.append(("int", str(t.value), t.line))
+        elif t.kind == "float":
+            # the reference holds a parsed float, the revl lexer the source
+            # text; both must denote the same value, so compare the value
+            out.append(("float", repr(float(t.value)), t.line))
         elif t.kind == "template":
             parts = "|".join(
                 ("t:" if k == "text" else "v:") + _esc(s) for k, s in t.value)
@@ -85,7 +89,9 @@ def _canon_reference(tokens):
 
 
 def _canon_emitted(tokens):
-    return [(t["kind"], t["text"], t["line"]) for t in tokens]
+    return [(t["kind"],
+             repr(float(t["text"])) if t["kind"] == "float" else t["text"],
+             t["line"]) for t in tokens]
 
 
 @pytest.fixture(scope="module")
@@ -152,3 +158,21 @@ def test_selfhosted_lexer_templates_match_reference(lex_src, src):
     got = _canon_emitted(lex_src(src))
     assert "error" not in {k for k, _, _ in got}, got
     assert got == _canon_reference(reference_lex(src, "template_case.rvl"))
+
+
+
+# Float literals, which no corpus file contains — the same blind spot `hole`
+# and `${a || b}` fell into. `.` starts a fraction only before a digit, so
+# `7.div_trunc(2)` must stay an Int and a method call, and `1e` must stay an
+# Int beside an ident rather than becoming an error.
+NUMBER_CASES = [
+    "1.5", "0.0", "1e10", "1E10", "1.5e-3", "1.5e+3", "2.0",
+    "7.div_trunc(2)", "1", "1e", "3.", "x.mod(2)", "let a = 1.5 + 2",
+]
+
+
+@pytest.mark.parametrize("src", NUMBER_CASES)
+def test_selfhosted_lexer_numbers_match_reference(lex_src, src):
+    got = _canon_emitted(lex_src(src))
+    assert "error" not in {k for k, _, _ in got}, got
+    assert got == _canon_reference(reference_lex(src, "number_case.rvl"))

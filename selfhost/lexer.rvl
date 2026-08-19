@@ -281,7 +281,30 @@ fn step(source: Str, i: Int, line: Int) -> Step {
   }
   if (is_digit(c)) {
     let sd = scan_digits(source, i)
-    return { i: sd.j, line: line, tok: { kind: "int", text: sd.out, line: line } }
+    // A float needs a fraction or an exponent. `.` only starts one when a
+    // digit follows, so `7.div_trunc(2)` stays an Int and a method call;
+    // `1e` is an Int beside an ident, not an error.
+    var j = sd.j
+    var isf = false
+    if (source.slice(j, j + 1) == "." && is_digit(source.slice(j + 1, j + 2))) {
+      let frac = scan_digits(source, j + 1)
+      j = frac.j
+      isf = true
+    }
+    let e = source.slice(j, j + 1)
+    if (e == "e" || e == "E") {
+      var k = j + 1
+      let sign = source.slice(k, k + 1)
+      if (sign == "+" || sign == "-") { k += 1 }
+      if (is_digit(source.slice(k, k + 1))) {
+        let ex = scan_digits(source, k)
+        j = ex.j
+        isf = true
+      }
+    }
+    let jj = j
+    let kind3 = isf ? "float" : "int"
+    return { i: jj, line: line, tok: { kind: kind3, text: source.slice(i, jj), line: line } }
   }
   if (singles().indexOf(c) != 0 - 1) {
     return { i: i + 1, line: line, tok: { kind: c, text: c, line: line } }

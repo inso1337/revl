@@ -1061,10 +1061,20 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
         equality = expr.get("kind") == "bin" and expr.get("op") in (
             "==", "===", "!=", "!==")
         if test_mode and equality:
+            # Must go through `revlEq`, not vitest's `toStrictEqual`: revl's
+            # `==` is IEEE on Float, so `NaN == NaN` is false, while
+            # toStrictEqual uses Object.is and calls them equal. An assertion
+            # has to use the language's equality or it is testing the wrong
+            # thing. The rendered source and both values go in the message,
+            # which is what the matcher's diff was buying us.
             left = _expr(expr["left"], ctx)
             right = _expr(expr["right"], ctx)
-            negate = ".not" if expr["op"] in ("!=", "!==") else ""
-            out.append(f"{pad}expect({left}){negate}.toStrictEqual({right})")
+            want = "false" if expr["op"] in ("!=", "!==") else "true"
+            shown = json.dumps(f"{left} {expr['op']} {right}")
+            out.append(f"{pad}{{ const l = {left}, r = {right};")
+            out.append(f"{pad}  expect(revlEq(l, r), {shown} + "
+                       f'"\\n  left  = " + JSON.stringify(l) + '
+                       f'"\\n  right = " + JSON.stringify(r)).toBe({want}) }}')
         elif test_mode:
             out.append(f"{pad}expect({_expr(expr, ctx)}).toBeTruthy()")
         elif expr.get("kind") == "bin" and expr.get("op") in (
@@ -1148,6 +1158,8 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
 
 
 def _uses_equality(node) -> bool:
+    """Equality appears both in expressions and in `assert` steps; both are
+    `bin` nodes, so one scan covers the helper's use in either position."""
     """Does anything in this IR compare with `==`/`!=`?
 
     Emitting the helper unconditionally would leave a dead function in every

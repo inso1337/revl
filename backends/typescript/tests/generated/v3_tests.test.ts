@@ -26,7 +26,8 @@ export function add(a: number, b: number): number {
 }
 
 it("add works", () => {
-    expect(add(1, 2)).toStrictEqual(3)
+    { const l = add(1, 2), r = 3;
+      expect(revlEq(l, r), "add(1, 2) == 3" + "\n  left  = " + JSON.stringify(l) + "\n  right = " + JSON.stringify(r)).toBe(true) }
 })
 
 it("bool works", () => {

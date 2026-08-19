@@ -1591,8 +1591,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         op = _V3_BIN_OPS.get(node.get("op"))
         if op is None:
             raise EmitError(f"unsupported binary operator {node.get('op')!r}")
-        return (f"({_render_expr(node['left'], ctx, rename)} {op} "
-                f"{_render_expr(node['right'], ctx, rename)})")
+        left = _render_expr(node["left"], ctx, rename)
+        right = _render_expr(node["right"], ctx, rename)
+        if node.get("op") == "/" and node.get("operands") == "Int":
+            # `/` is true division and yields Float (docs/arithmetic.md), but
+            # rust `/` on two i64 is integer division — it would compute 3 for
+            # `7 / 2` and then fail to typecheck against the f64 the checker
+            # declared. Widen both sides; IEEE division on f64 follows, so a
+            # zero divisor gives +/-inf rather than the i64 panic.
+            return f"(({left}) as f64 / ({right}) as f64)"
+        return f"({left} {op} {right})"
 
     if kind == "un":
         operand = _render_expr(node.get("operand"), ctx, rename)

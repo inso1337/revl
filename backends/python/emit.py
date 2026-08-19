@@ -85,6 +85,18 @@ class _Lines:
         return "\n".join(self._lines)
 
 
+def _uses_true_division(node) -> bool:
+    """Does anything in this IR divide with `/`? The IEEE helper is emitted
+    only where it is used, so modules that never divide stay unchanged."""
+    if isinstance(node, dict):
+        if node.get("kind") == "bin" and node.get("op") == "/":
+            return True
+        return any(_uses_true_division(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_true_division(v) for v in node)
+    return False
+
+
 def _render_builtin(method, target: str, args: list) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
     `push`/`concat` are persistent (value semantics); `indexOf` returns -1
@@ -746,6 +758,9 @@ def _expr(node: dict) -> str:
             lhs = _expr(node["left"])
             rhs = _expr(node["right"])
             return f"({rhs} if {lhs} is None else {lhs})"
+        if node["op"] == "/":
+            # true division, IEEE at zero (docs/arithmetic.md)
+            return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
         if node["op"] == "%" and node.get("operands") in ("Int", "Float"):
             # `%` is the TRUNCATED remainder — it takes the sign of the
             # dividend, as in TypeScript (§0) — and pairs with `div_trunc` so
@@ -1290,6 +1305,22 @@ def emit(ir: dict) -> str:
     if lifecycle:
         out.add(0, "import asyncio as _revl_asyncio")
         out.add(0, "import inspect as _revl_inspect")
+        out.add(0)
+    if _uses_true_division(ir):
+        # `/` is IEEE true division (docs/arithmetic.md): a zero divisor gives
+        # +/-inf, and 0/0 gives NaN. Python is the only tier that raises
+        # instead, so it is the only one that needs this.
+        out.add(0, "import math as _revl_math")
+        out.add(0)
+        out.add(0, "def _revl_div(a, b):")
+        out.add(0, '    """IEEE 754 true division: python raises where every '
+                   'other tier follows IEEE."""')
+        out.add(0, "    if b:")
+        out.add(0, "        return a / b")
+        out.add(0, "    if a == 0:")
+        out.add(0, "        return float('nan')")
+        out.add(0, "    return (_revl_math.copysign(float('inf'), a)")
+        out.add(0, "            * _revl_math.copysign(1.0, b))")
         out.add(0)
     out.add(0, "def _revl_field(v, name):")
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')
