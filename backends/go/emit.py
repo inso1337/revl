@@ -1417,17 +1417,16 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
         ret = _go_v3_type(ext.get("returns"), ctx.types)
         sig_ret = f" {ret}" if ret else ""
         bodies = ext.get("bodies") or {}
-        # Prefer a native @go body; fall back to the @ts body (the pure-expression
-        # externs in scope share `return <expr>` syntax with Go). See report.
-        if "go" in bodies:
-            body = bodies["go"].strip()
-        elif "ts" in bodies:
-            body = bodies["ts"].strip()
-        else:
+        # Require a native @go body — like the rust (@rs) and java (@java) tiers.
+        # Never fall back to another tier's body: emitting @ts text as Go only
+        # "works" for trivial expressions and would silently ship broken Go for
+        # anything else. A missing @go body is a portability boundary, not a gap.
+        if "go" not in bodies:
             raise EmitError(
                 f"extern `{name}` has no @go body — not portable to this backend "
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
+        body = bodies["go"].strip()
         out.append(f"func {name}({params}){sig_ret} {{")
         if body:
             for line in body.splitlines():

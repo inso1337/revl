@@ -415,7 +415,8 @@
       ],
       "returns": "Str",
       "bodies": {
-        "ts": " return \"hello \" + name "
+        "ts": " return \"hello \" + name ",
+        "go": " return \"hello \" + name "
       }
     }
   ]
