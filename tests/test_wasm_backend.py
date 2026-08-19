@@ -48,7 +48,7 @@ def test_pulse_await_lowering():
     # the first distinct name in the module is id 1
     assert "(call $host_job_run (i32.const 1))" in pulse
     # the effect after the await is a separate segment: divert can skip it
-    assert pulse.index("job_run (i32.const 1)") < pulse.index("(i32.const 2) (i32.const 22)")
+    assert pulse.index("job_run (i32.const 1)") < pulse.index("(i64.const 2) (i64.const 22)")
 
 
 def test_import_section_is_the_coeffect_specification():
@@ -58,7 +58,7 @@ def test_import_section_is_the_coeffect_specification():
     assert '(import "coeffect:kv" "set"' in beacon
     assert '(export "provide:status.shared")' in beacon
     # the accumulator: inverses guarded by completed-step count, LIFO
-    assert beacon.index("i32.const 8) (i32.const 0)") < beacon.index("i32.const 7) (i32.const 0)")
+    assert beacon.index("i64.const 8) (i64.const 0)") < beacon.index("i64.const 7) (i64.const 0)")
 
 
 def test_v2_realms_lower_to_realm_namespaces():
@@ -245,16 +245,16 @@ def test_plain_i32_components_declare_no_memory():
 
 def test_boundary_refusals_say_why_not_unknown_kind():
     """The distinction that matters: an unhandled node is a bug, a value that
-    cannot cross the i32 service boundary is this tier's design."""
+    cannot cross the scalar service boundary is this tier's design."""
     emitter = _emitter()
     for source, expected in [
         # a compound value returned from a service operation
-        (_component("{ let xs = [1, 2]  return xs }"), "cannot cross this tier's i32 service boundary"),
+        (_component("{ let xs = [1, 2]  return xs }"), "cannot cross this tier's scalar service boundary"),
         # a compound value passed to a coeffect
         ("service B { fn g(n: Int) -> Int }\n" + _SVC
          + "component C requires b: B provides s: S "
            "{ provide s { fn f(x) { let xs = [1]  return b.g(xs) } } }",
-         "cannot cross this tier's i32 coeffect boundary"),
+         "cannot cross this tier's scalar coeffect boundary"),
         # an extern with no @wasm body is not a missing case either
         ("extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n }\n"
          + _component("= h(x)"), "has no @wasm body"),
