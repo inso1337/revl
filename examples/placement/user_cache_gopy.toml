@@ -1,0 +1,14 @@
+# Go (cordis-go) provider, Python consumer. The reverse of user_cache_pygo:
+# PgDatabase runs on Go and serves `db` over a Unix socket; UserCache runs on
+# Python and proxies it, so `cache.put`'s `emit db.execute(...)` crosses the
+# seam INTO the Go provider process.
+[config.PgDatabase]
+url = "postgres://primary:5432/app"
+
+[processes.provider]
+backend = "go"
+components = ["PgDatabase"]
+
+[processes.consumer]
+components = ["UserCache"]
+probe = ["cache.put('alice', '42')", "cache.get('alice')"]
