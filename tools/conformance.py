@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 
-TIERS = ("python", "typescript", "rust", "java", "wasm")
+TIERS = ("python", "typescript", "rust", "java", "wasm", "go")
 
 _EMITTERS: dict = {}
 
@@ -223,12 +223,13 @@ CASES: list[tuple[str, str, str]] = [
 def _emit_kwargs(tier: str, index: int) -> dict:
     """Per-tier emitter options needed to validate many cases side by side.
 
-    Only java needs one: every case emits a class named `Components`, so a
-    single `javac` invocation over all of them would see 47 duplicates of
-    `revl.Components` rather than 47 programs. `package_name` is a normal
+    java and go both need one: every case emits into a package/class that
+    would otherwise collide across the corpus (java's `revl.Components`, go's
+    `package emitted`), so a single `javac`/`go build` over all of them would
+    see 47 duplicates rather than 47 programs. `package_name` is a normal
     emitter parameter, so what gets validated is still real emitter output.
     """
-    return {"package_name": f"case_{index}"} if tier == "java" else {}
+    return {"package_name": f"case_{index}"} if tier in ("java", "go") else {}
 
 
 def run(all_cases: bool = False, validate: bool = False) -> dict:
