@@ -35,13 +35,19 @@ import emit  # noqa: E402  (this backend)
 
 # The bottom of the mesh: a provider in hand-written WAT (from the
 # cordis-wasm demo) — state in its own linear memory, dropped on unload.
+#
+# `Int` is 64-bit on every revl tier (docs/arithmetic.md), so a service
+# declared `fn get(k: Int) -> Int` compiles to `(param i64) (result i64)` in
+# the emitted import section. A hand-written peer speaks the same ABI: the key
+# is an `Int` too, so it is narrowed *here*, by the provider doing its own
+# addressing, rather than silently at the boundary.
 KV_PROVIDER = r"""
 (module
   (memory 1)
-  (func (export "provide:kv.get") (param $k i32) (result i32)
-    (i32.load (i32.mul (local.get $k) (i32.const 4))))
-  (func (export "provide:kv.set") (param $k i32) (param $v i32)
-    (i32.store (i32.mul (local.get $k) (i32.const 4)) (local.get $v))))
+  (func (export "provide:kv.get") (param $k i64) (result i64)
+    (i64.load (i32.mul (i32.wrap_i64 (local.get $k)) (i32.const 8))))
+  (func (export "provide:kv.set") (param $k i64) (param $v i64)
+    (i64.store (i32.mul (i32.wrap_i64 (local.get $k)) (i32.const 8)) (local.get $v))))
 """
 
 BEACON_V2 = """
