@@ -941,6 +941,11 @@ def _expr(
             return f"java.util.Objects.equals({left}, {right})"
         if op in ("!=", "!=="):
             return f"!java.util.Objects.equals({left}, {right})"
+        if op in ("+", "-", "*") and node.get("operands") == "Int":
+            # Int overflow traps (docs/arithmetic.md); Math.*Exact throws
+            # ArithmeticException, which is exactly the fault we want.
+            exact = {"+": "addExact", "-": "subtractExact", "*": "multiplyExact"}[op]
+            return f"Math.{exact}({left}, {right})"
         java_op = _JAVA_V3_BIN_OPS.get(op)
         if java_op is None:
             raise EmitError(f"unsupported binary operator {op!r}")

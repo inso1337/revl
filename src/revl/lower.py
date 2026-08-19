@@ -1590,9 +1590,11 @@ def _retarget_holes(node, source: str) -> None:
 
 
 # Operators whose meaning depends on whether the operands are Int or Float.
-# Only these carry an `operands` annotation, so the IR does not grow a field
-# on every comparison and boolean for no reason.
-_TYPED_ARITH_OPS = ("/", "%")
+# `/` and `%` because integer and float division differ; `+`, `-` and `*`
+# because Int is a *bounded* 64-bit type whose overflow traps, and a tier
+# cannot check a bound it does not know applies. Comparisons and booleans
+# gain nothing from the annotation, so they do not carry it.
+_TYPED_ARITH_OPS = ("/", "%", "+", "-", "*")
 
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
