@@ -10,7 +10,10 @@ The organizing fact: **the five tiers are disjoint by directory** (`backends/{py
 | cordis-ts | upstream | 10 test files, `tsc` + executed | thinner realm runtime coverage than py |
 | cordis-rs | upstream crate (0.3.0) | 1 scenario file (8 tests), `cargo check`/`cargo test` | none blocking — reactive isolate-linking fixed (plug-time isolation, emitter-side); realm labels fixed |
 | cordis4j | upstream (github/1na-ko) | 1 scenario file, real-jar scenarios | global-realm divergence (errata'd, xfail) |
-| cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | *named* realms conform (gate green); lacks *local/identity* realms (instance-parametric) |
+| cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | i64 port in flight; service boundary is scalar-only (rich types = follow-up after the port); named realms conform |
+| cordis-go | third-party `0xdenny218/stc-go` (pinned `b3d6788`) | scenarios + v3 fixtures executed; **0 gaps in the conformance matrix**, CI-gated (`go build`) | v1/v2/v3 all emit & build; teardown-ordering divergence from cordis-rs (errata); no spawn yet |
+
+**Conformance matrix status:** all five *language* tiers — python, typescript, rust, java, **go** — are at **0 gaps**, each validated by its real compiler. Only cordis-wasm has gaps (its i32→i64 port is in flight; its remaining gaps are scalar-only-service-boundary + config/host, not extern gaps).
 
 The through-line across every past wave: **a claim with no gate behind it** — emitters marked correct with nothing executing their output (the `Map.new()` that shipped in a golden; realm semantics asserted at runtime nowhere). The runtime-truth theme below exists to close that class for good.
 
@@ -30,18 +33,21 @@ Goal: every guarantee a tier claims is asserted by *executing* emitted code on t
 
 > **Correction folded in (gate result):** an earlier draft listed "wasm local realms" as a Wave-A win. Wrong — wasm has no xfail; its *named* realms already conform at runtime. What wasm lacks is *local/identity* realms for runtime-created instances → design-gated Wave-B work (B3 below).
 
-## Wave B — Instance-parametric foundation (DESIGN-GATED — hold)
+## Wave B — Instance-parametric foundation (PHASE 1 LANDED)
 
-Blocked on the `docs/design-v2-instances.md` addressing decision (question 2). Do not spawn until accepted. When unblocked, most of it lands in the two first-party tiers:
+Addressing decided: **supervision-tree** (an instance is reachable by its spawner and its own children, never by arbitrary siblings). **Phase 1 is on `main`**: a frozen `spawn` IR (instantiation-as-acquisition — a `let-effect` step whose `acquire` is a `spawn` node, so no new IR step kind), one new grammar form (`spawn C with {…}`), the G2/G3/G4/G8 rule changes, and a **cordis-py reference that executes** (two live instances in distinct local realms, independent LIFO teardown, request-scoped early reclamation, supervision-tree addressing). Two design simplifications fell out: the nested teardown scope is just a child fiber (no `Frame` subclass), and hierarchical realm resolution wasn't needed because spawn targets are templates excluded from the static manifest. Remaining:
 
 - **B1 · sub-component teardown scopes** *(first-party: py runtime + emitter)* — item zero from the static audit. Today effects created in a provide-method are adopted into the component-level `Frame` and live until the component tears down; a request-scoped instance needs a nested scope. `backends/python/runtime.py` `Frame`.
 - **B2 · hierarchical realm resolution in the checker** — `src/revl/lower.py:3047` `_realm` is flat; the runtime walks the parent chain. Diverges the instant a child is plugged onto its spawner's context. Prerequisite for `spawn`, opens before per-instance realms. *(compiler, not a backend — noted here because it gates the backend work.)*
 - **B3 · wasm local/identity realms** *(first-party)* — the gate proved wasm handles *named* realms, but instance-parametric components need *local* realms (each runtime instance in its own realm without a distinct label string). wasm's provider table is flat and realms are compile-time mangling, so a runtime-determined instance count can't be expressed today. Add a realm prefix applied at resolve / publish / conflict-check (`backends/wasm/runtime.py` ~`:293`, `:332`, `:131-137`). This is the ~10-line first-party change — but it only matters once instance-parametric is accepted, hence Wave B not A.
 - **B4 · spawn lowering across tiers** — once py proves the shape, one agent per remaining tier, disjoint.
 
-## Wave C — New Cordis runtimes (INDEPENDENT — parallel anytime)
+## Wave C — New Cordis runtimes
 
-"C/C++/Go/Zig in progress." The backend contract is small (install effect with inverse; provide/read keys; reactive refresh). Each new tier is a fresh directory = one agent, fully disjoint from every other wave. Can run concurrently with Wave A. Sequence by demand, not dependency.
+- **Go — ✅ DONE.** cordis-go targets third-party `0xdenny218/stc-go` (pinned `b3d6788`), a paper-faithful Go runtime. Emits v1/v2/v3, executed on real stc-go, **0 gaps in the conformance matrix**, CI-gated. One divergence pinned (teardown ordering vs cordis-rs, errata).
+- **C / C++ / Zig — blocked on the runtime.** No Cordis-paradigm runtime exists on GitHub for these (searched); revl can't emit-and-execute against a runtime that isn't there. This is runtime-authoring work (the user's domain, like cordis-wasm), not an emitter wave. revl's side starts once the first one runs.
+
+The backend contract is small (install effect with inverse; provide/read keys; reactive refresh), so each new tier is a fresh directory = one agent, disjoint from every other wave — *once its runtime exists*.
 
 ## Wave D — Emitter structural cleanups (SEQUENCED — do not naively parallelize)
 
