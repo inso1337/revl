@@ -19,13 +19,20 @@ Lowering — the paper's §6.7 state machine, literally:
 - `req` calls compile to `coeffect:<key>` imports — the committed view is
   the linker binding itself, alive through this component's whole teardown.
 
+Widths: `Int` is **i64** — 64-bit two's complement with trapping overflow, as
+docs/arithmetic.md specifies for every tier. Linear-memory *addresses* stay
+i32 (wasm32 addressing is 32-bit), as do Bool and the internal counters, so
+this emitter deliberately uses both widths and `_wasm_ty` is the single place
+that decides which. `Float` remains refused by name.
+
 Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
-Violations are EmitError, never silent degradation. The component tier is
-i32-only (Int service params/returns, `await Job.run(name)`); the v3
-functions tier additionally lowers Str/List/record values through a
-canonical-ABI-shaped linear-memory representation. Config blocks, host
-builtins outside `await Job.run`, method-time effects, and variant values
-are still rejected with a precise reason.
+Violations are EmitError, never silent degradation. The component tier carries
+scalars across a service boundary (Int service params/returns,
+`await Job.run(name)`); the v3 functions tier additionally lowers
+Str/List/record values through a canonical-ABI-shaped linear-memory
+representation. Config blocks, host builtins outside `await Job.run`,
+method-time effects, and variant values are still rejected with a precise
+reason.
 
 `emit(ir) -> dict[name, wat]` — one WAT module per component, plus a
 `functions` module for IR v3 type/function documents.
@@ -42,8 +49,35 @@ IR_VERSION = 1
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+#: Every non-byte value slot in linear memory — a record field, a list
+#: element, a tagged cell's payload — is this many bytes wide. It used to be 4;
+#: `Int` is 64-bit (docs/arithmetic.md), so a slot has to be able to hold an
+#: i64. The width is *uniform* rather than per-field: list elements are
+#: addressed as `base + 8 * index` by helpers that never see the element type,
+#: and a record's field offset has to be computable without walking the
+#: preceding fields' types. Pointers and Bools occupy a full slot too — they
+#: are zero-extended in (`_slot_store`) and wrapped back out (`_slot_load`), so
+#: a slot always holds the same 8 bytes whichever way it is read.
+_SLOT = 8
+
+
 def _align4(value: int) -> int:
     return (value + 3) & ~3
+
+
+def _align8(value: int) -> int:
+    return (value + 7) & ~7
+
+
+def _wasm_ty(ty: str | None) -> str:
+    """The wasm value type that carries a revl type on this tier.
+
+    `Int` is the only revl type here that is 64-bit. Everything else is a Bool
+    (0/1) or a *linear-memory address*, and wasm32 addressing is 32-bit, so
+    those stay i32. This one function is what stops "value" and "pointer" from
+    being confused now that they are no longer the same wasm type.
+    """
+    return "i64" if ty == "Int" else "i32"
 
 
 def _wat_string(value: str) -> str:
@@ -82,12 +116,12 @@ def _ident(name: Any, what: str) -> str:
     return name
 
 
-def _i32_only(type_name: Any, where: str) -> None:
+def _int_only(type_name: Any, where: str) -> None:
     if type_name not in ("Int", None):
         raise EmitError(
             f"{where}: type {type_name!r} is not lowerable — the cordis-wasm "
-            f"tier is i32-only (Int in, Int out); keep string-shaped services "
-            f"on the hosted backends"
+            f"tier carries scalars across a service boundary (Int in, Int out); "
+            f"keep string-shaped services on the hosted backends"
         )
 
 
@@ -134,7 +168,7 @@ class _ComponentEmitter:
             except (TypeError, ValueError) as exc:
                 raise EmitError(f"{self.name}: intercept metadata for {key!r} is not JSON: {exc}")
         self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
-        self.globals: list[str] = []
+        self.globals: list[tuple[str, str]] = []   # (name, wasm type)
         self.uses_job = False
         # job name -> interned i32 id (see _job_id)
         self.job_names: dict[str, int] = {}
@@ -193,8 +227,8 @@ class _ComponentEmitter:
         if spec is None:
             raise EmitError(f"{where}: {key}.{op} is not a method of {service_name}")
         for param in spec.get("params") or []:
-            _i32_only(param.get("type"), f"{where}: {key}.{op} param {param.get('name')!r}")
-        _i32_only(spec.get("returns"), f"{where}: {key}.{op} return")
+            _int_only(param.get("type"), f"{where}: {key}.{op} param {param.get('name')!r}")
+        _int_only(spec.get("returns"), f"{where}: {key}.{op} return")
         arity = len(spec.get("params") or [])
         has_result = spec.get("returns") is not None
         self.imports[(key, op)] = (arity, has_result)
@@ -229,7 +263,7 @@ class _ComponentEmitter:
         if kind == "lit":
             value = node.get("value")
             if isinstance(value, int) and not isinstance(value, bool):
-                return _E(f"(i32.const {value})", "Int")
+                return _E(f"(i64.const {value})", "Int")
             # Bool/Str literals are in-module values: the engine owns them
             return self._delegate(node, scope, types, where)
         if kind == "name":
@@ -249,7 +283,7 @@ class _ComponentEmitter:
             target = node.get("target") or {}
             if target.get("kind") != "req":
                 raise EmitError(
-                    f"{where}: i32 values have no methods — only calls on "
+                    f"{where}: scalar values have no methods — only calls on "
                     f"required services are lowerable on this tier"
                 )
             key = _ident(target.get("name"), f"{where}: req")
@@ -263,10 +297,10 @@ class _ComponentEmitter:
                 value = self._lower(arg, scope, types, where)
                 if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: void expression used as an argument")
-                if not _is_i32_type(value.ty):
+                if not _is_scalar_type(value.ty):
                     raise EmitError(
                         f"{where}: a {value.ty!r} argument cannot cross this tier's "
-                        f"i32 coeffect boundary — {key}.{op} is declared over Int; "
+                        f"scalar coeffect boundary — {key}.{op} is declared over Int; "
                         f"keep compound values inside the module"
                     )
                 parts.append(value.wat)
@@ -280,51 +314,47 @@ class _ComponentEmitter:
                 f"the cordis-wasm tier — express state through coeffects instead"
             )
         if kind in ("bin", "un"):
-            # pure i32 arithmetic/comparison inside a component or method body
-            # — this tier's native shape, and what a method that names an
+            # pure scalar arithmetic/comparison inside a component or method
+            # body — this tier's native shape, and what a method that names an
             # intermediate is usually doing (tests/test_cross_tier.py).
-            # Operators the i32 path has no instruction for (`??`, Str `+`,
+            # Operators this path has no instruction for (`??`, Str `+`,
             # Str `==`) are the engine's: it knows the operand types.
-            return self._i32_operator(node, scope, types, where)
+            return self._scalar_operator(node, scope, types, where)
         if kind in self._DELEGATED:
             return self._delegate(node, scope, types, where)
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
-    _I32_BINOPS = {
-        "+": "i32.add", "-": "i32.sub", "*": "i32.mul",
-        "/": "i32.div_s", "%": "i32.rem_s",
-        "==": "i32.eq", "===": "i32.eq", "!=": "i32.ne", "!==": "i32.ne",
-        "<": "i32.lt_s", ">": "i32.gt_s", "<=": "i32.le_s", ">=": "i32.ge_s",
-        "&&": "i32.and", "||": "i32.or",
-    }
-
-    def _i32_operator(self, node: Any, scope: dict[str, str],
-                      types: dict[str, str | None], where: str) -> _E:
+    def _scalar_operator(self, node: Any, scope: dict[str, str],
+                         types: dict[str, str | None], where: str) -> _E:
         if node.get("kind") == "un":
             op = node.get("op")
             operand = self._lower(node.get("operand"), scope, types, where)
             if _is_unit_type(operand.ty):
                 raise EmitError(f"{where}: unary `{op}` on a void expression")
-            if not _is_i32_type(operand.ty):
+            if not _is_scalar_type(operand.ty):
                 return self._delegate(node, scope, types, where)
             if op == "-":
-                return _E(f"(i32.sub (i32.const 0) {operand.wat})", "Int")
+                # `0 - Int.MIN` overflows, so negation traps like any other
+                # subtraction rather than being the one wrapping operator.
+                return _E(f"(call $int_sub (i64.const 0) {operand.wat})", "Int")
             if op == "!":
                 return _E(f"(i32.eqz {operand.wat})", "Bool")
-            raise EmitError(f"{where}: unary `{op}` is not lowerable on the i32 tier")
+            raise EmitError(f"{where}: unary `{op}` is not lowerable on this tier")
 
         op = node.get("op")
         left = self._lower(node.get("left"), scope, types, where)
         right = self._lower(node.get("right"), scope, types, where)
         if _is_unit_type(left.ty) or _is_unit_type(right.ty):
             raise EmitError(f"{where}: `{op}` on a void expression")
-        instruction = self._I32_BINOPS.get(op)
-        if instruction is None or not (_is_i32_type(left.ty) and _is_i32_type(right.ty)):
+        _refuse_float_operands(node, where)
+        operand_ty = left.ty if left.ty == right.ty else None
+        instruction = _bin_instr(op, operand_ty) if _is_scalar_type(operand_ty) else None
+        if instruction is None:
             # `??`, Str concatenation, Str equality, List `+` — the engine has
             # them and knows the operand types; it refuses with its own reason
             # if the combination is genuinely not lowerable.
             return self._delegate(node, scope, types, where)
-        result_ty = "Bool" if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||") else "Int"
+        result_ty = "Bool" if op in _COMPARISON_OPS else "Int"
         return _E(f"({instruction} {left.wat} {right.wat})", result_ty)
 
     def _statement(self, node: Any, scope: dict[str, str], where: str,
@@ -367,6 +397,7 @@ class _ComponentEmitter:
         self.v3._match_counter = 0
         self.v3._loop_counter = 0
         self.v3._for_temps = []
+        self.v3._local_types = {}
         self.extra_locals = set()
         self.func_uses_v3 = False
 
@@ -399,12 +430,12 @@ class _ComponentEmitter:
         Save the activation function's rendering state across them."""
         return (self.extra_locals, self.func_uses_v3, self.v3._tmp,
                 self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
-                self.v3._loop_counter, self.v3._for_temps)
+                self.v3._loop_counter, self.v3._for_temps, self.v3._local_types)
 
     def _restore_function_state(self, saved: tuple) -> None:
         (self.extra_locals, self.func_uses_v3, self.v3._tmp,
          self.v3._arrows, self.v3._arrow_counter, self.v3._match_counter,
-         self.v3._loop_counter, self.v3._for_temps) = saved
+         self.v3._loop_counter, self.v3._for_temps, self.v3._local_types) = saved
 
     def _to_v3(self, node: Any, scope: dict[str, str],
                types: dict[str, str | None], where: str) -> Any:
@@ -512,14 +543,16 @@ class _ComponentEmitter:
                 if kind == "let-effect":
                     bind = _ident(step.get("bind"), f"{where}: bind")
                     glob = f"$g_{bind}"
-                    self.globals.append(glob)
-                    wat, has_result = self._expr(step["acquire"], scope, where)
-                    if not has_result:
+                    value = self._lower(step["acquire"], scope, {}, where)
+                    if _is_unit_type(value.ty):
                         raise EmitError(
                             f"{where}: `let {bind}` binds a void acquisition — "
                             f"use a plain `effect` step"
                         )
-                    seg.append(f"(global.set {glob} {wat})")
+                    # the global carries the acquisition's *value*, so an Int
+                    # acquisition needs an i64 global, not an i32 one
+                    self.globals.append((glob, _wasm_ty(value.ty)))
+                    seg.append(f"(global.set {glob} {value.wat})")
                     scope[bind] = f"(global.get {glob})"
                 else:
                     seg.append(self._statement(step["acquire"], scope, where))
@@ -592,8 +625,8 @@ class _ComponentEmitter:
                 raise EmitError(f"{where}: {mname!r} is not a method of {service_name}")
             spec_params = spec.get("params") or []
             for param in spec_params:
-                _i32_only(param.get("type"), f"{where}: {key}.{mname} param")
-            _i32_only(spec.get("returns"), f"{where}: {key}.{mname} return")
+                _int_only(param.get("type"), f"{where}: {key}.{mname} param")
+            _int_only(spec.get("returns"), f"{where}: {key}.{mname} return")
             params = [_ident(p, f"{where}: param") for p in method.get("params") or []]
             if len(params) != len(spec_params):
                 raise EmitError(f"{where}: method {mname!r} arity does not match the service")
@@ -608,12 +641,14 @@ class _ComponentEmitter:
             mtypes: dict[str, str | None] = {name: "Int" for name in scope}
             decl = []
             for i, param in enumerate(params):
-                decl.append(f"(param $p_{param} i32)")
+                # a service parameter is declared `Int` (`_int_only`), and an
+                # `Int` is 64-bit — this is a *value*, not an address
+                decl.append(f"(param $p_{param} i64)")
                 mscope[param] = f"(local.get $p_{param})"
                 mtypes[param] = "Int"
             has_result = spec.get("returns") is not None
             if has_result:
-                decl.append("(result i32)")
+                decl.append("(result i64)")
 
             body_lines = []
             mlocals: list[str] = []
@@ -635,10 +670,10 @@ class _ComponentEmitter:
                     value = self._lower(mstep["expr"], mscope, mtypes, mwhere)
                     if has_result and _is_unit_type(value.ty):
                         raise EmitError(f"{mwhere}: void expression returned from a typed method")
-                    if has_result and not _is_i32_type(value.ty):
+                    if has_result and not _is_scalar_type(value.ty):
                         raise EmitError(
                             f"{mwhere}: a {value.ty!r} value cannot cross this tier's "
-                            f"i32 service boundary — the operation is declared "
+                            f"scalar service boundary — the operation is declared "
                             f"{spec.get('returns')!r}; compound values stay inside the "
                             f"module (return them from a `fn`, or use a hosted backend)"
                         )
@@ -668,6 +703,7 @@ class _ComponentEmitter:
                         mlocals.append(name)
                         mscope[name] = f"(local.get ${name})"
                         mtypes[name] = value.ty
+                        self.v3._declare_local(name, value.ty, mwhere)
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
                     body_lines.append(f"(local.set ${name} {value.wat})")
@@ -681,13 +717,15 @@ class _ComponentEmitter:
                     raise EmitError(f"{mwhere}: unknown step {mkind!r}")
 
             header = f'(func (export "{self._provide_prefix(key)}.{mname}") {" ".join(decl)}'.rstrip()
-            # wasm requires local declarations before the body
+            # wasm requires local declarations before the body — and each one
+            # now has to be declared at the width of the value it holds, which
+            # is only known once the body has been lowered (`_declare_local`)
             if mlocals:
-                header += "".join(f" (local ${name} i32)" for name in mlocals)
+                header += "".join(self.v3._local_decl(name) for name in mlocals)
             # scratch slots the value engine needs (match binds + scrutinee
             # pointers, inlined-arrow params, the allocation temporary)
             for extra in sorted(self.extra_locals):
-                header += f" (local ${extra} i32)"
+                header += self.v3._local_decl(extra)
             if self.func_uses_v3:
                 header += f" (local ${self.v3._tmp} i32)"
                 # deeper scratch pointers from nested allocations in the body
@@ -701,6 +739,11 @@ class _ComponentEmitter:
         return funcs
 
     def _module(self, segments: list[str], inverses: list[tuple[int, str]], provide_funcs: list[str]) -> str:
+        # the activation function's local widths come from the engine's
+        # per-function record, and `_emit_function` below resets it — so render
+        # the declarations before the `fn`s are emitted, not after
+        activation_decls = "".join(self.v3._local_decl(name)
+                                   for name in self.activation_locals)
         # the top-level `fn`s this component calls are emitted into its own
         # module, so `call $name` resolves and the component stays a single
         # self-contained artifact for the runtime to instantiate
@@ -708,19 +751,31 @@ class _ComponentEmitter:
         rendered = "\n".join(provide_funcs + fn_defs + segments
                              + [wat for _index, wat in inverses])
         # linear memory is pulled in only when something actually reaches for
-        # it, so a purely-i32 component emits exactly the module it always did
+        # it, so a scalar-only component emits no memory at all
         needs_memory = self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)
+        # the checked-arithmetic and named-division helpers are *not* memory:
+        # `x + 1` traps on overflow through `$int_add` in a component that
+        # never touches linear memory, so they get their own gate. (Before
+        # this, `x.div_floor(2)` in a memory-free component emitted a call to
+        # an `$int_div_floor` that was never defined.)
+        needs_arith = any(token in rendered for token in _ARITH_TOKENS)
 
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
                  "(module"]
         lines.extend(self._realm_sections())
         for (key, op), (arity, has_result) in sorted(self.imports.items()):
-            params = " ".join(["(param i32)"] * arity)
-            result = " (result i32)" if has_result else ""
+            # service params/returns are `Int` (`_int_only`), so the coeffect
+            # ABI is i64 in and i64 out — a coeffect carries values, not
+            # addresses, and truncating one at the boundary would be exactly
+            # the silent narrowing this port exists to remove
+            params = " ".join(["(param i64)"] * arity)
+            result = " (result i64)" if has_result else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
         if self.uses_job:
+            # the job id is an interned compile-time *tag*, not an Int value:
+            # it stays i32, which is what the runtime's host op declares
             lines.append('  (import "host" "job_run" (func $host_job_run (param i32)))')
         if needs_memory:
             lines.append('  (memory (export "memory") 1)')
@@ -728,11 +783,9 @@ class _ComponentEmitter:
                 lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
             lines.append(f"  (global $__hp (mut i32) (i32.const {self.v3.heap_start}))")
         lines.append("  (global $__step (mut i32) (i32.const 0))")
-        for glob in self.globals:
-            lines.append(f"  (global {glob} (mut i32) (i32.const 0))")
-
-        activation_decls = "".join(f" (local ${name} i32)"
-                                   for name in self.activation_locals)
+        for glob, glob_ty in self.globals:
+            zero = "i64.const 0" if glob_ty == "i64" else "i32.const 0"
+            lines.append(f"  (global {glob} (mut {glob_ty}) ({zero}))")
 
         # activate_step: one iteration per body segment (paper §4.3.2)
         lines.append(f'  (func (export "activate_step") (result i32){activation_decls}')
@@ -760,6 +813,8 @@ class _ComponentEmitter:
         lines.extend(provide_funcs)
         if needs_memory:
             lines.extend(self.v3._helper_funcs())
+        elif needs_arith:
+            lines.extend(self.v3._arith_helper_funcs())
         lines.extend(fn_defs)
         lines.append(")")
         return "\n".join(lines) + "\n"
@@ -767,10 +822,17 @@ class _ComponentEmitter:
 
 #: WAT that only appears when a value lives in linear memory. Scanning the
 #: rendered body for these is what decides whether a component module declares
-#: a memory at all — a plain i32 component must stay byte-identical.
+#: a memory at all — a scalar-only component declares none.
 _MEMORY_TOKENS = (
     "$alloc", "$str_", "$list_", "$int_to_str",
-    "i32.load", "i32.store", "memory.copy",
+    "i32.load", "i32.store", "i64.load", "i64.store", "memory.copy",
+)
+
+#: The arithmetic helpers, which need no memory. All six travel together
+#: because they call each other ($int_div_euclid -> $int_div_floor).
+_ARITH_TOKENS = (
+    "$int_add", "$int_sub", "$int_mul",
+    "$int_div_floor", "$int_div_euclid", "$int_mod",
 )
 
 
@@ -803,19 +865,69 @@ def _format_parts(template: str) -> list[tuple[str, Any]]:
     return parts
 
 
-_WASM_BIN_OPS = {
-    "==": "i32.eq", "===": "i32.eq", "!=": "i32.ne", "!==": "i32.ne",
-    "<": "i32.lt_s", ">": "i32.gt_s", "<=": "i32.le_s", ">=": "i32.ge_s",
-    "+": "i32.add", "-": "i32.sub", "*": "i32.mul", "/": "i32.div_s",
-    "%": "i32.rem_s", "&&": "i32.and", "||": "i32.or",
+#: Comparisons: same suffix on both widths, so the instruction is picked from
+#: the *operand* type, not the result type (which is always Bool/i32).
+_CMP_SUFFIX = {
+    "==": "eq", "===": "eq", "!=": "ne", "!==": "ne",
+    "<": "lt_s", ">": "gt_s", "<=": "le_s", ">=": "ge_s",
 }
+_BOOL_OPS = {"&&": "i32.and", "||": "i32.or"}
+#: `Int` overflow *traps* (docs/arithmetic.md), and wasm has no checked
+#: arithmetic, so `+`/`-`/`*` go through helpers that test for overflow and
+#: execute `unreachable`. `/` and `%` cannot overflow into a wrong value — they
+#: trap natively on a zero divisor, which is the fault every other tier gives.
+_TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int_mul"}
+_RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
+_COMPARISON_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS))
+_BINARY_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS)
+                        | set(_TRAPPING_INT_OPS) | set(_RAW_INT_OPS))
+
+
+def _bin_instr(op: str, operand_ty: str | None) -> str | None:
+    """The wasm instruction implementing `op` over `operand_ty` operands.
+
+    Returns None when this tier has no single instruction for the combination
+    (Str/List operands, `??`) — the caller then routes to the helper that does.
+    """
+    if op in _BOOL_OPS:
+        return _BOOL_OPS[op] if operand_ty == "Bool" else None
+    if op in _CMP_SUFFIX:
+        if operand_ty == "Int":
+            return f"i64.{_CMP_SUFFIX[op]}"
+        if operand_ty == "Bool":
+            return f"i32.{_CMP_SUFFIX[op]}"
+        return None
+    if operand_ty != "Int":
+        return None
+    return _TRAPPING_INT_OPS.get(op) or _RAW_INT_OPS.get(op)
+
+
+def _refuse_float_operands(node: Any, where: str) -> None:
+    """`Float` stays refused on this tier, by name (docs/arithmetic.md).
+
+    The IR annotates `/ % + - *` with the *operand* type, which is the only
+    thing that distinguishes `Int / Int` from `Float / Float` in the node. It
+    is also what tells this tier that a site is Float-valued before it tries to
+    infer a type for it, so the refusal names Float rather than surfacing as a
+    confusing failure further down.
+    """
+    if isinstance(node, dict) and node.get("operands") == "Float":
+        raise EmitError(
+            f"{where}: type 'Float' is not lowerable — this tier supports "
+            f"Int/Bool, and the operands of `{node.get('op')}` are Float")
 
 
 def _is_unit_type(ty: str | None) -> bool:
     return ty in (None, "Unit")
 
 
-def _is_i32_type(ty: str | None) -> bool:
+def _is_scalar_type(ty: str | None) -> bool:
+    """A value that lives in a wasm register rather than in linear memory.
+
+    (Was `_is_i32_type` while every value was an i32; an `Int` is an i64 now,
+    so the question the callers actually ask — "does this cross a service
+    boundary without a pointer?" — needed its own name.)
+    """
     return ty in ("Int", "Bool")
 
 
@@ -876,10 +988,13 @@ def _wat_bytes(data: bytes) -> str:
 class _V3Emitter:
     """IR v3 types + pure functions -> a standalone WAT module.
 
-    Int/Bool stay i32; Str/List/record values use the canonical-ABI-shaped
-    linear memory representation (u32 length/count prefix followed by bytes or
-    4-byte elements/fields). The emitted module exports its memory, so a host
-    can read string/list/record results without an object model.
+    `Int` is i64 (docs/arithmetic.md: 64-bit two's complement, overflow traps);
+    Bool is i32, and every linear-memory *address* is i32 because wasm32
+    addressing is. Str/List/record values use the canonical-ABI-shaped linear
+    memory representation: a u32 length/count prefix followed by bytes (Str) or
+    by one 8-byte slot per element/field. The emitted module exports its
+    memory, so a host can read string/list/record results without an object
+    model.
     """
 
     def __init__(self, types: dict, functions: list, externs: list, tests: list) -> None:
@@ -910,6 +1025,27 @@ class _V3Emitter:
         # goldens — stay byte-identical.
         self._tmp_stack: list[str] = []
         self._tmp_extra: set[str] = set()
+        # wasm local name (already prefixed: `l_x`, `ap_v_1`, `msc_2`, …) ->
+        # wasm value type. Populated while a body is lowered, because that is
+        # the first moment a binding's revl type is known; the `(local …)`
+        # declarations are rendered from it afterwards. Everything not recorded
+        # here is a pointer or an internal counter, hence i32.
+        self._local_types: dict[str, str] = {}
+
+    def _declare_local(self, name: str, ty: str | None, where: str) -> None:
+        """Record the wasm width of a local. Idempotent; conflicts are fatal."""
+        wasm = _wasm_ty(ty)
+        previous = self._local_types.get(name)
+        if previous is not None and previous != wasm:
+            raise EmitError(
+                f"{where}: `{name}` is bound to both a {previous} and a {wasm} "
+                f"value on different paths — a wasm local has one type, so this "
+                f"tier cannot hold that binding; split it into two names"
+            )
+        self._local_types[name] = wasm
+
+    def _local_decl(self, name: str) -> str:
+        return f" (local ${name} {self._local_types.get(name, 'i32')})"
 
     def _reset_tmp_pool(self) -> None:
         self._tmp_stack = []
@@ -984,9 +1120,9 @@ class _V3Emitter:
                 if _is_fn_type(ftype):
                     self._check_type(ftype, f"{where}: field {fname!r} of {ty!r}")
             return
-        # tagged unions (user variants, Opt, Result) lower to a 2-word
-        # [i32 tag][i32 payload] cell — the payload is always one i32 (an Int/
-        # Bool value or a pointer). Check payload types are themselves lowerable.
+        # tagged unions (user variants, Opt, Result) lower to a two-slot
+        # [u32 tag][pad][payload] cell — the payload is one 8-byte slot (an
+        # Int/Bool value or a pointer). Check payloads are themselves lowerable.
         layout = self._tagged_layout(ty)
         if layout is not None:
             for _case, payload in layout:
@@ -1076,13 +1212,39 @@ class _V3Emitter:
             self.literal_offsets[value] = offset
             self.data_segments.append((offset, data))
             offset = _align4(offset + len(data))
-        self.heap_start = offset
+        # a string is a u32 length followed by bytes, so the pool itself only
+        # needs 4-byte alignment; the heap above it hands out 8-byte slots, so
+        # the first allocation has to start 8-aligned for `$alloc` to keep it
+        self.heap_start = _align8(offset)
 
     def _str_ptr(self, value: str) -> str:
         offset = self.literal_offsets.get(value)
         if offset is None:
             raise EmitError(f"internal: string literal {value!r} was not pooled")
         return f"(i32.const {offset})"
+
+    # -- the 8-byte value slot ------------------------------------------------
+    #
+    # Record fields, list elements and a tagged cell's payload all live in a
+    # slot of `_SLOT` bytes, always read and written as an i64. An `Int` sits
+    # there natively; a Bool or a pointer is zero-extended on the way in and
+    # wrapped on the way out, so the same eight bytes are in the slot whichever
+    # of the two views is taken. Doing it that way (rather than an `i32.store`
+    # that leaves the high half untouched) means a slot whose element type the
+    # emitter could not pin down — an `Any` variant payload, say — still reads
+    # back the value that was written instead of half of it plus whatever the
+    # allocator last left there.
+
+    @staticmethod
+    def _slot_load(address: str, ty: str | None) -> str:
+        load = f"(i64.load {address})"
+        return load if ty == "Int" else f"(i32.wrap_i64 {load})"
+
+    @staticmethod
+    def _slot_store(address: str, value: str, ty: str | None) -> str:
+        if ty != "Int":
+            value = f"(i64.extend_i32_u {value})"
+        return f"(i64.store {address} {value})"
 
 
     # -- linear-memory runtime helpers ---------------------------------------
@@ -1097,15 +1259,29 @@ class _V3Emitter:
             self._helper_str_slice(),
             self._helper_str_char_at(),
             self._helper_str_char_code_at(),
-            self._helper_int_div_floor(),
-            self._helper_int_div_euclid(),
-            self._helper_int_mod(),
+        ] + self._arith_helper_funcs() + [
             self._helper_list_push(),
             self._helper_list_concat(),
             self._helper_list_slice(),
         ]
 
+    def _arith_helper_funcs(self) -> list[str]:
+        """The helpers that need no linear memory — checked `+ - *` and the
+        three named integer divisions. Kept separate so a component that does
+        arithmetic and nothing else still gets them (`_ARITH_TOKENS`)."""
+        return [
+            self._helper_int_add(),
+            self._helper_int_sub(),
+            self._helper_int_mul(),
+            self._helper_int_div_floor(),
+            self._helper_int_div_euclid(),
+            self._helper_int_mod(),
+        ]
+
     def _helper_alloc(self) -> str:
+        # `$n` is a byte count and the result is an address: both stay i32,
+        # wasm32 addressing being 32-bit. The bump is rounded to 8 rather than
+        # 4 so every allocation starts on an 8-byte slot boundary.
         return """  (func $alloc (param $n i32) (result i32)
     (local $p i32)
     (local.set $p (global.get $__hp))
@@ -1113,8 +1289,8 @@ class _V3Emitter:
       (i32.add
         (global.get $__hp)
         (i32.and
-          (i32.add (local.get $n) (i32.const 3))
-          (i32.const -4))))
+          (i32.add (local.get $n) (i32.const 7))
+          (i32.const -8))))
     (local.get $p))"""
 
     def _helper_alloc_str(self) -> str:
@@ -1125,40 +1301,49 @@ class _V3Emitter:
     (local.get $p))"""
 
     def _helper_int_to_str(self) -> str:
-        return """  (func $int_to_str (param $n i32) (result i32)
+        # The value is an i64 and the result is a string *address*, so this
+        # helper straddles the split: `$n`/`$x`/`$d` are values, `$p`/`$i`/
+        # `$len` are the address, the write cursor and a byte count.
+        #
+        # The digits are produced with unsigned division on the negated value,
+        # which is what makes Int.MIN work: `0 - Int.MIN` wraps back to
+        # Int.MIN, and Int.MIN read as unsigned is exactly its magnitude.
+        return """  (func $int_to_str (param $n i64) (result i32)
     (local $neg i32)
-    (local $x i32)
+    (local $x i64)
+    (local $d i64)
     (local $len i32)
     (local $p i32)
     (local $i i32)
-    (if (i32.eqz (local.get $n))
+    (if (i64.eqz (local.get $n))
       (then
         (local.set $p (call $alloc_str (i32.const 1)))
         (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 48))
         (return (local.get $p))))
-    (local.set $neg (i32.lt_s (local.get $n) (i32.const 0)))
+    (local.set $neg (i64.lt_s (local.get $n) (i64.const 0)))
     (local.set $x (select
-      (i32.sub (i32.const 0) (local.get $n))
+      (i64.sub (i64.const 0) (local.get $n))
       (local.get $n)
       (local.get $neg)))
     (local.set $len (i32.const 0))
-    (local.set $i (local.get $x))
+    (local.set $d (local.get $x))
     (block (loop
-      (br_if 1 (i32.eqz (local.get $i)))
+      (br_if 1 (i64.eqz (local.get $d)))
       (local.set $len (i32.add (local.get $len) (i32.const 1)))
-      (local.set $i (i32.div_u (local.get $i) (i32.const 10)))
+      (local.set $d (i64.div_u (local.get $d) (i64.const 10)))
       (br 0)))
     (local.set $p (call $alloc_str (i32.add (local.get $len) (local.get $neg))))
     (if (local.get $neg)
       (then (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))))
     (local.set $i (i32.add (local.get $len) (local.get $neg)))
     (block (loop
-      (br_if 1 (i32.eqz (local.get $x)))
+      (br_if 1 (i64.eqz (local.get $x)))
       (local.set $i (i32.sub (local.get $i) (i32.const 1)))
       (i32.store8
         (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $i))
-        (i32.add (i32.rem_u (local.get $x) (i32.const 10)) (i32.const 48)))
-      (local.set $x (i32.div_u (local.get $x) (i32.const 10)))
+        (i32.wrap_i64
+          (i64.add (i64.rem_u (local.get $x) (i64.const 10)) (i64.const 48))))
+      (local.set $x (i64.div_u (local.get $x) (i64.const 10)))
       (br 0)))
     (local.get $p))"""
 
@@ -1200,86 +1385,153 @@ class _V3Emitter:
     (i32.const 1))"""
 
 
+    # -- checked arithmetic ---------------------------------------------------
+    #
+    # `Int` is 64-bit two's complement and overflow *traps* (docs/arithmetic.md
+    # — python bound-checks, rust uses checked_*, java *Exact, go revlAdd/…).
+    # wasm has no checked arithmetic at all, so the test is written out and the
+    # fault is `unreachable`, which is a wasm trap. The one thing this tier
+    # cannot carry is the message: a wasm trap has no payload, so `revl: Int
+    # overflow` is not attached to it the way the hosted tiers attach it.
+
+    def _helper_int_add(self) -> str:
+        # Signed overflow iff both operands differ in sign from the result.
+        return """  (func $int_add (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (local.set $r (i64.add (local.get $a) (local.get $b)))
+    (if (i64.lt_s
+          (i64.and (i64.xor (local.get $a) (local.get $r))
+                   (i64.xor (local.get $b) (local.get $r)))
+          (i64.const 0))
+      (then unreachable))
+    (local.get $r))"""
+
+    def _helper_int_sub(self) -> str:
+        # Signed overflow iff the operands differ in sign and the result's sign
+        # is not the minuend's.
+        return """  (func $int_sub (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (local.set $r (i64.sub (local.get $a) (local.get $b)))
+    (if (i64.lt_s
+          (i64.and (i64.xor (local.get $a) (local.get $b))
+                   (i64.xor (local.get $a) (local.get $r)))
+          (i64.const 0))
+      (then unreachable))
+    (local.get $r))"""
+
+    def _helper_int_mul(self) -> str:
+        # Zero never overflows; otherwise the wrapped product must divide back
+        # to the other operand exactly. The one case that does not reach the
+        # comparison is `Int.MIN * -1`, where the division itself traps — which
+        # is the same answer, since that product overflows too.
+        return """  (func $int_mul (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (local.set $r (i64.mul (local.get $a) (local.get $b)))
+    (if (i64.ne (local.get $a) (i64.const 0))
+      (then
+        (if (i64.ne (i64.div_s (local.get $r) (local.get $a)) (local.get $b))
+          (then unreachable))))
+    (local.get $r))"""
+
     def _helper_int_div_floor(self) -> str:
-        # wasm i32.div_s truncates; step the quotient down when the operands
+        # wasm i64.div_s truncates; step the quotient down when the operands
         # have opposite signs and the division was inexact.
-        return """  (func $int_div_floor (param $a i32) (param $b i32) (result i32)
-    (local $q i32)
-    (local.set $q (i32.div_s (local.get $a) (local.get $b)))
-    (if (result i32)
+        return """  (func $int_div_floor (param $a i64) (param $b i64) (result i64)
+    (local $q i64)
+    (local.set $q (i64.div_s (local.get $a) (local.get $b)))
+    (if (result i64)
       (i32.and
-        (i32.ne (i32.rem_s (local.get $a) (local.get $b)) (i32.const 0))
-        (i32.ne (i32.lt_s (local.get $a) (i32.const 0))
-                (i32.lt_s (local.get $b) (i32.const 0))))
-      (then (i32.sub (local.get $q) (i32.const 1)))
+        (i64.ne (i64.rem_s (local.get $a) (local.get $b)) (i64.const 0))
+        (i32.ne (i64.lt_s (local.get $a) (i64.const 0))
+                (i64.lt_s (local.get $b) (i64.const 0))))
+      (then (i64.sub (local.get $q) (i64.const 1)))
       (else (local.get $q))))"""
 
     def _helper_int_div_euclid(self) -> str:
-        return """  (func $int_div_euclid (param $a i32) (param $b i32) (result i32)
-    (if (result i32) (i32.gt_s (local.get $b) (i32.const 0))
+        return """  (func $int_div_euclid (param $a i64) (param $b i64) (result i64)
+    (if (result i64) (i64.gt_s (local.get $b) (i64.const 0))
       (then (call $int_div_floor (local.get $a) (local.get $b)))
-      (else (i32.sub (i32.const 0)
+      (else (i64.sub (i64.const 0)
               (call $int_div_floor (local.get $a)
-                (i32.sub (i32.const 0) (local.get $b)))))))"""
+                (i64.sub (i64.const 0) (local.get $b)))))))"""
 
     def _helper_int_mod(self) -> str:
         # Euclidean remainder: always in [0, |b|), for either sign of b.
-        return """  (func $int_mod (param $a i32) (param $b i32) (result i32)
-    (local $ab i32)
-    (local $m i32)
+        return """  (func $int_mod (param $a i64) (param $b i64) (result i64)
+    (local $ab i64)
+    (local $m i64)
     (local.set $ab
-      (if (result i32) (i32.lt_s (local.get $b) (i32.const 0))
-        (then (i32.sub (i32.const 0) (local.get $b)))
+      (if (result i64) (i64.lt_s (local.get $b) (i64.const 0))
+        (then (i64.sub (i64.const 0) (local.get $b)))
         (else (local.get $b))))
-    (local.set $m (i32.rem_s (local.get $a) (local.get $ab)))
-    (if (result i32) (i32.lt_s (local.get $m) (i32.const 0))
-      (then (i32.add (local.get $m) (local.get $ab)))
+    (local.set $m (i64.rem_s (local.get $a) (local.get $ab)))
+    (if (result i64) (i64.lt_s (local.get $m) (i64.const 0))
+      (then (i64.add (local.get $m) (local.get $ab)))
       (else (local.get $m))))"""
 
     def _helper_str_slice(self) -> str:
-        return """  (func $str_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
+        # `$s` is a string address (i32); `$start`/`$end` are `Int` *values*
+        # (i64) and are narrowed once, here, into the byte offsets they index.
+        return """  (func $str_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $from i32)
     (local $len i32)
     (local $p i32)
-    (local.set $len (i32.sub (local.get $end) (local.get $start)))
+    (local.set $from (i32.wrap_i64 (local.get $start)))
+    (local.set $len (i32.sub (i32.wrap_i64 (local.get $end)) (local.get $from)))
     (local.set $p (call $alloc_str (local.get $len)))
     (memory.copy
       (i32.add (local.get $p) (i32.const 4))
-      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $start))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
       (local.get $len))
     (local.get $p))"""
 
     def _helper_str_char_at(self) -> str:
-        return """  (func $str_char_at (param $s i32) (param $idx i32) (result i32)
+        return """  (func $str_char_at (param $s i32) (param $idx i64) (result i32)
     (local $p i32)
     (local.set $p (call $alloc_str (i32.const 1)))
     (i32.store8
       (i32.add (local.get $p) (i32.const 4))
-      (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $idx))))
+      (i32.load8_u
+        (i32.add (i32.add (local.get $s) (i32.const 4))
+                 (i32.wrap_i64 (local.get $idx)))))
     (local.get $p))"""
 
     def _helper_str_char_code_at(self) -> str:
-        return """  (func $str_char_code_at (param $s i32) (param $idx i32) (result i32)
-    (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $idx))))"""
+        # in: an address and an Int index. out: an Int (a code point), so the
+        # byte that comes back has to be widened rather than returned as an i32.
+        return """  (func $str_char_code_at (param $s i32) (param $idx i64) (result i64)
+    (i64.extend_i32_u
+      (i32.load8_u
+        (i32.add (i32.add (local.get $s) (i32.const 4))
+                 (i32.wrap_i64 (local.get $idx))))))"""
+
+    # -- lists: [u32 count][pad][slot0][slot1]… , one 8-byte slot per element --
+    #
+    # The count stays a u32 at offset 0 (the canonical-ABI shape a host reads);
+    # the four bytes after it are padding, so the first element lands 8-aligned
+    # and every element is at `8 + 8*i`. These helpers never learn the element
+    # type — that is exactly why the slot width is uniform and why they move
+    # elements as i64.
 
     def _helper_list_push(self) -> str:
-        return """  (func $list_push (param $list i32) (param $elem i32) (result i32)
+        return """  (func $list_push (param $list i32) (param $elem i64) (result i32)
     (local $n i32)
     (local $p i32)
     (local.set $n (i32.load (local.get $list)))
     (local.set $p
       (call $alloc
         (i32.add
-          (i32.mul (i32.add (local.get $n) (i32.const 1)) (i32.const 4))
-          (i32.const 4))))
+          (i32.mul (i32.add (local.get $n) (i32.const 1)) (i32.const 8))
+          (i32.const 8))))
     (i32.store (local.get $p) (i32.add (local.get $n) (i32.const 1)))
     (memory.copy
-      (i32.add (local.get $p) (i32.const 4))
-      (i32.add (local.get $list) (i32.const 4))
-      (i32.mul (local.get $n) (i32.const 4)))
-    (i32.store
+      (i32.add (local.get $p) (i32.const 8))
+      (i32.add (local.get $list) (i32.const 8))
+      (i32.mul (local.get $n) (i32.const 8)))
+    (i64.store
       (i32.add
-        (i32.add (local.get $p) (i32.const 4))
-        (i32.mul (local.get $n) (i32.const 4)))
+        (i32.add (local.get $p) (i32.const 8))
+        (i32.mul (local.get $n) (i32.const 8)))
       (local.get $elem))
     (local.get $p))"""
 
@@ -1293,36 +1545,39 @@ class _V3Emitter:
     (local.set $p
       (call $alloc
         (i32.add
-          (i32.mul (i32.add (local.get $na) (local.get $nb)) (i32.const 4))
-          (i32.const 4))))
+          (i32.mul (i32.add (local.get $na) (local.get $nb)) (i32.const 8))
+          (i32.const 8))))
     (i32.store (local.get $p) (i32.add (local.get $na) (local.get $nb)))
     (memory.copy
-      (i32.add (local.get $p) (i32.const 4))
-      (i32.add (local.get $a) (i32.const 4))
-      (i32.mul (local.get $na) (i32.const 4)))
+      (i32.add (local.get $p) (i32.const 8))
+      (i32.add (local.get $a) (i32.const 8))
+      (i32.mul (local.get $na) (i32.const 8)))
     (memory.copy
       (i32.add
-        (i32.add (local.get $p) (i32.const 4))
-        (i32.mul (local.get $na) (i32.const 4)))
-      (i32.add (local.get $b) (i32.const 4))
-      (i32.mul (local.get $nb) (i32.const 4)))
+        (i32.add (local.get $p) (i32.const 8))
+        (i32.mul (local.get $na) (i32.const 8)))
+      (i32.add (local.get $b) (i32.const 8))
+      (i32.mul (local.get $nb) (i32.const 8)))
     (local.get $p))"""
 
     def _helper_list_slice(self) -> str:
-        return """  (func $list_slice (param $s i32) (param $start i32) (param $end i32) (result i32)
+        # `$start`/`$end` are `Int` values; the element stride is bytes.
+        return """  (func $list_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $from i32)
     (local $len i32)
     (local $p i32)
-    (local.set $len (i32.sub (local.get $end) (local.get $start)))
+    (local.set $from (i32.wrap_i64 (local.get $start)))
+    (local.set $len (i32.sub (i32.wrap_i64 (local.get $end)) (local.get $from)))
     (local.set $p
       (call $alloc
-        (i32.add (i32.mul (local.get $len) (i32.const 4)) (i32.const 4))))
+        (i32.add (i32.mul (local.get $len) (i32.const 8)) (i32.const 8))))
     (i32.store (local.get $p) (local.get $len))
     (memory.copy
-      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (local.get $p) (i32.const 8))
       (i32.add
-        (i32.add (local.get $s) (i32.const 4))
-        (i32.mul (local.get $start) (i32.const 4)))
-      (i32.mul (local.get $len) (i32.const 4)))
+        (i32.add (local.get $s) (i32.const 8))
+        (i32.mul (local.get $from) (i32.const 8)))
+      (i32.mul (local.get $len) (i32.const 8)))
     (local.get $p))"""
 
 
@@ -1544,7 +1799,9 @@ class _V3Emitter:
             if isinstance(value, bool):
                 return _E("(i32.const 1)" if value else "(i32.const 0)", "Bool")
             if isinstance(value, int) and not isinstance(value, bool):
-                return _E(f"(i32.const {value})", "Int")
+                # an Int literal is a 64-bit *value*; only offsets and counts
+                # stay i32.const
+                return _E(f"(i64.const {value})", "Int")
             if isinstance(value, str):
                 return _E(self._str_ptr(value), "Str")
             raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
@@ -1603,10 +1860,10 @@ class _V3Emitter:
     def _nullish_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         """`a ?? b` on the tagged-cell model: read the tag, take the payload.
 
-        `Opt` is `[i32 tag][i32 payload]` with `None` = 0 and `Some` = 1, so
-        nullish coalescing is one load and a branch. It is lowerable exactly
+        `Opt` is `[u32 tag][pad][slot payload]` with `None` = 0 and `Some` = 1,
+        so nullish coalescing is one load and a branch. It is lowerable exactly
         when the Opt value is *in* the module; an `Opt` returned by a required
-        service never gets here — the i32 coeffect boundary rejects it first.
+        service never gets here — the scalar coeffect boundary rejects it first.
         """
         left_node, right_node = node.get("left"), node.get("right")
         left_ty = self._infer_type(left_node, scope)
@@ -1627,11 +1884,13 @@ class _V3Emitter:
                     f"{where}: the `??` default is {right.ty!r} but the Opt carries "
                     f"{payload_ty!r}"
                 )
+            payload = self._slot_load(
+                f"(i32.add (local.get ${tmp}) (i32.const {_SLOT}))", payload_ty)
             wat = (
                 f"{left.wat}\n      (local.set ${tmp})\n"
-                f"      (if (result i32)\n"
+                f"      (if (result {_wasm_ty(payload_ty)})\n"
                 f"        (i32.eq (i32.load (local.get ${tmp})) (i32.const 1))\n"
-                f"        (then (i32.load (i32.add (local.get ${tmp}) (i32.const 4))))\n"
+                f"        (then {payload})\n"
                 f"        (else {right.wat}))"
             )
         finally:
@@ -1667,20 +1926,35 @@ class _V3Emitter:
             raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
         if op in ("==", "===", "!=", "!==") and (left_ty not in ("Int", "Bool") or right_ty not in ("Int", "Bool")):
             raise EmitError(f"{where}: equality on this tier is lowerable for Int, Bool, and Str")
+        if op in ("==", "===", "!=", "!==") and left_ty != right_ty:
+            # Int and Bool used to be the same wasm type, so a mixed comparison
+            # lowered to *something*. They are i64 and i32 now, and there is no
+            # comparison instruction spanning both — say so rather than emit a
+            # module that does not validate.
+            raise EmitError(
+                f"{where}: cannot compare {left_ty!r} with {right_ty!r} on this "
+                f"tier — Int is 64-bit and Bool is not")
         if op in ("+", "-", "*", "/", "%") and (left_ty != "Int" or right_ty != "Int"):
+            _refuse_float_operands(node, where)
             raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int")
-        if op not in _WASM_BIN_OPS:
+        if op not in _BINARY_OPS:
             raise EmitError(f"{where}: unsupported binary operator {op!r}")
-        if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
-            expected = "Bool"
-        else:
-            expected = "Int"
-        left = self._expr(left_node, scope, where, expected)
-        right = self._expr(right_node, scope, where, expected)
+        _refuse_float_operands(node, where)
+        # `expected` is the *operand* type, which is also what picks the
+        # instruction: `i64.eq` and `i32.eq` are the same comparison at two
+        # widths, and only the operands say which.
+        operand_ty = "Bool" if op in _BOOL_OPS or (
+            op in _CMP_SUFFIX and left_ty == "Bool" and right_ty == "Bool") else "Int"
+        left = self._expr(left_node, scope, where, operand_ty)
+        right = self._expr(right_node, scope, where, operand_ty)
         if _is_unit_type(left.ty) or _is_unit_type(right.ty):
             raise EmitError(f"{where}: void operand in binary expression")
-        result_ty = "Bool" if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||") else "Int"
-        return _E(f"{left.wat}\n      {right.wat}\n      ({_WASM_BIN_OPS[op]})", result_ty)
+        instruction = _bin_instr(op, operand_ty)
+        if instruction is None:
+            raise EmitError(
+                f"{where}: {op!r} is not lowerable over {operand_ty} on this tier")
+        result_ty = "Bool" if op in _COMPARISON_OPS else "Int"
+        return _E(f"{left.wat}\n      {right.wat}\n      ({instruction})", result_ty)
 
     def _un_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         op = node.get("op")
@@ -1690,7 +1964,9 @@ class _V3Emitter:
         if op == "!":
             return _E(f"{operand.wat}\n      (i32.eqz)", "Bool")
         if op == "-":
-            return _E(f"(i32.const 0)\n      {operand.wat}\n      (i32.sub)", "Int")
+            # negation is a subtraction from zero, and `0 - Int.MIN` overflows:
+            # it goes through the checked helper like any other subtraction
+            return _E(f"(i64.const 0)\n      {operand.wat}\n      (call $int_sub)", "Int")
         raise EmitError(f"{where}: unsupported unary operator {op!r}")
 
     def _inline_arrow(self, arrow: dict, args: list, scope: _Scope, where: str) -> _E:
@@ -1706,6 +1982,7 @@ class _V3Emitter:
         inner = _Scope(dict(scope.slots), dict(scope.types))
         for p, a in zip(params, args):
             av = self._expr(a, scope, where)
+            self._declare_local(f"ap_{p}_{aid}", av.ty, where)
             sets.append(f"{av.wat}\n      (local.set $ap_{p}_{aid})")
             inner.slots[p] = f"(local.get $ap_{p}_{aid})"
             inner.types[p] = av.ty
@@ -1755,13 +2032,19 @@ class _V3Emitter:
             target = self._expr(target_node, scope, where, target_ty)
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
                 raise EmitError(f"{where}: length is only lowerable on Str/Bytes/List")
-            return _E(f"(i32.load {target.wat})", "Int")
+            # the count/length prefix stays a u32 in memory (the canonical-ABI
+            # shape a host reads); the *value* it yields is an Int
+            return _E(f"(i64.extend_i32_u (i32.load {target.wat}))", "Int")
         if method == "push":
             if not _is_list_type(target_ty):
                 raise EmitError(f"{where}: push is only lowerable on List values")
             target = self._expr(target_node, scope, where, target_ty)
-            arg = self._expr(args[0], scope, where, _list_elem(target_ty))
-            return _E(f"{target.wat}\n      {arg.wat}\n      (call $list_push)", target_ty)
+            elem_ty = _list_elem(target_ty)
+            arg = self._expr(args[0], scope, where, elem_ty)
+            # $list_push writes one 8-byte slot and never learns the element
+            # type, so a non-Int element is widened into the slot here
+            elem = arg.wat if elem_ty == "Int" else f"(i64.extend_i32_u {arg.wat})"
+            return _E(f"{target.wat}\n      {elem}\n      (call $list_push)", target_ty)
         if method == "concat":
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
                 raise EmitError(f"{where}: concat is only lowerable on Str/Bytes/List")
@@ -1790,13 +2073,13 @@ class _V3Emitter:
             arg = self._expr(args[0], scope, where, "Int")
             return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_code_at)", "Int")
         if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
-            # Integer division and modulo (docs/arithmetic.md). i32.div_s
+            # Integer division and modulo (docs/arithmetic.md). i64.div_s
             # already truncates; the other three go through helpers so every
             # tier computes the same thing rather than inheriting a host rule.
             target = self._expr(target_node, scope, where, "Int")
             arg = self._expr(args[0], scope, where, "Int")
             if method == "div_trunc":
-                return _E(f"(i32.div_s {target.wat} {arg.wat})", "Int")
+                return _E(f"(i64.div_s {target.wat} {arg.wat})", "Int")
             call = {"div_floor": "$int_div_floor",
                     "div_euclid": "$int_div_euclid",
                     "mod": "$int_mod"}[method]
@@ -1817,12 +2100,10 @@ class _V3Emitter:
         if _is_unit_type(field_ty):
             raise EmitError(f"{where}: cannot access void record field {name!r}")
         target = self._expr(node.get("target"), scope, where, target_ty)
-        offset = 4 * list(fields).index(name)
-        if offset:
-            wat = f"(i32.load (i32.add {target.wat} (i32.const {offset})))"
-        else:
-            wat = f"(i32.load {target.wat})"
-        return _E(wat, field_ty)
+        offset = _SLOT * list(fields).index(name)
+        address = (f"(i32.add {target.wat} (i32.const {offset}))"
+                   if offset else target.wat)
+        return _E(self._slot_load(address, field_ty), field_ty)
 
     def _index_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         target_ty = self._infer_type(node.get("target"), scope)
@@ -1835,16 +2116,18 @@ class _V3Emitter:
             if _is_unit_type(elem_ty):
                 raise EmitError(f"{where}: list of void is not lowerable")
             target = self._expr(node.get("target"), scope, where, target_ty)
-            if index.wat.startswith("(i32.const "):
-                value = int(index.wat[len("(i32.const ") : -1])
-                offset = 4 + 4 * value
-                wat = f"(i32.load (i32.add {target.wat} (i32.const {offset})))"
+            # the index is an Int *value*; the address it lands on is i32, so
+            # it is narrowed exactly once, here
+            if index.wat.startswith("(i64.const "):
+                value = int(index.wat[len("(i64.const ") : -1])
+                address = f"(i32.add {target.wat} (i32.const {_SLOT + _SLOT * value}))"
             else:
-                wat = (
-                    f"(i32.load (i32.add {target.wat}\n"
-                    f"        (i32.add (i32.const 4) (i32.mul {index.wat} (i32.const 4)))))"
+                address = (
+                    f"(i32.add {target.wat}\n"
+                    f"        (i32.add (i32.const {_SLOT})"
+                    f" (i32.mul (i32.wrap_i64 {index.wat}) (i32.const {_SLOT}))))"
                 )
-            return _E(wat, elem_ty)
+            return _E(self._slot_load(address, elem_ty), elem_ty)
         raise EmitError(f"{where}: indexing is only lowerable for Str and List, got {target_ty!r}")
 
     def _len_expr(self, node: dict, scope: _Scope, where: str) -> _E:
@@ -1852,7 +2135,7 @@ class _V3Emitter:
         if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
             raise EmitError(f"{where}: length is only lowerable for Str/Bytes/List")
         target = self._expr(node.get("target"), scope, where, target_ty)
-        return _E(f"(i32.load {target.wat})", "Int")
+        return _E(f"(i64.extend_i32_u (i32.load {target.wat}))", "Int")
 
     def _if_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
         cond = self._expr(node.get("cond"), scope, where, "Bool")
@@ -1866,7 +2149,7 @@ class _V3Emitter:
         else_wat = self._expr(node.get("else"), scope, where, then_ty).wat
         wat = (
             f"{cond.wat}\n"
-            f"      (if (result i32)\n"
+            f"      (if (result {_wasm_ty(then_ty)})\n"
             f"        (then {then_wat})\n"
             f"        (else {else_wat}))"
         )
@@ -1892,21 +2175,19 @@ class _V3Emitter:
                 if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: record field {name!r} is void")
                 field_values.append((name, value))
-            lines = [f"(call $alloc (i32.const {4 * len(field_values)}))", f"(local.set ${tmp})"]
+            lines = [f"(call $alloc (i32.const {_SLOT * len(field_values)}))",
+                     f"(local.set ${tmp})"]
             for position, (name, value) in enumerate(field_values):
-                offset = 4 * position
-                if offset:
-                    lines.append(
-                        f"(i32.store (i32.add (local.get ${tmp}) (i32.const {offset})) {value.wat})"
-                    )
-                else:
-                    lines.append(f"(i32.store (local.get ${tmp}) {value.wat})")
+                offset = _SLOT * position
+                address = (f"(i32.add (local.get ${tmp}) (i32.const {offset}))"
+                           if offset else f"(local.get ${tmp})")
+                lines.append(self._slot_store(address, value.wat, value.ty))
             lines.append(f"(local.get ${tmp})")
         finally:
             self._release_tmp()
         return _E("\n      ".join(lines), ty)
 
-    # -- tagged unions (variants, Opt, Result): [i32 tag][i32 payload] --------
+    # -- tagged unions (variants, Opt, Result): [u32 tag][pad][slot payload] --
 
     def _make_tagged(self, ty: str | None, case: str, payload_node: Any,
                      scope: _Scope, where: str) -> _E:
@@ -1919,19 +2200,19 @@ class _V3Emitter:
         # list, or nested variant) must not reuse this cell's base pointer.
         tmp = self._acquire_tmp()
         try:
+            # the tag is a discriminant, not an Int value: it stays a u32, and
+            # the payload slot follows it 8-aligned like every other slot
             lines = [
-                "(call $alloc (i32.const 8))",
+                f"(call $alloc (i32.const {2 * _SLOT}))",
                 f"(local.set ${tmp})",
                 f"(i32.store (local.get ${tmp}) (i32.const {tag}))",
             ]
+            address = f"(i32.add (local.get ${tmp}) (i32.const {_SLOT}))"
             if payload_node is not None:
                 value = self._expr(payload_node, scope, where, payload_ty)
-                payload_wat = value.wat
+                lines.append(self._slot_store(address, value.wat, value.ty))
             else:
-                payload_wat = "(i32.const 0)"
-            lines.append(
-                f"(i32.store (i32.add (local.get ${tmp}) (i32.const 4)) {payload_wat})"
-            )
+                lines.append(f"(i64.store {address} (i64.const 0))")
             lines.append(f"(local.get ${tmp})")
         finally:
             self._release_tmp()
@@ -1969,8 +2250,13 @@ class _V3Emitter:
                 payload_ty = None
             inner = _Scope(dict(scope.slots), dict(scope.types))
             inner.slots[bind] = f"(local.get $l_{bname})"
-            # on the i32 tier an unknown payload is still an i32 — default to Int
+            # An unknown payload defaults to Int, so the binding is read at the
+            # full slot width. That is the safe default now that widths differ:
+            # a slot is always written as a whole i64 (`_slot_store`), so
+            # reading an unknown one as an Int returns the value that was put
+            # there — reading it as an i32 would silently keep half of it.
             inner.types[bind] = payload_ty or "Int"
+            self._declare_local(f"l_{bname}", inner.types[bind], where)
             return inner
 
         # the result type has to be inferred *inside* the first arm's scope:
@@ -1980,12 +2266,16 @@ class _V3Emitter:
             arms[0].get("body"), arm_scope(arms[0]), expected)
 
         def arm_body(arm: dict) -> str:
-            body = self._expr(arm.get("body"), arm_scope(arm), where, result_ty).wat
+            inner = arm_scope(arm)
+            body = self._expr(arm.get("body"), inner, where, result_ty).wat
             bind = arm.get("bind")
             if not bind:
                 return body
             bname = _ident(bind, f"{where}: match bind")
-            load = f"(local.set $l_{bname} (i32.load (i32.add (local.get ${mloc}) (i32.const 4))))"
+            payload = self._slot_load(
+                f"(i32.add (local.get ${mloc}) (i32.const {_SLOT}))",
+                inner.types[bind])
+            load = f"(local.set $l_{bname} {payload})"
             return f"{load}\n      {body}"
 
         wildcard = next((a for a in arms if a.get("pattern") == "_"), None)
@@ -1993,7 +2283,7 @@ class _V3Emitter:
         for arm in reversed([a for a in arms if a.get("pattern") != "_"]):
             tag = self._tag_of(scrut.ty, arm.get("pattern"))
             cond = f"(i32.eq (i32.load (local.get ${mloc})) (i32.const {tag}))"
-            chain = (f"(if (result i32)\n        {cond}\n"
+            chain = (f"(if (result {_wasm_ty(result_ty)})\n        {cond}\n"
                      f"        (then {arm_body(arm)})\n        (else {chain}))")
         wat = f"{scrut.wat}\n      (local.set ${mloc})\n      {chain}"
         return _E(wat, result_ty)
@@ -2026,16 +2316,17 @@ class _V3Emitter:
             for value in values:
                 if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: list element is void")
+            # [u32 count][pad][slot0]… — the count keeps its canonical-ABI
+            # width, the elements are one 8-byte slot each
             lines = [
-                f"(call $alloc (i32.const {4 * (len(values) + 1)}))",
+                f"(call $alloc (i32.const {_SLOT * (len(values) + 1)}))",
                 f"(local.set ${tmp})",
                 f"(i32.store (local.get ${tmp}) (i32.const {len(values)}))",
             ]
             for position, value in enumerate(values):
-                offset = 4 + 4 * position
-                lines.append(
-                    f"(i32.store (i32.add (local.get ${tmp}) (i32.const {offset})) {value.wat})"
-                )
+                offset = _SLOT + _SLOT * position
+                address = f"(i32.add (local.get ${tmp}) (i32.const {offset}))"
+                lines.append(self._slot_store(address, value.wat, value.ty))
             lines.append(f"(local.get ${tmp})")
         finally:
             self._release_tmp()
@@ -2123,7 +2414,10 @@ class _V3Emitter:
                     self._arrows[name] = value_node
                     aid = value_node.get("_aid")
                     for c in value_node.get("captures") or []:
-                        out.append(f"(local.get $l_{_ident(c, 'capture')})")
+                        capture = _ident(c, "capture")
+                        self._declare_local(f"cap_{c}_{aid}",
+                                            scope.types.get(capture), where)
+                        out.append(f"(local.get $l_{capture})")
                         out.append(f"(local.set $cap_{c}_{aid})")
                     continue
                 if step == "let":
@@ -2135,6 +2429,7 @@ class _V3Emitter:
                 if _is_unit_type(value_ty):
                     raise EmitError(f"{where}: cannot bind a void expression")
                 value = self._expr(stmt.get("value"), scope, where, value_ty)
+                self._declare_local(f"l_{name}", value_ty, where)
                 out.append(value.wat)
                 out.append(f"(local.set $l_{name})")
                 scope.slots[name] = f"(local.get $l_{name})"
@@ -2195,19 +2490,30 @@ class _V3Emitter:
         return out
 
     def _emit_for(self, stmt: dict, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
-        """`for (x of xs)` over a list `[i32 count][elem0]…` in linear memory."""
+        """`for (x of xs)` over a list `[u32 count][pad][slot0]…` in memory.
+
+        The cursor locals stay i32: `$for_ptr` is an address and `$for_cnt` /
+        `$for_idx` are the stored count and a slot index, none of which is an
+        `Int` value the program can observe.
+        """
         n = stmt.get("_lid")
         iter_ty = self._infer_type(stmt.get("iterable"), scope)
         if not _is_list_type(iter_ty):
             raise EmitError(f"{where}: `for … of` iterates a List, got {iter_ty!r}")
         elem_ty = _list_elem(iter_ty)
         bind = _ident(stmt.get("bind"), f"{where}: loop bind")
+        self._declare_local(f"l_{bind}", elem_ty, where)
         it = self._expr(stmt.get("iterable"), scope, where, iter_ty)
         body_scope = _Scope(dict(scope.slots), dict(scope.types))
         body_scope.slots[stmt.get("bind")] = f"(local.get $l_{bind})"
         body_scope.types[stmt.get("bind")] = elem_ty
         body_lines = self._emit_stmts(stmt.get("body") or [], body_scope, where, expected_return)
         ptr, cnt, idx = f"$for_ptr_{n}", f"$for_cnt_{n}", f"$for_idx_{n}"
+        element = self._slot_load(
+            f"(i32.add (local.get {ptr}) "
+            f"(i32.add (i32.const {_SLOT}) "
+            f"(i32.mul (local.get {idx}) (i32.const {_SLOT}))))",
+            elem_ty)
         out = [
             it.wat, f"(local.set {ptr})",
             f"(i32.load (local.get {ptr}))", f"(local.set {cnt})",
@@ -2216,8 +2522,7 @@ class _V3Emitter:
             "  (loop",
             f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))",
             "    (br_if 1)",
-            f"    (i32.load (i32.add (local.get {ptr}) "
-            f"(i32.add (i32.const 4) (i32.mul (local.get {idx}) (i32.const 4)))))",
+            f"    {element}",
             f"    (local.set $l_{bind})",
         ]
         out.extend("    " + line for line in body_lines)
@@ -2242,29 +2547,35 @@ class _V3Emitter:
         name = _ident(fn.get("name"), "function name")
         where = name
         scope = _Scope({}, {})
-        decls: list[str] = []
+        # A local's *width* is only known once its binding has been lowered, so
+        # the declarations are collected by name here and rendered after the
+        # body (`_declare_local` / `_local_decl`). Params and the result come
+        # from the signature and are known up front.
+        signature: list[str] = []
+        local_names_in_order: list[str] = []
         for param in fn.get("params") or []:
             pname = _ident(param.get("name"), f"{where}: parameter")
             ptype = param.get("type")
             self._check_type(ptype, f"{where}: parameter {pname}")
             if not _is_unit_type(ptype):
-                decls.append(f"(param $p_{pname} i32)")
+                signature.append(f"(param $p_{pname} {_wasm_ty(ptype)})")
             scope.slots[pname] = f"(local.get $p_{pname})"
             scope.types[pname] = ptype
         return_ty = fn.get("returns")
         self._check_type(return_ty, f"{where}: return")
         if not _is_unit_type(return_ty):
-            decls.append("(result i32)")
+            signature.append(f"(result {_wasm_ty(return_ty)})")
 
         local_names: set[str] = set()
         self._loop_counter = 0
         self._for_temps: list[str] = []
         self._arrows: dict = {}
         self._arrow_counter = 0
+        self._local_types = {}
         self._collect_locals(fn.get("body") or [], local_names)
         for lname in sorted(local_names):
             if lname not in scope.types:
-                decls.append(f"(local $l_{lname} i32)")
+                local_names_in_order.append(f"l_{lname}")
                 scope.slots[lname] = f"(local.get $l_{lname})"
                 scope.types[lname] = None
         # match binds + one scratch pointer per match (match is in expression
@@ -2275,27 +2586,28 @@ class _V3Emitter:
         self._collect_match_locals(fn.get("body") or [], match_binds, match_scruts)
         for bname in sorted(match_binds):
             if bname not in local_names:
-                decls.append(f"(local $l_{bname} i32)")
+                local_names_in_order.append(f"l_{bname}")
         for sname in sorted(match_scruts):
-            decls.append(f"(local ${sname} i32)")
+            local_names_in_order.append(sname)
         for tname in self._for_temps:
-            decls.append(f"(local ${tname} i32)")
+            local_names_in_order.append(tname)
         # arrow param + capture-snapshot locals (arrows are inlined at calls)
         arrow_locals: set[str] = set()
         self._collect_arrow_locals(fn.get("body") or [], arrow_locals)
         for aname in sorted(arrow_locals):
-            decls.append(f"(local ${aname} i32)")
+            local_names_in_order.append(aname)
         tmp = self._fresh_tmp(set(scope.types) | local_names | match_scruts
                               | set(self._for_temps) | arrow_locals)
         self._tmp = tmp
-        decls.append(f"(local ${tmp} i32)")
+        local_names_in_order.append(tmp)
         self._reset_tmp_pool()
 
         body_lines = self._emit_stmts(fn.get("body") or [], scope, where, return_ty)
         # deeper scratch pointers minted for nested allocations (see
         # `_acquire_tmp`); wasm requires every local declared in the header
         for extra in sorted(self._tmp_extra):
-            decls.append(f"(local ${extra} i32)")
+            local_names_in_order.append(extra)
+        decls = signature + [self._local_decl(n).lstrip() for n in local_names_in_order]
         if body_lines:
             body = "\n    ".join(body_lines)
         elif not _is_unit_type(return_ty):
@@ -2311,8 +2623,9 @@ class _V3Emitter:
         self._collect_string_literals()
         lines = [
             ";; Generated by the revl cordis-wasm backend (ir_version 3) — do not edit.",
-            ";; pure functions + documented type layouts; Str/List/record values use",
-            ";; canonical-ABI-shaped linear memory (u32 length/count prefix)",
+            ";; pure functions + documented type layouts; Int is i64 (values), addresses",
+            ";; are i32; Str/List/record values use canonical-ABI-shaped linear memory",
+            ";; (u32 length/count prefix, then one 8-byte slot per field/element)",
             "(module",
             '  (memory (export "memory") 1)',
         ]

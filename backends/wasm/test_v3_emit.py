@@ -140,8 +140,11 @@ def test_v3_str_list_record_functions_emit():
     assert '(export "first")' in wat
     assert '(export "greet")' in wat
     assert '(export "make_row")' in wat
-    assert "(i32.load (i32.add (local.get $p_row) (i32.const 4)))" in wat
-    assert "(i32.load (i32.add (local.get $p_xs) (i32.const 4)))" in wat
+    # a record field / list element is one 8-byte slot: the Str field comes
+    # back through the slot and is narrowed to its i32 address, the Int element
+    # is the slot
+    assert "(i32.wrap_i64 (i64.load (i32.add (local.get $p_row) (i32.const 8))))" in wat
+    assert "(i64.load (i32.add (local.get $p_xs) (i32.const 8)))" in wat
     assert '  (data (i32.const 0) "\\02\\00\\00\\00hi")' in wat
 
 
@@ -205,8 +208,9 @@ def test_v3_externs_and_tests_are_documented_not_rejected():
     assert "unsupported on this tier: tests 'would run on a hosted backend'" in wat
 
 
-# tagged unions (user variants, Result, Opt) lower to [i32 tag][i32 payload]
-# in linear memory; match dispatches on the tag.
+# tagged unions (user variants, Result, Opt) lower to
+# [u32 tag][pad][8-byte payload slot] in linear memory; match dispatches on
+# the tag, which stays a u32 because it is a discriminant, not an Int value.
 _ADT_SRC = """
 type O = Found(Int) | Missing
 fn mk_u(h: Bool) -> Int { let o = h ? Found(9) : Missing  return match o { Found(v) => v, Missing => 0 } }
@@ -218,8 +222,8 @@ fn opt_or(some: Bool) -> Int { let x = some ? Some(5) : None  return match x { S
 def test_v3_variant_result_opt_emit():
     emit = _emitter()
     wat = emit.emit(compile_source(_ADT_SRC))["functions"]
-    # construction: alloc 8, store tag + payload
-    assert "(call $alloc (i32.const 8))" in wat
+    # construction: alloc two slots, store tag + payload
+    assert "(call $alloc (i32.const 16))" in wat
     assert "(i32.store (local.get $__revl_tmp) (i32.const 0))" in wat  # a tag store
     # match: dispatch on the loaded tag
     assert "(i32.eq (i32.load (local.get $msc_1)) (i32.const" in wat
@@ -576,3 +580,212 @@ def test_v3_indexof_rejected_by_tier():
     emit = _emitter()
     with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
         emit.emit(compile_source('fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }'))
+
+
+# ---------------------------------------------------------------------------
+# `Int` is 64-bit two's complement and overflow TRAPS (docs/arithmetic.md).
+#
+# This tier was i32 throughout its emitter until the port, which made it the
+# narrowest of the six — narrower than the spec, silently. Emitted text cannot
+# demonstrate the claim (an `i64.add` proves nothing about the bound), so every
+# case below is EXECUTED on wasmtime, and the overflow cases assert that the
+# module *traps* rather than returning a wrapped value.
+# ---------------------------------------------------------------------------
+
+INT_MAX = 9223372036854775807
+INT_MIN = -9223372036854775808
+
+_INT64_SRC = """
+fn add(a: Int, b: Int) -> Int { return a + b }
+fn sub(a: Int, b: Int) -> Int { return a - b }
+fn mul(a: Int, b: Int) -> Int { return a * b }
+fn wide() -> Int { return 9007199254740993 - 9007199254740992 }
+fn near_max() -> Int { return 9223372036854775807 - 1 }
+fn million_squared() -> Int { return 1000000 * 1000000 }
+fn in_list(a: Int) -> Int { let xs = [a, 2]  return xs[0] }
+fn pushed(a: Int) -> Int { let xs = [1]  return xs.push(a)[1] }
+fn in_record(a: Int) -> Int { let r = { v: a, w: 1 }  return r.v }
+fn in_opt(a: Int) -> Int { let o = Some(a)  return o ?? 0 }
+fn in_loop(a: Int) -> Int { let xs = [a, 0 - 1]  var s = 0  for (x of xs) { s = s + x }  return s }
+fn width(n: Int) -> Int { return `${n}`.length() }
+fn digit(n: Int, i: Int) -> Int { return `${n}`.charCodeAt(i) }
+"""
+
+
+def _int64_module(tmp_path):
+    """Compile `_INT64_SRC` once and return `(invoke, traps)` against it."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    wat = tmp_path / "int64.wat"
+    wat.write_text(_emitter().emit(compile_source(_INT64_SRC))["functions"],
+                   encoding="utf-8")
+
+    def run(fn: str, *args):
+        return subprocess.run(
+            ["wasmtime", "--invoke", fn, str(wat), *[str(a) for a in args]],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def invoke(fn: str, *args) -> int:
+        out = run(fn, *args)
+        assert out.returncode == 0, f"{fn}{args}: {out.stderr}"
+        return int(out.stdout.strip().splitlines()[-1])
+
+    def traps(fn: str, *args) -> bool:
+        out = run(fn, *args)
+        return out.returncode != 0 and "wasm trap" in out.stderr
+
+    return invoke, traps
+
+
+@_needs_wasmtime
+def test_v3_int_is_64_bit_on_wasmtime(tmp_path):
+    """The whole 64-bit range round-trips — through parameters, results, list
+    elements, record fields, an Opt payload, a for-of binding and itoa. Each of
+    those is a place the value crosses a *slot*, which is where a half-done
+    widening would show up as a truncated answer rather than an error."""
+    invoke, _traps = _int64_module(tmp_path)
+    assert invoke("add", INT_MAX - 1, 1) == INT_MAX
+    assert invoke("sub", INT_MIN + 1, 1) == INT_MIN
+    assert invoke("near_max") == 9223372036854775806
+    assert invoke("million_squared") == 1000000000000
+    # the value TypeScript cannot represent: exact past 2^53
+    assert invoke("wide") == 1
+    for carrier in ("in_list", "pushed", "in_record", "in_opt"):
+        assert invoke(carrier, INT_MAX) == INT_MAX, carrier
+        assert invoke(carrier, INT_MIN) == INT_MIN, carrier
+    assert invoke("in_loop", INT_MAX) == INT_MAX - 1
+    assert invoke("width", INT_MAX) == 19
+    assert invoke("width", INT_MIN) == 20
+    rendered = "".join(chr(invoke("digit", INT_MIN, i)) for i in range(20))
+    assert rendered == str(INT_MIN)
+
+
+@_needs_wasmtime
+def test_v3_int_overflow_traps_on_wasmtime(tmp_path):
+    """A tier that *returns* here has silently wrapped, which is the whole
+    thing this guarantee exists to prevent. wasm has no checked arithmetic, so
+    the check is emitted and the fault is `unreachable` — a wasm trap."""
+    invoke, traps = _int64_module(tmp_path)
+    assert traps("add", INT_MAX, 1)
+    assert traps("add", INT_MIN, -1)
+    assert traps("sub", INT_MIN, 1)
+    assert traps("sub", INT_MAX, -1)
+    assert traps("mul", INT_MAX, 2)
+    assert traps("mul", INT_MIN, -1)
+    assert traps("mul", -1, INT_MIN)
+    # …and the neighbouring in-range cases still compute, so the check is not
+    # simply refusing everything
+    assert invoke("mul", 0, INT_MIN) == 0
+    assert invoke("mul", 1, INT_MIN) == INT_MIN
+    assert invoke("mul", INT_MAX, 1) == INT_MAX
+
+
+_NAMED_DIVISION_SRC = """
+fn div_trunc(a: Int, b: Int) -> Int { return a.div_trunc(b) }
+fn div_floor(a: Int, b: Int) -> Int { return a.div_floor(b) }
+fn div_euclid(a: Int, b: Int) -> Int { return a.div_euclid(b) }
+fn modulo(a: Int, b: Int) -> Int { return a.mod(b) }
+fn rem(a: Int, b: Int) -> Int { return a % b }
+"""
+
+
+@_needs_wasmtime
+def test_v3_named_integer_arithmetic_runs_on_wasmtime(tmp_path):
+    """The table in docs/arithmetic.md, executed at 64 bits — the negatives are
+    the point, and so is the pairing law that makes the convention checkable
+    rather than a matter of taste."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    wat = tmp_path / "div.wat"
+    wat.write_text(_emitter().emit(compile_source(_NAMED_DIVISION_SRC))["functions"],
+                   encoding="utf-8")
+
+    def invoke(fn: str, *args) -> int:
+        out = subprocess.run(
+            ["wasmtime", "--invoke", fn, str(wat), *[str(a) for a in args]],
+            capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, f"{fn}{args}: {out.stderr}"
+        return int(out.stdout.strip().splitlines()[-1])
+
+    assert invoke("rem", -7, 3) == -1          # sign of the dividend
+    assert invoke("rem", 7, -3) == 1
+    assert invoke("rem", -7, -3) == -1
+    assert invoke("div_trunc", -7, 2) == -3    # toward zero
+    assert invoke("div_trunc", 7, 2) == 3
+    assert invoke("div_floor", -7, 2) == -4    # toward -infinity
+    assert invoke("div_euclid", -7, 2) == -4
+    assert invoke("div_euclid", -7, -2) == 4
+    assert invoke("modulo", -7, 3) == 2        # never negative
+    assert invoke("modulo", 7, -3) == 1
+    assert invoke("modulo", 7, 3) == 1
+    # the pairing law, over both signs of both operands
+    for a, b in [(7, 3), (-7, 3), (7, -3), (-7, -3), (9, 3), (-9, 3), (1, 7), (-1, 7)]:
+        assert invoke("div_trunc", a, b) * b + invoke("rem", a, b) == a, (a, b)
+        assert invoke("div_euclid", a, b) * b + invoke("modulo", a, b) == a, (a, b)
+    # …and it holds at the top of the range, which an i32 tier could not reach
+    assert invoke("div_trunc", INT_MAX, 2) == INT_MAX // 2
+    assert invoke("div_floor", INT_MIN, 2) == INT_MIN // 2
+
+
+@_needs_wasmtime
+def test_v3_integer_division_by_zero_faults_on_wasmtime(tmp_path):
+    """Integer division has no value at zero, and this tier must fault rather
+    than invent one. A *computed* divisor is the only way to reach it — a
+    literal zero is refused by the checker."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    wat = tmp_path / "zero.wat"
+    wat.write_text(_emitter().emit(compile_source(_NAMED_DIVISION_SRC))["functions"],
+                   encoding="utf-8")
+    for fn in ("div_trunc", "div_floor", "div_euclid", "modulo", "rem"):
+        out = subprocess.run(["wasmtime", "--invoke", fn, str(wat), "7", "0"],
+                             capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0 and "wasm trap" in out.stderr, (fn, out.stdout)
+
+
+@_needs_wasmtime
+def test_component_boundary_carries_a_64_bit_int(tmp_path):
+    """The coeffect/provision ABI is `Int` too, so it is i64 in and i64 out. A
+    boundary left at i32 would truncate exactly where the tier claims to be
+    handing a value to another component."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    wat = tmp_path / "boundary.wat"
+    wat.write_text(_emitter().emit(compile_source(
+        "service S { fn f(x: Int) -> Int }\n"
+        "component C provides s: S { provide s { fn f(x) = x - 1 } }"
+    ))["C"], encoding="utf-8")
+    assert '(param $p_x i64) (result i64)' in wat.read_text()
+    out = subprocess.run(
+        ["wasmtime", "--invoke", "provide:s.f", str(wat), str(INT_MAX)],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().splitlines()[-1]) == INT_MAX - 1
+
+
+@_needs_wasmtime
+def test_arithmetic_helpers_reach_a_memory_free_component(tmp_path):
+    """REGRESSION: the helper functions were gated on the *memory* tokens, so a
+    component that called `$int_div_floor` (or, after the port, `$int_add`) but
+    never touched linear memory emitted a call to a function the module did not
+    define — invalid wasm that no test caught, because nothing executed it."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    wat = tmp_path / "arith.wat"
+    module = _emitter().emit(compile_source(
+        "service S { fn f(x: Int) -> Int }\n"
+        "component C provides s: S { provide s { fn f(x) = x.div_floor(2) + 1 } }"
+    ))["C"]
+    assert "(memory" not in module        # still no linear memory
+    assert "(func $int_div_floor" in module and "(func $int_add" in module
+    wat.write_text(module, encoding="utf-8")
+    out = subprocess.run(["wasmtime", "--invoke", "provide:s.f", str(wat), "-7"],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert int(out.stdout.strip().splitlines()[-1]) == -3     # (-7).div_floor(2) + 1
