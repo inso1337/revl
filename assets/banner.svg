@@ -49,12 +49,12 @@
     <text x="524" y="387">
       <tspan font-weight="700" fill="#2dd4bf">Polyglot</tspan>
       <tspan fill="#3d4450"> — </tspan>
-      <tspan fill="#8b949e">Python · TypeScript · Rust · Java components interoperate live</tspan>
+      <tspan fill="#8b949e">Python · TypeScript · Rust · Java · Go components interoperate live</tspan>
     </text>
     <text x="524" y="429">
       <tspan font-weight="700" fill="#2dd4bf">Multiplatform</tspan>
       <tspan fill="#3d4450"> — </tspan>
-      <tspan fill="#8b949e">one source, five targets — including WASM</tspan>
+      <tspan fill="#8b949e">one source, six targets — including WASM</tspan>
     </text>
     <text x="524" y="471">
       <tspan font-weight="700" fill="#2dd4bf">Self-mutating</tspan>
