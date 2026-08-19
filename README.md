@@ -329,6 +329,7 @@ or **[docs/vision.md](docs/vision.md)** for what this is *for*.
 
 **Internals**
 - [backend-ir-v1.md](docs/backend-ir-v1.md) · [backend-ir-v3.md](docs/backend-ir-v3.md) — the IR contract
+- [backend-go-v3.md](docs/backend-go-v3.md) — the Go tier's IR v3 implementation plan
 - [v2.0-roadmap.md](docs/v2.0-roadmap.md) — what's done and what's in flight
 
 ## Quickstart
