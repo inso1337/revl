@@ -183,6 +183,31 @@ reachable from the CLI and, where it makes sense, as an MCP tool.
 | **Importers** | `revl import openapi` / `revl import wit` — an external contract becomes a typed service | [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) |
 | **MCP server** | `revl mcp serve` — the whole compiler as an agent admission gate; `revl mcp schema` derives tool safety hints from the *body* | [mcp-bridge.md](docs/mcp-bridge.md) |
 
+## Interoperability
+
+revl components built for *different* runtimes compose in **one running
+system**, across process boundaries — a Python component can require a service
+a Rust component provides, and neither shares an address space. `revl run
+--placement` spreads a composition over per-tier processes and wires each seam
+with a generated proxy/stub pair.
+
+- **Four tiers, symmetric and reactive.** `py ↔ node (TypeScript) ↔ rust ↔
+  java` compose in one lifecycle: every tier both *consumes* and *serves*
+  across a seam, and every tier turns a provider's death into a reactive
+  withdrawal (R2/R3) rather than an exception. Verified end-to-end with `revl
+  run --placement … --once`. (Java is reactive on a real JDK 21 runtime, a stub
+  otherwise. **wasm** is sandboxed and **Go** is a compile/execute target — so
+  neither is a bridge participant yet.)
+- **Values cross by construction, not by a wire schema.** A revl value is a
+  record / ADT / `Opt[T]` — value semantics, no object identity, no cycles — so
+  it serializes across a seam without a marshalling spec. A service that would
+  need shared memory (an address-space-bound host object) is a **checked**
+  verdict: `revl audit` (G8) refuses it *at the seam* rather than silently
+  marshalling something that cannot cross.
+
+See [docs/interop-bridge.md](docs/interop-bridge.md) for the transport tier,
+the trust model, and the distributability audit.
+
 ### Turing-complete, demonstrated by execution
 
 2.0's pure stratum is Turing-complete (`var` + `while` + recursion), and the
