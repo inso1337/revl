@@ -2282,6 +2282,321 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     return "\n".join(out) + "\n"
 
 
+# ==========================================================================
+# interop bridge (docs/interop-bridge.md §3): generated per-service proxy +
+# stub-dispatch, so a cordis-go process can consume/serve a cross-process key.
+# cordis-go services are static Go interfaces, so this is codegen (a
+# runtime-generic proxy is impossible in Go, unlike py attribute access) — the
+# same shape backends/rust/emit.py::_emit_bridge takes for cordis-rs traits.
+#
+# This block is ADDITIVE and self-contained: it is emitted into a SEPARATE Go
+# file (`bridge_gen.go`) alongside the ordinary module (`gen.go`, from emit()),
+# so the v1/v2 module output stays byte-identical (conformance never sees it).
+# The canonical wire encoding matches backends/python/bridge.py exactly: scalars
+# / lists / records / Opt cross as plain JSON, ADT / Result cases as
+# {"$kind","$value"}. --------------------------------------------------------
+
+
+def _go_result_inner(rtype: str):
+    """`Result[T, E]` -> (T_go, E_go), else None."""
+    t = str(rtype).strip()
+    if t.startswith("Result[") and t.endswith("]"):
+        ok, err = _v3_split_generic(t[7:-1])
+        return _go_type(ok), _go_type(err)
+    return None
+
+
+def _go_opt_inner(rtype: str):
+    """`Opt[T]` -> T_go, else None."""
+    t = str(rtype).strip()
+    if t.startswith("Opt[") and t.endswith("]"):
+        return _go_type(t[4:-1])
+    return None
+
+
+def _go_bridge_arg_expr(param) -> str:
+    """A proxy method argument as an `any` for the wire args list. Scalars,
+    lists, maps, records and Opt (`*T`, nil==null) json.Marshal canonically, so
+    the local name is passed straight through — matching python's plain-JSON
+    encoding for those shapes."""
+    return _safe_local(param["name"])
+
+
+def _emit_go_proxy_method(struct, mname, params, ret_revl, out):
+    go_params = ", ".join(
+        "%s %s" % (_safe_local(p["name"]), _go_type(p["type"])) for p in params)
+    ret_sig = _go_return(ret_revl)
+    sig = "func (p *%s) %s(%s)" % (struct, _camel(mname), go_params)
+    if ret_sig:
+        sig += " " + ret_sig
+    out.append(sig + " {")
+    argvec = ", ".join(_go_bridge_arg_expr(p) for p in params)
+    out.append('\t_v, _err := p.client.Call(p.key, %s, []any{%s})'
+               % (_go_string(mname), argvec))
+    out.append("\tif _err != nil {")
+    out.append("\t\tpanic(_err)")
+    out.append("\t}")
+    out.append("\t_ = _v")
+    _emit_go_proxy_decode(ret_revl, out)
+    out.append("}")
+    out.append("")
+
+
+def _emit_go_proxy_decode(ret_revl, out):
+    """Decode the reply `_v` (json.RawMessage) into the method's Go return."""
+    if ret_revl is None or str(ret_revl).strip() in ("", "Unit"):
+        return  # void
+    result = _go_result_inner(str(ret_revl))
+    if result is not None:
+        ok_go, err_go = result
+        out.append('\tvar _tag struct {')
+        out.append('\t\tKind  string          `json:"$kind"`')
+        out.append('\t\tValue json.RawMessage `json:"$value"`')
+        out.append("\t}")
+        out.append("\t_ = json.Unmarshal(_v, &_tag)")
+        out.append('\tif _tag.Kind == "Ok" {')
+        out.append("\t\tvar _ok %s" % ok_go)
+        out.append("\t\t_ = json.Unmarshal(_tag.Value, &_ok)")
+        out.append("\t\tvar _zeroE %s" % err_go)
+        out.append("\t\treturn _ok, _zeroE, true")
+        out.append("\t}")
+        out.append("\tvar _zeroT %s" % ok_go)
+        out.append("\tvar _err2 %s" % err_go)
+        out.append("\t_ = json.Unmarshal(_tag.Value, &_err2)")
+        out.append("\treturn _zeroT, _err2, false")
+        return
+    opt = _go_opt_inner(str(ret_revl))
+    if opt is not None:
+        out.append('\tif len(_v) == 0 || string(_v) == "null" {')
+        out.append("\t\tvar _zero %s" % opt)
+        out.append("\t\treturn _zero, false")
+        out.append("\t}")
+        out.append("\tvar _r %s" % opt)
+        out.append("\t_ = json.Unmarshal(_v, &_r)")
+        out.append("\treturn _r, true")
+        return
+    out.append("\tvar _r %s" % _go_type(ret_revl))
+    out.append("\t_ = json.Unmarshal(_v, &_r)")
+    out.append("\treturn _r")
+
+
+def _emit_go_dispatch_encode(call, ret_revl, out):
+    """Encode a stub method's return value to the reply `value` (an `any`)."""
+    if ret_revl is None or str(ret_revl).strip() in ("", "Unit"):
+        out.append("\t\t%s" % call)
+        out.append("\t\treturn nil, nil")
+        return
+    result = _go_result_inner(str(ret_revl))
+    if result is not None:
+        out.append("\t\t_okv, _errv, _ok := %s" % call)
+        out.append("\t\tif _ok {")
+        out.append('\t\t\treturn map[string]any{"$kind": "Ok", "$value": _okv}, nil')
+        out.append("\t\t}")
+        out.append('\t\treturn map[string]any{"$kind": "Err", "$value": _errv}, nil')
+        return
+    opt = _go_opt_inner(str(ret_revl))
+    if opt is not None:
+        out.append("\t\t_v, _ok := %s" % call)
+        out.append("\t\tif !_ok {")
+        out.append("\t\t\treturn nil, nil")
+        out.append("\t\t}")
+        out.append("\t\treturn _v, nil")
+        return
+    out.append("\t\treturn %s, nil" % call)
+
+
+def _emit_go_dispatch(sname, methods, out):
+    cs = _camel(sname)
+    out.append("func _revlDispatch%s(svc %s, method string, "
+               "args []json.RawMessage) (any, error) {" % (cs, cs))
+    out.append("\tswitch method {")
+    for mname, m in methods.items():
+        params = m.get("params", []) or []
+        out.append("\tcase %s:" % _go_string(mname))
+        for i, p in enumerate(params):
+            out.append("\t\tvar a%d %s" % (i, _go_type(p["type"])))
+            out.append("\t\t_ = json.Unmarshal(_revlArg(args, %d), &a%d)" % (i, i))
+        call = "svc.%s(%s)" % (_camel(mname),
+                               ", ".join("a%d" % i for i in range(len(params))))
+        _emit_go_dispatch_encode(call, m.get("returns"), out)
+    out.append("\t}")
+    out.append('\treturn nil, fmt.Errorf("method %%q is not exported for '
+               'service %s", method)' % sname)
+    out.append("}")
+    out.append("")
+
+
+def _emit_go_bridge(ir: dict) -> list[str]:
+    """Emit the placement bridge for one composition: per-service proxy structs
+    (consumer side) + stub dispatch (provider side), and the fixed-name entry
+    points the runner (main.go) calls. Empty when the composition declares no
+    services (nothing crosses)."""
+    services = ir.get("services", {}) or {}
+    components = ir.get("components", []) or []
+    if not services:
+        return []
+
+    provided: dict[str, str] = {}   # key -> service, over provided keys
+    seen: dict[str, str] = {}       # key -> service, over provided + required
+    for comp in components:
+        for key, svc in (comp.get("provides", {}) or {}).items():
+            provided[key] = svc
+            seen[key] = svc
+        for key, svc in (comp.get("requires", {}) or {}).items():
+            seen.setdefault(key, svc)
+
+    out: list[str] = []
+    for sname, sdef in services.items():
+        methods = sdef.get("methods", {}) or {}
+        struct = "%sProxy" % _camel(sname)
+        # consumer-side proxy struct implementing the service interface
+        out.append("// %s forwards %s calls to a remote stub over the bridge."
+                   % (struct, _camel(sname)))
+        out.append("type %s struct {" % struct)
+        out.append("\tclient *bridge.Client")
+        out.append("\tkey    string")
+        out.append("}")
+        out.append("")
+        for mname, m in methods.items():
+            _emit_go_proxy_method(struct, mname, m.get("params", []) or [],
+                                  m.get("returns"), out)
+        # provider-side dispatch (the declared method allowlist, G8)
+        _emit_go_dispatch(sname, methods, out)
+
+    # arg accessor: a missing positional arg decodes as JSON null.
+    out.append("func _revlArg(args []json.RawMessage, i int) json.RawMessage {")
+    out.append("\tif i < len(args) {")
+    out.append("\t\treturn args[i]")
+    out.append("\t}")
+    out.append('\treturn json.RawMessage("null")')
+    out.append("}")
+    out.append("")
+
+    # key -> service name (over provided keys)
+    out.append("// RevlServiceOf names the service a provided key exports.")
+    out.append("func RevlServiceOf(key string) (string, bool) {")
+    out.append("\tswitch key {")
+    for key, svc in provided.items():
+        out.append("\tcase %s:" % _go_string(key))
+        out.append("\t\treturn %s, true" % _go_string(svc))
+    out.append("\t}")
+    out.append('\treturn "", false')
+    out.append("}")
+    out.append("")
+
+    # consumer: build a plugin that provides `key` via the right proxy. The
+    # runner owns the *bridge.Client (so it can also Monitor the same socket).
+    out.append("func _revlProxyComponent(pname string, k stc.Key, value any) "
+               "stc.Component {")
+    out.append("\treturn stc.Component{")
+    out.append("\t\tName:    pname,")
+    out.append("\t\tProvide: []stc.Key{k},")
+    out.append("\t\tApply: func(ctx *stc.Context) (stc.Inverse, error) {")
+    out.append("\t\t\treturn ctx.Provide(k, value)")
+    out.append("\t\t},")
+    out.append("\t}")
+    out.append("}")
+    out.append("")
+    out.append("// RevlProxyComponent is a component that provides `key` with a proxy")
+    out.append("// forwarding to the stub `client` is connected to.")
+    out.append("func RevlProxyComponent(key, service string, client *bridge.Client) "
+               "(stc.Component, bool) {")
+    out.append("\tswitch key {")
+    for key, svc in seen.items():
+        struct = "%sProxy" % _camel(svc)
+        out.append("\tcase %s:" % _go_string(key))
+        out.append('\t\treturn _revlProxyComponent(%s, %s, &%s{client: client, key: key}), true'
+                   % (_go_string(struct), _key_var(key), struct))
+    out.append("\t}")
+    out.append("\treturn stc.Component{}, false")
+    out.append("}")
+    out.append("")
+
+    # provider/probe: resolve a provided key and dispatch to it. On a consumer
+    # process the key resolves to the proxy; on a provider, to the real impl —
+    # so this same entry point serves the seam AND drives probes.
+    out.append("// RevlInvoke dispatches one call against the service currently")
+    out.append("// providing `key` in ctx (a proxy or the local impl).")
+    out.append("func RevlInvoke(ctx *stc.Context, key, method string, "
+               "args []json.RawMessage) (any, error) {")
+    out.append("\tswitch key {")
+    for key, svc in provided.items():
+        cs = _camel(svc)
+        out.append("\tcase %s:" % _go_string(key))
+        out.append("\t\tsvc, err := stc.Service[%s](ctx, %s)" % (cs, _key_var(key)))
+        out.append("\t\tif err != nil {")
+        out.append("\t\t\treturn nil, err")
+        out.append("\t\t}")
+        out.append("\t\treturn _revlDispatch%s(svc, method, args)" % cs)
+    out.append("\t}")
+    out.append('\treturn nil, fmt.Errorf("key %q is not provided by this process", key)')
+    out.append("}")
+    out.append("")
+
+    # component name -> loaded Fiber, building typed config from the placement
+    # spec's `config` object (keyed by PascalCase component name).
+    out.append("// RevlLoad loads a component by name with config from the spec.")
+    out.append("func RevlLoad(target *stc.Context, name string, "
+               "config map[string]json.RawMessage) (*stc.Fiber, bool) {")
+    out.append("\tswitch name {")
+    for comp in components:
+        cname = _camel(comp["name"])
+        fields = comp.get("config") or []
+        out.append("\tcase %s:" % _go_string(comp["name"]))
+        if fields:
+            out.append("\t\tcfg := Default%sConfig()" % cname)
+            out.append("\t\tif _raw, _ok := config[%s]; _ok {" % _go_string(comp["name"]))
+            out.append("\t\t\tvar _m map[string]json.RawMessage")
+            out.append("\t\t\t_ = json.Unmarshal(_raw, &_m)")
+            for f in fields:
+                out.append("\t\t\tif _v, _ok := _m[%s]; _ok {" % _go_string(f["name"]))
+                out.append("\t\t\t\t_ = json.Unmarshal(_v, &cfg.%s)" % _camel(f["name"]))
+                out.append("\t\t\t}")
+            out.append("\t\t}")
+            out.append("\t\treturn Load%s(target, cfg), true" % cname)
+        else:
+            out.append("\t\treturn Load%s(target), true" % cname)
+    out.append("\t}")
+    out.append("\treturn nil, false")
+    out.append("}")
+    out.append("")
+    return out
+
+
+def emit_placement(ir: dict, package: str = "emitted") -> str:
+    """The Go source for a placement runner's `emitted` package: the ordinary
+    v1/v2 module (proxied/served interfaces, impls, load helpers) followed by
+    the interop-bridge file (proxy/stub/dispatch + runner entry points). Emitted
+    as two logical files concatenated with a form-feed sentinel the build step
+    splits on, so each carries its own import block."""
+    module = emit(ir, package)
+    bridge_lines = _emit_go_bridge(ir)
+    if not bridge_lines:
+        raise EmitError("placement needs at least one `service` to bridge")
+    header = [
+        "// Code generated by backends/go/emit.py (placement bridge) — DO NOT EDIT.",
+        "// revl interop bridge over a Unix socket; wire-compatible with",
+        "// backends/python/bridge.py (docs/interop-bridge.md §3).",
+        "package %s" % package,
+        "",
+        "import (",
+        '\t"encoding/json"',
+        '\t"fmt"',
+        "",
+        '\tstc "github.com/0xdenny218/stc-go"',
+        "",
+        '\t"revl.goplacement/bridge"',
+        ")",
+        "",
+        "var _ = json.Marshal",
+        "var _ = fmt.Sprintf",
+        "",
+    ]
+    bridge_src = "\n".join(header + bridge_lines) + "\n"
+    # \f (form feed) sentinel separates gen.go from bridge_gen.go for the build.
+    return module + "\f" + bridge_src
+
+
 def main(argv):
     if len(argv) < 2:
         print("usage: emit.py <ir.json> [package]", file=sys.stderr)
