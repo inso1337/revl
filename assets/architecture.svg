@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
-  <title>revl — one checked front-end, five hardened runtimes</title>
+  <title>revl — one checked front-end, six hardened runtimes</title>
   <defs>
     <linearGradient id="teal" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#2dd4bf"/>
@@ -23,7 +23,7 @@
   <text x="600" y="72" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
         font-size="46" font-weight="700" fill="#e6edf3">revl</text>
   <text x="600" y="104" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
-        font-size="17" fill="#8b949e">revertible effects as a type system — one checked front-end, five hardened runtimes</text>
+        font-size="17" fill="#8b949e">revertible effects as a type system — one checked front-end, six hardened runtimes</text>
 
   <!-- source -->
   <rect x="470" y="132" width="260" height="54" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
@@ -43,37 +43,45 @@
   <!-- emitters -->
   <rect x="440" y="342" width="320" height="48" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
   <text x="600" y="372" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="18" fill="#e6edf3">five emitters, one IR</text>
+        font-size="18" fill="#e6edf3">six emitters, one IR</text>
   <line x1="600" y1="302" x2="600" y2="338" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
 
   <!-- fan-out lines -->
-  <path d="M 600 390 L 600 412 L 150 412 L 150 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 375 412 L 375 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 600 412 L 600 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 825 412 L 825 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
-  <path d="M 600 412 L 1050 412 L 1050 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 600 390 L 600 412" fill="none" stroke="#30363d" stroke-width="2"/>
+  <path d="M 135 412 L 1065 412" fill="none" stroke="#30363d" stroke-width="2"/>
+  <path d="M 135 412 L 135 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 321 412 L 321 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 507 412 L 507 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 693 412 L 693 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 879 412 L 879 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M 1065 412 L 1065 436" fill="none" stroke="#30363d" stroke-width="2" marker-end="url(#arr)"/>
 
   <!-- tier boxes -->
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" text-anchor="middle">
-    <rect x="60" y="440" width="180" height="86" rx="12" fill="#161b22" stroke="#2dd4bf" stroke-width="1.8"/>
-    <text x="150" y="474" fill="#e6edf3">cordis-py</text>
-    <text x="150" y="500" font-size="13" fill="#8b949e">reference</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" text-anchor="middle">
+    <rect x="51" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#2dd4bf" stroke-width="1.8"/>
+    <text x="135" y="474" fill="#e6edf3">cordis-py</text>
+    <text x="135" y="500" font-size="12" fill="#8b949e">reference</text>
 
-    <rect x="285" y="440" width="180" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="375" y="474" fill="#e6edf3">cordis (TS)</text>
-    <text x="375" y="500" font-size="13" fill="#8b949e">portability</text>
+    <rect x="237" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="321" y="474" fill="#e6edf3">cordis (TS)</text>
+    <text x="321" y="500" font-size="12" fill="#8b949e">portability</text>
 
-    <rect x="510" y="440" width="180" height="86" rx="12" fill="#161b22" stroke="#a78bfa" stroke-width="1.8"/>
-    <text x="600" y="474" fill="#e6edf3">cordis-wasm</text>
-    <text x="600" y="500" font-size="13" fill="#8b949e">sandbox + enforcement</text>
+    <rect x="423" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#a78bfa" stroke-width="1.8"/>
+    <text x="507" y="474" fill="#e6edf3">cordis-wasm</text>
+    <text x="507" y="500" font-size="12" fill="#8b949e">sandbox</text>
 
-    <rect x="735" y="440" width="180" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="825" y="474" fill="#e6edf3">cordis-rs</text>
-    <text x="825" y="500" font-size="13" fill="#8b949e">native runtime</text>
+    <rect x="609" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="693" y="474" fill="#e6edf3">cordis-rs</text>
+    <text x="693" y="500" font-size="12" fill="#8b949e">native</text>
 
-    <rect x="960" y="440" width="180" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <text x="1050" y="474" fill="#e6edf3">cordis4j</text>
-    <text x="1050" y="500" font-size="13" fill="#8b949e">JVM runtime</text>
+    <rect x="795" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="879" y="474" fill="#e6edf3">cordis4j</text>
+    <text x="879" y="500" font-size="12" fill="#8b949e">JVM</text>
+
+    <rect x="981" y="440" width="168" height="86" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+    <text x="1065" y="474" fill="#e6edf3">cordis-go</text>
+    <text x="1065" y="500" font-size="12" fill="#8b949e">stc-go</text>
+
   </g>
 
   <!-- agent boundary -->
