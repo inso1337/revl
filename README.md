@@ -356,14 +356,15 @@ design, the guarantees, and every runtime it targets come from that ecosystem.
 - [Cordis](https://github.com/cordiverse/cordis) — the reference library and the TypeScript runtime (npm [`cordis`](https://www.npmjs.com/package/cordis))
 
 **The runtime targets.** One revl source lowers to community ports of the
-same spatiotemporal-composability paradigm; revl exists because these do.
+same spatiotemporal-composability paradigm; revl exists because these do. Each
+runs on its language's platform, cited alongside it.
 
-- [cordis-py](https://github.com/geohotstan/cordis-py) — the Python reference runtime
-- [Cordis](https://github.com/cordiverse/cordis) (TypeScript) — the portability tier
-- [cordis-rs](https://docs.rs/cordis-rs) ([source](https://github.com/dshbox/cordis-rs)) — the Rust runtime
-- [cordis4j](https://github.com/1na-ko/cordis4j) — the JVM runtime
-- [cordis-wasm](https://github.com/inso1337/cordis-wasm) — the wasm substrate tier (first-party), running on [Wasmtime](https://github.com/bytecodealliance/wasmtime) (Bytecode Alliance), the sandbox it is validated and executed on
-- [stc-go](https://github.com/0xdenny218/stc-go) — a Go implementation of the paradigm; the newest tier (emitted components run under `go test`, not yet in the conformance matrix)
+- [cordis-py](https://github.com/geohotstan/cordis-py) — the Python reference runtime, on [CPython](https://github.com/python/cpython)
+- [Cordis](https://github.com/cordiverse/cordis) (TypeScript) — the portability tier, on [Node.js](https://github.com/nodejs/node)
+- [cordis-rs](https://docs.rs/cordis-rs) ([source](https://github.com/dshbox/cordis-rs)) — the native tier, on [Rust](https://github.com/rust-lang/rust)
+- [cordis4j](https://github.com/1na-ko/cordis4j) — the JVM tier, on [OpenJDK](https://github.com/openjdk/jdk)
+- [cordis-wasm](https://github.com/inso1337/cordis-wasm) — the wasm substrate (first-party), on [Wasmtime](https://github.com/bytecodealliance/wasmtime) (Bytecode Alliance)
+- [stc-go](https://github.com/0xdenny218/stc-go) — the newest tier, on [Go](https://github.com/golang/go) (runs under `go test`, not yet in the conformance matrix)
 
 **Toolchains & libraries** used to build, emit, and test.
 
