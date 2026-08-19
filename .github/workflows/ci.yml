@@ -153,6 +153,24 @@ jobs:
         env:
           REVL_CORDIS4J_CLASSES: /tmp/cordis4j-classes
 
+  backend-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: pip install -e ".[test]"
+      # emitted Go is compiled and executed against the pinned stc-go runtime
+      # (fetched from the module proxy on a fresh runner), mirroring how the
+      # rust tier gates against cordis-rs and java against cordis4j.
+      - run: pytest backends/go/test_emit_go.py -q
+      - run: cd backends/go/scenarios && go test ./...
+      - run: cd backends/go/v3 && go test ./...
+
   # The conformance matrix's second half: emitted code must survive its own
   # toolchain, not merely leave the emitter without raising. That gate
   # (tests/test_conformance_validate.py) lives in the frontend suite, where
@@ -174,6 +192,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - name: Install wasmtime (pinned)
         run: |
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
