@@ -91,9 +91,19 @@ def test_python_passing_test_still_passes():
     _run_python_tests()["plain"]()
 
 
-def test_typescript_equality_uses_the_matcher_that_diffs():
+def test_typescript_equality_asserts_through_revl_equality():
+    """Assertions must use the *language's* equality, not vitest's.
+
+    This first shipped as `expect(l).toStrictEqual(r)`, for the diff. That was
+    wrong once Float became IEEE: `toStrictEqual` uses Object.is and calls
+    `NaN` equal to `NaN`, while revl's `==` says they differ — so a passing
+    assertion could be testing the opposite of what the program means. It now
+    routes through `revlEq` and carries both values in the message, which is
+    what the matcher's diff was buying.
+    """
     emitted = _emit("typescript")
-    assert "expect(add(2, 2)).toStrictEqual(5)" in emitted, emitted
+    assert "expect(revlEq(l, r)" in emitted, emitted
+    assert "function revlEq" in emitted
     # a non-equality comparison keeps the truthy form rather than guessing a
     # matcher for every operator
     assert "toBeTruthy()" in emitted

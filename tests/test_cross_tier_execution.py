@@ -308,3 +308,60 @@ def test_division_remainder_pairing_law_slow(tier: str):
     if status == "skip":
         pytest.skip(f"{tier}: {message}")
     assert status == "pass", f"{tier} breaks the pairing law: {message}"
+
+
+# ------------------------------------------------------------ IEEE 754 Float
+#
+# `Float` is IEEE 754 binary64. Every host implements it natively, so the
+# commitment costs nothing to honour — but it has to be *tested*, because two
+# tiers did not honour it: python raised where IEEE says +/-infinity, and rust
+# rendered `Int / Int` as integer division against an f64 the checker had
+# declared.
+#
+# Two consequences worth stating in a test rather than only in prose: `==` on
+# Float is IEEE, so NaN is not equal to itself (which is why an assertion
+# cannot go through vitest's `toStrictEqual`), and `<` is therefore a partial
+# order.
+
+IEEE_FLOAT = """
+test "true division is exact"        { assert 7 / 2 == 3.5 }
+test "float literals and arithmetic" { assert 1.5 + 2.5 == 4.0 }
+test "binary floating point"         { assert 0.1 + 0.2 != 0.3 }
+test "NaN is not equal to itself"    { assert 0.0 / 0.0 != 0.0 / 0.0 }
+test "division by zero is infinite"  { assert 1.0 / 0.0 > 1.0e308 }
+test "negative infinity"             { assert (0.0 - 1.0) / 0.0 < (0.0 - 1.0e308) }
+test "negative zero equals zero"     { assert 0.0 - 0.0 == 0.0 }
+test "exponent literals"             { assert 1.5e3 == 1500.0 }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_ieee_float_semantics(tier: str):
+    status, message = _run(tier, IEEE_FLOAT)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} is not IEEE 754: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_ieee_float_semantics_slow(tier: str):
+    status, message = _run(tier, IEEE_FLOAT)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} is not IEEE 754: {message}"
+
+
+def test_wasm_refuses_float_by_name():
+    """The wasm tier is i32-only, so `Float` is a *deliberate* limit — it must
+    refuse with a reason rather than emit something that quietly is not IEEE.
+    """
+    from revl.errors import RevlError
+    import importlib.util as _il
+    spec = _il.spec_from_file_location("emit_wasm_ieee", ROOT / "backends" / "wasm" / "emit.py")
+    module = _il.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with pytest.raises((RevlError, Exception)) as failure:
+        module.emit(compile_source("pub fn f() -> Float { return 1.5 }", "f.rvl"))
+    assert "Float" in str(failure.value)

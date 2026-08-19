@@ -961,7 +961,7 @@ class Parser:
         if tok.kind == "-" and self.toks[self.pos + 1].kind == "int":
             self.next()
             return -self.next().value
-        if tok.kind == "int":
+        if tok.kind in ("int", "float"):
             return self.next().value
         if tok.kind == "string":
             return self.next().value
@@ -1953,7 +1953,7 @@ class Parser:
 
     def _primary(self):
         tok = self.peek()
-        if tok.kind == "int":
+        if tok.kind in ("int", "float"):
             self.next()
             return ExprLit(tok.value, tok.line)
         if tok.kind == "string":
@@ -2117,7 +2117,7 @@ class Parser:
 
     def expr(self):
         tok = self.peek()
-        if tok.kind == "int":
+        if tok.kind in ("int", "float"):
             self.next()
             base = Lit(tok.value, tok.line)
         elif tok.kind == "string":

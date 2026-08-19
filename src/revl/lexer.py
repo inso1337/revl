@@ -32,7 +32,7 @@ SINGLE_OPERATORS = "+-*/%<>!?;|@"
 
 @dataclass
 class Token:
-    kind: str          # 'ident' | 'kw' | 'int' | 'string' | 'template' | 'arrow' | symbol | 'eof'
+    kind: str          # 'ident' | 'kw' | 'int' | 'float' | 'string' | 'template' | 'arrow' | symbol | 'eof'
     value: object
     line: int
 
@@ -73,7 +73,30 @@ def lex(source: str, filename: str) -> list[Token]:
             j = i
             while j < n and source[j].isdigit():
                 j += 1
-            tokens.append(Token("int", int(source[i:j]), line))
+            # A float needs a fraction or an exponent. `.` only starts one when
+            # a digit follows, so `7.div_trunc(2)` stays an Int and a method
+            # call; `1e10` only lexes as a float when real digits follow the
+            # exponent marker, so `1e` is an Int beside an ident, not an error.
+            is_float = False
+            if j < n and source[j] == "." and j + 1 < n and source[j + 1].isdigit():
+                j += 1
+                while j < n and source[j].isdigit():
+                    j += 1
+                is_float = True
+            if j < n and source[j] in "eE":
+                k = j + 1
+                if k < n and source[k] in "+-":
+                    k += 1
+                if k < n and source[k].isdigit():
+                    while k < n and source[k].isdigit():
+                        k += 1
+                    j = k
+                    is_float = True
+            text = source[i:j]
+            if is_float:
+                tokens.append(Token("float", float(text), line))
+            else:
+                tokens.append(Token("int", int(text), line))
             i = j
         elif c == "@" and i + 1 < n and (source[i + 1].isalpha() or source[i + 1] == "_"):
             # Host block: `@backend { <verbatim, brace-balanced> }`.

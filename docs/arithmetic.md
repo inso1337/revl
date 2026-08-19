@@ -105,6 +105,59 @@ determine it. Only those two operators carry it — a comparison or a boolean
 gains nothing from it, and the IR should not grow a field it does not use.
 
 
+
+## `Float` is IEEE 754 binary64
+
+Every host revl targets implements it natively — JS `number`, Rust `f64`,
+Java `double`, Python `float` — so the commitment costs nothing to honour and
+there is no better-specified alternative. Rationals and decimals are different
+*types*, not a better `Float`.
+
+Literals are written as you would expect, and `.` starts a fraction only when
+a digit follows, so a method call on an integer is never mistaken for one:
+
+```revl fragment
+1.5
+0.0
+1e10
+1.5e-3
+7.div_trunc(2)     // Int, then a method call — not the float `7.`
+```
+
+### Two consequences that touch other guarantees
+
+- **`==` on Float is IEEE, so it is not reflexive.** `NaN != NaN`. §3.4 says
+  revl has "a single equality: structural value equality" — true for records,
+  lists and every other value, and Float is the one place where the *IEEE*
+  rule governs instead. This is not a divergence between tiers; every tier
+  agrees. It is a caveat on the spec's wording.
+
+  It also constrains the test runners: an assertion cannot go through
+  vitest's `toStrictEqual`, which uses `Object.is` and calls `NaN` equal to
+  itself. Assertions lower through revl's own equality instead.
+
+- **`<` on Float is a partial order.** NaN is unordered against everything,
+  including itself, so `a < b`, `a == b` and `a > b` can all be false. Any
+  code that assumes a total order — sorting, binary search — is wrong on Float
+  unless it excludes NaN first.
+
+### Division by zero
+
+IEEE defines it as a *value*, not a fault: `1.0 / 0.0` is `+infinity`,
+`-1.0 / 0.0` is `-infinity`, and `0.0 / 0.0` is `NaN`. Python raises
+`ZeroDivisionError` and was the only tier out of step; it now goes through a
+helper that returns the IEEE result.
+
+This is why `/` by zero is *not* refused while `div_trunc(0)` and `mod(0)`
+are: integer division at zero has no value, and float division does.
+
+### The wasm tier refuses Float
+
+wasm values are i32 on this tier, so `Float` is a **deliberate limit** with a
+named refusal (`type 'Float' is not lowerable — this tier supports Int/Bool`),
+not a silent approximation. That means `/` is unavailable there too, since it
+yields Float. `div_trunc`, `div_floor`, `div_euclid` and `mod` all work.
+
 ## Division by zero
 
 Integer division and modulo have no value at zero, and every tier said so
@@ -128,11 +181,8 @@ A *computed* divisor still faults at runtime; guard it if the program should
 survive. `tests/test_cross_tier_execution.py` asserts that every tier faults
 rather than inventing a value.
 
-Note that `/` is a different question, because it is true division on `Float`.
-IEEE 754 defines `x / 0.0` as ±infinity, which is a value, not a fault — and
-python is the outlier there, raising where JS and rust follow IEEE. That
-divergence is recorded but not closed: it is a decision about whether revl's
-`Float` is IEEE, which is a bigger question than division.
+`/` is deliberately not refused at zero: it is true division on `Float`, where
+IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
 
 ## Still open
 

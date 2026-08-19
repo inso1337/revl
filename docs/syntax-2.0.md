@@ -144,7 +144,10 @@ match lookup(key) {
 
 revl has a single equality: structural value equality, no coercion. Both
 spellings `==` and `===` are accepted and mean that one thing (`!=`/`!==`
-likewise). Rationale: models emit both reflexively; making one of them an
+likewise). **One exception, and it is IEEE's, not revl's:** `Float` is IEEE
+754 binary64, so `NaN != NaN` and equality on Float is not reflexive. Every
+tier agrees on this — it is a property of the type, not a divergence between
+backends (docs/arithmetic.md). Rationale: models emit both reflexively; making one of them an
 error would burn feedback cycles on a distinction revl doesn't have. The
 compiler canonicalizes to `==` in the IR (the parser folds `===`→`==`,
 `!==`→`!=`), so no backend can diverge; a source-level formatter pass that
