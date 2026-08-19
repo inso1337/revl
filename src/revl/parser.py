@@ -132,6 +132,18 @@ class EmitExpr:
 
 
 @dataclass
+class SpawnExpr:
+    """`spawn <Component> [with { <field>: <expr>, ... }]` — instantiate a
+    component at runtime (docs/design-v2-instances.md). Only legal as the
+    acquisition of an effect binding: `let s = effect spawn C with {..} undo
+    s.dispose()`. The instance is an acquisition whose inverse is its own
+    teardown."""
+    component: str
+    config: dict  # field name -> expression AST (lowered in the spawner's scope)
+    line: int
+
+
+@dataclass
 class AwaitStmt:
     expr: object
     line: int
@@ -1092,6 +1104,23 @@ class Parser:
 
     def effect_form(self, line: int):
         self.expect("kw", "effect")
+        # instance-parametric components: `effect spawn C with {..} undo …`.
+        # `spawn` is the one new acquisition form (docs/design-v2-instances.md);
+        # its inverse is the instance's own teardown, so an `undo` is required
+        # exactly as for any acquisition.
+        if self.at("kw", "spawn"):
+            acquire = self.spawn_expr()
+            if not self.at("kw", "undo"):
+                raise self.err(
+                    line,
+                    "a `spawn` acquisition needs `undo <handle>.dispose()`",
+                    hint="an instance is an acquisition whose inverse is its own "
+                         "teardown; write `let s = effect spawn "
+                         f"{acquire.component} … undo s.dispose()` (G4)",
+                )
+            self.next()
+            undo = self.pure_expr()
+            return acquire, undo, line, []
         setup: list = []
         if self.at("{"):
             self.next()
@@ -1126,6 +1155,26 @@ class Parser:
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup
+
+    def spawn_expr(self) -> "SpawnExpr":
+        """`spawn <Component> [with { field: <expr>, ... }]`."""
+        line = self.expect("kw", "spawn").line
+        component = self.expect("ident").value
+        config: dict = {}
+        if self.at("kw", "with"):
+            self.next()
+            self.expect("{")
+            while not self.at("}"):
+                fline = self.peek().line
+                field = self.expect("ident").value
+                if field in config:
+                    raise self.err(fline, f"duplicate config field `{field}` in spawn")
+                self.expect(":")
+                config[field] = self.pure_expr()
+                if self.at(","):
+                    self.next()
+            self.expect("}")
+        return SpawnExpr(component, config, line)
 
     def component_if(self) -> IfStmt:
         line = self.expect("kw", "if").line
