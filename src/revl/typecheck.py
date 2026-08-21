@@ -594,6 +594,32 @@ def pin_hole(expr, expected: str | None, filename: str | None = None,
     return True
 
 
+# `Int` is 64-bit two's complement (docs/arithmetic.md). The bounds live here,
+# beside the checker, because a literal outside them has no tier-independent
+# meaning: an arbitrary-precision host reads it exactly, wasm reads an i64 bit
+# pattern, and the tiers then disagree about the same source text.
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def _reject_int_literal_range(filename: str | None, line: int, v: int) -> None:
+    """Refuse an `Int` literal outside the i64 range at compile time.
+
+    Gated on `filename` like every definite checker refusal: the no-filename
+    form is a pure type oracle and never raises.
+    """
+    if filename is None or _INT64_MIN <= v <= _INT64_MAX:
+        return
+    raise RevlError(
+        filename, line,
+        f"Int literal `{v}` is outside the 64-bit range",
+        hint="`Int` is 64-bit two's complement "
+             "([-9223372036854775808, 9223372036854775807]); a literal beyond the "
+             "bound reads differently per tier, so it never reaches one "
+             "(docs/arithmetic.md)",
+    )
+
+
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
@@ -619,6 +645,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         if isinstance(v, bool):
             return "Bool"
         if isinstance(v, int):
+            # `Int` is 64-bit two's complement and arithmetic that leaves the
+            # range faults (docs/arithmetic.md). A literal outside the range
+            # has no single meaning across tiers — an arbitrary-precision host
+            # reads it exactly while wasm reads an i64 bit pattern — so it is
+            # refused here, where it is one diagnostic instead of a behaviour
+            # per tier. This is also why `Int.MIN` has no spelling: writing
+            # `-9223372036854775808` negates the out-of-range literal
+            # `9223372036854775808`, which this rule refuses.
+            _reject_int_literal_range(filename, line, v)
             return "Int"
         if isinstance(v, float):
             return "Float"
@@ -1095,6 +1130,9 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         if isinstance(v, bool):
             return "Bool"
         if isinstance(v, int):
+            # the same bound the parser-AST checker enforces; IR literals come
+            # from already-checked source, so this is the belt to its braces
+            _reject_int_literal_range(filename, line, v)
             return "Int"
         if isinstance(v, float):
             return "Float"
