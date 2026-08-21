@@ -1,14 +1,10 @@
 # The Go tier and IR v3 — an implementation plan
 
-**Status: planned, not done.** The Go backend (`backends/go/`) today emits
-`ir_version` **1 and 2** — components, `effect`/`undo`, `let`-effect binds,
-config, provide/inject, provide-method bodies, `isolate`/realms, `intercept` —
-targeting [stc-go](https://github.com/0xdenny218/stc-go). IR v3 (types, pure
-`fn`, `extern`, `test`, `match`, and the 2.0 expression layer) is currently
-**refused with a clear `EmitError`** (`backends/go/README.md`, "Out of scope").
-This document specifies what v3-compatibility requires and how each construct
-maps to idiomatic Go, so the work has a contract to target and the tier can
-join `tools/conformance.py --validate` as a sixth validated backend.
+**Status: landed — kept as the implementation record.** The Go backend
+(`backends/go/`) emits `ir_version` **1, 2 and 3**, sits in the conformance
+matrix at **0 gaps**, and validates under `go build` (§Validation below). What
+follows is the plan that work was built to: how each v3 construct maps to
+idiomatic Go, targeting [stc-go](https://github.com/0xdenny218/stc-go).
 
 The authority for *what* v3 is remains [docs/backend-ir-v3.md](backend-ir-v3.md)
 (the generic IR contract) and [docs/syntax-2.0.md](syntax-2.0.md) (the source
@@ -110,18 +106,16 @@ right side of it rather than repeat it.
   the wrong child; key on the presence of `callee` vs `target`. This is the one
   place the split fails *quietly*, and it bit every tier that got it wrong.
 
-## Validation: joining the sixth tier
+## Validation: the sixth tier, joined
 
-`tools/conformance.py` currently walks `TIERS = (python, typescript, rust,
-java, wasm)`; `--validate` hands each tier's output to its real compiler. When
-Go emits v3, add it to `TIERS` and give `tools/validate.py` a `GoValidator`
-that runs `go build` (or `go vet`) over the emitted package — the honest
-second question ("does the emitted code compile?"), the same gate that caught a
-rust bug that had reported `ok` for months. Until then, the Go tier stays out
-of the matrix and the "five tiers validate 100%" claim in the README remains
-accurate. The Go backend already *executes* under `go test`, which is stronger
-than compile-only; the conformance addition is about breadth (every construct)
-rather than depth.
+`tools/conformance.py` now walks `TIERS = (python, typescript, rust, java,
+wasm, go)`; `--validate` hands each tier's output to its real compiler, via a
+`GoValidator` in `tools/validate.py` that runs `go build` over the emitted
+package — the honest second question ("does the emitted code compile?"), the
+same gate that caught a rust bug that had reported `ok` for months. This plan
+predates the landing: Go emits v3, sits in the matrix at **0 gaps**, and
+the README's tier count reads six. The Go backend also *executes* under `go
+test`, which is stronger than compile-only.
 
 ## Not in scope for v3
 
