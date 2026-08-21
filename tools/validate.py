@@ -17,6 +17,7 @@ implied:
 | rust       | `cargo check`                      | full typecheck               |
 | java       | `javac` against the cordis4j stubs | full typecheck               |
 | wasm       | `wasmtime compile`                 | validation (types + locals)  |
+| go         | `go build` against pinned stc-go   | full compilation             |
 
 A validator that cannot run says so (`unavailable`) with the reason. That is
 deliberately distinct from a pass: "no toolchain" must never read as "clean".
