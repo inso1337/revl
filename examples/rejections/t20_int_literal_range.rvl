@@ -1,0 +1,14 @@
+// REJECTED — an Int literal outside the 64-bit two's-complement range has no
+// single meaning across tiers: python reads it at arbitrary precision while
+// wasm reads it as an i64 bit pattern, so the same source text is two
+// different values. The bound belongs in the checker, where it is one
+// diagnostic instead of a behaviour per tier (docs/arithmetic.md).
+// This is also why `Int.MIN` has no spelling: `-9223372036854775808` negates
+// this same out-of-range literal.
+//
+// expected error:
+//   Int literal `9223372036854775808` is outside the 64-bit range
+
+fn big() -> Int {
+  return 9223372036854775808
+}
