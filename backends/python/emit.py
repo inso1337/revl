@@ -86,11 +86,15 @@ class _Lines:
 
 
 def _uses_bounded_int(node) -> bool:
-    """Does this IR do Int `+`, `-` or `*`? The bound check is emitted only
-    where it is needed, so modules that never do Int arithmetic are
-    unchanged."""
+    """Does this IR do Int `+`, `-` or `*`, or negate an Int? The bound check
+    is emitted only where it is needed, so modules that never do Int
+    arithmetic are unchanged."""
     if isinstance(node, dict):
         if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int"):
+            return True
+        # unary minus on an Int goes through the bound too: it is `0 - x`
+        if (node.get("kind") == "un" and node.get("op") == "-"
                 and node.get("operands") == "Int"):
             return True
         return any(_uses_bounded_int(v) for v in node.values())
@@ -841,6 +845,13 @@ def _expr(node: dict) -> str:
         if node["op"] == "!":
             return f"(not {_expr(node['operand'])})"
         if node["op"] == "-":
+            if node.get("operands") == "Int":
+                # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes
+                # through the bound like any other subtraction (docs/
+                # arithmetic.md). Without this, `-Int.MIN` — which traps on
+                # rust and wasm — quietly came back as 2^63 here, out of the
+                # range python itself imposes on every other operation.
+                return f"_revl_i64(-{_expr(node['operand'])})"
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
