@@ -985,6 +985,31 @@ def _wat_bytes(data: bytes) -> str:
     return "".join(parts)
 
 
+def test_export_names(tests: list) -> list[tuple[str, str]]:
+    """The deterministic wasm export for each `test` block, in document order.
+
+    A test name is free-form source text ("add works"); an export name must be
+    a wasm identifier, so it is slugified (`revl_test_add_works`) with a
+    counter suffix on collision — deterministically, so the host-side test
+    runner (`src/revl/test.py run_wasm`) can compute the same list from the IR
+    alone and invoke each export by name.
+    """
+    used: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for test in tests or []:
+        base = re.sub(r"[^A-Za-z0-9_]", "_", str(test.get("name") or "test"))
+        if not base or base[0].isdigit():
+            base = f"test_{base}"
+        name = f"revl_test_{base}"
+        counter = 0
+        while name in used:
+            counter += 1
+            name = f"revl_test_{base}_{counter}"
+        used.add(name)
+        out.append((test.get("name"), name))
+    return out
+
+
 class _V3Emitter:
     """IR v3 types + pure functions -> a standalone WAT module.
 
@@ -1089,9 +1114,6 @@ class _V3Emitter:
         if self.externs:
             names = ", ".join(_ident(ext.get("name"), "extern name") for ext in self.externs)
             lines.append(f"  ;; unsupported on this tier: externs {names} (no @wasm body)")
-        if self.tests:
-            names = ", ".join(repr(test.get("name")) for test in self.tests)
-            lines.append(f"  ;; unsupported on this tier: tests {names} (test runner is host-side)")
         return lines
 
     # -- type/layout helpers --------------------------------------------------
@@ -2543,7 +2565,15 @@ class _V3Emitter:
             counter += 1
         return candidate
 
-    def _emit_function(self, fn: dict) -> str:
+    def _emit_function(self, fn: dict, *, test_mode: bool = False) -> str:
+        """Lower one v3 function (or, with *test_mode*, one `test` block).
+
+        A test lowers as an exported zero-arg function returning Bool (i32):
+        reaching the end means every `assert` held, so the tail is
+        `(i32.const 1)`; a failed `assert` traps (`unreachable`, the existing
+        statement lowering) before that point — wasmtime surfaces the trap as
+        a nonzero exit, which is the host-side runner's failure signal.
+        """
         name = _ident(fn.get("name"), "function name")
         where = name
         scope = _Scope({}, {})
@@ -2608,7 +2638,9 @@ class _V3Emitter:
         for extra in sorted(self._tmp_extra):
             local_names_in_order.append(extra)
         decls = signature + [self._local_decl(n).lstrip() for n in local_names_in_order]
-        if body_lines:
+        if test_mode:
+            body = "\n    ".join(body_lines + ["(i32.const 1)"])
+        elif body_lines:
             body = "\n    ".join(body_lines)
         elif not _is_unit_type(return_ty):
             body = "unreachable"
@@ -2642,6 +2674,24 @@ class _V3Emitter:
             lines.append("")
         for fn in self.functions:
             lines.append(self._emit_function(fn))
+            lines.append("")
+        # Each `test` block lowers to an exported zero-arg function returning
+        # Bool: 1 = every assert held; a failed assert traps before the tail
+        # (`src/revl/test.py run_wasm` invokes these via wasmtime). Lifecycle
+        # tests never reach here — `_refuse_lifecycle_tests` rejects them by
+        # name at the top of `emit`.
+        fn_names = {fn.get("name") for fn in self.functions}
+        for (tname, export), test in zip(test_export_names(self.tests), self.tests):
+            if export in fn_names:
+                raise EmitError(
+                    f"test {tname!r} would export wasm function {export!r}, "
+                    f"which collides with a declared function of the same "
+                    f"name — rename one of them"
+                )
+            lines.append(self._emit_function(
+                {"name": export, "params": [], "returns": "Bool",
+                 "body": test.get("body") or []},
+                test_mode=True))
             lines.append("")
         lines.append(")")
         return "\n".join(lines) + "\n"
@@ -2677,8 +2727,11 @@ def _emit_v3(ir: dict) -> dict[str, str]:
 
     Components (when present) use the v1 component lowering; types and pure
     functions are emitted as a standalone `functions` module with documented
-    record/variant layouts and exported wasm functions. Externs/tests are
-    documented as unsupported in that module rather than rejected wholesale.
+    record/variant layouts and exported wasm functions. Each `test` block is
+    lowered to an exported zero-arg function returning Bool (`revl_test_*`,
+    true = pass, failed asserts trap) so the host-side runner can invoke them;
+    externs remain documented as unsupported in that module rather than
+    rejected wholesale.
     """
     services = ir.get("services") or {}
     components = ir.get("components") or []

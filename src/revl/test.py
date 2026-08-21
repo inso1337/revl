@@ -321,11 +321,45 @@ def run_java(ir: dict) -> tuple[str, str]:
 
 
 def run_wasm(ir: dict) -> tuple[str, str]:
-    """The wasm tier has no in-language test runner — test blocks are
-    host-side (the emitter itself notes ``unsupported on this tier``)."""
-    tail = _fault_note(ir, "wasm")
-    return ("skip",
-            "test blocks do not lower to the wasm tier (the test runner is host-side)" + tail)
+    """Emit the module with each `test` block as an exported zero-arg Bool
+    function (`revl_test_*`, true = pass) and invoke every export on the real
+    ``wasmtime`` substrate — the same recipe backends/wasm/test_v3_emit.py
+    uses. A failed `assert` traps, which wasmtime reports as a nonzero exit.
+    """
+    wasmtime = shutil.which("wasmtime")
+    if wasmtime is None:
+        return ("skip", "wasmtime not installed (brew install wasmtime)")
+    note = _fault_note(ir, "wasm")
+    try:
+        emit = _emitter("wasm")
+        modules = emit.emit(_without_fault_tests(ir))
+        exports = emit.test_export_names(ir.get("tests") or [])
+    except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        return ("fail", f"emitter refused: {error}")
+    if not exports:
+        return ("pass", "no tests emitted by the backend" + note)
+    source = modules.get("functions")
+    if source is None:
+        return ("fail", "emitter produced no functions module for the tests")
+
+    failures = 0
+    with tempfile.TemporaryDirectory(prefix="revl_test_wasm_") as tmpd:
+        wat = Path(tmpd) / "mod.wat"
+        wat.write_text(source, encoding="utf-8")
+        for tname, export in exports:
+            run = subprocess.run(
+                [wasmtime, "--invoke", export, str(wat)],
+                capture_output=True, text=True, timeout=600)
+            if run.returncode != 0:
+                failures += 1
+                detail = (run.stderr.strip().splitlines() or [""])[-1]
+                print(f"FAIL {tname}: {detail or f'wasmtime exited {run.returncode}'}")
+            else:
+                print(f"PASS {tname}")
+
+    if failures:
+        return ("fail", f"{failures} of {len(exports)} test(s) failed" + note)
+    return ("pass", f"wasmtime: {len(exports)} test(s) passed" + note)
 
 
 RUNNERS: dict[str, callable] = {
