@@ -60,6 +60,12 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: a slot always holds the same 8 bytes whichever way it is read.
 _SLOT = 8
 
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
+                 "checked_div_euclid", "checked_mod")
+_DIV_ZERO_MSG = "revl: division by zero"
+
 
 def _align4(value: int) -> int:
     return (value + 3) & ~3
@@ -379,6 +385,9 @@ class _ComponentEmitter:
         self.extra_locals.update(f"l_{name}" for name in binds)
         self.extra_locals.update(scruts)
         self.extra_locals.update(arrows)
+        cdiv_locals: list[str] = []
+        self.v3._collect_cdiv_locals(v3_node, cdiv_locals)
+        self.extra_locals.update(cdiv_locals)
         self.uses_v3 = True
         self.func_uses_v3 = True
         return self.v3._expr(v3_node, _Scope(dict(scope), dict(types)), where)
@@ -395,6 +404,7 @@ class _ComponentEmitter:
         self.v3._arrows = {}
         self.v3._arrow_counter = 0
         self.v3._match_counter = 0
+        self.v3._cdiv_counter = 0
         self.v3._loop_counter = 0
         self.v3._for_temps = []
         self.v3._local_types = {}
@@ -1209,6 +1219,11 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
+                if node.get("method") in _CHECKED_DIVS:
+                    # the total division forms carry their Err reason from
+                    # the emitter, not from a literal in the source — pool it
+                    # here so `_str_ptr` can name it at lowering time
+                    seen.setdefault(_DIV_ZERO_MSG, None)
                 if node.get("kind") == "interp":
                     # template text segments are string literals too
                     for part_kind, part in node.get("parts") or []:
@@ -1843,7 +1858,7 @@ class _V3Emitter:
         if kind == "call":
             return self._call_expr(node, scope, where, expected)
         if kind == "builtin":
-            return self._builtin_expr(node, scope, where)
+            return self._builtin_expr(node, scope, where, expected)
         if kind == "field":
             return self._field_expr(node, scope, where)
         if kind == "index":
@@ -2045,11 +2060,53 @@ class _V3Emitter:
         parts.append(f"(call ${name})")
         return _E("\n      ".join(parts), sig["returns"])
 
-    def _builtin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+    def _builtin_expr(self, node: dict, scope: _Scope, where: str,
+                      expected: str | None = None) -> _E:
         method = node.get("method")
         target_node = node.get("target")
         target_ty = self._infer_type(target_node, scope)
         args = node.get("args") or []
+        # The total forms (docs/arithmetic.md): same quotient as the faulting
+        # operation, but a zero divisor yields Err(reason) instead of the
+        # `i64.div_s` trap — `fail` is refused in a pure fn, so the error
+        # travels as a value. Both operands are evaluated once into scratch
+        # slots; each branch allocates its own tagged cell.
+        if method in _CHECKED_DIVS:
+            ty = expected if self._tagged_layout(expected) is not None else "Result[Int, Str]"
+            if self._tagged_layout(ty) is None:
+                raise EmitError(f"{where}: {ty!r} is not a tagged union")
+            # the operands are Int *values* (i64), so they get their own i64
+            # locals rather than the i32 scratch slots the tagged cells use;
+            # the names were minted per-node by `_collect_cdiv_locals`
+            tmp_a = f"cdiv_{node['_cdiv']}_a"
+            tmp_b = f"cdiv_{node['_cdiv']}_b"
+            self._declare_local(tmp_a, "Int", where)
+            self._declare_local(tmp_b, "Int", where)
+            dividend = self._expr(target_node, scope, where, "Int")
+            divisor = self._expr(args[0], scope, where, "Int")
+            read_a = f"(local.get ${tmp_a})"
+            read_b = f"(local.get ${tmp_b})"
+            quotient = {
+                "checked_div_trunc": f"(i64.div_s {read_a} {read_b})",
+                "checked_div_floor": f"(call $int_div_floor {read_a} {read_b})",
+                "checked_div_euclid": f"(call $int_div_euclid {read_a} {read_b})",
+                "checked_mod": f"(call $int_mod {read_a} {read_b})",
+            }[method]
+            ok_cell = self._make_tagged(
+                ty, "Ok",
+                {"kind": "__wat", "wat": quotient, "ty": "Int"},
+                scope, where)
+            err_cell = self._make_tagged(
+                ty, "Err",
+                {"kind": "lit", "value": _DIV_ZERO_MSG},
+                scope, where)
+            wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
+                   f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
+                   f"      (if (result i32)\n"
+                   f"        (i64.eqz {read_b})\n"
+                   f"        (then {err_cell.wat})\n"
+                   f"        (else {ok_cell.wat}))")
+            return _E(wat, ty)
         if method == "length":
             target = self._expr(target_node, scope, where, target_ty)
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
@@ -2324,6 +2381,22 @@ class _V3Emitter:
         elif isinstance(node, list):
             for value in node:
                 self._collect_match_locals(value, binds, scruts)
+
+    def _collect_cdiv_locals(self, node: Any, names: list) -> None:
+        """Mint the i64 operand locals each total-division form needs, in the
+        order the bodies are lowered — the same pre-pass `_collect_match_locals`
+        does for match scratch, since both live in expression position."""
+        if isinstance(node, dict):
+            if node.get("method") in _CHECKED_DIVS and "_cdiv" not in node:
+                self._cdiv_counter += 1
+                node["_cdiv"] = self._cdiv_counter
+                names.extend([f"cdiv_{self._cdiv_counter}_a",
+                              f"cdiv_{self._cdiv_counter}_b"])
+            for value in node.values():
+                self._collect_cdiv_locals(value, names)
+        elif isinstance(node, list):
+            for value in node:
+                self._collect_cdiv_locals(value, names)
 
     def _list_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
         ty = self._list_type(node, scope, expected)
@@ -2611,12 +2684,16 @@ class _V3Emitter:
         # match binds + one scratch pointer per match (match is in expression
         # position, so _collect_locals doesn't reach it)
         self._match_counter = 0
+        self._cdiv_counter = 0
         match_binds: set[str] = set()
         match_scruts: set[str] = set()
         self._collect_match_locals(fn.get("body") or [], match_binds, match_scruts)
         for bname in sorted(match_binds):
             if bname not in local_names:
                 local_names_in_order.append(f"l_{bname}")
+        cdiv_locals: list[str] = []
+        self._collect_cdiv_locals(fn.get("body") or [], cdiv_locals)
+        local_names_in_order.extend(cdiv_locals)
         for sname in sorted(match_scruts):
             local_names_in_order.append(sname)
         for tname in self._for_temps:

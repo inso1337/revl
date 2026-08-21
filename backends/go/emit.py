@@ -1216,10 +1216,21 @@ class _V3GoCtx:
         return _v3_ident(name, "type name")
 
 
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_GO_CHECKED_DIV = ("checked_div_trunc", "checked_div_floor",
+                   "checked_div_euclid", "checked_mod")
+_GO_DIV_ZERO_MSG = "revl: division by zero"
+
+
 def _v3_builtin_ret_type(method, recv_type):
     if method in ("length", "indexOf", "charCodeAt",
                   "div_trunc", "div_floor", "div_euclid", "mod"):
         return "Int"
+    # The total forms (docs/arithmetic.md) produce a Result value.
+    if method in ("checked_div_trunc", "checked_div_floor",
+                  "checked_div_euclid", "checked_mod"):
+        return "Result[Int, Str]"
     if method in ("charAt", "repeat", "join"):
         return "Str"
     if method == "split":
@@ -1621,6 +1632,23 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         helper = {"div_floor": "revlDivFloor", "div_euclid": "revlDivEuclid",
                   "mod": "revlMod"}[method]
         return f"{helper}({target}, {args[0]})"
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of panicking —
+    # `fail` is refused in a pure fn, so the error travels as a value. An
+    # immediately-applied func literal evaluates each operand exactly once;
+    # the concrete RevlOk/RevlErr instantiations satisfy the interface.
+    if method in _GO_CHECKED_DIV:
+        if method != "checked_div_trunc":
+            ctx.needs_int_arith = True
+        quotient = {"checked_div_trunc": "_a / _b",
+                    "checked_div_floor": "revlDivFloor(_a, _b)",
+                    "checked_div_euclid": "revlDivEuclid(_a, _b)",
+                    "checked_mod": "revlMod(_a, _b)"}[method]
+        return (f'func(_a, _b int64) RevlResult[int64, string] {{ '
+                f'if _b == 0 {{ return RevlErr[int64, string]'
+                f'{{Value: "{_GO_DIV_ZERO_MSG}"}} }}; '
+                f'return RevlOk[int64, string]{{Value: {quotient}}} }}'
+                f'({target}, {args[0]})')
     raise EmitError(f"unknown v3 builtin method {method!r}")
 
 
@@ -2110,7 +2138,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         "externs": externs, "tests": tests,
     })
     used_opt = ("Opt[" in blob) or ('"optfield"' in blob) or ('"optcall"' in blob)
-    used_result = "Result[" in blob
+    # The total division forms produce a Result value without the source ever
+    # spelling `Result[` — their method names put Result in the module too.
+    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
 
     imports: list[str] = []
     if tests:

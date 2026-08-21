@@ -305,6 +305,77 @@ def test_integer_division_by_zero_faults(tier: str):
         f"returns a value here is unsound, not lenient: {message}")
 
 
+# ------------------------------------------------- the total division forms
+#
+# The faulting operations have a total, value-returning counterpart:
+# `checked_div_trunc` / `checked_div_floor` / `checked_div_euclid` /
+# `checked_mod` return `Result[Int, Str]` — Ok(quotient), or Err(reason) at a
+# zero divisor instead of the fault. `fail` cannot serve here (it is a
+# component construct and is refused in a pure fn), so the error travels as a
+# value (docs/arithmetic.md). The rounding convention is the *same* one each
+# named operation already specifies — only the zero-divisor behaviour differs.
+#
+# A literal zero divisor is refused for the faulting operations
+# (arith_zero_divisor.rvl) and deliberately accepted for these: handling it
+# is the entire point.
+
+CHECKED_DIVISION = """
+pub fn qt(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }
+pub fn qf(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_floor(b) }
+pub fn qe(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_euclid(b) }
+pub fn qm(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mod(b) }
+pub fn qt_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qt(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+pub fn qf_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qf(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+pub fn qe_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qe(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+pub fn qm_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qm(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+test "checked trunc rounds toward zero"   { assert qt_is(7, 2, 3, false) }
+test "checked trunc on negatives"         { assert qt_is(0 - 7, 2, 0 - 3, false) }
+test "checked trunc yields Err at zero"   { assert qt_is(7, 0, 0, true) }
+test "checked floor rounds toward -inf"   { assert qf_is(0 - 7, 2, 0 - 4, false) }
+test "checked floor yields Err at zero"   { assert qf_is(5, 0, 0, true) }
+test "checked euclid, both negative"      { assert qe_is(0 - 7, 0 - 2, 4, false) }
+test "checked euclid yields Err at zero"  { assert qe_is(5, 0, 0, true) }
+test "checked mod is never negative"      { assert qm_is(0 - 7, 3, 2, false) }
+test "checked mod yields Err at zero"     { assert qm_is(5, 0, 0, true) }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_checked_division_returns_values(tier: str):
+    status, message = _run(tier, CHECKED_DIVISION)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_checked_division_returns_values_slow(tier: str):
+    status, message = _run(tier, CHECKED_DIVISION)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+def test_literal_zero_divisor_accepted_for_checked_forms():
+    """The checker refuses `x.mod(0)` (arith_zero_divisor.rvl) because it is
+    not a program anyone meant to write. Passing a literal zero to the total
+    form IS such a program — handling it is what it is for."""
+    compile_source(
+        "pub fn d(b: Int) -> Result[Int, Str] { return 7.checked_div_trunc(b) }\n"
+        "pub fn z() -> Result[Int, Str] { return 7.checked_mod(0) }\n",
+        "checked_lit_zero.rvl")
+
+
 def test_typescript_guards_the_divisor():
     """The guard travels with the module, and every named integer operation
     routes through it rather than through a bare `/`."""
@@ -313,6 +384,24 @@ def test_typescript_guards_the_divisor():
     for helper in ("revlDivTrunc", "revlDivFloor", "revlDivEuclid", "revlMod"):
         assert f"function {helper}" in emitted, helper
     assert "revl: division by zero" in emitted
+
+
+def test_checked_division_lowers_on_every_tier():
+    """The total forms produce a Result value on each tier through that
+    tier's Result representation: tagged objects on TS, std Result on rust,
+    RevlResult on java, RevlOk/RevlErr on go, tagged cells on wasm."""
+    for helper in ("revlCheckedDivTrunc", "revlCheckedDivFloor",
+                   "revlCheckedDivEuclid", "revlCheckedMod"):
+        assert f"function {helper}" in _emit("typescript", CHECKED_DIVISION), helper
+    assert 'Err::<i64, String>("revl: division by zero".to_string())' in \
+        _emit("rust", CHECKED_DIVISION)
+    java = _emit("java", CHECKED_DIVISION)
+    assert "revlCheckedDivTrunc" in java and "RevlResult<Long, String>" in java
+    go = _emit("go", CHECKED_DIVISION)
+    assert "RevlOk[int64, string]" in go and "RevlErr[int64, string]" in go
+    wasm = _emit("wasm", CHECKED_DIVISION)
+    wat = wasm["functions"] if isinstance(wasm, dict) else wasm
+    assert "(i64.eqz" in wat and "revl: division by zero" in wat
 
 
 # --------------------------------------------------------- the pairing law

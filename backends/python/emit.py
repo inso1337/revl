@@ -115,6 +115,13 @@ def _uses_true_division(node) -> bool:
     return False
 
 
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
+                 "checked_div_euclid", "checked_mod")
+_DIV_ZERO_MSG = "revl: division by zero"
+
+
 def _render_builtin(method, target: str, args: list) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
     `push`/`concat` are persistent (value semantics); `indexOf` returns -1
@@ -155,6 +162,21 @@ def _render_builtin(method, target: str, args: list) -> str:
                 f"({target}, {args[0]})")
     if method == "mod":
         return f"({target} % abs({args[0]}))"
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of raising —
+    # the whole point is that a pure fn cannot `fail`, so the error travels
+    # as a value. Ok/Err are the tagged classes emitted when the IR uses
+    # Result (gated in `_uses_builtin_result`).
+    if method in _CHECKED_DIVS:
+        quotient = {
+            "checked_div_trunc":
+                "abs(_a) // abs(_b) if (_a < 0) == (_b < 0) else -(abs(_a) // abs(_b))",
+            "checked_div_floor": "_a // _b",
+            "checked_div_euclid": "_a // _b if _b > 0 else -(_a // -_b)",
+            "checked_mod": "_a % abs(_b)",
+        }[method]
+        return (f"(lambda _a, _b: Ok({quotient}) if _b != 0 "
+                f"else Err({_DIV_ZERO_MSG!r}))({target}, {args[0]})")
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -1273,7 +1295,8 @@ def _find_host_roots(nodes) -> set[str]:
 
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
-    an `adt` node typed Result, or a `match` arm on Ok/Err. Used to decide
+    an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
+    the total division forms (which *produce* a Result). Used to decide
     whether to emit the built-in Result classes (keeps v1 goldens intact)."""
     def walk(node) -> bool:
         if isinstance(node, dict):
@@ -1282,6 +1305,8 @@ def _uses_builtin_result(ir: dict) -> bool:
             if node.get("kind") == "match":
                 if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
                     return True
+            if node.get("method") in _CHECKED_DIVS:
+                return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
             return any(walk(v) for v in node)
