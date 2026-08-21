@@ -203,6 +203,23 @@ say why in revl's words. It is the same limit that already applies to its
 division-by-zero fault, and it is a property of the instruction set rather
 than of the lowering.
 
+### A literal outside the range never reaches a tier
+
+The bound is a *compile-time* fact before it is a runtime one. An `Int`
+literal outside `[-2^63, 2^63-1]` is refused by the checker
+(`examples/rejections/t20_int_literal_range.rvl`), because the tiers cannot
+agree on what such a text even means: python reads it at arbitrary precision,
+wasm reads an i64 bit pattern, and the same source file is two different
+programs. It used to be accepted and left to the tiers to disagree about;
+now it is one diagnostic instead of a behaviour per tier.
+
+This is also why `Int.MIN` has no spelling in the surface. Unary minus binds
+to the *positive* literal, so writing `-9223372036854775808` negates an
+out-of-range literal and is refused by the same rule. The negative bound is
+reachable by computation from in-range literals — `0 - 9223372036854775807 -
+1` — which is an ordinary runtime value on every tier, inside the range and
+checked like any other arithmetic.
+
 ### Every tier holds it
 
 Two did not, and both were closed by the ports written up below — wasm was
@@ -357,13 +374,11 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   else — python imposes the bound, rust/java/go/wasm are all 64-bit and all
   fault at the edge — but TypeScript maps it to f64, exact only to 2^53, so
   `MAX + 1` silently loses precision there. Closing it means `BigInt`.
-- **An `Int` literal outside the range is not diagnosed.** The checker accepts
-  `9223372036854775808`, and the tiers then disagree about it: python reads it
-  at arbitrary precision, so `0 - 9223372036854775808` is exactly `Int.MIN` and
-  passes the bound check, while wasm reads it as an i64 bit pattern — already
-  `Int.MIN` — so negating it overflows and *traps*. The bound belongs in the
-  checker, where it would be one diagnostic instead of a behaviour per tier; it
-  is also why `Int.MIN` has no spelling in the surface today.
+- ~~**An `Int` literal outside the range is not diagnosed.**~~ **Closed.** The
+  checker now refuses an `Int` literal outside `[-2^63, 2^63-1]` — one
+  diagnostic where the tiers used to disagree (python at arbitrary precision,
+  wasm reading an i64 bit pattern). See "A literal outside the range never
+  reaches a tier" above; it remains why `Int.MIN` has no spelling.
 
 - **`Int` is 64-bit on every tier but wasm**, which is still `i32` (see
   above). python and TypeScript are arbitrary-precision hosts and impose the
