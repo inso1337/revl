@@ -214,6 +214,20 @@ Both are asserted by *execution* in `tests/test_cross_tier_execution.py` —
 in-range arithmetic on every bounded tier, and overflow that must fault rather
 than return a value — so neither can regress quietly.
 
+Unary minus is arithmetic too: negation is `0 - x`, and `0 - Int.MIN`
+overflows. python imposed the bound on `+`, `-` and `*` but let `-x` lower to
+the host's unary minus, so `-Int.MIN` came back as 2^63 — out of the very
+range python imposes a line earlier, silently. It now goes through `_revl_i64`
+like any other subtraction, and the closure is asserted by execution. wasm had
+this right from the start: its emitter spells negation as a subtraction from
+zero through the checked helper, and rust's own `-` panics at the edge in the
+debug builds `cargo test` runs. The remaining tiers do not trap — go and java
+negate with the host operator, which wraps (`-Int.MIN == Int.MIN`), and
+TypeScript's `bigint` negation has no bound check, so the value simply leaves
+the range. That split is recorded as a pinned divergence
+(`tests/test_cross_tier_execution.py`, docs/contract-errata.md), not papered
+over.
+
 ### What the wasm port took
 
 wasm was the other entry on that list — `i32` throughout its emitter, narrower
