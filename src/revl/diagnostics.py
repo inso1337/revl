@@ -108,8 +108,11 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"dependency cycle|import cycle"), "G3", "linking"),
     (re.compile(r"cannot reassign|already (declared|bound)"), "G6", "binding"),
     (re.compile(r"is not declared in this (function|component)"), "G1", "binding"),
+    (re.compile(r"is not a declared requirement"), "G1", "binding"),
+    (re.compile(r"acquisition after `provide`"), "A2", "ordering"),
     (re.compile(r"no builtin method"), "T1", "stdlib"),
     (re.compile(r"verified fn .* is not total"), "G7", "totality"),
+    (re.compile(r"unclassified extern"), "G8", "boundary"),
     (re.compile(r"expected .*, found "), "SYNTAX", "parse"),
     (re.compile(r"unexpected character|unterminated string"), "SYNTAX", "lex"),
 ]
