@@ -91,11 +91,16 @@ func TestRef_ReactiveProvideInject(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		m := rec.Marks()
-		if contains(m, "consumer:down") && contains(m, "provider:down") {
+		// Wait for STATE, not just marks: `consumer:down` is recorded while
+		// the reactive teardown's undos may still be in flight, so on a
+		// loaded runner the fiber can still be Unloading when both marks
+		// have landed. Pending is the settled end-state.
+		if contains(m, "consumer:down") && contains(m, "provider:down") &&
+			consumer.State() == stc.StatePending {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("did not observe reactive consumer teardown: %v", m)
+			t.Fatalf("did not observe reactive consumer teardown: %v (state=%v)", m, consumer.State())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
