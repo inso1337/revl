@@ -659,6 +659,28 @@ def _py_type(type_name: str) -> str:
 
 def _emit_types(types: dict) -> "_Lines":
     out = _Lines()
+    # Forward-reference support: revl types may be mutually recursive (a
+    # record referencing an ADT defined later, or vice versa), but Python
+    # evaluates class-body annotations at class-definition time, so a bare
+    # name would raise NameError. We cannot use `from __future__ import
+    # annotations` (PEP 563): @dataclass's InitVar/ClassVar detection calls
+    # sys.modules.get(cls.__module__).__dict__ on every string annotation,
+    # which crashes for consumers that exec() the module without registering
+    # it in sys.modules. Instead, quote only the annotations that actually
+    # reference a not-yet-emitted type; dataclasses treat any string
+    # annotation as lazy, and the ADTs here are plain classes (no
+    # InitVar/ClassVar introspection), so quoting is always safe.
+    all_names = {_ident(name, "type name") for name in types}
+    emitted: set[str] = set()
+
+    def _ann(ftype: str) -> str:
+        """Render one field/payload annotation, quoting forward refs."""
+        rendered = _py_type(ftype)
+        mentioned = set(re.findall(r"[A-Za-z_]\w*", ftype))
+        if mentioned & (all_names - emitted):
+            return repr(rendered)
+        return rendered
+
     for name, spec in types.items():
         name = _ident(name, "type name")
         if spec["kind"] == "record":
@@ -667,10 +689,12 @@ def _emit_types(types: dict) -> "_Lines":
             if not spec["fields"]:
                 out.add(1, "pass")
             for field, ftype in spec["fields"].items():
-                out.add(1, f"{field}: {_py_type(ftype)}")
+                out.add(1, f"{field}: {_ann(ftype)}")
+            emitted.add(name)
         else:
             out.add(0, f"class {name}:")
             out.add(1, "__slots__ = ()")
+            emitted.add(name)  # base precedes its cases; case refs are never forward
             out.add(0)
             for case in spec["cases"]:
                 cname = _ident(case["name"], "case name")
