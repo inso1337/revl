@@ -1722,6 +1722,31 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
 
 
 
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
+                 "checked_div_euclid", "checked_mod")
+_DIV_ZERO_MSG = "revl: division by zero"
+
+
+def _v3_checked_div(method: str, target: str, arg: str) -> str:
+    """The total forms (docs/arithmetic.md): same quotient as the faulting
+    operation, but a zero divisor yields Err(reason) instead of panicking —
+    `fail` is refused in a pure fn, so the error travels as a value. The
+    turbofish pins Result<i64, String> so the expression is context-free;
+    operands are bound once, since a block evaluates them exactly once."""
+    ok = {
+        "checked_div_trunc": "a / b",
+        "checked_div_floor":
+            "{ let q = a / b; if a % b != 0 && ((a < 0) != (b < 0)) { q - 1 } else { q } }",
+        "checked_div_euclid": "a.div_euclid(b)",
+        "checked_mod": "a.rem_euclid(b).abs()",
+    }[method]
+    return (f"{{ let a = ({target}); let b = ({arg}); "
+            f'if b == 0 {{ Err::<i64, String>("{_DIV_ZERO_MSG}".to_string()) }} '
+            f'else {{ Ok::<i64, String>({ok}) }} }}')
+
+
 def _v3_builtin(method: str, target: str, args: list[str]) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched via the Revl*Ops
     helper traits so every (method, Str|List) pair from the spec table
@@ -1759,6 +1784,13 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"(({target}).div_euclid({args[0]}))"
     if method == "mod":
         return f"(({target}).rem_euclid({args[0]}).abs())"
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of panicking —
+    # `fail` is refused in a pure fn, so the error travels as a value. The
+    # turbofish pins Result<i64, String> so the expression is context-free;
+    # operands are bound once, since a block evaluates them exactly once.
+    if method in _CHECKED_DIVS:
+        return _v3_checked_div(method, target, args[0])
     raise EmitError(f"unknown builtin method {method!r}")
 
 

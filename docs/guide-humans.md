@@ -302,7 +302,7 @@ easiest place to overclaim:
   physical. Deliberately i32-only at the service boundary.
 
 What each tier can and cannot express is measured, not asserted:
-`tools/conformance.py` runs every construct through all five and
+`tools/conformance.py` runs every construct through all six and
 [docs/conformance.md](conformance.md) records the result, separating a
 deliberate limit from a gap.
 

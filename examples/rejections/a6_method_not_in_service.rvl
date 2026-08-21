@@ -1,0 +1,14 @@
+// REJECTED — A6: a provide/call surface is bounded by the service declaration.
+// `db.execute` is not declared by service Database, so the call has no
+// signature to check against — the service, not the component, is the
+// source of truth for what the key offers (the same bound G4 refines for
+// effects and the compat gate enforces across upgrades).
+//
+// expected error:
+//   a6_method_not_in_service.rvl:14: `db.execute` is not a method of service Database
+
+service Database { fn query(sql: Str) -> List[Row] }
+
+component Migrator requires db: Database {
+  let n = effect db.execute("DROP TABLE old") undo db.query("ROLLBACK")
+}

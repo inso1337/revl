@@ -6,6 +6,7 @@ the per-tier suites gate themselves.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from revl import test as test_module  # noqa: E402
+
+needs_wasmtime = pytest.mark.skipif(
+    shutil.which("wasmtime") is None, reason="wasmtime not installed")
 
 
 def _cli(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -47,11 +51,37 @@ def test_default_backend_is_py(tmp_path):
     assert "FAIL fails" in result.stdout
 
 
-def test_explicit_wasm_is_refused(tmp_path):
-    source = _write_rvl(tmp_path, "x.rvl", 'test "t" { assert true }')
+@needs_wasmtime
+def test_backend_wasm_runs_tests(tmp_path):
+    source = _write_rvl(
+        tmp_path, "x.rvl",
+        'fn one() -> Int { return 1 }\n'
+        'test "one is one" { assert one() == 1 }\n'
+        'test "empty body passes" { }\n')
+    result = _cli(tmp_path, str(source), "--backend", "wasm")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS one is one" in result.stdout
+    assert "[wasm] ok: wasmtime: 2 test(s) passed" in result.stdout
+
+
+@needs_wasmtime
+def test_backend_wasm_failing_assert_exits_1(tmp_path):
+    source = _write_rvl(tmp_path, "x.rvl", 'test "boom" { assert 1 == 2 }')
     result = _cli(tmp_path, str(source), "--backend", "wasm")
     assert result.returncode == 1
-    assert "host-side" in result.stderr
+    assert "FAIL boom" in result.stdout
+    # the trap that the failed `assert` lowered to is surfaced, not swallowed
+    assert "unreachable" in (result.stdout + result.stderr)
+
+
+def test_backend_wasm_skips_without_wasmtime(monkeypatch):
+    """Graceful degradation: no wasmtime binary -> skip with a reason, never a
+    fake pass (the same gate every other toolchain-bound runner applies)."""
+    monkeypatch.setattr(test_module.shutil, "which", lambda name: None)
+    ir = compile_source('test "t" { assert true }')
+    outcome, message = test_module.run_wasm(ir)
+    assert outcome == "skip"
+    assert "wasmtime not installed" in message
 
 
 _VITEST = ROOT / "backends" / "typescript" / "node_modules" / ".bin" / "vitest"

@@ -17,6 +17,7 @@ implied:
 | rust       | `cargo check`                      | full typecheck               |
 | java       | `javac` against the cordis4j stubs | full typecheck               |
 | wasm       | `wasmtime compile`                 | validation (types + locals)  |
+| go         | `go build` against pinned stc-go   | full compilation             |
 
 A validator that cannot run says so (`unavailable`) with the reason. That is
 deliberately distinct from a pass: "no toolchain" must never read as "clean".
@@ -589,7 +590,14 @@ class GoValidator(Validator):
         download_failed = ("cannot find module" in blob
                            or "missing go.sum entry" in blob
                            or "GOPROXY=off" in blob
-                           or "no required module provides" in blob)
+                           or "no required module provides" in blob
+                           # an older local Go than the go.mod directive
+                           # wants: GOTOOLCHAIN tries to fetch the newer
+                           # toolchain itself, which the offline attempt
+                           # always refuses. Same shape as a cold module
+                           # cache — worth the networked retry.
+                           or "toolchain not available" in blob
+                           or "download go" in blob.lower())
         if offline.returncode == 0 or not download_failed:
             return offline, None
         # The module is not cached; only now is the network worth the wait.

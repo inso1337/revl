@@ -7,8 +7,8 @@ v1-shaped source still emits `ir_version: 1` byte-identically.
 
 | version | adds | backends |
 |---|---|---|
-| 2 | realms and interception | all five |
-| 3 | types, pure functions, externs, tests, and the component-body constructs below | all five |
+| 2 | realms and interception | all six |
+| 3 | types, pure functions, externs, tests, and the component-body constructs below | all six |
 
 Ground truth is `tools/conformance.py`: it emits 48 constructs through every
 backend and reports what each does. A tier that cannot express something must
