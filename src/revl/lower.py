@@ -107,6 +107,11 @@ _BUILTIN_METHODS = {
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).
     "div_trunc": 1, "div_floor": 1, "div_euclid": 1, "mod": 1,
+    # The total forms (docs/arithmetic.md): a zero divisor is the *point*
+    # here, so these are deliberately absent from _DIVIDES_BY below — a
+    # literal zero argument is refused for the faulting operations only.
+    "checked_div_trunc": 1, "checked_div_floor": 1,
+    "checked_div_euclid": 1, "checked_mod": 1,
 }
 
 
