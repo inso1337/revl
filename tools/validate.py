@@ -590,7 +590,14 @@ class GoValidator(Validator):
         download_failed = ("cannot find module" in blob
                            or "missing go.sum entry" in blob
                            or "GOPROXY=off" in blob
-                           or "no required module provides" in blob)
+                           or "no required module provides" in blob
+                           # an older local Go than the go.mod directive
+                           # wants: GOTOOLCHAIN tries to fetch the newer
+                           # toolchain itself, which the offline attempt
+                           # always refuses. Same shape as a cold module
+                           # cache — worth the networked retry.
+                           or "toolchain not available" in blob
+                           or "download go" in blob.lower())
         if offline.returncode == 0 or not download_failed:
             return offline, None
         # The module is not cached; only now is the network worth the wait.
