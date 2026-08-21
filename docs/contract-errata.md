@@ -227,14 +227,29 @@ it cannot drift silently. **These are not fixed.**
   `BigInt`, not a type annotation — `Int` now maps to `bigint` on that tier,
   which imposes the 64-bit bound and traps on overflow the way python does.
   docs/arithmetic.md records the Int/Float boundary rules the port settled.
+- **Unary minus does not trap on every tier** (open; python closed). Negating
+  `Int.MIN` overflows — it is `0 - Int.MIN` — and the tiers split three ways.
+  python let `-x` lower to the host's unary minus, so `-Int.MIN` came back as
+  2^63, out of the range python itself imposes on every other operation; it
+  now routes Int negation through `_revl_i64` and traps with the usual
+  message. wasm already spelled negation as a subtraction from zero through
+  its checked helper, and rust's native `-` panics in the debug builds
+  `cargo test` runs. But **go and java negate with the host operator, which
+  wraps** (`-Int.MIN == Int.MIN`; JLS 15.15.4 for java), and **TypeScript's
+  `bigint` negation has no bound check**, so the result simply leaves the
+  range as 2^63. Closing those means emitting the checked form on each tier,
+  as wasm already does; until then the behaviour is pinned per tier in
+  `DIVERGENCES` (tests/test_cross_tier_execution.py).
 
 **The root cause is closed.** An IR `bin` node used to carry `op`, `left` and
 `right` and *no type*, so no backend could distinguish `Int / Int` from
 `Float / Float` — a runtime dispatch works on python, where `int` and `float`
 are distinct, and cannot work on TypeScript, where both are `number`. `/` and
 `%` now carry an `operands` field (`"Int"` / `"Float"`) when the checker can
-determine it. The annotation is additive and v1 documents are untouched, so
-the frozen-reference invariant holds.
+determine it, and so does unary minus on an `Int` — the one unary operator
+whose operand type a backend must know, since negating `Int.MIN` overflows
+(see the entry above). The annotation is additive and v1 documents are
+untouched, so the frozen-reference invariant holds.
 
 `%` and the `Int` width are both settled now (docs/arithmetic.md): `%` is
 the truncated remainder, and `Int` is 64-bit two's complement with a

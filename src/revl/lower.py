@@ -1669,8 +1669,19 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 node["operands"] = "Float"
         return node
     if isinstance(expr, ExprUn):
-        return {"kind": "un", "op": expr.op,
+        node = {"kind": "un", "op": expr.op,
                 "operand": _lower_pure_expr(expr.operand, scope, callables, alias_fns, filename, type_env, types)}
+        # Unary minus is arithmetic too: negating Int.MIN overflows, and a
+        # backend cannot tell an Int negation from a Float one without the
+        # operand type — the same information `bin` carries for the same
+        # reason. Only `Int` is annotated: it is the type whose bound a
+        # backend must re-impose (docs/arithmetic.md), and no tier needs to
+        # treat Float negation specially.
+        if expr.op == "-":
+            operand_type = infer_ast(expr.operand, type_env, types, None)
+            if operand_type == "Int":
+                node["operands"] = "Int"
+        return node
     if isinstance(expr, ExprCall):
         _callee = expr.callee
         _host_receiver = isinstance(_callee, ExprField) and (
