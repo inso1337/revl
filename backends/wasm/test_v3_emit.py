@@ -193,7 +193,10 @@ def test_version_gate_accepts_1_2_3_and_rejects_4():
         emit.emit({**base, "ir_version": 4})
 
 
-def test_v3_externs_and_tests_are_documented_not_rejected():
+def test_v3_externs_are_documented_and_tests_lower_to_exports():
+    """Externs stay a documented gap; each `test` block lowers to an exported
+    zero-arg Bool function (`revl_test_*`, true = pass, failed asserts trap)
+    that the host-side runner (`src/revl/test.py run_wasm`) invokes."""
     emit = _emitter()
     ir = compile_source(
         """
@@ -205,7 +208,45 @@ def test_v3_externs_and_tests_are_documented_not_rejected():
     assert "functions" in modules
     wat = modules["functions"]
     assert "unsupported on this tier: externs host_call" in wat
-    assert "unsupported on this tier: tests 'would run on a hosted backend'" in wat
+    assert '(func $revl_test_would_run_on_a_hosted_backend ' \
+        '(export "revl_test_would_run_on_a_hosted_backend")' in wat
+    # deterministic export list, shared with the host-side runner
+    assert emit.test_export_names(ir["tests"]) == [
+        ("would run on a hosted backend", "revl_test_would_run_on_a_hosted_backend")]
+    # lifecycle tests keep their precise refusal (never silently dropped)
+    with pytest.raises(emit.EmitError, match="lifecycle"):
+        emit.emit(compile_source('lifecycle test "live" { }'))
+
+
+@_needs_wasmtime
+def test_v3_test_block_exports_pass_and_trap_on_wasmtime(tmp_path):
+    """End to end: a passing test export returns 1; a failing `assert` traps
+    (nonzero exit) — the two signals the host-side runner aggregates."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    emit = _emitter()
+    ir = compile_source(
+        """
+        fn one() -> Int { return 1 }
+        test "one is one" { assert one() == 1 }
+        test "boom" { assert 1 == 2 }
+        """
+    )
+    wat_path = tmp_path / "mod.wat"
+    wat_path.write_text(emit.emit(ir)["functions"], encoding="utf-8")
+
+    def run_export(export: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["wasmtime", "--invoke", export, str(wat_path)],
+            capture_output=True, text=True, timeout=60)
+
+    ok = run_export("revl_test_one_is_one")
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stdout.strip().endswith("1")
+    boom = run_export("revl_test_boom")
+    assert boom.returncode != 0
+    assert "unreachable" in boom.stderr
 
 
 # tagged unions (user variants, Result, Opt) lower to
