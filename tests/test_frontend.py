@@ -108,6 +108,7 @@ REJECTIONS = {
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
+    "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
     "t3_config_default_type.rvl": "config field `n` default expects `Int`, got `Str`",
     "t4_field_arg_type.rvl": "`s.take` argument `s` expects `Str`, got `Int`",
