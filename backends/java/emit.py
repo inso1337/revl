@@ -505,6 +505,13 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
     (`subList` broke Str.slice, `String.concat` broke List.concat) and the
     `instanceof java.util.List` ternaries did not compile for receivers
     statically typed `String`."""
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of throwing —
+    # `fail` is refused in a pure fn, so the error travels as a value. The
+    # static helpers (emitted by `_emit_checked_div_helpers`) evaluate each
+    # operand exactly once and return a typed RevlResult.
+    if method in _CHECKED_DIVS:
+        return f"{_CHECKED_HELPER[method]}({target}, {args[0]})"
     if method == "length":
         return f"revlLength({target})"
     if method == "push":
@@ -1249,7 +1256,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) — an
-    `adt` node typed Result, or a match arm on Ok/Err. Emitted RevlResult is
+    `adt` node typed Result, a match arm on Ok/Err, or a call to one of the
+    total division forms (which produce a Result). Emitted RevlResult is
     gated on this so non-Result modules and v1 goldens are unaffected."""
     def walk(node) -> bool:
         if isinstance(node, dict):
@@ -1258,6 +1266,8 @@ def _uses_builtin_result(ir: dict) -> bool:
             if node.get("kind") == "match" and any(
                 a.get("pattern") in ("Ok", "Err") for a in node.get("arms") or []
             ):
+                return True
+            if node.get("method") in _CHECKED_DIVS:
                 return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
@@ -1275,6 +1285,64 @@ def _emit_result_type() -> list[str]:
         "public sealed interface RevlResult<T, E> permits RevlResult.Ok, RevlResult.Err {",
         "    record Ok<T, E>(T value) implements RevlResult<T, E> {}",
         "    record Err<T, E>(E value) implements RevlResult<T, E> {}",
+        "}",
+        "",
+    ]
+
+
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
+                 "checked_div_euclid", "checked_mod")
+_CHECKED_HELPER = {
+    "checked_div_trunc": "revlCheckedDivTrunc",
+    "checked_div_floor": "revlCheckedDivFloor",
+    "checked_div_euclid": "revlCheckedDivEuclid",
+    "checked_mod": "revlCheckedMod",
+}
+_DIV_ZERO_MSG = "revl: division by zero"
+
+
+def _uses_checked_div(ir: dict) -> bool:
+    """True if the IR calls one of the total division forms — gates the
+    static helpers those calls lower to."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("method") in _CHECKED_DIVS:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    return walk(ir.get("functions")) or walk(ir.get("tests")) or walk(ir.get("components"))
+
+
+def _emit_checked_div_helpers() -> list[str]:
+    """Static helpers backing the total division forms — emitted once per
+    file when any `checked_*` node is present. Each evaluates its operands
+    exactly once and returns a typed RevlResult."""
+    return [
+        "// total division forms (docs/arithmetic.md): a zero divisor yields",
+        "// Err(reason) instead of the fault the unchecked operations raise.",
+        "private static RevlResult<Long, String> revlCheckedDivTrunc(long a, long b) {",
+        f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        "    return new RevlResult.Ok<>(a / b);",
+        "}",
+        "private static RevlResult<Long, String> revlCheckedDivFloor(long a, long b) {",
+        f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        "    long q = a / b;",
+        "    if (a % b != 0L && ((a < 0L) != (b < 0L))) { q -= 1L; }",
+        "    return new RevlResult.Ok<>(q);",
+        "}",
+        "private static RevlResult<Long, String> revlCheckedDivEuclid(long a, long b) {",
+        f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        "    return new RevlResult.Ok<>(b > 0L ? Math.floorDiv(a, b)",
+        "                                      : -Math.floorDiv(a, -b));",
+        "}",
+        "private static RevlResult<Long, String> revlCheckedMod(long a, long b) {",
+        f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        "    return new RevlResult.Ok<>(Math.floorMod(a, Math.abs(b)));",
         "}",
         "",
     ]
@@ -2397,6 +2465,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_checked_div(ir):
+        out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if externs:
         out.extend(["    " + line if line else line for line in _emit_v3_externs(externs)])
     if functions:

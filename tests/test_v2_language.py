@@ -606,3 +606,42 @@ def test_python_backend_runs_adt_result_opt_match():
         assert module.opt(5) == 5 and module.opt(None) == 0
     finally:
         sys.path.remove(str(backend_dir))
+
+
+def test_python_backend_runs_checked_division():
+    """The total division forms (docs/arithmetic.md): Ok(quotient) on a
+    non-zero divisor, Err(reason) at zero — executed on the reference
+    backend. A literal zero divisor is accepted here (handling it is the
+    point), where the faulting operations refuse it at compile time."""
+    import types
+
+    backend_dir = ROOT / "backends" / "python"
+    sys.path.insert(0, str(backend_dir))
+    try:
+        from revl.compiler import compile_source
+        import emit
+
+        src = (
+            "pub fn qt(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_div_trunc(b) }\n"
+            "pub fn qf(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_div_floor(b) }\n"
+            "pub fn qe(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_div_euclid(b) }\n"
+            "pub fn qm(a: Int, b: Int) -> Result[Int, Str] "
+            "{ return a.checked_mod(b) }\n"
+            "pub fn lit() -> Result[Int, Str] { return 7.checked_mod(0) }\n"
+        )
+        module = types.ModuleType("t")
+        exec(compile(emit.emit(compile_source(src)), "<t>", "exec"), module.__dict__)
+        ok = module.qt(7, 2)
+        assert type(ok).__name__ == "Ok" and ok.value == 3
+        err = module.qt(7, 0)
+        assert type(err).__name__ == "Err"
+        assert err.value == "revl: division by zero"
+        assert module.qf(0 - 7, 2).value == 0 - 4
+        assert module.qe(0 - 7, 0 - 2).value == 4
+        assert module.qm(0 - 7, 3).value == 2
+        assert type(module.lit()).__name__ == "Err"   # literal zero accepted
+    finally:
+        sys.path.remove(str(backend_dir))

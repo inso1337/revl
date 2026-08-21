@@ -444,7 +444,9 @@ def test_every_tier_reports_one_row_affected_from_execute():
     used to return 0 while every other tier returned 1."""
     sources = _tier_sources()
     assert Pool.open("pg://x", 1).execute("INSERT") == 1
-    assert "return 1\n" in sources["typescript"]
+    # rows affected is a revl `Int`, so this tier answers a bigint (`1n`) —
+    # the same one-row contract as rust's `1i64` and java's `1L`.
+    assert "return 1n\n" in sources["typescript"]
     assert "        1i64\n" in sources["rust"]
     assert "return 1L;" in sources["java"]
 

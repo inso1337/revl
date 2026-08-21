@@ -166,6 +166,24 @@ DIVERGENCES = {
         'test "w" { assert ident(3) == 3.0 }',
         {"py": "pass", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
     ),
+    # Unary minus on Int.MIN splits the tiers three ways. python now routes
+    # Int negation through `_revl_i64` (closed — asserted positively above);
+    # wasm lowers `-x` as `0 - x` through its checked subtraction and traps;
+    # rust's native `-` panics ("attempt to negate with overflow") in the
+    # debug builds cargo test runs. But go and java negate with the host
+    # operator, which WRAPS (`-Int.MIN == Int.MIN`; JLS 15.15.4 for java),
+    # and TypeScript's `bigint` negation has no bound check, so the result
+    # simply leaves the range as 2^63. The probe asserts the *wrapped* value,
+    # so a wrapping tier passes and a trapping or range-growing tier fails;
+    # closing go/java/ts means emitting the checked form, as wasm already
+    # does. java is recorded from its emitted source (`return (-x)` on
+    # `long`) and is not asserted: no test parametrizes java.
+    "negating Int.MIN does not trap on every tier": (
+        'pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n'
+        'pub fn neg(x: Int) -> Int { return -x }\n'
+        'test "pinned" { assert neg(lo()) == 0 - 9223372036854775807 - 1 }',
+        {"py": "fail", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
+    ),
 }
 
 
@@ -287,6 +305,77 @@ def test_integer_division_by_zero_faults(tier: str):
         f"returns a value here is unsound, not lenient: {message}")
 
 
+# ------------------------------------------------- the total division forms
+#
+# The faulting operations have a total, value-returning counterpart:
+# `checked_div_trunc` / `checked_div_floor` / `checked_div_euclid` /
+# `checked_mod` return `Result[Int, Str]` — Ok(quotient), or Err(reason) at a
+# zero divisor instead of the fault. `fail` cannot serve here (it is a
+# component construct and is refused in a pure fn), so the error travels as a
+# value (docs/arithmetic.md). The rounding convention is the *same* one each
+# named operation already specifies — only the zero-divisor behaviour differs.
+#
+# A literal zero divisor is refused for the faulting operations
+# (arith_zero_divisor.rvl) and deliberately accepted for these: handling it
+# is the entire point.
+
+CHECKED_DIVISION = """
+pub fn qt(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }
+pub fn qf(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_floor(b) }
+pub fn qe(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_euclid(b) }
+pub fn qm(a: Int, b: Int) -> Result[Int, Str] { return a.checked_mod(b) }
+pub fn qt_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qt(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+pub fn qf_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qf(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+pub fn qe_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qe(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+pub fn qm_is(a: Int, b: Int, want: Int, iserr: Bool) -> Bool {
+  return match qm(a, b) { Ok(v) => !iserr && v == want, Err(e) => iserr && e == "revl: division by zero" }
+}
+test "checked trunc rounds toward zero"   { assert qt_is(7, 2, 3, false) }
+test "checked trunc on negatives"         { assert qt_is(0 - 7, 2, 0 - 3, false) }
+test "checked trunc yields Err at zero"   { assert qt_is(7, 0, 0, true) }
+test "checked floor rounds toward -inf"   { assert qf_is(0 - 7, 2, 0 - 4, false) }
+test "checked floor yields Err at zero"   { assert qf_is(5, 0, 0, true) }
+test "checked euclid, both negative"      { assert qe_is(0 - 7, 0 - 2, 4, false) }
+test "checked euclid yields Err at zero"  { assert qe_is(5, 0, 0, true) }
+test "checked mod is never negative"      { assert qm_is(0 - 7, 3, 2, false) }
+test "checked mod yields Err at zero"     { assert qm_is(5, 0, 0, true) }
+"""
+
+
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_checked_division_returns_values(tier: str):
+    status, message = _run(tier, CHECKED_DIVISION)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", SLOW_TIERS)
+def test_checked_division_returns_values_slow(tier: str):
+    status, message = _run(tier, CHECKED_DIVISION)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+def test_literal_zero_divisor_accepted_for_checked_forms():
+    """The checker refuses `x.mod(0)` (arith_zero_divisor.rvl) because it is
+    not a program anyone meant to write. Passing a literal zero to the total
+    form IS such a program — handling it is what it is for."""
+    compile_source(
+        "pub fn d(b: Int) -> Result[Int, Str] { return 7.checked_div_trunc(b) }\n"
+        "pub fn z() -> Result[Int, Str] { return 7.checked_mod(0) }\n",
+        "checked_lit_zero.rvl")
+
+
 def test_typescript_guards_the_divisor():
     """The guard travels with the module, and every named integer operation
     routes through it rather than through a bare `/`."""
@@ -295,6 +384,24 @@ def test_typescript_guards_the_divisor():
     for helper in ("revlDivTrunc", "revlDivFloor", "revlDivEuclid", "revlMod"):
         assert f"function {helper}" in emitted, helper
     assert "revl: division by zero" in emitted
+
+
+def test_checked_division_lowers_on_every_tier():
+    """The total forms produce a Result value on each tier through that
+    tier's Result representation: tagged objects on TS, std Result on rust,
+    RevlResult on java, RevlOk/RevlErr on go, tagged cells on wasm."""
+    for helper in ("revlCheckedDivTrunc", "revlCheckedDivFloor",
+                   "revlCheckedDivEuclid", "revlCheckedMod"):
+        assert f"function {helper}" in _emit("typescript", CHECKED_DIVISION), helper
+    assert 'Err::<i64, String>("revl: division by zero".to_string())' in \
+        _emit("rust", CHECKED_DIVISION)
+    java = _emit("java", CHECKED_DIVISION)
+    assert "revlCheckedDivTrunc" in java and "RevlResult<Long, String>" in java
+    go = _emit("go", CHECKED_DIVISION)
+    assert "RevlOk[int64, string]" in go and "RevlErr[int64, string]" in go
+    wasm = _emit("wasm", CHECKED_DIVISION)
+    wat = wasm["functions"] if isinstance(wasm, dict) else wasm
+    assert "(i64.eqz" in wat and "revl: division by zero" in wat
 
 
 # --------------------------------------------------------- the pairing law
@@ -444,6 +551,7 @@ test "near the bound"     { assert 9223372036854775807 - 1 == 922337203685477580
 test "multiplication"     { assert 1000000 * 1000000 == 1000000000000 }
 test "negative bound"     { assert (0 - 9223372036854775807) + 1 == 0 - 9223372036854775806 }
 test "precision past 2^53" { assert 9007199254740993 - 9007199254740992 == 1 }
+test "negation in range"  { assert -(0 - 42) == 42 }
 """
 
 INT_OVERFLOW = """
@@ -496,6 +604,40 @@ def test_every_bounded_tier_uses_the_same_trap_message():
                             ("java", "Math.addExact")):
         emitted = _emit(backend, INT_OVERFLOW)
         assert needle in emitted, (backend, emitted[:400])
+
+
+# ------------------------------------------------- unary minus re-imposes the bound
+#
+# Negation is `0 - x`, and `0 - Int.MIN` overflows — so `-x` on an Int is
+# arithmetic and must fault at the edge like every other operation. python
+# imposed the bound on `+`, `-` and `*` but let unary minus lower to the
+# host's operator, so `-Int.MIN` came back as 2^63: out of the very range
+# python imposes elsewhere, silently. It now goes through `_revl_i64`.
+# The tiers that do NOT trap are pinned in DIVERGENCES below.
+
+NEG_INT_MIN = """
+pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }
+pub fn neg(x: Int) -> Int { return -x }
+test "negating Int.MIN must not produce a value" { assert neg(lo()) == 0 }
+"""
+
+
+def test_python_negation_of_int_min_traps(capsys):
+    """python is arbitrary precision, so it *imposes* the bound rather than
+    detects it — and negation used to slip past that imposition."""
+    status, message = _run("py", NEG_INT_MIN)
+    if status == "skip":
+        pytest.skip(message)
+    assert status == "fail", f"python returned a value for -Int.MIN: {message}"
+    # the runner reports the per-test fault on stdout, not in its summary
+    assert "revl: Int overflow" in capsys.readouterr().out
+
+
+def test_python_emits_int_negation_through_the_bound():
+    """The static half of the guarantee: an Int negation must render through
+    the bound helper, not the host's unary minus."""
+    emitted = _emit("python", NEG_INT_MIN)
+    assert "_revl_i64(-" in emitted
 
 
 def test_wasm_int_is_i64_and_checks_the_bound():

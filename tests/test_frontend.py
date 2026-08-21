@@ -95,6 +95,7 @@ REJECTIONS = {
     "v2_extern_acquire_no_undo.rvl": "acquire extern `listen` must declare `undo` (G4)",
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
     "arith_zero_divisor.rvl": "`mod` by a literal zero is undefined",
+    "t20_int_literal_range.rvl": "Int literal `9223372036854775808` is outside the 64-bit range",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
     "t1_service_arg_type.rvl": "`db.query` argument `sql` expects `Str`, got `Int`",
@@ -107,6 +108,7 @@ REJECTIONS = {
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
+    "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
     "t3_config_default_type.rvl": "config field `n` default expects `Int`, got `Str`",
     "t4_field_arg_type.rvl": "`s.take` argument `s` expects `Str`, got `Int`",
@@ -305,3 +307,52 @@ def test_rejections_carry_file_and_line():
     rendered = str(excinfo.value)
     assert "g1_undeclared_access.rvl:" in rendered
     assert excinfo.value.line == 12  # the `let rows = effect db.query(...)` line
+
+
+# --------------------------------------------------------- Int literal range
+# `Int` is 64-bit two's complement (docs/arithmetic.md): in-range literals
+# compile, the boundary value compiles, and one step past either edge is a
+# compile-time diagnostic instead of a behaviour that differs per tier.
+
+def _compile_return(expr_src: str) -> None:
+    from revl import compile_source
+
+    compile_source(f"fn probe() -> Int {{ return {expr_src} }}")
+
+
+@pytest.mark.parametrize("literal", [
+    "0",
+    "1",
+    "0 - 1",
+    "9223372036854775806",
+    "9223372036854775807",  # INT64_MAX
+])
+def test_int_literal_in_range_compiles(literal):
+    _compile_return(literal)
+
+
+def test_int_literal_min_by_computation_compiles():
+    # `Int.MIN` has no spelling (see next test); computing it from in-range
+    # literals is a runtime concern and compiles fine.
+    _compile_return("(0 - 9223372036854775807) - 1")
+
+
+@pytest.mark.parametrize("literal,shown", [
+    ("9223372036854775808", "9223372036854775808"),    # MAX + 1
+    ("-9223372036854775809", "9223372036854775809"),   # MIN - 1
+])
+def test_int_literal_out_of_range_rejected(literal, shown):
+    with pytest.raises(RevlError) as excinfo:
+        _compile_return(literal)
+    message = str(excinfo.value)
+    assert f"Int literal `{shown}` is outside the 64-bit range" in message
+
+
+def test_int_min_has_no_spelling():
+    # docs/arithmetic.md: the same refusal is why `Int.MIN` cannot be written.
+    # Unary minus applies to the *positive* literal, so `-9223372036854775808`
+    # negates an out-of-range literal and is rejected before any tier sees it.
+    with pytest.raises(RevlError) as excinfo:
+        _compile_return("-9223372036854775808")
+    assert "Int literal `9223372036854775808` is outside the 64-bit range" \
+        in str(excinfo.value)
