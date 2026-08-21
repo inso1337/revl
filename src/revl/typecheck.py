@@ -498,7 +498,16 @@ _BUILTIN_SIG = {
     "div_trunc": ("Int", ["Int"], "Int"),
     "div_floor": ("Int", ["Int"], "Int"),
     "div_euclid": ("Int", ["Int"], "Int"),
-    "mod": ("Int", ["Int"], "Int"),
+    # The total, value-returning forms (docs/arithmetic.md, "Still open"):
+    # same rounding convention as their faulting counterparts, but a zero
+    # divisor yields `Err(reason)` instead of faulting — `fail` cannot serve
+    # here (it is a component construct, refused in a pure fn), so the error
+    # travels as a value. The Err payload is `Str` because it is the one
+    # type every tier can hold in a Result without new representation.
+    "checked_div_trunc": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_div_floor": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_div_euclid": ("Int", ["Int"], "Result[Int, Str]"),
+    "checked_mod": ("Int", ["Int"], "Result[Int, Str]"),
 }
 
 
