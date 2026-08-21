@@ -27,7 +27,7 @@ generate → check → run loop closes inside one file (`test`/`verified`,
 syntax-2.0 §7), and the checker's totality lets a corpus be
 compile-verified rather than hoped-for.
 
-## One language, five tiers
+## One language, six tiers
 
 The same checked front-end lowers to a family of hardened runtimes rather
 than to raw native code (DESIGN.md §8 explains why native is deliberately not
@@ -40,8 +40,9 @@ component owned, which `dlopen`/`dlclose` cannot promise):
 | portability | cordis (TypeScript, v4) | the same IR runs unchanged on a second host |
 | performance + enforcement | cordis-wasm | confinement becomes physical (sandbox), instances drop cleanly |
 | spikes | cordis-rs (Rust), cordis4j (Java) | the backend contract is small enough to target any Cordis runtime |
+| third-party runtime | cordis-go (Go) | the same contract holds for a Cordis runtime nobody on the project wrote ([stc-go](https://github.com/0xdenny218/stc-go)) |
 
-One `.rvl` source, one IR, five emitters. The [2.0 roadmap](v2.0-roadmap.md)
+One `.rvl` source, one IR, six emitters. The [2.0 roadmap](v2.0-roadmap.md)
 tracks per-tier coverage.
 
 Where each "what it proves" is actually proved — a claim in this project gets
@@ -53,6 +54,7 @@ a command or it gets softened:
 | cordis (TS) | `cd backends/typescript && npm ci && npx vitest run` | same IR, second host |
 | cordis-wasm | `pytest backends/wasm/test_v3_emit.py tests/test_wasm_backend.py -q` | executes on real `wasmtime`; skips without it |
 | cordis-rs, cordis4j | `pytest backends/rust/test_emit_rust.py backends/java/test_emit_java.py -q` | needs cargo + a JDK; skips loudly otherwise |
+| cordis-go | `pytest backends/go/test_emit_go.py -q` | emitted code executes on real stc-go under `go test`; skips loudly otherwise |
 
 What every tier can and cannot *express* is measured by
 `python3 tools/conformance.py` and recorded in
