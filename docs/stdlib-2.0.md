@@ -29,6 +29,9 @@ revl refuses.)
 | `checked_div_floor(b)` | 1 | Int | total `div_floor`, same Result shape | native `//` under `Ok` | built |
 | `checked_div_euclid(b)` | 1 | Int | total `div_euclid`, same Result shape | built | built |
 | `checked_mod(b)` | 1 | Int | total `mod`, same Result shape | `a % abs(b)` under `Ok` | built |
+| `set(k, v)` | 2 | Map | **persistent** put — new map, receiver unchanged (§Map below) | `{**x, k: v}` | IIFE copy + `set` |
+| `lookup(k)` | 1 | Map | value under `k` as `Opt[V]` | `x.get(k)` | `x.get(k)` |
+| `has(k)` | 1 | Map | key membership | `k in x` | `x.has(k)` |
 
 - `push`/`concat` are **persistent** (value semantics) — consistent with
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:
@@ -71,13 +74,90 @@ canonical-ABI string/list model and rejects the rest (`indexOf`, `split`,
 `join`, `repeat`) with its usual named tier error — not yet lowerable on
 that tier.
 
-## Planned (needed for self-hosting, not yet specified)
+## `Map`: the persistent value type (graduated from Planned)
 
-`Map` as a *value* type (persistent set/get/has) — symbol tables for the
-self-hosted checker. Extend the table here first, per the house rule:
-spec, then checker, then all emitters, then tests. (`split`/`join`/
-`repeat` graduated to the table above for the self-hosted lexer.)
+`Map[Str, V]` is now a *value* type — the symbol table the self-hosted
+checker needs. It is specified here before any code, per the house rule:
+spec, then checker, then all emitters, then tests.
 
+### Surface
+
+| form | arity | on | semantics |
+|---|---|---|---|
+| `Map.empty()` | 0 | (constructor) | the empty map, typed `Map[Str, Never]` |
+| `set(k, v)` | 2 | Map | **persistent** put — returns a new map, receiver unchanged |
+| `lookup(k)` | 1 | Map | `Opt[V]` — the value under `k`, or `None` |
+| `has(k)` | 1 | Map | `Bool` — is `k` present? |
+
+The grain follows `List`: operations are methods on the value (`m.set(k, v)`
+rebinds, exactly like `out = out.push(v)`), because revl has no mutation and
+no free-function namespace to pollute. There is deliberately no `remove`,
+no `length`, no iteration yet — symbol tables need build/read/member, and
+the surface grows by specification, not by accretion.
+
+### Coexistence with the host `Map.new()`
+
+The v1 host stub object (`let store = Map.new()`, methods
+`insert/remove/get/drop`) keeps its exact existing surface. The two
+namespaces stay collision-free **by construction**: every new value-side
+name (`empty`, `set`, `lookup`, `has`) was chosen disjoint from the host
+verb set (`open/close/query/execute/new/get/insert/remove/drop`). In
+particular the reader is `lookup`, not `get` — `get` already means the host
+stub's unchecked read, and reusing the spelling would make `x.get(k)`
+uninterpretable to a human even though dispatch itself is unambiguous
+(host-family receivers route to `_HOST_FAMILIES` before `_BUILTIN_SIG` ever
+runs). The disjointness is pinned by a test, so extending either namespace
+without keeping it fails CI. `Map.empty()` vs `Map.new()` reads exactly
+like what they are: an empty persistent value vs a stateful host object.
+
+### Semantics, pinned
+
+- **Keys are `Str`.** Every tier hashes strings natively, and the target
+  application (symbol tables) is string-keyed. `Map[Int, V]` parses (the
+  type algebra admits it) but no operation accepts a non-`Str` key, so it
+  cannot be populated; widening keys is a later spec change.
+- **Values are one type `V`**, inferred from use: `m.set(k, v)` requires
+  `v` to match the receiver's `V`.
+- **Persistence:** `set` returns a fresh map; the receiver is untouched.
+  `let m2 = m.set(k, v)` leaves `m` exactly as it was, on every tier.
+- **Equality** is the language's one structural equality (syntax-2.0
+  §3.4), specialized order-independently: two maps are equal iff they have
+  the same key set and equal values under every key — `{a=1, b=2} ==
+  {b=2, a=1}`. Insertion order is never observable through `==`.
+- **`Map.empty()` types as `Map[Str, Never]`.** `Never` is the bottom of
+  the compatibility relation, so the empty map flows into any `Map[Str,
+  V]` — the same trick the untyped empty list literal plays — and `set`
+  widens it from there.
+
+### Per-tier representation
+
+| tier | representation | equality lowering |
+|---|---|---|
+| python | `dict` | native `==` (order-independent) |
+| typescript | built-in `Map<K, V>` | `revlEq` gains a `Map` branch |
+| go | `map[string]V` | `reflect.DeepEqual` via `revlEq` |
+| rust | `std::collections::HashMap<String, V>` | native `PartialEq` |
+| java | `java.util.HashMap<String, V>` | native `Map.equals` |
+
+All five give structural, order-independent map equality natively; only TS
+needs help, because `Object.keys(new Map())` is `[]`.
+
+**wasm refuses.** That tier lowers only Int/Bool/String/List over its
+canonical-ABI model; a persistent map needs a richer value model than that
+tier has (there are not even pairs to spell an assoc list with). `set`,
+`lookup`, `has` and `Map.empty()` therefore fail with the same named tier
+error shape as `indexOf` did — an honest refusal, never a miscompile. It
+graduates when the tier grows a map (or assoc-list) value model.
+
+**Go's inference limit, stated honestly:** Go cannot infer a composite
+literal's type from later use, so `var m = Map.empty()` compiles on every
+tier *except* that the go emitter needs the empty map's type pinned by
+context — a typed return position (`fn newTable() -> Map[Str, Int] { return
+Map.empty() }`), a parameter, or any annotated flow. Unpinned, it refuses
+at emit time with a message saying so, mirroring how an untyped empty list
+literal already behaves on tiers that cannot infer it.
+
+## Versioning
 
 Integer division and modulo are specified in **docs/arithmetic.md**, including
 why `/` is true division and `%` keeps TypeScript's truncated remainder.
