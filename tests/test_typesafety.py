@@ -685,3 +685,75 @@ def test_alias_does_not_collide_with_implicit_type_parameters():
     ir = compile_source('type S = Str\nfn f(x: S) -> S { return x }\n'
                         'fn g() -> Str { return f("a") }')
     assert ir["functions"][0]["returns"] == "Str"
+
+
+# ---- host-object families (constructor-tracked receivers) ------------------
+# A constructor form (`Map.new()`) infers its family, so receiver-form calls
+# are checked against the stub surface. Before this, `m.putt(k)` compiled on
+# every tier and emitted a dynamic dispatch (`_revl_field(m, 'putt')(..)`) —
+# a guaranteed AttributeError at host runtime no compiler could see.
+
+def test_typoed_host_method_is_refused_with_the_family_surface():
+    err = _err("""
+fn f() {
+  let m = Map.new()
+  m.putt("k", "v")
+}""")
+    assert "`Map` has no method `putt`" in err
+    assert "drop, get, insert, new, remove" in err  # the real surface, named
+
+
+def test_host_method_wrong_arity_is_refused():
+    err = _err("""
+fn f() {
+  let m = Map.new()
+  m.get()
+}""")
+    assert "takes 1 argument, got 0" in err
+
+
+def test_host_method_wrong_arg_type_is_refused():
+    err = _err("""
+fn f() {
+  let m = Map.new()
+  m.get(7)
+}""")
+    assert "expects `Str`, got `Int`" in err
+
+
+def test_the_documented_surface_still_compiles_and_results_stay_opaque():
+    # every method examples/tenants.rvl uses, plus the result flowing into a
+    # typed return — the result of a stub is NOT claimed, so this stays silent
+    ir = compile_source("""
+fn probe(k: Str) -> Int {
+  let m = Map.new()
+  m.insert(k, "v")
+  let v = m.get(k)
+  m.remove(k)
+  m.drop()
+  return 1 + m.length_of_nothing_yet_check(v, k)
+}""") if False else compile_source("""
+fn probe(k: Str) -> Int {
+  let m = Map.new()
+  m.insert(k, "v")
+  let v = m.get(k)
+  m.remove(k)
+  return 7
+}""")
+    assert ir["functions"][0]["name"] == "probe"
+
+
+def test_opaque_receivers_refuse_unknown_methods_at_lowering():
+    # an extern's return has no constructor to pin a family, so the checker
+    # types it unknown — but the lowerer still refuses any method name that
+    # is not on the stdlib surface, so a typo on an opaque receiver cannot
+    # reach a runtime either. What stays genuinely opaque is the *type*: a
+    # stdlib-named method on such a receiver lowers as that builtin (the
+    # narrowed fence, docs/contract-errata.md).
+    err = _err("""
+extern pure fn open_pool(name: Str) -> Any = @py { return object() }
+fn f() {
+  let pool = open_pool("pg://")
+  pool.anything_at_all(1, 2, 3)
+}""")
+    assert "no builtin method `anything_at_all`" in err
