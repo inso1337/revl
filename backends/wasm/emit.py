@@ -1209,9 +1209,14 @@ class _V3Emitter:
     def _collect_string_literals(self, roots: list | None = None) -> None:
         """Pool every string constant reachable from `roots` into data.
 
-        `roots` defaults to this module's function bodies. The component path
-        passes its own set (its body plus only the functions it calls) so a
-        component module carries just the data it can reach.
+        `roots` defaults to this module's function bodies PLUS its `test`
+        bodies — the tests are lowered later (as exported `revl_test_*`
+        functions) but their string literals, template text segments and
+        checked-division Err messages pool through the same `_str_ptr`, so
+        they must be collected here or lowering a test raises "string
+        literal … was not pooled". The component path passes its own set
+        (its body plus only the functions it calls) so a component module
+        carries just the data it can reach.
         """
         seen: dict[str, None] = {}
 
@@ -1240,7 +1245,10 @@ class _V3Emitter:
                 for child in node:
                     walk(child)
 
-        for root in (roots if roots is not None else [fn.get("body") for fn in self.functions]):
+        if roots is None:
+            roots = ([fn.get("body") for fn in self.functions]
+                     + [t.get("body") or [] for t in self.tests])
+        for root in roots:
             walk(root)
         offset = 0
         for value in seen:
@@ -2741,7 +2749,9 @@ class _V3Emitter:
         for offset, data in self.data_segments:
             lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
         lines.append(f"  (global $__hp (mut i32) (i32.const {self.heap_start}))")
-        if self.functions:
+        # tests call the same helpers their functions do ($str_eq, $alloc_str,
+        # …), so a document whose bodies are all `test` blocks still needs them
+        if self.functions or self.tests:
             lines.extend(self._helper_funcs())
         lines.extend(self._type_comments())
         unsupported = self._unsupported_comments()
