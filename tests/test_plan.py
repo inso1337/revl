@@ -356,15 +356,160 @@ def test_a_rejected_admission_still_reports_the_delta(running):
     assert result["resulting"]["loadOrder"] is None
 
 
-def test_interface_drift_is_enumerated_not_just_the_first_one(running):
+def test_interface_drift_reports_what_the_gate_would_refuse(running):
     drift = plan(source=DRIFT, manifest=running)["interfaceDrift"]
     assert [entry["service"] for entry in drift] == ["Database"]
-    assert drift[0]["running"] == ["execute", "query"]
-    assert drift[0]["candidate"] == ["query"]
+    assert drift[0]["method"] == "execute"
+    assert drift[0]["kind"] == "removed"
+    assert "a running consumer may still call it" in drift[0]["reason"]
+    # the running components the change strands, read off the manifest
+    assert "Store" in drift[0]["consumers"]
+    assert "Db" in drift[0]["providers"]
 
 
 def test_an_admitted_plan_reports_no_drift(running):
     assert plan(source=ADDITION, manifest=running)["interfaceDrift"] == []
+
+
+# ------------------------------------------- compatible evolution (§5/§6.6)
+
+# The structural relation (docs/service-compat.md) admits *compatible* change
+# and refuses incompatible change, but only against the running components
+# that actually touch the interface. Each candidate below replaces its
+# provider (`Db`/`N1` is re-declared, so no running provider is retained —
+# G2 forbids two providers of one key), while a running *consumer* survives
+# (`Store` injects `db`, `Watch` injects `nick`): the candidate is NOT allowed
+# to redeclare that consumer, so its call sites pin the shared methods. The
+# old preview flagged every dict inequality as drift; the structural relation
+# must report none of these.
+
+EVOLVE_ADD = """
+service Database { fn query(sql: Str) -> List[Row]
+                   emission fn execute(sql: Str) -> Int
+                   fn health() -> Bool }
+component Db provides db: Database {
+  let pool = effect Pool.open("u", 1) undo pool.close()
+  provide db { fn query(sql) = pool.query(sql)
+               fn execute(sql) = pool.execute(sql)
+               fn health() = true }
+}
+"""
+
+NICK_CHAIN = """
+service Nick { fn name(id: Str) -> Opt[Str]
+               fn area(w: Int) -> Int }
+component N1 provides nick: Nick {
+  let m = effect Map.new() undo m.drop()
+  provide nick { fn name(id) = m.get(id)
+                 fn area(w) = w }
+}
+component Watch requires nick: Nick {
+  let m = effect Map.new() undo m.drop()
+}
+"""
+
+EVOLVE_WIDEN_PARAM = """
+service Nick { fn name(id: Str) -> Opt[Str]
+               fn area(w: Float) -> Int }
+component N1 provides nick: Nick {
+  let m = effect Map.new() undo m.drop()
+  provide nick { fn name(id) = m.get(id)
+                 fn area(w) = 0 }
+}
+"""
+
+EVOLVE_NARROW_RETURN = """
+service Nick { fn name(id: Str) -> Str
+               fn area(w: Int) -> Int }
+component N1 provides nick: Nick {
+  let m = effect Map.new() undo m.drop()
+  provide nick { fn name(id) = "ok"
+                 fn area(w) = w }
+}
+"""
+
+EVOLVE_DROP_EMISSION = """
+service Database { fn query(sql: Str) -> List[Row]
+                   fn execute(sql: Str) -> Int }
+component Db provides db: Database {
+  let pool = effect Pool.open("u", 1) undo pool.close()
+  provide db { fn query(sql) = pool.query(sql)
+               fn execute(sql) = 0 }
+}
+"""
+
+
+@pytest.mark.parametrize("source", [EVOLVE_ADD, EVOLVE_WIDEN_PARAM,
+                                    EVOLVE_NARROW_RETURN,
+                                    EVOLVE_DROP_EMISSION],
+                         ids=["add-method", "widen-param", "narrow-return",
+                              "drop-emission"])
+def test_compatible_evolution_is_not_drift(running, source):
+    """Compatible evolution under a *retained consumer* is admitted and is not
+    drift: `Store`/`Watch` keeps its call sites against the old interface, and
+    the relation allows what keeps them valid (a method may be added, a
+    parameter widened, a return narrowed, an emission dropped)."""
+    manifest = running if source in (EVOLVE_ADD, EVOLVE_DROP_EMISSION) \
+        else compile_source(NICK_CHAIN)
+    result = plan(source=source, manifest=manifest)
+    assert result["admissible"] is True
+    assert result["interfaceDrift"] == []
+
+
+# Genuine breaks, each under the same retained consumer. The candidate
+# deliberately does NOT redeclare `Watch`: a running consumer whose call sites
+# are never recompiled is what pins the interface (docs/service-compat.md).
+# Redeclaring the whole program would drop `Watch` from the gate's ambient and
+# the admission would (correctly) admit any shape change — that mistake is
+# exactly what the earlier draft of these tests made.
+
+BREAK_EMISSION = """
+service Nick { fn name(id: Str) -> Opt[Str]
+               emission fn area(w: Int) -> Int }
+component N1 provides nick: Nick {
+  let m = effect Map.new() undo m.drop()
+  provide nick { fn name(id) = m.get(id)
+                 fn area(w) = m.drop() }
+}
+"""
+
+BREAK_NARROW_PARAM = """
+service Nick { fn name(id: Str) -> Opt[Str]
+               fn area(w: Str) -> Int }
+component N1 provides nick: Nick {
+  let m = effect Map.new() undo m.drop()
+  provide nick { fn name(id) = m.get(id)
+                 fn area(w) = 0 }
+}
+"""
+
+BREAK_REMOVE_METHOD = """
+service Nick { fn name(id: Str) -> Opt[Str] }
+component N1 provides nick: Nick {
+  let m = effect Map.new() undo m.drop()
+  provide nick { fn name(id) = m.get(id) }
+}
+"""
+
+
+@pytest.mark.parametrize("source,kind,method,needle", [
+    (BREAK_EMISSION, "emission", "area", "becomes an `emission`"),
+    (BREAK_NARROW_PARAM, "signature", "area", "narrows"),
+    (BREAK_REMOVE_METHOD, "removed", "area", "removed"),
+], ids=["emission-appears", "narrow-param", "remove-method"])
+def test_genuine_breaks_still_appear_as_drift(source, kind, method, needle):
+    """Genuine breaks are refused and the plan names the same method, kind and
+    reason the gate's own G2 rejection does, plus the running consumer the
+    change strands."""
+    running = compile_source(NICK_CHAIN)
+    result = plan(source=source, manifest=running)
+    assert result["admissible"] is False
+    entries = [(d["kind"], d["method"]) for d in result["interfaceDrift"]]
+    assert (kind, method) in entries
+    entry = next(d for d in result["interfaceDrift"]
+                 if (d["kind"], d["method"]) == (kind, method))
+    assert needle in entry["reason"]
+    assert "Watch" in entry["consumers"]
 
 
 def test_a_g2_conflict_is_reported_with_the_delta_it_would_have_caused(running):

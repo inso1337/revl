@@ -861,6 +861,12 @@ def _expr(
         ctx = _V3Ctx({}, [], [])
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed v3 expression: {node!r}")
+    # An implicit Int -> Float coercion site (docs/arithmetic.md): java used
+    # to absorb it behind JLS 5.1.2's long->double widening; the marker makes
+    # the conversion explicit in the emitted source.
+    if node.get("widen") == "Float":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"((double) ({_expr(inner, ctx, rename, env)}))"
     kind = node["kind"]
 
     if kind == "lit":

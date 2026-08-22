@@ -814,6 +814,13 @@ def _match_expr(scrutinee: str, arms: list) -> str:
 def _expr(node: dict) -> str:
     if isinstance(node, dict) and node.get("kind") == "__rendered__":
         return node["text"]
+    # An implicit Int -> Float coercion site (docs/arithmetic.md): the
+    # frontend marks it, this tier renders the conversion. python would
+    # otherwise absorb `3` silently, which is exactly the invisibility the
+    # marker exists to remove.
+    if isinstance(node, dict) and node.get("widen") == "Float":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"float({_expr(inner)})"
     kind = node["kind"]
     if kind == "lit":
         return repr(node["value"])

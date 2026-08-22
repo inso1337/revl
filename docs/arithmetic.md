@@ -311,31 +311,42 @@ a value it had and `9007199254740993 - 9007199254740992` was `0`. `Int` is now
   conflates one with a `number`, so an `Int` and a `Float` cannot compare
   equal by accident.
 
-### `Int` widens into `Float`, and the IR does not say where
+### `Int` widens into `Float`, and the IR now says where
 
 `compatible("Float", "Int")` is true, so `1.5 + 2` and `ident(3)` (for
 `fn ident(x: Float) -> Float`) both type-check. The `bin` node carries
-`operands`, so the *arithmetic* case is specifiable and every tier gets it
-right. Nothing else is: a `call` argument, a `record` field, a `let` value and
-a `list` element all reach a backend as a bare `lit`/`var` with no declared
-type on the node, which is the same shape of gap `operands` was created to
-close for `/`.
+`operands`, so the *arithmetic* case was always specifiable and every tier
+got it right. The rest — a `call` argument, a `let` value, a `return`
+expression — used to reach every backend as a bare `lit`/`var` with no
+declared type on the node, the same shape of gap `operands` was created to
+close for `/`. The tiers that keep `Int` and `Float` apart therefore split
+on `ident(3)`, and not in the same direction:
 
-The tiers that keep `Int` and `Float` apart therefore split, and not in the
-same direction:
+| tier | before | now |
+|---|---|---|
+| python | `3` and `3.0` are both numbers — absorbed it | `ident(float(3))` |
+| go | `3` is an untyped constant — absorbed it | `ident(float64(3))` |
+| java | `long` -> `double` is an implicit widening (JLS 5.1.2) — absorbed it | `ident(((double) (3L)))` |
+| rust | `ident(3i64)` against `f64` is **E0308**, a compile error | `ident((3i64 as f64))` |
+| typescript | `ident(3n)` against `number`; `3n === 3` is false — a **wrong answer** | `ident(Number(3n))` |
+| wasm | refuses `Float` (the tier lowers `Int`/`Bool` only) | refuses, unchanged |
 
-| tier | `ident(3)` |
-|---|---|
-| python | `3` and `3.0` are both numbers — absorbs it |
-| go | `3` is an untyped constant — absorbs it |
-| java | `long` -> `double` is an implicit widening (JLS 5.1.2) — absorbs it |
-| rust | `ident(3i64)` against `f64` is **E0308**, a compile error |
-| typescript | `ident(3n)` against `number`; `3n === 3` is false, so it is a **wrong answer** |
+A refusal was survivable and the wrong answer was not, so the gap was pinned
+in `tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to
+be rediscovered. It is now closed the same way `operands` closed `/`: the
+frontend — the single IR producer, and the only stage that knows both types
+— marks each coercion site on the node itself (`"widen": "Float"`), and
+every backend emits the conversion explicitly instead of letting a host rule
+absorb it. The marker is additive, so no `ir_version` changes and the
+v1/v2/v3 reference documents stay byte-identical.
 
-A refusal is survivable and a wrong answer is not, so this is pinned in
-`tests/test_cross_tier_execution.py` (`DIVERGENCES`) rather than left to be
-rediscovered. The fix is a frontend one, with the precedent above: make the
-coercion explicit in the IR, or refuse the implicit widening.
+The marked sites are exactly the declared-`Float`-position ones: call
+arguments (generic signatures are instantiated first, so a `T` bound to
+`Float` by the call marks too), `let`/`assign` targets declared `Float`, and
+`return` expressions of a `Float`-declared family. A `record` field or a
+`list` element has no declared `Float` position to coerce toward and stays as
+written. Pinned positively: a test asserts the marker is present in the IR,
+and one per tier pins the emitted conversion text.
 
 ## Division by zero
 

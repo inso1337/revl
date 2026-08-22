@@ -378,7 +378,7 @@ def plan(source: str | None = None, files: list[str] | None = None,
                                 after_by_name, replaced_names)
 
     # -- interface drift -----------------------------------------------------
-    drift = _interface_drift(running_ir, candidate_ir)
+    drift = _interface_drift(running_ir, candidate_ir, dropped)
 
     if basis != "admitted":
         notes.append("the admission gate rejected this candidate — nothing below "
@@ -522,13 +522,21 @@ def _emission_surface(running_ir: dict | None, candidate_ir: dict | None,
     return surface
 
 
-def _interface_drift(running_ir: dict | None, candidate_ir: dict | None) -> list[dict]:
-    """Services the candidate redeclares with a different shape.
+def _interface_drift(running_ir: dict | None, candidate_ir: dict | None,
+                     dropped: frozenset | set = frozenset()) -> list[dict]:
+    """Services the candidate redeclares *incompatibly*.
 
-    The gate raises on the first one it meets; this enumerates every
-    disagreement so an author can fix them in one pass. Both tables are
-    lowered by the same code, so a plain structural comparison is exactly
-    `lower._service_equal` over the IR projection.
+    This previews exactly what the admission gate would refuse
+    (`lower._service_compatible`, docs/service-compat.md): a method removal,
+    a parameter narrowing (or arity change), a return widening, an emission
+    appearance or capability widening — each relative to the running
+    components that actually touch the interface. A *compatible* evolution
+    (a method added, a parameter widened, a return narrowed, an emission
+    dropped) is not drift and is not reported; neither is a change to a
+    service nothing running consumes or provides.
+
+    Both tables are lowered by the same code, so the check runs the gate's
+    own relation over `lower._service_from_ir` projections of the two IRs.
     """
     if not running_ir or not candidate_ir:
         return []
@@ -538,17 +546,44 @@ def _interface_drift(running_ir: dict | None, candidate_ir: dict | None) -> list
     # verbatim, so on the admitted path every shared name compares equal and
     # this list is empty by construction. It only fills in on the standalone
     # path, which is exactly where the author needs it.
+    from .lower import (_service_compatible, _service_from_ir,
+                        _service_touchers)
+    # the same ambient view the gate itself sees: running components minus
+    # what this admission drops, plus the key -> service map read off the
+    # running document's `components` (whose `provides` is {key: service}).
+    running_manifest = running_ir.get("manifest", running_ir) or {}
+    key_service: dict = {}
+    for comp in running_ir.get("components") or []:
+        provides = comp.get("provides")
+        if isinstance(provides, dict):
+            key_service.update(provides)
+    ambient = {
+        "services": running,
+        "components": [e for e in running_manifest.get("components") or []
+                       if e.get("name") not in dropped],
+        "provision_services": key_service,
+    }
     drift = []
     for name in sorted(set(running) & set(candidate)):
-        theirs, ours = running[name], candidate[name]
-        if theirs == ours:
+        old = _service_from_ir(name, running[name] or {})
+        new = _service_from_ir(name, candidate[name] or {})
+        touch = _service_touchers(name, ambient)
+        # a retained provider (or an unresolved key that might be one) pins
+        # the interface to identity — exactly as the gate decides it
+        incompatible = _service_compatible(new, old,
+                                           bool(touch.providers)
+                                           or touch.unresolved)
+        if incompatible is None:
             continue
+        if not (touch.consumers or touch.providers or touch.unresolved):
+            continue  # nothing running touches it: the gate admits any change
         drift.append({
             "service": name,
-            "running": sorted((theirs or {}).get("methods") or {}),
-            "candidate": sorted((ours or {}).get("methods") or {}),
-            "detail": "the candidate redeclares this service with a different shape; "
-                      "the admission gate refuses interface drift (DESIGN §6.6)",
+            "method": incompatible.method,
+            "kind": incompatible.kind,
+            "reason": incompatible.reason,
+            "consumers": list(touch.consumers),
+            "providers": list(touch.providers),
         })
     return drift
 
@@ -669,9 +704,12 @@ def render(result: dict) -> str:
     if result["interfaceDrift"]:
         out.append("\ninterface drift (would be refused)")
         for entry in result["interfaceDrift"]:
-            out.append(f"  service {entry['service']}: running "
-                       f"{{{', '.join(entry['running'])}}} vs candidate "
-                       f"{{{', '.join(entry['candidate'])}}}")
+            method = f", method `{entry['method']}`" if entry.get("method") else ""
+            out.append(f"  service {entry['service']}{method} — {entry['kind']}")
+            out.append(f"    {entry['reason']}")
+            affected = list(entry["consumers"]) + list(entry["providers"])
+            if affected:
+                out.append(f"    running components affected: {', '.join(affected)}")
 
     if result["notes"]:
         out.append("\nnotes")

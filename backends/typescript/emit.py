@@ -338,6 +338,13 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     """
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed expression: {node!r}")
+    # An implicit Int -> Float coercion site (docs/arithmetic.md): Int is a
+    # bigint here and Float a number, so without the conversion `ident(3)`
+    # did not just disagree across tiers — it computed the wrong answer
+    # (`3n === 3` is false). The frontend marker makes the coercion emit-able.
+    if node.get("widen") == "Float":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"Number({_expr(inner, ctx)})"
     kind = node["kind"]
     scope = ctx.component_scope
 
