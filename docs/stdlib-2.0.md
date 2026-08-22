@@ -25,6 +25,10 @@ revl refuses.)
 | `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
 | `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
 | `mod(b)` | 1 | Int | Euclidean remainder, always in [0, \|b\|) | `a % abs(b)` | built |
+| `checked_div_trunc(b)` | 1 | Int | total `div_trunc`: `Result[Int, Str]` — `Err(reason)` at a zero divisor instead of a fault (docs/arithmetic.md) | built | built |
+| `checked_div_floor(b)` | 1 | Int | total `div_floor`, same Result shape | native `//` under `Ok` | built |
+| `checked_div_euclid(b)` | 1 | Int | total `div_euclid`, same Result shape | built | built |
+| `checked_mod(b)` | 1 | Int | total `mod`, same Result shape | `a % abs(b)` under `Ok` | built |
 
 - `push`/`concat` are **persistent** (value semantics) — consistent with
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:

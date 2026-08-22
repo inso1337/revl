@@ -86,7 +86,7 @@ field the component does not declare, a duplicate fault-test name.
 The harness (`src/revl/fault.py`) does not simulate anything.
 
 1. **Splice.** Deep-copy the IR and insert an IR `fail` step at index `N-1` of
-   the target component's body. `fail` is a step the frontend and all five
+   the target component's body. `fail` is a step the frontend and all six
    backends already carry — it is how an author writes a *deliberate* L-Raise
    — so a fault test drives exactly the machinery the hand-written A8 scenarios
    drive. This is the "reuse, don't invent" call the design note asked for.

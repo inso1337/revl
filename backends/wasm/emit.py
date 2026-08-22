@@ -60,6 +60,12 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: a slot always holds the same 8 bytes whichever way it is read.
 _SLOT = 8
 
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
+                 "checked_div_euclid", "checked_mod")
+_DIV_ZERO_MSG = "revl: division by zero"
+
 
 def _align4(value: int) -> int:
     return (value + 3) & ~3
@@ -379,6 +385,9 @@ class _ComponentEmitter:
         self.extra_locals.update(f"l_{name}" for name in binds)
         self.extra_locals.update(scruts)
         self.extra_locals.update(arrows)
+        cdiv_locals: list[str] = []
+        self.v3._collect_cdiv_locals(v3_node, cdiv_locals)
+        self.extra_locals.update(cdiv_locals)
         self.uses_v3 = True
         self.func_uses_v3 = True
         return self.v3._expr(v3_node, _Scope(dict(scope), dict(types)), where)
@@ -395,6 +404,7 @@ class _ComponentEmitter:
         self.v3._arrows = {}
         self.v3._arrow_counter = 0
         self.v3._match_counter = 0
+        self.v3._cdiv_counter = 0
         self.v3._loop_counter = 0
         self.v3._for_temps = []
         self.v3._local_types = {}
@@ -985,6 +995,31 @@ def _wat_bytes(data: bytes) -> str:
     return "".join(parts)
 
 
+def test_export_names(tests: list) -> list[tuple[str, str]]:
+    """The deterministic wasm export for each `test` block, in document order.
+
+    A test name is free-form source text ("add works"); an export name must be
+    a wasm identifier, so it is slugified (`revl_test_add_works`) with a
+    counter suffix on collision — deterministically, so the host-side test
+    runner (`src/revl/test.py run_wasm`) can compute the same list from the IR
+    alone and invoke each export by name.
+    """
+    used: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for test in tests or []:
+        base = re.sub(r"[^A-Za-z0-9_]", "_", str(test.get("name") or "test"))
+        if not base or base[0].isdigit():
+            base = f"test_{base}"
+        name = f"revl_test_{base}"
+        counter = 0
+        while name in used:
+            counter += 1
+            name = f"revl_test_{base}_{counter}"
+        used.add(name)
+        out.append((test.get("name"), name))
+    return out
+
+
 class _V3Emitter:
     """IR v3 types + pure functions -> a standalone WAT module.
 
@@ -1089,9 +1124,6 @@ class _V3Emitter:
         if self.externs:
             names = ", ".join(_ident(ext.get("name"), "extern name") for ext in self.externs)
             lines.append(f"  ;; unsupported on this tier: externs {names} (no @wasm body)")
-        if self.tests:
-            names = ", ".join(repr(test.get("name")) for test in self.tests)
-            lines.append(f"  ;; unsupported on this tier: tests {names} (test runner is host-side)")
         return lines
 
     # -- type/layout helpers --------------------------------------------------
@@ -1187,6 +1219,11 @@ class _V3Emitter:
             if isinstance(node, dict):
                 if node.get("kind") == "lit" and isinstance(node.get("value"), str):
                     seen.setdefault(node["value"], None)
+                if node.get("method") in _CHECKED_DIVS:
+                    # the total division forms carry their Err reason from
+                    # the emitter, not from a literal in the source — pool it
+                    # here so `_str_ptr` can name it at lowering time
+                    seen.setdefault(_DIV_ZERO_MSG, None)
                 if node.get("kind") == "interp":
                     # template text segments are string literals too
                     for part_kind, part in node.get("parts") or []:
@@ -1821,7 +1858,7 @@ class _V3Emitter:
         if kind == "call":
             return self._call_expr(node, scope, where, expected)
         if kind == "builtin":
-            return self._builtin_expr(node, scope, where)
+            return self._builtin_expr(node, scope, where, expected)
         if kind == "field":
             return self._field_expr(node, scope, where)
         if kind == "index":
@@ -2023,11 +2060,53 @@ class _V3Emitter:
         parts.append(f"(call ${name})")
         return _E("\n      ".join(parts), sig["returns"])
 
-    def _builtin_expr(self, node: dict, scope: _Scope, where: str) -> _E:
+    def _builtin_expr(self, node: dict, scope: _Scope, where: str,
+                      expected: str | None = None) -> _E:
         method = node.get("method")
         target_node = node.get("target")
         target_ty = self._infer_type(target_node, scope)
         args = node.get("args") or []
+        # The total forms (docs/arithmetic.md): same quotient as the faulting
+        # operation, but a zero divisor yields Err(reason) instead of the
+        # `i64.div_s` trap — `fail` is refused in a pure fn, so the error
+        # travels as a value. Both operands are evaluated once into scratch
+        # slots; each branch allocates its own tagged cell.
+        if method in _CHECKED_DIVS:
+            ty = expected if self._tagged_layout(expected) is not None else "Result[Int, Str]"
+            if self._tagged_layout(ty) is None:
+                raise EmitError(f"{where}: {ty!r} is not a tagged union")
+            # the operands are Int *values* (i64), so they get their own i64
+            # locals rather than the i32 scratch slots the tagged cells use;
+            # the names were minted per-node by `_collect_cdiv_locals`
+            tmp_a = f"cdiv_{node['_cdiv']}_a"
+            tmp_b = f"cdiv_{node['_cdiv']}_b"
+            self._declare_local(tmp_a, "Int", where)
+            self._declare_local(tmp_b, "Int", where)
+            dividend = self._expr(target_node, scope, where, "Int")
+            divisor = self._expr(args[0], scope, where, "Int")
+            read_a = f"(local.get ${tmp_a})"
+            read_b = f"(local.get ${tmp_b})"
+            quotient = {
+                "checked_div_trunc": f"(i64.div_s {read_a} {read_b})",
+                "checked_div_floor": f"(call $int_div_floor {read_a} {read_b})",
+                "checked_div_euclid": f"(call $int_div_euclid {read_a} {read_b})",
+                "checked_mod": f"(call $int_mod {read_a} {read_b})",
+            }[method]
+            ok_cell = self._make_tagged(
+                ty, "Ok",
+                {"kind": "__wat", "wat": quotient, "ty": "Int"},
+                scope, where)
+            err_cell = self._make_tagged(
+                ty, "Err",
+                {"kind": "lit", "value": _DIV_ZERO_MSG},
+                scope, where)
+            wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
+                   f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
+                   f"      (if (result i32)\n"
+                   f"        (i64.eqz {read_b})\n"
+                   f"        (then {err_cell.wat})\n"
+                   f"        (else {ok_cell.wat}))")
+            return _E(wat, ty)
         if method == "length":
             target = self._expr(target_node, scope, where, target_ty)
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
@@ -2303,6 +2382,22 @@ class _V3Emitter:
             for value in node:
                 self._collect_match_locals(value, binds, scruts)
 
+    def _collect_cdiv_locals(self, node: Any, names: list) -> None:
+        """Mint the i64 operand locals each total-division form needs, in the
+        order the bodies are lowered — the same pre-pass `_collect_match_locals`
+        does for match scratch, since both live in expression position."""
+        if isinstance(node, dict):
+            if node.get("method") in _CHECKED_DIVS and "_cdiv" not in node:
+                self._cdiv_counter += 1
+                node["_cdiv"] = self._cdiv_counter
+                names.extend([f"cdiv_{self._cdiv_counter}_a",
+                              f"cdiv_{self._cdiv_counter}_b"])
+            for value in node.values():
+                self._collect_cdiv_locals(value, names)
+        elif isinstance(node, list):
+            for value in node:
+                self._collect_cdiv_locals(value, names)
+
     def _list_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
         ty = self._list_type(node, scope, expected)
         elem_ty = _list_elem(ty)
@@ -2543,7 +2638,15 @@ class _V3Emitter:
             counter += 1
         return candidate
 
-    def _emit_function(self, fn: dict) -> str:
+    def _emit_function(self, fn: dict, *, test_mode: bool = False) -> str:
+        """Lower one v3 function (or, with *test_mode*, one `test` block).
+
+        A test lowers as an exported zero-arg function returning Bool (i32):
+        reaching the end means every `assert` held, so the tail is
+        `(i32.const 1)`; a failed `assert` traps (`unreachable`, the existing
+        statement lowering) before that point — wasmtime surfaces the trap as
+        a nonzero exit, which is the host-side runner's failure signal.
+        """
         name = _ident(fn.get("name"), "function name")
         where = name
         scope = _Scope({}, {})
@@ -2581,12 +2684,16 @@ class _V3Emitter:
         # match binds + one scratch pointer per match (match is in expression
         # position, so _collect_locals doesn't reach it)
         self._match_counter = 0
+        self._cdiv_counter = 0
         match_binds: set[str] = set()
         match_scruts: set[str] = set()
         self._collect_match_locals(fn.get("body") or [], match_binds, match_scruts)
         for bname in sorted(match_binds):
             if bname not in local_names:
                 local_names_in_order.append(f"l_{bname}")
+        cdiv_locals: list[str] = []
+        self._collect_cdiv_locals(fn.get("body") or [], cdiv_locals)
+        local_names_in_order.extend(cdiv_locals)
         for sname in sorted(match_scruts):
             local_names_in_order.append(sname)
         for tname in self._for_temps:
@@ -2608,7 +2715,9 @@ class _V3Emitter:
         for extra in sorted(self._tmp_extra):
             local_names_in_order.append(extra)
         decls = signature + [self._local_decl(n).lstrip() for n in local_names_in_order]
-        if body_lines:
+        if test_mode:
+            body = "\n    ".join(body_lines + ["(i32.const 1)"])
+        elif body_lines:
             body = "\n    ".join(body_lines)
         elif not _is_unit_type(return_ty):
             body = "unreachable"
@@ -2642,6 +2751,24 @@ class _V3Emitter:
             lines.append("")
         for fn in self.functions:
             lines.append(self._emit_function(fn))
+            lines.append("")
+        # Each `test` block lowers to an exported zero-arg function returning
+        # Bool: 1 = every assert held; a failed assert traps before the tail
+        # (`src/revl/test.py run_wasm` invokes these via wasmtime). Lifecycle
+        # tests never reach here — `_refuse_lifecycle_tests` rejects them by
+        # name at the top of `emit`.
+        fn_names = {fn.get("name") for fn in self.functions}
+        for (tname, export), test in zip(test_export_names(self.tests), self.tests):
+            if export in fn_names:
+                raise EmitError(
+                    f"test {tname!r} would export wasm function {export!r}, "
+                    f"which collides with a declared function of the same "
+                    f"name — rename one of them"
+                )
+            lines.append(self._emit_function(
+                {"name": export, "params": [], "returns": "Bool",
+                 "body": test.get("body") or []},
+                test_mode=True))
             lines.append("")
         lines.append(")")
         return "\n".join(lines) + "\n"
@@ -2677,8 +2804,11 @@ def _emit_v3(ir: dict) -> dict[str, str]:
 
     Components (when present) use the v1 component lowering; types and pure
     functions are emitted as a standalone `functions` module with documented
-    record/variant layouts and exported wasm functions. Externs/tests are
-    documented as unsupported in that module rather than rejected wholesale.
+    record/variant layouts and exported wasm functions. Each `test` block is
+    lowered to an exported zero-arg function returning Bool (`revl_test_*`,
+    true = pass, failed asserts trap) so the host-side runner can invoke them;
+    externs remain documented as unsupported in that module rather than
+    rejected wholesale.
     """
     services = ir.get("services") or {}
     components = ir.get("components") or []

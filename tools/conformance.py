@@ -10,7 +10,7 @@ surface and prints what each tier does with it.
 
 Every case is a minimal source. A case that the frontend itself rejects is
 reported as such (a language-level limit, not a backend gap). Otherwise each
-of the five emitters runs and the result is OK or the refusal it raised.
+of the six emitters runs and the result is OK or the refusal it raised.
 """
 
 from __future__ import annotations

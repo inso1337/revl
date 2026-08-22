@@ -203,6 +203,23 @@ say why in revl's words. It is the same limit that already applies to its
 division-by-zero fault, and it is a property of the instruction set rather
 than of the lowering.
 
+### A literal outside the range never reaches a tier
+
+The bound is a *compile-time* fact before it is a runtime one. An `Int`
+literal outside `[-2^63, 2^63-1]` is refused by the checker
+(`examples/rejections/t20_int_literal_range.rvl`), because the tiers cannot
+agree on what such a text even means: python reads it at arbitrary precision,
+wasm reads an i64 bit pattern, and the same source file is two different
+programs. It used to be accepted and left to the tiers to disagree about;
+now it is one diagnostic instead of a behaviour per tier.
+
+This is also why `Int.MIN` has no spelling in the surface. Unary minus binds
+to the *positive* literal, so writing `-9223372036854775808` negates an
+out-of-range literal and is refused by the same rule. The negative bound is
+reachable by computation from in-range literals — `0 - 9223372036854775807 -
+1` — which is an ordinary runtime value on every tier, inside the range and
+checked like any other arithmetic.
+
 ### Every tier holds it
 
 Two did not, and both were closed by the ports written up below — wasm was
@@ -213,6 +230,20 @@ exact only to 2^53. Neither was a platform limit: WebAssembly has native
 Both are asserted by *execution* in `tests/test_cross_tier_execution.py` —
 in-range arithmetic on every bounded tier, and overflow that must fault rather
 than return a value — so neither can regress quietly.
+
+Unary minus is arithmetic too: negation is `0 - x`, and `0 - Int.MIN`
+overflows. python imposed the bound on `+`, `-` and `*` but let `-x` lower to
+the host's unary minus, so `-Int.MIN` came back as 2^63 — out of the very
+range python imposes a line earlier, silently. It now goes through `_revl_i64`
+like any other subtraction, and the closure is asserted by execution. wasm had
+this right from the start: its emitter spells negation as a subtraction from
+zero through the checked helper, and rust's own `-` panics at the edge in the
+debug builds `cargo test` runs. The remaining tiers do not trap — go and java
+negate with the host operator, which wraps (`-Int.MIN == Int.MIN`), and
+TypeScript's `bigint` negation has no bound check, so the value simply leaves
+the range. That split is recorded as a pinned divergence
+(`tests/test_cross_tier_execution.py`, docs/contract-errata.md), not papered
+over.
 
 ### What the wasm port took
 
@@ -357,21 +388,68 @@ IEEE defines ±infinity and `NaN` as *values*. See the Float section above.
   else — python imposes the bound, rust/java/go/wasm are all 64-bit and all
   fault at the edge — but TypeScript maps it to f64, exact only to 2^53, so
   `MAX + 1` silently loses precision there. Closing it means `BigInt`.
-- **An `Int` literal outside the range is not diagnosed.** The checker accepts
-  `9223372036854775808`, and the tiers then disagree about it: python reads it
-  at arbitrary precision, so `0 - 9223372036854775808` is exactly `Int.MIN` and
-  passes the bound check, while wasm reads it as an i64 bit pattern — already
-  `Int.MIN` — so negating it overflows and *traps*. The bound belongs in the
-  checker, where it would be one diagnostic instead of a behaviour per tier; it
-  is also why `Int.MIN` has no spelling in the surface today.
+- ~~**An `Int` literal outside the range is not diagnosed.**~~ **Closed.** The
+  checker now refuses an `Int` literal outside `[-2^63, 2^63-1]` — one
+  diagnostic where the tiers used to disagree (python at arbitrary precision,
+  wasm reading an i64 bit pattern). See "A literal outside the range never
+  reaches a tier" above; it remains why `Int.MIN` has no spelling.
 
 - **`Int` is 64-bit on every tier but wasm**, which is still `i32` (see
   above). python and TypeScript are arbitrary-precision hosts and impose the
   bound; rust, java and go carry it natively. The remaining gap is the wasm
   widening, not the specification.
-- **A total, value-returning form.** `checked_div_*` returning
-  `Result[Int, _]` would let a program handle a zero divisor without faulting.
-  `fail` cannot serve here: it is a component construct (A8) and is refused in
-  a pure `fn`, so making division "fail" would mean either extending `fail`
-  into the pure stratum — which costs totality, the property `verified` rests
-  on — or a `Result` form. The second is the better shape; neither is built.
+- ~~**A total, value-returning form.**~~ **Closed.** The `checked_div_*`
+  forms below return `Result[Int, Str]`, so a program handles a zero divisor
+  without faulting. `fail` could not serve here: it is a component construct
+  (A8) and is refused in a pure `fn`, so making division "fail" would have
+  meant either extending `fail` into the pure stratum — which costs totality,
+  the property `verified` rests on — or a `Result` form. The second is what
+  was built.
+
+## The total division forms
+
+Each faulting operation has a value-returning counterpart, named by prefixing
+`checked_`:
+
+| operation | returns | rounding |
+|---|---|---|
+| `a.checked_div_trunc(b)` | `Result[Int, Str]` | toward zero (as `div_trunc`) |
+| `a.checked_div_floor(b)` | `Result[Int, Str]` | toward −∞ (as `div_floor`) |
+| `a.checked_div_euclid(b)` | `Result[Int, Str]` | Euclidean (as `div_euclid`) |
+| `a.checked_mod(b)` | `Result[Int, Str]` | Euclidean remainder (as `mod`) |
+
+`Ok(quotient)` carries exactly the quotient the faulting operation computes —
+the rounding convention is not a second choice to make. A zero divisor yields
+`Err("revl: division by zero")` instead of the fault:
+
+```revl
+fn ratio(a: Int, b: Int) -> Int {
+  return match a.checked_div_trunc(b) { Ok(v) => v, Err(e) => 0 }
+}
+```
+
+Two consequences worth stating:
+
+- **A literal zero divisor is accepted here** and refused for the faulting
+  operations (`arith_zero_divisor.rvl`). The refusal exists because `x.mod(0)`
+  is never a program anyone meant to write; passing zero to the *checked*
+  form is precisely the program it is for.
+- **Overflow behaviour is unchanged from the unchecked forms**, per tier:
+  python and TypeScript impose the 64-bit bound on the quotient (so
+  `Int.MIN.checked_div_trunc(0 - 1)` faults there), rust traps, wasm traps,
+  and java/go compute natively like their unchecked `/`. Totalising the zero
+  case did not totalise the range.
+
+| tier | Result representation for the Err payload |
+|---|---|
+| python | tagged `Ok`/`Err` classes (emitted when the IR uses Result) |
+| typescript | `{ kind: "Ok" \| "Err", value }` — the built-in Result shape |
+| rust | std `Result<i64, String>` (`Ok::<i64, String>(..)` turbofish) |
+| java | `RevlResult<Long, String>` sealed interface, static helper methods |
+| go | `RevlResult[int64, string]` (`RevlOk`/`RevlErr` structs) |
+| wasm | a tagged cell (`[u32 tag][i64 payload]`), Err pooling the reason string |
+
+All six tiers lower every form; there is no tier where `checked_div_*` is a
+compile error. Execution is asserted in `tests/test_cross_tier_execution.py`
+(`CHECKED_DIVISION`) on python, TypeScript, go and wasm; rust and java behind
+`REVL_CROSS_TIER_SLOW=1`.

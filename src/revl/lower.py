@@ -107,6 +107,11 @@ _BUILTIN_METHODS = {
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).
     "div_trunc": 1, "div_floor": 1, "div_euclid": 1, "mod": 1,
+    # The total forms (docs/arithmetic.md): a zero divisor is the *point*
+    # here, so these are deliberately absent from _DIVIDES_BY below — a
+    # literal zero argument is refused for the faulting operations only.
+    "checked_div_trunc": 1, "checked_div_floor": 1,
+    "checked_div_euclid": 1, "checked_mod": 1,
 }
 
 
@@ -1669,8 +1674,19 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 node["operands"] = "Float"
         return node
     if isinstance(expr, ExprUn):
-        return {"kind": "un", "op": expr.op,
+        node = {"kind": "un", "op": expr.op,
                 "operand": _lower_pure_expr(expr.operand, scope, callables, alias_fns, filename, type_env, types)}
+        # Unary minus is arithmetic too: negating Int.MIN overflows, and a
+        # backend cannot tell an Int negation from a Float one without the
+        # operand type — the same information `bin` carries for the same
+        # reason. Only `Int` is annotated: it is the type whose bound a
+        # backend must re-impose (docs/arithmetic.md), and no tier needs to
+        # treat Float negation specially.
+        if expr.op == "-":
+            operand_type = infer_ast(expr.operand, type_env, types, None)
+            if operand_type == "Int":
+                node["operands"] = "Int"
+        return node
     if isinstance(expr, ExprCall):
         _callee = expr.callee
         _host_receiver = isinstance(_callee, ExprField) and (

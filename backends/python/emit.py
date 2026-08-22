@@ -86,11 +86,15 @@ class _Lines:
 
 
 def _uses_bounded_int(node) -> bool:
-    """Does this IR do Int `+`, `-` or `*`? The bound check is emitted only
-    where it is needed, so modules that never do Int arithmetic are
-    unchanged."""
+    """Does this IR do Int `+`, `-` or `*`, or negate an Int? The bound check
+    is emitted only where it is needed, so modules that never do Int
+    arithmetic are unchanged."""
     if isinstance(node, dict):
         if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int"):
+            return True
+        # unary minus on an Int goes through the bound too: it is `0 - x`
+        if (node.get("kind") == "un" and node.get("op") == "-"
                 and node.get("operands") == "Int"):
             return True
         return any(_uses_bounded_int(v) for v in node.values())
@@ -109,6 +113,13 @@ def _uses_true_division(node) -> bool:
     if isinstance(node, (list, tuple)):
         return any(_uses_true_division(v) for v in node)
     return False
+
+
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
+_CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
+                 "checked_div_euclid", "checked_mod")
+_DIV_ZERO_MSG = "revl: division by zero"
 
 
 def _render_builtin(method, target: str, args: list) -> str:
@@ -151,6 +162,21 @@ def _render_builtin(method, target: str, args: list) -> str:
                 f"({target}, {args[0]})")
     if method == "mod":
         return f"({target} % abs({args[0]}))"
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of raising —
+    # the whole point is that a pure fn cannot `fail`, so the error travels
+    # as a value. Ok/Err are the tagged classes emitted when the IR uses
+    # Result (gated in `_uses_builtin_result`).
+    if method in _CHECKED_DIVS:
+        quotient = {
+            "checked_div_trunc":
+                "abs(_a) // abs(_b) if (_a < 0) == (_b < 0) else -(abs(_a) // abs(_b))",
+            "checked_div_floor": "_a // _b",
+            "checked_div_euclid": "_a // _b if _b > 0 else -(_a // -_b)",
+            "checked_mod": "_a % abs(_b)",
+        }[method]
+        return (f"(lambda _a, _b: Ok({quotient}) if _b != 0 "
+                f"else Err({_DIV_ZERO_MSG!r}))({target}, {args[0]})")
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -659,6 +685,28 @@ def _py_type(type_name: str) -> str:
 
 def _emit_types(types: dict) -> "_Lines":
     out = _Lines()
+    # Forward-reference support: revl types may be mutually recursive (a
+    # record referencing an ADT defined later, or vice versa), but Python
+    # evaluates class-body annotations at class-definition time, so a bare
+    # name would raise NameError. We cannot use `from __future__ import
+    # annotations` (PEP 563): @dataclass's InitVar/ClassVar detection calls
+    # sys.modules.get(cls.__module__).__dict__ on every string annotation,
+    # which crashes for consumers that exec() the module without registering
+    # it in sys.modules. Instead, quote only the annotations that actually
+    # reference a not-yet-emitted type; dataclasses treat any string
+    # annotation as lazy, and the ADTs here are plain classes (no
+    # InitVar/ClassVar introspection), so quoting is always safe.
+    all_names = {_ident(name, "type name") for name in types}
+    emitted: set[str] = set()
+
+    def _ann(ftype: str) -> str:
+        """Render one field/payload annotation, quoting forward refs."""
+        rendered = _py_type(ftype)
+        mentioned = set(re.findall(r"[A-Za-z_]\w*", ftype))
+        if mentioned & (all_names - emitted):
+            return repr(rendered)
+        return rendered
+
     for name, spec in types.items():
         name = _ident(name, "type name")
         if spec["kind"] == "record":
@@ -667,10 +715,12 @@ def _emit_types(types: dict) -> "_Lines":
             if not spec["fields"]:
                 out.add(1, "pass")
             for field, ftype in spec["fields"].items():
-                out.add(1, f"{field}: {_py_type(ftype)}")
+                out.add(1, f"{field}: {_ann(ftype)}")
+            emitted.add(name)
         else:
             out.add(0, f"class {name}:")
             out.add(1, "__slots__ = ()")
+            emitted.add(name)  # base precedes its cases; case refs are never forward
             out.add(0)
             for case in spec["cases"]:
                 cname = _ident(case["name"], "case name")
@@ -817,6 +867,13 @@ def _expr(node: dict) -> str:
         if node["op"] == "!":
             return f"(not {_expr(node['operand'])})"
         if node["op"] == "-":
+            if node.get("operands") == "Int":
+                # Negation is `0 - x`, and `0 - Int.MIN` overflows: it goes
+                # through the bound like any other subtraction (docs/
+                # arithmetic.md). Without this, `-Int.MIN` — which traps on
+                # rust and wasm — quietly came back as 2^63 here, out of the
+                # range python itself imposes on every other operation.
+                return f"_revl_i64(-{_expr(node['operand'])})"
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
@@ -1238,7 +1295,8 @@ def _find_host_roots(nodes) -> set[str]:
 
 def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
-    an `adt` node typed Result, or a `match` arm on Ok/Err. Used to decide
+    an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
+    the total division forms (which *produce* a Result). Used to decide
     whether to emit the built-in Result classes (keeps v1 goldens intact)."""
     def walk(node) -> bool:
         if isinstance(node, dict):
@@ -1247,6 +1305,8 @@ def _uses_builtin_result(ir: dict) -> bool:
             if node.get("kind") == "match":
                 if any(arm.get("pattern") in ("Ok", "Err") for arm in node.get("arms") or []):
                     return True
+            if node.get("method") in _CHECKED_DIVS:
+                return True
             return any(walk(v) for v in node.values())
         if isinstance(node, list):
             return any(walk(v) for v in node)

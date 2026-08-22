@@ -64,15 +64,15 @@ component UserCache requires db: Database provides cache: Cache {
 
 <div align="center">
 
-<img src="assets/architecture.svg" alt="one checked front-end, five hardened runtimes" width="880">
+<img src="assets/architecture.svg" alt="one checked front-end, six hardened runtimes" width="880">
 
 </div>
 
 One front-end parses, checks and links `.rvl` source into a single IR, enforcing
-guarantees **G1–G8** before any code is emitted. Five emitters lower that one IR
-to five runtimes — and the same compiler runs behind an MCP server, so an AI
+guarantees **G1–G8** before any code is emitted. Six emitters lower that one IR
+to six runtimes — and the same compiler runs behind an MCP server, so an AI
 agent proposing a component talks to the *admission gate*, not the filesystem.
-The claim that all five tiers agree is not asserted; it is
+The claim that all six tiers agree is not asserted; it is
 [measured](docs/conformance.md), by handing each emitter's output to that tier's
 real compiler.
 
@@ -98,7 +98,7 @@ real compiler.
   method body, so a tool cannot describe itself as harmless when it emits.
   See [docs/mcp-bridge.md](docs/mcp-bridge.md).
 - **Conformance is measured, not asserted.** `tools/conformance.py` emits 50
-  language constructs through all five backends and reports what each does;
+  language constructs through all six backends and reports what each does;
   `docs/conformance.md` records the result and separates a *deliberate* tier
   limit (an extern with no body for that backend; `Str` on the i32-only wasm
   tier) from a real gap — every gap in *emitting* is closed. `--validate`
@@ -118,16 +118,18 @@ real compiler.
   `wasmtime` present) but are **not** gated on every push.
 - Backends: [cordis-py](https://github.com/geohotstan/cordis-py) (reference),
   [cordis](https://github.com/cordiverse/cordis) (TypeScript), the
-  cordis-wasm substrate, plus first [cordis-rs](https://docs.rs/cordis-rs)
-  (Rust) and [cordis4j](https://github.com/1na-ko/cordis4j) (Java) spikes —
-  one language, five tiers ([docs/vision.md](docs/vision.md)). See
+  cordis-wasm substrate, [cordis-rs](https://docs.rs/cordis-rs)
+  (Rust), [cordis4j](https://github.com/1na-ko/cordis4j) (Java), and
+  [cordis-go](https://github.com/0xdenny218/stc-go) (Go, targeting the
+  third-party stc-go runtime) —
+  one language, six tiers ([docs/vision.md](docs/vision.md)). See
   [DESIGN.md](DESIGN.md) for the full design, the checked-guarantees table,
   and why raw native codegen is deliberately a non-goal.
 
-**Status: v1.** The pipeline runs end-to-end on **five backends** — three
-runnable (**cordis-py**, **cordis** (TS), and the **cordis-wasm substrate**,
-[backends/wasm/](backends/wasm/)) plus first **cordis-rs** (Rust) and
-**cordis4j** (Java) spikes ([docs/v2.0-roadmap.md](docs/v2.0-roadmap.md)) —
+**Status: v1.** The pipeline runs end-to-end on **six backends** —
+**cordis-py** (reference), **cordis** (TS), the **cordis-wasm substrate**,
+[backends/wasm/](backends/wasm/), **cordis-rs** (Rust), **cordis4j** (Java),
+and **cordis-go** (Go) ([docs/v2.0-roadmap.md](docs/v2.0-roadmap.md)) —
 `python -m revl compile` takes `.rvl` sources through parse → check →
 link → IR ([docs/backend-ir-v1.md](docs/backend-ir-v1.md)), and the
 emitters produce runnable components. On the wasm substrate, confinement is
@@ -191,8 +193,9 @@ a Rust component provides, and neither shares an address space. `revl run
 --placement` spreads a composition over per-tier processes and wires each seam
 with a generated proxy/stub pair.
 
-- **Five tiers, symmetric and reactive.** `py ↔ node (TypeScript) ↔ rust ↔
-  java ↔ go` compose in one lifecycle: every tier both *consumes* and *serves*
+- **Five of the six tiers are symmetric and reactive on the bridge.** `py ↔
+  node (TypeScript) ↔ rust ↔ java ↔ go` compose in one lifecycle: every tier
+  both *consumes* and *serves*
   across a seam, and every tier turns a provider's death into a reactive
   withdrawal (R2/R3) rather than an exception. Verified end-to-end with `revl
   run --placement … --once` — including a Go↔Python round-trip whose values are
