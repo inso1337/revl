@@ -1,0 +1,13 @@
+// REJECTED — a method call on a host object is checked against the stub
+// surface its constructor names (docs/stdlib-2.0.md). `putt` is not on the
+// Map surface; before this check it compiled on every tier and emitted a
+// dynamic dispatch (`_revl_field(m, 'putt')(..)`) — a guaranteed
+// AttributeError at host runtime that no tier's compiler could see.
+//
+// expected error:
+//   `Map` has no method `putt` (its surface: drop, get, insert, new, remove)
+
+fn put(m_hint: Str) {
+  let m = Map.new()
+  m.putt("k", "v")
+}
