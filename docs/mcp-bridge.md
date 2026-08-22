@@ -65,6 +65,24 @@ emissions by reading the declarations of the methods it calls — so an
 under-declared operation made the audit *incomplete for every consumer*,
 not just misleading to an MCP client.
 
+**What the guarantee covers — and first-class functions.** The emission
+analysis is name-based: it proves a body reaches no `emission` extern
+*through the calls it names*. An emission can also hide behind a function
+*value* — `fn quiet(a) = indirect(ship, a)`, where `indirect` dispatches
+through an arrow-typed parameter — which no call-graph edge can see, and
+which before this fix compiled, advertised `readOnlyHint: true`, and
+emitted at runtime. The rule now is: a first-class reference to an
+emitting callable (any use of its name outside call position — passed as
+an argument, returned, aliased to a binding) is treated as reaching an
+unnameable boundary, propagates through the same fixed point as a real
+emission, and refuses a plain declaration with the same G4 diagnostic,
+naming the value flow. The cost is deliberate: a dispatcher helper that
+*ever* receives an emitting function is may-emit for every caller, even
+one that passes only pure functions. Higher-order code that never touches
+an emitting callable — the ordinary case — still compiles read-only. The
+guarantee remains static and revl-complete: it bounds what the compiled
+program's own bodies can reach, not what host-provided values do.
+
 The projection therefore trusts the declaration, and reports what the body
 reaches as provenance:
 

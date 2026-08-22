@@ -2724,22 +2724,36 @@ def _config_default_type(value) -> str | None:
     return None
 
 
-def _calls_in(node, found: set) -> None:
+def _calls_in(node, found: set, values: set | None = None) -> None:
     """Function/extern names a lowered node calls. Component bodies lower a
     call to `{kind: fn, name}`; pure fn bodies to `{kind: call, callee:
-    {kind: var, name}}`."""
+    {kind: var, name}}`.
+
+    With `values` (a set, filled in place), a *first-class* reference — a
+    bare `{kind: var, name}` naming a callable in value position, where the
+    function value itself flows instead of a call happening — is recorded
+    too. Call-callee positions are excluded: `f(x)` is a call (already in
+    `found`), not a value escaping. This is how the emission analysis sees
+    an emitting callable being handed to code that may dispatch it.
+    """
     if isinstance(node, dict):
-        if node.get("kind") == "fn" and isinstance(node.get("name"), str):
+        kind = node.get("kind")
+        if kind == "fn" and isinstance(node.get("name"), str):
             found.add(node["name"])
         callee = node.get("callee")
-        if node.get("kind") == "call" and isinstance(callee, dict) \
+        if kind == "call" and isinstance(callee, dict) \
                 and callee.get("kind") == "var" and isinstance(callee.get("name"), str):
             found.add(callee["name"])
-        for value in node.values():
-            _calls_in(value, found)
+        elif values is not None and kind == "var" \
+                and isinstance(node.get("name"), str):
+            values.add(node["name"])
+        for key, value in node.items():
+            if key == "callee" and kind == "call":
+                continue  # the callee is a call target, not a flowing value
+            _calls_in(value, found, values)
     elif isinstance(node, list):
         for value in node:
-            _calls_in(value, found)
+            _calls_in(value, found, values)
 
 
 def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
@@ -2770,10 +2784,13 @@ def _emitting_capabilities(fns: list, externs: list,
     caps: dict[str, set] = {ext["name"]: {ext["name"]}
                             for ext in externs if ext.get("class") == "emission"}
     calls: dict[str, set] = {}
+    passed: dict[str, set] = {}  # first-class callable references per fn body
     for fn in fns:
         called: set = set()
-        _calls_in(fn.get("body") or [], called)
+        values: set = set()
+        _calls_in(fn.get("body") or [], called, values=values)
         calls[fn["name"]] = called
+        passed[fn["name"]] = values
 
     changed = True
     while changed:  # least fixed point over the call graph
@@ -2782,14 +2799,35 @@ def _emitting_capabilities(fns: list, externs: list,
             reached: set = set()
             for callee in called:
                 reached |= caps.get(callee, set())
+            # A first-class reference to an emitting callable: the function
+            # *value* escapes this body and may be dispatched by whoever
+            # receives it (an arrow-typed parameter, a stored binding), so
+            # what it runs is not statically boundable here. `*` is
+            # deliberately the capability no `emission[...]` list can name
+            # (docs/capabilities.md), so the may-emit propagates through the
+            # fixed point exactly like a real emission — a plain service
+            # method whose body hands an emitting callable to a dispatcher is
+            # refused by the same G4 check as one that calls the extern
+            # directly. A dispatching helper that only ever receives pure
+            # functions stays clean: nothing emitting is ever referenced as a
+            # value on any path that reaches it.
+            for ref in sorted(passed.get(name, ())):
+                if caps.get(ref):
+                    reached.add("*")
+                    if witness is not None:
+                        witness.setdefault(name, ref)
             if reached and not reached <= caps.get(name, set()):
                 if witness is not None and name not in caps:
                     # of the callees that prove the point, take the one with
                     # the shortest onward chain (ties by name): the author is
-                    # asked to read the shortest derivation, deterministically
-                    witness[name] = min(
-                        sorted(c for c in called if caps.get(c)),
-                        key=lambda callee: _witness_depth(callee, witness))
+                    # asked to read the shortest derivation, deterministically.
+                    # A body flagged only by the first-class-value edge has no
+                    # emitting name-callee; its witness is already recorded.
+                    culprits = sorted(c for c in called if caps.get(c))
+                    if culprits:
+                        witness[name] = min(
+                            culprits,
+                            key=lambda callee: _witness_depth(callee, witness))
                 caps.setdefault(name, set()).update(reached)
                 changed = True
     return caps
@@ -2967,12 +3005,23 @@ def _method_emissions(body: list, env: "Env",
                          service_emission_step(target.get("name"), node.get("method")))
                     caps.add(target.get("name"))
             calls: set = set()
-            _calls_in(node, calls)
+            values: set = set()
+            _calls_in(node, calls, values=values)
             for name in sorted(calls & env.emitting_fns):
                 evidence = getattr(env, "emission_evidence", None)
                 note(f"{name}()",
                      evidence.chain_steps(name) if evidence is not None else None)
                 caps.update(env.emitting_caps.get(name) or {"*"})
+            # a first-class reference to an emitting callable: the value may
+            # be dispatched by whoever receives it (an arrow-typed parameter,
+            # a stored binding), so the method reaches code no bound can
+            # name — same verdict as calling it, one indirection later
+            for name in sorted(values & env.emitting_fns):
+                evidence = getattr(env, "emission_evidence", None)
+                note(f"{name} (passed as a function value)",
+                     evidence.chain_steps(name) if evidence is not None else None)
+                caps.update(env.emitting_caps.get(name) or set())
+                caps.add("*")
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -3372,7 +3421,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         # declarations of the methods it calls.
         if not decl.emission:
             caused_steps: dict[str, list] = {}
-            caused, _caps = _method_emissions(mbody, env, caused_steps)
+            caused, caps_used = _method_emissions(mbody, env, caused_steps)
             if caused:
                 evidence = ", ".join(f"`{item}`" for item in caused)
                 # the derivation for the *first* culprit: the message already
@@ -3387,16 +3436,32 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     why = WhyTrace(kind="emission-propagation",
                                    subject=f"{svc.name}.{method.name}",
                                    steps=[head, *chain], shape=CHAIN)
+                hint = (
+                    f"a service declaration bounds what its providers may do — "
+                    f"mark it `emission fn {method.name}(...)` in service "
+                    f"`{svc.name}`, or move the irreversible call out of this "
+                    f"method (G4)"
+                )
+                if "*" in caps_used:
+                    # the capability set carries `*`: somewhere in the chain a
+                    # call dispatches through a first-class function value
+                    # (an arrow-typed parameter or binding), so the analysis
+                    # cannot name what that call runs. Say so — the author is
+                    # looking at a helper that looks pure and is not.
+                    hint += (
+                        ". This trace crosses a first-class dispatch: a call "
+                        "invokes a function *value* (an arrow-typed parameter "
+                        "or binding) rather than a named `fn`, so revl cannot "
+                        "statically bound what it runs and must treat the "
+                        "whole chain as possibly emitting"
+                    )
                 raise RevlError(
                     # the offending body lives in the component's own file,
                     # which is not the merged program filename
                     comp.source or filename, method.line,
                     f"`{svc.name}.{method.name}` is declared plain, but this "
                     f"implementation reaches {evidence}",
-                    hint=f"a service declaration bounds what its providers may do — "
-                         f"mark it `emission fn {method.name}(...)` in service "
-                         f"`{svc.name}`, or move the irreversible call out of this "
-                         f"method (G4)",
+                    hint=hint,
                     code="G4", category="emission-propagation",
                     why=why,
                 )
