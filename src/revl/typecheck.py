@@ -10,8 +10,10 @@ Design (see the "type safety" milestone discussion):
   whose types cannot be recovered stay unchecked and are the documented
   gradual frontier. What is still on that frontier:
     * host-valued objects (`Map.new()`, `Pool.open(..)`, `Job.run(..)` and
-      every member reached through one) — their *arguments* are checked
-      against `_HOST_ARG_SIG`, their results are opaque;
+      every member reached through one) — the call form's *arguments* are
+      checked against `_HOST_ARG_SIG`, a constructor form infers its family so
+      receiver-form method calls are checked too (`_HOST_FAMILIES`), but every
+      *result* is opaque;
     * an arrow with **no expected type and no parameter annotations**
       (`let g = v => v + 1`) — its body is still walked, but the arrow
       itself has no type. An arrow in checking position, or one whose
@@ -553,9 +555,60 @@ def host_check(fn: str, arg_types: list, filename: str | None, line: int) -> Non
                            expected, actual)
 
 
+# Host-object *families*, derived from _HOST_ARG_SIG's dotted names. The
+# constructor form (`Map.new()`, `Pool.open(..)`) infers the family as its
+# static type, and a method call on a family-typed receiver is checked here:
+# an unknown method is a compile error (the typo'd `m.putt(k)` used to emit
+# `_revl_field(m, 'putt')(..)` — a guaranteed AttributeError at host runtime,
+# invisible to every tier's compiler), and arguments are checked exactly like
+# the call form. What stays deliberately opaque is the *result*: no entry
+# claims to know what a stub returns, so values flowing OUT of host objects —
+# and receivers whose provenance no constructor pins (an extern's return) —
+# remain on the G8 audit surface, not the checked one (docs/contract-errata.md).
+_HOST_FAMILIES: dict[str, dict[str, list[str]]] = {}
+for _dotted, _params in _HOST_ARG_SIG.items():
+    _family, _, _method = _dotted.partition(".")
+    _HOST_FAMILIES.setdefault(_family, {})[_method] = _params
+
+
+def host_family_check(family: str, method: str, arg_types: list,
+                      filename: str | None, line: int) -> None:
+    """Check a method call on a family-typed host receiver."""
+    methods = _HOST_FAMILIES[family]
+    params = methods.get(method)
+    if params is None:
+        if filename:
+            raise RevlError(
+                filename, line,
+                f"`{family}` has no method `{method}` "
+                f"(its surface: {', '.join(sorted(methods))})",
+                hint="host objects are checked against the stub surface spelled "
+                     "in docs/stdlib-2.0.md — a misspelled method compiles on "
+                     "every tier and only fails at the host runtime",
+                code="HOST-METHOD", category="host-boundary")
+        return
+    if filename and len(arg_types) != len(params):
+        raise RevlError(
+            filename, line,
+            f"host `{family}.{method}` takes {len(params)} argument"
+            f"{'' if len(params) == 1 else 's'}, got {len(arg_types)}",
+            hint=f"the signature is `.{method}({', '.join(params) or ''})`",
+            code="HOST-ARITY", category="host-boundary")
+    for expected, actual in zip(params, arg_types):
+        if filename and expected and actual and not compatible(expected, actual):
+            raise mismatch(filename, line,
+                           f"host `{family}.{method}` argument", expected, actual)
+
+
 def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int) -> str | None:
     """Type a stdlib method call; raises on definite mismatches."""
+    # a method call on a constructor-tracked host receiver (`store.get(k)`
+    # where `store = Map.new()`): checked against the family surface, result
+    # opaque (see _HOST_FAMILIES)
+    if target_type in _HOST_FAMILIES:
+        host_family_check(target_type, method, arg_types, filename, line)
+        return None
     sig = _BUILTIN_SIG.get(method)
     if sig is None:
         return None
@@ -874,6 +927,15 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                   tenv, types, filename, f"`{name}(...)`")
                 return substitute(sig["returns"], subst)
         if isinstance(expr.callee, ExprField):
+            # a constructor form (`Map.new()`, `Pool.open(..)`) infers the
+            # *family* — that is what lets receiver-form calls on the bound
+            # value be checked against the stub surface (_HOST_FAMILIES)
+            if isinstance(expr.callee.target, ExprVar):
+                ctor = _HOST_FAMILIES.get(expr.callee.target.name or "")
+                if ctor is not None and expr.callee.name in ctor:
+                    dotted = f"{expr.callee.target.name}.{expr.callee.name}"
+                    host_check(dotted, arg_types, filename, line)
+                    return expr.callee.target.name
             target_t = infer_ast(expr.callee.target, tenv, types, filename)
             return builtin_check(expr.callee.name, target_t, arg_types, filename, line)
         # any other callee expression: an arrow applied in place, a function

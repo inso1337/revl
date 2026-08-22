@@ -308,18 +308,23 @@ Arrow bodies are now checked against their enclosing scope, which is where the
 first four used to hide. Do not re-fence any of these; each has an executable
 rejection.
 
-- **Host-object methods are untyped** (by design, host provenance): a value of
-  host provenance (a `let` bound to `Map.new()` / `Pool.open(...)`, or a
-  requirement's return) carries the host stub's methods, which sit outside the
-  specified stdlib surface (docs/stdlib-2.0.md). `builtin_check` returns `None`
-  for any method not in `_BUILTIN_SIG`, so a host-object method call has unknown
-  type. Trigger: `store.get(key)` on a `Map` used in a typed position. Blast
-  radius: the result flows anywhere with no check, and a misspelled host method
-  is caught at the host runtime, not by the checker. This is the deliberate G8
-  trust boundary: host objects are on the audit surface, not the checked
-  surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are typed and
-  their misuse is refused, in `fn` bodies and (as of the setup op sweep) in
-  component effect blocks alike.
+- **Host-object results are untyped** (by design, host provenance — *narrowed*):
+  the method *names, arities, and argument types* on a constructor-tracked
+  receiver are now checked: `Map.new()` infers the family, and a method call on
+  it is validated against the stub surface spelled in `_HOST_ARG_SIG`
+  (docs/stdlib-2.0.md) — `m.putt(k)`, the typo'd method that used to emit a
+  dynamic dispatch and crash at host runtime, is now a compile error
+  (`HOST-METHOD`). What stays opaque is the *result*: no table entry claims to
+  know what a stub returns, so a value flowing out of `store.get(k)` carries no
+  type and is unchecked wherever it goes. Receivers whose provenance no
+  constructor pins (an extern's return) type unknown; the lowerer refuses
+  non-stdlib method *names* on them, but a stdlib-named method on such a
+  receiver lowers as that builtin and is wrong at runtime — that residual
+  sliver, plus host-object results, is the remaining fence. Still the
+  deliberate G8 trust boundary: host objects are on the audit surface, not the
+  checked surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are
+  typed and their misuse is refused, in `fn` bodies and (as of the setup op
+  sweep) in component effect blocks alike.
 
 - **Arrow *values* have no type** (frontier, narrowed): an arrow's parameters
   are un-annotated and no arrow type is reconstructed, so the arrow itself, and
