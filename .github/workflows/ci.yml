@@ -16,6 +16,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # the conformance-validate gate compiles emitted Go against the pinned
+      # stc-go (go.mod says `go 1.25.0`). The runner's preinstalled Go is
+      # older, and its toolchain auto-download fails under the validator's
+      # offline-first probe — pin the same version the backend jobs use.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - run: pip install -e ".[test]"
       # the frontend suite includes the pure-Python halves of all three
       # backends (emitter goldens, IR contract, manifest/admission, audit);

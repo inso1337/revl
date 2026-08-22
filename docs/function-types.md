@@ -216,7 +216,7 @@ is already reflected in the arrow node and in the enclosing declared types.
 The three strict tiers refuse **a function type written in a declaration** —
 a `fn`/`extern` parameter or return, a service method signature, a record
 field, an ADT payload, a config field. They do **not** refuse arrows: an arrow
-bound to a local `let` and called in the same body lowers on all five tiers,
+bound to a local `let` and called in the same body lowers on all six tiers,
 exactly as it did before this change. Nothing that compiled on those tiers
 before compiles differently now.
 

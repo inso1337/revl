@@ -1057,6 +1057,8 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     # `===`-for-equality bug was.
     if method in _TS_INT_ARITH:
         return f"{_TS_INT_ARITH[method]}({target}, {args[0]})"
+    if method in _TS_CHECKED_DIV:
+        return f"{_TS_CHECKED_DIV[method]}({target}, {args[0]})"
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
@@ -1248,6 +1250,14 @@ _TS_INT_ARITH = {
     "mod": "revlMod",
 }
 
+# The total forms (docs/arithmetic.md): same quotient, Err(reason) at zero.
+_TS_CHECKED_DIV = {
+    "checked_div_trunc": "revlCheckedDivTrunc",
+    "checked_div_floor": "revlCheckedDivFloor",
+    "checked_div_euclid": "revlCheckedDivEuclid",
+    "checked_mod": "revlCheckedMod",
+}
+
 # Builtin methods whose named argument positions revl types `Int` while the JS
 # API takes a `number`, and builtins revl types `Int` while the JS API answers
 # a `number`. `_ts_builtin` spells each conversion out per method; these tables
@@ -1297,13 +1307,41 @@ function revlDivEuclid(a: bigint, b: bigint): bigint {
 function revlMod(a: bigint, b: bigint): bigint {
   const m = revlNonZero(b) < 0n ? -b : b
   return ((a % m) + m) % m
+}
+// The total forms (docs/arithmetic.md): the same quotient as the faulting
+// helpers, but a zero divisor yields Err(reason) instead of throwing — `fail`
+// is refused in a pure fn, so the error travels as a value. The shape is the
+// one the `adt` node renders for a built-in Result: `{ kind, value }`.
+function revlCheckedDivTrunc(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  return { kind: "Ok", value: revlI64(a / b) }
+}
+function revlCheckedDivFloor(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  const q = a / b
+  return a % b !== 0n && (a < 0n) !== (b < 0n)
+    ? { kind: "Ok", value: revlI64(q - 1n) }
+    : { kind: "Ok", value: revlI64(q) }
+}
+function revlCheckedDivEuclid(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  const q = a / b
+  if (a % b >= 0n) return { kind: "Ok", value: revlI64(q) }
+  return b > 0n ? { kind: "Ok", value: revlI64(q - 1n) } : { kind: "Ok", value: revlI64(q + 1n) }
+}
+function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  const m = b < 0n ? -b : b
+  return { kind: "Ok", value: ((a % m) + m) % m }
 }"""
 
 
 def _uses_int_arith(node) -> bool:
-    """Does anything in this IR call a named integer division or modulo?"""
+    """Does anything in this IR call a named integer division or modulo?
+    The total (`checked_*`) forms count too: they route through the same
+    helpers' tier (and need `revlI64` for the one overflowing quotient)."""
     if isinstance(node, dict):
-        if node.get("method") in _TS_INT_ARITH:
+        if node.get("method") in _TS_INT_ARITH or node.get("method") in _TS_CHECKED_DIV:
             return True
         return any(_uses_int_arith(v) for v in node.values())
     if isinstance(node, (list, tuple)):
