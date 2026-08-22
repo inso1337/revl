@@ -252,8 +252,11 @@ whose operand type a backend must know, since negating `Int.MIN` overflows
 untouched, so the frozen-reference invariant holds.
 
 `%` and the `Int` width are both settled now (docs/arithmetic.md): `%` is
-the truncated remainder, and `Int` is 64-bit two's complement with a
-trapping overflow on every tier but wasm, which is still `i32`.
+the truncated remainder, and `Int` is 64-bit two's complement with trapping
+overflow on every tier — including wasm, whose `Int` was widened to `i64`
+with checked `$int_*` helpers. The one residual split is the *message*: a
+wasm trap carries no payload, so it faults with `unreachable` where the
+hosted tiers raise a labelled overflow error (see docs/arithmetic.md).
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
@@ -413,8 +416,9 @@ sampled.
   `tests/test_frontend.py` (`test_a3_host_colliding_names_are_renamed`,
   `test_a4_literal_dollars_are_escaped`, `test_a5_compensate_lowering`).
 - **A7** is advisory; its enforcement is G4 itself (`g4_unmarked_emission.rvl`).
-- **T1–T19** are the type-soundness refusals. `t8`–`t19` were added with the
-  typing follow-ups above and are deliberately paired: each rejection file
+- **T1–T20** are the type-soundness refusals. `t8`–`t19` were added with the
+  typing follow-ups above and `t20_int_literal_range.rvl` alongside the Int
+  literal-range diagnostic; they are deliberately paired: each rejection file
   states the tier error it prevents, and `tests/test_typesafety.py` asserts
   both the refusal *and* the legal spellings it must not touch (a `fn`
   returning nothing needs no `return`; `if`/`else` where both arms return is
