@@ -51,6 +51,23 @@ test "list order matters" { assert !list_ne() }
 test "nesting composes" { assert nested() }
 test "inequality is the negation" { assert { id: 1, name: "a" } != { id: 2, name: "a" } }
 """,
+
+    # The former pinned divergence "Int widens into a Float position": revl
+    # widens `Int` into `Float` implicitly (`compatible("Float", "Int")`), so
+    # `ident(3)` for `ident: (Float) -> Float` is a legal program — and until
+    # the coercion was marked in the IR it split the tiers three ways (rust
+    # E0308, TypeScript a wrong answer via `3n === 3`, host-rule absorption
+    # elsewhere; docs/arithmetic.md). The frontend now marks every coercion
+    # site (`"widen": "Float"`) and each backend emits the conversion, so this
+    # probe must *pass* on every tier that can run it.
+    "int widens into a float position": """
+pub fn ident(x: Float) -> Float { return x }
+pub fn widen_let() -> Float { let x: Float = 3 return x }
+pub fn widen_return(x: Int) -> Float { return x }
+test "call argument widens" { assert ident(3) == 3.0 }
+test "annotated let widens" { assert widen_let() == 3.0 }
+test "return widens" { assert widen_return(4) == 4.0 }
+""",
 }
 
 # go joins the fast set: the v3 tier is dependency-free Go, so `go test`
@@ -120,6 +137,56 @@ def test_java_equality_goes_through_objects_equals():
     assert "java.util.Objects.equals(" in emitted
 
 
+# ------------------------------------------------- widening is emitted, not absorbed
+
+def test_widening_is_marked_in_the_ir():
+    """The coercion site itself must be visible in the document: the marker is
+    what lets every backend emit the same conversion for `ident(3)`."""
+    ir = compile_source(
+        'pub fn ident(x: Float) -> Float { return x }\n'
+        'test "w" { assert ident(3) == 3.0 }',
+        "widen.rvl")
+    call = ir["functions"][0]
+    assert call["name"] == "ident"
+    # the marker lives on the argument node of the *test* body's call; find it
+    def find_widened(node):
+        if isinstance(node, dict):
+            if node.get("widen") == "Float":
+                return node
+            for v in node.values():
+                found = find_widened(v)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for v in node:
+                found = find_widened(v)
+                if found is not None:
+                    return found
+        return None
+    assert find_widened(ir) is not None, (
+        "an Int literal flowing into a Float parameter must carry the "
+        '`"widen": "Float"` marker (docs/arithmetic.md)')
+
+
+@pytest.mark.parametrize("backend, conversion", [
+    ("python", "ident(float(3))"),
+    ("typescript", "ident(Number(3n))"),
+    ("rust", "ident((3i64 as f64))"),
+    ("go", "ident(float64(3))"),
+    ("java", "ident(((double) (3L)))"),
+])
+def test_every_tier_emits_the_conversion(backend, conversion):
+    """The point of the marker: no tier absorbs the widening behind a host
+    rule any more — rust used to refuse (E0308) and TypeScript computed the
+    wrong answer (`3n === 3` is false). Each emitter spells the conversion in
+    its own host syntax, and each spelling is pinned here."""
+    source = ('pub fn ident(x: Float) -> Float { return x }\n'
+              'test "w" { assert ident(3) == 3.0 }')
+    assert conversion in _emit(backend, source), (
+        f"{backend} must emit the Int -> Float conversion at the marked "
+        "coercion site (docs/arithmetic.md)")
+
+
 # ------------------------------------------------- pinned arithmetic divergences
 #
 # These are NOT the intended semantics. They are the current per-tier behaviour,
@@ -139,33 +206,13 @@ def test_java_equality_goes_through_objects_equals():
 # being pinned. An entry leaves this table only by the tier conforming.
 
 DIVERGENCES = {
-    # revl widens `Int` to `Float` implicitly (`compatible("Float", "Int")` is
-    # true), and the IR records *nothing* where it happens: a `call` argument, a
-    # `record` field, a `let` value and a `list` element all arrive as a bare
-    # `lit`/`var` with no declared type on the node. Only the `bin` node says
-    # what its operands are, and the arithmetic case is closed by that — `1.5 +
-    # 2` is right on every tier.
-    #
-    # The rest cannot be closed by a backend, for the same reason `Int / Int`
-    # could not be before `operands` existed: the information is not in the
-    # document. The tiers that type Int and Float apart therefore split — rust
-    # refuses (E0308, a loud compile error) and TypeScript accepts and then
-    # computes the wrong answer, because `3n === 3` is false. python, go and
-    # java have a host rule that absorbs it (arbitrary-precision numbers,
-    # untyped constants, JLS 5.1.2 long->double).
-    #
-    # The fix is a frontend one and has a precedent: make the widening explicit
-    # in the IR — a marker on the coercion site, the way `operands` made `/`
-    # specifiable — or refuse the implicit widening outright. Pinned here so it
-    # cannot drift while that is decided.
-    #
-    # java is recorded from its emitted source (`ident(3L)` into a `double`
-    # parameter, JLS 5.1.2) and is not asserted: no test parametrizes java.
-    "Int widens into a Float position": (
-        'pub fn ident(x: Float) -> Float { return x }\n'
-        'test "w" { assert ident(3) == 3.0 }',
-        {"py": "pass", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
-    ),
+    # ~~"Int widens into a Float position"~~ **Closed.** The frontend now
+    # marks every implicit Int -> Float coercion site in the IR (`"widen":
+    # "Float"` on the coerced node — additive, like `operands`, no ir_version
+    # bump) and each backend emits the conversion (`float(3)`, `Number(3n)`,
+    # `(3i64 as f64)`, `float64(3)`, `((double) (3L))`), so rust no longer
+    # refuses with E0308 and TypeScript no longer computes the wrong answer.
+    # Asserted positively in WIDENING below; docs/arithmetic.md has the write-up.
     # Unary minus on Int.MIN splits the tiers three ways. python now routes
     # Int negation through `_revl_i64` (closed — asserted positively above);
     # wasm lowers `-x` as `0 - x` through its checked subtraction and traps;
