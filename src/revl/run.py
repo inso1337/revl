@@ -1,16 +1,19 @@
-"""`revl run`: boot a compiled composition on a Cordis runtime.
+"""Boot a compiled composition on a Cordis runtime.
 
-Three modes, one command:
+Run: ``revl run app.rvl`` loads the composition, streams the lifecycle/host
+trace, holds it live with an interactive REPL over its provided services, and
+on EOF/Ctrl-C tears down and reports no-residue. With stdin closed (``<
+/dev/null``) the same command completes the round-trip non-interactively.
+Flags: ``--watch`` recompiles on source change (a rejected or mis-hosted edit
+never touches the running generation); ``--plan`` prints the load plan without
+a runtime; ``--record`` powers the backwards-replay REPL commands
+(docs/replay.md); ``--placement`` splits the composition across processes.
 
-- ``revl run app.rvl``            load the composition, run activation, then
-                                  hold it live with an interactive REPL over
-                                  its provided services; tear down on exit and
-                                  report no-residue.
-- ``revl run app.rvl --watch``    load, then watch the sources and recompile on
-                                  change. A rejected edit (a guarantee refused
-                                  it) leaves the running composition untouched.
-- ``revl run app.rvl --plan``     print the load plan (order, config, callable
-                                  keys) and exit, without touching a runtime.
+Admission is the host's job: ``--config FILE`` supplies the per-component
+config each component declares, and a component admitted with a missing
+*required* field (IR ``config`` with ``default: null``) refuses the run
+*before* any runtime is loaded — with the diagnostic available even on an
+interpreter that has no cordis at all.
 
 The frontend stays pure: the backend emitter and the cordis-py runtime are
 imported lazily, inside ``run_command``, so ``compile``/``audit``/``test``/
@@ -63,6 +66,46 @@ def _load_config(path: str | None) -> dict:
 
 def _components(ir: dict) -> list[dict]:
     return ir.get("components") or []
+
+
+def _required_config_problem(ir: dict, config: dict) -> str | None:
+    """The mis-hosted required-config fields, as a diagnostic, or ``None``.
+
+    A component's IR ``config`` list is the schema it runs against: a field
+    with ``default: null`` is *required* (the same rule the runtime enforces
+    in backends/python/runtime.py, :class:`ConfigSchema`). The CLI preflights
+    that list before any runtime is imported, for two reasons:
+
+    * a component admitted with a missing required field should fail the run
+      *loudly and at admission*, not boot a fiber that silently settles onto
+      ``FAILED`` while the rest of the composition waits on it, and
+    * the diagnostic must work with no cordis installed at all — config is a
+      host concern (DESIGN §2 non-goals), not a runtime one.
+
+    The runtime stays the authority for everything else (type mismatches,
+    mid-body failures); the preflight only mirrors the deterministic
+    required-ness carried in the IR itself.
+    """
+    by_name = {c["name"]: c for c in _components(ir)}
+    missing: list[str] = []
+    for name in _load_order(ir):
+        fields = (by_name.get(name) or {}).get("config") or []
+        supplied = config.get(name) or {}
+        for field in fields:
+            if field.get("default") is None and field["name"] not in supplied:
+                missing.append(
+                    f'{name} is missing required config "{field["name"]}"'
+                    f" ({field.get('type') or '?'})"
+                )
+    if not missing:
+        return None
+    rendered = "\n".join(f"  - {entry}" for entry in missing)
+    return (
+        "invalid config:\n"
+        f"{rendered}\n"
+        "  components are declarations — supply their config with "
+        "--config <file>."
+    )
 
 
 def _load_order(ir: dict) -> list[str]:
@@ -410,6 +453,11 @@ class _Driver:
         try:
             ir = compile_files(files)
             refuse_admission(ir)  # a hole may not reach a live generation
+            problem = _required_config_problem(ir, self.config)
+            if problem is not None:
+                # a new/changed requirement the host's config cannot meet is
+                # an edit the running composition refuses, not a boot failure
+                raise RevlError(problem)
         except RevlError as exc:
             for i, text in enumerate(str(exc).splitlines()):
                 self._log("reject", "REJECTED" if i == 0 else "", text)
@@ -485,6 +533,11 @@ def run_command(args) -> int:
     if not _components(ir):
         print("nothing to run: no components in the composition", file=sys.stderr)
         return 0
+
+    problem = _required_config_problem(ir, config)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
 
     backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
     if str(backend_dir) not in sys.path:

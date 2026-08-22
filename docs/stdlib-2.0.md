@@ -47,12 +47,18 @@ revl refuses.)
 - `join` is declared on `List[Str]` (TS orientation: `xs.join(sep)`); the
   Python lowering swaps receiver and argument (`sep.join(xs)`).
 
-## Host objects are exempt, by provenance
+## Host objects: constructor-tracked receivers are checked
 
 v1 host stub objects (`Pool.open(...)`, `Map.new()`) carry their own methods
 (`query`, `insert`, `drop`, ...). The checker tracks host provenance — a
-`let` bound to a host-constructor call, or a direct constructor-call
-receiver — and exempts those receivers from the table. The two method
+`let` bound to a host-constructor call infers the *family* — and checks a
+method call on such a receiver against that family's surface (the dotted
+names in `_HOST_ARG_SIG`): an unknown method is refused (`HOST-METHOD`, with
+the real surface named), and arity/argument types are checked exactly like
+the call form. The stub's *result* stays opaque — no entry claims to know
+what comes back — so values flowing out of host objects remain on the audit
+surface. Receivers with no pinned family (an extern's return) type unknown;
+the lowerer refuses non-stdlib method names on them. The two method
 namespaces are collision-free by construction (checked when extending
 either: the table vs `open/close/query/execute/new/get/insert/remove/drop`).
 

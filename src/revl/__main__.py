@@ -495,10 +495,11 @@ def main(argv: list[str] | None = None) -> int:
                          help="on rejection, print a structured diagnostic instead "
                               "of the human rendering")
 
-    run = sub.add_parser("run", help="boot a composition on a Cordis runtime (hold + REPL, or --watch)")
+    run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
-                     help="target runtime tier (default: py; only py is runnable today)")
+                     help="target runtime tier (default: py; only py is runnable today; "
+                          "a missing runtime prints setup.sh and exits nonzero)")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--watch", action="store_true",
