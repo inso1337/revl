@@ -16,6 +16,13 @@ from .holes import render as render_holes
 from .run import KNOWN_BACKENDS, run_command
 from .test import test_command
 
+# G8 audit: the pseudo-boundary recorded when a component reaches host code
+# through a first-class function dispatch (an arrow-typed parameter or
+# binding) — the same `*` capability the G4 analysis uses, for the same
+# reason: no extern name can be given, because what runs is not statically
+# boundable. The concrete names that travel alongside it are reported too.
+_UNKNOWN_DISPATCH = "*"
+
 
 def _fn_call_names(node, out: set) -> None:
     """Collect callable references in an IR tree: component positions use
@@ -86,6 +93,14 @@ def _boundary(ir: dict) -> dict:
     reach = _extern_reachability(ir)
     externs = reach["__externs__"]
     extern_class = {ext["name"]: ext for ext in ir.get("externs") or []}
+    # the capability fixed point (G4's own analysis) — see the note where it
+    # joins the walk below; without it a first-class dispatch is invisible
+    from .lower import _emitting_capabilities  # noqa: PLC0415 — lazy, like plan
+
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    fn_caps_map = _emitting_capabilities(fns, ir.get("externs") or [])
 
     report: dict[str, dict] = {}
     for comp in ir.get("components") or []:
@@ -127,11 +142,25 @@ def _boundary(ir: dict) -> dict:
         called: set = set()
         _fn_call_names(comp.get("body") or [], called)
         host: set = set()
+        unknown_dispatch = False
         for name in called:
             if name in externs:
                 host.add(name)
             else:
                 host |= reach.get(name, set())
+                # the name-only walk cannot see a first-class dispatch: a fn
+                # whose body hands an emitting callable to a dispatcher (`f(x)`
+                # through an arrow-typed parameter) reaches boundaries no call
+                # name names. The lowerer's capability fixed point tracks that
+                # — its concrete extern names join the surface, and `*` marks
+                # the dispatch itself so the report can say what is unnameable.
+                fn_caps = fn_caps_map.get(name) or set()
+                host |= {c for c in fn_caps if c != "*"}
+                if "*" in fn_caps:
+                    unknown_dispatch = True
+
+        if unknown_dispatch:
+            host.add(_UNKNOWN_DISPATCH)
 
         report[comp["name"]] = {
             "emissions": sorted(stats["emissions"]),
@@ -139,6 +168,10 @@ def _boundary(ir: dict) -> dict:
             "compensated": stats["compensated"],
             "awaits": stats["awaits"],
             "externs": [
+                {"name": _UNKNOWN_DISPATCH,
+                 "class": "first-class dispatch",
+                 "backends": []}
+                if name == _UNKNOWN_DISPATCH else
                 {"name": name,
                  "class": extern_class.get(name, {}).get("class"),
                  "backends": sorted((extern_class.get(name, {}).get("bodies") or {}).keys())}
@@ -583,6 +616,9 @@ def main(argv: list[str] | None = None) -> int:
                     detail.append(f"iteration boundaries: {stats['awaits']}")
                 if host:
                     rendered = ", ".join(
+                        f"{e['name']} (reached through first-class function "
+                        "dispatch — what runs is not statically boundable)"
+                        if e.get("class") == "first-class dispatch" else
                         f"{e['name']} ({e['class']}, {'+'.join(e['backends']) or 'no bodies'})"
                         for e in host)
                     detail.append(f"host code: {rendered}")
