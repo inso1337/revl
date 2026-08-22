@@ -830,3 +830,36 @@ def test_arithmetic_helpers_reach_a_memory_free_component(tmp_path):
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     assert int(out.stdout.strip().splitlines()[-1]) == -3     # (-7).div_floor(2) + 1
+
+
+@_needs_wasmtime
+def test_v3_test_block_strings_are_pooled_and_run_on_wasmtime(tmp_path):
+    """REGRESSION: the pooling pass rooted only the declared functions, so a
+    `test` block's own strings — plain literals, template text segments and
+    the checked-division Err message — were never pooled. Tests are lowered
+    after the functions (`revl_test_*` exports), so lowering one died with
+    "internal: string literal … was not pooled". Their bodies now pool with
+    everything else, and the exported test must actually run and pass."""
+    import subprocess
+
+    _wasmtime_or_fail()
+    src = (
+        "fn greet(n: Str) -> Str { return `hi ${n}` }\n"
+        "fn qt(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_trunc(b) }\n"
+        "test \"strings survive lowering\" {\n"
+        "  assert greet(\"a\") == \"hi a\"\n"
+        "  assert greet(\"xy\").length() == 5\n"
+        "  assert match qt(7, 0) { Err(e) => e.length() > 0, Ok(q) => q == 0 }\n"
+        "}"
+    )
+    modules = _emitter().emit(compile_source(src))
+    module = modules["functions"]
+    assert "revl_test_strings_survive_lowering" in module
+    wat = tmp_path / "tests.wat"
+    wat.write_text(module, encoding="utf-8")
+    out = subprocess.run(
+        ["wasmtime", "--invoke", "revl_test_strings_survive_lowering", str(wat)],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    # 1 = every assert held (a failed assert traps before the tail)
+    assert int(out.stdout.strip().splitlines()[-1]) == 1
