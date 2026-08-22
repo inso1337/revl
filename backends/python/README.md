@@ -49,6 +49,22 @@ and R3 (the dependent's inverses — `map.remove`, `map.drop` — all run before
 the provider's `pool.close`), then asserts R1 (LIFO teardown tail) and R4
 (no hooks, provisions, runtimes, or effects left on the Context).
 
+## Run a composition from the CLI (`revl run`)
+
+The same emitter + runtime, driven by the revl CLI with no host-language
+driver (roadmap §2; `docs/guide-humans.md` Tooling):
+
+```sh
+.venv/bin/python -m revl run ../../examples/user_cache.rvl --config cfg.toml
+```
+
+`revl run` compiles the manifest, boots the composition on a cordis `Context`,
+streams the lifecycle/host trace (`load` / `fiber` / `host` lines), holds a
+REPL over the provided services, and on EOF/Ctrl-C tears everything down and
+proves no residue. `--watch` hot-swaps edits in; `--plan` prints the load plan
+with no runtime. A component admitted with a missing *required* config field
+is refused before the runtime loads.
+
 ## Regenerating the golden file
 
 ```sh

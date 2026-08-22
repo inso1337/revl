@@ -264,9 +264,16 @@ python -m revl mcp import tools.json               # an MCP server -> revl sourc
 python3 tools/conformance.py                       # every construct x every backend
 ```
 
-`run` needs the cordis-py runtime (`backends/python/setup.sh`); `--backend`
-selects the tier, and `revl test --all` is gated by
-`tests/test_cross_tier.py`.
+`run` needs the cordis-py runtime (`backends/python/setup.sh`); without it the
+command says so and exits nonzero, and the end-to-end tests in `tests/test_run.py`
+skip with that reason. `--config FILE` supplies the host config a composition
+declares (a component with a missing required field refuses the run before any
+runtime loads); `--backend` selects the tier, and `revl test --all` is gated by
+`tests/test_cross_tier.py`. Non-interactive round-trip (boot → trace → exit):
+
+```bash
+python -m revl run examples/user_cache.rvl --config cfg.toml < /dev/null
+```
 
 Two of these are worth being precise about, because they are the project's
 easiest place to overclaim:
