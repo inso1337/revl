@@ -82,6 +82,11 @@ one that passes only pure functions. Higher-order code that never touches
 an emitting callable — the ordinary case — still compiles read-only. The
 guarantee remains static and revl-complete: it bounds what the compiled
 program's own bodies can reach, not what host-provided values do.
+The G8 audit (`revl audit`) shares this analysis: a boundary reached
+through a first-class dispatch is reported as both the concrete extern
+(`ship (emission, py)`) and a `*` entry — *that* the reach crosses an
+unnameable dispatch and *what* it reaches, so an audit never reads
+cleaner than the program it describes.
 
 The projection therefore trusts the declaration, and reports what the body
 reaches as provenance:
