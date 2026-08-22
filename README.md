@@ -4,7 +4,7 @@
 
 <p>
   <a href="https://github.com/inso1337/revl/actions/workflows/ci.yml"><img src="https://github.com/inso1337/revl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/runtimes-5-2dd4bf" alt="6 runtimes">
+  <img src="https://img.shields.io/badge/runtimes-6-2dd4bf" alt="6 runtimes">
   <img src="https://img.shields.io/badge/emitted%20code-validated%20by%20real%20compilers-2dd4bf" alt="validated by real compilers">
   <img src="https://img.shields.io/badge/agent--native-MCP-a78bfa" alt="MCP native">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
