@@ -365,3 +365,58 @@ def test_a_plain_operation_has_an_empty_capability_set():
     (tool,) = tools_from_ir(ir)
     assert tool["x-revl"]["capabilities"] == []
     assert tool["annotations"]["readOnlyHint"] is True
+
+
+# --- G8 audit surface under first-class dispatch ---------------------------
+# The G4 fix (agent/mcp-hint-hardening2) made a first-class reference to an
+# emitting callable add the `*` capability. The G8 audit must not lose the
+# concrete boundary names in the same situation: `*` says *that* the reach is
+# unnameable, the concrete names say *what* it reaches.
+
+_DISPATCH_SOURCE = """
+extern emission fn ship(x: Str) -> Str = @py { print("SHIP EMITTED"); return x }
+fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
+fn wrap(x: Str) -> Str { return indirect(ship, x) }
+service S { emission fn loud(a: Str) -> Str }
+component C provides s: S {
+  provide s { fn loud(a) = wrap(a) }
+}
+"""
+
+
+def test_capability_fixed_point_keeps_concrete_names_alongside_the_dispatch_star():
+    ir = compile_source(_DISPATCH_SOURCE)
+    caps = _emitting_capabilities(ir.get("functions") or [], ir.get("externs") or [])
+    # `wrap` carries both: `*` marks that a first-class dispatch happens,
+    # `ship` names the boundary the dispatched value reaches.
+    assert caps["wrap"] == {"*", "ship"}
+    # `indirect` alone earns NO entry: its dispatch runs through its own
+    # parameter, so nothing concrete flows there — a dispatcher stays pure
+    # until an emitting value is handed to it, which happens at `wrap`.
+    assert "indirect" not in caps
+
+
+def test_the_audit_reports_the_boundary_behind_a_first_class_dispatch():
+    ir = compile_source(_DISPATCH_SOURCE)
+    externs = _boundary(ir)["C"]["externs"]
+    names = {e["name"] for e in externs}
+    # before the fix only `*`-less name-only reaches appeared: ship vanished
+    assert names == {"*", "ship"}
+    star = next(e for e in externs if e["name"] == "*")
+    assert star["class"] == "first-class dispatch"
+    ship = next(e for e in externs if e["name"] == "ship")
+    assert ship["class"] == "emission"
+
+
+def test_the_audit_stays_clean_for_pure_higher_order_chains():
+    ir = compile_source("""
+    extern emission fn log(x: Str) -> Str = @py { print("LOG"); return x }
+    extern pure fn purefn(x: Str) -> Str = @py { return x }
+    fn chain2(x: Str) -> Str { return purefn(x) }
+    service T { emission fn op(a: Str) -> Str }
+    component D provides t: T {
+      provide t { fn op(a) = log(chain2(a)) }
+    }
+    """)
+    externs = _boundary(ir)["D"]["externs"]
+    assert {e["name"] for e in externs} == {"log", "purefn"}

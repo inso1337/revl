@@ -2890,10 +2890,14 @@ def _emitting_capabilities(fns: list, externs: list,
             # refused by the same G4 check as one that calls the extern
             # directly. A dispatching helper that only ever receives pure
             # functions stays clean: nothing emitting is ever referenced as a
-            # value on any path that reaches it.
+            # value on any path that reaches it. The concrete names travel
+            # too (`reached |= caps[ref]`): `*` marks the dispatch as
+            # unnameable for the declaration checks, while the G8 audit
+            # surface still reports which boundaries the chain reaches.
             for ref in sorted(passed.get(name, ())):
                 if caps.get(ref):
                     reached.add("*")
+                    reached |= caps[ref]
                     if witness is not None:
                         witness.setdefault(name, ref)
             if reached and not reached <= caps.get(name, set()):
