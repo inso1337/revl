@@ -38,6 +38,8 @@ from .typecheck import (
     pin_hole,
     null_error,
     parse_type,
+    substitute,
+    unify,
 )
 from .parser import (
     AssertStmt,
@@ -1347,12 +1349,17 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
             check_ast(stmt.value, declared, type_env, types, filename,
                       f"`let {stmt.name}: {render_type(declared)}`")
             type_env[stmt.name] = declared
+            actual_declared = infer_ast(stmt.value, type_env, types, None)
         else:
             inferred = infer_ast(stmt.value, type_env, types, filename)
             if inferred is not None:
                 type_env[stmt.name] = inferred
+            actual_declared = None
+        lowered_value = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
+        # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
+        _mark_widen(declared, actual_declared, lowered_value)
         body.append({"step": "let", "name": stmt.name,
-                     "value": _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types),
+                     "value": lowered_value,
                      "mutable": stmt.mutable})
     elif isinstance(stmt, LetPatternStmt):
         _lower_let_pattern_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types)
@@ -1385,8 +1392,11 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                            declared, inferred)
         if inferred is not None and declared is None:
             type_env[stmt.name] = inferred
+        lowered_value = _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)
+        # assigning into a `Float`-declared variable is a coercion site too
+        _mark_widen(declared, inferred, lowered_value)
         body.append({"step": "assign", "name": stmt.name,
-                     "value": _lower_pure_expr(value, scope, callables, alias_fns, filename, type_env, types)})
+                     "value": lowered_value})
     elif isinstance(stmt, ReturnStmt):
         if stmt.expr is not None:
             check_ast(stmt.expr, expected_return, type_env, types, filename, "this function's return")
@@ -1397,8 +1407,11 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
                    _lower_pure_expr(stmt.expr, scope, callables, alias_fns,
                                     filename, type_env, types))
         if lowered is not None and expected_return:
+            actual_ret = infer_ast(stmt.expr, type_env, types, filename)
+            # `return 3` in a `-> Float` fn is a coercion site (docs/arithmetic.md)
+            _mark_widen(expected_return, actual_ret, lowered)
             lowered = _inject_opt(expected_return,
-                                  infer_ast(stmt.expr, type_env, types, filename),
+                                  actual_ret,
                                   lowered)
         body.append({"step": "return", "expr": lowered})
     elif isinstance(stmt, IfStmt):
@@ -1602,6 +1615,32 @@ def _retarget_holes(node, source: str) -> None:
 _TYPED_ARITH_OPS = ("/", "%", "+", "-", "*")
 
 
+def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> dict | None:
+    """Mark an implicit `Int` -> `Float` coercion site in the IR.
+
+    `compatible` lets an `Int` stand where a `Float` is declared, but until
+    now the widening was invisible: a `call` argument, a `let` value or a
+    `return` expression reached every backend as a bare `lit`/`var`, and the
+    tiers that keep `Int` and `Float` apart split three ways on `ident(3)`
+    (docs/arithmetic.md) — rust refused with E0308, TypeScript computed the
+    wrong answer (`3n === 3` is false), and python/go/java absorbed it behind
+    a host rule. This is the same shape of gap `operands` closed for `/`, and
+    it closes the same way: the frontend — the single IR producer, and the
+    only stage that knows both types — annotates the coercion site, and every
+    backend can emit the conversion.
+
+    The marker is additive (`"widen": "Float"` on the coerced node), so no
+    `ir_version` changes and v1/v2/v3 reference documents stay
+    byte-identical: a coercion site requires a declared `Float` position,
+    which only full-language (v3) sources can express.
+    """
+    if node is None:
+        return node
+    if parse_type(expected)[0] == "Float" and parse_type(actual)[0] == "Int":
+        node["widen"] = "Float"
+    return node
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
@@ -1715,6 +1754,31 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
             return {"kind": "builtin", "method": method,
                     "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
                     "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
+        # A call argument that widens Int -> Float is marked on the argument
+        # node (`_mark_widen`) so every backend emits the conversion — the
+        # `ident(3)` gap in docs/arithmetic.md. Generic signatures are
+        # instantiated first, exactly as the checker does, so a `T` bound to
+        # `Float` by this call marks too. Inference runs without a filename:
+        # the checking pass has already diagnosed real mismatches, so this is
+        # annotation only.
+        if isinstance(expr.callee, ExprVar):
+            sig = (types.get(FNS_KEY) or {}).get(expr.callee.name)
+            if sig is not None and sig.get("params"):
+                params = list(sig["params"])
+                if sig.get("tparams"):
+                    subst: dict = {}
+                    arg_types = [infer_ast(a, type_env, types, None) for a in expr.args]
+                    for p, a in zip(params, arg_types):
+                        unify(p, a, subst)
+                    params = [substitute(p, subst) for p in params]
+                lowered_args = [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types)
+                                for a in expr.args]
+                for p, a, node in zip(params,
+                                      [infer_ast(a, type_env, types, None) for a in expr.args],
+                                      lowered_args):
+                    _mark_widen(p, a, node)
+                return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
+                        "args": lowered_args}
         return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
                 "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
     if isinstance(expr, ExprField):
