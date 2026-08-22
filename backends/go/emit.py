@@ -205,6 +205,12 @@ def _expr(node, env: _Env, expected=None) -> str:
     """
     if not isinstance(node, dict):
         raise EmitError("expr must be an object: %r" % (node,))
+    # An implicit Int -> Float coercion site (docs/arithmetic.md): go's
+    # untyped-constant rule used to absorb it silently; the marker makes the
+    # conversion explicit in the emitted source.
+    if node.get("widen") == "Float":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return "float64(%s)" % (_expr(inner, env, expected),)
     kind = node.get("kind")
     if kind == "name":
         return env.name_ref(node["id"])
@@ -1244,6 +1250,10 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
     """Surface type of an expression when knowable, else None."""
     if not isinstance(node, dict):
         return None
+    # a marked Int -> Float coercion site yields a Float (docs/arithmetic.md):
+    # without this, `let x: Float = 3` declared `var x int64 = float64(3)`.
+    if node.get("widen") == "Float":
+        return "Float"
     kind = node.get("kind")
     if kind == "lit":
         v = node.get("value")
@@ -1392,6 +1402,12 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected):
 def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed v3 expression: {node!r}")
+    # An implicit Int -> Float coercion site (docs/arithmetic.md): go's
+    # untyped-constant rule used to absorb it silently; the marker makes the
+    # conversion explicit in the emitted source.
+    if node.get("widen") == "Float":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"float64({_go_v3_expr(inner, ctx, expected)})"
     kind = node["kind"]
 
     if kind == "lit":

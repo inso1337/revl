@@ -1500,6 +1500,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
     """
     if not isinstance(node, dict) or "kind" not in node:
         raise EmitError(f"malformed expression: {node!r}")
+    # An implicit Int -> Float coercion site (docs/arithmetic.md). This tier
+    # is the one that *refused* `ident(3)` with E0308 before the marker
+    # existed — the widening was real but invisible; now it is emitted.
+    if node.get("widen") == "Float":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"({_render_expr(inner, ctx, rename)} as f64)"
     rename = rename or {}
     kind = node["kind"]
 
