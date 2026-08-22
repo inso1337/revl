@@ -66,7 +66,7 @@ reports is read off that pair:
 | components added / replaced / withdrawn | entry names on each side |
 | resulting load order | the linker's own Kahn ordering |
 | emission surface | `revl audit`'s `_boundary` walk over both IRs |
-| interface drift | the two `services` tables, compared structurally |
+| interface drift | the gate's own compatibility relation over the two `services` tables (consumer/provider-relative — `lower._service_compatible`, docs/service-compat.md) |
 
 **Provisions are keyed by `(key, realm)`, not by key.** G2 is per-realm
 (paper Def. 43), so replacing tenant A's `kv` provider says nothing about
@@ -214,10 +214,16 @@ also [REVL] <candidate>.rvl:2
         composition's services in scope — it may not be a real defect
 ```
 
-Interface drift gets its own section. The gate raises on the first service
-that disagrees with the running manifest; the plan enumerates **every**
-disagreement, so a rename can be fixed in one pass rather than one compile at
-a time.
+Interface drift gets its own section, and it previews exactly what the gate
+would refuse. The gate raises on the first service that breaks a running
+component's use of it; the plan enumerates **every** such break — the
+offending method, the kind of break (`removed` / `signature` / `emission` /
+`commutative`), the reason, and the running components affected — so a rename
+or a retype can be fixed in one pass rather than one compile at a time.
+*Compatible* evolution under a retained consumer (a method added, a parameter
+widened, a return narrowed, an emission dropped) is not drift and is not
+reported: the same consumer/provider-relative relation the admission gate
+applies (docs/service-compat.md).
 
 ## 7. The MCP tool
 
