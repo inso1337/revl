@@ -1164,6 +1164,23 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
         return f"{target}.get({args[0]})"
     if method == "has":
         return f"{target}.has({args[0]})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map). JS `.sort()` is
+    # UTF-16 code-unit order, which diverges from the canonical (code-point)
+    # order only past U+FFFF — the inline comparator compares code points via
+    # Array.from, so supplementary-plane keys sort canonically too.
+    # `size` answers number; revl Int is a bigint here, so BigInt() on the
+    # way out, exactly as length does. remove copies before deleting.
+    if method == "size":
+        return f"BigInt({target}.size)"
+    if method == "keys":
+        return (f"[...{target}.keys()].sort((a, b) => {{ "
+                f"const A = Array.from(a), B = Array.from(b); "
+                f"for (let i = 0; i < Math.min(A.length, B.length); i++) {{ "
+                f"if (A[i] !== B[i]) return A[i] < B[i] ? -1 : 1 }} "
+                f"return A.length - B.length }})")
+    if method == "remove":
+        return (f"(() => {{ const c = new Map({target}); "
+                f"c.delete({args[0]}); return c }})()")
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): Int is a
     # bigint on this tier, and BigInt.prototype.toString is exact decimal.
     if method == "to_str":

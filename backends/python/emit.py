@@ -242,6 +242,16 @@ def _render_builtin(method, target: str, args: list) -> str:
         return f"{target}.get({args[0]})"
     if method == "has":
         return f"({args[0]} in {target})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map). python str
+    # comparison IS canonical (code-point) order, so sorted() is exact;
+    # remove copies without the key, receiver untouched.
+    if method == "size":
+        return f"len({target})"
+    if method == "keys":
+        return f"sorted({target})"
+    if method == "remove":
+        return (f"(dict((kk, vv) for kk, vv in {target}.items() "
+                f"if kk != {args[0]}))")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
     # and its `%` takes the divisor's sign, so div_floor is native and the
     # Euclidean remainder is `a % abs(b)`; truncation has to be built.

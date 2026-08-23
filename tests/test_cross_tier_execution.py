@@ -68,6 +68,41 @@ test "call argument widens" { assert ident(3) == 3.0 }
 test "annotated let widens" { assert widen_let() == 3.0 }
 test "return widens" { assert widen_return(4) == 4.0 }
 """,
+
+    # The C1 contract (docs/collections.md, docs/stdlib-2.0.md §Map): keys()
+    # yields ascending canonical Str order — a pure function of the key set,
+    # never of insertion history (go/rust randomize by design; the fixture
+    # inserts out of order so any insertion- or hash-order tier fails here).
+    # size/remove ride along: remove is persistent (the receiver keeps its
+    # entry) and total (a missing key is a no-op), and both are exercised at
+    # the empty-map boundary.
+    "map iteration is canonical order": """
+fn emptyTable() -> Map[Str, Int] { return Map.empty() }
+pub fn build(pairs: List[Str]) -> Map[Str, Int] {
+  var m = emptyTable()
+  var i = 0
+  while (i < pairs.length()) {
+    m = m.set(pairs[i], i)
+    i += 1
+  }
+  return m
+}
+pub fn ordered(pairs: List[Str]) -> List[Str] { return build(pairs).keys() }
+test "iteration is canonical, not insertion order" {
+  assert ordered(["banana", "apple", "cherry"]) == ["apple", "banana", "cherry"]
+}
+test "size counts entries" { assert build(["a", "bb"]).size() == 2 }
+test "empty map sizes zero and iterates to nothing" {
+  assert emptyTable().size() == 0 && emptyTable().keys().length() == 0
+}
+test "remove is persistent and total" {
+  let m = build(["a", "b"])
+  let m2 = m.remove("a")
+  let m3 = m.remove("nope")
+  assert m.has("a") && !m2.has("a") && m2.size() == 1
+  assert m3 == m
+}
+""",
 }
 
 # go joins the fast set: the v3 tier is dependency-free Go, so `go test`

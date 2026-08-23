@@ -572,6 +572,15 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
         return f"revlMapGet({target}, {args[0]})"
     if method == "has":
         return f"revlMapHas({target}, {args[0]})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): persistent remove,
+    # keys in canonical order via the code-point comparator (Java's
+    # String.compareTo is UTF-16 code-unit order, wrong past U+FFFF).
+    if method == "size":
+        return f"(long) {target}.size()"
+    if method == "keys":
+        return f"revlMapKeys({target})"
+    if method == "remove":
+        return f"revlMapRemove({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): the receiver
     # lowers to a long, and String.valueOf(long) is exact decimal —
     # including Long.MIN_VALUE, no |MIN| detour needed.
@@ -659,6 +668,27 @@ def _emit_stdlib_helpers() -> list[str]:
         "}",
         "private static <V> boolean revlMapHas(java.util.Map<String, V> m, String k) {",
         "    return m.containsKey(k);",
+        "}",
+        "// remove copies before deleting (persistent); keys sorts a copied",
+        "// list with a code-point comparator — canonical Str order even for",
+        "// supplementary-plane keys, where compareTo would misorder.",
+        "private static <V> java.util.Map<String, V> revlMapRemove(java.util.Map<String, V> m, String k) {",
+        "    java.util.Map<String, V> out = new java.util.HashMap<>(m);",
+        "    out.remove(k);",
+        "    return out;",
+        "}",
+        "private static <V> java.util.List<String> revlMapKeys(java.util.Map<String, V> m) {",
+        "    java.util.List<String> ks = new java.util.ArrayList<>(m.keySet());",
+        "    ks.sort((a, b) -> {",
+        "        int i = 0, j = 0;",
+        "        while (i < a.length() && j < b.length()) {",
+        "            int ca = a.codePointAt(i), cb = b.codePointAt(j);",
+        "            if (ca != cb) { return Integer.compare(ca, cb); }",
+        "            i += Character.charCount(ca); j += Character.charCount(cb);",
+        "        }",
+        "        return Boolean.compare(i >= a.length(), j >= b.length());",
+        "    });",
+        "    return java.util.List.copyOf(ks);",
         "}",
         "",
     ]

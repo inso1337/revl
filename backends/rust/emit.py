@@ -1923,6 +1923,17 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"{target}.get(&{args[0]}).cloned()"
     if method == "has":
         return f"{target}.contains_key(&{args[0]})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map). String: Ord is
+    # UTF-8 byte order — the canonical Str order on this tier. keys collects
+    # into a Vec<String> (the List[Str] representation) and sorts a copy;
+    # remove clones before deleting, so the receiver never mutates.
+    if method == "size":
+        return f"({target}.len() as i64)"
+    if method == "keys":
+        return (f"{{ let mut ks: std::vec::Vec<String> = "
+                f"{target}.keys().cloned().collect(); ks.sort(); ks }}")
+    if method == "remove":
+        return f"{{ let mut c = {target}.clone(); c.remove(&{args[0]}); c }}"
     # Integer division and modulo (docs/arithmetic.md). Rust `/` already
     # truncates and carries div_euclid/rem_euclid in std (stable since 1.38);
     # div_floor is spelled out rather than using the much newer
