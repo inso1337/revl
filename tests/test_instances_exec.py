@@ -194,3 +194,52 @@ def test_supervision_tree_addressing():
     # two workers, two disjoint realms: neither collided on `counter`, which is
     # only possible if each is a distinct local realm
     assert len(obs["spawned_maps"]) == 2
+
+
+# --------------------------------------------------------------------------
+# Instance accessor: reading a provision back through a spawn handle.
+# Phase 1's handle exposed only `.dispose()`, so property (d)'s *positive*
+# direction (the spawner reaching its own instance) could not be expressed
+# in revl. `s.<key>` closes that — a provision read gated to the handle
+# holder, staying on the supervision tree.
+# --------------------------------------------------------------------------
+
+_ACCESSOR_SRC = """
+service Counter { fn value() -> Int }
+service Probe { fn read() -> Int }
+component Worker provides counter: Counter {
+  config { tag: Str }
+  provide counter { fn value() = 42 }
+}
+component App provides probe: Probe {
+  let w = effect spawn Worker with { tag: "a" } undo w.dispose()
+  provide probe { fn read() = w.counter.value() }
+}
+"""
+
+
+def test_instance_accessor_reads_the_spawned_instances_provision():
+    """`s.<key>` resolves to THAT instance's provided service and is callable
+    on cordis-py — the positive supervision-tree direction phase 1 could not
+    express. `App` reaches its spawned `Worker`'s private `counter` only
+    through the handle it holds, and root cannot."""
+    module = loader.load(compile_source(_ACCESSOR_SRC, "accessor.rvl"))
+
+    async def main() -> None:
+        root = Context()
+        runtime.plug(root, module.App, {})
+        for _ in range(12):
+            await asyncio.sleep(0)
+        assert root.get("probe").read() == 42
+        # the instance's provision stays private to its local realm
+        assert root.get("counter") is None
+
+    asyncio.run(main())
+
+
+def test_instance_accessor_rejects_a_key_the_target_does_not_provide():
+    """Reading `s.<key>` for a key the target does not provide is a compile
+    error — the accessor cannot become a back-door to an arbitrary provision."""
+    src = _ACCESSOR_SRC.replace("w.counter.value()", "w.nonesuch.value()")
+    with pytest.raises(Exception, match="nonesuch|provision"):
+        compile_source(src, "accessor.rvl")

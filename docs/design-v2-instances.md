@@ -462,3 +462,36 @@ template is not in the manifest a hot-swap admits against. The other four tiers
 (TS, rust, java, wasm) are phase 2+; cordis-wasm additionally needs the ~10-line
 per-fiber realm-prefix runtime change recorded in
 `docs/notes/runtime-parity-local-realms.md`.
+
+## Instance accessor — frozen (frontend + cordis-py reference landed)
+
+Phase 1's spawn handle exposed only `.dispose()`, so property (d)'s *positive*
+direction — a spawner **reading a provision back** from its own instance — was
+inexpressible in revl. The accessor closes that with **no new grammar form**:
+field access on the handle.
+
+- **Surface:** `s.<key>` where `s : Instance[C]` (a name bound by a `spawn`
+  acquisition) and `<key>` is a key `C` **provides** → resolves to that
+  provided service (so `s.<key>.method(..)` calls it). Reading a key `C` does
+  not provide is a compile error (`` `<key>` is not a provision of C ``).
+- **Supervision-tree preserved:** only a name this component bound to a spawn
+  handle carries `Instance[C]`, so `s.<key>` cannot reach a sibling's or the
+  root's provision — it stays on the tree, exactly like phase-1 addressing.
+- **Frozen IR node** (what the other five tiers must lower):
+  ```json
+  { "kind": "instance-get", "target": <handle expr>,
+    "component": "<TargetComponent>", "key": "<providedKey>",
+    "service": "<ServiceType>" }
+  ```
+  `service` is frozen inline (the typing rule's result) so no tier re-derives
+  it — mirroring how `spawn.realms` carries the provided keys.
+- **Runtime contract:** every tier resolves `key` through the handle's stored
+  instance context — the private local realm the matching `spawn` node isolated
+  the key into — yielding *that instance's* provision and no other's.
+
+**Landed:** typecheck + lower (`src/revl/`) and the cordis-py reference
+(`backends/python/emit.py` + `runtime.py` `SpawnHandle`), with an executed
+test (`tests/test_instances_exec.py` — positive read returns the instance's
+provision; the compile-error negative). **Remaining (fan-out):** lower
+`instance-get` on ts / rust / java / go / wasm, each resolving through its
+spawn handle's stored context.

@@ -479,6 +479,17 @@ class _ComponentEmitter:
                 for k, v in (expr.get("config") or {}).items()) + "}"
             realms = tuple(expr.get("realms") or ())
             return f"spawn(ctx, {target}, {cfg}, {realms!r})"
+        if kind == "instance-get":
+            # instance-parametric components (docs/design-v2-instances.md):
+            # `s.<key>` reads a provision off a spawn handle. The handle
+            # (`target`) is a `SpawnHandle`, whose `.get(key)` resolves the key
+            # through the instance's own private local realm — only the spawner
+            # holding this handle reaches it (supervision-tree addressing).
+            target = self._expr(expr.get("target"), where)
+            key = expr.get("key")
+            if not isinstance(key, str) or not key.isidentifier():
+                raise EmitError(f"{where}: bad instance-get key {key!r}")
+            return f"{target}.get({key!r})"
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
     # -- steps --------------------------------------------------------------
