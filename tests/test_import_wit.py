@@ -140,9 +140,12 @@ def test_resource_maps_to_the_acquire_returned_handle_model(tmp_path):
     source = import_wit_file(str(FIXTURES / "resource.wit"))
     # the handle: an opaque proxy record, identity host-side
     assert "type Descriptor = { handle: Int }" in source
-    # construction + destructor as a tracked inverse (G4)
+    # construction + destructor as a tracked inverse (G4); `result` is the
+    # undo slot's one implicit binding — the acquired handle
     assert ("extern acquire fn descriptor_new(path: Str) -> Descriptor"
-            " undo descriptor_drop(descriptor)") in source
+            " undo descriptor_drop(result)") in source
+    # the destructor is a declared extern, so the undo's callee is checked
+    assert "extern emission fn descriptor_drop(self: Descriptor)" in source
     assert "crosses a seam by proxy not by copy (distribute.py)" in source
 
     ir = _compile(source, tmp_path)
@@ -189,7 +192,7 @@ interface i {
   open: func() -> pool;
 }
 """, filename="pool.wit")
-    assert "extern acquire fn pool_new() -> Pool undo pool_drop(pool)" in source
+    assert "extern acquire fn pool_new() -> Pool undo pool_drop(result)" in source
     assert "declares no constructor" in source
     ir = _compile(source, tmp_path)
     assert "Pool" in {e["returns"] for e in ir["externs"] if e.get("class") == "acquire"}
