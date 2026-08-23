@@ -32,6 +32,13 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   refused (unknown stdlib methods, invented syntax forms, missing types),
   ranked by frequency across the committed corpora. Orders the stdlib/syntax
   roadmap by *measured* demand. Free — reads committed data, no model.
+- `tokens.py` — the **token economy's measurement** (item 50): records
+  *tokens-to-green* — output tokens spent per admitted component — beside the
+  iterations-to-green everything else tracks. Recomputes green against the
+  current checker (like `rescore.py`) and sums the output tokens the model
+  emitted across every attempt up to the admitted one. Free — reads committed
+  data, no model. Committed number: `results/tokens-to-green.md`; the
+  protocol-side companion analysis: `results/token-surface-audit.md`.
 - `score_raw_ts.py` — the raw-ts scoring + re-score path. Mounts/unmounts each
   committed `raw-ts/attempt-1.ts` N cycles via the item-18 residue probe
   (`tools/residue-probe/`) and reports the leak set. Free — the probe calls no
@@ -163,6 +170,54 @@ compiler**, so it is the right tool for "did this language change break
 previously-accepted code?". It is *not* a current model-capability figure: the
 generations were produced against older prompts and an older checker, and no
 prompt fix can retroactively improve them. Only a fresh `run.py` does that.
+
+## The token economy: tokens-to-green (measured, not assumed)
+
+Iterations-to-green counts *turns*; it does not count *spend*. A two-iteration
+component that emitted 900 output tokens cost more than a three-iteration one
+that emitted 300. Item 50 makes revl the cheapest language for an agent to
+write, and its house rule is *measured, not assumed* — so before any
+optimization can claim it pays, there has to be a number it moves. That number
+is **output tokens spent per admitted component**, across *all* attempts up to
+admission (retries are not free):
+
+```bash
+python3 bench/tokens.py                    # both model runs
+python3 bench/tokens.py --run typed-deepseek-v4-pro
+python3 bench/tokens.py --json tokens.json # machine-readable
+```
+
+It is recorded in two places, and is explicit about which is real:
+
+- **In the committed corpora (free re-score):** `tokens.py` tokenises the
+  committed generation files (`attempt-N.rvl`) with a deterministic, dependency-
+  free **BPE-proxy** (`count_tokens`) and sums to green. The *artefacts* are
+  real; the *tokeniser* is a proxy, because the model's own output-token count
+  was never recorded for these corpora. Alongside it surfaces the **real as-run
+  dollar cost** from the committed `cost_total`. Green is recomputed against the
+  current checker, so the number tracks the language exactly as first-pass rate
+  does. Committed snapshot: `results/tokens-to-green.md`.
+- **In future funded runs (exact):** `run.py` now captures cline's
+  `output_tokens` per attempt into `results.jsonl`, and writes a
+  `tokens_to_green` summary row + a *mean tokens-to-green* column into each
+  run's `summary.md`. Where a committed cell carries a recorded `output_tokens`,
+  `tokens.py` uses it verbatim instead of the proxy — so the next paid run
+  upgrades the number from proxy to exact with no code change.
+
+The committed figure today: **mean ~149 est. output tokens-to-green** across 136
+admitted components (real as-run cost $0.29). The costliest cells and the
+per-variant breakdown are in `results/tokens-to-green.md`.
+
+This is only the *generation* half of the token economy. The larger,
+protocol-side half — tokens an agent burns re-sending source and running chatty
+MCP verb sequences — is ranked in `results/token-surface-audit.md`, an
+analysis-only audit cross-referenced with the item-38 demand ranking (demand =
+what agents retry; tokens = what retries cost). That audit is the map of *where
+the spend goes*; the optimizations item 50 will weigh against this metric (a
+compound one-intent verb, a terser authoring wire-form, `revl_edit` structured
+patches) each have to move tokens-to-green here before they ship — no trick
+ships on taste. Where the paying tricks eventually land is the "How you're
+measured" contract in `../docs/guide-ai-agents.md`; this metric is the scale.
 
 ## Reading the results
 
