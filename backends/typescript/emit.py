@@ -563,13 +563,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
 
     if kind == "len":
         # `xs.length` in field position (lower.py emits `len` rather than
-        # `field` when the receiver is a sized type). revl types it `Int`, and
-        # the JS `.length` is a `number`, so it converts at the boundary.
+        # `field` when the receiver is a sized type). revl types it `Int`. For
+        # a `Str` the count is in code points, not UTF-16 units, so it routes
+        # through `revlLen` (which leaves a List/Bytes receiver on `.length`).
         target_node = node.get("target")
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"BigInt({target}.length)"
+        return f"revlLen({target})"
 
     if kind == "builtin":
         target_node = node.get("target")
@@ -646,14 +647,37 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                     f"({call})")
         return call
 
+    if kind == "spawn":
+        # instance-parametric components (docs/design-v2-instances.md): a spawn
+        # is an acquisition that plugs the target component as a *child fiber* of
+        # the spawner, each provided key isolated into its own fresh LOCAL realm
+        # (an unlabelled `ctx.isolate`, a distinct identity per spawn — so two
+        # instances never collide on a provision). `spawn(ctx, Worker, {config},
+        # [realms])` returns a disposable handle; the step's `undo` disposes it,
+        # tearing down that child fiber (its own nested teardown scope). The
+        # target is a module-level plugin dict emitted like any component.
+        target = node.get("component")
+        if not isinstance(target, str) or not target.isidentifier():
+            raise EmitError(f"bad spawn component {target!r}")
+        cfg = "{" + ", ".join(
+            f"{_string(k)}: {_expr(v, ctx)}"
+            for k, v in (node.get("config") or {}).items()) + "}"
+        realms = "[" + ", ".join(
+            _string(r) for r in node.get("realms") or []) + "]"
+        return f"spawn(ctx, {target}, {cfg}, {realms})"
+
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
-def _method_body(steps: list, ctx: "_Ctx", indent: str) -> list[str]:
+def _method_body(steps: list, ctx: "_Ctx", indent: str,
+                 method_is_async: bool = False) -> list[str]:
     """Steps inside a provide-method body.
 
     These run while the component is ACTIVE; `effect` steps go through
-    `ctx.effect` so their undos join the component fiber's accumulator.
+    `ctx.effect` so their undos join the component fiber's accumulator. An
+    `async` service operation (services 2.0 §5) lowers to an `async` method,
+    whose body may `await` a host async value or an instance disposal (A1);
+    a `sync` method rejects `await`, matching the reference tier.
     """
     scope = ctx.component_scope
     lines: list[str] = []
@@ -696,7 +720,14 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str) -> list[str]:
             else:
                 lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         elif kind == "await":
-            raise EmitError("await steps are not allowed inside method bodies (A1)")
+            # A1: legal only in an `async` provide-method (services 2.0 §5); a
+            # sync method has no in-flight window. The await lands, then control
+            # returns to the caller — used here so a request can `await
+            # handle.dispose()` and see an instance reclaimed synchronously.
+            if not method_is_async:
+                raise EmitError(
+                    "await steps are not allowed inside sync provide-method bodies (A1)")
+            lines.append(f"{indent}await {_expr(step['expr'], ctx)}")
         elif kind == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:
@@ -734,8 +765,14 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[
             f"{p}: {_ts_type(spec.get('type'))}"
             for p, spec in zip(params, spec_params)
         )
-        lines.append(f"{indent}{name}({sig}) {{")
-        lines.extend(_method_body(method.get("body") or [], ctx.with_scope(body_scope), indent + "  "))
+        # services 2.0 §5: an async operation lowers to an async method, whose
+        # body may await (A1). The flag lives on the service declaration, the
+        # single source of truth for the operation's shape.
+        method_is_async = bool(declared[name].get("async"))
+        prefix = "async " if method_is_async else ""
+        lines.append(f"{indent}{prefix}{name}({sig}) {{")
+        lines.extend(_method_body(method.get("body") or [], ctx.with_scope(body_scope),
+                                  indent + "  ", method_is_async))
         lines.append(f"{indent}}},")
     return lines
 
@@ -1074,17 +1111,20 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     JS needs a `number`. Neither direction is implicit in JS, so both convert
     here — `BigInt(...)` on the way out, `Number(...)` on the way in.
     """
+    # `Str` methods count and index in Unicode code points (docs/strings.md);
+    # the JS UTF-16 APIs would count code units. `length`/`slice`/`indexOf` are
+    # shared with List/Bytes, so they route through helpers that dispatch on
+    # the receiver at runtime; `charAt`/`charCodeAt` are Str-only.
     if method == "length":
-        return f"BigInt({target}.length)"
+        return f"revlLen({target})"
     if method == "push":
         return f"[...{target}, {args[0]}]"
     if method == "slice":
-        return (f"{target}.slice({_int_as_number(arg_nodes[0], ctx)}, "
-                f"{_int_as_number(arg_nodes[1], ctx)})")
+        return f"revlSlice({target}, {args[0]}, {args[1]})"
     if method == "charAt":
-        return f"{target}.charAt({_int_as_number(arg_nodes[0], ctx)})"
+        return f"revlCharAt({target}, {args[0]})"
     if method == "charCodeAt":
-        return f"BigInt({target}.charCodeAt({_int_as_number(arg_nodes[0], ctx)}))"
+        return f"revlCharCodeAt({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). JS `/` is true division
     # and `%` takes the dividend's sign, so every one of these is built rather
     # than inherited — through helpers, so the divisor is evaluated once and a
@@ -1105,7 +1145,7 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
-        return f"BigInt({target}.indexOf({args[0]}))"
+        return f"revlIndexOf({target}, {args[0]})"
     if method == "split":
         return f"{target}.split({args[0]})"
     if method == "join":
@@ -1474,6 +1514,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
         out.extend([_REVL_INT_ARITH_HELPER, ""])
+    if _uses_str_methods(ir):
+        out.extend([_REVL_STR_HELPER, ""])
     return out
 
 
@@ -1542,6 +1584,56 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
   return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)
     && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
 }"""
+
+
+# A `Str` is a sequence of Unicode code points (docs/strings.md); a JS string
+# is UTF-16, so its `.length`/`.charAt`/`.charCodeAt`/`.slice`/`.indexOf` count
+# and index in code units — 2 for one astral char. These helpers reinterpret a
+# string through its code points (`Array.from` iterates by code point) while
+# leaving List/Bytes receivers on their native element operations, so
+# `"😀".length()` is 1 and `charCodeAt(0)` is the scalar 128512, not a
+# surrogate. Receiver type is not known statically on this tier, so the branch
+# is at runtime on `typeof x === "string"`.
+_REVL_STR_HELPER = """function revlLen(x: string | ArrayLike<unknown>): bigint {
+  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
+}
+function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+  const i = Number(a), j = Number(b)
+  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+}
+function revlCharAt(s: string, i: bigint): string {
+  const c = Array.from(s)[Number(i)]
+  return c === undefined ? "" : c
+}
+function revlCharCodeAt(s: string, i: bigint): bigint {
+  const c = Array.from(s)[Number(i)]
+  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
+}
+function revlIndexOf(x: string | unknown[], v: unknown): bigint {
+  if (typeof x === "string") {
+    const at = x.indexOf(v as string)
+    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
+  }
+  return BigInt(x.indexOf(v))
+}"""
+
+_STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "indexOf"}
+
+
+def _uses_str_methods(node) -> bool:
+    """Does this IR call one of the code-point string helpers — a `length`
+    field-read (`len`) or a `length`/`slice`/`charAt`/`charCodeAt`/`indexOf`
+    builtin? These share a receiver with List/Bytes, so the helper dispatches
+    at runtime; it is emitted only where one of these forms appears."""
+    if isinstance(node, dict):
+        if node.get("kind") == "len":
+            return True
+        if node.get("kind") == "builtin" and node.get("method") in _STR_METHOD_NAMES:
+            return True
+        return any(_uses_str_methods(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_str_methods(v) for v in node)
+    return False
 
 
 def _uses_equality(node) -> bool:
@@ -1692,6 +1784,39 @@ def _context_augmentation(components: list) -> list[str]:
             + ["  }", "}", ""])
 
 
+def _uses_spawn(ir: dict) -> bool:
+    """True iff any component body contains a `spawn` acquisition node, so the
+    module must import the `spawn` runtime helper. Non-spawning documents skip
+    the import entirely and stay byte-identical to the pre-feature output."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") == "spawn":
+                found = True
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    return found
+
+
+def _runtime_imports(ir: dict, runtime_import: str) -> str:
+    """The `import { ... } from '<runtime>'` line. `spawn` is added only when a
+    spawn node is present (docs/design-v2-instances.md phase 2)."""
+    names = ["host"]
+    if _uses_spawn(ir):
+        names.append("spawn")
+    return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
+
+
 def _emit_v1(ir: dict, *, runtime_import: str) -> str:
     """Emit a v1/v2 component module (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
@@ -1711,7 +1836,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
         "import type { Context } from 'cordis'",
-        f"import {{ host }} from '{runtime_import}'",
+        _runtime_imports(ir, runtime_import),
         "",
     ]
 
@@ -1733,6 +1858,9 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
                 for p in method.get("params") or []
             )
             returns = _ts_type(method["returns"]) if method.get("returns") else "void"
+            # services 2.0 §5: an async operation returns a Promise on this tier.
+            if method.get("async"):
+                returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
             out.append(f"  {mname}({params}): {returns}")
@@ -1771,7 +1899,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
         "import type { Context } from 'cordis'",
-        f"import {{ host }} from '{runtime_import}'",
+        _runtime_imports(ir, runtime_import),
     ]
     if tests:
         out.append("import { expect, it } from 'vitest'")
@@ -1799,6 +1927,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
                 for p in method.get("params") or []
             )
             returns = _ts_type(method["returns"]) if method.get("returns") else "void"
+            # services 2.0 §5: an async operation returns a Promise on this tier.
+            if method.get("async"):
+                returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
             out.append(f"  {mname}({params}): {returns}")

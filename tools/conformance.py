@@ -201,7 +201,7 @@ CASES: list[tuple[str, str, str]] = [
 
     # ---- host blocks and tests
     ("extern", "pure extern",
-     "extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n } = @go { return n } = @rs { return n } = @java { return n; }\n"
+     "extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n } = @go { return n } = @rs { return n } = @java { return n; } = @wasm { (local.get $p_n) }\n"
      + _component("  provide s { fn f(x) = h(x) }")),
     ("extern", "acquire extern",
      "extern acquire fn open_(n: Int) -> Int undo close_(handle)\n"
@@ -209,7 +209,7 @@ CASES: list[tuple[str, str, str]] = [
      "extern pure fn close_(h: Int) -> Int = @py { return h } = @ts { return h } = @go { return h } = @rs { return h } = @java { return h; }\n"
      + _component("  provide s { fn f(x) = x }")),
     ("extern", "emission extern",
-     "extern emission fn ship(n: Int) -> Int = @py { return n } = @ts { return n } = @go { return n } = @rs { return n } = @java { return n; }\n"
+     "extern emission fn ship(n: Int) -> Int = @py { return n } = @ts { return n } = @go { return n } = @rs { return n } = @java { return n; } = @wasm { (local.get $p_n) }\n"
      + _component("  provide s { fn f(x) = emit ship(x) }",
                   services="service S { emission fn f(x: Int) -> Int }\n")),
     ("test", "test block",

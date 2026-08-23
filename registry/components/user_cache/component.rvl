@@ -1,0 +1,30 @@
+// A cache built on a Database. Provides `cache: Cache`; requires `db: Database`
+// (a resolve for a Database provider fills that in). The registry seed's
+// canonical Cache provider — the `revl_resolve` exit test finds it from a
+// Cache-shaped need whose service is declared under a different name, proving
+// the match is structural, not textual (docs/registry.md §6).
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  // `put` writes the cache log through `db` — a service declaration is an
+  // upper bound on what its providers may do.
+  emission fn put(key: Str, value: Str)
+}
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      emit db.execute(`INSERT INTO cache_log VALUES (${key})`)
+    }
+  }
+}

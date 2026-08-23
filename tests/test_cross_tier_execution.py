@@ -963,3 +963,209 @@ def test_narrowing_is_explicit_and_checked_on_every_tier():
     }
     for backend, needle in checks.items():
         assert needle in _emit_text(backend, src), (backend, needle)
+
+
+# ============================================================ THE STRING WAVE
+#
+# Roadmap item 51 (the string wave) — "Str gets the treatment Int got". The
+# stdlib spec never says what a string's *unit* is, and the lowerings already
+# disagree, so `"😀".length()` is a different number on different tiers with
+# every test passing, because every test was ASCII. This is the Int -> Float
+# class of silent wrong answer, one level up: "every emitter agreed on a
+# shape" never implied "every tier agrees on a value".
+#
+# These probes assert the CHOSEN unit — code points (docs/strings.md). The fix
+# has landed, so they are plain asserts: `"😀"` is U+1F600 — 1 code point,
+# 2 UTF-16 units (D83D DE00), 4 UTF-8 bytes (F0 9F 98 80), the one input that
+# separates all three units — and every tier now answers 1 for its length.
+#
+# What each tier had to do (measured divergence -> fix; docs/strings.md):
+#   length():      py 1 (reference) · ts 2 -> [...s].length · go/rust
+#                  literal-rejected -> valid `\U…`/`\u{…}` escapes · java 2 ->
+#                  codePointCount · wasm 4 -> UTF-8-decoding WAT helper
+#   charCodeAt(0): py 128512 · ts 55357 (hi-surrogate) -> codePointAt · go/rust
+#                  rej -> free once the literal compiles · java 55357 ->
+#                  codePointAt · wasm 240 (byte) -> UTF-8 decode
+# The IR stored the astral literal as a code point already; the go/rust
+# emitters re-encoded it as lone-surrogate `\uXXXX` via `json.dumps`, which
+# neither language accepts — now they escape from code points (`\U0001F600`,
+# `\u{1F600}`). java is not executed here (no JDK); its column is verified from
+# backends/java/emit.py (codePointCount/offsetByCodePoints/codePointAt).
+
+STRING_UNIT_PROBES = {
+    # name: (source asserting the CODE-POINT answer, human note)
+    "length counts code points": (
+        'pub fn f() -> Int { return "😀".length() }\n'
+        'test "one astral char is one code point" { assert f() == 1 }',
+        "py=1 · ts=2 · go/rust=literal-rejected · java=2 · wasm=4",
+    ),
+    "charCodeAt yields the scalar value": (
+        'pub fn f() -> Int { return "😀".charCodeAt(0) }\n'
+        'test "charCodeAt is the Unicode scalar" { assert f() == 128512 }',
+        "py=128512 · ts=55357(hi-surrogate) · go/rust=rej · java=55357 · wasm=240(byte)",
+    ),
+    "charAt keeps the whole scalar": (
+        'pub fn f() -> Bool { return "😀".charAt(0) == "😀" }\n'
+        'test "charAt(0) is the whole char, not half a surrogate" { assert f() }',
+        "py=true · ts=false · go/rust=rej · java=false · wasm=false",
+    ),
+    "slice cuts on code-point boundaries": (
+        'pub fn f() -> Bool { return "a😀b".slice(1, 2) == "😀" }\n'
+        'test "slice(1,2) is the middle code point" { assert f() }',
+        "py=true · ts=false · go/rust=rej · java=false · wasm=false",
+    ),
+}
+
+# wasm needs wasmtime and is slow to spin up; group it with the compiled tiers.
+STRING_SLOW_TIERS = ("rust", "java", "wasm")
+
+
+# The string wave is fixed (item 51, docs/strings.md): every tier answers in
+# code points, so these are plain asserts now. The IR stores string literals as
+# code points and each backend escapes from them (go `\U…`, rust `\u{…}`); ts
+# and java route length/charAt/charCodeAt/slice/indexOf through code-point APIs;
+# wasm decodes UTF-8 in its WAT string helpers. python was the reference.
+@pytest.mark.parametrize("name", sorted(STRING_UNIT_PROBES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_string_unit_is_code_points(tier: str, name: str):
+    source, _note = STRING_UNIT_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} does not answer in code points for {name!r}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac/wasmtime are slow)")
+@pytest.mark.parametrize("name", sorted(STRING_UNIT_PROBES))
+@pytest.mark.parametrize("tier", STRING_SLOW_TIERS)
+def test_string_unit_is_code_points_slow(tier: str, name: str):
+    source, _note = STRING_UNIT_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} does not answer in code points for {name!r}: {message}"
+
+
+# ------------------------------------------ float rendering in interpolation
+#
+# The other half of the string wave: `${aFloat}` inside a template has no
+# canonical spelling, so the same Float renders differently on every tier —
+# a template that logs or hashes a Float is a silent cross-tier divergence
+# exactly like the unit is. Measured today:
+#
+#   `${1.0e21}`         py/ts/go "1e+21" · rust "1000000000000000000000" ·
+#                       java "1.0E21"† · wasm REFUSED ("literal .. not lowerable")
+#   `${0.0 / 0.0}` (NaN) py "nan" · ts/go/rust/java "NaN"† · wasm refused
+#   `${(0.0-1.0)*0.0}` (-0.0) py "-0.0" · rust "-0" · ts/go "0" · java "-0.0"† · wasm refused
+#   `${0.0}`  (whole)   py "0.0" · ts/go/rust "0" · java "0.0"† · wasm refused
+#
+# Decision (docs/strings.md): one canonical Float -> Str, the ECMAScript
+# Number::toString shortest-round-trip form — the JS-prior tiebreak, the same
+# one that made `/` "spelled as TS spells it". That is "1e+21", "NaN",
+# "Infinity"/"-Infinity", and negative zero rendered "0". These probes assert
+# that canonical and xfail until every tier renders it.
+
+FLOAT_INTERP_PROBES = {
+    "large magnitude uses exponent": (
+        'pub fn f() -> Str { return `${1.0e21}` }\n'
+        'test "1e21 renders as 1e+21" { assert f() == "1e+21" }',
+        'py/ts/go "1e+21" · rust "1000000000000000000000" · java "1.0E21" · wasm refused',
+    ),
+    "NaN spelling": (
+        'pub fn f() -> Str { return `${0.0 / 0.0}` }\n'
+        'test "NaN renders as NaN" { assert f() == "NaN" }',
+        'py "nan" · ts/go/rust/java "NaN" · wasm refused',
+    ),
+    "whole-number float has no trailing point": (
+        'pub fn f() -> Str { return `${0.0}` }\n'
+        'test "0.0 renders as 0" { assert f() == "0" }',
+        'py "0.0" · ts/go/rust "0" · java "0.0" · wasm refused',
+    ),
+    "negative zero loses its sign in text": (
+        'pub fn f() -> Str { return `${(0.0 - 1.0) * 0.0}` }\n'
+        'test "-0.0 renders as 0" { assert f() == "0" }',
+        'py "-0.0" · rust "-0" · ts/go "0" · java "-0.0" · wasm refused',
+    ),
+}
+
+
+# Float -> Str in interpolation is the canonical ECMAScript Number::toString
+# form on every tier that renders it (item 51, docs/strings.md): python/go/rust/
+# java each spell the shared renderer in host syntax; ts's `${x}` already is it.
+# wasm now renders the subset it can do *exactly* in hand-written WAT — NaN,
+# +/-Infinity, and every integer-valued float with |x| < 2^63 (rendered through
+# `$f64_to_str`, which reuses `$int_to_str`). The three probes in that subset
+# are plain asserts below. The one still-fenced case is the exponent form
+# (`${1.0e21}` -> "1e+21"): its ES spelling needs a shortest-round-trip
+# float->decimal (Grisu/Ryu class) that is not implemented in WAT, so
+# `$f64_to_str` traps on |x| >= 2^63 rather than emit a divergent string. That
+# one probe stays xfail (docs/strings.md §"Remaining wasm WAT work").
+FLOAT_SLOW_TIERS = ("rust", "java")
+
+# The subset wasm renders byte-exactly today, and the one case still fenced.
+WASM_FLOAT_CANONICAL = (
+    "NaN spelling",
+    "negative zero loses its sign in text",
+    "whole-number float has no trailing point",
+)
+WASM_FLOAT_FENCED = ("large magnitude uses exponent",)
+
+
+@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_float_interpolation_is_canonical(tier: str, name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
+@pytest.mark.parametrize("tier", FLOAT_SLOW_TIERS)
+def test_float_interpolation_is_canonical_slow(tier: str, name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (wasmtime is slow)")
+@pytest.mark.parametrize("name", sorted(WASM_FLOAT_CANONICAL))
+def test_float_interpolation_wasm_is_canonical(name: str):
+    """wasm now renders these Float cases in the canonical ECMAScript form,
+    byte-for-byte, via a hand-written `$f64_to_str` (item 51, docs/strings.md):
+    NaN, integer-valued floats (whole-number and negative-zero both -> "0").
+    The module's own `assert f() == "..."` traps on any divergence, so a pass
+    here is wasmtime confirming the exact canonical bytes."""
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run("wasm", source)
+    if status == "skip":
+        pytest.skip(f"wasm: {message}")
+    assert status == "pass", f"wasm renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (wasmtime is slow)")
+@pytest.mark.xfail(
+    reason="item 51: wasm renders NaN/Infinity and every integer-valued float "
+    "|x| < 2^63 canonically, but the exponent form (`${1.0e21}` -> \"1e+21\") "
+    "needs a shortest-round-trip float->decimal (Grisu/Ryu class) not "
+    "implemented in hand-written WAT. `$f64_to_str` traps on |x| >= 2^63 "
+    "rather than emit a string that would diverge from the other tiers — the "
+    "narrowed remaining wasm work (docs/strings.md §\"Remaining wasm WAT "
+    "work\"). Named unsupported inputs: non-integer floats, and |x| >= 2^63.",
+    strict=True,
+)
+@pytest.mark.parametrize("name", sorted(WASM_FLOAT_FENCED))
+def test_float_interpolation_wasm_exponent_is_fenced(name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run("wasm", source)
+    if status == "skip":
+        pytest.skip(f"wasm: {message}")
+    assert status == "pass", f"wasm renders the Float differently: {message}"

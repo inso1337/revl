@@ -1,0 +1,18 @@
+// A minimal Int-only provider/consumer pair used by the java and wasm run
+// drivers (docs/v2.0-roadmap.md §2). Deliberately simple: no config, no
+// strings, no ADTs/Result, no host builtins, no floats — so it lowers on the
+// substrate (wasm) tier and boots on the stub cordis4j (java) tier alike. Two
+// components so the LIFO teardown order (consumer before provider) is
+// observable, exactly as examples/outcome.rvl gives the rust/py drivers.
+service Counter {
+  fn next() -> Int
+}
+
+component CounterSvc provides counter: Counter {
+  provide counter {
+    fn next() = 42
+  }
+}
+
+component CounterUser requires counter: Counter {
+}

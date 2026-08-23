@@ -379,7 +379,7 @@ def test_v3_int_interpolation_runs_on_wasmtime(tmp_path):
 
 def test_v3_compound_interpolation_rejected_by_tier():
     emit = _emitter()
-    with pytest.raises(emit.EmitError, match="Str or Int on this tier"):
+    with pytest.raises(emit.EmitError, match="Str, Int or Float on this tier"):
         emit.emit(compile_source("fn f(xs: List[Int]) -> Str { return `xs=${xs}` }"))
 
 

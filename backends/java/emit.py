@@ -430,10 +430,18 @@ def _java_test_method_name(name: object, index: int, used: set[str]) -> str:
 class _V3Ctx:
     """Names and type layouts visible to v3 expression emitters."""
 
-    def __init__(self, types: dict, functions: list, externs: list) -> None:
+    def __init__(self, types: dict, functions: list, externs: list,
+                 components: list | None = None) -> None:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # Every component in the document, keyed by name, so a `spawn`
+        # acquisition can resolve its target template's config layout (the
+        # plugin-constructor argument order) and provided keys (the services to
+        # isolate into fresh local realms). Empty for non-spawning documents.
+        self.spawn_targets: dict[str, dict] = {
+            comp.get("name"): comp for comp in components or []
+        }
         self.case_owners: dict[str, str] = {}
         for tname, spec in self.types.items():
             if spec.get("kind") == "variant":
@@ -523,9 +531,9 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
     if method == "slice":
         return f"revlSlice({target}, {args[0]}, {args[1]})"
     if method == "charAt":
-        return f"String.valueOf(String.valueOf({target}).charAt((int)({args[0]})))"
+        return f"revlCharAt(String.valueOf({target}), {args[0]})"
     if method == "charCodeAt":
-        return f"(long) String.valueOf({target}).charAt((int)({args[0]}))"
+        return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
     if method == "concat":
         return f"revlConcat({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Java `/` truncates and
@@ -579,17 +587,23 @@ def _emit_stdlib_helpers() -> list[str]:
     return copies (persistent, docs/stdlib-2.0.md)."""
     return [
         "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
-        "private static long revlLength(String s) { return s.length(); }",
+        "// A Str counts and indexes in Unicode code points (docs/strings.md);",
+        "// Java's String APIs are UTF-16, so the String overloads go through",
+        "// codePointCount/offsetByCodePoints. The List overloads are unchanged.",
+        "private static long revlLength(String s) { return s.codePointCount(0, s.length()); }",
         "private static long revlLength(java.util.List<?> xs) { return xs.size(); }",
         "private static long revlLength(Object x) {",
-        "    return (x instanceof java.util.List<?>) ? ((java.util.List<?>) x).size() : String.valueOf(x).length();",
+        "    if (x instanceof java.util.List<?>) { return ((java.util.List<?>) x).size(); }",
+        "    String s = String.valueOf(x);",
+        "    return s.codePointCount(0, s.length());",
         "}",
-        "// JS slice semantics: out-of-range bounds clamp, never throw.",
+        "// JS slice semantics: out-of-range bounds clamp, never throw. Bounds",
+        "// are code-point offsets for a Str.",
         "private static String revlSlice(String s, long a, long b) {",
-        "    int len = s.length();",
+        "    int len = s.codePointCount(0, s.length());",
         "    int a2 = (int) Math.min(Math.max(a, 0L), len);",
         "    int b2 = (int) Math.max(Math.min(Math.max(b, 0L), len), a2);",
-        "    return s.substring(a2, b2);",
+        "    return s.substring(s.offsetByCodePoints(0, a2), s.offsetByCodePoints(0, b2));",
         "}",
         "private static <T> java.util.List<T> revlSlice(java.util.List<T> xs, long a, long b) {",
         "    int len = xs.size();",
@@ -597,8 +611,21 @@ def _emit_stdlib_helpers() -> list[str]:
         "    int b2 = (int) Math.max(Math.min(Math.max(b, 0L), len), a2);",
         "    return java.util.List.copyOf(xs.subList(a2, b2));",
         "}",
-        "private static long revlIndexOf(String s, String needle) { return s.indexOf(needle); }",
+        "private static long revlIndexOf(String s, String needle) {",
+        "    int i = s.indexOf(needle);",
+        "    return i < 0 ? -1 : s.codePointCount(0, i);",
+        "}",
         "private static <T> long revlIndexOf(java.util.List<T> xs, T v) { return xs.indexOf(v); }",
+        "// charAt/charCodeAt are Str-only; the index and the returned scalar",
+        "// are code points, not UTF-16 units (docs/strings.md).",
+        "private static String revlCharAt(String s, long i) {",
+        "    int len = s.codePointCount(0, s.length());",
+        "    if (i < 0 || i >= len) { return \"\"; }",
+        "    return new String(Character.toChars(s.codePointAt(s.offsetByCodePoints(0, (int) i))));",
+        "}",
+        "private static long revlCharCodeAt(String s, long i) {",
+        "    return (long) s.codePointAt(s.offsetByCodePoints(0, (int) i));",
+        "}",
         "private static String revlConcat(String a, String b) { return a.concat(b); }",
         "private static <T> java.util.List<T> revlConcat(java.util.List<T> a, java.util.List<T> b) {",
         "    return java.util.stream.Stream.concat(a.stream(), b.stream()).toList();",
@@ -659,6 +686,100 @@ def _uses_stdlib(ir: dict) -> bool:
     walk(ir.get("functions"))
     walk(ir.get("tests"))
     return found
+
+
+def _is_float_expr(node: object) -> bool:
+    """Node-local proof that an expression is a `Float`: a Float literal, a `/`
+    (true division), a Float-annotated arithmetic node, or a unary minus of
+    one — the shared proof the other tiers use (docs/strings.md)."""
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        value = node.get("value")
+        return isinstance(value, float) and not isinstance(value, bool)
+    if kind == "bin":
+        return node.get("op") == "/" or node.get("operands") == "Float"
+    if kind == "un":
+        return node.get("op") == "-" and _is_float_expr(node.get("operand"))
+    return False
+
+
+def _uses_float_interp(ir: dict) -> bool:
+    """True when any `${…}` interpolates a provably-`Float` expression, so the
+    canonical Float renderer is emitted only where it is used."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") == "interp":
+                for part in node.get("parts") or []:
+                    if (isinstance(part, (list, tuple)) and len(part) == 2
+                            and part[0] == "expr" and _is_float_expr(part[1])):
+                        found = True
+                        return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    walk(ir.get("functions"))
+    walk(ir.get("tests"))
+    return found
+
+
+def _emit_ftoa_helper() -> list[str]:
+    """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md).
+    Double.toString supplies the shortest round-trip digits; this reformats
+    them into the ES notation so `${aFloat}` agrees with every other tier."""
+    return [
+        "// Canonical Float -> Str (docs/strings.md): ECMAScript Number::toString.",
+        "private static String revlFtoa(double x) {",
+        "    if (Double.isNaN(x)) { return \"NaN\"; }",
+        "    if (Double.isInfinite(x)) { return x < 0 ? \"-Infinity\" : \"Infinity\"; }",
+        "    if (x == 0.0) { return \"0\"; }",
+        "    String sign = x < 0 ? \"-\" : \"\";",
+        "    String s = Double.toString(Math.abs(x));",
+        "    String mant = s;",
+        "    long exp = 0;",
+        "    int e = s.indexOf('E');",
+        "    if (e >= 0) { mant = s.substring(0, e); exp = Long.parseLong(s.substring(e + 1)); }",
+        "    String intpart = mant, frac = \"\";",
+        "    int d = mant.indexOf('.');",
+        "    if (d >= 0) { intpart = mant.substring(0, d); frac = mant.substring(d + 1); }",
+        "    String digits = intpart + frac;",
+        "    long point = intpart.length() + exp;",
+        "    int lead = 0;",
+        "    while (lead + 1 < digits.length() && digits.charAt(lead) == '0') { lead++; point--; }",
+        "    digits = digits.substring(lead);",
+        "    int end = digits.length();",
+        "    while (end > 1 && digits.charAt(end - 1) == '0') { end--; }",
+        "    digits = digits.substring(0, end);",
+        "    if (digits.equals(\"0\")) { return \"0\"; }",
+        "    long k = digits.length();",
+        "    long n = point;",
+        "    String body;",
+        "    if (k <= n && n <= 21) {",
+        "        body = digits + \"0\".repeat((int) (n - k));",
+        "    } else if (0 < n && n <= 21) {",
+        "        int p = (int) n;",
+        "        body = digits.substring(0, p) + \".\" + digits.substring(p);",
+        "    } else if (-6 < n && n <= 0) {",
+        "        body = \"0.\" + \"0\".repeat((int) (-n)) + digits;",
+        "    } else {",
+        "        long ee = n - 1;",
+        "        String m = k > 1 ? digits.substring(0, 1) + \".\" + digits.substring(1) : digits;",
+        "        String esign = ee < 0 ? \"-\" : \"+\";",
+        "        body = m + \"e\" + esign + Math.abs(ee);",
+        "    }",
+        "    return sign + body;",
+        "}",
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -1094,6 +1215,11 @@ def _expr(
         for part_kind, value in parts:
             if part_kind == "text":
                 segs.append(_string(value))
+            elif _is_float_expr(value):
+                # A Float renders through the canonical ECMAScript form, not
+                # String.valueOf (which gives "1.0E21"/"0.0"/"-0.0"); see
+                # docs/strings.md.
+                segs.append(f"revlFtoa({_expr(value, ctx, rename, env)})")
             else:  # ["expr", ir_node] — a full expression, stringified
                 segs.append(f"String.valueOf({_expr(value, ctx, rename, env)})")
         if not segs:
@@ -1106,7 +1232,63 @@ def _expr(
             f"({kind!r}); unwrap with `match` or `??` for now"
         )
 
+    if kind == "spawn":
+        return _v3_spawn(node, ctx, rename, env)
+
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
+
+
+def _v3_spawn(
+    node: dict,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None,
+    env: "_Env | None",
+) -> str:
+    """Lower an instance-parametric `spawn` acquisition (docs/design-v2-instances.md).
+
+    `spawn` is the acquisition of a `let-effect` step, so this renders the
+    expression that step binds to the handle. It plugs the target *template* as
+    a CHILD instance of the spawner — each key the template provides isolated
+    into a FRESH LOCAL realm (a per-spawn-unique label, so two instances of one
+    component never collide on a provision) — and returns a `RevlSpawnHandle`
+    wrapping that instance's own teardown scope. The step's `undo`
+    (`<handle>.dispose()`) reclaims it early, in LIFO order; if it never runs,
+    the instance is torn down with the spawner (the parent scope is the safety
+    net). Mirrors the rust/cordis (ts) lowering that already landed.
+    """
+    target = node.get("component")
+    if not isinstance(target, str) or not target.isidentifier():
+        raise EmitError(f"bad spawn component {target!r}")
+    template = ctx.spawn_targets.get(target)
+    if template is None:
+        raise EmitError(
+            f"spawn target {target!r} is not a component in this document"
+        )
+    cname = _ident(target, "component")
+    # Config values in the target's DECLARED order — the order its plugin
+    # constructor takes them (`_emit_plugin_ctors`). A field the spawn omits
+    # (only possible when it has a default; the lowerer requires the rest) is
+    # filled with that default, matching the full-argument constructor.
+    supplied = node.get("config") or {}
+    ctor_args = []
+    for field in template.get("config") or []:
+        fname = field.get("name")
+        if fname in supplied:
+            ctor_args.append(_expr(supplied[fname], ctx, rename, env))
+        else:
+            ctor_args.append(_config_default_lit(field, _java_v3_type))
+    # Each provided key -> the service to isolate into its own fresh local
+    # realm at plug time (`Context.isolate(<Svc>.class, <fresh label>)`).
+    provides = template.get("provides") or {}
+    realm_classes = ", ".join(
+        f"{_ident(provides[key], 'service')}.class"
+        for key in node.get("realms") or []
+    )
+    ctx_expr = rename.get("ctx", "ctx") if rename else "ctx"
+    return (
+        f"RevlSpawnHandle.spawn({ctx_expr}, new {cname}Plugin("
+        f"{', '.join(ctor_args)}), new Class<?>[]{{{realm_classes}}})"
+    )
 
 
 def _v3_match_expr(
@@ -1860,6 +2042,11 @@ def _host_of(component: dict, bind: str) -> str:
     for s in component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
             acquire = s.get("acquire") or {}
+            # A `spawn` acquisition binds a live-instance handle, not a host
+            # resource: its type is the emitted `RevlSpawnHandle`, so a
+            # provide-method that captured it can call `.dispose()`.
+            if acquire.get("kind") == "spawn":
+                return "RevlSpawnHandle"
             return (acquire.get("fn") or "").split(".")[0] or "Object"
     return "Object"
 
@@ -1923,6 +2110,13 @@ def _component_needs_modern(component: dict) -> bool:
         if step.get("setup"):
             return True
         if step.get("step") in {"if", "fail", "await", "return"}:
+            return True
+        # An `emit` carrying a `compensate` MUST take the modern path: the
+        # simple renderer emits the emission but silently drops its
+        # compensation — a lost teardown (G7 residue). The generic
+        # `_contains_expr` key-scan below misses a compensate whose expression
+        # is a plain call, so guard it explicitly by step shape.
+        if step.get("step") == "emit" and step.get("compensate") is not None:
             return True
         if step.get("step") == "provide":
             for method in step.get("methods") or []:
@@ -2190,9 +2384,10 @@ def _emit_component_modern(
     types: dict | None = None,
     functions: list | None = None,
     externs: list | None = None,
+    components: list | None = None,
 ) -> list[str]:
     env = _Env(component, services)
-    v3_ctx = _V3Ctx(types or {}, functions or [], externs or [])
+    v3_ctx = _V3Ctx(types or {}, functions or [], externs or [], components or [])
     name = component["name"]
     cname = _ident(name, "component")
     isolate = component.get("isolate") or {}
@@ -2310,6 +2505,7 @@ def _emit_component(
     types: dict | None = None,
     functions: list | None = None,
     externs: list | None = None,
+    components: list | None = None,
     *,
     render_type=_java_type,
 ) -> list[str]:
@@ -2321,7 +2517,8 @@ def _emit_component(
     `f(Object)`, which javac reports as the class not being abstract.
     """
     if _component_needs_modern(component):
-        return _emit_component_modern(component, services, types, functions, externs)
+        return _emit_component_modern(
+            component, services, types, functions, externs, components)
     env = _Env(component, services)
     name = component["name"]
     cname = _ident(name, "component")
@@ -2470,6 +2667,8 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_float_interp(ir):
+        out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -2495,10 +2694,81 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_float_interp(ir):
+        out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
+
+
+def _uses_spawn(ir: dict) -> bool:
+    """True when any component body contains a `spawn` acquisition node — gates
+    the `RevlSpawnHandle` helper. Non-spawning documents skip it entirely and
+    stay byte-identical to the pre-feature output (v1 goldens unaffected)."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "spawn":
+                return True
+            return any(walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(walk(value) for value in node)
+        return False
+
+    return walk(ir.get("components"))
+
+
+def _emit_spawn_handle() -> list[str]:
+    """The value a `spawn` acquisition binds: a live component instance
+    (docs/design-v2-instances.md, phase 1), reclaimed by its own `dispose()`.
+
+    `spawn` plugs the target template as a CHILD instance of the spawner: each
+    key it provides is isolated into a FRESH LOCAL realm (a per-spawn-unique
+    label — so two instances of one component coexist without a duplicate-key
+    collision, and only the spawner, holding the handle, reaches its instance),
+    and the template is applied on that isolated context. The returned handle
+    owns the instance's own teardown scope. `dispose()` runs that scope's LIFO
+    teardown NOW, independent of the spawner — a request-scoped instance is
+    reclaimed when the request ends, not deferred to the component's teardown.
+    It is idempotent (the instance disposable is taken exactly once), so the
+    spawner's own `undo` inverse — and the parent scope's safety net that stops
+    an un-disposed instance outliving its spawner — are harmless no-ops once the
+    instance is already gone."""
+    return [
+        "/** A live spawned-component instance (docs/design-v2-instances.md). */",
+        "static final class RevlSpawnHandle {",
+        "    private static final java.util.concurrent.atomic.AtomicLong SPAWN_SEQ =",
+        "        new java.util.concurrent.atomic.AtomicLong();",
+        "    private final java.util.concurrent.atomic.AtomicReference<Disposable> instance;",
+        "",
+        "    private RevlSpawnHandle(Disposable instance) {",
+        "        this.instance = new java.util.concurrent.atomic.AtomicReference<>(instance);",
+        "    }",
+        "",
+        "    /** Plug `plugin` as a child instance: each provided service is",
+        "     * isolated into a fresh local realm (a per-spawn-unique label, so",
+        "     * two instances never collide), then the template is applied on",
+        "     * that isolated context. */",
+        "    static RevlSpawnHandle spawn(Context ctx, Plugin plugin, Class<?>[] realms) {",
+        "        String realm = \"revl$spawn$\" + SPAWN_SEQ.getAndIncrement();",
+        "        Context child = ctx;",
+        "        for (Class<?> service : realms) {",
+        "            child = child.isolate(service, realm);",
+        "        }",
+        "        return new RevlSpawnHandle(plugin.apply(child));",
+        "    }",
+        "",
+        "    /** Reclaim the instance now — run its own LIFO teardown. Idempotent. */",
+        "    long dispose() {",
+        "        Disposable taken = instance.getAndSet(null);",
+        "        if (taken != null) {",
+        "            taken.dispose();",
+        "        }",
+        "        return 0L;",
+        "    }",
+        "}",
+        "",
+    ]
 
 
 def _emit_v3(ir: dict, package_name: str) -> str:
@@ -2531,6 +2801,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_float_interp(ir):
+        out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if externs:
@@ -2539,9 +2811,11 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_v3_functions(functions, types, externs)])
     if tests:
         out.extend(["    " + line if line else line for line in _emit_v3_tests(tests, types, functions, externs)])
+    if _uses_spawn(ir):
+        out.extend(["    " + line if line else line for line in _emit_spawn_handle()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
-            component, services, types, functions, externs,
+            component, services, types, functions, externs, components,
             render_type=_java_v3_type)])
     out.append("}")
     return "\n".join(out).rstrip() + "\n"

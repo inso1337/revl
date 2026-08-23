@@ -20,6 +20,7 @@
 use revl_scenarios::Probe;
 use revl_scenarios::{boundary, fails_after, kv_consumer, kv_provider, realm_store_t, two_steps};
 use revl_scenarios::{realm_kv_consumer_t, Kv, _revl_isolate_ctx, _revl_realm};
+use revl_scenarios::{supervisor, Counter, Ctl};
 use std::sync::{Arc, Mutex};
 
 struct Recorder {
@@ -247,5 +248,81 @@ fn isolated_consumer_reactively_links_to_isolated_provider_same_realm() {
     assert!(
         after.contains(&"consumer_t:down".to_string()),
         "withdrawing the in-realm provider must deactivate the consumer: {after:?}"
+    );
+}
+
+#[test]
+fn spawn_instances_coexist_dispose_is_scoped_and_lifo() {
+    // Instance-parametric components (docs/design-v2-instances.md) driven on
+    // the REAL cordis-rs runtime. The Supervisor's activation body spawns two
+    // Workers; each `spawn` isolates the Worker's `counter` provision into a
+    // fresh LOCAL realm (`Context::isolate`, no label) and plugs it as a child
+    // fiber of the supervisor. This proves the four properties by RUNNING:
+    //   1. two live instances coexist in distinct local realms (non-colliding);
+    //   2. disposing one runs ITS LIFO teardown and leaves the others live;
+    //   3. a request-scoped instance is reclaimed at dispose(), NOT deferred to
+    //      the parent component's teardown (the anti-leak property);
+    //   4. supervision-tree addressing: the spawner reaches its instance, a
+    //      sibling (here the root, standing in for any outside party) cannot.
+    let (root, log) = root_with_probe();
+    let supervisor = root.plugin(supervisor(), ());
+    supervisor.wait().unwrap();
+
+    // (1) Two live instances, each carrying the config that flowed through its
+    // spawn: worker A (tag "a") then worker B (tag "b") each activated and ran
+    // both effects. Their order is the spawn order in the activation body.
+    let up = marks(&log);
+    assert_eq!(
+        up,
+        ["up:a", "up2", "up:b", "up2"],
+        "both instances must activate with their spawned configs: {up:?}"
+    );
+
+    // (1/4) Distinct local realms + supervision-tree addressing: neither
+    // worker's `counter` provision escaped to the shared/root realm, so the
+    // root — a stand-in for any sibling or outside party — cannot resolve it.
+    // Two providers of the SAME key coexisting without a DuplicateService
+    // collision is only possible because each lives in its own local realm.
+    assert!(
+        root.get_unchecked::<Box<dyn Counter>>("counter")
+            .unwrap()
+            .is_none(),
+        "an instance's provision must stay private to its local realm (a sibling cannot reach it)"
+    );
+    assert_eq!(supervisor.state(), cordis::FiberState::Active);
+
+    // (2/3/4) Retire worker A through the supervisor — the spawner reaching its
+    // OWN instance through the handle it alone holds. Worker A's teardown runs
+    // NOW and in LIFO order (`d2` before `d1:a`), not deferred to the
+    // supervisor's teardown, and leaves the supervisor and worker B live.
+    log.lock().unwrap().clear();
+    let ctl = root
+        .get_unchecked::<Box<dyn Ctl>>("ctl")
+        .unwrap()
+        .expect("the supervisor provides `ctl` in the shared realm");
+    assert_eq!(ctl.retire_a(), 1);
+    let after_retire = marks(&log);
+    assert_eq!(
+        after_retire,
+        ["d2", "d1:a"],
+        "worker A's own LIFO teardown must run at retire, not at supervisor teardown: {after_retire:?}"
+    );
+    assert_eq!(
+        supervisor.state(),
+        cordis::FiberState::Active,
+        "the supervisor and the sibling instance stay live after retiring worker A"
+    );
+
+    // (3) The remaining worker (B) is reclaimed ONLY when the supervisor tears
+    // down — the `ctx.plugin()` parent-effect safety net, so an un-disposed
+    // instance never leaks past its spawner — and only it: worker A is already
+    // gone, so its teardown does not run a second time (idempotent dispose).
+    log.lock().unwrap().clear();
+    supervisor.dispose().unwrap();
+    let after_dispose = marks(&log);
+    assert_eq!(
+        after_dispose,
+        ["d2", "d1:b"],
+        "only worker B is reclaimed at supervisor teardown (A already gone): {after_dispose:?}"
     );
 }

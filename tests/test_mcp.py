@@ -221,6 +221,8 @@ def test_initialize_and_tools_list():
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_load", "revl_call",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
+                          # deltas, not documents (docs/mcp-bridge.md, item 50)
+                          "revl_edit",
                           # the proving ground (docs/gauntlet.md)
                           "revl_gauntlet",
                           # composition persistence (docs/persistence.md)
@@ -234,7 +236,9 @@ def test_initialize_and_tools_list():
                           "revl_history_lifetime",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
-                          "revl_replay_forward", "revl_replay_bisect"}
+                          "revl_replay_forward", "revl_replay_bisect",
+                          # the component registry read path (docs/registry.md)
+                          "revl_resolve"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True

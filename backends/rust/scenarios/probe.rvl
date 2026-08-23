@@ -81,3 +81,32 @@ component RealmStoreOther requires probe: Probe provides kv: Kv {
     fn put(k, v) = store.insert(k, v)
   }
 }
+
+// Instance-parametric components (docs/design-v2-instances.md, phase 2 rust).
+// `spawn` plugs the target template as a CHILD FIBER of the spawner, each
+// provided key isolated into a FRESH LOCAL realm — so two instances of one
+// component coexist without colliding, each is its own nested teardown scope
+// reclaimable early, and only the spawner reaches its instance. Worker marks
+// its own activation (`up:<tag>`, carrying the config that flowed through the
+// spawn) and its LIFO teardown (`d2` then `d1:<tag>`); Supervisor spawns two
+// Workers in its activation body and can retire worker A on demand through the
+// handle it alone holds. Driven on the real cordis-rs runtime in scenarios.rs.
+service Counter { fn value() -> Int }
+service Ctl { fn retire_a() -> Int }
+
+component Worker requires probe: Probe provides counter: Counter {
+  config { tag: Str }
+  effect probe.mark(`up:${config.tag}`) undo probe.mark(`d1:${config.tag}`)
+  effect probe.mark("up2") undo probe.mark("d2")
+  provide counter {
+    fn value() = 0
+  }
+}
+
+component Supervisor requires probe: Probe provides ctl: Ctl {
+  let w1 = effect spawn Worker with { tag: "a" } undo w1.dispose()
+  let w2 = effect spawn Worker with { tag: "b" } undo w2.dispose()
+  provide ctl {
+    fn retire_a() { let r = w1.dispose() return 1 }
+  }
+}

@@ -1,0 +1,27 @@
+// Instance-parametric spawn scenario for the cordis-go tier
+// (docs/design-v2-instances.md, phase 1). Probe records marks in order so the
+// go test can assert per-instance activation, LIFO teardown, and scoped
+// disposal on the real stc-go runtime.
+service Probe {
+  fn mark(m: Str) -> Int
+}
+
+service Counter { fn value() -> Int }
+service Ctl { fn retire_a() -> Int }
+
+component Worker requires probe: Probe provides counter: Counter {
+  config { tag: Str, id: Int }
+  effect probe.mark(`up:${config.tag}`) undo probe.mark(`d1:${config.tag}`)
+  effect probe.mark("up2") undo probe.mark("d2")
+  provide counter {
+    fn value() = config.id
+  }
+}
+
+component Supervisor requires probe: Probe provides ctl: Ctl {
+  let w1 = effect spawn Worker with { tag: "a", id: 1 } undo w1.dispose()
+  let w2 = effect spawn Worker with { tag: "b", id: 2 } undo w2.dispose()
+  provide ctl {
+    fn retire_a() { let r = w1.dispose() return 1 }
+  }
+}

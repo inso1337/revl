@@ -36,6 +36,29 @@ function revlI64(v: bigint): bigint {
   return v
 }
 
+function revlLen(x: string | ArrayLike<unknown>): bigint {
+  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
+}
+function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+  const i = Number(a), j = Number(b)
+  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+}
+function revlCharAt(s: string, i: bigint): string {
+  const c = Array.from(s)[Number(i)]
+  return c === undefined ? "" : c
+}
+function revlCharCodeAt(s: string, i: bigint): bigint {
+  const c = Array.from(s)[Number(i)]
+  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
+}
+function revlIndexOf(x: string | unknown[], v: unknown): bigint {
+  if (typeof x === "string") {
+    const at = x.indexOf(v as string)
+    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
+  }
+  return BigInt(x.indexOf(v))
+}
+
 export function newTable(): Map<string, bigint> {
     return new Map()
 }
@@ -55,8 +78,8 @@ export function member(m: Map<string, bigint>, k: string): boolean {
 export function build(pairs: string[]): Map<string, bigint> {
     let m = new Map()
     let i = 0n
-    while ((i < BigInt(pairs.length))) {
-      m = (() => { const c = new Map(m); c.set(pairs[Number(i)], BigInt(pairs[Number(i)].length)); return c })()
+    while ((i < revlLen(pairs))) {
+      m = (() => { const c = new Map(m); c.set(pairs[Number(i)], revlLen(pairs[Number(i)])); return c })()
       i = revlI64(i + 1n)
     }
     return m

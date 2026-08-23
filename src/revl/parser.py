@@ -959,6 +959,25 @@ class Parser:
             rendered = f"Opt[{rendered}]"  # T? sugar (syntax-2.0 §2)
         return rendered
 
+    def _provision_key(self, what: str = "a provision key") -> str:
+        """A provision key, optionally namespace-qualified as `ns::key`
+        (docs/namespacing.md).
+
+        The `::` separator is two adjacent `:` tokens, so this is a pure
+        parser addition — the lexer is untouched. An unqualified key returns
+        its bare identifier verbatim, so v1 programs lower byte-for-byte as
+        before; a qualified key returns the joined `ns::local` string, which
+        is the key's wiring identity (G2 / injection resolution)."""
+        first = self.expect("ident", what=what).value
+        # `ns::local`: a `:` immediately followed by another `:`. A single
+        # `:` here is the ordinary `key: Service` separator and is left alone.
+        if self.at(":") and self.toks[self.pos + 1].kind == ":":
+            self.next()  # first `:`
+            self.next()  # second `:`
+            local = self.expect("ident", what="a key after `::`").value
+            return f"{first}::{local}"
+        return first
+
     def component(self) -> ComponentDecl:
         line = self.expect("kw", "component").line
         name = self.expect("ident").value
@@ -969,7 +988,7 @@ class Parser:
             target = requires if kw == "requires" else provides
             while True:
                 bline = self.peek().line
-                local = self.expect("ident").value
+                local = self._provision_key(what="a requirement or provision key")
                 self.expect(":")
                 svc = self.expect("ident").value
                 target.append((local, svc, bline))
@@ -1156,14 +1175,14 @@ class Parser:
             if in_method:
                 raise self.err(tok.line, "`isolate` is not allowed inside a method body")
             self.next()
-            key = self.expect("ident").value
+            key = self._provision_key()
             self.expect("kw", "in")
             return IsolateStmt(key, self.realm_label(), tok.line)
         if tok.kind == "kw" and tok.value == "intercept":
             if in_method:
                 raise self.err(tok.line, "`intercept` is not allowed inside a method body")
             self.next()
-            key = self.expect("ident").value
+            key = self._provision_key()
             self.expect("kw", "with")
             return InterceptStmt(key, self.record_literal(), tok.line)
         if tok.kind == "kw" and tok.value == "provide":
@@ -1565,7 +1584,7 @@ class Parser:
                            hint="a lifecycle binding names the result of a service call: "
                                 "`let x = call key.op(args)`")
         self.next()
-        key = self.expect("ident", what="a provision key").value
+        key = self._provision_key()
         self.expect(".")
         method = self.expect("ident", what="an operation name").value
         self.expect("(")
@@ -2239,7 +2258,7 @@ class Parser:
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line
-        key = self.expect("ident").value
+        key = self._provision_key()
         self.expect("{")
         methods: list[ProvideMethod] = []
         while not self.at("}"):

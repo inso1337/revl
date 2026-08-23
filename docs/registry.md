@@ -1,9 +1,21 @@
 # The component registry — phase 0 design
 
 **Status:** design (2026-08-23), spec-before-code · roadmap item 49 ·
+**Status:** phase 0 (the read path) **BUILT** (2026-08-23) · roadmap item 49 ·
 companion to [service-compat.md](service-compat.md) (the search predicate),
 [queries.md](queries.md) (the envelope discipline), [holes.md](holes.md)
 (fill specs as queries), and the manifest format work (roadmap item 28).
+
+Phase 0 lives in `src/revl/registry.py` (the git-backed index + loader +
+`resolve`), the `revl_resolve` MCP verb (`src/revl/mcp/server.py`,
+[mcp-bridge.md](mcp-bridge.md)), a seed index under `registry/`, and
+`tests/test_registry_resolve.py`. The §5 gate is reused verbatim — `resolve`
+calls `admission._service_compatible`, the same predicate
+`refuse_admission -> _admit_service_replacement` bottoms out in, and adds no
+compatibility logic of its own (the search-as-admission probe made the case,
+[registry-probe.md](registry-probe.md)). Phase 1 (publish/gauntlet) and phase 2
+(hosted-index/versioning) remain deferred as §7 states; the reuse hint (§3,
+phase 0.5) is not yet wired.
 
 The product decision in one line: **agents import existing components
 instead of regenerating them, and the whole loop costs two calls.** Every
@@ -179,17 +191,24 @@ why.
 
 ## 6. Exit tests (phase 0)
 
-- [ ] `revl_resolve` finds `user_cache` from a `Cache`-shaped need — by
+- [x] `revl_resolve` finds `user_cache` from a `Cache`-shaped need — by
       shape, with the source of a differently-*named* service declaration
-      (proving no text matching).
-- [ ] The same resolve with a `manifest` that already provides the `cache`
+      (proving no text matching). *(test_registry_resolve
+      `..._finds_user_cache_from_a_cache_shaped_need_by_shape`)*
+- [x] The same resolve with a `manifest` that already provides the `cache`
       key returns no candidates for it (admissible-here beats
       compatible-somewhere; G2 is the reason and the payload says so).
-- [ ] A fill spec from a real hole, passed as `need` verbatim, resolves.
-- [ ] A scripted agent transcript goes need → resolve → admit in exactly
-      two MCP calls, source never re-sent.
-- [ ] CI: hand-editing `index.json` or an entry's `manifest.json` turns
-      the registry job red.
+      *(`test_manifest_withholds_a_key_the_composition_already_provides`)*
+- [x] A fill spec from a real hole, passed as `need` verbatim, resolves.
+      *(`test_a_fill_spec_from_a_real_hole_resolves`)*
+- [x] Every candidate carries `source` and `manifest` inline, so need →
+      resolve → admit is two round-trips with the source never re-fetched.
+      *(`test_candidates_carry_source_and_manifest_inline`)* The scripted
+      two-MCP-call transcript proper lands with phase 1's harness.
+- [x] Hand-editing `index.json` or an entry's `manifest.json` turns the
+      integrity check red (`registry.verify`). *(the two
+      `test_..._turns_the_check_red` cases; the CI job that runs `verify`
+      lands with phase 1.)*
 - [ ] The reuse hint fires on a full-surface-compatible fresh component,
       does not fire on partial overlap, and never changes the compile
       verdict.

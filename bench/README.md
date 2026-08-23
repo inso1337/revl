@@ -245,3 +245,40 @@ Caveats worth keeping in mind:
   contradicting the "use these interfaces verbatim" instruction. They now
   declare `emission fn`. When a language rule changes, re-check the specs
   against it — a benchmark that cannot be passed measures nothing.
+
+## Scaffold-with-holes vs whole-component (design note, item 32)
+
+`tokens.py` measures **tokens-to-green** for the whole-component loop:
+generate a plausible file, let the checker refuse, regenerate. Typed holes
+(docs/holes.md) enable a second loop worth measuring against it — **scaffold
+then fill**: write the skeleton with a `hole` at every unknown expression, then
+close them one at a time, each fill constrained by the hole's *fill spec*
+(docs/holes.md §8: expected type, emission bound, in-scope bindings, reachable
+service signatures).
+
+The comparison this note proposes — not yet a wired variant, so `demand.py`
+and `tokens.py` are untouched — is a fair-billing A/B on the existing `specs`
+corpus:
+
+- **Whole-component (baseline):** today's `tokens.py` path — output tokens
+  summed across every regenerate iteration until the file admits.
+- **Scaffold-then-fill:** bill the skeleton once, then bill each fill turn.
+  Every turn is prompted with only that hole's fill spec, not the whole file,
+  so the accounting question is whether the specs' constraint (most wrong
+  fills are unrepresentable) buys back the per-hole prompt overhead.
+
+Two quantities decide it, both already derivable from committed data plus a
+fill-loop harness that reuses `run.py`'s scoring:
+
+1. **tokens-to-green**, summed the same way `tokens.py` sums it, so the two
+   loops are billed identically and the numbers are directly comparable; and
+2. **first-fill validity** — the share of fills that admit on the first try,
+   the fill-loop analogue of first-pass compile-rate, which is where a spec
+   that makes wrong answers unrepresentable should show up.
+
+The prediction under test: scaffold-then-fill trades more turns for far fewer
+wasted output tokens per turn, so tokens-to-green drops on the specs with
+several independent unknowns and is roughly flat on single-expression bodies
+where there is nothing to scaffold. Wiring it is a `run.py` variant plus a
+fill-loop billing pass; it is out of scope here, where the deliverable is the
+fill spec itself.
