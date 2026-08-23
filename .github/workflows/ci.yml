@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Exposed as a reusable workflow so the release job can gate the PyPI publish
+  # on the *same* suite that gates main (see .github/workflows/publish.yml).
+  # A version on PyPI must be a claim this whole matrix passed. No job below
+  # changes; this only lets the workflow be `uses:`-called from the tag build.
+  workflow_call:
 
 jobs:
   frontend:

@@ -688,6 +688,20 @@ def main(argv: list[str] | None = None) -> int:
         "--accept-all", action="store_true",
         help="acknowledge every added crossing under --diff")
 
+    erase = sub.add_parser(
+        "erase-report",
+        help="right-to-erasure evidence for one realm: in-process state gone "
+             "(no-residue proof), boundary crossings compensated-vs-bare, and "
+             "other realms provably untouched (docs/erase-report.md)")
+    erase.add_argument("files", nargs="+")
+    erase.add_argument("--realm", required=True, metavar="R",
+                       help="the realm to report erasure evidence for")
+    erase.add_argument("--json", action="store_true",
+                       help="machine-readable, versioned report document")
+    erase.add_argument("--no-residue-proof", action="store_true",
+                       help="skip the runtime teardown proof (static sections "
+                            "only; use where the cordis runtime is unavailable)")
+
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
     plan_cmd.add_argument("files", nargs="+")
@@ -1007,6 +1021,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "query":
         return _run_query(args, ir)
+
+    if args.command == "erase-report":
+        from .erase_report import build_report, render  # noqa: PLC0415
+        report_doc = build_report(
+            ir, args.realm,
+            prove_residue=not getattr(args, "no_residue_proof", False))
+        if args.json:
+            print(json.dumps(report_doc, indent=2))
+        else:
+            print(render(report_doc))
+        if not report_doc.get("ok"):
+            return 1
+        # a proven state-gone + untouched other realms is a clean report;
+        # a bare crossing does not fail (it is enumerated, by design), but an
+        # unproven teardown or a breached other realm does.
+        state = report_doc["inProcessStateGone"]["noResidueProof"]
+        residue_bad = state.get("available") and not state.get("proven")
+        breached = not report_doc["otherRealmsUntouched"]["untouched"]
+        return 1 if (residue_bad or breached) else 0
 
     if args.command == "audit" and getattr(args, "diff", None):
         from .audit_diff import audit_report, evaluate, render  # noqa: PLC0415
