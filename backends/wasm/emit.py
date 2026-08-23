@@ -141,16 +141,40 @@ class _ComponentEmitter:
 
     def __init__(self, component: dict, services: dict, ir_version: int = IR_VERSION,
                  types: dict | None = None, functions: list | None = None,
-                 externs: list | None = None) -> None:
+                 externs: list | None = None, is_template: bool = False,
+                 spawn_targets: dict | None = None) -> None:
         self.ir = component
         self.services = services
         self.ir_version = ir_version
         self.name = _ident(component.get("name"), "component name")
-        if component.get("config"):
+        # A spawn target is a *template* (docs/design-v2-instances.md): a runtime
+        # instance, never a static composition member. It alone may carry a
+        # `config { }` block — the fields cross the instantiation-config channel
+        # (the runtime binds each to a `config:<field>` import at spawn time),
+        # which is exactly the gap "no config channel yet" used to reject.
+        self.is_template = is_template
+        # field -> declared type, for a template's own `config.<field>` reads.
+        self.config_fields: dict[str, str] = {}
+        for field in component.get("config") or []:
+            self.config_fields[_ident(field.get("name"), f"{self.name}: config field")] = \
+                field.get("type")
+        if component.get("config") and not is_template:
+            # A statically composed component with admission-time config still
+            # has no channel on this tier — only a spawn target's config flows.
             raise EmitError(
                 f"{self.name}: config blocks are not lowerable — the "
-                f"cordis-wasm runtime has no instantiation-config channel yet"
+                f"cordis-wasm runtime has no instantiation-config channel yet "
+                f"(a spawn *target* is the exception: its config crosses the "
+                f"spawn boundary)"
             )
+        # every component's declared config shape (field, type), in order — so a
+        # `spawn <Target>` can pass its config positionally, in the target's
+        # declared field order, matching the runtime's `register_template` order.
+        self.spawn_targets: dict[str, list[tuple[str, str]]] = spawn_targets or {}
+        # instance-parametric imports minted while lowering (rendered in _module)
+        self.config_imports: dict[str, str] = {}   # field -> result wasm type
+        self.spawn_imports: dict[str, list[str]] = {}  # template -> param wtys
+        self.uses_dispose = False
         self.requires = component.get("requires") or {}
         self.provides = component.get("provides") or {}
         self.isolate = component.get("isolate") or {}
@@ -316,6 +340,8 @@ class _ComponentEmitter:
             return _E(slot, types.get(name, "Int"))
         if kind == "req":
             raise EmitError(f"{where}: a required service is only usable as a call target")
+        if kind == "spawn":
+            return self._lower_spawn(node, scope, types, where)
         if kind == "call":
             if node.get("callee") is not None:
                 # the frontend spells `Some(x)` (and other builtin
@@ -323,6 +349,21 @@ class _ComponentEmitter:
                 # body — callee-shaped, not req-shaped
                 return self._delegate(node, scope, types, where)
             target = node.get("target") or {}
+            # `<handle>.dispose()` — the one method a spawn handle carries: the
+            # acquisition's inverse (and the request-scoped reclaim when it
+            # appears in a provide-method body). It lowers to the runtime's
+            # `dispose` host op, taking the i32 handle the spawn returned.
+            if node.get("method") == "dispose" and target.get("kind") == "name":
+                hname = _ident(target.get("id"), f"{where}: dispose target")
+                slot = scope.get(hname)
+                if slot is None:
+                    raise EmitError(f"{where}: unbound spawn handle {hname!r}")
+                if node.get("args"):
+                    raise EmitError(f"{where}: dispose() takes no arguments")
+                self.uses_dispose = True
+                # i32 result (a disposal status the runtime returns); the handle
+                # itself is an i32 instance id.
+                return _E(f"(call $dispose_instance {slot})", "Bool")
             if target.get("kind") != "req":
                 raise EmitError(
                     f"{where}: scalar values have no methods — only calls on "
@@ -353,7 +394,26 @@ class _ComponentEmitter:
             call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
             return _E(call, return_type)
         if kind == "config":
-            raise EmitError(f"{where}: config is not available on this tier")
+            # A template reads its own `config { }` fields through the
+            # instantiation-config channel: each field is an import the runtime
+            # binds to the value the spawner passed. Only a spawn *target* has
+            # config here, so a config read outside one is still refused.
+            field = node.get("field")
+            if not self.is_template or field not in self.config_fields:
+                raise EmitError(f"{where}: config is not available on this tier")
+            fty = self.config_fields[field]
+            # The config channel passes a *value* (the runtime returns it from
+            # the `config:<field>` import). A rich type would cross as a pointer
+            # into memory the instance does not own — a genuine tier boundary,
+            # the same one the scalar coeffect boundary draws.
+            if not _is_scalar_type(fty):
+                raise EmitError(
+                    f"{where}: config field {field!r} is {fty!r} — only scalar "
+                    f"config (Int/Bool) crosses the spawn boundary on this tier; "
+                    f"a Str/record/List config value would cross as a pointer into "
+                    f"memory the instance does not own (use a hosted backend)")
+            self.config_imports[field] = _wasm_ty(fty)
+            return _E(f"(call $config_{field})", fty)
         if kind == "host":
             raise EmitError(
                 f"{where}: host builtin {node.get('fn')!r} is not available on "
@@ -374,6 +434,55 @@ class _ComponentEmitter:
                 "emitted by the wasm backend yet (implemented tiers: python, "
                 "typescript) — see docs/records.md §6; lift it into a helper fn instead")
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
+
+    def _lower_spawn(self, node: Any, scope: dict[str, str],
+                     types: dict[str, str | None], where: str) -> "_E":
+        """Lower a `spawn <Target> with { .. }` acquisition (the frozen IR of
+        docs/design-v2-instances.md) to the runtime's `spawn` host op.
+
+        The target is a template — its module is registered with the runtime,
+        never statically composed. Spawning plugs a fresh instance of it into a
+        FRESH LOCAL realm (each provided key isolated per-instance, disjoint by
+        construction) as its own nested teardown scope, and returns the i32
+        handle the spawner names in `undo` / reaches its instance through. The
+        config crosses positionally, in the target's declared field order, which
+        is the order the runtime's `register_template` records — so the
+        `config:<field>` imports on the instance bind to the right values.
+        """
+        target = node.get("component")
+        if not isinstance(target, str) or not target.isidentifier():
+            raise EmitError(f"{where}: bad spawn target {target!r}")
+        if target not in self.spawn_targets:
+            raise EmitError(f"{where}: spawn target {target!r} is not a component")
+        fields = self.spawn_targets[target]           # [(name, type), ...] in order
+        supplied = node.get("config") or {}
+        unknown = set(supplied) - {f for f, _ in fields}
+        if unknown:
+            raise EmitError(f"{where}: spawn {target} has no config field {sorted(unknown)[0]!r}")
+        args_wat: list[str] = []
+        param_wtys: list[str] = []
+        for fname, ftype in fields:
+            if fname not in supplied:
+                raise EmitError(f"{where}: spawn {target} is missing config field {fname!r}")
+            # config crosses by value; a rich (pointer) type is a genuine tier
+            # boundary, refused symmetrically with the template's own config read.
+            if not _is_scalar_type(ftype):
+                raise EmitError(
+                    f"{where}: spawn {target}.{fname} is {ftype!r} — only scalar "
+                    f"config (Int/Bool) crosses the spawn boundary on this tier")
+            wty = _wasm_ty(ftype)
+            value = self._lower(supplied[fname], scope, types, where)
+            if _wasm_ty(value.ty) != wty:
+                raise EmitError(
+                    f"{where}: spawn {target}.{fname} expects {ftype!r} but got a "
+                    f"{value.ty!r} value — config crosses this tier's scalar boundary")
+            args_wat.append(value.wat)
+            param_wtys.append(wty)
+        self.spawn_imports[target] = param_wtys
+        call = f"(call $spawn_{target} {' '.join(args_wat)})".replace("  ", " ")
+        # the handle is a host-frontier instance id (i32); `Instance[T]` is
+        # advisory and never Int, so _wasm_ty carries it as i32.
+        return _E(call, f"Instance[{target}]")
 
     def _scalar_operator(self, node: Any, scope: dict[str, str],
                          types: dict[str, str | None], where: str) -> _E:
@@ -851,6 +960,17 @@ class _ComponentEmitter:
             # the job id is an interned compile-time *tag*, not an Int value:
             # it stays i32, which is what the runtime's host op declares
             lines.append('  (import "host" "job_run" (func $host_job_run (param i32)))')
+        # instance-parametric spawn ABI (docs/design-v2-instances.md). Each is
+        # inert unless the component actually spawns/reads-config, so a
+        # non-spawning program's import section is byte-identical to before.
+        for field, wty in sorted(self.config_imports.items()):
+            lines.append(f'  (import "config" "{field}" (func $config_{field} (result {wty})))')
+        for target, param_wtys in sorted(self.spawn_imports.items()):
+            params = " ".join(f"(param {w})" for w in param_wtys)
+            sig = f" {params}" if params else ""
+            lines.append(f'  (import "spawn:{target}" "new" (func $spawn_{target}{sig} (result i32)))')
+        if self.uses_dispose:
+            lines.append('  (import "dispose" "instance" (func $dispose_instance (param i32) (result i32)))')
         if needs_memory:
             lines.append('  (memory (export "memory") 1)')
             for offset, data in self.v3.data_segments:
@@ -3332,11 +3452,25 @@ def _emit_v3(ir: dict) -> dict[str, str]:
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
 
+    # Every component's declared config shape, so a `spawn <Target>` resolves
+    # the target's config field order; and the set of spawn targets (templates),
+    # read off the manifest, so a template may carry a config block.
+    spawn_targets = {
+        _ident(c.get("name"), "component name"): [
+            (_ident(f.get("name"), "config field"), f.get("type"))
+            for f in c.get("config") or []
+        ]
+        for c in components
+    }
+    templates = set((ir.get("manifest") or {}).get("templates") or [])
+
     out: dict[str, str] = {}
     for component in components:
         emitter = _ComponentEmitter(component, services, ir_version=3,
                                     types=types, functions=functions,
-                                    externs=externs)
+                                    externs=externs,
+                                    is_template=component.get("name") in templates,
+                                    spawn_targets=spawn_targets)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
