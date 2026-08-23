@@ -1763,6 +1763,30 @@ def _retarget_holes(node, source: str) -> None:
 _TYPED_ARITH_OPS = ("/", "%", "+", "-", "*")
 
 
+def _str_literal_value(value):
+    """Canonical IR form for a `Str` literal: a sequence of Unicode scalar
+    values (code points), never UTF-16 surrogate pairs (docs/strings.md,
+    roadmap item 51 — the string wave).
+
+    The lexer stores raw source characters and a Python `str` is already a
+    code-point sequence, so for a well-formed program this is the identity.
+    It is stated explicitly here because it is the invariant every backend's
+    literal escaper depends on: each emitter reads this value and must escape
+    *from code points* (`\\u{1F600}` on rust, `\\U0001F600` on go, the raw
+    scalar in wasm's UTF-8 pool), never re-encode it as UTF-16. A lone
+    surrogate reaching this point would mean an upstream path re-introduced
+    UTF-16 — the exact defect that made astral literals uncompilable on go and
+    rust — so it is rejected here rather than emitted as invalid source.
+    """
+    if isinstance(value, str):
+        for ch in value:
+            if 0xD800 <= ord(ch) <= 0xDFFF:
+                raise ValueError(
+                    "string literal carries a lone surrogate; a Str literal is "
+                    "a sequence of Unicode code points (docs/strings.md)")
+    return value
+
+
 def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> dict | None:
     """Mark an implicit `Int` -> `Float` coercion site in the IR.
 
@@ -1843,7 +1867,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, expr.line)
-        return {"kind": "lit", "value": expr.value}
+        return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
@@ -2376,7 +2400,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, line)
-        return {"kind": "lit", "value": expr.value}
+        return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, Interp):
         return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
     if isinstance(expr, ExprVar):
@@ -3297,7 +3321,7 @@ def _lower_expr(expr, env: Env, mode: str):
     if isinstance(expr, Lit):
         if expr.value is None:
             raise null_error(env.filename, expr.line)
-        return {"kind": "lit", "value": expr.value}
+        return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, Interp):
         template = []
         args = []

@@ -200,7 +200,40 @@ def _camel(name: str) -> str:
 
 
 def _string(value: str) -> str:
-    return json.dumps(value)
+    """A Rust double-quoted string literal, escaped *from code points*.
+
+    The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
+    Rust source is UTF-8 and spells a non-ASCII scalar as `\\u{XXXX}` — it
+    rejects the lone-surrogate `\\uXXXX` escapes `json.dumps` emits, which is
+    why every non-ASCII literal used to fail to compile on this tier. ASCII is
+    byte-identical to the old `json.dumps` output (printable ASCII verbatim;
+    `\\n`/`\\r`/`\\t`/`\\"`/`\\\\` the same), so v1 goldens stay frozen.
+
+    A non-`str` input (e.g. a list of requirement names) keeps the old
+    `json.dumps` serialization unchanged — only real `Str` values take the
+    code-point path.
+    """
+    if not isinstance(value, str):
+        return json.dumps(value)
+    out = ['"']
+    for ch in value:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        else:
+            out.append("\\u{%x}" % cp)
+    out.append('"')
+    return "".join(out)
 
 
 def _rust_v3_lit(node: dict) -> str:
@@ -1386,6 +1419,24 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
     return "Str" if _v3_is_str(node, ctx) else None
 
 
+def _v3_is_float(node: object) -> bool:
+    """Is this expression *syntactically* certain to be a `Float`? A Float
+    literal, a `/` (true division), a Float-annotated arithmetic node, or a
+    unary minus of one — the same node-local proof the other tiers use so a
+    `${aFloat}` routes through the canonical renderer (docs/strings.md)."""
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        value = node.get("value")
+        return isinstance(value, float) and not isinstance(value, bool)
+    if kind == "bin":
+        return node.get("op") == "/" or node.get("operands") == "Float"
+    if kind == "un":
+        return node.get("op") == "-" and _v3_is_float(node.get("operand"))
+    return False
+
+
 class _V3Ctx:
     """Names visible to lowered IR v3 expression/statement emitters."""
 
@@ -1926,6 +1977,12 @@ def _v3_interp(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
     for kind, value in parts:
         if kind == "text":
             format_parts.append(value.replace("{", "{{").replace("}", "}}"))
+        elif _v3_is_float(value):
+            # A `Float` renders through the canonical ECMAScript form, not
+            # Rust's `{}` (`format!("{}", 1e21)` is the full 22-digit expansion
+            # and `-0.0` is `-0`); see docs/strings.md.
+            format_parts.append("{}")
+            args.append(f"revl_ftoa({_render_expr(value, ctx, rename)})")
         else:  # ["expr", ir_node]
             format_parts.append("{}")
             args.append(_render_expr(value, ctx, rename))
@@ -2177,6 +2234,88 @@ def _uses_stdlib(ir: dict) -> bool:
     walk(ir.get("functions"))
     walk(ir.get("tests"))
     return found
+
+
+def _uses_float_interp(ir: dict) -> bool:
+    """True when any `${…}` template interpolates a provably-`Float`
+    expression, so the canonical Float renderer is emitted only then."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") == "interp":
+                for part in node.get("parts") or []:
+                    if (isinstance(part, (list, tuple)) and len(part) == 2
+                            and part[0] == "expr" and _v3_is_float(part[1])):
+                        found = True
+                        return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    walk(ir.get("functions"))
+    walk(ir.get("tests"))
+    return found
+
+
+def _revl_ftoa_helper() -> list[str]:
+    """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md).
+    `{:e}` supplies the shortest round-trip digits; this reformats them into
+    the ES notation so `${aFloat}` agrees with every other tier."""
+    return [
+        "fn revl_ftoa(x: f64) -> String {",
+        '    if x.is_nan() { return "NaN".to_string(); }',
+        "    if x.is_infinite() {",
+        '        return (if x < 0.0 { "-Infinity" } else { "Infinity" }).to_string();',
+        "    }",
+        '    if x == 0.0 { return "0".to_string(); }',
+        '    let sign = if x < 0.0 { "-" } else { "" };',
+        '    let s = format!("{:e}", x.abs());',
+        "    let (mant, exp): (&str, i64) = match s.find('e') {",
+        "        Some(i) => (&s[..i], s[i + 1..].parse().unwrap()),",
+        "        None => (s.as_str(), 0),",
+        "    };",
+        "    let (intpart, frac) = match mant.find('.') {",
+        "        Some(i) => (&mant[..i], &mant[i + 1..]),",
+        '        None => (mant, ""),',
+        "    };",
+        '    let mut digits = format!("{}{}", intpart, frac);',
+        "    let mut point = intpart.len() as i64 + exp;",
+        "    let mut lead = 0;",
+        "    let b = digits.clone();",
+        "    let bb = b.as_bytes();",
+        "    while lead + 1 < bb.len() && bb[lead] == b'0' { lead += 1; point -= 1; }",
+        "    digits = digits[lead..].to_string();",
+        "    while digits.len() > 1 && digits.ends_with('0') { digits.pop(); }",
+        '    if digits == "0" { return "0".to_string(); }',
+        "    let k = digits.len() as i64;",
+        "    let n = point;",
+        "    let body = if k <= n && n <= 21 {",
+        '        format!("{}{}", digits, "0".repeat((n - k) as usize))',
+        "    } else if 0 < n && n <= 21 {",
+        "        let p = n as usize;",
+        '        format!("{}.{}", &digits[..p], &digits[p..])',
+        "    } else if -6 < n && n <= 0 {",
+        '        format!("0.{}{}", "0".repeat((-n) as usize), digits)',
+        "    } else {",
+        "        let e = n - 1;",
+        "        let m = if k > 1 {",
+        '            format!("{}.{}", &digits[..1], &digits[1..])',
+        "        } else {",
+        "            digits.clone()",
+        "        };",
+        '        let (esign, ea) = if e < 0 { ("-", -e) } else { ("+", e) };',
+        '        format!("{}e{}{}", m, esign, ea)',
+        "    };",
+        '    format!("{}{}", sign, body)',
+        "}",
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -2512,6 +2651,8 @@ def _emit_components(ir: dict, components: list) -> list[str]:
     out.extend(_emit_host_stubs(ir))
     if _uses_stdlib(ir):
         out.extend(_stdlib_helper_traits())
+    if _uses_float_interp(ir):
+        out.extend(_revl_ftoa_helper())
     if _needs_realm_helper(components):
         out.extend(_revl_realm_helper(components))
     for component in components:

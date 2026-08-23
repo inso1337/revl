@@ -6,6 +6,15 @@ the treatment Int got"**). The measurement half lives in
 below come from running those probes on every tier this environment could
 execute (py, ts, go, rust, wasm; java read from its emitter — no JDK here).
 
+> **Status: implemented.** The unit is code points on every tier and the
+> string-unit probes pass everywhere (python, typescript, go, rust, wasm
+> executed; java verified from its emitter). The canonical `Float → Str`
+> renderer is implemented on python, typescript, go, rust and java, and their
+> float-interpolation probes pass. **wasm is fenced for `Float`
+> interpolation only** — it is code-point-correct for the string *unit*, but a
+> canonical shortest-round-trip `Float → Str` routine in hand-written WAT is
+> deferred; see *Remaining wasm WAT work* at the end of this file.
+
 The problem is the arithmetic problem, one level up. `Int / Int` diverged
 because the IR carried no operand type, so every backend inherited its host's
 division. A `Str`'s **unit** diverges for the same reason: the stdlib spec
@@ -164,8 +173,55 @@ decoding in wat helpers + a Float renderer that does not exist yet).
 
 `tests/test_cross_tier_execution.py` carries the probes under *THE STRING
 WAVE*. They assert the **chosen** answers (code points; the ECMAScript float
-form), so they are `xfail(strict=False)` today — the tiers already in the
-chosen unit **xpass**, the tiers that owe work **xfail** — and they flip to
-plain `pass` (remove the marker) as each tier is fixed. They are the
-acceptance test for the fix wave. They do **not** modify any emitter; the
-divergence is documented and measured here, not yet closed.
+form). Now that the fix has landed they are plain `pass` (the `xfail` markers
+were removed) for every tier that is fixed — the string-unit probes on all six
+tiers, and the float-interpolation probes on python/typescript/go/rust/java.
+The one remaining `xfail` is `test_float_interpolation_wasm_is_fenced`, which
+points here.
+
+## How the fix was made, per tier
+
+- **Frontend / IR (`src/revl/lower.py`).** A `Str` literal is stored as a
+  sequence of Unicode scalar values (code points). A Python `str` already is
+  one, so this is enforced (a lone surrogate is rejected) rather than
+  converted; the real fix is that every backend now escapes *from code points*.
+- **python.** Reference for the unit. `Float → Str` renders through
+  `_revl_ftoa` (the canonical ES form) rather than `str(float)`.
+- **go.** Literals emit valid UTF-8 escapes (`\uXXXX` for BMP, `\UXXXXXXXX`
+  for astral) instead of the lone-surrogate `\uXXXX` `json.dumps` produced;
+  the method helpers were already `[]rune`-based. `Float` interpolates through
+  a `revlFtoa` helper.
+- **rust.** Literals emit `\u{XXXX}`, which unblocks *all* non-ASCII (rust
+  rejected every one before); methods were already `chars()`-based. `Float`
+  interpolates through a `revl_ftoa` helper.
+- **typescript.** `length`/`charAt`/`charCodeAt`/`slice`/`indexOf` route
+  through code-point helpers (`Array.from`/`codePointAt`); `charCodeAt`
+  returns the scalar. `${x}` is already the canonical `Float` form.
+- **java.** The `String` overloads use `codePointCount`/`offsetByCodePoints`/
+  `codePointAt`; `Float` interpolates through a `revlFtoa` helper.
+- **wasm.** The WAT string helpers decode UTF-8 (`$str_cp_length`,
+  `$str_cp_offset`, `$str_cp_slice`, `$str_cp_char_at`,
+  `$str_cp_char_code_at`) so `length`/`charAt`/`charCodeAt`/`slice` count and
+  index in code points; `Bytes` keeps the byte helpers. `Float` interpolation
+  is *fenced* (below).
+
+ASCII code points are identical to their UTF-16 units, so ASCII literal
+emission is byte-identical and the v1 goldens are unchanged.
+
+## Remaining wasm WAT work
+
+wasm is code-point-correct for the string **unit** — its `length`/`charAt`/
+`charCodeAt`/`slice` probes pass — but it **still refuses a `Float` in
+interpolation**, exactly as it did before this wave. The other tiers each
+spell one shared `Float → Str` spec (ECMAScript `Number::toString`) in host
+syntax by leaning on the host's shortest-round-trip float formatter (python
+`repr`, go `strconv.FormatFloat`, rust `{:e}`, java `Double.toString`) and
+then reformatting the digits into the ES notation. wasm has no such primitive:
+a canonical renderer needs a shortest-round-trip float→decimal conversion
+(Grisu/Ryū class) hand-written in WAT, which is a substantial piece of work on
+its own. Rather than ship a non-shortest renderer that would *diverge* from
+the other tiers — a silent wrong answer, the very thing this wave exists to
+kill — the wasm float path is left refusing, and
+`test_float_interpolation_wasm_is_fenced` stays `xfail` with this note as its
+reason. Closing it means implementing that WAT float renderer; the unit work
+is done.

@@ -452,7 +452,39 @@ def _format(template: str, args: list[str]) -> str:
 
 
 def _go_string(s: str) -> str:
-    return json.dumps(str(s))
+    """A Go double-quoted string literal, escaped *from code points*.
+
+    The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
+    Go source is UTF-8: a BMP scalar spells as `\\uXXXX` (4 hex) and an astral
+    scalar as `\\UXXXXXXXX` (8 hex). `json.dumps` instead emits the astral
+    scalar as a UTF-16 surrogate pair (`\\ud83d\\ude00`), which Go rejects as an
+    invalid Unicode code point — the reason astral literals used to fail to
+    compile here. ASCII and BMP non-ASCII stay byte-identical to the old
+    `json.dumps` output (printable ASCII verbatim; `\\uXXXX` for `é` etc.), so
+    only astral literals change and v1 goldens stay frozen.
+    """
+    s = str(s)
+    out = ['"']
+    for ch in s:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append("\\u%04x" % cp)
+        else:
+            out.append("\\U%08x" % cp)
+    out.append('"')
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -1233,6 +1265,7 @@ class _V3GoCtx:
         self.used_stdlib = False
         self.needs_reflect = False      # structural `==` on a non-scalar
         self.needs_float_div = False    # `/` (true division, IEEE at zero)
+        self.needs_ftoa = False         # canonical Float -> Str in interpolation
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
@@ -1789,6 +1822,13 @@ def _go_v3_interp(node: dict, ctx: _V3GoCtx) -> str:
     for part_kind, value in node.get("parts") or []:
         if part_kind == "text":
             fmt_parts.append(str(value).replace("%", "%%"))
+        elif _go_v3_infer_type(value, ctx) == "Float":
+            # A `Float` renders through the canonical ECMAScript form, not
+            # Go's `%v` (`%v` matches for these values but diverges elsewhere,
+            # e.g. `1e-07` vs `1e-7`); see docs/strings.md.
+            ctx.needs_ftoa = True
+            fmt_parts.append("%s")
+            args.append(f"revlFtoa({_go_v3_expr(value, ctx)})")
         else:
             fmt_parts.append("%v")
             args.append(_go_v3_expr(value, ctx))
@@ -2140,6 +2180,82 @@ func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
 }
 '''
 
+_V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
+// cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,
+// "1e+21"/"NaN"/"Infinity", a whole-number float as "0", negative zero as "0".
+func revlFtoa(x float64) string {
+	if math.IsNaN(x) {
+		return "NaN"
+	}
+	if math.IsInf(x, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(x, -1) {
+		return "-Infinity"
+	}
+	if x == 0 {
+		return "0"
+	}
+	sign := ""
+	if x < 0 {
+		sign = "-"
+		x = -x
+	}
+	s := strconv.FormatFloat(x, 'e', -1, 64) // shortest mantissa: d[.ddd]e±dd
+	mant := s
+	exp := 0
+	if e := strings.IndexByte(s, 'e'); e >= 0 {
+		mant = s[:e]
+		exp, _ = strconv.Atoi(s[e+1:])
+	}
+	intpart := mant
+	frac := ""
+	if d := strings.IndexByte(mant, '.'); d >= 0 {
+		intpart = mant[:d]
+		frac = mant[d+1:]
+	}
+	digits := intpart + frac
+	point := len(intpart) + exp
+	i := 0
+	for i < len(digits)-1 && digits[i] == '0' {
+		i++
+		point--
+	}
+	digits = digits[i:]
+	j := len(digits)
+	for j > 1 && digits[j-1] == '0' {
+		j--
+	}
+	digits = digits[:j]
+	if digits == "0" {
+		return "0"
+	}
+	k := len(digits)
+	n := point
+	var body string
+	switch {
+	case k <= n && n <= 21:
+		body = digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		body = digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		body = "0." + strings.Repeat("0", -n) + digits
+	default:
+		e := n - 1
+		m := digits
+		if k > 1 {
+			m = digits[:1] + "." + digits[1:]
+		}
+		esign := "+"
+		if e < 0 {
+			esign = "-"
+			e = -e
+		}
+		body = m + "e" + esign + strconv.Itoa(e)
+	}
+	return sign + body
+}'''
+
 _V3_STDLIB_PREAMBLE = '''// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 
@@ -2311,6 +2427,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     if ctx.used_stdlib:
         imports.append('\t"strings"')
         imports.append('\t"unicode/utf8"')
+    if ctx.needs_ftoa:
+        imports.append('\t"math"')
+        imports.append('\t"strconv"')
+        imports.append('\t"strings"')
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -2319,7 +2439,7 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     out.append("")
     if imports:
         out.append("import (")
-        out.extend(sorted(imports))
+        out.extend(sorted(set(imports)))
         out.append(")")
         out.append("")
     if ctx.needs_reflect:
@@ -2333,6 +2453,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         # at compile time, where IEEE defines +Inf. Through a call it is an
         # ordinary runtime float division, which is what revl specifies.
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_ftoa:
+        out.append(_V3_FTOA_HELPER)
         out.append("")
     if ctx.needs_overflow:
         out.append("func revlAdd(a, b int64) int64 {")

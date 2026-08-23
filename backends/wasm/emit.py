@@ -1314,6 +1314,11 @@ class _V3Emitter:
             self._helper_str_slice(),
             self._helper_str_char_at(),
             self._helper_str_char_code_at(),
+            self._helper_str_cp_length(),
+            self._helper_str_cp_offset(),
+            self._helper_str_cp_slice(),
+            self._helper_str_cp_char_at(),
+            self._helper_str_cp_char_code_at(),
         ] + self._arith_helper_funcs() + [
             self._helper_list_push(),
             self._helper_list_concat(),
@@ -1591,11 +1596,131 @@ class _V3Emitter:
     def _helper_str_char_code_at(self) -> str:
         # in: an address and an Int index. out: an Int (a code point), so the
         # byte that comes back has to be widened rather than returned as an i32.
+        # This is the *Bytes* form (one byte per index); Str routes through
+        # $str_cp_char_code_at, which decodes UTF-8 (docs/strings.md).
         return """  (func $str_char_code_at (param $s i32) (param $idx i64) (result i64)
     (i64.extend_i32_u
       (i32.load8_u
         (i32.add (i32.add (local.get $s) (i32.const 4))
                  (i32.wrap_i64 (local.get $idx))))))"""
+
+    # -- Str as code points (docs/strings.md) --------------------------------
+    #
+    # A `Str` is a sequence of Unicode scalar values. In memory it is UTF-8
+    # (a u32 byte-length prefix, then the bytes), so `length`/`charAt`/
+    # `charCodeAt`/`slice` count and index in *code points*, walking UTF-8
+    # continuation bytes rather than raw byte offsets. `Bytes` keeps the byte
+    # helpers above. A code point boundary is any byte whose top two bits are
+    # not `10` (i.e. `(b & 0xC0) != 0x80`).
+
+    def _helper_str_cp_length(self) -> str:
+        return """  (func $str_cp_length (param $s i32) (result i32)
+    (local $len i32) (local $i i32) (local $count i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+        (if (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80))
+          (then (local.set $count (i32.add (local.get $count) (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (local.get $count))"""
+
+    def _helper_str_cp_offset(self) -> str:
+        # Byte offset of the `$cp`-th code point (or the byte length when `$cp`
+        # is at/after the end), so a code-point index becomes a byte index.
+        return """  (func $str_cp_offset (param $s i32) (param $cp i32) (result i32)
+    (local $len i32) (local $i i32) (local $seen i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (br_if $done (i32.ge_s (local.get $seen) (local.get $cp)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (block $cont_done
+          (loop $cont
+            (br_if $cont_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (br_if $cont_done (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cont)))
+        (local.set $seen (i32.add (local.get $seen) (i32.const 1)))
+        (br $loop)))
+    (local.get $i))"""
+
+    def _helper_str_cp_slice(self) -> str:
+        # `$start`/`$end` are code-point indices (Int values). JS slice
+        # semantics: out-of-range bounds clamp into [0, cp_length], never trap.
+        return """  (func $str_cp_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $cplen i32) (local $a i32) (local $b i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $cplen (call $str_cp_length (local.get $s)))
+    (local.set $a (i32.wrap_i64 (local.get $start)))
+    (local.set $b (i32.wrap_i64 (local.get $end)))
+    (if (i32.lt_s (local.get $a) (i32.const 0)) (then (local.set $a (i32.const 0))))
+    (if (i32.gt_s (local.get $a) (local.get $cplen)) (then (local.set $a (local.get $cplen))))
+    (if (i32.lt_s (local.get $b) (local.get $a)) (then (local.set $b (local.get $a))))
+    (if (i32.gt_s (local.get $b) (local.get $cplen)) (then (local.set $b (local.get $cplen))))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $a)))
+    (local.set $to (call $str_cp_offset (local.get $s) (local.get $b)))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))"""
+
+    def _helper_str_cp_char_at(self) -> str:
+        # The whole scalar at code-point index `$idx`, as a new one-code-point
+        # Str (its UTF-8 bytes copied out), not a single byte.
+        return """  (func $str_cp_char_at (param $s i32) (param $idx i64) (result i32)
+    (local $i i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $i (i32.wrap_i64 (local.get $idx)))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $i)))
+    (local.set $to (call $str_cp_offset (local.get $s) (i32.add (local.get $i) (i32.const 1))))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))"""
+
+    def _helper_str_cp_char_code_at(self) -> str:
+        # The Unicode scalar value at code-point index `$idx`: a UTF-8 decode
+        # (1–4 bytes) rather than a raw byte read, so an astral char returns
+        # e.g. 128512, not the lead byte.
+        return """  (func $str_cp_char_code_at (param $s i32) (param $idx i64) (result i64)
+    (local $off i32) (local $base i32) (local $b0 i32)
+    (local.set $off (call $str_cp_offset (local.get $s) (i32.wrap_i64 (local.get $idx))))
+    (local.set $base (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $off)))
+    (local.set $b0 (i32.load8_u (local.get $base)))
+    (i64.extend_i32_u
+      (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0x80))
+        (then (local.get $b0))
+        (else
+          (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xE0))
+            (then
+              (i32.or
+                (i32.shl (i32.and (local.get $b0) (i32.const 0x1F)) (i32.const 6))
+                (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F))))
+            (else
+              (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xF0))
+                (then
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x0F)) (i32.const 12))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 6)))
+                    (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F))))
+                (else
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x07)) (i32.const 18))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 12)))
+                    (i32.or
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F)) (i32.const 6))
+                      (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 3))) (i32.const 0x3F))))))))))))"""
 
     # -- lists: [u32 count][pad][slot0][slot1]… , one 8-byte slot per element --
     #
@@ -2209,8 +2334,11 @@ class _V3Emitter:
             target = self._expr(target_node, scope, where, target_ty)
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
                 raise EmitError(f"{where}: length is only lowerable on Str/Bytes/List")
-            # the count/length prefix stays a u32 in memory (the canonical-ABI
-            # shape a host reads); the *value* it yields is an Int
+            # A `Str` counts code points (docs/strings.md), decoding UTF-8; a
+            # `Bytes` or `List` counts its elements from the u32 prefix, which
+            # is the byte/element count.
+            if target_ty == "Str":
+                return _E(f"(i64.extend_i32_u (call $str_cp_length {target.wat}))", "Int")
             return _E(f"(i64.extend_i32_u (i32.load {target.wat}))", "Int")
         # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
         # is a sign-extend; narrowing Int -> Int32 traps out of the i32 range
@@ -2244,20 +2372,33 @@ class _V3Emitter:
             target = self._expr(target_node, scope, where, target_ty)
             start = self._expr(args[0], scope, where, "Int")
             end = self._expr(args[1], scope, where, "Int")
-            helper = "$str_slice" if target_ty in ("Str", "Bytes") else "$list_slice"
+            # Str slices on code-point boundaries; Bytes on byte offsets; List
+            # on element offsets (docs/strings.md).
+            if target_ty == "Str":
+                helper = "$str_cp_slice"
+            elif target_ty == "Bytes":
+                helper = "$str_slice"
+            else:
+                helper = "$list_slice"
             return _E(f"{target.wat}\n      {start.wat}\n      {end.wat}\n      (call {helper})", target_ty)
         if method == "charAt":
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError(f"{where}: charAt is only lowerable on Str/Bytes")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Int")
-            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_at)", "Str")
+            # Str returns the whole scalar at a code-point index (docs/strings.md);
+            # Bytes returns the single byte at a byte index.
+            helper = "$str_cp_char_at" if target_ty == "Str" else "$str_char_at"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Str")
         if method == "charCodeAt":
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError(f"{where}: charCodeAt is only lowerable on Str/Bytes")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Int")
-            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_code_at)", "Int")
+            # Str decodes the UTF-8 scalar value at a code-point index; Bytes
+            # reads the raw byte (docs/strings.md).
+            helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
         if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
             # Integer division and modulo (docs/arithmetic.md). i64.div_s
             # already truncates; the other three go through helpers so every
