@@ -1,0 +1,10 @@
+// REJECTED — `set` on a Map VALUE is checked like every builtin: the value
+// argument must be the map's V (docs/stdlib-2.0.md §Map). A Str into a
+// Map[Str, Int] would surface as a corrupted symbol table three tiers away.
+//
+// expected error:
+//   builtin `set` argument expects `Int`, got `Str`
+
+fn put(m: Map[Str, Int], k: Str) -> Map[Str, Int] {
+  return m.set(k, "one")
+}

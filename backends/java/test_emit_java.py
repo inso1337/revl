@@ -886,3 +886,31 @@ def test_an_arrow_argument_is_never_evaluated_twice():
 @pytest.mark.skipif(JAVAC is None, reason="no working javac")
 def test_javac_compiles_adt_matches_and_arrows(tmp_path):
     _javac_compile(tmp_path, emit.emit(compile_source(_ADT_MATCH_SRC + _ARROW_SRC)))
+
+
+# ---- Map value type (docs/stdlib-2.0.md §Map) ------------------------------
+
+MAP_SRC = """
+pub fn newTable() -> Map[Str, Int] { return Map.empty() }
+pub fn put(m: Map[Str, Int], k: Str, v: Int) -> Map[Str, Int] { return m.set(k, v) }
+pub fn get(m: Map[Str, Int], k: Str) -> Int { return m.lookup(k) ?? 0 - 1 }
+pub fn member(m: Map[Str, Int], k: Str) -> Bool { return m.has(k) }
+"""
+
+
+def test_map_value_type_lowers_to_persistent_hashmaps():
+    """Text-level: set goes through the copying static (never `m.put`), and
+    lookup answers the tier's Optional."""
+    src = emit.emit(compile_source(MAP_SRC))
+    assert "revlMapSet(m, k, v)" in src
+    assert "revlMapGet(m, k)" in src
+    assert "revlMapHas(m, k)" in src
+    # the copying helper itself is emitted exactly once per file
+    assert src.count("private static <V> java.util.Map<String, V> revlMapSet(") == 1
+    # the empty map is a diamond-inferred HashMap
+    assert "return new java.util.HashMap<>();" in src
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_the_map_value_type(tmp_path):
+    _javac_compile(tmp_path, emit.emit(compile_source(MAP_SRC + STDLIB_SRC)))

@@ -1,0 +1,11 @@
+// REJECTED — a method call on a Map VALUE must name the stdlib surface
+// (`set`/`lookup`/`has`, docs/stdlib-2.0.md §Map). There is no verbatim
+// pass-through to whatever method name happens to compile on some host —
+// that is finding 6's portability sin all over again.
+//
+// expected error:
+//   no builtin method `fetch` on values
+
+fn get(m: Map[Str, Int], k: Str) -> Int {
+  return m.fetch(k) ?? 0
+}

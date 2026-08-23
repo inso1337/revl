@@ -510,6 +510,16 @@ _BUILTIN_SIG = {
     "checked_div_floor": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_euclid": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_mod": ("Int", ["Int"], "Result[Int, Str]"),
+    # The Map value type (docs/stdlib-2.0.md §Map): persistent, Str-keyed.
+    # Method names are deliberately disjoint from the host verb set
+    # (`open/close/query/execute/new/get/insert/remove/drop`) so the two
+    # namespaces stay collision-free by construction; dispatch is also by
+    # receiver kind, since a host-family receiver routes to
+    # _HOST_FAMILIES before this table is ever consulted. `@elem` below
+    # means the map's VALUE parameter (targs[1]), not its key.
+    "set": ("Map", ["Str", "@elem"], "@self"),
+    "lookup": ("Map", ["Str"], "Opt[@elem]"),
+    "has": ("Map", ["Str"], "Bool"),
 }
 
 
@@ -618,18 +628,48 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         if family == "sized" and thead not in _SIZED_HEADS:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
-        if family in ("List", "Str", "Int") and thead != family:
+        if family in ("List", "Str", "Int", "Map") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
-    elem = targs[0] if thead == "List" and targs else None
+    # `@elem` is the element/value parameter: a List's single argument for
+    # List receivers, a Map's second (value) argument for Map receivers.
+    elem = None
+    if thead == "List" and targs:
+        elem = targs[0]
+    elif thead == "Map" and len(targs) == 2:
+        elem = targs[1]
     for spec, actual in zip(params, arg_types):
         expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
         if filename and expected and actual and not compatible(expected, actual):
             raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual)
+    if ret == "@self" and elem == "Never":
+        # Bottom-typed receiver — the empty literal `[]` / `Map.empty()`.
+        # Its element type is a wildcard, so the argument checks above
+        # proved NOTHING (compatible(Never, anything) is True), and the
+        # @self result would flow into ANY Map[Str, X] / List[T] the same
+        # way. Learn the element type from a concrete argument and carry it
+        # in the rebuilt container, so `[].push("s")` types as List[Str]
+        # and is refused where List[Int] is expected. When no argument
+        # offers a concrete type (holes, unknowns), behavior is unchanged.
+        learned = None
+        for spec, actual in zip(params, arg_types):
+            if not actual or _is_wildcard(actual):
+                continue
+            if spec == "@elem":
+                learned = actual
+            elif spec == "@self":
+                ahead, aargs = parse_type(actual)
+                if ahead == thead and aargs and not _is_wildcard(aargs[-1]):
+                    learned = aargs[-1]
+        if learned is not None:
+            return format_type(thead,
+                               [learned] if thead == "List" else [targs[0], learned])
     if ret == "@self":
         return target_type
     if ret == "@elem":
         return elem
+    if ret == "Opt[@elem]":
+        return f"Opt[{elem or 'Never'}]"
     return ret
 
 
@@ -931,7 +971,23 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             # *family* — that is what lets receiver-form calls on the bound
             # value be checked against the stub surface (_HOST_FAMILIES)
             if isinstance(expr.callee.target, ExprVar):
-                ctor = _HOST_FAMILIES.get(expr.callee.target.name or "")
+                ctor_root = expr.callee.target.name or ""
+                # the Map VALUE constructor (docs/stdlib-2.0.md §Map): the
+                # empty map is `Map[Str, Never]` — bottom-typed, so it flows
+                # into any `Map[Str, V]` exactly as the untyped `[]` flows
+                # into any `List[T]`. Deliberately checked BEFORE the host
+                # family: `empty` is not a host verb and never will be
+                # (namespace disjointness is pinned by test).
+                if ctor_root == "Map" and expr.callee.name == "empty":
+                    if filename and arg_types:
+                        raise RevlError(
+                            filename, line,
+                            f"`Map.empty()` takes no arguments, {len(arg_types)} given",
+                            hint="build up an empty map with `set`: "
+                                 "`Map.empty().set(\"k\", v)`",
+                        )
+                    return "Map[Str, Never]"
+                ctor = _HOST_FAMILIES.get(ctor_root)
                 if ctor is not None and expr.callee.name in ctor:
                     dotted = f"{expr.callee.target.name}.{expr.callee.name}"
                     host_check(dotted, arg_types, filename, line)
@@ -1268,6 +1324,10 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         target_t = infer_ir(node.get("target"), tenv, types, services, filename, line)
         args = [infer_ir(a, tenv, types, services, filename, line) for a in node.get("args") or []]
         return builtin_check(node.get("method"), target_t, args, filename, line)
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map): bottom-typed empty value.
+        return "Map[Str, Never]"
+
     if kind == "bin":
         lt = infer_ir(node.get("left"), tenv, types, services, filename, line)
         rt = infer_ir(node.get("right"), tenv, types, services, filename, line)
