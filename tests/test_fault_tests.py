@@ -14,6 +14,7 @@ Three layers, gated separately so a missing runtime never looks like a pass:
 """
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -552,3 +553,115 @@ fault test "async body dies at the pool" for Migrator {
     # `no residue` and `inverses lifo` still held: the unwind itself is correct
     assert "residue in the" not in out
     assert "out of LIFO order" not in out
+
+# ------------------------------------------------- R1: host-trace residue
+#
+# The fault-path `assert no residue` reads the same host trace the lifecycle
+# harness's R1 accounting reads (findings-uxprobe2: a Map stub acquired with
+# a non-inverse undo used to PASS a fault test while the identical component
+# failed the lifecycle one, because the four runtime counters cannot see an
+# acquisition whose undo is not its inverse).
+
+def test_pairing_releases_a_matching_drop():
+    events = ["map#1.new", "map#1.insert k", "map#1.drop"]
+    assert fault_mod._unreleased_host_resources(events) == []
+
+
+def test_pairing_flags_an_unpaired_new():
+    got = fault_mod._unreleased_host_resources(["map#1.new", "map#1.insert leak"])
+    assert got == ["map#1 (new() with no drop())"]
+
+
+def test_pairing_handles_pools_and_order():
+    events = ["pool#1.open postgres://primary/app",
+              "map#2.new",
+              "map#2.drop",
+              "pool#1.close postgres://primary/app"]
+    assert fault_mod._unreleased_host_resources(events) == []
+    events[3] = "pool#1.query SELECT 1"          # not the inverse of open
+    assert fault_mod._unreleased_host_resources(events) == \
+        ["pool#1 (open() with no close())"]
+
+
+def test_non_host_events_are_ignored():
+    events = ["store.config {url=..}", "fiber#7.dispose", "cache.put k"]
+    assert fault_mod._unreleased_host_resources(events) == []
+
+
+def test_judge_names_the_unreleased_resource():
+    outcome = _outcome(events=["map#1.new", "map#1.insert leak"])
+    problems = fault_mod._judge(_ALL, outcome, _FiberState)
+    hit = [p for p in problems if "residue in the host" in p]
+    assert len(hit) == 1
+    assert "map#1 (new() with no drop())" in hit[0]
+    assert "(R1)" in hit[0]
+
+
+def test_judge_stays_quiet_when_the_trace_pairs():
+    outcome = _outcome(events=["map#1.new", "map#1.drop"])
+    assert fault_mod._judge(_ALL, outcome, _FiberState) == []
+
+
+# ------------------------------------------------------------ execution
+# The uxprobe2 repro, as a regression. A component whose setup acquires a
+# Map stub with a NON-INVERSE undo used to PASS a fault test while the
+# identical component failed the lifecycle one; `assert no residue` must
+# now read the host trace and refuse.
+
+_LEAKY_BODY = '''service Ping { fn ping(tag: Str) -> Str }
+
+component Fragile provides p: Ping {
+  let scratch = effect Map.new() undo scratch.insert("leak", "1")
+  fail "deliberate activation fault"
+  provide p { fn ping(tag) = tag }
+}
+'''
+
+_FAULT_ON_LEAKY = _LEAKY_BODY + '''
+fault test "mid-activation failure reverts its acquisition" for Fragile {
+  fail at step 2
+  assert no residue
+}
+'''
+
+_FAULT_ON_HONEST = (_LEAKY_BODY
+                    .replace('undo scratch.insert("leak", "1")',
+                             'undo scratch.drop()')
+                    + '''
+fault test "clean mid-activation failure" for Fragile {
+  fail at step 2
+  assert no residue
+}
+''')
+
+
+def _run_src(src: str, capsys):
+    from revl.test import test_command
+
+    code = test_command(compile_source(src, "fault.rvl"), "py")
+    return code, capsys.readouterr().out
+
+
+@needs_cordis
+def test_a_non_inverse_undo_fails_the_fault_test(capsys):
+    """Before the R1 accounting this exact document passed."""
+    code, out = _run_src(_FAULT_ON_LEAKY, capsys)
+    assert code == 1, out
+    assert "FAIL mid-activation failure reverts its acquisition" in out
+    assert "residue in the host" in out
+    # the tag carries the runtime's global Map serial, which depends on how
+    # many stubs earlier tests created - assert the shape, not the number
+    assert re.search(r"map#\d+ \(new\(\) with no drop\(\)\)", out)
+    assert "(R1)" in out
+
+
+@needs_cordis
+def test_an_inverse_undo_still_passes_the_fault_test(capsys):
+    """Positive control: the same shape with the real inverse keeps passing —
+    the trace must not grow false positives."""
+    code, out = _run_src(_FAULT_ON_HONEST, capsys)
+    assert code == 0, out
+    assert "PASS clean mid-activation failure" in out
+
+
+

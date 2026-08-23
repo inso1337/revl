@@ -153,6 +153,41 @@ def _snapshot(root) -> dict:
     }
 
 
+# Host acquire/release verbs (docs/backend-ir.md §Host builtins). Mirrored
+# from the lifecycle harness's R1 accounting in backends/python/emit.py
+# (`_REVL_ACQUIRE`) — the two live on opposite sides of the emit boundary,
+# so the sync is enforced by tests on both sides instead of by import.
+_ACQUIRE_VERBS = {"new": "drop", "open": "close"}
+
+
+def _unreleased_host_resources(events: list) -> list:
+    """Host resources acquired inside the capture window and never released
+    (R1): the same acquire/release pairing the lifecycle `assert no_residue`
+    harness applies, fed by the same host trace.
+
+    This is the half the four runtime counters cannot express. An undo that
+    is *not* the inverse of its acquisition still runs — `scratch.insert`
+    executes happily — so the effect stack drains, the registry returns to
+    baseline, and every snapshot matches, while the stub itself stays alive
+    in the host process. Only the trace sees the unpaired `new`. Without
+    this, a fault test passes a component the lifecycle test condemns.
+    """
+    live: dict = {}
+    for event in events:
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if not tag:
+            continue
+        if verb in _ACQUIRE_VERBS:
+            live[tag] = verb
+        elif verb in _ACQUIRE_VERBS.values():
+            live.pop(tag, None)
+    return sorted(
+        "{} ({}() with no {}())".format(tag, verb, _ACQUIRE_VERBS[verb])
+        for tag, verb in live.items()
+    )
+
+
 async def _flush() -> None:
     for _ in range(30):
         await asyncio.sleep(0)
@@ -166,7 +201,8 @@ class _Outcome:
         self.siblings: dict = {}     # name -> FiberState of every other component
         self.baseline: dict = {}
         self.unwound: dict = {}      # snapshot with the FAILED handle still held
-        self.settled: dict = {}      # snapshot after the host disposes the handle
+        self.settled: dict = {}      # snapshot after the host dispos
+        self.events: list = []       # host trace over the activation windowes the handle
         self.accumulated = 0
         self.ran: list = []
         self.never_ran: list = []
@@ -220,33 +256,45 @@ async def _drive(ir: dict, unit: dict, emit, runtime_mod, Context, FiberState) -
             await _flush()
             outcome.baseline = _snapshot(root)
 
-            # 2. activate the target with the fault armed
-            probe = runtime_mod.arm_fault_probe(target)
+            # 2. activate the target with the fault armed, capturing the
+            #    host trace from here through settle. The window opens after
+            #    the baseline, so resources the *siblings* acquired and hold
+            #    are not charged to this test; everything the target's
+            #    activation acquires must be released by its unwind for
+            #    `assert no residue` to hold (R1 — the property that makes
+            #    the assertion falsifiable; see _unreleased_host_resources).
+            events: list = []
+            forget_trace = runtime_mod.add_trace(events.append)
             try:
-                fiber = runtime_mod.plug(root, getattr(module, target), unit.get("config") or {})
-                await _flush()
-                if fiber.state == FiberState.LOADING:  # an `await` step in flight
-                    try:
-                        await asyncio.wait_for(asyncio.shield(fiber), 5)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                        pass
+                probe = runtime_mod.arm_fault_probe(target)
+                try:
+                    fiber = runtime_mod.plug(root, getattr(module, target), unit.get("config") or {})
                     await _flush()
+                    if fiber.state == FiberState.LOADING:  # an `await` step in flight
+                        try:
+                            await asyncio.wait_for(asyncio.shield(fiber), 5)
+                        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                            pass
+                        await _flush()
+                finally:
+                    runtime_mod.disarm_fault_probe()
+
+                outcome.state = fiber.state
+                outcome.unwound = _snapshot(root)
+                outcome.accumulated = len(probe.accumulated)
+                outcome.ran = list(probe.ran)
+                outcome.never_ran = probe.never_ran()
+                outcome.lifo_violation = probe.lifo_violation()
+                outcome.siblings = {name: f.state for name, f in fibers.items()}
+
+                # 3. the host drops the FAILED handle — A8's "error recorded" is
+                #    a registration the host owns, so R4 is measured after it goes
+                await fiber.dispose()
+                await _flush()
+                outcome.settled = _snapshot(root)
             finally:
-                runtime_mod.disarm_fault_probe()
-
-            outcome.state = fiber.state
-            outcome.unwound = _snapshot(root)
-            outcome.accumulated = len(probe.accumulated)
-            outcome.ran = list(probe.ran)
-            outcome.never_ran = probe.never_ran()
-            outcome.lifo_violation = probe.lifo_violation()
-            outcome.siblings = {name: f.state for name, f in fibers.items()}
-
-            # 3. the host drops the FAILED handle — A8's "error recorded" is
-            #    a registration the host owns, so R4 is measured after it goes
-            await fiber.dispose()
-            await _flush()
-            outcome.settled = _snapshot(root)
+                forget_trace()
+            outcome.events = events
         finally:
             for name in reversed(order):
                 fiber = fibers.pop(name, None)
@@ -319,6 +367,13 @@ def _judge(unit: dict, outcome: _Outcome, FiberState) -> list:
             failures.append(
                 f"residue in the service registry after teardown: {settled['provisions']}, "
                 f"baseline {base['provisions']}")
+        unreleased = _unreleased_host_resources(outcome.events)
+        if unreleased:
+            failures.append(
+                "residue in the host: " + ", ".join(unreleased)
+                + " — acquired during the activation and never released by "
+                "its inverses (R1); the runtime counters all returned to "
+                "baseline, which is exactly why the trace is read")
 
     if "inverses-lifo" in wanted:
         violation = outcome.lifo_violation
