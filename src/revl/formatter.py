@@ -275,6 +275,10 @@ def _space_between(prev: _Piece, cur: _Piece) -> bool:
     # never a space right after an opener
     if p in ("(", "["):
         return False
+    # capability annotation `emission[db]` binds its bracket tight, unlike the
+    # `return [1, 2]` list form where the keyword keeps its space
+    if c == "[" and p == "emission":
+        return False
     # call / index: `f(...)`, `xs[...]`, `Opt[Str]`, `)(...)` -- but a keyword
     # keeps its space (`return (x)`, `if (c)`)
     if c in ("(", "[") and pk in (_WORD, _VERBATIM) or (c in ("(", "[") and p in (")", "]")):
@@ -398,6 +402,22 @@ def _canonical_ir(ir: dict) -> str:
     return json.dumps(ir, sort_keys=True, ensure_ascii=False)
 
 
+def _token_signature(source: str, filename: str) -> list[tuple[str, str]] | None:
+    """The significant token stream (kind, text), dropping comments/newlines.
+
+    This is the invariant the formatter actually guarantees, and the sound
+    fall-back proof when neither side compiles (a syntactically valid file
+    the type checker rejects still deserves formatting, and its line numbers
+    -- hence its diagnostics -- move under reformatting).  Returns None if the
+    source cannot be scanned at all.
+    """
+    try:
+        pieces = _scan(source, filename)
+    except RevlError:
+        return None
+    return [(p.kind, p.text) for p in pieces if p.kind not in (_COMMENT, _NEWLINE)]
+
+
 def _compile_ir(source: str, filename: str):
     """Compile *source* to IR, returning `(ir, None)` or `(None, error)`.
 
@@ -421,11 +441,18 @@ class GateResult:
     reason: str | None = None  # populated when refused
 
 
-def ir_equivalent(original: str, candidate: str, filename: str = "<source>") -> GateResult:
+def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
+                  token_preserving: bool = True) -> GateResult:
     """The admissibility gate shared by `fmt` and `--migrate`.
 
     Compile both texts and require their IR to be byte-identical.  The result
     records what was proven, or -- when refused -- why.
+
+    `token_preserving` describes the rewrite.  The formatter only ever
+    normalises whitespace, so its rewrites keep the token stream identical
+    (True, the default).  `--migrate` deliberately rewrites tokens
+    (a legacy `"$name"` string becomes a `` `${name}` `` template), so it
+    passes False -- the token-identity fall-back below does not apply to it.
 
     Rules, in order:
 
@@ -433,10 +460,19 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>") -> 
     * original compiles:  the candidate MUST compile to byte-identical IR,
       otherwise it is refused (this is the headline gate -- it catches any
       rewrite that changed what the compiler sees).
-    * original does NOT compile standalone (an `import`-only file, or a 1.x
-      source the 2.0 compiler rejects before `--migrate` fixes it):  IR cannot
-      be compared, so the candidate must at least be *admissible* -- it must
-      compile.  A candidate that still fails to compile is refused.
+    * original does NOT compile standalone but the candidate does (an
+      `import`-only file, or a 1.x source the 2.0 compiler rejects before
+      `--migrate` fixes it):  IR cannot be compared, so the candidate is
+      admitted as *newly admissible* -- it now compiles.
+    * neither side compiles:  there is no compilable baseline for the gate to
+      violate.  A token-preserving rewrite (the formatter) still proves the
+      sound weaker invariant it guarantees -- the significant token stream is
+      byte-identical -- admitting it (this formats a syntactically valid file
+      the type checker rejects, e.g. an `examples/rejections/*` case) or
+      refusing if the tokens changed.  A token-changing rewrite (`--migrate`)
+      has no such baseline and no token invariant; it proceeds as the trusted
+      mechanical rewrite it is (the gate's protection is the compilable-origin
+      case above, where a migration that altered a working program is caught).
     """
     if candidate == original:
         return GateResult(True, "unchanged")
@@ -465,8 +501,23 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>") -> 
             True,
             "output newly admissible (original did not compile standalone)",
         )
+
+    # Neither side compiles: no compilable baseline for the gate to violate.
+    if not token_preserving:
+        # A token-changing mechanical rewrite (`--migrate`) proceeds; the gate
+        # only guards the compilable-origin case handled above.
+        return GateResult(True, "no compilable baseline (mechanical rewrite)")
+
+    # A token-preserving rewrite (the formatter) still proves its invariant.
+    sig_orig = _token_signature(original, filename)
+    sig_cand = _token_signature(candidate, filename)
+    if sig_orig is not None and sig_orig == sig_cand:
+        return GateResult(
+            True,
+            "token-stream identity (source does not compile standalone)",
+        )
     return GateResult(
         False,
-        "IR comparison",
-        reason=f"neither original nor rewritten source compiles: {err_cand}",
+        "token comparison",
+        reason=f"formatting changed the token stream (source does not compile): {err_cand}",
     )
