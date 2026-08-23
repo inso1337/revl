@@ -369,6 +369,7 @@ class _Env:
         types: dict | None = None,
         functions: list | None = None,
         externs: list | None = None,
+        components: list | None = None,
     ):
         self.component = component
         self.services = services
@@ -378,11 +379,17 @@ class _Env:
         self.types: dict = types or {}
         self.functions: list = functions or []
         self.externs: list = externs or []
+        # Every component in the document, so a `spawn` acquisition can resolve
+        # its target template's config shape (whether it takes a typed
+        # `<Comp>Config` or unit `()`), which the shared expression renderer
+        # needs to build the plug-time config value.
+        self.components: list = components or []
         self._v3_ctx: _V3Ctx | None = None
 
     def v3_ctx(self) -> _V3Ctx:
         if self._v3_ctx is None:
-            self._v3_ctx = _V3Ctx(self.types, self.functions, self.externs)
+            self._v3_ctx = _V3Ctx(self.types, self.functions, self.externs,
+                                  self.components)
         return self._v3_ctx
 
 
@@ -747,6 +754,11 @@ def _host_of(component: dict, bind: str) -> str:
     for s in component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
             acquire = s.get("acquire") or {}
+            # A `spawn` acquisition binds a live-instance handle, not a host
+            # resource: the binding's type is the emitted `RevlSpawnHandle`,
+            # so a provide-method that captures it can call `.dispose()`.
+            if acquire.get("kind") == "spawn":
+                return "RevlSpawnHandle"
             return (acquire.get("fn") or "").split(".")[0] or "Value"
     return "Value"
 
@@ -993,6 +1005,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         types=ir.get("types"),
         functions=ir.get("functions"),
         externs=ir.get("externs"),
+        components=ir.get("components"),
     )
     name = component["name"]
     cname = _ident(name, "component")
@@ -1193,6 +1206,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         types=ir.get("types"),
         functions=ir.get("functions"),
         externs=ir.get("externs"),
+        components=ir.get("components"),
     )
     name = component["name"]
     cname = _ident(name, "component")
@@ -1440,10 +1454,18 @@ def _v3_is_float(node: object) -> bool:
 class _V3Ctx:
     """Names visible to lowered IR v3 expression/statement emitters."""
 
-    def __init__(self, types: dict, functions: list, externs: list) -> None:
+    def __init__(self, types: dict, functions: list, externs: list,
+                 components: list | None = None) -> None:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # target component name -> whether it declares a typed config struct.
+        # A `spawn` acquisition uses this to build the plug-time config value:
+        # `<Comp>Config { .. }` when the template has config fields, else `()`.
+        self.spawn_target_has_config: dict[str, bool] = {
+            comp.get("name"): bool(comp.get("config"))
+            for comp in components or []
+        }
         # Binding -> surface type, seeded from declared signatures and from
         # `let` right-hand sides. Rust is the only tier that needs this: `+`
         # on strings has ownership rules (`String + &str` only), so the
@@ -1795,7 +1817,51 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
             f"({kind!r}); unwrap with `match` or `??` for now"
         )
 
+    if kind == "spawn":
+        return _v3_spawn(node, ctx, rename)
+
     raise EmitError(f"unsupported expression kind {kind!r} in Rust backend")
+
+
+def _v3_spawn(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
+    """Lower an instance-parametric `spawn` acquisition (docs/design-v2-instances.md).
+
+    `spawn` is the acquisition of a `let-effect` step, so this renders the
+    expression the enclosing step wraps in `Arc::new(..)` and binds to the
+    handle. It plugs the target *template* as a CHILD FIBER of the spawner —
+    each key the template provides isolated into a FRESH LOCAL realm
+    (`Context::isolate`, no label -> a distinct `Isolation` per spawn, so two
+    instances never collide) — and returns a `RevlSpawnHandle` wrapping that
+    fiber. cordis-rs registers the child fiber as a `ctx.plugin()` effect on
+    the spawner's frame (registry.rs:501-512), so it is the spawner's own
+    nested teardown scope: the safety net that stops an un-disposed instance
+    outliving its spawner, while `handle.dispose()` reclaims it earlier.
+    """
+    target = node.get("component")
+    if not isinstance(target, str) or not target.isidentifier():
+        raise EmitError(f"bad spawn component {target!r}")
+    ctx_expr = rename.get("ctx", "ctx")
+    # Each provided key -> its own fresh local realm, applied at plug time (the
+    # child fiber's Inject gate resolves against this isolated context, exactly
+    # as `_revl_isolate_ctx` does for a statically composed realm placement).
+    isolate_chain = ctx_expr
+    for key in node.get("realms") or []:
+        isolate_chain += f".isolate({_string(key)})"
+    if ctx.spawn_target_has_config.get(target):
+        cfg_ty = f"{_ident(target, 'component')}Config"
+        fields = "".join(
+            f"{_ident(k, 'config field')}: {_render_expr(v, ctx, rename)}, "
+            for k, v in (node.get("config") or {}).items()
+        )
+        cfg_expr = f"{cfg_ty} {{ {fields}..Default::default() }}"
+    else:
+        cfg_expr = "()"
+    plug_fn = _snake(target)
+    return (
+        "{ let __revl_sctx = " + isolate_chain + "; "
+        f"let __revl_fiber = __revl_sctx.plugin({plug_fn}(), {cfg_expr}); "
+        "RevlSpawnHandle::new(__revl_fiber, __revl_sctx) }"
+    )
 
 
 
@@ -2210,6 +2276,61 @@ def _module_header(version: int) -> list[str]:
 
 def _needs_realm_helper(components: list) -> bool:
     return any(component.get("isolate") for component in components)
+
+
+def _uses_spawn(components: list) -> bool:
+    """True when any component acquires an instance via `spawn`."""
+    for component in components:
+        for step in component.get("body") or []:
+            if (step.get("step") == "let-effect"
+                    and (step.get("acquire") or {}).get("kind") == "spawn"):
+                return True
+    return False
+
+
+def _revl_spawn_handle() -> list[str]:
+    """The value a `spawn` acquisition binds: a live component instance, torn
+    down by its own `.dispose()` (docs/design-v2-instances.md, phase 1).
+
+    The instance is a CHILD FIBER of its spawner — its own nested teardown
+    scope. `dispose()` unloads that fiber, running the instance's LIFO teardown
+    NOW, independent of the spawner: a request-scoped instance is reclaimed
+    when the request ends, never deferred to the component's teardown. Disposal
+    is idempotent (a `Mutex<Option<Fiber>>` taken once), so the spawner's own
+    inverse — and cordis-rs's `ctx.plugin()` parent-effect safety net — are
+    harmless no-ops once the instance is already gone. `get` reads a provision
+    the instance published in ITS local realm: only the holder of this handle
+    (the spawner) can reach it; a sibling, isolated into a different local
+    realm, cannot (supervision-tree addressing)."""
+    return [
+        "/// A live spawned-component instance (docs/design-v2-instances.md).",
+        "pub struct RevlSpawnHandle {",
+        "    fiber: std::sync::Mutex<Option<cordis::Fiber>>,",
+        "    ctx: cordis::Context,",
+        "}",
+        "",
+        "impl RevlSpawnHandle {",
+        "    pub fn new(fiber: cordis::Fiber, ctx: cordis::Context) -> Self {",
+        "        Self { fiber: std::sync::Mutex::new(Some(fiber)), ctx }",
+        "    }",
+        "    /// Unload the instance's fiber (its LIFO teardown). Idempotent.",
+        "    pub fn dispose(&self) -> cordis::Result<()> {",
+        "        let taken = self.fiber.lock().unwrap().take();",
+        "        if let Some(fiber) = taken { fiber.dispose()?; }",
+        "        Ok(())",
+        "    }",
+        "    /// Read a provision the instance published, in its own local realm.",
+        "    pub fn get<T: Send + Sync + 'static>(&self, name: &str)",
+        "        -> cordis::Result<Option<std::sync::Arc<T>>> {",
+        "        self.ctx.get_unchecked::<T>(name)",
+        "    }",
+        "    /// The instance's fiber lifecycle state (Active while live).",
+        "    pub fn state(&self) -> Option<cordis::FiberState> {",
+        "        self.fiber.lock().unwrap().as_ref().map(|f| f.state())",
+        "    }",
+        "}",
+        "",
+    ]
 
 
 def _uses_stdlib(ir: dict) -> bool:
@@ -2655,6 +2776,8 @@ def _emit_components(ir: dict, components: list) -> list[str]:
         out.extend(_revl_ftoa_helper())
     if _needs_realm_helper(components):
         out.extend(_revl_realm_helper(components))
+    if _uses_spawn(components):
+        out.extend(_revl_spawn_handle())
     for component in components:
         out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     out.extend(_emit_bridge(ir))

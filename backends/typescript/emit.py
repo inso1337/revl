@@ -647,14 +647,37 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                     f"({call})")
         return call
 
+    if kind == "spawn":
+        # instance-parametric components (docs/design-v2-instances.md): a spawn
+        # is an acquisition that plugs the target component as a *child fiber* of
+        # the spawner, each provided key isolated into its own fresh LOCAL realm
+        # (an unlabelled `ctx.isolate`, a distinct identity per spawn — so two
+        # instances never collide on a provision). `spawn(ctx, Worker, {config},
+        # [realms])` returns a disposable handle; the step's `undo` disposes it,
+        # tearing down that child fiber (its own nested teardown scope). The
+        # target is a module-level plugin dict emitted like any component.
+        target = node.get("component")
+        if not isinstance(target, str) or not target.isidentifier():
+            raise EmitError(f"bad spawn component {target!r}")
+        cfg = "{" + ", ".join(
+            f"{_string(k)}: {_expr(v, ctx)}"
+            for k, v in (node.get("config") or {}).items()) + "}"
+        realms = "[" + ", ".join(
+            _string(r) for r in node.get("realms") or []) + "]"
+        return f"spawn(ctx, {target}, {cfg}, {realms})"
+
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
-def _method_body(steps: list, ctx: "_Ctx", indent: str) -> list[str]:
+def _method_body(steps: list, ctx: "_Ctx", indent: str,
+                 method_is_async: bool = False) -> list[str]:
     """Steps inside a provide-method body.
 
     These run while the component is ACTIVE; `effect` steps go through
-    `ctx.effect` so their undos join the component fiber's accumulator.
+    `ctx.effect` so their undos join the component fiber's accumulator. An
+    `async` service operation (services 2.0 §5) lowers to an `async` method,
+    whose body may `await` a host async value or an instance disposal (A1);
+    a `sync` method rejects `await`, matching the reference tier.
     """
     scope = ctx.component_scope
     lines: list[str] = []
@@ -697,7 +720,14 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str) -> list[str]:
             else:
                 lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         elif kind == "await":
-            raise EmitError("await steps are not allowed inside method bodies (A1)")
+            # A1: legal only in an `async` provide-method (services 2.0 §5); a
+            # sync method has no in-flight window. The await lands, then control
+            # returns to the caller — used here so a request can `await
+            # handle.dispose()` and see an instance reclaimed synchronously.
+            if not method_is_async:
+                raise EmitError(
+                    "await steps are not allowed inside sync provide-method bodies (A1)")
+            lines.append(f"{indent}await {_expr(step['expr'], ctx)}")
         elif kind == "provide":
             raise EmitError("provide steps are not allowed inside method bodies")
         else:
@@ -735,8 +765,14 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[
             f"{p}: {_ts_type(spec.get('type'))}"
             for p, spec in zip(params, spec_params)
         )
-        lines.append(f"{indent}{name}({sig}) {{")
-        lines.extend(_method_body(method.get("body") or [], ctx.with_scope(body_scope), indent + "  "))
+        # services 2.0 §5: an async operation lowers to an async method, whose
+        # body may await (A1). The flag lives on the service declaration, the
+        # single source of truth for the operation's shape.
+        method_is_async = bool(declared[name].get("async"))
+        prefix = "async " if method_is_async else ""
+        lines.append(f"{indent}{prefix}{name}({sig}) {{")
+        lines.extend(_method_body(method.get("body") or [], ctx.with_scope(body_scope),
+                                  indent + "  ", method_is_async))
         lines.append(f"{indent}}},")
     return lines
 
@@ -1748,6 +1784,39 @@ def _context_augmentation(components: list) -> list[str]:
             + ["  }", "}", ""])
 
 
+def _uses_spawn(ir: dict) -> bool:
+    """True iff any component body contains a `spawn` acquisition node, so the
+    module must import the `spawn` runtime helper. Non-spawning documents skip
+    the import entirely and stay byte-identical to the pre-feature output."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") == "spawn":
+                found = True
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    return found
+
+
+def _runtime_imports(ir: dict, runtime_import: str) -> str:
+    """The `import { ... } from '<runtime>'` line. `spawn` is added only when a
+    spawn node is present (docs/design-v2-instances.md phase 2)."""
+    names = ["host"]
+    if _uses_spawn(ir):
+        names.append("spawn")
+    return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
+
+
 def _emit_v1(ir: dict, *, runtime_import: str) -> str:
     """Emit a v1/v2 component module (docs/backend-ir.md)."""
     if not isinstance(ir, dict):
@@ -1767,7 +1836,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
         "import type { Context } from 'cordis'",
-        f"import {{ host }} from '{runtime_import}'",
+        _runtime_imports(ir, runtime_import),
         "",
     ]
 
@@ -1789,6 +1858,9 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
                 for p in method.get("params") or []
             )
             returns = _ts_type(method["returns"]) if method.get("returns") else "void"
+            # services 2.0 §5: an async operation returns a Promise on this tier.
+            if method.get("async"):
+                returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
             out.append(f"  {mname}({params}): {returns}")
@@ -1827,7 +1899,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
         "import type { Context } from 'cordis'",
-        f"import {{ host }} from '{runtime_import}'",
+        _runtime_imports(ir, runtime_import),
     ]
     if tests:
         out.append("import { expect, it } from 'vitest'")
@@ -1855,6 +1927,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
                 for p in method.get("params") or []
             )
             returns = _ts_type(method["returns"]) if method.get("returns") else "void"
+            # services 2.0 §5: an async operation returns a Promise on this tier.
+            if method.get("async"):
+                returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
             out.append(f"  {mname}({params}): {returns}")

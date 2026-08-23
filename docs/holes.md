@@ -213,3 +213,90 @@ names the file you must actually open.
 expr := … | hole
 hole := 'hole' [ '[' type ']' ] [ STRING ]
 ```
+
+## 8. Fill specs — hole-directed generation
+
+An obligation says *that* an agent owes an expression of some type at some
+position. That is most of what a hole is for, but not all of it: the
+obligation names what the fill must eventually *be*, and says nothing about
+what the agent has to *work with*. Everything the checker knew standing at the
+hole's position — the expected type, whether a fill may cross the emission
+boundary, the bindings in scope, the services within reach — it already
+computed and then dropped. A **fill spec** is that context, serialized.
+
+The `revl_check` MCP result enriches every open hole with one:
+
+```json
+{
+  "severity": "obligation", "code": "T3", "category": "hole",
+  "file": "draft.rvl", "line": 8, "expected": "Str",
+  "message": "look it up", "guarantee": "…",
+  "fillSpec": {
+    "expected": "Str",
+    "capability": {"mayEmit": false, "bound": [],
+                   "reason": "a non-emission provide-method — pure"},
+    "bindings": [
+      {"name": "ttl", "type": "Int"},
+      {"name": "key", "type": "Str"},
+      {"name": "raw", "type": "Str"}
+    ],
+    "reachableServices": [
+      {"service": "Db", "method": "q", "signature": "q(sql: Str) -> Str",
+       "instance": "db", "emission": false}
+    ]
+  }
+}
+```
+
+The base obligation fields are byte-identical to §3, so an agent that only
+reads `expected` and `message` keeps working; `fillSpec` is purely additive.
+
+* **`expected`** — the hole's type (§2). A fill that does not have it is a
+  type error before it is a wrong answer.
+* **`capability`** — the emission upper bound at this position, the G4 question
+  (docs/capabilities.md). A hole is a pure expression and can never be `emit
+  hole` (§2); the question is what the *fill that replaces it* may do. An
+  expression here may cross the emission boundary only inside a provide-method
+  whose service method is declared `emission`, and then only within that
+  method's bound: `bound` is the named capabilities of a scoped
+  `emission[db, log]`, `null` for a bare `emission` ("any boundary"), and an
+  empty list with `mayEmit: false` for every other position — a plain `fn`, a
+  non-emission method, a `test`, or component setup. A fill that reaches for an
+  emitting call where `mayEmit` is false is refused by the same G4 check that
+  guards a hand-written body.
+* **`bindings`** — every name in scope at the hole, with its type: the
+  component's `config` fields, the enclosing method's parameters (typed from
+  the service's declaration), and the `let` bindings that *precede* the hole
+  (a binding declared after it is not in its scope). A type shown is one a
+  declaration already fixed; a binding whose type no declaration pins down is
+  listed with a `null` type rather than a guess.
+* **`reachableServices`** — the component's injected dependencies (`requires`),
+  each expanded to its full method table with rendered signatures, so a fill
+  knows exactly what it may call and with what. `emission` flags the methods
+  that themselves cross the boundary.
+
+None of this is new inference. Each field is read off the compiled IR — the
+services table, the component's `requires`/`config`, the enclosing method's
+declared emission, the preceding bindings — the same facts a check established
+and the same ones admission and the backends already trust.
+
+### The scaffold-then-fill loop
+
+The spec changes the shape of the work. Without it the loop is
+**generate-whole → refuse → regenerate**: an agent writes a plausible whole
+component, admission refuses the draft (§4), and the agent regenerates against
+a diagnostic that describes one line at a time. With fill specs the loop is
+**scaffold → fill → fill**:
+
+1. write the component's skeleton with a `hole` at every not-yet-known
+   expression — it compiles (§3), so the checker's verdict on the parts that
+   *are* written arrives immediately;
+2. call `revl_check`; each open hole comes back with its fill spec;
+3. fill one hole, constrained by its spec — the expected type, the bindings to
+   draw from, the services to call, and whether an emitting call is even
+   permissible. Most wrong answers are unrepresentable before they are written;
+4. re-check and repeat until `holes` is empty, then admit (§4).
+
+Each fill is a bounded, local decision against a spec, rather than a whole-file
+gamble against a refusal. The token economics of the two loops are the subject
+of the note in `bench/README` under item 20's demand harness.

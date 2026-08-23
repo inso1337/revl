@@ -1047,8 +1047,10 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
-                     help="target runtime tier (default: py; only py is runnable today; "
-                          "a missing runtime prints setup.sh and exits nonzero)")
+                     help="target runtime tier (default: py; py and rust are runnable — "
+                          "rust boots as a cordis-rs process, --once for the "
+                          "boot/teardown round-trip; a missing runtime is a skip with a "
+                          "reason and a nonzero exit)")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--watch", action="store_true",
@@ -1076,7 +1078,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--placement", default=None,
                      help="TOML/JSON placement map: split components across processes and wire the seams")
     run.add_argument("--once", action="store_true",
-                     help="with --placement: bring the composition up, run probes, then tear down and exit")
+                     help="bring the composition up, then tear down LIFO and exit "
+                          "(with --placement: run probes across processes first; "
+                          "with --backend rust: boot the cordis-rs process, prove "
+                          "no residue, exit)")
 
     recover = sub.add_parser(
         "recover",
