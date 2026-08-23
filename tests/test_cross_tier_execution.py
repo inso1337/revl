@@ -963,3 +963,170 @@ def test_narrowing_is_explicit_and_checked_on_every_tier():
     }
     for backend, needle in checks.items():
         assert needle in _emit_text(backend, src), (backend, needle)
+
+
+# ============================================================ THE STRING WAVE
+#
+# Roadmap item 51 (the string wave) — "Str gets the treatment Int got". The
+# stdlib spec never says what a string's *unit* is, and the lowerings already
+# disagree, so `"😀".length()` is a different number on different tiers with
+# every test passing, because every test was ASCII. This is the Int -> Float
+# class of silent wrong answer, one level up: "every emitter agreed on a
+# shape" never implied "every tier agrees on a value".
+#
+# These probes MEASURE the divergence into docs/strings.md's table; they do
+# NOT fix it (that is the next wave). They assert the CHOSEN unit — code
+# points (docs/strings.md) — so that when the fix lands they flip from xfail
+# to pass and the marker is removed. Until then they are xfail(strict=False):
+# python already answers in code points and xpasses; the tiers that owe work
+# xfail. `"😀"` is U+1F600 — 1 code point, 2 UTF-16 units (D83D DE00), 4
+# UTF-8 bytes (F0 9F 98 80) — the one input that separates all three units.
+#
+# Measured today (docs/strings.md has the full table and per-tier costs):
+#   length():      py 1 · ts 2 · go/rust literal-rejected* · java 2† · wasm 4
+#   charCodeAt(0): py 128512 · ts 55357 · go/rust rej* · java 55357† · wasm 240
+#   * go/rust reject the astral literal outright: the IR stores the string as
+#     UTF-16 surrogate pairs ({"value":"😀"}) and the go/rust
+#     emitters spell that as lone-surrogate `\uXXXX` escapes, which are not
+#     valid in those languages (go: "invalid Unicode code point"; rust wants
+#     `\u{..}`). Their length helpers ARE code-point based already
+#     (utf8.RuneCountInString / chars().count()) — verified on a BMP literal
+#     ("é".length() == 1 on go) — so once the literal representation is fixed
+#     they are free. The literal-escaping fix lives in the frontend + those
+#     two emitters; see docs/strings.md.
+#   † java not executed here (no JDK in this environment); values read from
+#     backends/java/emit.py (String.length()/charAt are UTF-16).
+
+STRING_UNIT_PROBES = {
+    # name: (source asserting the CODE-POINT answer, human note)
+    "length counts code points": (
+        'pub fn f() -> Int { return "😀".length() }\n'
+        'test "one astral char is one code point" { assert f() == 1 }',
+        "py=1 · ts=2 · go/rust=literal-rejected · java=2 · wasm=4",
+    ),
+    "charCodeAt yields the scalar value": (
+        'pub fn f() -> Int { return "😀".charCodeAt(0) }\n'
+        'test "charCodeAt is the Unicode scalar" { assert f() == 128512 }',
+        "py=128512 · ts=55357(hi-surrogate) · go/rust=rej · java=55357 · wasm=240(byte)",
+    ),
+    "charAt keeps the whole scalar": (
+        'pub fn f() -> Bool { return "😀".charAt(0) == "😀" }\n'
+        'test "charAt(0) is the whole char, not half a surrogate" { assert f() }',
+        "py=true · ts=false · go/rust=rej · java=false · wasm=false",
+    ),
+    "slice cuts on code-point boundaries": (
+        'pub fn f() -> Bool { return "a😀b".slice(1, 2) == "😀" }\n'
+        'test "slice(1,2) is the middle code point" { assert f() }',
+        "py=true · ts=false · go/rust=rej · java=false · wasm=false",
+    ),
+}
+
+# wasm needs wasmtime and is slow to spin up; group it with the compiled tiers.
+STRING_SLOW_TIERS = ("rust", "java", "wasm")
+
+
+@pytest.mark.xfail(
+    reason="item 51 (the string wave) is not fixed yet: the string unit "
+    "diverges by tier — see docs/strings.md. python answers in the chosen "
+    "unit (code points) and xpasses; the tiers that owe work xfail.",
+    strict=False,
+)
+@pytest.mark.parametrize("name", sorted(STRING_UNIT_PROBES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_string_unit_is_code_points(tier: str, name: str):
+    source, _note = STRING_UNIT_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} does not answer in code points for {name!r}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac/wasmtime are slow)")
+@pytest.mark.xfail(
+    reason="item 51 (the string wave) is not fixed yet — see docs/strings.md.",
+    strict=False,
+)
+@pytest.mark.parametrize("name", sorted(STRING_UNIT_PROBES))
+@pytest.mark.parametrize("tier", STRING_SLOW_TIERS)
+def test_string_unit_is_code_points_slow(tier: str, name: str):
+    source, _note = STRING_UNIT_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} does not answer in code points for {name!r}: {message}"
+
+
+# ------------------------------------------ float rendering in interpolation
+#
+# The other half of the string wave: `${aFloat}` inside a template has no
+# canonical spelling, so the same Float renders differently on every tier —
+# a template that logs or hashes a Float is a silent cross-tier divergence
+# exactly like the unit is. Measured today:
+#
+#   `${1.0e21}`         py/ts/go "1e+21" · rust "1000000000000000000000" ·
+#                       java "1.0E21"† · wasm REFUSED ("literal .. not lowerable")
+#   `${0.0 / 0.0}` (NaN) py "nan" · ts/go/rust/java "NaN"† · wasm refused
+#   `${(0.0-1.0)*0.0}` (-0.0) py "-0.0" · rust "-0" · ts/go "0" · java "-0.0"† · wasm refused
+#   `${0.0}`  (whole)   py "0.0" · ts/go/rust "0" · java "0.0"† · wasm refused
+#
+# Decision (docs/strings.md): one canonical Float -> Str, the ECMAScript
+# Number::toString shortest-round-trip form — the JS-prior tiebreak, the same
+# one that made `/` "spelled as TS spells it". That is "1e+21", "NaN",
+# "Infinity"/"-Infinity", and negative zero rendered "0". These probes assert
+# that canonical and xfail until every tier renders it.
+
+FLOAT_INTERP_PROBES = {
+    "large magnitude uses exponent": (
+        'pub fn f() -> Str { return `${1.0e21}` }\n'
+        'test "1e21 renders as 1e+21" { assert f() == "1e+21" }',
+        'py/ts/go "1e+21" · rust "1000000000000000000000" · java "1.0E21" · wasm refused',
+    ),
+    "NaN spelling": (
+        'pub fn f() -> Str { return `${0.0 / 0.0}` }\n'
+        'test "NaN renders as NaN" { assert f() == "NaN" }',
+        'py "nan" · ts/go/rust/java "NaN" · wasm refused',
+    ),
+    "whole-number float has no trailing point": (
+        'pub fn f() -> Str { return `${0.0}` }\n'
+        'test "0.0 renders as 0" { assert f() == "0" }',
+        'py "0.0" · ts/go/rust "0" · java "0.0" · wasm refused',
+    ),
+    "negative zero loses its sign in text": (
+        'pub fn f() -> Str { return `${(0.0 - 1.0) * 0.0}` }\n'
+        'test "-0.0 renders as 0" { assert f() == "0" }',
+        'py "-0.0" · rust "-0" · ts/go "0" · java "-0.0" · wasm refused',
+    ),
+}
+
+
+@pytest.mark.xfail(
+    reason="item 51 (the string wave): Float -> Str in interpolation has no "
+    "canonical spelling yet — see docs/strings.md. The tiers that already "
+    "match the chosen ECMAScript form xpass; the rest xfail.",
+    strict=False,
+)
+@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_float_interpolation_is_canonical(tier: str, name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac/wasmtime are slow)")
+@pytest.mark.xfail(
+    reason="item 51 (the string wave) — see docs/strings.md.",
+    strict=False,
+)
+@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
+@pytest.mark.parametrize("tier", STRING_SLOW_TIERS)
+def test_float_interpolation_is_canonical_slow(tier: str, name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} renders the Float differently: {message}"
