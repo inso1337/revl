@@ -1,0 +1,144 @@
+// Background job-processing architecture — UX probe round 2 (agent/uxprobe2).
+// Surfaces exercised here that round 1 never touched:
+//   * extern pure/acquire/emission fns with @py bodies (the host boundary)
+//   * explicit generic [T] syntax, called at two type instantiations
+//   * function types passed as parameters across fn boundaries
+//   * checked_mod / checked_div_trunc over a computed divisor
+//   * a lifecycle test asserting no_residue over the live composition
+
+// ---------- the host boundary ----------
+
+extern pure fn sha256_hex(data: Str) -> Str
+  = @py { import hashlib; return hashlib.sha256(data.encode()).hexdigest() }
+
+extern pure fn close_ledger(h: Int) = @py { pass }
+
+// NOTE: the extern-level `undo <expr>` slot compiles unchecked — see findings
+extern acquire fn open_ledger(path: Str) -> Int undo close_ledger(1)
+  = @py { return abs(hash(path)) % 100000 }
+
+extern emission fn append_line(h: Int, line: Str) = @py { pass }
+
+// ---------- services ----------
+
+service Ledger {
+  emission fn record(line: Str)
+}
+
+service JobQueue {
+  fn status(id: Str) -> Opt[Str]
+  emission fn submit(id: Str, payload: Str)
+}
+
+service Aggregator {
+  // a function value crosses this boundary as a parameter
+  fn fold(seed: Int, batch: List[Int], step: (Int, Int) -> Int) -> Int
+}
+
+// ---------- components ----------
+
+component FileLedger provides audit: Ledger {
+  config { path: Str = "/tmp/revl-probe2-ledger.log" }
+
+  let h = effect open_ledger(config.path)
+           undo   close_ledger(h)
+
+  provide audit {
+    fn record(line) = emit append_line(h, line)
+  }
+}
+
+component JobStore requires audit: Ledger provides queue: JobQueue {
+  let store = effect Map.new() undo store.drop()
+
+  provide queue {
+    fn status(id) = store.get(id)
+    fn submit(id, payload) {
+      effect store.insert(id, payload)
+      undo   store.remove(id)
+      emit audit.record(`submit ${id} sha:${sha256_hex(payload)}`)
+    }
+  }
+}
+
+// the loop lives in stratum 1; the provide method delegates
+fn fold_loop(seed: Int, batch: List[Int], step: (Int, Int) -> Int) -> Int {
+  var acc = seed
+  for (b of batch) {
+    acc = step(acc, b)
+  }
+  return acc
+}
+
+component Summer provides agg: Aggregator {
+  provide agg {
+    fn fold(seed, batch, step) = fold_loop(seed, batch, step)
+  }
+}
+
+// ---------- the pure layer ----------
+
+// explicit generic, called below at Opt[Int] and Opt[Str]
+fn unwrap_or[T](opt: Opt[T], fallback: T) -> T {
+  return match opt {
+    Some(v) => v,
+    None    => fallback,
+  }
+}
+
+// computed divisor -> Result; never faults
+fn shard_of(job_id: Int, workers: Int) -> Result[Int, Str] {
+  return match job_id.checked_mod(workers) {
+    Ok(v)  => Ok(v),
+    Err(e) => Err(e),
+  }
+}
+
+// higher-order: a retry wrapper over a step that can fail
+fn retry_once(step: (Int) -> Result[Int, Str], x: Int) -> Result[Int, Str] {
+  let first = step(x)
+  return match first {
+    Ok(v)  => Ok(v),
+    Err(_) => step(x - 1),
+  }
+}
+
+// ---------- checks ----------
+
+test "checked_mod handles a computed zero divisor" {
+  assert shard_of(10, 3) == Ok(1)
+  assert shard_of(7, 0) == Err("revl: division by zero")
+}
+
+test "checked_div_trunc pairs with its remainder" {
+  assert shard_of(10, 3) == Ok(1)
+  let q = match 10.checked_div_trunc(3) { Ok(v) => v, Err(e) => 0 - 999 }
+  assert q == 3
+}
+
+test "explicit generic at two type instantiations" {
+  assert unwrap_or(Some(5), 0) == 5
+  assert unwrap_or(None, 7) == 7
+  assert unwrap_or(Some("job-a"), "none") == "job-a"
+  assert unwrap_or(None, "none") == "none"
+}
+
+test "function values cross function boundaries" {
+  assert retry_once((x: Int) => shard_of(x, x - 1), 5) == Ok(1)
+  assert retry_once((x: Int) => shard_of(x, x * 0), 9) == Err("revl: division by zero")
+}
+
+// ---------- lifecycle ----------
+
+lifecycle test "a submitted job survives until unload, then leaves no residue" {
+  load FileLedger
+  load JobStore
+  call queue.submit("job-1", "payload")
+  let s = call queue.status("job-1")
+  assert s == Some("payload")
+  let missing = call queue.status("job-404")
+  assert missing == None
+  unload JobStore
+  unload FileLedger
+  assert no_residue
+}

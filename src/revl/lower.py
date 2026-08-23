@@ -118,6 +118,8 @@ _BUILTIN_METHODS = {
     # host verb set (open/close/query/execute/new/get/insert/remove/drop):
     # the two method namespaces stay collision-free by construction.
     "set": 2, "lookup": 1, "has": 1,
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
+    "to_str": 0,
 }
 
 
@@ -1320,7 +1322,10 @@ def _lower_lifecycle_call(stmt: CallStmt, provided: dict, components: dict, serv
     if stmt.bind is not None:
         if stmt.bind in scope:
             raise RevlError(filename, stmt.line,
-                            f"`{stmt.bind}` is already declared in this lifecycle test")
+                            f"`{stmt.bind}` is already declared in this lifecycle test",
+                            hint="bindings are test-scoped, not block-scoped — "
+                                 "sibling branches share one namespace; rename "
+                                 "or reuse the existing binding")
         scope[stmt.bind] = False
         if method.returns:
             type_env[stmt.bind] = method.returns
@@ -1345,7 +1350,11 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
     types = types if types is not None else {}
     if isinstance(stmt, LetStmt):
         if stmt.name in scope:
-            raise RevlError(filename, stmt.line, f"`{stmt.name}` is already declared in this function")
+            raise RevlError(filename, stmt.line,
+                            f"`{stmt.name}` is already declared in this function",
+                            hint="lets are function-scoped, not block-scoped — "
+                                 "sibling branches share one namespace; rename "
+                                 "or reuse the existing binding")
         # host provenance: a let bound to a host constructor call carries
         # host-object methods, exempt from the stdlib method table
         if not stmt.mutable and _is_host_valued(stmt.value, scope):
@@ -1449,7 +1458,11 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         body.append({"step": "while", "cond": cond, "body": inner_body})
     elif isinstance(stmt, ForStmt):
         if stmt.bind in scope:
-            raise RevlError(filename, stmt.line, f"`{stmt.bind}` is already declared in this function")
+            raise RevlError(filename, stmt.line,
+                            f"`{stmt.bind}` is already declared in this function",
+                            hint="bindings are function-scoped, not block-scoped — "
+                                 "sibling branches share one namespace; rename "
+                                 "or reuse the existing binding")
         iter_diag = infer_ast(stmt.iterable, type_env, types, filename)
         if iter_diag is not None and parse_type(iter_diag)[0] != "List":
             raise RevlError(filename, stmt.line,
@@ -1488,7 +1501,11 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             raise RevlError(filename, pattern.line, "duplicate name in record destructuring")
         for name in names:
             if name in scope:
-                raise RevlError(filename, stmt.line, f"`{name}` is already declared in this function")
+                raise RevlError(filename, stmt.line,
+                                f"`{name}` is already declared in this function",
+                                hint="lets are function-scoped, not block-scoped — "
+                                     "sibling branches share one namespace; rename "
+                                     "or reuse the existing binding")
         value_type = _expr_static_type(stmt.value, type_env, types)
         spec = types.get(value_type or "")
         if spec is not None:
@@ -1532,7 +1549,11 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             raise RevlError(filename, pattern.line, "duplicate name in list destructuring")
         for name in names:
             if name in scope:
-                raise RevlError(filename, stmt.line, f"`{name}` is already declared in this function")
+                raise RevlError(filename, stmt.line,
+                                f"`{name}` is already declared in this function",
+                                hint="lets are function-scoped, not block-scoped — "
+                                     "sibling branches share one namespace; rename "
+                                     "or reuse the existing binding")
         value_type = _expr_static_type(stmt.value, type_env, types)
         if value_type is not None and parse_type(value_type)[0] != "List" and (
             types.get(value_type) is not None
