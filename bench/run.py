@@ -29,10 +29,26 @@ from pathlib import Path
 BENCH = Path(__file__).resolve().parent
 ROOT = BENCH.parent
 
+# raw-ts (the paradigm baseline) is scored on lifecycle correctness via the
+# residue probe, not on compile-rate — see score_raw_ts.py. The revl variants'
+# compile-rate path below is untouched by it.
+sys.path.insert(0, str(BENCH))
+from score_raw_ts import (  # noqa: E402
+    RAW_TS_VARIANT, DEFAULT_CYCLES, probe_source, render_raw_ts_summary,
+)
+
 OUTPUT_REMINDER = (
     "\n\n## Task\n\n{brief}\n\nUse these service interfaces verbatim:\n\n"
     "```revl\n{services}\n```\n\n"
     "Reply with exactly one fenced code block containing the complete .rvl file."
+)
+
+RAW_TS_REMINDER = (
+    "\n\n## Task\n\n{brief}\n\nThe service interface(s), in revl notation "
+    "(implement the same operations from your Cordis `ctx.provide`):\n\n"
+    "```revl\n{services}\n```\n\n"
+    "Reply with exactly one fenced ```ts code block: the complete raw Cordis "
+    "plugin as `export const plugin`. No revl."
 )
 
 RETRY_TEMPLATE = (
@@ -43,6 +59,8 @@ RETRY_TEMPLATE = (
 
 
 def load_variant_prompt(variant: str) -> str:
+    if variant == RAW_TS_VARIANT:
+        return (BENCH / "prompts" / "raw-ts.md").read_text()
     if variant == "v1":
         return (BENCH / "prompts" / "v1.md").read_text()
     if variant == "v2":
@@ -133,7 +151,74 @@ def run_mock(system: str, prompt: str, spec: dict, attempt: int):
     return {"text": f"```revl\n{code}```", "cost": 0.0, "model": "mock", "provider": "mock"}
 
 
+# A leaky mock plugin roughly every third spec, so the mock run exercises both
+# outcomes of the probe (clean vs residue) end-to-end. The clean form scopes its
+# provision + resource to its own fiber (revl's emitted shape); the leaky form
+# binds a listener to the root (the ordinary Cordis mistake the probe catches).
+def _mock_raw_ts(spec: dict) -> str:
+    try:
+        leaky = int(spec["id"][:2]) % 3 == 0
+    except ValueError:
+        leaky = False
+    body = (
+        "    ctx.root.on('internal/info' as never, () => {})\n"
+        if leaky else
+        "    ctx.effect(function* () {\n"
+        "      const m = host.Map.new()\n"
+        "      yield () => m.drop()\n"
+        "      yield (ctx as unknown as { provide(k: string, v: unknown): () => void })\n"
+        "        .provide('svc', { get: (k: string) => m.get(k) })\n"
+        "    }, 'MockPlugin.body')\n"
+    )
+    return (
+        "import type { Context } from 'cordis'\n"
+        "import { host } from './host.ts'\n\n"
+        "export const plugin = {\n"
+        f"  name: 'Mock_{spec['id']}',\n"
+        "  apply(ctx: Context) {\n"
+        f"{body}"
+        "  },\n"
+        "}\n"
+    )
+
+
+def run_mock_raw_ts(spec: dict):
+    return {"text": f"```ts\n{_mock_raw_ts(spec)}```",
+            "cost": 0.0, "model": "mock", "provider": "mock"}
+
+
 # --- orchestration ---------------------------------------------------------
+
+def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
+    """Generate one raw Cordis plugin for `spec`, save it, and score it with the
+    residue probe. Returns a single row (there is no retry loop)."""
+    task = RAW_TS_REMINDER.format(brief=spec["brief"], services=spec["services"])
+    t0 = time.time()
+    try:
+        if args.runner == "mock":
+            reply = run_mock_raw_ts(spec)
+        else:
+            reply = run_cline(system, task, args.model, args.provider,
+                              args.timeout, args.inline_system)
+    except Exception as exc:
+        print(f"  !! {spec['id']}/{RAW_TS_VARIANT}: runner error: {exc}", file=sys.stderr)
+        return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
+                "status": "error", "leaked": True, "leaked_categories": [],
+                "error": f"[runner error] {exc}", "duration_s": round(time.time() - t0, 2)}
+    dur = round(time.time() - t0, 2)
+    code = extract_code(reply["text"])
+    adir = run_dir / spec["id"] / RAW_TS_VARIANT
+    adir.mkdir(parents=True, exist_ok=True)
+    (adir / "attempt-1.ts").write_text(code)
+    rec = probe_source(code, cycles=args.raw_ts_cycles, name=f"{run_dir.name}__{spec['id']}")
+    flag = {"clean": "clean", "leaked": "LEAK", "error": "error"}[rec["status"]]
+    extra = (" — " + ", ".join(rec["leaked_categories"])) if rec["leaked_categories"] \
+        else (f" — {rec['error']}" if rec.get("error") else "")
+    print(f"  {spec['id']}/{RAW_TS_VARIANT}: {flag}{extra}")
+    return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
+            "model": reply.get("model"), "duration_s": dur,
+            "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0, **rec}
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -151,6 +236,9 @@ def main():
     ap.add_argument("--compiler-root", default=None,
                     help="score against <dir>/src/revl instead of the live tree "
                          "(e.g. a clean export of a pinned commit)")
+    ap.add_argument("--raw-ts-cycles", type=int, default=DEFAULT_CYCLES,
+                    help="mount/unmount cycles for the raw-ts residue probe "
+                         f"(default {DEFAULT_CYCLES}); only used by the raw-ts variant")
     args = ap.parse_args()
 
     if args.compiler_root:
@@ -179,10 +267,23 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     results_path = run_dir / "results.jsonl"
     rows = []
+    raw_rows = []  # raw-ts scoring records, for the paradigm-comparison summary
 
     for spec in specs:
         for variant in variants:
             system = prompts[variant]
+
+            # raw-ts: the paradigm baseline. One generation, no compiler retry
+            # loop — a raw Cordis plugin always "compiles". Scored on lifecycle
+            # correctness via the residue probe (score_raw_ts.py), NOT on
+            # compile-rate. The revl compile-rate path below is left untouched.
+            if variant == RAW_TS_VARIANT:
+                raw = run_one_raw_ts(spec, system, run_dir, args)
+                rows.append(raw)
+                raw_rows.append(raw)
+                results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+                continue
+
             task = OUTPUT_REMINDER.format(brief=spec["brief"], services=spec["services"])
             prompt, code, error = task, None, None
             green_at, cost_total, model_seen = None, 0.0, None
@@ -226,18 +327,21 @@ def main():
                          "cost_total": round(cost_total, 6)})
             results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
-    write_summary(run_dir, rows, args)
+    write_summary(run_dir, rows, raw_rows, args)
     print(f"\nresults: {results_path}\nsummary: {run_dir / 'summary.md'}")
 
 
-def write_summary(run_dir: Path, rows: list, args):
-    finals = [r for r in rows if r.get("summary")]
+def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
+    finals = [r for r in rows if r.get("summary") and r["variant"] != RAW_TS_VARIANT]
     lines = ["# syntax-2.0 acceptance benchmark — run summary", "",
              f"runner: `{args.runner}`" + (f" · model: `{args.model}`" if args.model else ""),
-             f"max iterations: {args.max_iters}", "",
-             "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | cost |",
-             "|---|---|---|---|---|---|"]
-    for variant in args.variants.split(","):
+             f"max iterations: {args.max_iters}", ""]
+    revl_variants = [v for v in args.variants.split(",") if v != RAW_TS_VARIANT]
+    if revl_variants:
+        lines += ["## revl variants — compile-gated (residue refused at compile)", "",
+                  "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | cost |",
+                  "|---|---|---|---|---|---|"]
+    for variant in revl_variants:
         vs = [r for r in finals if r["variant"] == variant]
         if not vs:
             continue
@@ -251,6 +355,15 @@ def write_summary(run_dir: Path, rows: list, args):
     unsolved = [(r["spec"], r["variant"]) for r in finals if not r["green_at"]]
     if unsolved:
         lines += ["", "Unsolved: " + ", ".join(f"{s}/{v}" for s, v in unsolved)]
+
+    if raw_rows:
+        cycles = raw_rows[0].get("cycles", DEFAULT_CYCLES)
+        lines += ["", "## raw-ts — probe-scored (does revl earn its keep?)", ""]
+        lines += render_raw_ts_summary(raw_rows, cycles)
+        lines += ["> The revl variants are compile-gated: a residue-carrying "
+                  "component never reaches this corpus — the compiler refuses it. "
+                  "The raw-ts column is what that gate would have caught.", ""]
+
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
