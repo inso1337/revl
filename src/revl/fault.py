@@ -190,7 +190,8 @@ def _label(outcome: _Outcome, index) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _drive(ir: dict, unit: dict, emit, runtime_mod, Context, FiberState) -> _Outcome:
+async def _drive(ir: dict, unit: dict, emit, runtime_mod, Context, FiberState,
+                 exclude: frozenset = frozenset()) -> _Outcome:
     outcome = _Outcome()
     target = unit["component"]
     body = next((c.get("body") or [] for c in ir.get("components") or []
@@ -211,9 +212,13 @@ async def _drive(ir: dict, unit: dict, emit, runtime_mod, Context, FiberState) -
         fibers: dict = {}
         try:
             # 1. bring up the rest of the composition, so the target activates
-            #    against its real providers rather than a stub
+            #    against its real providers rather than a stub.  `exclude` names
+            #    components the caller does not want brought up — used by the
+            #    sweep to drop the target's downstream dependents, which would
+            #    otherwise sit PENDING (their provider is the target, held back
+            #    to activate last) and read as a false "sibling affected".
             for name in order:
-                if name == target:
+                if name == target or name in exclude:
                     continue
                 fibers[name] = runtime_mod.plug(root, getattr(module, name), {})
                 await _flush()
@@ -402,13 +407,10 @@ def fault_units(ir: dict, module=None) -> list:
     return units
 
 
-def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
-    """Run *units* against the py reference tier; ``(failures, total)``.
-
-    Raises ``ModuleNotFoundError`` when the cordis-py runtime is absent — the
-    caller decides whether that is a skip or an error.
-    """
-    printer = (lambda line: print(line)) if out is None else out
+def _load_py_tier():
+    """Import the cordis-py reference tier: ``(emit, runtime, Context,
+    FiberState)``.  Raises ``ModuleNotFoundError`` when the runtime is absent —
+    the caller decides whether that is a skip or an error."""
     backend_dir = BACKENDS / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
@@ -416,6 +418,18 @@ def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
+
+    return emit, runtime_mod, Context, FiberState
+
+
+def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
+    """Run *units* against the py reference tier; ``(failures, total)``.
+
+    Raises ``ModuleNotFoundError`` when the cordis-py runtime is absent — the
+    caller decides whether that is a skip or an error.
+    """
+    printer = (lambda line: print(line)) if out is None else out
+    emit, runtime_mod, Context, FiberState = _load_py_tier()
 
     failures = 0
     for unit in units:
@@ -441,3 +455,280 @@ def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
         for note in _notes(outcome):
             printer(f"    note: {note}")
     return failures, len(units)
+
+
+# ---------------------------------------------------------------------------
+# the sweep — from "fail at a chosen step" to "fail at every step"
+# ---------------------------------------------------------------------------
+#
+# A `fault test` proves A8/R4 at ONE author-chosen point.  The sweep upgrades
+# the claim to an exhaustive one: the compiler already knows the complete step
+# list from the IR, so it auto-generates the injection at *every* top-level
+# body step of *every* component, runs the full assertion set at each, and
+# reports.  A component with N steps gets N fault tests nobody wrote —
+# "no mid-life failure point leaves residue", not "A8 held where I looked".
+#
+# It reuses the single-point machinery verbatim: the same `_inject`, `_drive`,
+# `_judge`.  The sweep is a generator loop over the IR plus an aggregating
+# report; the hard part (the injector and the runtime interrogation) is not
+# re-implemented.
+#
+# The exhaustive verdict is honest about its edges.  A step the injection
+# scheme cannot address — one nested inside a component `if` — is *named* in
+# the report, never silently skipped: "nothing checked must never read as
+# clean".  (The surface language forbids anything but `fail` inside a
+# component `if` per G6, so nested steps arise only from hand-written or
+# imported IR; the sweep still refuses to pretend it covered them.)
+#
+# OUT OF SCOPE, recorded for the horizon: seeded clock/random coeffects and
+# async-interleaving exploration would turn this sequential sweep into a
+# schedule sweep (fail at every step *under every interleaving*).  The
+# sequential sweep captures the value now; the async/coeffect axis is the
+# next frontier, not this one.
+
+_SWEEP_ASSERTS = ["failed", "no-residue", "inverses-lifo", "siblings-unaffected"]
+
+_ROADMAP_ITEM = 30
+_SWEEP_TITLE = "fault sweep at every step"
+
+
+def _body_of(ir: dict, component: str) -> list:
+    return next((c.get("body") or [] for c in ir.get("components") or []
+                 if c.get("name") == component), [])
+
+
+def _step_where(step: dict, index: int) -> str:
+    """A short label for a top-level body step, in the diagnostics' idiom."""
+    kind = step.get("step")
+    if kind == "let-effect":
+        return f"step {index} (effect `{step.get('bind')}`)"
+    if kind == "provide":
+        return f"step {index} (provision `{step.get('name')}`)"
+    if kind == "emit":
+        return f"step {index} (emit)"
+    if kind == "await":
+        return f"step {index} (await)"
+    return f"step {index} ({kind})"
+
+
+def _provider_dependents(ir: dict) -> dict:
+    """Map component -> the set of components that transitively require what it
+    provides.  Computed from the manifest alone (no runtime): component B
+    depends on A when B injects a key A provides.
+
+    The sweep uses this to hold a target's *dependents* out of the bring-up.
+    A dependent whose provider is the target could never activate (the target
+    is deliberately plugged last, with the fault armed), so it would sit
+    PENDING and read as a spurious "sibling affected".  Its unavailability is
+    expected propagation of the injected failure, not a containment breach.
+    """
+    comps = (ir.get("manifest") or {}).get("components") or []
+    provides = {c["name"]: set(c.get("provides") or []) for c in comps}
+    injects = {c["name"]: set(c.get("inject") or []) for c in comps}
+    names = [c["name"] for c in comps]
+    direct = {a: {b for b in names
+                  if b != a and injects.get(b, set()) & provides.get(a, set())}
+              for a in names}
+    closure: dict = {}
+    for start in names:
+        seen: set = set()
+        stack = list(direct.get(start, ()))
+        while stack:
+            node = stack.pop()
+            if node in seen or node == start:
+                continue
+            seen.add(node)
+            stack.extend(direct.get(node, ()))
+        closure[start] = seen
+    return closure
+
+
+def sweep_units(ir: dict, component: str) -> list:
+    """One synthesized fault unit per *top-level* body step of *component*.
+
+    The unit is exactly what an author would have written by hand — the same
+    shape `fault_units` produces — carrying the full assertion set.  `effect`
+    is filled for `let … effect` steps so the diagnostics can print the name.
+    """
+    units = []
+    for index, step in enumerate(_body_of(ir, component), 1):
+        effect = step.get("bind") if step.get("step") == "let-effect" else None
+        units.append({
+            "name": f"sweep {component} @ step {index}",
+            "component": component,
+            "step": index,
+            "effect": effect,
+            "assert": list(_SWEEP_ASSERTS),
+            "config": {},
+            "where": _step_where(step, index),
+        })
+    return units
+
+
+def _unreachable_steps(body: list, prefix: str = "") -> list:
+    """Steps the injection scheme cannot address — those nested inside a
+    control-flow construct.  Returned as ``[{"where", "reason"}]`` so the
+    report can name each one rather than skip it silently."""
+    found: list = []
+    for index, step in enumerate(body, 1):
+        if step.get("step") == "if":
+            here = f"{prefix}step {index}"
+            for branch in ("then", "else"):
+                nested = step.get(branch) or []
+                for jndex, inner in enumerate(nested, 1):
+                    where = f"{here} > {branch} > step {jndex} ({inner.get('step')})"
+                    found.append({
+                        "where": where,
+                        "reason": "nested inside an `if`; the injection scheme "
+                                  "addresses only top-level body steps "
+                                  "(docs/fault-tests.md, section 5)",
+                    })
+                    found.extend(_unreachable_steps(
+                        [inner], prefix=f"{here} > {branch} > "))
+    return found
+
+
+def _sweep_dossier(per_component: list) -> dict:
+    """Aggregate per-component step results into a gauntlet-compatible dossier.
+
+    *per_component* is a list of ``(name, excluded, step_results, unreachable)``
+    where *step_results* is ``[(unit, problems, notes)]``.  Pure — no runtime,
+    so the aggregation and the counts are testable against fabricated results.
+    """
+    components = []
+    total_steps = total_passed = total_failed = total_unreachable = 0
+    flat_unreachable: list = []
+    for name, excluded, step_results, unreachable in per_component:
+        steps = []
+        passed = failed = 0
+        for unit, problems, _notes_lines in step_results:
+            ok = not problems
+            passed += ok
+            failed += not ok
+            steps.append({
+                "step": unit["step"],
+                "where": unit.get("where") or f"step {unit['step']}",
+                "status": "pass" if ok else "fail",
+                "problems": list(problems),
+            })
+        for item in unreachable:
+            flat_unreachable.append({"component": name, **item})
+        components.append({
+            "component": name,
+            "swept": len(step_results),
+            "passed": passed,
+            "failed": failed,
+            "excludedSiblings": list(excluded),
+            "steps": steps,
+            "unreachable": list(unreachable),
+        })
+        total_steps += len(step_results)
+        total_passed += passed
+        total_failed += failed
+        total_unreachable += len(unreachable)
+    return {
+        "kind": "tested",
+        "status": "failed" if total_failed else "passed",
+        "roadmapItem": _ROADMAP_ITEM,
+        "title": _SWEEP_TITLE,
+        "tier": "py",
+        "note": "every top-level body step of every component was made to fail "
+                "in turn and checked for L-Raise / no-residue / LIFO / "
+                "unaffected siblings; steps the scheme cannot address are "
+                "named, never skipped (docs/fault-tests.md).",
+        "counts": {
+            "components": len(per_component),
+            "steps": total_steps,
+            "passed": total_passed,
+            "failed": total_failed,
+            "unreachable": total_unreachable,
+        },
+        "components": components,
+        "unreachable": flat_unreachable,
+    }
+
+
+def _format_sweep(dossier: dict, per_component: list, printer) -> None:
+    """Human-readable rendering of the sweep.  Mirrors the fault-test runner's
+    PASS/FAIL idiom and always closes with the exhaustive line."""
+    printer("fault sweep — py reference tier (the only tier that executes "
+            "fault tests)")
+    notes_by_step = {(name, unit["step"]): notes
+                     for name, _e, results, _u in per_component
+                     for unit, _p, notes in results}
+    for section in dossier["components"]:
+        name = section["component"]
+        printer("")
+        printer(f"{name}: {section['swept']} step(s) swept, "
+                f"{section['passed']} passed, {section['failed']} failed")
+        if section["excludedSiblings"]:
+            printer("  (held out of the bring-up — they require what "
+                    f"{name} provides: "
+                    + ", ".join(section["excludedSiblings"]) + ")")
+        for step in section["steps"]:
+            tag = "PASS" if step["status"] == "pass" else "FAIL"
+            printer(f"  {tag} {step['where']}")
+            for problem in step["problems"]:
+                printer(f"      - {problem}")
+            for note in notes_by_step.get((name, step["step"]), []):
+                printer(f"      note: {note}")
+        for item in section["unreachable"]:
+            printer(f"  UNREACHABLE {item['where']}: {item['reason']}")
+    counts = dossier["counts"]
+    if dossier["unreachable"]:
+        printer("")
+        printer(f"unreachable (enumerated, never silently skipped): "
+                f"{counts['unreachable']} step(s)")
+    printer("")
+    printer(f"swept {counts['steps']} step(s) across {counts['components']} "
+            f"component(s): {counts['passed']} passed, {counts['failed']} "
+            f"failed, {counts['unreachable']} unreachable")
+
+
+def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
+    """Sweep every top-level step of every component (or just *only*), run the
+    full assertion set at each on the py reference tier, and report.
+
+    Returns ``(failures, dossier)``.  The dossier's ``counts`` and ``status``
+    are shaped to drop straight into the gauntlet's `faultSweep` slot
+    (src/revl/mcp/gauntlet.py) — a later task wires it; here the shape is made
+    compatible.  Raises ``ModuleNotFoundError`` when cordis-py is absent, so
+    the caller can report a skip (never a pass) rather than crash.
+    """
+    printer = (lambda line: print(line)) if out is None else out
+    emit, runtime_mod, Context, FiberState = _load_py_tier()
+
+    dependents = _provider_dependents(ir)
+    if only is not None:
+        names = [only]
+    else:
+        names = [c.get("name") for c in ir.get("components") or []]
+
+    per_component: list = []
+    for name in names:
+        excluded = frozenset(dependents.get(name, ()))
+        results: list = []
+        for unit in sweep_units(ir, name):
+            try:
+                outcome = asyncio.run(_drive(ir, unit, emit, runtime_mod,
+                                             Context, FiberState, exclude=excluded))
+            except Exception as error:  # noqa: BLE001 — a driver crash is a failure
+                results.append((unit,
+                                [f"the fault-test driver raised "
+                                 f"{type(error).__name__}: {error}"], []))
+                continue
+            results.append((unit, _judge(unit, outcome, FiberState),
+                            _notes(outcome)))
+        per_component.append((name, sorted(excluded), results,
+                              _unreachable_steps(_body_of(ir, name))))
+
+    dossier = _sweep_dossier(per_component)
+    _format_sweep(dossier, per_component, printer)
+    return dossier["counts"]["failed"], dossier
+
+
+def sweep_dossier(ir: dict, only: str | None = None) -> dict:
+    """The sweep as a structured dossier only (no printing) — the entry the
+    gauntlet's `faultSweep` slot consumes.  Same runtime requirement as
+    :func:`run_sweep`."""
+    return run_sweep(ir, out=lambda _line: None, only=only)[1]
