@@ -544,6 +544,14 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
         return f"revlJoin({target}, {args[0]})"
     if method == "repeat":
         return f"revlRepeat({target}, {args[0]})"
+    # The Map value type (docs/stdlib-2.0.md §Map): persistent HashMaps —
+    # revlMapSet copies before it puts, so the receiver never mutates.
+    if method == "set":
+        return f"revlMapSet({target}, {args[0]}, {args[1]})"
+    if method == "lookup":
+        return f"revlMapGet({target}, {args[0]})"
+    if method == "has":
+        return f"revlMapHas({target}, {args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -594,6 +602,19 @@ def _emit_stdlib_helpers() -> list[str]:
         "}",
         "private static String revlRepeat(String s, long n) {",
         "    return s.repeat((int) Math.max(0L, n));",
+        "}",
+        "// The Map value type (docs/stdlib-2.0.md §Map): persistent maps —",
+        "// set copies before it puts; lookup answers the tier's Optional.",
+        "private static <V> java.util.Map<String, V> revlMapSet(java.util.Map<String, V> m, String k, V v) {",
+        "    java.util.Map<String, V> out = new java.util.HashMap<>(m);",
+        "    out.put(k, v);",
+        "    return out;",
+        "}",
+        "private static <V> java.util.Optional<V> revlMapGet(java.util.Map<String, V> m, String k) {",
+        "    return java.util.Optional.ofNullable(m.get(k));",
+        "}",
+        "private static <V> boolean revlMapHas(java.util.Map<String, V> m, String k) {",
+        "    return m.containsKey(k);",
         "}",
         "",
     ]
@@ -1024,6 +1045,12 @@ def _expr(
         return "java.util.List.of(" + ", ".join(
             _expr(item, ctx, rename, env) for item in node.get("items") or []
         ) + ")"
+
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map). The diamond infers from
+        # the surrounding target type (return / declared variable /
+        # argument), which covers every typed position.
+        return "new java.util.HashMap<>()"
 
     if kind == "arrow":
         # reached only in *value* position — a called arrow is beta-reduced by

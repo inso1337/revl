@@ -365,6 +365,10 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     if kind == "list":
         return "[" + ", ".join(_expr(item, ctx) for item in node.get("items") or []) + "]"
 
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map)
+        return "new Map()"
+
     if kind == "adt":
         # tagged ADT value (Result / user variant): `{ kind: "Ok", value: x }`
         # or `{ kind: "Missing" }`. Opt is not tagged (value | undefined).
@@ -1080,6 +1084,18 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
         return f"{target}.join({args[0]})"
     if method == "repeat":
         return f"{target}.repeat({_int_as_number(arg_nodes[0], ctx)})"
+    # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
+    # copied on write. There is no expression-form copy, so `set` goes
+    # through an immediately-applied closure: operands evaluate exactly
+    # once, receiver never mutates.
+    if method == "set":
+        return (f"(() => {{ const c = new Map({target}); "
+                f"c.set({args[0]}, {args[1]}); return c }})()")
+    if method == "lookup":
+        # Map.get answers undefined when absent: exactly the Opt None case.
+        return f"{target}.get({args[0]})"
+    if method == "has":
+        return f"{target}.has({args[0]})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -1449,6 +1465,15 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
   if (arrA && arrB) {
     const xs = a as unknown[], ys = b as unknown[]
     return xs.length === ys.length && xs.every((x, i) => revlEq(x, ys[i]))
+  }
+  if (a instanceof Map && b instanceof Map) {
+    // revl equality is structural and order-independent (syntax-2.0 §3.4);
+    // for maps that means same key set, equal value under every key.
+    if (a.size !== b.size) return false
+    for (const [k, v] of a.entries()) {
+      if (!b.has(k) || !revlEq(v, b.get(k))) return false
+    }
+    return true
   }
   const ka = Object.keys(a as object), kb = Object.keys(b as object)
   if (ka.length !== kb.length) return false

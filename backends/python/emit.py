@@ -154,6 +154,15 @@ def _render_builtin(method, target: str, args: list) -> str:
         return f"{args[0]}.join({target})"
     if method == "repeat":
         return f"({target} * {args[0]})"
+    # The Map value type (docs/stdlib-2.0.md §Map): a python dict, copied
+    # on write — `{**m, k: v}` IS the persistent set.
+    if method == "set":
+        return f"({{**{target}, {args[0]}: {args[1]}}})"
+    if method == "lookup":
+        # dict.get answers None when absent: exactly the Opt None case.
+        return f"{target}.get({args[0]})"
+    if method == "has":
+        return f"({args[0]} in {target})"
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
     # and its `%` takes the divisor's sign, so div_floor is native and the
     # Euclidean remainder is `a % abs(b)`; truncation has to be built.
@@ -224,6 +233,9 @@ class _ComponentEmitter:
             t = self._expr(expr.get("target"), where)
             a = [self._expr(x, where) for x in expr.get("args") or []]
             return _render_builtin(expr.get("method"), t, a)
+        if kind == "maplit":
+            # `Map.empty()` (docs/stdlib-2.0.md §Map)
+            return "{}"
         if kind == "lit":
             return repr(expr.get("value"))
         if kind == "name":
@@ -913,6 +925,9 @@ def _expr(node: dict) -> str:
         return _render_builtin(
             node.get("method"), _expr(node["target"]),
             [_expr(a) for a in node.get("args") or []])
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map)
+        return "{}"
     if kind == "arrow":
         params = list(node["params"])
         captures = node.get("captures") or []

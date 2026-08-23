@@ -2,7 +2,6 @@
 // Target runtime: cordis v4 (https://github.com/cordiverse/cordis).
 import type { Context } from 'cordis'
 import { host } from '../../runtime.ts'
-import { expect, it } from 'vitest'
 
 function revlEq(a: unknown, b: unknown): boolean {
   if (a === b) return true
@@ -30,27 +29,39 @@ function revlEq(a: unknown, b: unknown): boolean {
     && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
 }
 
-function revlShow(v: unknown): string {
-  if (typeof v === 'bigint') return v.toString()
-  if (typeof v === 'number') return String(v)
-  if (Array.isArray(v)) return '[' + v.map(revlShow).join(', ') + ']'
-  if (v !== null && typeof v === 'object') {
-    const o = v as Record<string, unknown>
-    return '{' + Object.keys(o).map((k) => JSON.stringify(k) + ': ' + revlShow(o[k])).join(', ') + '}'
-  }
-  return JSON.stringify(v) ?? String(v)
+const REVL_I64_MIN = -(2n ** 63n)
+const REVL_I64_MAX = 2n ** 63n - 1n
+function revlI64(v: bigint): bigint {
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
+  return v
 }
 
-export function add(a: bigint, b: bigint): bigint {
-    return (a + b)
+export function newTable(): Map<string, bigint> {
+    return new Map()
 }
 
-it("add works", () => {
-    { const l = add(1n, 2n), r = 3n;
-      expect(revlEq(l, r), "add(1n, 2n) == 3n" + "\n  left  = " + revlShow(l) + "\n  right = " + revlShow(r)).toBe(true) }
-})
+export function put(m: Map<string, bigint>, k: string, v: bigint): Map<string, bigint> {
+    return (() => { const c = new Map(m); c.set(k, v); return c })()
+}
 
-it("bool works", () => {
-    const t = true
-    expect(t).toBeTruthy()
-})
+export function get(m: Map<string, bigint>, k: string): bigint {
+    return (m.get(k) ?? revlI64(0n - 1n))
+}
+
+export function member(m: Map<string, bigint>, k: string): boolean {
+    return m.has(k)
+}
+
+export function build(pairs: string[]): Map<string, bigint> {
+    let m = new Map()
+    let i = 0n
+    while ((i < BigInt(pairs.length))) {
+      m = (() => { const c = new Map(m); c.set(pairs[Number(i)], BigInt(pairs[Number(i)].length)); return c })()
+      i = revlI64(i + 1n)
+    }
+    return m
+}
+
+export function eqT(a: Map<string, bigint>, b: Map<string, bigint>): boolean {
+    return revlEq(a, b)
+}

@@ -114,6 +114,10 @@ _BUILTIN_METHODS = {
     # literal zero argument is refused for the faulting operations only.
     "checked_div_trunc": 1, "checked_div_floor": 1,
     "checked_div_euclid": 1, "checked_mod": 1,
+    # The Map value type (docs/stdlib-2.0.md §Map). Names disjoint from the
+    # host verb set (open/close/query/execute/new/get/insert/remove/drop):
+    # the two method namespaces stay collision-free by construction.
+    "set": 2, "lookup": 1, "has": 1,
 }
 
 
@@ -147,6 +151,14 @@ def _is_host_valued(expr, scope) -> bool:
     if isinstance(expr, _V):
         return scope.get(expr.name) == "host"
     if isinstance(expr, _C) and isinstance(expr.callee, _F)             and isinstance(expr.callee.target, _V):
+        # `Map.empty()` is the Map VALUE constructor (docs/stdlib-2.0.md
+        # §Map) — a pure value, not a host acquisition. Its constructor ROOT
+        # is a host callable, so without this exclusion a `let m =
+        # Map.empty()` bound the name as "host" and every later
+        # m.set/m.lookup/m.has lowered as a verbatim *field* call: unchecked
+        # at compile time, AttributeError-shaped at runtime.
+        if expr.callee.target.name == "Map" and expr.callee.name == "empty":
+            return False
         return expr.callee.target.name in _HOST_CALLABLES
     return False
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
@@ -1728,6 +1740,21 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return node
     if isinstance(expr, ExprCall):
         _callee = expr.callee
+        # the Map VALUE constructor (docs/stdlib-2.0.md §Map): intercepted
+        # before the host-receiver test, because `Map` is a host root — but
+        # `empty` is a value-namespace name, disjoint from the host verbs.
+        if (isinstance(_callee, ExprField)
+                and isinstance(_callee.target, ExprVar)
+                and _callee.target.name == "Map"
+                and _callee.target.name not in scope
+                and _callee.name == "empty"):
+            if expr.args:
+                raise RevlError(
+                    filename, expr.line,
+                    f"`Map.empty()` takes no arguments, {len(expr.args)} given",
+                    hint="build up an empty map with `set`: `Map.empty().set(\"k\", v)`",
+                )
+            return {"kind": "maplit", "entries": []}
         _host_receiver = isinstance(_callee, ExprField) and (
             _is_host_valued(_callee.target, scope)
             # the constructor root itself (Map.new(), Pool.open(...)):
@@ -2546,6 +2573,18 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             root = expr.callee.target.name
             method = expr.callee.name
             if root in _HOST_CALLABLES:
+                # the Map VALUE constructor (docs/stdlib-2.0.md §Map) — a
+                # pure value, not an effect; intercepted before the host
+                # builtin check (`empty` is not a host verb).
+                if root == "Map" and method == "empty":
+                    if args:
+                        raise RevlError(
+                            filename, line,
+                            f"`Map.empty()` takes no arguments, {len(args)} given",
+                            hint="build up an empty map with `set`: "
+                                 "`Map.empty().set(\"k\", v)`",
+                        )
+                    return {"kind": "maplit", "entries": []}
                 if pure_only:
                     raise RevlError(
                         filename, line,
@@ -3738,6 +3777,25 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
         node = {"kind": "req", "name": head}
     elif head[:1].isupper() and ops and ops[0].args is not None:
         call = ops.pop(0)
+        # the Map VALUE constructor (docs/stdlib-2.0.md §Map): a value, not
+        # a host acquisition — intercepted before host_check.
+        if head == "Map" and call.name == "empty":
+            if call.args:
+                raise RevlError(
+                    env.filename, expr.line,
+                    f"`Map.empty()` takes no arguments, {len(call.args)} given",
+                    hint="build up an empty map with `set`: "
+                         "`Map.empty().set(\"k\", v)`",
+                )
+            node = {"kind": "maplit", "entries": []}
+            for op in ops:
+                if op.args is None:
+                    raise RevlError(env.filename, expr.line,
+                                    "field access `.{}` is not supported in v0 — only method calls".format(op.name))
+                node = {"kind": "builtin", "method": op.name,
+                        "target": node,
+                        "args": [_lower_expr(a, env, mode) for a in op.args]}
+            return node
         host_args = [_lower_expr(a, env, mode) for a in call.args]
         host_check(f"{head}.{call.name}",
                    [infer_ir(a, env.type_env, env.types, env.services)
