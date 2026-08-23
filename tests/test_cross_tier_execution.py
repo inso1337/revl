@@ -213,24 +213,11 @@ DIVERGENCES = {
     # `(3i64 as f64)`, `float64(3)`, `((double) (3L))`), so rust no longer
     # refuses with E0308 and TypeScript no longer computes the wrong answer.
     # Asserted positively in WIDENING below; docs/arithmetic.md has the write-up.
-    # Unary minus on Int.MIN splits the tiers three ways. python now routes
-    # Int negation through `_revl_i64` (closed — asserted positively above);
-    # wasm lowers `-x` as `0 - x` through its checked subtraction and traps;
-    # rust's native `-` panics ("attempt to negate with overflow") in the
-    # debug builds cargo test runs. But go and java negate with the host
-    # operator, which WRAPS (`-Int.MIN == Int.MIN`; JLS 15.15.4 for java),
-    # and TypeScript's `bigint` negation has no bound check, so the result
-    # simply leaves the range as 2^63. The probe asserts the *wrapped* value,
-    # so a wrapping tier passes and a trapping or range-growing tier fails;
-    # closing go/java/ts means emitting the checked form, as wasm already
-    # does. java is recorded from its emitted source (`return (-x)` on
-    # `long`) and is not asserted: no test parametrizes java.
-    "negating Int.MIN does not trap on every tier": (
-        'pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n'
-        'pub fn neg(x: Int) -> Int { return -x }\n'
-        'test "pinned" { assert neg(lo()) == 0 - 9223372036854775807 - 1 }',
-        {"py": "fail", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
-    ),
+    # ~~"negating Int.MIN does not trap on every tier"~~ **Closed.** go now
+    # negates through `revlSub(0, x)`, java through `Math.negateExact`, ts
+    # through `revlI64(-x)` — so every bounded tier faults on `-Int.MIN` exactly
+    # as it does on any other Int overflow. Asserted positively below
+    # (test_negation_of_int_min_traps + the per-tier emit checks).
 }
 
 
@@ -685,6 +672,37 @@ def test_python_emits_int_negation_through_the_bound():
     the bound helper, not the host's unary minus."""
     emitted = _emit("python", NEG_INT_MIN)
     assert "_revl_i64(-" in emitted
+
+
+@pytest.mark.parametrize("tier", BOUNDED_TIERS)
+def test_negation_of_int_min_traps(tier: str):
+    """`-Int.MIN` overflows, so every bounded tier must fault rather than wrap
+    or grow past the range. go/java/ts used to be the exceptions (DIVERGENCES);
+    they now emit the checked form."""
+    status, message = _run(tier, NEG_INT_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on -Int.MIN ({status}) — it wrapped or grew: "
+        f"{message}")
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_negation_of_int_min_traps_slow(tier: str):
+    status, message = _run(tier, NEG_INT_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", f"{tier} did not trap on -Int.MIN: {message}"
+
+
+def test_bounded_tiers_emit_checked_int_negation():
+    """The static half for go/java/ts: an Int negation renders through the
+    tier's checked mechanism, never the host's wrapping unary minus."""
+    assert "revlSub(0, " in _emit("go", NEG_INT_MIN)
+    assert "Math.negateExact(" in _emit("java", NEG_INT_MIN)
+    assert "revlI64(-" in _emit("typescript", NEG_INT_MIN)
 
 
 def test_wasm_int_is_i64_and_checks_the_bound():

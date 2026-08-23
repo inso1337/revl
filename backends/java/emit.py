@@ -969,6 +969,10 @@ def _expr(
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
+            if node.get("operands") == "Int":
+                # negating Long.MIN overflows; Math.negateExact throws the same
+                # ArithmeticException as the other Int operations (arithmetic.md)
+                return f"Math.negateExact({operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 

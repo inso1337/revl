@@ -514,6 +514,10 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
+            if node.get("operands") == "Int":
+                # BigInt negation is unbounded; re-impose the i64 bound so
+                # negating Int.MIN traps like every other tier (arithmetic.md)
+                return f"revlI64(-{operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
@@ -1361,6 +1365,9 @@ def _uses_bounded_int(node) -> bool:
     module only where it is needed, matching the python backend."""
     if isinstance(node, dict):
         if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int"):
+            return True
+        if (node.get("kind") == "un" and node.get("op") == "-"
                 and node.get("operands") == "Int"):
             return True
         return any(_uses_bounded_int(v) for v in node.values())
