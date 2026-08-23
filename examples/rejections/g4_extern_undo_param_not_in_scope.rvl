@@ -1,0 +1,15 @@
+// REJECTED — G4: the undo expression sees exactly ONE implicit binding,
+// `result` (the value the acquisition returned). The extern's own
+// parameters are NOT visible — no tier defines teardown parameter
+// capture. Anything the inverse needs beyond the acquired value must
+// travel as constants or through other declared fns.
+//
+// expected error:
+//   `path` is not declared — the `undo` slot of extern `open_ledger` sees
+//   only the implicit `result` binding
+
+extern acquire fn open_ledger(path: Str) -> Int undo close_ledger(path)
+  = @py { return abs(hash(path)) % 100000 }
+
+extern pure fn close_ledger(handle: Int)
+  = @py { return None }

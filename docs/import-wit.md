@@ -128,7 +128,7 @@ can offer.
 | `variant v { a(t), b }` | `type V = A(T) \| B` | |
 | `enum e { a, b }` | `type E = A \| B` | a payload-free ADT |
 | `type x = <t>;` | *inlined at use sites* | see below |
-| `resource r { … }` | `type R = { handle: Int }` + `extern acquire fn r_new(…) -> R undo r_drop(R)` + methods as `r_m(self: R, …)` | a live handle onto revl's acquire-returned-handle model; see docs/wit-bridge.md §3 |
+| `resource r { … }` | `type R = { handle: Int }` + `extern acquire fn r_new(…) -> R undo r_drop(result)` (with `extern emission fn r_drop(self: R)` declared alongside) + methods as `r_m(self: R, …)` | a live handle onto revl's acquire-returned-handle model; `result` is the undo slot's implicit binding — the acquired handle; see docs/wit-bridge.md §3 |
 | `borrow<r>`, `own<r>` | the handle type `R` | a resource *reference*; copy-vs-move is tracked by the acquire/undo pair |
 | `interface i { … }` | `service I` + `extern`s + `component IProvider provides i: I` | |
 | `world w { export f: func(…) }` | `service W` + provider | a world export is what a revl consumer may call |

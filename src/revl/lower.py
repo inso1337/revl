@@ -1023,7 +1023,134 @@ def _lower_extern_expr(expr, filename: str) -> dict:
     return _lower_pure_expr(expr, _LaxScope(), set(), {}, filename)
 
 
-def _lower_externs(program: Program, filename: str) -> list:
+def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
+                       filename: str, result_type: str | None = None) -> None:
+    """The extern-level `undo`/`compensate` slot, checked.
+
+    Component-site `effect ... undo ...` runs through the component
+    expression machinery, so it resolves every name against the bindings
+    in scope at the effect site. An extern declares no bindings, so the
+    slot's variable namespace is almost empty — with ONE exception. The
+    `undo` of an acquire extern with a declared return type binds `result`,
+    the acquired value: the teardown exists to release exactly what the
+    acquisition produced (the WIT resource model is the canonical user —
+    `extern acquire fn r_new(...) -> R undo r_drop(result)`). Nothing else
+    is visible: the extern's own parameters are *not* implicitly captured
+    (no tier defines teardown parameter capture; inventing that here would
+    be unsound speculation), and `compensate` — a best-effort follow-up to
+    a one-way emission, not an inverse — binds nothing at all. What the
+    slot must satisfy mirrors the component-site rules plus the arity/type
+    rigor of every other call:
+
+    1. the callee is a plain call to a DECLARED callable (fn/extern via the
+       shared signature table, host builtin, ADT constructor);
+    2. self-reference is refused — the teardown exists to INVERT the
+       acquisition; calling the extern again would re-acquire mid-cleanup;
+    3. arity and argument types are checked against the declared signature,
+       with `result: T` in scope exactly when described above.
+    """
+    from .parser import ExprCall, ExprField, ExprVar
+
+    def _walk(e):
+        if isinstance(e, ExprVar):
+            if e.name == "result":
+                if result_type is not None:
+                    return  # the one implicit binding: the acquired value
+                if slot == "compensate":
+                    raise RevlError(
+                        filename, e.line,
+                        f"`result` is not bound in the `compensate` slot of "
+                        f"extern `{decl_name}`",
+                        hint="`result` names the value an acquire returns; a "
+                             "compensation follows a one-way emission, which "
+                             "acquires nothing — compensate from constants or "
+                             "other declared fns")
+                raise RevlError(
+                    filename, e.line,
+                    f"`result` does not exist here — extern `{decl_name}` "
+                    "declares no return type, so there is no acquired value "
+                    "to bind",
+                    hint="declare `-> T` on the extern to give the teardown "
+                         "its `result`, or tear down from constants")
+            # any other bare name: the only implicit binding is `result`
+            # (undo of an acquire) — locals don't exist, and the extern's
+            # own parameters are not visible (no tier defines teardown
+            # parameter capture)
+            if result_type is not None:
+                raise RevlError(
+                    filename, e.line,
+                    f"`{e.name}` is not declared — the `{slot}` slot of "
+                    f"extern `{decl_name}` sees only the implicit `result` "
+                    "binding",
+                    hint="`result` is the acquired value; the extern's own "
+                         "parameters are not visible to its teardown, so "
+                         "anything else must travel as constants or through "
+                         "other declared fns")
+            raise RevlError(
+                filename, e.line,
+                f"`{e.name}` is not declared — the `{slot}` slot of extern "
+                f"`{decl_name}` runs with no variables in scope",
+                hint="an extern's own parameters are not visible to its "
+                     "teardown; the undo must work from constants or from "
+                     "other declared fns")
+        if isinstance(e, ExprCall):
+            if isinstance(e.callee, ExprVar):
+                name = e.callee.name
+                if name == decl_name:
+                    raise RevlError(
+                        filename, e.line,
+                        f"extern `{decl_name}`'s `{slot}` cannot call the "
+                        "extern itself",
+                        hint="the teardown runs to invert this acquisition — "
+                             "calling it again would re-acquire during "
+                             "cleanup; call the declared inverse instead")
+                if (name not in (types.get(FNS_KEY) or {})
+                        and name not in (types.get(CASES_KEY) or {})
+                        and name not in _HOST_CALLABLES
+                        and name not in _BUILTIN_CONSTRUCTORS):
+                    raise RevlError(
+                        filename, e.line,
+                        f"`{name}` is not declared — the `{slot}` slot of "
+                        f"extern `{decl_name}` may only call a declared fn, "
+                        "extern, or host builtin",
+                        hint="an extern binds no callables (only the acquire's "
+                             "`result` value is ever in scope), so every "
+                             "callee must be a module-level declaration")
+            elif isinstance(e.callee, ExprField):
+                raise RevlError(
+                    filename, e.line,
+                    f"the `{slot}` slot of extern `{decl_name}` must be a "
+                    "plain call to a declared fn or extern",
+                    hint="host objects cannot be acquired inside a teardown "
+                         "expression; call the declared inverse directly")
+            for a in e.args:
+                _walk(a)
+            return
+        # generic recursion over the dataclass children (bin operands, record
+        # fields, match arms, template parts, ...)
+        for f in type(e).__dataclass_fields__:
+            v = getattr(e, f)
+            if hasattr(v, "__dataclass_fields__"):
+                _walk(v)
+            elif isinstance(v, (list, tuple)):
+                for x in v:
+                    if hasattr(x, "__dataclass_fields__"):
+                        _walk(x)
+                    elif isinstance(x, (list, tuple)):
+                        for y in x:
+                            if hasattr(y, "__dataclass_fields__"):
+                                _walk(y)
+
+    _walk(expr)
+    # the tenv carries exactly what the slot binds: `result: T` for the undo
+    # of an acquire with a declared return, nothing otherwise — so argument
+    # type-checking sees the acquired value at its declared type
+    tenv = {"result": result_type} if result_type is not None else {}
+    check_ast(expr, None, tenv, types, filename,
+              f"{slot} of extern `{decl_name}`")
+
+
+def _lower_externs(program: Program, filename: str, types: dict) -> list:
     externs: list[dict] = []
     seen: set[str] = set()
     for decl in program.externs:
@@ -1062,8 +1189,14 @@ def _lower_externs(program: Program, filename: str) -> list:
             "bodies": bodies,
         }
         if decl.undo is not None:
+            # only an acquire reaches here with `undo` (pure/emission are
+            # refused above); its declared return, if any, binds `result`
+            _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
+                               result_type=decl.returns)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
         if decl.compensate is not None:
+            _check_extern_undo(decl.compensate, decl.name, "compensate",
+                               types, filename)
             entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
         externs.append(entry)
     return externs
@@ -2175,7 +2308,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename)
+    externs = _lower_externs(program, program.filename, types)
     # One fixed point, two consumers: `emitting_caps` is what it computes
     # (docs/capabilities.md), `witness` is why (why.py). Evidence never
     # decides a rejection, it only explains one.

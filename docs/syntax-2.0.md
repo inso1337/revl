@@ -364,11 +364,23 @@ extern pure fn sha256(data: Bytes) -> Str
   = @ts { return crypto.createHash("sha256").update(data).digest("hex") }
   = @py { import hashlib; return hashlib.sha256(data).hexdigest() }
 
-extern acquire fn listen(port: Int) -> Socket undo close(socket)
+// the `undo`/`compensate` slots run at teardown with almost nothing in
+// scope. An acquire's `undo` sees exactly ONE implicit binding — `result`,
+// the value the acquisition returned — so the inverse releases what was
+// acquired. The extern's own parameters are NOT visible (no tier defines
+// teardown parameter capture), `compensate` binds nothing at all, and the
+// callee must be DECLARED (a checked declaration, G4)
+extern pure fn close(sock: Socket)
+  = @py { return None }
+
+extern acquire fn listen(port: Int) -> Socket undo close(result)
   = @ts { ... } = @py { ... }
 
+extern pure fn log_unsent(n: Int)
+  = @py { return None }
+
 extern emission fn send(sock: Socket, data: Bytes)
-  compensate log_unsent(sock, data)
+  compensate log_unsent(0)
   = @ts { ... }
 ```
 
