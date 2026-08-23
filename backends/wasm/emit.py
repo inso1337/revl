@@ -2180,7 +2180,7 @@ class _V3Emitter:
             return "Str"
         if method == "indexOf":
             raise EmitError("indexOf is not lowerable on this tier yet — use a hosted backend")
-        if method in ("set", "lookup", "has"):
+        if method in ("set", "lookup", "has", "size", "keys", "remove"):
             raise EmitError(
                 f"`{method}` is not lowerable on this tier yet — the Map value "
                 f"type has no representation here; use a hosted backend")
@@ -2645,7 +2645,7 @@ class _V3Emitter:
         # named tier error, like indexOf — the canonical-ABI model carries
         # only Int/Bool/String/List, and a persistent map needs a richer
         # value model than that. An honest refusal beats a miscompile.
-        if method in ("set", "lookup", "has"):
+        if method in ("set", "lookup", "has", "size", "keys", "remove"):
             raise EmitError(
                 f"{where}: `{method}` is not lowerable on this tier yet — "
                 f"the Map value type has no representation here; use a hosted backend")

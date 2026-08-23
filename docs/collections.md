@@ -128,10 +128,10 @@ UTF‑16 sort would place a key with a surrogate lead unit differently from its
 true scalar; the code-point comparator removes that. For every key the checker
 builds today it is a no-op.
 
-## What implementing iteration to this order would take (noted, not built)
+## What implementing iteration took (built in the same spec step)
 
-Iteration is still unimplemented; only its *order* is now decided. When
-`keys()` (and/or `for`) graduates by its own spec step, the per-tier work is:
+Iteration is no longer unimplemented; `size`/`keys`/`remove` shipped to this
+order (docs/stdlib-2.0.md §Map). What each tier does:
 
 - **python** — `return sorted(m)` (or `sorted(m.items())`). No representation
   change.

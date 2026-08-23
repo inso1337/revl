@@ -90,14 +90,17 @@ spec, then checker, then all emitters, then tests.
 | `set(k, v)` | 2 | Map | **persistent** put — returns a new map, receiver unchanged |
 | `lookup(k)` | 1 | Map | `Opt[V]` — the value under `k`, or `None` |
 | `has(k)` | 1 | Map | `Bool` — is `k` present? |
+| `size()` | 0 | Map | `Int` — the number of key/value pairs |
+| `keys()` | 0 | Map | `List[Str]` — the keys in ascending canonical `Str` order; this IS iteration |
+| `remove(k)` | 1 | Map | **persistent** delete — a new map without `k`; absent `k` is a total no-op returning an equal map, never an error |
 
 The grain follows `List`: operations are methods on the value (`m.set(k, v)`
 rebinds, exactly like `out = out.push(v)`), because revl has no mutation and
-no free-function namespace to pollute. There is deliberately no `remove`,
-no `length`, no iteration yet — symbol tables need build/read/member, and
-the surface grows by specification, not by accretion. Iteration is absent,
-but its **order is already decided** ahead of shipping — see *Iteration
-order* below and **docs/collections.md** — because that is the moment the
+no free-function namespace to pollute. The surface grows by specification,
+not by accretion: build/read/member shipped first; `size`/`keys`/`remove`
+graduate by the spec step below. Iteration's **order was decided before it
+shipped** — see *Iteration order* below and **docs/collections.md** — because
+that is the moment the
 tiers would otherwise diverge for free.
 
 ### Coexistence with the host `Map.new()`
@@ -196,12 +199,48 @@ runtime drives real map iteration.
 All five give structural, order-independent map equality natively; only TS
 needs help, because `Object.keys(new Map())` is `[]`.
 
-**wasm refuses.** That tier lowers only Int/Bool/String/List over its
+### `size`, `keys`, `remove` — the iteration/remove spec step
+
+These three graduate together because they share one design decision set.
+
+**Method form, not free functions.** `size()` follows the method-on-Map
+precedent (`m.size()`) rather than a `size(m)` builtin: revl has no
+free-function namespace to pollute, and every other Map operation is already
+a method on the receiver. `size` (not `length`) because the List surface
+already owns `length` for element counts and reusing the name across
+dict-like and sequence-like receivers would invite the wrong intuition about
+order; `size` is the JS-Map spelling and says "how many entries".
+
+**Iteration = `keys()`.** There is deliberately no `for (k, v) over m` yet —
+revl's loop story is under design. Iteration ships as `keys(): List[Str]`
+in ascending canonical order (the order contract below, pinned by tests on
+every hosted tier); with `lookup`, that composes into any walk of the table.
+The order is **sorted canonical**, NOT insertion order: go and rust randomize
+map order by design, so insertion order would force an ordered-wrapper
+retrofit on both (docs/collections.md weighs the options and rejects them).
+Sorted order is deterministic, tier-portable with no representation change,
+and a pure function of content — the same property map equality already has.
+
+**Removal is persistent and total.** `remove(k)` returns a NEW map without
+`k`, exactly as `set` returns a new map with it — never mutation, matching
+the G6 value rule. A missing key is **not** an error: the result is a map
+equal to the receiver (`has(k)` was already false, so there is nothing to
+report), which keeps `remove` total and composable in expression position.
+A defined error would force every caller to pre-check `has`, duplicating the
+lookup for no added safety. `remove` reuses a host verb name (`Map.remove`
+on the v1 stub) — the ONE sanctioned overlap between the two namespaces,
+safe because dispatch is by receiver kind: a constructor-tracked host
+receiver checks against the family surface before the stdlib table is ever
+consulted. The namespace-invariant test pins the overlap at exactly
+`{"remove"}` so it cannot grow silently.
+
+**wasm still refuses.** That tier lowers only Int/Bool/String/List over its
 canonical-ABI model; a persistent map needs a richer value model than that
 tier has (there are not even pairs to spell an assoc list with). `set`,
-`lookup`, `has` and `Map.empty()` therefore fail with the same named tier
-error shape as `indexOf` did — an honest refusal, never a miscompile. It
-graduates when the tier grows a map (or assoc-list) value model.
+`lookup`, `has`, `size`, `keys`, `remove` and `Map.empty()` therefore fail
+with the same named tier error shape as `indexOf` did — an honest refusal,
+never a miscompile. It graduates when the tier grows a map (or assoc-list)
+value model.
 
 **Go's inference limit, stated honestly:** Go cannot infer a composite
 literal's type from later use, so `var m = Map.empty()` compiles on every

@@ -455,6 +455,18 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "has":
         _COMP_NEEDS_MAP = True
         return "revlMapHas(%s, %s)" % (target, args[0])
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): the same helpers,
+    # in _V3_MAP_PREAMBLE. revlMapKeys sorts a copy of the key set into
+    # canonical (UTF-8 byte) order — go's range order is randomized.
+    if method == "size":
+        _COMP_NEEDS_MAP = True
+        return "int64(len(%s))" % target
+    if method == "keys":
+        _COMP_NEEDS_MAP = True
+        return "revlMapKeys(%s)" % (target,)
+    if method == "remove":
+        _COMP_NEEDS_MAP = True
+        return "revlMapRemove(%s, %s)" % (target, args[0])
     raise EmitError("unknown stdlib method: %r" % (method,))
 
 
@@ -1474,6 +1486,12 @@ def _v3_builtin_ret_type(method, recv_type):
     # The Map value type (docs/stdlib-2.0.md §Map).
     if method == "set":
         return recv_type
+    if method == "remove":
+        return recv_type
+    if method == "size":
+        return "Int"
+    if method == "keys":
+        return "List[Str]"
     if method == "has":
         return "Bool"
     if method == "lookup":
@@ -1931,6 +1949,14 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlMapGet({target}, {args[0]})"
     if method == "has":
         return f"revlMapHas({target}, {args[0]})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): the same helpers
+    # as the component tier, in _V3_MAP_PREAMBLE.
+    if method == "size":
+        return f"int64(len({target}))"
+    if method == "keys":
+        return f"revlMapKeys({target})"
+    if method == "remove":
+        return f"revlMapRemove({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Go `/` truncates and
     # `%` takes the dividend's sign, which is what revl specifies, so
     # div_trunc is native; the other three are helpers so every tier computes
@@ -2338,6 +2364,32 @@ func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
 	_, ok := m[k]
 	return ok
 }
+
+func revlMapRemove[K comparable, V any](m map[K]V, k K) map[K]V {
+	out := make(map[K]V, len(m))
+	for kk, vv := range m {
+		if kk != k {
+			out[kk] = vv
+		}
+	}
+	return out
+}
+
+// revlMapKeys yields the keys in ascending canonical Str order (UTF-8 byte
+// lexicographic — go string < is exactly that). A plain insertion sort over
+// a copied slice: no sort import, and symbol-table keys come in small sets.
+func revlMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
+	return keys
+}
 '''
 
 _V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
@@ -2570,7 +2622,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     # The Map value type (docs/stdlib-2.0.md §Map): its helpers answer Opt
     # (`lookup`), so using any of them pulls the Opt preamble in too.
     used_map = ('"maplit"' in blob) or any(
-        f'"method": "{m}"' in blob for m in ("set", "lookup", "has"))
+        f'"method": "{m}"' in blob for m in ("set", "lookup", "has",
+                                             "size", "keys", "remove"))
     if used_map:
         used_opt = True
     # The total division forms produce a Result value without the source ever
