@@ -125,6 +125,9 @@ _BUILTIN_METHODS = {
     # host verb set (open/close/query/execute/new/get/insert/remove/drop):
     # the two method namespaces stay collision-free by construction.
     "set": 2, "lookup": 1, "has": 1,
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): same namespace
+    # discipline — disjoint from the host verb set by construction.
+    "size": 0, "keys": 0, "remove": 1,
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
     "to_str": 0,
 }
@@ -257,6 +260,12 @@ class Env:
         self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()
+        # host provenance (docs/stdlib-2.0.md §Map): component locals bound to
+        # a host acquisition (`let store = effect Map.new()`). Their method
+        # calls belong to the host stub surface and stay verbatim — checked
+        # BEFORE the stdlib builtin table, so a value-type method that shares
+        # a spelling with a host verb (`remove`) cannot capture them.
+        self.host_locals: set[str] = set()
 
     def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
@@ -2660,6 +2669,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                             for a in args],
                            filename, line)
                 return {"kind": "host", "fn": f"{root}.{method}", "args": args}
+            # host provenance (docs/stdlib-2.0.md §Map): a local bound to a
+            # host acquisition keeps its stub verb surface verbatim — checked
+            # BEFORE the builtin table so the sanctioned `remove` overlap
+            # dispatches by receiver kind, never by name alone.
+            if scope.get(root) in env.host_locals:
+                return {"kind": "call",
+                        "target": {"kind": "name", "id": scope[root]},
+                        "method": method, "args": args}
             if root in env.requires:
                 if pure_only:
                     raise RevlError(
@@ -3053,6 +3070,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")
             safe = env.bind_local(stmt.bind, stmt.line)
+            # host provenance: an effect-acquired HOST object (`Map.new()`)
+            # keeps its verb surface verbatim, exempt from the stdlib table —
+            # see Env.host_locals.
+            if acquire.get("kind") == "host":
+                env.host_locals.add(safe)
             acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
