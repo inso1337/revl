@@ -552,6 +552,11 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
         return f"revlMapGet({target}, {args[0]})"
     if method == "has":
         return f"revlMapHas({target}, {args[0]})"
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): the receiver
+    # lowers to a long, and String.valueOf(long) is exact decimal —
+    # including Long.MIN_VALUE, no |MIN| detour needed.
+    if method == "to_str":
+        return f"String.valueOf({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 

@@ -120,6 +120,10 @@ def _agree(infer_src, src: str) -> None:
 ACCEPTED = [
     # literals and variables
     "1", "0", "true", "false", "x", "y", "f", "s", "flag",
+    # float literals (parser slice gained them; they infer Float, like the
+    # reference's lit handling)
+    "2.5", "0.5", "2.5 + 1", "1 + 2.5", "f / 2.5", "2.5 < f",
+    "s + 2.5", "x / 0.5", "(2.5 + 0.5) * x",
     "q",  # not in the environment: the gradual frontier's unknown
     # arithmetic
     "1 + 2", "x - y", "x * 2", "7 / 2", "x % 3",
@@ -167,7 +171,8 @@ def test_rejected_expressions_agree(infer_src, src):
 
 # ---------------------------------------------------------------- fuzz
 
-ATOMS = ["1", "0", "7", "x", "y", "f", "s", "flag", "q", "true", "false"]
+ATOMS = ["1", "0", "7", "2.5", "x", "y", "f", "s", "flag", "q",
+         "true", "false"]
 BINOPS = ["+", "-", "*", "/", "%", "<", "<=", ">", ">=", "==", "!="]
 
 
