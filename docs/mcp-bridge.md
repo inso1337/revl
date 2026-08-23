@@ -172,6 +172,7 @@ has no file yet, and only write out what has already proven itself.
 | `revl_rollback` | restore the generation before the last swap |
 | `revl_unload` | tear down and report the residue checks (R4) |
 | `revl_state` | what is loaded, and the trace since the last call |
+| `revl_gauntlet` | grade a candidate — a verdict dossier from a battery run in an isolated scratch session ([docs/gauntlet.md](gauntlet.md)) |
 
 The loop an agent actually runs:
 
@@ -195,6 +196,15 @@ baseline, so an agent can demonstrate its component leaves nothing behind
 
 Multi-module candidates work too: `modules` supplies in-memory sources for
 `use` imports, keyed by the path the import names.
+
+Where `revl_swap` is binary — admit or refuse — `revl_gauntlet` is the graded
+form: candidate in, dossier out. It runs the same admission gate plus a real
+boot/unload no-residue lifecycle in an **isolated scratch session** and returns
+a verdict that separates what was **proved** (admission, derived teardown) from
+what was **tested** with counts (the no-residue lifecycle) from what remains
+**claimed** (the enumerated G8 extern boundary). Fault-sweep and
+inverse-round-trip sections are present but report `pending` until roadmap
+items 30 and 26 land. See [docs/gauntlet.md](gauntlet.md).
 
 ### Wiring it up
 
