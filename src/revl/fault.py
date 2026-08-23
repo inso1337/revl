@@ -1132,3 +1132,702 @@ def roundtrip_dossier(ir: dict, rounds: int = _ROUNDTRIP_ROUNDS) -> dict:
             "components": [],
         }
     return run_roundtrip_units(ir, units, out=lambda _line: None, rounds=rounds)[1]
+
+
+# ===========================================================================
+# `prop test` — property testing with type-derived generators (roadmap item 37)
+# ===========================================================================
+#
+# `prop test "name" (a: Int, b: Money) { assert … }` states a property that
+# must hold for EVERY value of its generated inputs.  The generators are
+# DERIVED from the parameter types the checker fully knows — the i64 edge
+# values for `Int`, both arms of every `Opt`, empty and non-empty `List`s,
+# every constructor of an ADT, and each field of a record — so the search is
+# not a blind random walk but one that provably visits the type's boundaries.
+# On failure the runner SHRINKS the offending input to a minimal counterexample
+# (fewer list elements, values pulled toward zero, `Some` collapsed to `None`,
+# a payload case collapsed to a base case) and reports that, not the first
+# messy input it happened to hit.
+#
+# Scope, like `fault test` / `verified effect`, is the PY REFERENCE TIER.  The
+# property body is a pure function of its parameters, so the runner lowers it
+# to an ordinary emitted function (injected into the module the same way the
+# fault runner injects a `fail` step), execs it, and calls it with generated
+# arguments in-process.  It needs no cordis Context — a `prop test` never
+# activates a component — which is why it can run even where a `lifecycle` or
+# `fault` test would be skipped.
+#
+# HORIZON (noted, NOT built here): the roadmap's bonus is compiling a
+# `prop test` to all six tiers as a cross-tier differential fuzzer (the same
+# generated inputs run on every backend, and a divergence is the finding).
+# That is an emit-side feature (it touches every backend's `emit.py` and the
+# backend golden suite); this pass keeps `prop test` a py-runtime feature.
+# RELATIONSHIP TO ITEM 26: `verified effect` is the inverse-round-trip property
+# — "for a generated activation, undo∘do leaves no observable residue."  It is
+# item 37's first, hand-written instance; its snapshot/randomize/compare loop
+# is exactly what this general runner does, specialized to one property.  It is
+# left in place (docs/verified-effect.md) and can later be re-expressed as a
+# derived `prop test` once activation-valued generators exist.
+
+_PROP_ITEM = 37
+_PROP_TITLE = "property tests"
+_PROP_RANDOM_ROUNDS = 64      # random-search rounds, on top of the edge rounds
+_PROP_MAX_SHRINK = 4000       # safety bound on total shrink trials
+_PROP_LIST_MAX = 4            # longest list a random round generates
+_PROP_DEPTH = 4              # recursion bound for self-referential ADTs
+
+_I64_MIN = -(2 ** 63)
+_I64_MAX = 2 ** 63 - 1
+_I32_MIN = -(2 ** 31)
+_I32_MAX = 2 ** 31 - 1
+# the edge/near-edge values the generator guarantees to visit for every `Int`
+_I64_EDGES = [0, 1, -1, 2, -2, _I64_MAX, _I64_MIN, _I64_MAX - 1, _I64_MIN + 1]
+_I32_EDGES = [0, 1, -1, 2, -2, _I32_MAX, _I32_MIN, _I32_MAX - 1, _I32_MIN + 1]
+_STR_EDGES = ["", "a", "Z", "0", " ", "aa", "revl"]
+_FLOAT_EDGES = [0.0, 1.0, -1.0, 0.5]
+_STR_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+
+_PROP_HEADER = (
+    "property tests — py reference tier (roadmap item 37)\n"
+    "  For each `prop test`, inputs are DERIVED from the parameter types the checker "
+    "knows\n"
+    "  (i64 edges, both arms of every Opt, empty/non-empty Lists, every ADT constructor, "
+    "each\n"
+    "  record field) and the property is checked over every generated round; on failure the\n"
+    "  counterexample is SHRUNK to a minimal input. Py-runtime scope (docs/prop-test.md); "
+    "the\n"
+    "  cross-tier differential-fuzzer horizon is noted there, not built."
+)
+
+
+def prop_units(ir: dict) -> list:
+    """The document's `prop test` units (docs/prop-test.md).
+
+    Reads the IR section directly — no cordis needed to enumerate or count
+    them, so `revl test` on any tier can report how many were not run there.
+    """
+    units: list = []
+    for unit in ir.get("prop_tests") or []:
+        units.append({
+            "name": unit.get("name"),
+            "params": [dict(p) for p in unit.get("params") or []],
+            "body": unit.get("body") or [],
+        })
+    return units
+
+
+def _parse_prop_type(type_str: str) -> tuple:
+    """`"List[Opt[Int]]"` -> `("List", ["Opt[Int]"])`; `"Int"` -> `("Int", [])`.
+
+    A tiny, self-contained splitter for the canonical type spellings lowering
+    produces (no function types reach a prop-test parameter), so fault.py needs
+    no import from the checker.
+    """
+    text = type_str.strip()
+    if text.endswith("]") and "[" in text:
+        head, _, rest = text.partition("[")
+        inner = rest[:-1]
+        args: list = []
+        depth = 0
+        current = ""
+        for char in inner:
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+            if char == "," and depth == 0:
+                args.append(current.strip())
+                current = ""
+            else:
+                current += char
+        if current.strip():
+            args.append(current.strip())
+        return head.strip(), args
+    return text, []
+
+
+_PROP_PRIMITIVES = {"Int", "Int32", "Bool", "Str", "Float", "F64", "Num"}
+
+
+def _case_is_recursive(payload: str | None, adt_head: str) -> bool:
+    """Whether an ADT case payload refers back to its own ADT (a recursive
+    constructor), so the depth bound knows to prefer base cases near the limit."""
+    if payload is None:
+        return False
+    head, args = _parse_prop_type(payload)
+    if head == adt_head:
+        return True
+    return any(_case_is_recursive(arg, adt_head) for arg in args)
+
+
+# --- construction (mirrors backends/python/emit.py type emission) -----------
+
+
+def _make_record(module, name: str, spec: dict, field_values: dict):
+    cls = getattr(module, name)
+    return cls(*[field_values[field] for field in spec.get("fields", {})])
+
+
+def _make_case(module, case_name: str, payload_value):
+    cls = getattr(module, case_name)
+    return cls() if payload_value is _NO_PAYLOAD else cls(payload_value)
+
+
+_NO_PAYLOAD = object()   # sentinel: construct a no-payload ADT case
+
+
+# --- edge generation (guarantees coverage) ----------------------------------
+
+
+def _edge_values(type_str: str, types: dict, module, depth: int = 0) -> list:
+    """A deterministic, finite list of representative values for *type_str* —
+    the i64 edges, both Opt arms, empty/one/two-element Lists, every ADT
+    constructor, and each record field varied through its edges.  Used for the
+    coverage-guaranteeing rounds (every entry here is actually run)."""
+    head, args = _parse_prop_type(type_str)
+    if head in ("Int",):
+        return list(_I64_EDGES)
+    if head == "Int32":
+        return list(_I32_EDGES)
+    if head == "Bool":
+        return [False, True]
+    if head == "Str":
+        return list(_STR_EDGES)
+    if head in ("Float", "F64", "Num"):
+        return list(_FLOAT_EDGES)
+    if head == "Opt" and args:
+        inner = _edge_values(args[0], types, module, depth + 1)
+        return [None] + inner[:3]           # None + a few Some(...) values
+    if head == "List" and args:
+        inner = _edge_values(args[0], types, module, depth + 1)
+        first = inner[:2]
+        return [[], first[:1], first]        # empty, one, two
+    spec = types.get(head) if head and not args else None
+    if spec and spec.get("kind") == "record":
+        fields = spec.get("fields", {})
+        base = {name: _edge_values(ftype, types, module, depth + 1)[0]
+                for name, ftype in fields.items()}
+        values = [_make_record(module, head, spec, base)]
+        for name, ftype in fields.items():
+            for edge in _edge_values(ftype, types, module, depth + 1)[:3]:
+                variant = dict(base)
+                variant[name] = edge
+                values.append(_make_record(module, head, spec, variant))
+        return values
+    if spec and spec.get("kind") == "variant":
+        values = []
+        for case in spec.get("cases") or []:
+            payload = case.get("payload")
+            if payload is None:
+                values.append(_make_case(module, case["name"], _NO_PAYLOAD))
+            elif depth >= _PROP_DEPTH and _case_is_recursive(payload, head):
+                continue                     # too deep to expand a recursive case
+            else:
+                for pv in _edge_values(payload, types, module, depth + 1)[:2]:
+                    values.append(_make_case(module, case["name"], pv))
+        if not values:                       # all cases recursive at the limit
+            for case in spec.get("cases") or []:
+                if case.get("payload") is None:
+                    values.append(_make_case(module, case["name"], _NO_PAYLOAD))
+        return values
+    raise ValueError(f"prop generator: unsupported type {type_str!r}")
+
+
+# --- random generation (search) ---------------------------------------------
+
+
+def _gen_random(type_str: str, types: dict, module, rng, depth: int = 0):
+    head, args = _parse_prop_type(type_str)
+    if head == "Int":
+        return rng.choice(_I64_EDGES + [rng.randint(_I64_MIN, _I64_MAX)])
+    if head == "Int32":
+        return rng.choice(_I32_EDGES + [rng.randint(_I32_MIN, _I32_MAX)])
+    if head == "Bool":
+        return rng.choice([False, True])
+    if head == "Str":
+        length = rng.randint(0, 8)
+        return rng.choice(_STR_EDGES + ["".join(rng.choice(_STR_ALPHABET)
+                                                for _ in range(length))])
+    if head in ("Float", "F64", "Num"):
+        return rng.choice(_FLOAT_EDGES + [round(rng.uniform(-1e6, 1e6), 3)])
+    if head == "Opt" and args:
+        if rng.random() < 0.3:
+            return None
+        return _gen_random(args[0], types, module, rng, depth + 1)
+    if head == "List" and args:
+        cap = 1 if depth >= _PROP_DEPTH else _PROP_LIST_MAX
+        return [_gen_random(args[0], types, module, rng, depth + 1)
+                for _ in range(rng.randint(0, cap))]
+    spec = types.get(head) if head and not args else None
+    if spec and spec.get("kind") == "record":
+        return _make_record(module, head, spec, {
+            name: _gen_random(ftype, types, module, rng, depth + 1)
+            for name, ftype in spec.get("fields", {}).items()})
+    if spec and spec.get("kind") == "variant":
+        cases = list(spec.get("cases") or [])
+        if depth >= _PROP_DEPTH:
+            base = [c for c in cases if not _case_is_recursive(c.get("payload"), head)]
+            cases = base or cases
+        case = rng.choice(cases)
+        payload = case.get("payload")
+        if payload is None:
+            return _make_case(module, case["name"], _NO_PAYLOAD)
+        return _make_case(module, case["name"],
+                          _gen_random(payload, types, module, rng, depth + 1))
+    raise ValueError(f"prop generator: unsupported type {type_str!r}")
+
+
+# --- coverage observation (a fold over what was generated) -------------------
+
+
+def _new_coverage() -> dict:
+    return {"int_edges": set(), "bool": set(), "str": set(),
+            "opt": set(), "list": set(), "float": set(),
+            "adt": {}}
+
+
+def _observe(value, type_str: str, types: dict, cov: dict) -> None:
+    """Record which type boundaries *value* exercised — a pure fold, so the
+    coverage claim is testable and never depends on runtime objects beyond the
+    value's own class name."""
+    head, args = _parse_prop_type(type_str)
+    if head == "Int" and value in _I64_EDGES:
+        cov["int_edges"].add(value)
+    elif head == "Int32" and value in _I32_EDGES:
+        cov["int_edges"].add(value)
+    elif head == "Bool":
+        cov["bool"].add(bool(value))
+    elif head == "Str":
+        cov["str"].add("empty" if value == "" else "nonempty")
+    elif head in ("Float", "F64", "Num"):
+        cov["float"].add("zero" if value == 0.0 else "nonzero")
+    elif head == "Opt" and args:
+        if value is None:
+            cov["opt"].add("None")
+        else:
+            cov["opt"].add("Some")
+            _observe(value, args[0], types, cov)
+    elif head == "List" and args:
+        cov["list"].add("empty" if not value else "nonempty")
+        for item in value:
+            _observe(item, args[0], types, cov)
+    else:
+        spec = types.get(head) if head and not args else None
+        if spec and spec.get("kind") == "record":
+            for name, ftype in spec.get("fields", {}).items():
+                _observe(getattr(value, name), ftype, types, cov)
+        elif spec and spec.get("kind") == "variant":
+            case_name = type(value).__name__
+            cov["adt"].setdefault(head, set()).add(case_name)
+            for case in spec.get("cases") or []:
+                if case["name"] == case_name and case.get("payload") is not None:
+                    _observe(value.value, case["payload"], types, cov)
+
+
+def _coverage_report(params: list, cov: dict, types: dict) -> list:
+    """Per-parameter coverage lines — what the generators actually reached."""
+    lines: list = []
+    for param in params:
+        head, args = _parse_prop_type(param["type"])
+        detail = None
+        if head in ("Int", "Int32"):
+            detail = f"{len(cov['int_edges'])} i64 edge value(s) visited"
+        elif head == "Bool":
+            detail = f"{len(cov['bool'])}/2 boolean value(s)"
+        elif head == "Opt":
+            detail = "arms: " + (", ".join(sorted(cov["opt"])) or "none")
+        elif head == "List":
+            detail = "lengths: " + (", ".join(sorted(cov["list"])) or "none")
+        if detail:
+            lines.append(f"    coverage {param['name']}: {param['type']} — {detail}")
+
+    reported: set = set()
+
+    def walk_adts(type_str: str, seen_types: frozenset = frozenset()) -> None:
+        h, a = _parse_prop_type(type_str)
+        if h in ("Opt", "List") and a:
+            walk_adts(a[0], seen_types)
+            return
+        if h in seen_types:                   # a recursive type — already noted
+            return
+        spec = types.get(h) if h and not a else None
+        if spec and spec.get("kind") == "variant":
+            if h not in reported:
+                declared = [c["name"] for c in spec.get("cases") or []]
+                seen = cov["adt"].get(h, set())
+                missing = [c for c in declared if c not in seen]
+                note = "all constructors visited" if not missing else \
+                       f"MISSED {', '.join(missing)}"
+                lines.append(f"    coverage {h}: {len(seen)}/{len(declared)} "
+                             f"constructor(s) — {note}")
+                reported.add(h)
+            for case in spec.get("cases") or []:
+                if case.get("payload"):
+                    walk_adts(case["payload"], seen_types | {h})
+        elif spec and spec.get("kind") == "record":
+            for ftype in spec.get("fields", {}).values():
+                walk_adts(ftype, seen_types | {h})
+
+    for param in params:
+        walk_adts(param["type"])
+    return lines
+
+
+# --- shrinking --------------------------------------------------------------
+
+
+def _shrink_value(value, type_str: str, types: dict, module):
+    """Yield strictly-smaller candidates for *value*, closer-to-minimal first.
+
+    "Smaller" is: an integer nearer zero, a shorter/emptier string or list, a
+    `Some` collapsed to `None`, a payload case collapsed to a base case, a
+    record with one field shrunk — the reductions a human would try to boil a
+    counterexample down to its essence."""
+    head, args = _parse_prop_type(type_str)
+    if head in ("Int", "Int32"):
+        seen = set()
+        for cand in (0, value // 2, value - (1 if value > 0 else -1)):
+            if abs(cand) < abs(value) and cand not in seen:
+                seen.add(cand)
+                yield cand
+        return
+    if head in ("Float", "F64", "Num"):
+        for cand in (0.0, value / 2):
+            if abs(cand) < abs(value):
+                yield cand
+        return
+    if head == "Bool":
+        if value:
+            yield False
+        return
+    if head == "Str":
+        if value:
+            yield ""
+            for i in range(len(value)):
+                yield value[:i] + value[i + 1:]
+        return
+    if head == "Opt" and args:
+        if value is None:
+            return
+        yield None                            # collapse Some(x) to None
+        yield from _shrink_value(value, args[0], types, module)
+        return
+    if head == "List" and args:
+        if value:
+            yield []
+            for i in range(len(value)):
+                yield value[:i] + value[i + 1:]   # drop one element
+            for i in range(len(value)):
+                for smaller in _shrink_value(value[i], args[0], types, module):
+                    yield value[:i] + [smaller] + value[i + 1:]
+        return
+    spec = types.get(head) if head and not args else None
+    if spec and spec.get("kind") == "record":
+        fields = list(spec.get("fields", {}).items())
+        current = {name: getattr(value, name) for name, _ in fields}
+        for name, ftype in fields:
+            for smaller in _shrink_value(current[name], ftype, types, module):
+                variant = dict(current)
+                variant[name] = smaller
+                yield _make_record(module, head, spec, variant)
+        return
+    if spec and spec.get("kind") == "variant":
+        case_name = type(value).__name__
+        # first, collapse to any base (no-payload) case — structurally smaller
+        for case in spec.get("cases") or []:
+            if case.get("payload") is None and case["name"] != case_name:
+                yield _make_case(module, case["name"], _NO_PAYLOAD)
+        # then shrink this case's own payload
+        for case in spec.get("cases") or []:
+            if case["name"] == case_name and case.get("payload") is not None:
+                for smaller in _shrink_value(value.value, case["payload"], types, module):
+                    yield _make_case(module, case["name"], smaller)
+        return
+
+
+def _shrink_args(args: tuple, param_types: list, types: dict, module, run_once) -> tuple:
+    """Greedily minimise a failing *args* tuple: repeatedly replace one
+    component with a smaller value that still fails, until no single reduction
+    fails.  Bounded by ``_PROP_MAX_SHRINK`` trials so a pathological property
+    cannot loop forever."""
+    current = list(args)
+    trials = 0
+    improved = True
+    while improved and trials < _PROP_MAX_SHRINK:
+        improved = False
+        for index in range(len(current)):
+            for candidate in _shrink_value(current[index], param_types[index], types, module):
+                trials += 1
+                if trials > _PROP_MAX_SHRINK:
+                    break
+                trial = list(current)
+                trial[index] = candidate
+                ok, _reason = run_once(tuple(trial))
+                if not ok:
+                    current[index] = candidate
+                    improved = True
+                    break
+            if improved:
+                break
+    return tuple(current)
+
+
+# --- the driver -------------------------------------------------------------
+
+
+def _load_py_emitter():
+    """Import the cordis-py backend *emitter only* (no cordis runtime): a prop
+    test's body is a pure function, so it needs the emitter to lower+exec it but
+    never a live ``Context``.  Returns the ``emit`` module."""
+    backend_dir = BACKENDS / "python"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    import emit  # noqa: PLC0415 — backend import after path setup
+    return emit
+
+
+def _prop_module(ir: dict, unit: dict, index: int, emit):
+    """Emit and exec a pure module carrying *unit*'s property as an ordinary
+    function ``_revl_prop_<index>(params…)``; return ``(module, fn)``.
+
+    The property lowers to a normal emitted function — the same injection trick
+    the fault runner uses for its `fail` step — so no backend emitter change is
+    needed.  Only the pure surface (types, functions, externs) is kept; the
+    component/test/fault/prop sections are dropped so the module imports nothing
+    from cordis and execs standalone.
+    """
+    # the emitter reserves leading-underscore names, so the synthetic function
+    # is camel-cased without one (and stays clear of user fn names)
+    fn_name = f"revlProp{index}"
+    pure = dict(ir)
+    for section in ("components", "tests", "fault_tests", "prop_tests", "manifest",
+                    "services", "holes"):
+        pure.pop(section, None)
+    pure["functions"] = list(ir.get("functions") or []) + [{
+        "name": fn_name,
+        "params": list(unit["params"]),
+        "returns": None,
+        "public": False,
+        "body": list(unit["body"]),
+    }]
+    module = types.ModuleType(f"revl_prop_{abs(hash(unit['name'])):x}")
+    sys.modules[module.__name__] = module
+    try:
+        source = emit.emit(pure)
+        exec(compile(source, f"<revl-prop {unit['name']}>", "exec"), module.__dict__)
+    except Exception:
+        sys.modules.pop(module.__name__, None)
+        raise
+    return module, getattr(module, fn_name)
+
+
+def _run_once_factory(fn):
+    """A ``run_once(args) -> (ok, reason)`` over the emitted property function.
+
+    A failing `assert` (AssertionError) is the property being false; any other
+    exception (an overflow at an i64 edge, a host precondition) is equally a
+    counterexample — the property did not hold for that input — and is reported
+    with its type, never swallowed."""
+    def run_once(args: tuple) -> tuple:
+        try:
+            fn(*args)
+        except AssertionError as error:
+            return (False, str(error).strip() or "assertion failed")
+        except Exception as error:  # noqa: BLE001 — any raise is a counterexample
+            return (False, f"{type(error).__name__}: {error}")
+        return (True, None)
+    return run_once
+
+
+def _render_arg(value) -> str:
+    """A short, faithful rendering of a generated argument for the report."""
+    cls = type(value).__name__
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_render_arg(v) for v in value) + "]"
+    if hasattr(value, "value"):              # ADT payload case
+        return f"{cls}({_render_arg(value.value)})"
+    fields = getattr(value, "__dataclass_fields__", None)
+    if fields:                               # record
+        inner = ", ".join(f"{name}={_render_arg(getattr(value, name))}" for name in fields)
+        return f"{cls}({inner})"
+    return f"{cls}()"                        # no-payload ADT case
+
+
+def _render_args(params: list, args: tuple) -> str:
+    return ", ".join(f"{p['name']}={_render_arg(v)}" for p, v in zip(params, args))
+
+
+def _prop_dossier(results: list, random_rounds: int) -> dict:
+    """Aggregate ``(unit, status, detail)`` into a gauntlet-shaped dossier.
+    ``detail`` carries the counterexample (on fail) and the coverage lines.
+    Pure."""
+    props = []
+    total = passed = failed = 0
+    for unit, status, detail in results:
+        total += 1
+        ok = status == "pass"
+        passed += ok
+        failed += not ok
+        entry = {
+            "name": unit["name"],
+            "params": [{"name": p["name"], "type": p["type"]} for p in unit["params"]],
+            "status": status,
+            "rounds": detail.get("rounds", 0),
+        }
+        if not ok and "counterexample" in detail:
+            entry["counterexample"] = detail["counterexample"]
+        if "error" in detail:
+            entry["error"] = detail["error"]
+        props.append(entry)
+    return {
+        "kind": "tested",
+        "status": "failed" if failed else "passed",
+        "roadmapItem": _PROP_ITEM,
+        "title": _PROP_TITLE,
+        "tier": "py",
+        "note": "each `prop test` was checked over type-derived inputs (i64 edges, "
+                "Opt arms, empty/non-empty Lists, every ADT constructor, record fields) "
+                f"plus {random_rounds} random rounds; a failing input was shrunk to a "
+                "minimal counterexample (docs/prop-test.md).",
+        "counts": {
+            "props": total,
+            "passed": passed,
+            "failed": failed,
+            "randomRounds": random_rounds,
+        },
+        "properties": props,
+    }
+
+
+def _run_prop_unit(ir: dict, unit: dict, index: int, emit, rng,
+                   random_rounds: int) -> tuple:
+    """Run one `prop test`: emit its property, generate the edge rounds (which
+    guarantee coverage) then the random rounds, find the first failing input,
+    shrink it, and fold coverage.  Returns ``(status, detail)``."""
+    types_ = ir.get("types") or {}
+    params = unit["params"]
+    param_types = [p["type"] for p in params]
+
+    module, fn = _prop_module(ir, unit, index, emit)
+    try:
+        run_once = _run_once_factory(fn)
+
+        # 1. the coverage-guaranteeing edge rounds: vary one parameter at a
+        #    time through its representative values, the others held at a base.
+        try:
+            per_param_edges = [_edge_values(t, types_, module) for t in param_types]
+        except Exception as error:  # noqa: BLE001 — a generator crash is a hard error
+            return ("fail", {"rounds": 0,
+                             "error": f"could not derive a generator: "
+                                      f"{type(error).__name__}: {error}"})
+        bases = tuple(edges[0] for edges in per_param_edges)
+        edge_tuples: list = [bases]
+        for i, edges in enumerate(per_param_edges):
+            for value in edges:
+                combo = list(bases)
+                combo[i] = value
+                edge_tuples.append(tuple(combo))
+
+        # 2. random-search rounds
+        random_tuples = [tuple(_gen_random(t, types_, module, rng) for t in param_types)
+                         for _ in range(random_rounds)]
+
+        all_tuples = edge_tuples + random_tuples
+
+        # coverage is a fold over every input the generators produced
+        cov = _new_coverage()
+        for combo in all_tuples:
+            for value, type_str in zip(combo, param_types):
+                _observe(value, type_str, types_, cov)
+        coverage_lines = _coverage_report(params, cov, types_)
+
+        rounds = len(all_tuples)
+        failing = None
+        for combo in all_tuples:
+            ok, reason = run_once(combo)
+            if not ok:
+                failing = (combo, reason)
+                break
+
+        if failing is None:
+            return ("pass", {"rounds": rounds, "coverage": coverage_lines})
+
+        minimal = _shrink_args(failing[0], param_types, types_, module, run_once)
+        _ok, reason = run_once(minimal)
+        return ("fail", {
+            "rounds": rounds,
+            "coverage": coverage_lines,
+            "counterexample": {
+                "args": _render_args(params, minimal),
+                "reason": reason,
+                "raw": _render_args(params, failing[0]),
+            },
+        })
+    finally:
+        sys.modules.pop(module.__name__, None)
+
+
+def run_prop_units(ir: dict, units: list, out=None,
+                   random_rounds: int = _PROP_RANDOM_ROUNDS) -> tuple:
+    """Run every `prop test` on the py reference tier; ``(failures, dossier)``.
+
+    Unlike the fault/round-trip runners this needs only the backend *emitter*
+    (a prop body is pure), so it does not raise when cordis is absent."""
+    import random  # noqa: PLC0415 — stdlib, only needed when the runner runs
+
+    printer = (lambda line: print(line)) if out is None else out
+    emit = _load_py_emitter()
+
+    for line in _PROP_HEADER.split("\n"):
+        printer(line)
+
+    results: list = []
+    for index, unit in enumerate(units):
+        # a per-property seed keeps a run reproducible while still exploring
+        rng = random.Random(f"revl-prop:{unit['name']}")
+        try:
+            status, detail = _run_prop_unit(ir, unit, index, emit, rng, random_rounds)
+        except Exception as error:  # noqa: BLE001 — a driver crash is a failure
+            status, detail = "fail", {"rounds": 0,
+                                      "error": f"the prop-test driver raised "
+                                               f"{type(error).__name__}: {error}"}
+        results.append((unit, status, detail))
+
+        if status == "pass":
+            printer(f"PASS {unit['name']}: property held over {detail['rounds']} "
+                    f"generated input(s)")
+        else:
+            if "error" in detail:
+                printer(f"FAIL {unit['name']}: {detail['error']}")
+            else:
+                ce = detail["counterexample"]
+                printer(f"FAIL {unit['name']}: property is false")
+                printer(f"    counterexample (shrunk): {ce['args']}")
+                printer(f"    because: {ce['reason']}")
+                if ce["raw"] != ce["args"]:
+                    printer(f"    (first failing input was: {ce['raw']})")
+        for line in detail.get("coverage") or []:
+            printer(line)
+
+    dossier = _prop_dossier(results, random_rounds)
+    counts = dossier["counts"]
+    printer(f"checked {counts['props']} property/properties: {counts['passed']} held, "
+            f"{counts['failed']} broke")
+    return counts["failed"], dossier
+
+
+def prop_dossier(ir: dict, random_rounds: int = _PROP_RANDOM_ROUNDS) -> dict:
+    """The prop run as a structured dossier only (no printing).  Returns an
+    empty ``passed`` dossier when the document declares no `prop test`."""
+    units = prop_units(ir)
+    if not units:
+        return {
+            "kind": "tested", "status": "passed", "roadmapItem": _PROP_ITEM,
+            "title": _PROP_TITLE, "tier": "py",
+            "note": "no `prop test` declared.",
+            "counts": {"props": 0, "passed": 0, "failed": 0, "randomRounds": random_rounds},
+            "properties": [],
+        }
+    return run_prop_units(ir, units, out=lambda _line: None, random_rounds=random_rounds)[1]
