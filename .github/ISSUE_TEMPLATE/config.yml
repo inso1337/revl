@@ -1,0 +1,13 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security or soundness escape
+    url: https://github.com/inso1337/revl/security/advisories/new
+    about: >
+      A program the checker ACCEPTS that violates a guarantee (G1–G8 / A1–A8), an audit-surface
+      escape, or an emitted-code injection is a security issue. Report it privately via GitHub
+      Security Advisories — do not open a public issue. See SECURITY.md.
+  - name: How to write revl (usage questions)
+    url: https://github.com/inso1337/revl/blob/main/docs/guide-humans.md
+    about: >
+      Trying to write a component and stuck? The human and agent guides cover the language, the
+      guarantees, and the errors. Open an issue only if the compiler is wrong, not if a program is.
