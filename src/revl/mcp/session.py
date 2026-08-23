@@ -174,10 +174,35 @@ class Session:
             self.recorder.instrument(module, ir)
         return module
 
-    def swap(self, ir: dict, origin: dict | None = None) -> dict:
+    def swap(self, ir: dict, origin: dict | None = None,
+             migrate: str = "generational") -> dict:
         """Replace the running composition. The caller has already had the
-        candidate admitted; this performs the transition."""
+        candidate admitted; this performs the transition.
+
+        When a swapped *template* has live instances (spawned children of some
+        component — docs/design-v2-instances.md), their **state migrates** onto
+        the successor template (roadmap item 10, "hot-swap with live
+        instances"). `migrate` selects the reconciliation policy:
+
+        * ``"generational"`` (default) — capture each live instance's state
+          before teardown, then re-seat it onto the successor's freshly-spawned
+          instances, gated by a **state-compatibility** check. An incompatible
+          successor (one that drops or retypes an instance's state, or is gone)
+          is *rejected*: the whole swap rolls back with the original state
+          intact, rather than silently dropping it (Q3/Q4).
+        * ``"respawn"`` — today's teardown semantics: instances die with the
+          old composition and the successor starts them cold. No migration.
+
+        Composition-level (static) state is unaffected either way; this only
+        reconciles the dynamic instance layer the static swap never saw."""
         driver = self._require()
+        old_ir = self.ir
+        # capture BEFORE teardown — while the old instances are still live and
+        # their state still exists (Q2). Empty unless something spawned, so a
+        # non-instance swap is byte-identical to before.
+        pre = (self._capture_instances(old_ir, ir)
+               if migrate == "generational" else {})
+        saved_previous, saved_previous_origin = self.previous, self.previous_origin
         self.previous = self.ir
         self.previous_origin = self.origin
         self._run(driver._dispose_all(self.ir))
@@ -186,14 +211,110 @@ class Session:
         self.draft = None  # a new generation makes any uncommitted edit stale
         self._generation += 1
         self._run(driver._load(ir, self._prepare_module(ir)))
-        return self.state(drain=True)
+        migration = None
+        if pre:
+            try:
+                migration = self._reconcile_instances(pre)
+            except driver.runtime.StateIncompatible as exc:
+                # atomicity (Q4): unwind the whole swap and re-seat the original
+                # instance state, so a rejected migration leaves nothing changed
+                # and nothing half-migrated.
+                self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin)
+                raise SessionError(
+                    f"swap rejected: a live instance's state cannot migrate onto "
+                    f"the successor — {exc}. The running composition is untouched "
+                    f"(rolled back to the previous generation, instance state "
+                    f"intact). Dropping the state would be residue, so admission "
+                    f"refuses it (docs/service-compat.md, state-compat gate)."
+                ) from None
+        state = self.state(drain=True)
+        if migration is not None:
+            state["migration"] = migration
+        return state
+
+    # -- live-instance state migration (roadmap item 10) -------------------
+
+    def _capture_instances(self, old_ir: dict, new_ir: dict) -> dict:
+        """Snapshot the live instances of every template being swapped (Q1/Q2).
+
+        Enumerated from the runtime's live-instance registry, in spawn order,
+        so reconciliation correlates old↔new positionally. Records whether the
+        template survives into the successor, so a *vanished* template's
+        instances are caught by the gate rather than silently dropped."""
+        runtime = self._driver.runtime
+        old_templates = (old_ir.get("manifest") or {}).get("templates") or []
+        new_templates = set((new_ir.get("manifest") or {}).get("templates") or [])
+        pre: dict = {}
+        for name in old_templates:
+            handles = runtime.live_instances(name)
+            if not handles:
+                continue
+            pre[name] = {
+                "present": name in new_templates,
+                "captured": [h.capture_state() for h in handles],
+            }
+        return pre
+
+    def _reconcile_instances(self, pre: dict) -> dict:
+        """Gate then migrate (Q2/Q3). Two passes so the whole cohort is checked
+        before any of it is written — a single incompatible instance rejects the
+        migration with nothing applied (Q4)."""
+        runtime = self._driver.runtime
+        plan: dict = {}
+        for name, info in pre.items():
+            captured = info["captured"]
+            if not info["present"]:
+                raise runtime.StateIncompatible(
+                    f"template {name!r} is gone from the successor composition — "
+                    f"its {len(captured)} live instance(s) have nowhere to land")
+            new_handles = runtime.live_instances(name)
+            if len(new_handles) != len(captured):
+                raise runtime.StateIncompatible(
+                    f"template {name!r} had {len(captured)} live instance(s); the "
+                    f"successor spawned {len(new_handles)} — cannot correlate them")
+            pairs = list(zip(new_handles, captured))
+            for handle, cap in pairs:
+                handle.check_state(cap)  # gate only, no mutation
+            plan[name] = pairs
+        report = {"policy": "generational", "templates": {}}
+        for name, pairs in plan.items():
+            for handle, cap in pairs:
+                handle.restore_state(cap)
+            report["templates"][name] = {"instances": len(pairs), "migrated": True}
+        return report
+
+    def _abort_swap(self, old_ir: dict, pre: dict,
+                    saved_previous: dict | None,
+                    saved_previous_origin: dict | None) -> None:
+        """Undo a swap whose instance migration was rejected: tear down the
+        rejected successor, reload the predecessor, and re-seat the captured
+        instance state onto its re-spawned instances — the composition is left
+        exactly as if the swap had never been attempted."""
+        driver = self._driver
+        self._run(driver._dispose_all(self.ir))
+        driver.ir = self.ir = old_ir
+        self.origin = self.previous_origin
+        self.previous, self.previous_origin = saved_previous, saved_previous_origin
+        self._generation += 1
+        self._run(driver._load(old_ir, self._prepare_module(old_ir)))
+        for name, info in pre.items():
+            for handle, cap in zip(driver.runtime.live_instances(name),
+                                   info["captured"]):
+                try:
+                    handle.restore_state(cap)  # same template — always compatible
+                except driver.runtime.StateIncompatible:  # pragma: no cover
+                    pass
 
     def rollback(self) -> dict:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
         restored, self.previous = self.previous, None
         restored_origin, self.previous_origin = self.previous_origin, None
-        return self.swap(restored, origin=restored_origin) | {"rolledBack": True}
+        # rollback restores the *code* of the previous generation; it keeps
+        # today's teardown semantics for instances (no cross-generation state
+        # migration back), so it stays byte-identical to the pre-item-10 path.
+        return self.swap(restored, origin=restored_origin,
+                         migrate="respawn") | {"rolledBack": True}
 
     # -- apply a plan artifact (docs/apply.md) -----------------------------
 
