@@ -14,6 +14,7 @@
 // strings, same tick count).  Change that text first, then all four tiers.
 
 import type { Context } from 'cordis'
+import type { Fiber } from 'cordis'
 
 // ---------------------------------------------------------------------------
 // v2: realm placement (docs/design-v2-realms.md)
@@ -57,6 +58,88 @@ export function plug(ctx: Context, component: RealmComponent, config?: any) {
     scoped = scoped.isolate(key, realmLabel(realm))
   }
   return scoped.plugin(component, config)
+}
+
+// ---------------------------------------------------------------------------
+// instance-parametric components (docs/design-v2-instances.md, phase 2)
+//
+// A `spawn` acquisition instantiates a component at RUNTIME as a child fiber of
+// its spawner. This mirrors the cordis-py reference (backends/python/runtime.py
+// `spawn` / `SpawnHandle`) on cordis v4:
+//
+//   - each key the target provides is isolated into a *fresh LOCAL realm* — an
+//     unlabelled `ctx.isolate(key)`, which mints `Symbol(key)` per call
+//     (node_modules/cordis/lib/index.js:1417), a distinct identity every spawn.
+//     Two instances of one component therefore never collide on a provision
+//     (disjoint by construction; no config value known at link time).
+//   - the instance is plugged as a *child fiber* of the spawner's context
+//     (`scoped.plugin`, registry.d.ts:57 -> `Fiber & PromiseLike<Fiber>`), i.e.
+//     its own nested teardown scope, NOT an effect adopted flatly into the
+//     spawner's fiber accumulator. Disposing the handle unloads that child now.
+
+/** The value a `spawn` acquisition binds: a live component instance torn down
+ * by its own `dispose()`. Because the instance is a child fiber, `dispose()`
+ * runs its LIFO teardown *now*, independent of the spawner — a request-scoped
+ * instance is reclaimed when the request ends, never deferred to the spawner's
+ * teardown. Disposal is idempotent, so the spawner's own inverse
+ * (`yield () => s.dispose()`) is a harmless no-op once the instance is gone. */
+export class SpawnHandle {
+  private disposed = false
+  private readonly fiber: Fiber
+  readonly component?: string
+
+  // Explicit field assignment, not constructor parameter-properties: Node's
+  // native type-stripping (used by tests/test_realm_conformance.py) only
+  // erases annotations, it cannot transform the `private`-in-constructor
+  // shorthand — which would make importing this runtime fail under `node`.
+  constructor(fiber: Fiber, component?: string) {
+    this.fiber = fiber
+    this.component = component
+  }
+
+  /** Unload the instance's fiber (its LIFO teardown). Returns cordis'
+   * `Promise<void>` so a caller in an async context can `await` reclamation;
+   * the emitted inverse is drained through cordis' disposer protocol, which
+   * already awaits a returned promise. */
+  dispose(): Promise<void> | void {
+    if (this.disposed) return
+    this.disposed = true
+    return this.fiber.dispose()
+  }
+
+  /** Read a provision the instance published, in *its* local realm. Only the
+   * spawner (which holds this handle) can reach it — a sibling instance,
+   * isolated into a different local realm, cannot (supervision-tree
+   * addressing, decision 1/2). */
+  get(key: string): any {
+    return (this.fiber.ctx as any)[key]
+  }
+
+  /** Live-fiber introspection for tests/harness (never named by emitted revl):
+   * the instance's fiber state and its committed context. */
+  get state() {
+    return this.fiber.state
+  }
+
+  get ctx(): Context {
+    return this.fiber.ctx
+  }
+}
+
+/** Instantiate `component` at runtime as a child of the spawner, each provided
+ * key isolated into a fresh LOCAL realm. Returns a {@link SpawnHandle}. */
+export function spawn(
+  ctx: Context,
+  component: RealmComponent,
+  config: any,
+  realms: string[],
+): SpawnHandle {
+  let scoped: Context = ctx
+  for (const key of realms ?? []) {
+    scoped = scoped.isolate(key) // no label -> a fresh local realm per spawn
+  }
+  const fiber = scoped.plugin(component, config)
+  return new SpawnHandle(fiber, component.name)
 }
 
 // ---------------------------------------------------------------------------

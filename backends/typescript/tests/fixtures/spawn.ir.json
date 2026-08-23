@@ -1,0 +1,196 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Counter": {
+      "methods": {
+        "value": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    },
+    "Ctl": {
+      "methods": {
+        "retire_a": {
+          "params": [],
+          "returns": "Int",
+          "emission": false,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Worker",
+      "source": "spawn.rvl",
+      "config": [
+        {
+          "name": "tag",
+          "type": "Str",
+          "default": null
+        }
+      ],
+      "requires": {},
+      "provides": {
+        "counter": "Counter"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "m",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "m"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "counter",
+          "service": "Counter",
+          "methods": [
+            {
+              "name": "value",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 0
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Supervisor",
+      "source": "spawn.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ctl": "Ctl"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "w1",
+          "acquire": {
+            "kind": "spawn",
+            "component": "Worker",
+            "config": {
+              "tag": {
+                "kind": "lit",
+                "value": "a"
+              }
+            },
+            "realms": [
+              "counter"
+            ],
+            "line": 19
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "w1"
+            },
+            "method": "dispose",
+            "args": []
+          }
+        },
+        {
+          "step": "let-effect",
+          "bind": "w2",
+          "acquire": {
+            "kind": "spawn",
+            "component": "Worker",
+            "config": {
+              "tag": {
+                "kind": "lit",
+                "value": "b"
+              }
+            },
+            "realms": [
+              "counter"
+            ],
+            "line": 20
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "w2"
+            },
+            "method": "dispose",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "ctl",
+          "service": "Ctl",
+          "methods": [
+            {
+              "name": "retire_a",
+              "params": [],
+              "body": [
+                {
+                  "step": "await",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "w1"
+                    },
+                    "method": "dispose",
+                    "args": []
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Supervisor",
+        "file": "spawn.rvl",
+        "inject": [],
+        "provides": [
+          "ctl"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Supervisor"
+    ],
+    "templates": [
+      "Worker"
+    ]
+  }
+}
