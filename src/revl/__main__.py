@@ -773,9 +773,15 @@ def main(argv: list[str] | None = None) -> int:
             for ext in ir.get("externs") or []
         ]
         if args.json:
-            print(json.dumps({"manifest": manifest, "boundary": boundary,
-                              "externs": declared_externs,
-                              "distributability": distribution}, indent=2))
+            # The manifest + G8 audit as the versioned interchange format
+            # (docs/interchange-format.md, roadmap item 28): `stamp` adds the
+            # `schema_version`/`kind` header additively, over the same body
+            # earlier consumers already read.
+            from .interchange import stamp  # noqa: PLC0415
+            print(json.dumps(stamp(
+                {"manifest": manifest, "boundary": boundary,
+                 "externs": declared_externs,
+                 "distributability": distribution}), indent=2))
             return 0
         print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
         for entry in manifest.get("components") or []:
