@@ -16,6 +16,11 @@ Requirement sources:
   * G7     — docs/contract-errata.md, "Contract rejection coverage" (G7 is a
              runtime property of the lowering, verified by the runtime
              scenarios, not by the checker).
+  * C1     — docs/collections.md, "Decision" (Map iteration yields keys in
+             ascending canonical Str order). A runtime property: it becomes
+             checkable the moment a runtime drives map iteration, and is
+             reported *pending* until then — the clause exists ahead of the
+             iteration feature so the order can never ship uncontracted.
 
 Not every amendment is observable at the runtime layer: A2/A3/A4/A6/A7 are
 compile-time / lowering / advisory obligations on the *emitter and checker*, so
@@ -225,6 +230,32 @@ def _g7(obs: Observation) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# C1 — deterministic Map iteration order (docs/collections.md)
+# ---------------------------------------------------------------------------
+
+# The fixture an exercising adapter must build: keys inserted deliberately
+# out of order, so the observed iteration sequence distinguishes the chosen
+# sorted order from insertion order AND from any randomized host order.
+#   insertion order would be : banana, apple, cherry
+#   a randomized host order   : any permutation, unstable across runs
+#   the CHOSEN canonical order: apple, banana, cherry
+# The adapter drives `keys()` (or a for-over-a-map) and appends one
+# ``"iter <key>"`` trace op per key yielded, in order.
+C1_INSERT_KEYS = ("banana", "apple", "cherry")
+C1_EXPECTED = ["iter apple", "iter banana", "iter cherry"]
+
+
+def _c1_map_iteration_order(obs: Observation) -> tuple[bool, str]:
+    # ascending canonical Str order (Unicode scalar / UTF-8 byte lexicographic).
+    # sorted() over the fixture keys is the canonical order on the reference
+    # tier; the oracle pins the exact sequence so insertion/random order fail.
+    got = [e for e in obs.trace if e.startswith("iter ")]
+    ok = got == C1_EXPECTED
+    return ok, f"iteration order {got!r} " + ("==" if ok else "!=") + \
+        f" canonical {C1_EXPECTED!r}"
+
+
+# ---------------------------------------------------------------------------
 # the catalog
 # ---------------------------------------------------------------------------
 
@@ -307,6 +338,19 @@ CATALOG: tuple[Case, ...] = (
          "newest-first in one drain; every dependent inverse precedes the "
          "provider's own close.",
          ideal=_g7),
+
+    Case("c1_map_iteration_order", "C1", Kind.RUNTIME,
+         "Map iteration order is sorted, not insertion",
+         "Iterating a Map (keys()/for) yields keys in ascending canonical Str "
+         "order (Unicode scalar / UTF-8 byte lexicographic) on every tier — a "
+         "pure function of the key set, never of insertion history. The fixture "
+         "inserts keys out of order (banana, apple, cherry) so the observed "
+         "sequence tells sorted order apart from insertion order and from any "
+         "randomized host order (docs/collections.md, docs/stdlib-2.0.md §Map). "
+         "Map iteration is unimplemented today, so every current adapter reports "
+         "this pending; the clause exists ahead of the feature so the order can "
+         "never ship uncontracted.",
+         ideal=_c1_map_iteration_order),
 
     # Compile-time / lowering / advisory amendments — a runtime adapter cannot
     # exercise these; they are enforced in the emitter and checker. Reported
