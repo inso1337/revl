@@ -2,8 +2,10 @@
 
 **Status:** implemented — `revl mcp {serve,schema,import}`, a live in-memory
 session (`revl_load`/`revl_call`/`revl_swap`/`revl_edit`/`revl_rollback`/
-`revl_unload`/`revl_state`), and `revl serve --mcp app.rvl`, which serves *one
-booted composition's own* operations as tools. Tests: `tests/test_mcp.py`
+`revl_unload`/`revl_state`/`revl_gauntlet`/`revl_resolve`, plus
+snapshot/restore, the replay verbs and the query/history verbs — see §3), and
+`revl serve --mcp app.rvl`, which serves *one booted composition's own*
+operations as tools. Tests: `tests/test_mcp.py`
 (projection and protocol), `tests/test_mcp_session.py` (in-memory compilation
 and the live session), `tests/test_mcp_edit.py` (the delta-patch verb) and
 `tests/test_mcp_serve.py` (the served composition;
@@ -339,6 +341,65 @@ what was **tested** with counts (the no-residue lifecycle) from what remains
 **claimed** (the enumerated G8 extern boundary). Fault-sweep and
 inverse-round-trip sections are present but report `pending` until roadmap
 items 30 and 26 land. See [docs/gauntlet.md](gauntlet.md).
+
+### Persistence, replay and query verbs
+
+The live session advertises three more verb families. Each answers a question
+the single-shot CLI cannot (it has no live session to hold), and each has a
+detailed home doc; the shapes below are what `revl mcp serve` puts on the wire.
+
+**Persistence — snapshot / restore** ([persistence.md](persistence.md)). The
+session keeps its admission inputs, so an evolved composition can be captured as
+re-admittable JSON and rebooted after a restart. The snapshot is re-admitted
+through the gate, never trusted blindly.
+
+```jsonc
+revl_snapshot {}                          // -> a re-admittable document of the running generation
+revl_restore  {snapshot: <document>}      // re-admit it into an empty session
+```
+
+`revl mcp serve --restore SNAPSHOT.json` performs the restore at boot, and
+crash recovery reuses the same document as its roll-forward target
+([crash-recovery.md](crash-recovery.md)).
+
+**Replay — walk a recorded accumulator** ([replay.md](replay.md)). `revl_load`
+with `record: true` (or `revl run --record`) records the effect accumulator;
+these verbs then step over it. `revl_timeline`, `revl_inspect_step` and
+`revl_replay_bisect` are `readOnlyHint: true` — they reconstruct each probed
+step rather than mutating the live system.
+
+```jsonc
+revl_timeline      {component?}                    // the recorded accumulator (all, or one component)
+revl_inspect_step  {k}                             // the composition's shape at step k (-1 = before every step)
+revl_step_back     {to, force?}                    // unwind to step k by running registered inverses
+revl_replay_bisect {assert, component?}            // git-bisect for an execution: first step a predicate holds
+revl_replay_forward {from}                         // re-run the tail after step k by re-invoking the service calls
+```
+
+`revl_replay_bisect` is the same search the REPL's `:bisect <expr>` exposes:
+binary-search the recorded steps for the first where a predicate over the
+`inspect` view becomes true — `log2(N)` reconstructions, under the same
+inverse-trust bound replay states.
+
+**Query — the composition's own questions** ([queries.md](queries.md)). The five
+static query verbs, plus their live and historical projections. `revl_live_query`
+answers them against the running session instead of a static IR; the
+`revl_history_*` verbs answer the windowed/lifetime questions over a recorded run.
+
+```jsonc
+revl_query_emitters   {target, source|files}       // WHO EMITS TO X?
+revl_query_withdraw   {component, source|files}     // WHAT BREAKS IF I WITHDRAW C?
+revl_query_dependents {target, source|files}        // WHO DEPENDS ON THIS?
+revl_query_reach      {component, source|files}     // WHAT DOES C REACH?
+revl_query_drift      {service, gains?, loses?, …}  // WHAT CHANGES IF A SERVICE GAINS/LOSES A METHOD?
+revl_live_query       {verb, target?/component?/service?/gains?/loses?}   // any of the five, against the live session
+revl_history_emitted_between {from, to, component?, recording}   // emissions crossed between steps X and Y
+revl_history_lifetime {component, trace?/traceFile?/recording?}   // everything a component touched in its life
+```
+
+Each query result states whether it is exact or a conservative
+over-approximation — the envelope discipline [queries.md](queries.md) defines,
+shared by the CLI `revl query …` subcommands.
 
 ## 4. `revl serve --mcp` — a composition's own operations, served live
 
