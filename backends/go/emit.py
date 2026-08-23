@@ -66,6 +66,7 @@ def _realm_helper_name() -> str:
 _PRIM = {
     "Str": "string",
     "Int": "int",
+    "Int32": "int32",
     "Float": "float64",
     "Bool": "bool",
     "Unit": "",
@@ -124,7 +125,7 @@ def _go_return(t):
 def _go_zero(surface) -> str:
     """A Go zero value for a surface type — used to pad Opt/Result spreads."""
     gt = _go_type(surface)
-    if gt in ("int", "int64", "float64"):
+    if gt in ("int", "int32", "int64", "float64"):
         return "0"
     if gt == "string":
         return '""'
@@ -1122,6 +1123,7 @@ _GO_RESERVED = {
 
 _V3_PRIM = {
     "Int": "int64",
+    "Int32": "int32",
     "Str": "string",
     "Bool": "bool",
     "Float": "float64",
@@ -1229,6 +1231,7 @@ class _V3GoCtx:
         self.needs_float_div = False    # `/` (true division, IEEE at zero)
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
+        self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
         for name, spec in self.types.items():
             if spec.get("kind") == "record":
                 key = tuple(sorted((spec.get("fields") or {}).keys()))
@@ -1263,8 +1266,10 @@ _GO_DIV_ZERO_MSG = "revl: division by zero"
 
 def _v3_builtin_ret_type(method, recv_type):
     if method in ("length", "indexOf", "charCodeAt",
-                  "div_trunc", "div_floor", "div_euclid", "mod"):
+                  "div_trunc", "div_floor", "div_euclid", "mod", "to_int"):
         return "Int"
+    if method == "to_int32":
+        return "Int32"
     # The total forms (docs/arithmetic.md) produce a Result value.
     if method in ("checked_div_trunc", "checked_div_floor",
                   "checked_div_euclid", "checked_mod"):
@@ -1296,6 +1301,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
     # without this, `let x: Float = 3` declared `var x int64 = float64(3)`.
     if node.get("widen") == "Float":
         return "Float"
+    if node.get("widen") == "Int":
+        return "Int"  # Int32 widened to Int
     kind = node.get("kind")
     if kind == "lit":
         v = node.get("value")
@@ -1337,6 +1344,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         op = node.get("op")
         if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
             return "Bool"
+        if node.get("operands") == "Int32" and op in ("+", "-", "*"):
+            return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
         if op == "+":
             lt = _go_v3_infer_type(node.get("left"), ctx)
             rt = _go_v3_infer_type(node.get("right"), ctx)
@@ -1376,7 +1385,7 @@ _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
 # Types Go can compare with `==` without it being either wrong or a compile
 # error. Everything else (records, lists, ADTs, Opt/Result) goes through
 # revlEq.
-_GO_SCALARS = {"Int", "Float", "Str", "Bool"}
+_GO_SCALARS = {"Int", "Int32", "Float", "Str", "Bool"}
 
 
 def _go_v3_lit(node: dict) -> str:
@@ -1450,6 +1459,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
         return f"float64({_go_v3_expr(inner, ctx, expected)})"
+    # An Int32 -> Int widening site (docs/arithmetic.md): int32 does not
+    # implicitly convert to int64 in Go, so the lossless widening is spelled
+    # out where the frontend marked it.
+    if node.get("widen") == "Int":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"int64({_go_v3_expr(inner, ctx, expected)})"
     kind = node["kind"]
 
     if kind == "lit":
@@ -1497,13 +1512,19 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             ctx.needs_overflow = True
             helper = {"+": "revlAdd", "-": "revlSub", "*": "revlMul"}[op]
             return f"{helper}({left}, {right})"
+        if op in ("+", "-", "*") and node.get("operands") == "Int32":
+            # Int32 traps at the i32 edge; Go's int32 wraps, so the helpers
+            # detect it exactly as the i64 ones do (docs/arithmetic.md).
+            ctx.needs_overflow32 = True
+            helper = {"+": "revlAddI32", "-": "revlSubI32", "*": "revlMulI32"}[op]
+            return f"{helper}({left}, {right})"
         if op == "/":
             # `/` is true division and yields Float (docs/arithmetic.md). Go
             # `/` on two int64 is integer division, and a *constant* `1.0/0.0`
             # is a compile error where IEEE defines +Inf — the helper makes it
             # a runtime float division, which is both.
             ctx.needs_float_div = True
-            if node.get("operands") == "Int":
+            if node.get("operands") in ("Int", "Int32"):
                 return f"revlDiv(float64({left}), float64({right}))"
             return f"revlDiv({left}, {right})"
         return f"({left} {go_op} {right})"
@@ -1516,6 +1537,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             if node.get("operands") == "Int":
                 ctx.needs_overflow = True
                 return f"revlSub(0, {operand})"
+            if node.get("operands") == "Int32":
+                ctx.needs_overflow32 = True
+                return f"revlSubI32(0, {operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported v3 unary operator {node.get('op')!r}")
 
@@ -1707,6 +1731,14 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # `%` takes the dividend's sign, which is what revl specifies, so
     # div_trunc is native; the other three are helpers so every tier computes
     # the same thing.
+    # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
+    # is a plain int64 conversion; narrowing Int -> Int32 re-imposes the 32-bit
+    # bound through revlToI32, which panics out of range.
+    if method == "to_int":
+        return f"int64({target})"
+    if method == "to_int32":
+        ctx.needs_overflow32 = True
+        return f"revlToI32({target})"
     if method == "div_trunc":
         ctx.needs_int_arith = True
         return f"revlDivTrunc({target}, {args[0]})"
@@ -2317,6 +2349,24 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append('\t\tpanic("revl: Int overflow")')
         out.append("\t}")
         out.append("\treturn p")
+        out.append("}")
+        out.append("")
+    if ctx.needs_overflow32:
+        # Int32 traps at the i32 edge (docs/arithmetic.md). Go's int32 wraps,
+        # so each op is computed in int64 (which cannot overflow for two i32
+        # inputs) and range-checked before narrowing. revlToI32 is the checked
+        # Int -> Int32 narrowing.
+        out.append("func revlAddI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) + int64(b)) }")
+        out.append("func revlSubI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) - int64(b)) }")
+        out.append("func revlMulI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) * int64(b)) }")
+        out.append("func revlToI32(v int64) int32 {")
+        out.append("\tif v < -2147483648 || v > 2147483647 {")
+        out.append('\t\tpanic("revl: Int32 overflow")')
+        out.append("\t}")
+        out.append("\treturn int32(v)")
         out.append("}")
         out.append("")
     if ctx.needs_int_arith:
