@@ -664,4 +664,51 @@ def test_an_inverse_undo_still_passes_the_fault_test(capsys):
     assert "PASS clean mid-activation failure" in out
 
 
+# The two tests above fail the component with an explicit `fail` statement in
+# its body. That is not how a fault test faults a component: `fail at step N`
+# arms the runtime's fault probe and the injected raise takes a different exit
+# from the activation than a body-level `fail` does. The review counterexample
+# below keeps the non-inverse undo but lets the *probe* kill the activation —
+# and on this branch it still PASSes, so the host trace the judge reads is not
+# fed on the injected-fault path. Constructed live during review from the
+# original findings-uxprobe2 asymmetry repro; kept verbatim.
+
+_LEAKY_UNDER_INJECTION = '''extern pure fn now() -> Int = @py { import time; return int(time.time()) }
+service Fragile { fn work(n: Int) -> Int }
+component Fragile provides f: Fragile {
+  let scratch = effect Map.new() undo scratch.insert("leak", "1")
+  provide f {
+    fn work(n) { return now() + n }
+  }
+}
+fault test "mid-activation failure with a non-inverse undo" for Fragile {
+  fail at step 1
+  assert no residue
+}
+'''
+
+
+@needs_cordis
+def test_a_non_inverse_undo_fails_under_an_injected_fault(capsys):
+    """The R1 accounting must hold when the *probe* faults the activation,
+    not only when a `fail` statement in the body does."""
+    code, out = _run_src(_LEAKY_UNDER_INJECTION, capsys)
+    assert code == 1, out
+    assert "FAIL mid-activation failure with a non-inverse undo" in out
+    assert "residue in the host" in out
+    assert re.search(r"map#\d+ \(new\(\) with no drop\(\)\)", out)
+    assert "(R1)" in out
+
+
+@needs_cordis
+def test_an_inverse_undo_still_passes_under_an_injected_fault(capsys):
+    """Positive control for the injected path: the identical construction
+    with the real inverse must keep passing."""
+    src = _LEAKY_UNDER_INJECTION.replace(
+        'undo scratch.insert("leak", "1")', 'undo scratch.drop()')
+    code, out = _run_src(src, capsys)
+    assert code == 0, out
+    assert "PASS mid-activation failure with a non-inverse undo" in out
+
+
 
