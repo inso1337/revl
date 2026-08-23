@@ -58,6 +58,65 @@ Task: spec + checker + 5 emitters + tests for `Map[Str, V]` value type
   recurring "stale generated golden" bug class; a CI check like go's
   `test_checked_in_generated_is_current` would catch it for TS too.
 
+## Review round 2 (orchestrator found two escapes; both fixed)
+
+This is exactly what the protocol exists for: I shipped a feature whose
+tests all passed, and review found two bugs by running code I never
+executed end-to-end.
+
+1. **BUG 1 — let-bound receivers lowered as verbatim field calls.**
+   `let m = Map.empty()` marked `m` as `"host"` in the lowerer's scope,
+   because `_is_host_valued` saw the constructor ROOT (`Map`) in
+   `_HOST_CALLABLES` and never looked at the method (`empty`). Every later
+   `m.set/lookup/has` then took the unchecked verbatim path — no compile
+   check, runtime `_revl_field` KeyError. My own tests missed it because
+   every executed flow used annotated parameters or a `var` binding, and
+   the one test that used the chained form only asserted `ir_version`.
+   Verdict: **caught-bug** (by review, not by me — that is the point of
+   having a reviewer). Root cause was ONE predicate; fixing
+   `_is_host_valued` closed the let-binding, the direct chain
+   `Map.empty().set(...)`, and kept genuine `Map.new()` bindings host.
+2. **BUG 2 — Never-as-wildcard soundness hole.** Independent of lowering:
+   `set` on a `Map[Str, Never]` receiver checked its value argument
+   against `Never`, which is compatible with everything, and returned
+   `@self = Map[Str, Never]` — which flows into ANY `Map[Str, X]`. A Str
+   could be planted under an Int-typed map; `lookup` would then claim
+   `Opt[Int]`. Wrong-answer class, exactly what revl exists to refuse.
+   Fix chosen: **(a) unify-and-carry**, not bidirectional plumbing or
+   refusal. When the receiver's element is bottom (`Never` exactly — not
+   Any/T-params, so generics are untouched), `builtin_check` learns the
+   element type from the concrete argument and returns the rebuilt
+   container (`m.set(k, "oops")` types `Map[Str, Str]`). Both required
+   flows close because both end in a check position against a concrete
+   expected type: expected-type flow refuses with ``let m2: Map[Str, Int]`
+   expects Map[Str, Int], got Map[Str, Str]`, return-position flow with the
+   return-position twin. Chosen over (b) because it needs no new plumbing
+   through infer/check call sites, and over (c) because refusal would ban
+   the natural build-up idiom `let m = Map.empty(); m = m.set(k, v)`;
+   unification instead makes the empty literal behave like every other
+   type-inference seed. Diagnostics get BETTER: they name the learned
+   type, telling the programmer exactly which value poisoned the map.
+3. **The List fence, honestly:** the reviewer asked whether `[]` had the
+   same escape. It did — pre-existing, predating Map entirely:
+   `[].push("s")` typed `List[Never]` and flowed into `List[Int]` in both
+   expected-type and return positions. The same learning rule (applied to
+   any `@self` builtin on a bottom-typed receiver: `push`, `concat`)
+   fences it. Correct uses (`[].push(1)` → `List[Int]`) keep compiling;
+   generics with T-param elements are untouched because only literal
+   `Never` triggers learning.
+4. Regression tests added for every repro verbatim (review round 2 section
+   in tests/test_map_value_type.py): the planted-Str repro now refused at
+   compile time; the let-bound flow asserted to lower to `builtin` nodes
+   AND executed on the python tier; direct-chain IR asserted; both BUG 2
+   flows plus their correct-value twins; the List fence; and a guard that
+   the fix did not de-host genuine `Map.new()` bindings.
+
+Count this round: 2 escapes found by review, ~4 probe cycles to root-cause
+(one shared predicate + one checker rule), 6 regression tests. Lesson
+logged: "compiles" is not "checked" when two namespaces share a dispatch
+predicate — the field-call fallback was a silent unchecked path, and
+nothing in my suite executed a let-bound receiver until review did.
+
 ## 3. What revl gave you
 
 - The namespace-disjointness invariant, once written as an exact-set

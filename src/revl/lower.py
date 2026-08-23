@@ -151,6 +151,14 @@ def _is_host_valued(expr, scope) -> bool:
     if isinstance(expr, _V):
         return scope.get(expr.name) == "host"
     if isinstance(expr, _C) and isinstance(expr.callee, _F)             and isinstance(expr.callee.target, _V):
+        # `Map.empty()` is the Map VALUE constructor (docs/stdlib-2.0.md
+        # §Map) — a pure value, not a host acquisition. Its constructor ROOT
+        # is a host callable, so without this exclusion a `let m =
+        # Map.empty()` bound the name as "host" and every later
+        # m.set/m.lookup/m.has lowered as a verbatim *field* call: unchecked
+        # at compile time, AttributeError-shaped at runtime.
+        if expr.callee.target.name == "Map" and expr.callee.name == "empty":
+            return False
         return expr.callee.target.name in _HOST_CALLABLES
     return False
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
