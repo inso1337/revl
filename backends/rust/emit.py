@@ -46,6 +46,7 @@ CRATE = "cordis-rs"
 TYPE_MAP = {
     "Str": "String",
     "Int": "i64",
+    "Int32": "i32",
     "Float": "f64",
     "Bool": "bool",
     "Bytes": "Vec<u8>",
@@ -226,6 +227,8 @@ def _default_for_rust_type(ftype: str) -> str:
         return "String::new()"
     if ftype == "i64":
         return "0i64"
+    if ftype == "i32":
+        return "0i32"
     if ftype == "f64":
         return "0f64"
     if ftype == "bool":
@@ -1506,6 +1509,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
     if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
         return f"({_render_expr(inner, ctx, rename)} as f64)"
+    # An Int32 -> Int widening site (docs/arithmetic.md): i32 does not coerce to
+    # i64 in Rust (E0308), so the lossless widening is written where the
+    # frontend marked it, exactly as the Float case is.
+    if node.get("widen") == "Int":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"({_render_expr(inner, ctx, rename)} as i64)"
     rename = rename or {}
     kind = node["kind"]
 
@@ -1605,7 +1614,13 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
             # rust only checks in debug builds by default.
             m = {"+": "checked_add", "-": "checked_sub", "*": "checked_mul"}[node["op"]]
             return (f'({left}).{m}({right}).expect("revl: Int overflow")')
-        if node.get("op") == "/" and node.get("operands") == "Int":
+        if node.get("op") in ("+", "-", "*") and node.get("operands") == "Int32":
+            # Int32 traps at the i32 edge; rust's own `*`/`+`/`-` only check in
+            # debug, so the checked forms make it release-safe too
+            # (docs/arithmetic.md).
+            m = {"+": "checked_add", "-": "checked_sub", "*": "checked_mul"}[node["op"]]
+            return (f'({left}).{m}({right}).expect("revl: Int32 overflow")')
+        if node.get("op") == "/" and node.get("operands") in ("Int", "Int32"):
             # `/` is true division and yields Float (docs/arithmetic.md), but
             # rust `/` on two i64 is integer division — it would compute 3 for
             # `7 / 2` and then fail to typecheck against the f64 the checker
@@ -1795,6 +1810,13 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
     # truncates and carries div_euclid/rem_euclid in std (stable since 1.38);
     # div_floor is spelled out rather than using the much newer
     # `i64::div_floor`, so the emitted crate does not need a recent toolchain.
+    # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int is
+    # a lossless `as i64`; narrowing Int -> Int32 goes through `i32::try_from`,
+    # which returns Err out of range — `.expect` turns that into the trap.
+    if method == "to_int":
+        return f"(({target}) as i64)"
+    if method == "to_int32":
+        return f'(i32::try_from({target}).expect("revl: Int32 overflow"))'
     if method == "div_trunc":
         return f"(({target}) / ({args[0]}))"
     if method == "div_floor":

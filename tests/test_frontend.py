@@ -102,6 +102,11 @@ REJECTIONS = {
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
     "arith_zero_divisor.rvl": "`mod` by a literal zero is undefined",
     "t20_int_literal_range.rvl": "Int literal `9223372036854775808` is outside the 64-bit range",
+    # Int32 (docs/arithmetic.md, "Sized integers"): lossless-widen /
+    # checked-narrow, and no silent width-mixing in arithmetic.
+    "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",
+    "t22_int32_width_mix.rvl": "`+` does not mix `Int32` and `Int`",
+    "t23_int32_remainder.rvl": "`%` is Int-only; widen the Int32 operands with `.to_int()` first",
     "host_method_not_on_surface.rvl": "`Map` has no method `putt`",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
