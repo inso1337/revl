@@ -208,14 +208,11 @@ def _a8_async_ideal(obs: Observation) -> tuple[bool, str]:
                 _state(obs, "failing", "FAILED"))
 
 
-def _a8_async_py_divergence(obs: Observation) -> bool:
-    # cordis-py: an async body routes the setup failure to _make_effect_guard,
-    # so the inverses DO run LIFO with no residue (containment holds) but the
-    # fiber lands ACTIVE instead of FAILED. A8's "lands FAILED" is dropped for
-    # async bodies only.
-    inverses_ran = "map.drop" in obs.trace
-    landed_active = obs.states.get("failing") == "ACTIVE"
-    return inverses_ran and landed_active
+# A8-async divergence RESOLVED: cordis-py (harden-fiber-lifecycle 1316174, folded
+# into geohotstan/cordis-py#1) now routes an async setup failure to the fiber's
+# error slot, landing FAILED like the sync path. So a8_async_body_failure carries
+# no pinned divergence any more — it is a plain conformance check the reference
+# tier passes. See docs/contract-errata.md, docs/fault-tests.md §8.
 
 
 def _g7(obs: Observation) -> tuple[bool, str]:
@@ -318,20 +315,10 @@ CATALOG: tuple[Case, ...] = (
     Case("a8_async_body_failure", "A8", Kind.RUNTIME,
          "mid-body failure containment (async body)",
          "The same L-Raise reading for a body containing an await: inverses run "
-         "LIFO, no residue, fiber lands FAILED.",
-         ideal=_a8_async_ideal,
-         divergences=(
-             Divergence(
-                 "async body lands ACTIVE, inverses still run (cordis-py)",
-                 frozenset({"cordis-py"}),
-                 _a8_async_py_divergence,
-                 "cordis-py routes an async effect-setup failure to "
-                 "_make_effect_guard: the accumulated inverses run LIFO with no "
-                 "residue (A8 containment holds) but the fiber lands ACTIVE "
-                 "instead of FAILED. Sync bodies are unaffected. Documented in "
-                 "docs/contract-errata.md, docs/fault-tests.md §8, "
-                 "docs/replay.md §7."),
-         )),
+         "LIFO, no residue, fiber lands FAILED. (Was a cordis-py pinned "
+         "divergence until harden-fiber-lifecycle 1316174 fixed it; now a plain "
+         "conformance check.)",
+         ideal=_a8_async_ideal),
     Case("g7_lifo_complete_teardown", "G7", Kind.RUNTIME,
          "LIFO-complete derived teardown",
          "Provisions, method-time effects, and activation inverses all recover "
