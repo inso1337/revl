@@ -180,7 +180,7 @@ reachable from the CLI and, where it makes sense, as an MCP tool.
 | **Backwards replay** | step an activation back over its own accumulator; R4 no-residue survives the round-trip. Only the revertible-effect model makes this cheap | [replay.md](docs/replay.md) |
 | **Capability-scoped emissions** | `emission[db]` bounds *which* boundary a provider may cross, not just whether it emits — a tighter contract for agent-authored code | [capabilities.md](docs/capabilities.md) |
 | **Why-traces** | a G2/G3/G4 rejection ships the derivation, not just the verdict (`put → writeThrough → audit.log`); `revl explain <code>` prints the fix | [why-traces.md](docs/why-traces.md) |
-| **Fault tests** | `fault test { fail at step 2; assert no residue }` — the paradigm's L-Raise guarantee as a declarable assertion | [fault-tests.md](docs/fault-tests.md) |
+| **Fault tests** | `fault test "…" for Component { fail at step 2; assert no residue }` — the paradigm's L-Raise guarantee as a declarable assertion | [fault-tests.md](docs/fault-tests.md) |
 | **Lifecycle tests** | `lifecycle test` — assert no-residue over a *live* composition from inside the language | [syntax-2.0.md](docs/syntax-2.0.md) §7.1 |
 | **Function types** | `(Int, Str) -> Bool` — arrows leave the unchecked frontier where a type is known | [function-types.md](docs/function-types.md) |
 | **Importers** | `revl import openapi` / `revl import wit` — an external contract becomes a typed service | [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) |
