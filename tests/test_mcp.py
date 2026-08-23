@@ -231,7 +231,7 @@ def test_initialize_and_tools_list():
                           "revl_query_drift",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
-                          "revl_replay_forward"}
+                          "revl_replay_forward", "revl_replay_bisect"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True

@@ -294,6 +294,20 @@ class Session:
     def inspect_step(self, component: str | None, at: int) -> dict:
         return self._timeline(component).inspect(at)
 
+    def bisect(self, component: str | None, predicate: str) -> dict:
+        """Binary-search the recorded timeline for the first step at which
+        `predicate` flips — git-bisect for an execution. Read-only: the
+        predicate is evaluated over the `inspect` reconstruction of each probed
+        step, so the timeline is never mutated and the answer is reached in
+        log2(N) evaluations. The report carries the found step's full record and
+        the verified/unverified status of the effects on the path to it."""
+        replay = replay_module()
+        timeline = self._timeline(component)
+        try:
+            return timeline.bisect(predicate)
+        except replay.ReplayError as error:
+            raise SessionError(str(error)) from None
+
     def step_back(self, component: str | None, to: int,
                   force: bool = False) -> dict:
         """Unwind the accumulator to step `to`, leaving the component LIVE.

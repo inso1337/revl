@@ -146,7 +146,7 @@ def _print_plan(ir: dict, config: dict, backend: str) -> None:
         print(f"  {key}: {keys[key]}  ->  {', '.join(methods) or '(no methods)'}")
 
 
-_REPLAY_COMMANDS = (":timeline", ":inspect", ":back", ":forward")
+_REPLAY_COMMANDS = (":timeline", ":inspect", ":back", ":forward", ":bisect")
 
 
 def _replay_command(line: str):
@@ -159,10 +159,26 @@ def _replay_command(line: str):
         :inspect <k> [component]
         :back <k> [!] [component]      -- `!` forces across uncompensated emissions
         :forward <k> [component]
+        :bisect [@component] <predicate expression>
+
+    For ``:bisect`` the ``at`` slot carries the predicate string (a free-form
+    expression, not a step index), the component comes from an optional leading
+    ``@name`` token, and ``force`` is unused.
     """
     parts = line.split()
     if not parts or parts[0] not in _REPLAY_COMMANDS:
         return None
+    if parts[0] == ":bisect":
+        rest = line[len(":bisect"):].strip()
+        component = None
+        if rest.startswith("@"):
+            head, _, rest = rest.partition(" ")
+            component = head[1:] or None
+            rest = rest.strip()
+        if not rest:
+            raise ValueError(":bisect needs a predicate expression "
+                             "(e.g. `:bisect emissionsSoFar`)")
+        return "bisect", rest, False, component
     op, rest = parts[0][1:], parts[1:]
     force = "!" in rest
     rest = [part for part in rest if part != "!"]
@@ -348,6 +364,26 @@ class _Driver:
                 self._log("note", "guarantee", replay.GUARANTEE)
                 return
             timeline = self.recorder.timeline(component)
+            if op == "bisect":
+                report = timeline.bisect(at)  # `at` carries the predicate here
+                if not report.get("flipped"):
+                    self._log("bisect", "no flip", report["reason"])
+                    self._log("note", "guarantee", report["guarantee"])
+                    return
+                rec = report["record"]
+                self._log("bisect", "found",
+                          f"step {report['found']}  {rec['label']} "
+                          f"({report['reduction']})")
+                self._log("bisect", "whoRan", rec["whoRan"])
+                self._log("bisect", "touched", repr(rec["touched"]) or "-")
+                self._log("bisect", "realm", rec["realm"])
+                verified = report["verified"]
+                self._log("bisect", "effects",
+                          f"{verified['status'].upper()} — "
+                          f"{verified['verifiedOnPath']}/{verified['effectsOnPath']} "
+                          "on the path verified")
+                self._log("note", "guarantee", report["guarantee"])
+                return
             if op == "inspect":
                 view = timeline.inspect(at)
                 self._log("replay", "at", f"{view['at']} {view['atLabel']}")
@@ -388,7 +424,7 @@ class _Driver:
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
         if self.recorder is not None:
             print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
-                  "`:forward k` (see docs/replay.md)")
+                  "`:forward k`, `:bisect <expr>` (see docs/replay.md)")
         self._print_keys()
         loop = asyncio.get_running_loop()
         try:

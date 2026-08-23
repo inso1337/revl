@@ -85,6 +85,18 @@ GUARANTEE = (
     "something the runtime observes or asserts."
 )
 
+#: The builtins a `bisect` predicate may use.  A predicate is an expression
+#: over the `inspect` view, so it needs the comprehension/aggregate helpers and
+#: nothing that touches the world.
+_SAFE_BUILTINS = {
+    name: getattr(__import__("builtins"), name) for name in (
+        "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
+        "int", "len", "list", "max", "min", "range", "repr", "reversed",
+        "set", "sorted", "str", "sum", "tuple", "zip",
+        "True", "False", "None",
+    )
+}
+
 
 class ReplayError(RuntimeError):
     """The timeline cannot do what was asked."""
@@ -372,6 +384,156 @@ class Timeline:
             "note": ("`accumulated` is the live accumulator at or below step k, "
                      "newest first. It reflects which inverses have run, not "
                      "what the application's state actually is."),
+        }
+
+    # -- bisecting ---------------------------------------------------------
+
+    def bisect(self, predicate: str,
+               scope: Optional[dict] = None) -> dict:
+        """Binary-search the timeline for the FIRST step at which ``predicate``
+        flips from the value it had before any step ran.
+
+        ``predicate`` is a Python expression evaluated in the same scope
+        :meth:`inspect` produces — every key of the ``inspect(k)`` view is a
+        name in scope (``at``, ``atLabel``, ``activeProvisions``,
+        ``withdrawnProvisions``, ``accumulated``, ``unwound``, ``aheadOfHere``,
+        ``emissionsSoFar``, ``component``), plus ``step`` (the step dict at
+        ``k``, or ``None`` at ``k == -1``).  ``scope`` adds further read-only
+        names.
+
+        The search reconstructs the composition at a probe step with
+        :meth:`inspect` — the same view :meth:`step_back` would restore state to
+        — and never mutates the timeline, so it can run the probes in any order
+        and reach the answer in ``ceil(log2(N)) + 2`` evaluations instead of
+        ``N``.  It returns the found step's full record (who ran, what it
+        touched, which realm) and, critically, the **verified/unverified**
+        status of the effects on the path to it: bisect trusts the recorded
+        inverses, and nothing here checks that an inverse actually restores
+        state (that is roadmap item 26, `verified effect`, and it is not built),
+        so today every effect on the path reads as *unverified*.
+
+        Assumes, as ``git bisect`` does, that the predicate is **monotone** over
+        the timeline — once flipped it stays flipped.  For a non-monotone
+        predicate it still returns *a* flip boundary, but not provably the
+        first; the report says so.
+        """
+        n = len(self.steps)
+        probes: list = []
+
+        def evaluate(k: int) -> bool:
+            probes.append(k)
+            view = self.inspect(k)
+            names = dict(view)
+            names["step"] = self.steps[k].as_dict() if k >= 0 else None
+            if scope:
+                for key, value in scope.items():
+                    names.setdefault(key, value)
+            try:
+                return bool(eval(predicate,  # noqa: S307 — a dev tool, same
+                                 {"__builtins__": _SAFE_BUILTINS}, names))  # trust as the REPL
+            except Exception as exc:  # noqa: BLE001
+                raise ReplayError(
+                    f"bisect predicate {predicate!r} failed at step {k}: "
+                    f"{type(exc).__name__}: {exc}") from None
+
+        base = {
+            "component": self.component,
+            "predicate": predicate,
+            "steps": n,
+            "guarantee": GUARANTEE,
+            "note": ("bisect reconstructs each probed step with `inspect` (the "
+                     "state `step_back` would restore to) and never mutates the "
+                     "timeline; it assumes the predicate is monotone over the "
+                     "timeline, exactly as `git bisect` assumes good->bad is "
+                     "monotone."),
+        }
+
+        if n == 0:
+            return {**base, "flipped": False, "found": None, "evaluations": 0,
+                    "reason": "the timeline is empty — nothing to bisect"}
+
+        before = evaluate(-1)         # the value before any step ran
+        after = evaluate(n - 1)       # the value once every step has run
+        if after == before:
+            return {**base, "flipped": False, "found": None,
+                    "evaluations": len(probes),
+                    "valueThroughout": before,
+                    "reason": ("the predicate never flips: it is "
+                               f"{before!r} before step 0 and still {before!r} "
+                               "after the last step")}
+
+        # invariant: predicate(lo) == before, predicate(hi) != before.
+        lo, hi = -1, n - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if evaluate(mid) == before:
+                lo = mid
+            else:
+                hi = mid
+
+        step = self.steps[hi]
+        return {
+            **base,
+            "flipped": True,
+            "found": hi,
+            "fromValue": before,
+            "toValue": after,
+            "evaluations": len(probes),
+            "probes": probes,
+            "reduction": f"{n} step(s) searched in {len(probes)} evaluation(s)",
+            "step": step.as_dict(),
+            "record": self._record(step),
+            "at": self.inspect(hi),
+            "verified": self._verified_path(hi),
+        }
+
+    def _record(self, step: Step) -> dict:
+        """The 'who ran / what it touched / which realm' of one step."""
+        origin = step.origin or {}
+        phase = origin.get("phase")
+        if phase == "call":
+            who = (f"{origin.get('key')}.{origin.get('method')}"
+                   f"({', '.join(repr(a) for a in origin.get('args') or [])})")
+        elif phase == "repl":
+            who = f"REPL: {origin.get('line')}"
+        else:
+            who = "activation body"
+        return {
+            "realm": self.component,
+            "whoRan": who,
+            "origin": origin,
+            "touched": step.detail or {},
+            "label": step.label,
+            "kind": step.kind,
+            "source": step.source,
+            "site": step.site,
+        }
+
+    def _verified_path(self, k: int) -> dict:
+        """The honest verification status of the effects on the path to ``k``.
+
+        bisect trusts the recorded inverses.  Whether an inverse actually
+        restores state — `verified effect`, roadmap item 26 — is not built, so
+        a step carries no ``verified`` marker and every revertible effect on the
+        path reads as unverified.  Written to light up on its own the day a
+        step *does* carry that marker.
+        """
+        path = [s for s in self.steps if 0 <= s.index <= k and s.revertible]
+        verified = [s for s in path if s.as_dict().get("verified") is True]
+        return {
+            "status": "verified" if path and len(verified) == len(path)
+            else "unverified",
+            "effectsOnPath": len(path),
+            "verifiedOnPath": len(verified),
+            "explanation": (
+                "bisect trusts the recorded inverses. The state it bisects over "
+                "is the one those inverses define at each step (what `inspect` "
+                "reconstructs), not an independently checked state. `verified "
+                "effect` (roadmap item 26) — which would confirm an inverse "
+                "actually restores state — is not built, so every effect on the "
+                "path to the found step reads as unverified. Whether the flip "
+                "reflects true program state is the application's own "
+                "equivalence, exactly the bound in docs/replay.md §4.1."),
         }
 
     # -- stepping back -----------------------------------------------------
