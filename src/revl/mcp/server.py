@@ -29,8 +29,10 @@ import sys
 from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, obligations, report
 from ..errors import RevlError
+from . import gauntlet as _gauntlet
 from .persist import RestoreError
-from .query_tools import QUERY_TOOLS
+from .. import query as Q
+from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
 from .session import Session, SessionError
 
@@ -190,6 +192,16 @@ def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
 
 
+def _tool_gauntlet(arguments: dict) -> dict:
+    """Grade a candidate: run the battery in an isolated scratch session and
+    return the verdict dossier. A rejected or misbehaving candidate is graded,
+    not thrown, and the live composition is never touched (docs/gauntlet.md)."""
+    if arguments.get("source") is None and not arguments.get("files"):
+        return _session_error("provide `source` or `files` — the gauntlet "
+                              "grades a candidate component")
+    return _gauntlet.run(SESSION, arguments)
+
+
 # -- composition persistence (docs/persistence.md) ------------------------
 
 def _tool_snapshot(_arguments: dict) -> dict:
@@ -264,6 +276,19 @@ def _tool_step_back(arguments: dict) -> dict:
         return _session_error(str(error), refused=True)
 
 
+def _tool_replay_bisect(arguments: dict) -> dict:
+    predicate = arguments.get("assert") or arguments.get("predicate")
+    if not predicate:
+        return _session_error("`assert` is required — a predicate expression "
+                              "over the `inspect` view (e.g. \"emissionsSoFar\" "
+                              "or \"'db' in activeProvisions\")")
+    try:
+        return {"ok": True, **SESSION.bisect(arguments.get("component"),
+                                             predicate)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_replay_forward(arguments: dict) -> dict:
     if "from" not in arguments:
         return _session_error("`from` is required")
@@ -272,6 +297,79 @@ def _tool_replay_forward(arguments: dict) -> dict:
                                                      arguments["from"])}
     except SessionError as error:
         return _session_error(str(error))
+
+
+# -- session-bound query modes (docs/queries.md §9) ------------------------
+
+
+def _tool_live_query(arguments: dict) -> dict:
+    """The five query verbs, answered against the LIVE session's post-swap
+    state instead of a compiled-from-source IR (query.live_query)."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded — a live query answers against "
+                              "the running composition; call revl_load first")
+    verb = arguments.get("verb")
+    if verb not in Q._VERB_FN:
+        return _session_error(f"unknown verb {verb!r}; one of "
+                              + ", ".join(sorted(Q._VERB_FN)))
+    live_state = SESSION.live_state()
+    if verb == "drift":
+        service = arguments.get("service") or arguments.get("target")
+        if not service:
+            return _session_error("`service` is required for the drift verb")
+        return Q.live_query(
+            SESSION.ir, verb, live_state, service,
+            gains=list(arguments.get("gains") or []),
+            losses=list(arguments.get("loses") or arguments.get("losses") or []))
+    arg = arguments.get("target") or arguments.get("component")
+    if not arg:
+        return _session_error("`target` (emits-to/depends-on) or `component` "
+                              "(withdraw/reaches) is required")
+    return Q.live_query(SESSION.ir, verb, live_state, arg)
+
+
+def _tool_history_emitted_between(arguments: dict) -> dict:
+    """which emissions crossed between steps X and Y? — over the live session's
+    recording, or an inline one (query.emitted_between)."""
+    frm, to = arguments.get("from"), arguments.get("to")
+    if frm is None or to is None:
+        return _session_error("`from` and `to` (step indices) are required")
+    timeline = arguments.get("timeline")
+    if timeline is None:
+        if not SESSION.loaded or SESSION.recorder is None:
+            return _session_error("no recorded timeline — revl_load with "
+                                  "`record: true`, or pass an inline `timeline`")
+        try:
+            timeline = SESSION.timeline(None)
+        except SessionError as error:
+            return _session_error(str(error))
+    return Q.emitted_between(timeline, frm, to, arguments.get("component"))
+
+
+def _tool_history_lifetime(arguments: dict) -> dict:
+    """everything a component touched during its life — the recording for the
+    effects, an item-27 lifecycle trace for the span (query.lifetime)."""
+    component = arguments.get("component")
+    if not component:
+        return _session_error("`component` is required")
+    timeline = arguments.get("timeline")
+    if timeline is None and SESSION.loaded and SESSION.recorder is not None:
+        try:
+            timeline = SESSION.timeline(None)
+        except SessionError:
+            timeline = None
+    trace = arguments.get("trace")
+    trace_file = arguments.get("traceFile")
+    if trace is None and trace_file:
+        from .. import why_runtime as wr
+        try:
+            trace = wr.read_trace(trace_file)
+        except (OSError, ValueError) as error:
+            return _session_error(f"cannot read trace {trace_file}: {error}")
+    if timeline is None and trace is None:
+        return _session_error("no recorded run to read — load with `record: "
+                              "true`, or pass `trace`/`traceFile`/`timeline`")
+    return Q.lifetime({"trace": trace, "timeline": timeline}, component)
 
 
 def _tool_check(arguments: dict) -> dict:
@@ -571,6 +669,33 @@ TOOLS = [
         "handler": _tool_swap,
     },
     {
+        "name": "revl_gauntlet",
+        "description": "Grade a candidate component instead of merely admitting "
+                       "it: run a battery in an ISOLATED scratch session the live "
+                       "composition never sees, and return a structured verdict "
+                       "dossier. It separates what was PROVED (admission, derived "
+                       "teardown), what was TESTED with counts (a real boot/unload "
+                       "no-residue lifecycle), and what remains CLAIMED (the "
+                       "enumerated G8 extern boundary). Fault-sweep and "
+                       "inverse-round-trip sections are present but report "
+                       "`pending`. A rejected or faulting candidate is graded, not "
+                       "thrown; the running system is untouched either way. "
+                       "`ok` reports that a dossier was produced; the grade is in "
+                       "`verdict` (admissible | rejected). See docs/gauntlet.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "config": {"type": "object",
+                           "description": "per-component config for the scratch boot"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_gauntlet,
+    },
+    {
         "name": "revl_rollback",
         "description": "Restore the generation that was running before the last swap.",
         "inputSchema": {"type": "object", "properties": {}},
@@ -683,6 +808,34 @@ TOOLS = [
         "handler": _tool_step_back,
     },
     {
+        "name": "revl_replay_bisect",
+        "description": "git-bisect for an execution: binary-search the recorded "
+                       "timeline for the FIRST step at which `assert` flips, in "
+                       "log2(N) evaluations instead of N. `assert` is a predicate "
+                       "expression over the same `inspect` view — names like "
+                       "`activeProvisions`, `emissionsSoFar`, `accumulated`, "
+                       "`step`. Read-only: it reconstructs each probed step, "
+                       "never mutating the timeline. Returns the found step's "
+                       "full record (who ran, what it touched, which realm) and "
+                       "the verified/unverified status of the effects on the path "
+                       "— today always UNVERIFIED, because `verified effect` "
+                       "(roadmap item 26) is not built, so the bisect trusts the "
+                       "recorded inverses rather than checking them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "assert": {"type": "string",
+                           "description": "predicate expression over the inspect "
+                                          "view; the first step where it flips is "
+                                          "the answer"},
+            },
+            "required": ["assert"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_replay_bisect,
+    },
+    {
         "name": "revl_replay_forward",
         "description": "Re-run the tail after step k by re-invoking the service calls "
                        "that produced it — how you re-test after a fix. Activation-body "
@@ -712,6 +865,16 @@ TOOLS = [
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own
 TOOLS.extend(QUERY_TOOLS)
+
+# the two session-bound query modes (live / historical) carry their schema
+# next door and their handler here, because only this module holds the session
+_SESSION_QUERY_HANDLERS = {
+    "revl_live_query": _tool_live_query,
+    "revl_history_emitted_between": _tool_history_emitted_between,
+    "revl_history_lifetime": _tool_history_lifetime,
+}
+for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
+    TOOLS.append({**_schema, "handler": _SESSION_QUERY_HANDLERS[_schema["name"]]})
 
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]

@@ -363,6 +363,11 @@ or **[docs/vision.md](docs/vision.md)** for what this is *for*.
 - [backend-go-v3.md](docs/backend-go-v3.md) — the Go tier's IR v3 implementation plan
 - [v2.0-roadmap.md](docs/v2.0-roadmap.md) — what's done and what's in flight
 
+**Project**
+- [docs/stability.md](docs/stability.md) — what a version number promises: v1 IR frozen and byte-identical, what is versioned by `ir_version`, what may break without notice
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the wave/worktree workflow, the pre-commit contract, and the "every rejection joins the executable spec" rule — for human and agent contributors
+- [SECURITY.md](SECURITY.md) — reporting a soundness escape (a program the checker accepts that breaks a guarantee)
+
 ## Quickstart
 
 ```bash

@@ -97,6 +97,7 @@ class LetEffect:
     undo: object
     line: int
     setup: list = field(default_factory=list)
+    verified: bool = False
 
 
 @dataclass
@@ -105,6 +106,7 @@ class EffectStmt:
     undo: object
     line: int
     setup: list = field(default_factory=list)
+    verified: bool = False
 
 
 @dataclass
@@ -544,6 +546,28 @@ class FaultTestDecl:
 
 
 @dataclass
+class PropTestDecl:
+    """`prop test "name" (a: Int, b: Money) { assert … }` (roadmap item 37).
+
+    A property test: the parameters are *generated inputs*, and the body is a
+    pure assertion over them that must hold for every generated value.  The
+    generators are DERIVED from the parameter types the checker already knows
+    (records, ADTs — every constructor, `Opt`/`List` nesting, the i64 edge
+    values); on failure the runner *shrinks* the input to a minimal
+    counterexample.  See docs/prop-test.md.
+
+    Precedent: `verified effect` (item 26) is the specific inverse-round-trip
+    instance of this general form; `lifecycle`/`fault` set the pattern of a
+    modifier/head changing a test's stratum without a new top-level keyword.
+    """
+
+    name: str
+    params: list[FnParam]   # generated-input surface (name + declared type)
+    body: list              # pure statements, at least one `assert`
+    line: int
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -554,6 +578,7 @@ class Program:
     externs: list[ExternDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
+    prop_tests: list[PropTestDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -692,6 +717,15 @@ class Parser:
                 # as an ordinary identifier (and the self-hosted lexer's
                 # KEYWORDS table needs no sync).
                 program.fault_tests.append(self.fault_test_decl())
+
+            elif self.at("ident", "prop") and self.toks[self.pos + 1].kind == "kw" \
+                    and self.toks[self.pos + 1].value == "test":
+                # `prop` is a *contextual* keyword: like `fault`, it only heads a
+                # declaration when immediately followed by `test`, so adding
+                # `prop test` cannot break a program that already uses `prop` as
+                # an ordinary identifier, and the self-hosted lexer's KEYWORDS
+                # table needs no sync (roadmap item 37).
+                program.prop_tests.append(self.prop_test_decl())
 
             elif self.at("ident", "lifecycle"):
                 # contextual keyword: `lifecycle` is a modifier on `test`
@@ -1010,7 +1044,19 @@ class Parser:
             self.expect("=")
             # `let x = effect … undo …` binds an acquisition; anything else
             # binds a plain value, so a method can name an intermediate
-            # result instead of nesting every call into one expression
+            # result instead of nesting every call into one expression. A
+            # `verified` modifier (syntax-2.0 §7) marks the acquisition for
+            # inverse round-trip testing (roadmap item 26).
+            verified_effect = False
+            if not mutable and self.at("kw", "verified"):
+                self.next()
+                if not self.at("kw", "effect"):
+                    tok2 = self.peek()
+                    raise self.err(tok2.line,
+                                   f"expected `effect` after `verified`, found {tok2.value!r}",
+                                   hint="`verified` marks an effect acquisition for inverse "
+                                        "round-trip testing: `let x = verified effect … undo …`")
+                verified_effect = True
             if not mutable and self.at("kw", "effect"):
                 if declared is not None:
                     # an acquisition binds a *host-valued* object, which the
@@ -1025,7 +1071,13 @@ class Parser:
                              "src/revl/typecheck.py); drop the annotation",
                     )
                 acquire, undo, line, setup = self.effect_form(tok.line)
-                return LetEffect(bind, acquire, undo, line, setup)
+                return LetEffect(bind, acquire, undo, line, setup, verified_effect)
+            if verified_effect:
+                tok2 = self.peek()
+                raise self.err(tok2.line,
+                               f"expected `effect` after `verified`, found {tok2.value!r}",
+                               hint="`verified` marks an effect acquisition for inverse "
+                                    "round-trip testing: `let x = verified effect … undo …`")
             if not in_method:
                 raise self.err(
                     tok.line,
@@ -1036,6 +1088,20 @@ class Parser:
                          "into a `fn` (G6)",
                 )
             return LetStmt(bind, self.pure_expr(), mutable, tok.line, declared)
+        if tok.kind == "kw" and tok.value == "verified":
+            # `verified effect … undo …` — the effect is marked for inverse
+            # round-trip testing (syntax-2.0 §7, roadmap item 26). `verified`
+            # heads a body statement only before `effect`; `verified fn` is a
+            # top-level declaration, never a body statement.
+            self.next()
+            if not self.at("kw", "effect"):
+                tok2 = self.peek()
+                raise self.err(tok2.line,
+                               f"expected `effect` after `verified`, found {tok2.value!r}",
+                               hint="inside a body, `verified` marks an effect for inverse "
+                                    "round-trip testing: `verified effect … undo …`")
+            acquire, undo, line, setup = self.effect_form(tok.line)
+            return EffectStmt(acquire, undo, line, setup, verified=True)
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup)
@@ -1634,6 +1700,54 @@ class Parser:
                  "`failed`, `no residue`, `inverses lifo`, `no emissions`, "
                  "`siblings unaffected`",
         )
+
+    # -- property tests (docs/prop-test.md, roadmap item 37) ---------------
+
+    def prop_test_decl(self) -> PropTestDecl:
+        """prop test STR (name: Type, …) { assert … }
+
+        `prop` and `test` are matched by spelling/keyword before this is
+        entered; the parameter list is exactly a `fn` parameter list (each an
+        input to be *generated* from its type), and the body is the same pure
+        statement grammar a plain `test` body is — so `assert` reads as it does
+        everywhere else, only checked over many generated inputs.
+        """
+        line = self.next().line              # `prop`
+        self.expect("kw", "test")
+        name_tok = self.expect("string", what="a prop-test name")
+        name = name_tok.value
+        if not name:
+            raise self.err(name_tok.line, "a prop test name cannot be empty")
+        self.expect("(", what="`(` — a prop test's parameters are its generated inputs")
+        params: list[FnParam] = []
+        seen: set[str] = set()
+        while not self.at(")"):
+            pline = self.peek().line
+            pname = self.expect("ident", what="a parameter name").value
+            if pname in seen:
+                raise self.err(pline, f"duplicate parameter `{pname}` in prop test `{name}`")
+            seen.add(pname)
+            self.expect(":", what="`:` and a type — a prop-test parameter is a generated input")
+            ptype = self.type_()
+            params.append(FnParam(pname, ptype, pline))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        if not params:
+            raise self.err(line, f"prop test `{name}` has no parameters",
+                           hint="a prop test's parameters are its generated inputs: "
+                                'write e.g. `prop test "commutes" (a: Int, b: Int) { … }`')
+        self.expect("{")
+        body = []
+        while not self.at("}"):
+            self._reject_lifecycle_stmt_here()
+            body.append(self.fn_stmt())
+        self.expect("}")
+        if not any(isinstance(stmt, AssertStmt) for stmt in body):
+            raise self.err(line, f"prop test `{name}` asserts nothing",
+                           hint="a prop test states a property to hold for every generated "
+                                "input: add at least one `assert <bool expr>`")
+        return PropTestDecl(name, params, body, line)
 
     def fn_stmt(self):
         tok = self.peek()

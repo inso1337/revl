@@ -1,0 +1,12 @@
+// REJECTED — `+ - * %` do not silently mix widths. `Int32` widens to `Int`
+// only at value-flow positions (let / return / argument), never inside
+// arithmetic: a mixed-width operation is a request to make the conversion
+// visible, not a place to hide one. Convert with `.to_int()` (widen) or
+// `.to_int32()` (checked narrow) first (docs/arithmetic.md).
+//
+// expected error:
+//   `+` does not mix `Int32` and `Int`
+
+fn add(a: Int32, b: Int) -> Int {
+  return a + b
+}

@@ -1,12 +1,24 @@
-// A refusal fixture: `resource` is a live handle with identity, which revl's
-// copy-semantics value model has no faithful spelling for.
+// A WIT `resource` — a live handle with identity. It maps onto revl's
+// acquire-returned-handle model (distribute.py): the handle crosses a seam by
+// proxy, and its WIT destructor becomes the `undo` of an `extern acquire`.
 package example:files@0.1.0;
 
 interface filesystem {
+  /// An open file the host handed us. revl holds it by proxy; the destructor
+  /// (the `undo` on the generated `extern acquire`) releases it (G4).
   resource descriptor {
+    /// Open the file at `path`.
     constructor(path: string);
+
+    /// Read up to `len` bytes. Touches the live file — irreversible here.
     read: func(len: u64) -> list<u8>;
+
+    /// The current byte offset. A pure query over the handle.
+    /// @revl:pure
+    tell: func() -> u64;
   }
 
+  /// Open a descriptor by path (a free function returning an owned handle,
+  /// the alternative to the constructor above).
   open: func(path: string) -> descriptor;
 }

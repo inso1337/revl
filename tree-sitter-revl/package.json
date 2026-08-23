@@ -1,0 +1,21 @@
+{
+  "name": "tree-sitter-revl",
+  "version": "0.1.0",
+  "description": "tree-sitter grammar for the revl language",
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "check": "node check.mjs"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.revl",
+      "file-types": ["rvl"],
+      "highlights": ["queries/highlights.scm"],
+      "injection-regex": "^revl$"
+    }
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.12"
+  }
+}

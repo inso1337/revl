@@ -182,11 +182,21 @@ def _boundary(ir: dict) -> dict:
 
 
 def _run_fmt(args: argparse.Namespace) -> int:
-    """`revl fmt --migrate`: rewrite 1.x `$` interpolation to 2.0 templates."""
+    """`revl fmt`: canonical formatter with a self-proving IR-equivalence gate.
+
+    Default mode produces a canonical formatting; `--migrate` rewrites 1.x
+    `$` interpolation to 2.0 templates.  Either way the rewrite is admitted
+    only when compiling the original and the rewritten text yields
+    byte-identical IR (roadmap item 35); a file whose IR would change is
+    REFUSED (named, nonzero exit) rather than written.
+    """
+    from .formatter import format_source, ir_equivalent, FormatError
+
     if args.output and len(args.files) != 1:
-        print("error: `fmt --migrate -o` expects exactly one input file", file=sys.stderr)
+        print("error: `fmt -o` expects exactly one input file", file=sys.stderr)
         return 1
 
+    exit_code = 0
     for path_str in args.files:
         path = Path(path_str)
         try:
@@ -195,24 +205,53 @@ def _run_fmt(args: argparse.Namespace) -> int:
             print(f"error: cannot read {path_str}: {error}", file=sys.stderr)
             return 1
 
-        migrated, warnings = migrate_source(original, str(path))
-        for warning in warnings:
-            print(f"warning: {warning}", file=sys.stderr)
+        if args.migrate:
+            try:
+                rewritten, warnings = migrate_source(original, str(path))
+            except RevlError as error:
+                print(f"error: cannot migrate {path_str}: {error}", file=sys.stderr)
+                exit_code = 1
+                continue
+            for warning in warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+        else:
+            try:
+                rewritten = format_source(original, str(path))
+            except FormatError as error:
+                print(f"error: cannot format {path_str}: {error}", file=sys.stderr)
+                exit_code = 1
+                continue
+
+        # The self-proving gate: a rewrite ships iff the IR is unchanged.
+        # `--migrate` deliberately rewrites tokens, so it forgoes the
+        # token-identity fall-back the (whitespace-only) formatter relies on.
+        gate = ir_equivalent(original, rewritten, str(path),
+                             token_preserving=not args.migrate)
+        if not gate.admitted:
+            print(f"error: refusing {path_str}: {gate.reason}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        if getattr(args, "check", False):
+            if rewritten != original:
+                print(f"{path_str}: would reformat", file=sys.stderr)
+                exit_code = 1
+            continue
 
         if args.output:
             try:
-                Path(args.output).write_bytes(migrated.encode("utf-8"))
+                Path(args.output).write_bytes(rewritten.encode("utf-8"))
             except OSError as error:
                 print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
                 return 1
-        elif migrated != original:
+        elif rewritten != original:
             try:
-                path.write_bytes(migrated.encode("utf-8"))
+                path.write_bytes(rewritten.encode("utf-8"))
             except OSError as error:
                 print(f"error: cannot write {path_str}: {error}", file=sys.stderr)
                 return 1
 
-    return 0
+    return exit_code
 
 
 def _run_mcp(args) -> int:
@@ -271,6 +310,61 @@ def _run_mcp(args) -> int:
     return 0
 
 
+def _run_serve(args) -> int:
+    """`revl serve --mcp FILES` — serve a composition's OWN provided operations
+    as MCP tools (the fourth quadrant of the bridge, docs/mcp-bridge.md).
+
+    Placement note: this boots one composition and stands it up, so it shares
+    `revl run`'s admission-and-config preflight (compile -> refuse holes ->
+    load config -> refuse a missing required field) rather than living under
+    `revl mcp serve`, whose tool set is the fixed compiler surface. `--mcp`
+    names the transport, leaving room for other serve frontends later.
+    """
+    from .run import _load_config, _required_config_problem  # noqa: PLC0415
+
+    if not getattr(args, "mcp", False):
+        print("error: `revl serve` needs a transport — pass --mcp to serve over "
+              "the MCP stdio protocol", file=sys.stderr)
+        return 2
+
+    from .holes import refuse_admission  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+        # booting is admission: a draft with open obligations may not become a
+        # running composition, however it was compiled (docs/holes.md)
+        refuse_admission(ir)
+        config = _load_config(getattr(args, "config", None))
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"error: cannot read config: {error}", file=sys.stderr)
+        return 1
+
+    if not (ir.get("components") or []):
+        print("nothing to serve: no components in the composition", file=sys.stderr)
+        return 0
+
+    # config-to-boot preflight: the same rule `revl run` enforces before a
+    # runtime is touched — a component admitted with a missing required config
+    # field refuses the boot loudly, rather than settling a fiber onto FAILED
+    # behind a tool the client can already see advertised.
+    problem = _required_config_problem(ir, config)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
+
+    from .mcp.composed import serve_composition  # noqa: PLC0415
+    from .mcp.session import SessionError  # noqa: PLC0415
+
+    try:
+        return serve_composition(ir, config, composition=args.composition)
+    except SessionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+
+
 def _run_import(args) -> int:
     """`revl import {wit,openapi,cordis}` — the import codegen family
     (docs/import-wit.md, docs/import-openapi.md, docs/import-cordis.md)."""
@@ -309,6 +403,43 @@ def _run_import(args) -> int:
     return 0
 
 
+def _run_export(args) -> int:
+    """`revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+
+    Slice 1 of the Component Model bridge: pure IR codegen of the standard WIT
+    interface a revl service or composition presents (the importer's type
+    mapping, run backwards). No runtime, no emission, no binary — interface
+    text only. Effects ride alongside the shape as `/// @revl:*` doc comments,
+    because WIT's type system carries shape, not lifecycle.
+    """
+    from .export_wit import export_wit  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        if getattr(args, "json_diagnostics", False):
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        source = export_wit(ir, service=args.service,
+                            composition=args.composition, package=args.package)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        try:
+            Path(args.output).write_text(source, encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+            return 1
+    else:
+        print(source, end="")
+    return 0
+
+
 def _run_plan(args) -> int:
     """`revl plan` — what admitting these files would do (docs/plan.md).
 
@@ -332,9 +463,110 @@ def _run_plan(args) -> int:
             return 1
 
     result = build_plan(files=list(args.files), manifest=running,
-                        replacing=tuple(args.replacing))
+                        replacing=tuple(args.replacing),
+                        include_ir=bool(args.output))
+
+    if args.output:
+        # -o turns the plan into an executable artifact (docs/apply.md). Only an
+        # admitted plan can be applied; a rejection is printed, not written.
+        from .apply import build_artifact, ApplyError  # noqa: PLC0415
+
+        try:
+            artifact = build_artifact(result, running)
+        except ApplyError as error:
+            print(render(result))
+            print(f"\nerror: {error}", file=sys.stderr)
+            return 1
+        with open(args.output, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+        ops = len(artifact["operations"])
+        print(f"wrote {args.output}: an applyable plan of {ops} operation(s) — "
+              f"`revl apply {args.output}` (docs/apply.md)")
+        return 0
+
     print(json.dumps(result, indent=2) if args.json else render(result))
     return 0 if result["admissible"] else 1
+
+
+def _run_apply(args) -> int:
+    """`revl apply change.plan` — boot the plan's pre-state, then execute the
+    plan against it: drift-refuse if the composition moved, verify each step
+    against its prediction, and roll the applied prefix back on any failure
+    (docs/apply.md). A one-shot: it tears the composition down afterwards and
+    reports whether the change (or its rollback) left any residue."""
+    from .apply import validate_artifact, ApplyError
+    from .mcp.session import Session, SessionError
+
+    try:
+        with open(args.plan, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.plan}: {error}", file=sys.stderr)
+        return 1
+    try:
+        validate_artifact(artifact)
+    except ApplyError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    running_ir = artifact.get("runningIR") or {}
+    if args.against:
+        # apply against a DIFFERENT current composition than the plan assumed —
+        # the honest way to exercise drift refusal from the CLI.
+        try:
+            with open(args.against, encoding="utf-8") as handle:
+                running_ir = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read {args.against}: {error}", file=sys.stderr)
+            return 1
+
+    session = Session()
+    try:
+        if running_ir.get("components"):
+            session.load(running_ir)
+        elif artifact["resultingIR"].get("components"):
+            # cold start: nothing was running, so applying is just bringing the
+            # resulting composition up.
+            state = session.load(artifact["resultingIR"])
+            report = {"applied": True, "coldStart": True,
+                      "resulting": artifact["resulting"]["components"],
+                      "state": state}
+            _print_apply(report, args)
+            unloaded = session.unload()
+            print(f"torn down — no residue: {unloaded['noResidue']}")
+            return 0
+        report = session.apply(artifact)
+    except SessionError as error:
+        # a drift refusal lands here — the composition is untouched
+        print(f"refused: {error}", file=sys.stderr)
+        if session.loaded:
+            session.unload()
+        return 1
+
+    _print_apply(report, args)
+    unloaded = session.unload()
+    print(f"\ntorn down — no residue: {unloaded['noResidue']}")
+    return 0 if report["applied"] else 1
+
+
+def _print_apply(report: dict, args) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2))
+        return
+    if report["applied"]:
+        print(f"applied: {len(report.get('steps') or [])} step(s) — resulting "
+              f"composition: {', '.join(report.get('resulting') or []) or '(empty)'}")
+        for step in report.get("steps") or []:
+            print(f"  {step['op']:<8} {step['name']:<16} -> {step['state'] or 'gone'}")
+        return
+    print(f"FAILED at `{report.get('failedAt')}`: {report['reason']}")
+    print(f"rolled back {len(report.get('rolledBack') or [])} step(s) "
+          f"(LIFO, derived inverses):")
+    for undo in report.get("rolledBack") or []:
+        print(f"  {undo['undo']:<8} {undo['name']}")
+    print(f"no residue: {report.get('noResidue')} "
+          f"(registry {report['registry']['baseline']} -> "
+          f"{report['registry']['afterRollback']})")
 
 
 def _run_query(args, ir: dict) -> int:
@@ -354,6 +586,143 @@ def _run_query(args, ir: dict) -> int:
     else:
         print(render(result))
     return 0 if result.get("ok") else 1
+
+
+def _run_history_query(args) -> int:
+    """`revl query {emitted-between,touched}` — the historical mode
+    (docs/queries.md §9): the same query envelope answered against a RECORDED
+    run rather than a static IR. Reads a replay-recording JSON and/or an
+    item-27 lifecycle JSONL, never source."""
+    from . import query, why_runtime  # noqa: PLC0415
+
+    def _load_json(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    if args.query_command == "emitted-between":
+        try:
+            timeline = _load_json(args.timeline)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read timeline {args.timeline}: {error}",
+                  file=sys.stderr)
+            return 1
+        result = query.emitted_between(timeline, args.frm, args.to,
+                                       args.component)
+    else:  # touched
+        record = {}
+        if args.timeline:
+            try:
+                record["timeline"] = _load_json(args.timeline)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read timeline {args.timeline}: {error}",
+                      file=sys.stderr)
+                return 1
+        if args.trace:
+            try:
+                record["trace"] = why_runtime.read_trace(args.trace)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read trace {args.trace}: {error}",
+                      file=sys.stderr)
+                return 1
+        if not record:
+            print("error: give --trace and/or --timeline (a recorded run to "
+                  "query)", file=sys.stderr)
+            return 1
+        result = query.lifetime(record, args.component)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(query.render(result))
+    return 0 if result.get("ok") else 1
+
+
+def _run_why(args) -> int:
+    """`revl why <component> --trace run.jsonl` — the runtime companion to the
+    compile-time why-traces: the cause chain behind a component's recorded
+    lifecycle transition, and (with --check) the prediction-vs-actuality
+    oracle (docs/why-runtime.md)."""
+    from . import why_runtime
+
+    try:
+        trace = why_runtime.Trace.load(args.trace)
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read trace {args.trace}: {error}", file=sys.stderr)
+        return 1
+
+    frames = trace.cause_chain(args.component)
+    report = None
+    if args.check is not None:
+        try:
+            ir = compile_files(args.check)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        report = why_runtime.oracle(ir, args.component, trace)
+
+    if args.json:
+        payload = {
+            "component": args.component,
+            "chain": [
+                {"component": f.component, "event": f.event,
+                 "transition": f.transition, "cause": f.cause, "note": f.note}
+                for f in frames
+            ],
+        }
+        if report is not None:
+            payload["oracle"] = report
+        print(json.dumps(payload, indent=2))
+    else:
+        print(why_runtime.render_chain(args.component, frames))
+        if report is not None:
+            print("\n" + why_runtime.render_oracle(report))
+
+    if report is not None and report.get("ok") and report.get("conforms") is False:
+        return 1
+    if not frames or (frames and frames[0].cause.get("kind") == "unrecorded"):
+        return 1
+    return 0
+
+
+def _run_recover(args) -> int:
+    """`revl recover --wal FILE` — crash recovery over a write-ahead log
+    (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
+    runs the reconstructible boundary inverses (roll-back) or resumes the
+    persisted generation (roll-forward), and prints a checked verdict with a
+    residue proof. Exit status follows the residue: 0 when clean, 1 when honest
+    residue remains."""
+    # the recovery module reads `replay.WriteAheadLog`, a backend module — put
+    # backends/python on the path exactly as `run` does, but *without* needing a
+    # cordis runtime (recovery works from the durable log, the process is dead).
+    backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+
+    from .recovery import recover, render, RecoveryError  # noqa: PLC0415
+
+    session = snapshot = None
+    if getattr(args, "restore", None):
+        try:
+            with open(args.restore, encoding="utf-8") as handle:
+                snapshot = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read snapshot {args.restore}: {error}",
+                  file=sys.stderr)
+            return 1
+        from .mcp.session import Session  # noqa: PLC0415 — lazy: cordis only if resuming
+        session = Session()
+
+    try:
+        report = recover(args.wal, session=session, snapshot=snapshot)
+    except RecoveryError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render(report))
+    return 0 if report.get("residue", {}).get("clean") else 1
 
 
 def _run_explain(args) -> int:
@@ -405,6 +774,20 @@ def main(argv: list[str] | None = None) -> int:
         "--accept-all", action="store_true",
         help="acknowledge every added crossing under --diff")
 
+    erase = sub.add_parser(
+        "erase-report",
+        help="right-to-erasure evidence for one realm: in-process state gone "
+             "(no-residue proof), boundary crossings compensated-vs-bare, and "
+             "other realms provably untouched (docs/erase-report.md)")
+    erase.add_argument("files", nargs="+")
+    erase.add_argument("--realm", required=True, metavar="R",
+                       help="the realm to report erasure evidence for")
+    erase.add_argument("--json", action="store_true",
+                       help="machine-readable, versioned report document")
+    erase.add_argument("--no-residue-proof", action="store_true",
+                       help="skip the runtime teardown proof (static sections "
+                            "only; use where the cordis runtime is unavailable)")
+
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
     plan_cmd.add_argument("files", nargs="+")
@@ -414,7 +797,22 @@ def main(argv: list[str] | None = None) -> int:
     plan_cmd.add_argument("--replacing", action="append", default=[], metavar="NAME",
                           help="a running component withdrawn in this admission "
                                "(renames); repeatable")
+    plan_cmd.add_argument("-o", "--output", default=None, metavar="change.plan",
+                          help="serialize an EXECUTABLE plan artifact to this path "
+                               "(basis for drift, ordered ops, resulting IR) — "
+                               "apply it with `revl apply` (docs/apply.md)")
     plan_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+
+    apply_cmd = sub.add_parser(
+        "apply", help="execute a `revl plan -o` artifact against a live composition: "
+                      "drift-refuse, verify each step, roll back on failure (docs/apply.md)")
+    apply_cmd.add_argument("plan", metavar="change.plan",
+                           help="a plan artifact written by `revl plan -o`")
+    apply_cmd.add_argument("--against", default=None, metavar="RUNNING.json",
+                           help="boot this composition as the live pre-state instead "
+                                "of the plan's own — drift is refused if it differs "
+                                "from the plan's basis")
+    apply_cmd.add_argument("--json", action="store_true", help="machine-readable output")
 
 
     query = sub.add_parser(
@@ -444,19 +842,55 @@ def main(argv: list[str] | None = None) -> int:
                                  metavar="METHOD",
                                  help="a method the service would lose (repeatable)")
 
-    fmt = sub.add_parser("fmt", help="format .rvl sources (migration §9)")
+    # historical mode (docs/queries.md §9): the same envelope, over a RECORDED
+    # run instead of a static IR. These read files, not source, so they sit
+    # outside the compile-from-source loop above. (Live mode is session-bound —
+    # it has no one-shot CLI entry; use the MCP `revl_live_query` tool.)
+    between = query_sub.add_parser(
+        "emitted-between",
+        help="which emissions crossed between steps X and Y (a recorded replay "
+             "timeline JSON)?")
+    between.add_argument("--timeline", required=True, metavar="FILE",
+                         help="a replay recording JSON (a `revl_timeline` dump)")
+    between.add_argument("--from", dest="frm", type=int, required=True,
+                         metavar="X", help="first step index (inclusive)")
+    between.add_argument("--to", type=int, required=True, metavar="Y",
+                         help="last step index (inclusive)")
+    between.add_argument("--component", default=None,
+                         help="restrict to one component; omit for all")
+    between.add_argument("--json", action="store_true",
+                         help="machine-readable output")
+
+    touched = query_sub.add_parser(
+        "touched",
+        help="everything a component touched during its life (item-27 lifecycle "
+             "trace + optional replay recording)")
+    touched.add_argument("component", metavar="COMPONENT")
+    touched.add_argument("--trace", default=None, metavar="FILE",
+                         help="an item-27 lifecycle JSONL (`revl run --trace`) "
+                              "for the load/withdraw span")
+    touched.add_argument("--timeline", default=None, metavar="FILE",
+                         help="a replay recording JSON for the effects/emissions")
+    touched.add_argument("--json", action="store_true",
+                         help="machine-readable output")
+
+    fmt = sub.add_parser("fmt", help="canonically format .rvl sources (IR-equivalence gated)")
     fmt.add_argument(
         "--migrate",
         action="store_true",
-        required=True,
-        help="rewrite 1.x `$` interpolation to backtick templates",
+        help="rewrite 1.x `$` interpolation to backtick templates instead of formatting",
+    )
+    fmt.add_argument(
+        "--check",
+        action="store_true",
+        help="do not write; exit nonzero if any file is not already canonical",
     )
     fmt.add_argument("files", nargs="+")
     fmt.add_argument(
         "-o",
         "--output",
         default=None,
-        help="write migrated source to this path instead of in place (single input)",
+        help="write the result to this path instead of in place (single input)",
     )
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
@@ -465,6 +899,10 @@ def main(argv: list[str] | None = None) -> int:
                       choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "
                            "`all` runs every tier whose toolchain is present")
+    test.add_argument("--sweep", action="store_true",
+                      help="fault sweep: inject failure at every step of every "
+                           "component and check L-Raise / no-residue / LIFO / "
+                           "siblings at each (py tier; docs/fault-tests.md)")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -567,6 +1005,45 @@ def main(argv: list[str] | None = None) -> int:
                             help="on rejection, print a structured diagnostic "
                                  "instead of the human rendering")
 
+    # `revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+    # Additive: its own `export` group, mirroring the `import` family's shape.
+    exp_cmd = sub.add_parser(
+        "export",
+        help="export a revl service/composition as an external interface "
+             "definition (the reverse of `revl import`)")
+    exp_sub = exp_cmd.add_subparsers(dest="export_command", required=True)
+    exp_wit = exp_sub.add_parser(
+        "wit",
+        help="generate the standard WIT interface for a revl service or "
+             "composition (docs/wit-bridge.md)")
+    exp_wit.add_argument("files", nargs="+", help=".rvl source files")
+    exp_group = exp_wit.add_mutually_exclusive_group(required=True)
+    exp_group.add_argument("--service", default=None, metavar="NAME",
+                           help="export a single service by name")
+    exp_group.add_argument("--composition", action="store_true",
+                           help="export every service the composition provides")
+    exp_wit.add_argument("--package", default="revl:exported", metavar="NS:NAME",
+                         help="WIT package id for the generated file "
+                              "(default: revl:exported)")
+    exp_wit.add_argument("-o", "--output", default=None,
+                         help="output path (default: stdout)")
+    exp_wit.add_argument("--json-diagnostics", action="store_true",
+                         help="on rejection, print a structured diagnostic instead "
+                              "of the human rendering")
+
+    serve = sub.add_parser(
+        "serve",
+        help="serve a composition's OWN provided operations as MCP tools "
+             "(the fourth quadrant: hints derived by the compiler)")
+    serve.add_argument("files", nargs="+")
+    serve.add_argument("--mcp", action="store_true",
+                       help="serve over the MCP stdio protocol (required)")
+    serve.add_argument("--config", default=None,
+                       help="TOML/JSON file of `component-name = { ... }` config "
+                            "tables — supplied to each component at boot")
+    serve.add_argument("--composition", default="revl",
+                       help="tool-name prefix (tools are `<prefix>.<key>.<op>`)")
+
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
@@ -579,12 +1056,53 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--record", action="store_true",
                      help="record the effect accumulator so the REPL can step "
                           "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
+    run.add_argument("--wal", default=None, metavar="FILE",
+                     help="persist the effect accumulator as a durable write-ahead "
+                          "log (implies --record). On restart, `revl recover --wal "
+                          "FILE` rolls forward or back and states a checked verdict "
+                          "(docs/crash-recovery.md)")
+    run.add_argument("--trace", default=None, metavar="FILE",
+                     help="write a causal lifecycle trace (JSONL) — every "
+                          "transition carries the cause chain behind it, "
+                          "queryable with `revl why <c> --trace FILE` "
+                          "(docs/why-runtime.md)")
+    run.add_argument("--withdraw", default=None, metavar="COMPONENT",
+                     help="one-shot: boot, withdraw this live component while "
+                          "recording the causal cascade, then diff the actual "
+                          "cascade against the static `withdraw` prediction "
+                          "(the runtime oracle) and tear down")
     run.add_argument("--plan", action="store_true",
                      help="print the load plan (order, config, callable keys) and exit, without a runtime")
     run.add_argument("--placement", default=None,
                      help="TOML/JSON placement map: split components across processes and wire the seams")
     run.add_argument("--once", action="store_true",
                      help="with --placement: bring the composition up, run probes, then tear down and exit")
+
+    recover = sub.add_parser(
+        "recover",
+        help="crash recovery: read a `revl run --wal` write-ahead log and roll "
+             "forward (resume the persisted generation) or roll back (run the "
+             "boundary inverses LIFO), ending in a checked verdict + residue "
+             "proof (docs/crash-recovery.md)")
+    recover.add_argument("--wal", required=True, metavar="FILE",
+                         help="a write-ahead log written by `revl run --wal`")
+    recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
+                         help="on roll-forward, the item-15 snapshot to re-admit "
+                              "so recovery resumes the persisted generation")
+    recover.add_argument("--json", action="store_true", help="machine-readable output")
+
+    why = sub.add_parser(
+        "why",
+        help="explain a recorded lifecycle transition — the cause chain for a "
+             "component in a `revl run --trace` JSONL trace (docs/why-runtime.md)")
+    why.add_argument("component", help="the component whose transition to explain")
+    why.add_argument("--trace", required=True, metavar="FILE",
+                     help="a JSONL causal trace written by `revl run --trace`")
+    why.add_argument("--check", nargs="+", default=None, metavar="FILE",
+                     help="also run the oracle: compile these source files and "
+                          "diff the static `withdraw` prediction against the "
+                          "recorded cascade; a mismatch is a defect (nonzero exit)")
+    why.add_argument("--json", action="store_true", help="machine-readable output")
 
     args = parser.parse_args(argv)
 
@@ -597,14 +1115,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return run_command(args)
 
+    if args.command == "why":
+        return _run_why(args)
+
+    if args.command == "recover":
+        return _run_recover(args)
+
+    if args.command == "serve":
+        return _run_serve(args)
+
     if args.command == "mcp":
         return _run_mcp(args)
 
     if args.command == "import":
         return _run_import(args)
 
+    if args.command == "export":
+        return _run_export(args)
+
     if args.command == "plan":
         return _run_plan(args)
+
+    if args.command == "apply":
+        return _run_apply(args)
+
+    # historical query mode reads a recorded run (files, not source), so it is
+    # routed before the compile-from-source step every other command shares
+    if args.command == "query" and args.query_command in ("emitted-between",
+                                                           "touched"):
+        return _run_history_query(args)
 
     try:
         ir = compile_files(args.files)
@@ -631,10 +1170,29 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {rendered}", file=sys.stderr)
 
     if args.command == "test":
-        return test_command(ir, args.backend)
+        return test_command(ir, args.backend, sweep=getattr(args, "sweep", False))
 
     if args.command == "query":
         return _run_query(args, ir)
+
+    if args.command == "erase-report":
+        from .erase_report import build_report, render  # noqa: PLC0415
+        report_doc = build_report(
+            ir, args.realm,
+            prove_residue=not getattr(args, "no_residue_proof", False))
+        if args.json:
+            print(json.dumps(report_doc, indent=2))
+        else:
+            print(render(report_doc))
+        if not report_doc.get("ok"):
+            return 1
+        # a proven state-gone + untouched other realms is a clean report;
+        # a bare crossing does not fail (it is enumerated, by design), but an
+        # unproven teardown or a breached other realm does.
+        state = report_doc["inProcessStateGone"]["noResidueProof"]
+        residue_bad = state.get("available") and not state.get("proven")
+        breached = not report_doc["otherRealmsUntouched"]["untouched"]
+        return 1 if (residue_bad or breached) else 0
 
     if args.command == "audit" and getattr(args, "diff", None):
         from .audit_diff import audit_report, evaluate, render  # noqa: PLC0415
@@ -659,9 +1217,15 @@ def main(argv: list[str] | None = None) -> int:
             for ext in ir.get("externs") or []
         ]
         if args.json:
-            print(json.dumps({"manifest": manifest, "boundary": boundary,
-                              "externs": declared_externs,
-                              "distributability": distribution}, indent=2))
+            # The manifest + G8 audit as the versioned interchange format
+            # (docs/interchange-format.md, roadmap item 28): `stamp` adds the
+            # `schema_version`/`kind` header additively, over the same body
+            # earlier consumers already read.
+            from .interchange import stamp  # noqa: PLC0415
+            print(json.dumps(stamp(
+                {"manifest": manifest, "boundary": boundary,
+                 "externs": declared_externs,
+                 "distributability": distribution}), indent=2))
             return 0
         print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
         for entry in manifest.get("components") or []:

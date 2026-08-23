@@ -253,6 +253,8 @@ python -m revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
 python -m revl run app.rvl                   # boot on cordis-py; hold live with a REPL over provided services
 python -m revl run app.rvl --watch           # recompile on edit; a rejected change keeps the run alive
 python -m revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
+python -m revl plan cand.rvl --manifest running.json -o change.plan  # an executable plan artifact (docs/apply.md)
+python -m revl apply change.plan             # apply it: drift-refuse, verify each step, roll back on failure
 ```
 
 ```bash

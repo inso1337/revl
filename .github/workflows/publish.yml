@@ -1,0 +1,92 @@
+name: publish
+
+# Cut releases FROM TAGS ONLY. This workflow must never publish on a push to
+# main — it triggers exclusively on a version tag, so a merge to main can never
+# ship a release by itself. A maintainer publishes by pushing a `v*` tag:
+#
+#     git tag v2.0.1 && git push origin v2.0.1
+#
+# The publish is gated on the full CI suite (the same one that gates main),
+# re-run on the tagged commit: a version on PyPI is a claim that suite passed.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # Re-run the exact matrix that gates main, on the tagged commit. If any tier
+  # fails, the publish job below never runs — so a broken tag cannot reach PyPI.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # Sanity gate: the tag must match the version in pyproject.toml. A tag of
+  # v2.0.1 publishing a wheel that says 2.0.0 (or vice versa) is a footgun; fail
+  # loudly before building rather than shipping a mislabeled release.
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj=$(python3 - <<'PY'
+          import re, pathlib
+          text = pathlib.Path("pyproject.toml").read_text()
+          m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+          print(m.group(1) if m else "")
+          PY
+          )
+          echo "tag=$tag  pyproject=$proj"
+          if [ -z "$proj" ]; then
+            echo "::error::could not read version from pyproject.toml"; exit 1
+          fi
+          if [ "$tag" != "$proj" ]; then
+            echo "::error::tag v$tag does not match pyproject version $proj"; exit 1
+          fi
+
+  publish:
+    needs: [ci, check-version]
+    runs-on: ubuntu-latest
+    # A dedicated environment lets the maintainer add manual-approval and
+    # branch/tag protection rules around every release from the repo settings.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/revl/
+    permissions:
+      # OIDC token for PyPI Trusted Publishing — no long-lived secret needed.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Check the built artifacts
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+      # Trusted Publishing (OIDC) — the recommended path, no API token stored.
+      #
+      # MAINTAINER TODO (one-time, before the first release):
+      #   Configure a Trusted Publisher on PyPI for the `revl` project:
+      #   PyPI → project `revl` → Settings → Publishing → Add a pending/trusted
+      #   publisher with
+      #     owner:        inso1337
+      #     repository:   revl
+      #     workflow:     publish.yml
+      #     environment:  pypi
+      #   Until that is set up, this step will fail closed (it will not publish).
+      #
+      # ALTERNATIVE (API token instead of OIDC): remove the `id-token: write`
+      # permission and the two lines are enough — set a `PYPI_API_TOKEN` repo
+      # secret and pass it here:
+      #     with:
+      #       password: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

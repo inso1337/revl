@@ -2,7 +2,11 @@
 
 **Status:** implemented — `revl query {emits-to,withdraw,depends-on,reaches,drift}`,
 `src/revl/query.py`, MCP tools `revl_query_*` (`src/revl/mcp/query_tools.py`).
-Tests: `tests/test_query.py` over `tests/fixtures/query_mesh.rvl`.
+Tests: `tests/test_query.py` over `tests/fixtures/query_mesh.rvl`. Three time
+modes (§9): the same verbs and envelope answered against the static IR, the
+live session (post-swap), or a recorded run — `revl_live_query`,
+`revl_history_*`, `revl query {emitted-between,touched}`, tests in
+`tests/test_query_modes.py`.
 
 `revl audit` prints a composition's manifest and its G8 boundary surface. That
 is the right shape for a review and the wrong shape for a refactor. An author
@@ -207,3 +211,105 @@ answers what I want to know".
 The pairing that matters: `revl_query_withdraw` before `revl_swap`, and
 `revl_query_drift` before proposing a service edit. Both are the cheap
 read-only half of a change the gate would otherwise refuse.
+
+## 9. One query surface, three time modes
+
+The five verbs and the envelope above answer against the **static IR** — the
+composition as compiled from source. But two of the envelope's own stated
+`assumptions` name worlds the static IR is *not*: "a hot swap changes which
+body a service call lands in" and "only components in this IR are considered".
+The same verbs, answered against those other worlds, are two more modes. The
+verbs do not change; the envelope's `precision`/`assumptions` already say how
+the worlds differ, so a result carries a `mode` and says **which world it
+describes**.
+
+```json
+{ "ok": true, "query": "withdrawal", "mode": "live", ... }
+```
+
+`mode` is one of `static` (the default, §§3–7), `live`, or `historical`.
+
+### 9.1 Live — the same verbs, against what is loaded now
+
+A static answer is for the composition *as linked*; after a `revl_swap` it can
+be stale. The **live** mode answers the same verb against the session's actual
+loaded generation — the composition as it stands after every swap applied so
+far. There is no new analysis: the linked graph the static verb reads is also
+what the running session holds (`session.ir` is the post-swap generation), so
+`withdrawal(session.ir, C)` already answers for the live world. Live mode adds
+two things to the envelope:
+
+- the static **hot-swap caveat is spent** and replaced by the live one — this
+  *is* the post-swap world, and re-querying after the next swap is how you move
+  to the one after it;
+- a **`live` block** carrying what only the runtime knows: `generation`, and
+  the provisions **served right now**. A declared key whose provider has
+  drifted to an inactive state reads as absent (`live.notServedNow` on a
+  `withdraw`), where the static query — which sees the graph, not the running
+  fibers — would still count it.
+
+Live mode is **session-bound**, so it lives on the MCP surface, not the
+one-shot CLI (which has no persistent session):
+
+```
+revl_live_query { "verb": "withdraw", "component": "PgDatabase" }
+revl_live_query { "verb": "reaches",  "component": "UserCache" }
+```
+
+`verb` is one of the five; the verb's argument is `target` (emits-to /
+depends-on), `component` (withdraw / reaches) or `service` + `gains`/`loses`
+(drift). Requires `revl_load`. Use it, not `revl_query_*`, once a composition
+is running.
+
+### 9.2 Historical — the same envelope, against a recorded run
+
+The **historical** mode answers against a *recorded* run rather than a static
+IR or the live session. This is the query-side of the runtime causal traces
+(item 27, `docs/why-runtime.md`): the lifecycle trace (`why_runtime`, JSONL of
+load/withdraw + cause) says *when* a component lived, and the recorded effect
+timeline (`backends/python/replay.py`) says *what* it did while it lived. Both
+formats are **reused verbatim** — nothing here invents a parallel recording.
+
+Two questions, both `mode: historical`, both `precision: exact` (a recorded
+step is a fact, not a may-analysis or a prediction):
+
+- **which emissions crossed between steps X and Y?** — a windowed read of the
+  recorded effect timeline. An emission is a one-way boundary crossing, so each
+  hit is a real crossing the runtime performed in `[from, to]`, not a reachable
+  site. This is the novel one: nobody can ask it of an *un*-recorded run, and a
+  *verified* effect timeline is the thing that makes the window meaningful.
+
+  ```
+  revl_history_emitted_between { "from": 3, "to": 7 }
+  revl query emitted-between --timeline run.json --from 3 --to 7
+  ```
+
+- **everything this component touched during its life** — the recorded
+  counterpart of `reaches`. Where `reaches` is a may-analysis over the graph,
+  this is the effects and emissions the component *actually* produced on the
+  run, bounded by the lifecycle trace's load and withdraw (with the cause
+  behind each).
+
+  ```
+  revl_history_lifetime { "component": "Store" }
+  revl query touched Store --trace run.jsonl --timeline run.json
+  ```
+
+The MCP tools read the live session's own recording (`revl_load` with `record:
+true`, the same recording the replay tools read) and accept an inline
+`timeline`; `revl_history_lifetime` also takes a `trace`/`traceFile` for the
+lifecycle span. The CLI reads files: a replay-recording JSON (`--timeline`) and
+an item-27 lifecycle JSONL (`--trace`, a `revl run --trace` file).
+
+### 9.3 What the envelope says in each mode
+
+| mode | world | precision | the assumption that changes |
+|---|---|---|---|
+| `static` | the compiled IR | per verb (§2) | "a hot swap changes the answer" **applies** |
+| `live` | the session, post-swap | per verb | the swap caveat is **spent**; `live.notServedNow` reconciles served-vs-declared |
+| `historical` | one recorded run | **exact** | neither may nor prediction — "what happened", scoped to what was recorded |
+
+The point is that `precision` and `assumptions` were already the fields that
+distinguished these worlds, so adding modes needed no second vocabulary: a
+result says which world it answers for, and an agent reading it knows whether
+it holds a proof, a may-analysis, or a log.

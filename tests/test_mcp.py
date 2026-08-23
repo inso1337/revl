@@ -221,15 +221,20 @@ def test_initialize_and_tools_list():
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_load", "revl_call",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
+                          # the proving ground (docs/gauntlet.md)
+                          "revl_gauntlet",
                           # composition persistence (docs/persistence.md)
                           "revl_snapshot", "revl_restore",
                           # composition queries (docs/queries.md)
                           "revl_query_emitters", "revl_query_withdraw",
                           "revl_query_dependents", "revl_query_reach",
                           "revl_query_drift",
+                          # live + historical query modes (docs/queries.md §9)
+                          "revl_live_query", "revl_history_emitted_between",
+                          "revl_history_lifetime",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
-                          "revl_replay_forward"}
+                          "revl_replay_forward", "revl_replay_bisect"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True

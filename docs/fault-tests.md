@@ -195,7 +195,8 @@ injection point:
   (TS), cordis-rs, cordis4j or wasm — those tiers *refuse* the construct
   (§6). Cross-tier L-Raise remains the job of the per-backend scenario suites.
 - **One point.** `fail at step 3` proves step 3. Steps 2 and 4 are separate
-  fault tests. There is no "all points" sweep.
+  fault tests — *unless* you sweep (section 9): the sweep injects at every step
+  in turn, so the "all points" verdict is one command.
 - **Total steps only.** The injection point addresses top-level body steps. A
   step nested inside an `if` is not directly addressable, and when the prefix
   before the injection point contains an `if`, inverse labels degrade to
@@ -269,24 +270,119 @@ FAIL store unwinds in order [Store dies at step 4]
 
 ---
 
-## 8. Known divergences found by this feature
+## 8. Divergences found by this feature
 
-**cordis-py: an `await` in the body defeats A8's "lands FAILED".**
+**cordis-py: an `await` in the body defeated A8's "lands FAILED" — RESOLVED.**
 
 A component body containing an `await` step compiles to an *async* generator
-(A1's iteration boundary). cordis-py runs an async effect setup as a task and
-routes its failure to `_make_effect_guard`, which auto-disposes the effect —
-the accumulated inverses **do** run, newest first, and no residue is left — but
-the exception never reaches the fiber's error slot, so the fiber stays `ACTIVE`
-instead of landing `FAILED`. A synchronous body raises straight out of `apply`
-into `_start_reload`'s handler and lands `FAILED` correctly.
+(A1's iteration boundary). cordis-py *used to* run an async effect setup as a
+task and route its failure to `_make_effect_guard`, which auto-disposes the
+effect — the accumulated inverses ran, newest first, with no residue — but the
+exception never reached the fiber's error slot, so the fiber stayed `ACTIVE`
+instead of landing `FAILED`. A synchronous body raised straight out of `apply`
+into `_start_reload`'s handler and landed `FAILED` correctly.
 
 The first `fault test` written against an `await`-containing component found
-this. Reproduced with no revl code in the loop: a hand-built IR with
-`let-effect` / `await` / `fail`, emitted and plugged directly, ends `ACTIVE`
-with `map.drop` in the trace.
+this, reproduced with no revl code in the loop (a hand-built IR with
+`let-effect` / `await` / `fail`, emitted and plugged directly, ended `ACTIVE`
+with `map.drop` in the trace).
 
-This is not worked around. `assert failed` fails on such a component, and the
-message says the inverses did run and only the fiber state is wrong. It belongs
-with the `assertActive` residue bug in `docs/contract-errata.md` as an upstream
-runtime defect, not a revl one.
+**Fixed upstream** in the pinned runtime
+(`inso1337/cordis-py@harden-fiber-lifecycle` commit `1316174`, folded into
+geohotstan/cordis-py#1): an async setup failure is now routed to the fiber's
+error slot exactly as the sync path is, so the fiber lands `FAILED` with the
+error recorded while the inverses still run LIFO. `assert failed` now holds on
+an `await`-containing component, and
+`test_fault_tests.py::test_an_await_body_lands_failed_like_a_sync_body` pins
+it. See `docs/contract-errata.md` (entry now marked RESOLVED).
+
+---
+
+## 9. The sweep — fail at *every* step
+
+A single `fault test` proves A8/R4 at the one point its author chose. But the
+compiler already knows the **complete** step list of every component from the
+IR, so the enumeration is mechanical. The sweep auto-generates the injection at
+every top-level body step of every component, runs the full assertion set
+(`failed` / `no residue` / `inverses lifo` / `siblings unaffected`) at each, and
+reports — a component with N steps gets N fault tests nobody wrote.
+
+```
+revl test --sweep app.rvl
+```
+
+This upgrades the claim from *"A8 held at the point I checked"* to *"no mid-life
+failure point leaves residue"* — an exhaustive verdict rather than a spot check.
+
+It is nearly free, because it invents nothing: the sweep is a generator loop
+over the IR (`fault.sweep_units`) plus an aggregating report. Each synthesized
+injection drives the **same** `_inject` / `_drive` / `_judge` machinery a
+hand-written `fault test` drives (section 2). There is no second injector.
+
+### 9.1 What it reports
+
+```
+fault sweep — py reference tier (the only tier that executes fault tests)
+
+Sink: 1 step(s) swept, 1 passed, 0 failed
+  (held out of the bring-up — they require what Sink provides: Store)
+  PASS step 1 (provision `log`)
+Store: 4 step(s) swept, 4 passed, 0 failed
+  PASS step 1 (effect `scratch`)
+  PASS step 2 (emit)
+  PASS step 3 (effect `pool`)
+  PASS step 4 (provision `cache`)
+
+swept 5 step(s) across 2 component(s): 5 passed, 0 failed, 0 unreachable
+```
+
+Every failing step names the residue it left, exactly as a single fault test
+does (section 7); every emission before an injection point still prints its
+irreversible `note:`.
+
+### 9.2 Sweeping a provider
+
+The single-point driver brings the rest of the composition up first, so the
+target activates against real providers. When the target is itself a *provider*,
+its **dependents** cannot activate — their provider is the one held back to fail
+last — so they would sit `PENDING` and read as a false "sibling affected". The
+sweep computes the dependents from the manifest and **holds them out of the
+bring-up**, printing which ones and why. A dependent going down because its
+upstream failed is expected propagation, not a containment breach; the
+`siblings unaffected` check therefore covers only the components that do *not*
+depend on the target.
+
+### 9.3 Nothing checked must never read as clean
+
+The injection scheme addresses only **top-level** body steps (section 5). A step
+nested inside a component `if` has no index of its own, so the sweep cannot
+inject there. It does **not** skip such a step silently — it lists it:
+
+```
+  UNREACHABLE step 2 > then > step 1 (emit): nested inside an `if`; the
+  injection scheme addresses only top-level body steps (docs/fault-tests.md,
+  section 5)
+```
+
+and counts it in the closing line (`… N unreachable`). An empty check must never
+be mistaken for a clean one. (Surface revl forbids anything but `fail` inside a
+component `if` per G6, so nested steps arise only from hand-written or imported
+IR — but the sweep refuses to pretend regardless.)
+
+### 9.4 Shape, and the gauntlet
+
+`fault.run_sweep` also returns a structured dossier whose `counts`
+(`{components, steps, passed, failed, unreachable}`) and `status` are shaped to
+drop straight into the gauntlet's `faultSweep` slot
+(`src/revl/mcp/gauntlet.py`, roadmap item 31), moving that section from
+`claimed` to `tested` when it is wired. `fault.sweep_dossier(ir, only=<name>)`
+grades a single candidate component the same way.
+
+### 9.5 Horizon — what the sweep does *not* yet cover
+
+The sweep is **sequential**: it fails one step at a time in program order. Two
+axes are deliberately out of scope for now — seeded clock/random coeffects, and
+async interleaving (failing at every step *under every legal interleaving* of
+concurrent activations); together they would turn this step sweep into a
+*schedule* sweep, the natural next frontier once the sequential exhaustive
+verdict is banked.
