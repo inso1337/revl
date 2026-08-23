@@ -1,0 +1,6 @@
+# The MCP / agent sandbox profile: agent-generated code admitted through the
+# MCP session may reach the model and its key-value store, and nothing else.
+mcp may reach llm, kv
+
+# The `AgentSummarize` component is trusted to reach exactly that set too.
+component Agent* may reach llm, kv

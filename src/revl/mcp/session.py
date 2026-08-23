@@ -112,6 +112,12 @@ class Session:
         # it on. This is the "which world" a live query answers for — see
         # `live_state` and docs/queries.md §9.
         self._generation = 0
+        # the agent-sandbox profile (roadmap item 33): a `revl.policy.Policy`
+        # whose `mcp` allow-list bounds what agent-generated code admitted here
+        # may reach — "agent output may reach [llm, kv*] and nothing else",
+        # enforced at load/swap as a machine-checked invariant instead of a
+        # review convention. None = no sandbox (the default).
+        self.sandbox = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -145,6 +151,7 @@ class Session:
                 f"{summarize_holes(open_holes)}. A hole has a type and no "
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
+        self._enforce_sandbox(ir)
         emit, runtime_mod, Context, FiberState = _backend()
         driver_class = _capturing_driver_class()
         self.config = config or {}
@@ -156,6 +163,31 @@ class Session:
         self._generation = 1
         self._run(self._driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True) | ({"recording": True} if record else {})
+
+    def _enforce_sandbox(self, ir: dict) -> None:
+        """The agent-sandbox invariant (roadmap item 33). When a `sandbox`
+        policy is set, every component being admitted here is agent output:
+        its G8 reach must stay within the policy's `mcp` allow-list. A breach
+        refuses admission before any runtime is touched — the sandbox profile
+        is a machine-checked gate, not a review convention.
+
+        Deliberately additive and self-contained: no runtime is needed to
+        decide it (it is set operations over the audit graph), so a draft that
+        over-reaches is refused without the composition ever booting."""
+        if self.sandbox is None or self.sandbox.mcp_allow is None:
+            return
+        from ..audit_diff import audit_report  # noqa: PLC0415 — lazy, no cordis
+        from ..policy import evaluate  # noqa: PLC0415
+
+        audit = audit_report(ir)
+        everyone = frozenset(audit.get("boundary") or {})
+        violations = evaluate(self.sandbox, audit, mcp_components=everyone)
+        if violations:
+            detail = "; ".join(v.message.split(" — ")[0] for v in violations)
+            raise SessionError(
+                f"agent-sandbox refuses admission: {detail}. The sandbox "
+                f"permits [{', '.join(self.sandbox.mcp_allow)}] and nothing "
+                f"else (boundary policy, docs/boundary-policy.md)")
 
     def _prepare_module(self, ir: dict):
         """Emit the module and, when recording, instrument it before load.
@@ -178,6 +210,7 @@ class Session:
         """Replace the running composition. The caller has already had the
         candidate admitted; this performs the transition."""
         driver = self._require()
+        self._enforce_sandbox(ir)
         self.previous = self.ir
         self.previous_origin = self.origin
         self._run(driver._dispose_all(self.ir))
