@@ -97,6 +97,7 @@ class LetEffect:
     undo: object
     line: int
     setup: list = field(default_factory=list)
+    verified: bool = False
 
 
 @dataclass
@@ -105,6 +106,7 @@ class EffectStmt:
     undo: object
     line: int
     setup: list = field(default_factory=list)
+    verified: bool = False
 
 
 @dataclass
@@ -1010,7 +1012,19 @@ class Parser:
             self.expect("=")
             # `let x = effect … undo …` binds an acquisition; anything else
             # binds a plain value, so a method can name an intermediate
-            # result instead of nesting every call into one expression
+            # result instead of nesting every call into one expression. A
+            # `verified` modifier (syntax-2.0 §7) marks the acquisition for
+            # inverse round-trip testing (roadmap item 26).
+            verified_effect = False
+            if not mutable and self.at("kw", "verified"):
+                self.next()
+                if not self.at("kw", "effect"):
+                    tok2 = self.peek()
+                    raise self.err(tok2.line,
+                                   f"expected `effect` after `verified`, found {tok2.value!r}",
+                                   hint="`verified` marks an effect acquisition for inverse "
+                                        "round-trip testing: `let x = verified effect … undo …`")
+                verified_effect = True
             if not mutable and self.at("kw", "effect"):
                 if declared is not None:
                     # an acquisition binds a *host-valued* object, which the
@@ -1025,7 +1039,13 @@ class Parser:
                              "src/revl/typecheck.py); drop the annotation",
                     )
                 acquire, undo, line, setup = self.effect_form(tok.line)
-                return LetEffect(bind, acquire, undo, line, setup)
+                return LetEffect(bind, acquire, undo, line, setup, verified_effect)
+            if verified_effect:
+                tok2 = self.peek()
+                raise self.err(tok2.line,
+                               f"expected `effect` after `verified`, found {tok2.value!r}",
+                               hint="`verified` marks an effect acquisition for inverse "
+                                    "round-trip testing: `let x = verified effect … undo …`")
             if not in_method:
                 raise self.err(
                     tok.line,
@@ -1036,6 +1056,20 @@ class Parser:
                          "into a `fn` (G6)",
                 )
             return LetStmt(bind, self.pure_expr(), mutable, tok.line, declared)
+        if tok.kind == "kw" and tok.value == "verified":
+            # `verified effect … undo …` — the effect is marked for inverse
+            # round-trip testing (syntax-2.0 §7, roadmap item 26). `verified`
+            # heads a body statement only before `effect`; `verified fn` is a
+            # top-level declaration, never a body statement.
+            self.next()
+            if not self.at("kw", "effect"):
+                tok2 = self.peek()
+                raise self.err(tok2.line,
+                               f"expected `effect` after `verified`, found {tok2.value!r}",
+                               hint="inside a body, `verified` marks an effect for inverse "
+                                    "round-trip testing: `verified effect … undo …`")
+            acquire, undo, line, setup = self.effect_form(tok.line)
+            return EffectStmt(acquire, undo, line, setup, verified=True)
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup)

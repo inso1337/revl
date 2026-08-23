@@ -118,6 +118,15 @@ Practically, the things it will *not* catch:
   `acquire`-classified extern touched;
 * time — a value derived from a clock does not come back.
 
+The runtime never closes this gap — but an author can opt one effect into a
+partial check of it. A `verified effect` (syntax-2.0 §7, roadmap item 26) makes
+`revl test` auto-generate an inverse round-trip: activate the component, tear it
+down so the inverse runs, and assert the observable in-process state returned to
+baseline, over N randomized rounds. It is a *test the author did not write*, not
+a proof, and its scope is exactly this section's — in-process state only; the
+first item above is what it catches, the others stay out of reach. See
+`docs/verified-effect.md`.
+
 ### 4.2 Compensation is not inversion
 
 Paper §6.1. An A5 `compensate` clause is *a second boundary crossing chosen to

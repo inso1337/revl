@@ -63,11 +63,21 @@ def _without_fault_tests(ir: dict) -> dict:
 
 def _fault_note(ir: dict, tier: str) -> str:
     units = ir.get("fault_tests") or []
-    if not units:
-        return ""
-    print(f"[{tier}] note: {len(units)} fault test(s) not run on this tier — "
-          f"`fault test` runs on the py reference tier only (docs/fault-tests.md)")
-    return f"; {len(units)} fault test(s) skipped (py tier only)"
+    note = ""
+    if units:
+        print(f"[{tier}] note: {len(units)} fault test(s) not run on this tier — "
+              f"`fault test` runs on the py reference tier only (docs/fault-tests.md)")
+        note += f"; {len(units)} fault test(s) skipped (py tier only)"
+    from .fault import roundtrip_units  # noqa: PLC0415 — no cordis needed to count them
+
+    rt = roundtrip_units(ir)
+    if rt:
+        n = sum(len(u["verified"]) for u in rt)
+        print(f"[{tier}] note: {n} verified-effect round-trip(s) not run on this tier — "
+              f"inverse round-trip testing runs on the py reference tier only "
+              f"(docs/verified-effect.md)")
+        note += f"; {n} verified-effect round-trip(s) skipped (py tier only)"
+    return note
 
 
 def _cordis_available() -> bool:
@@ -112,7 +122,10 @@ def run_py(ir: dict) -> tuple[str, str]:
         sys.modules.pop(module.__name__, None)
     entries = getattr(module, "REVL_TESTS", None) or []
     fault_entries = _fault(ir, module)
-    if not entries and not fault_entries:
+    from .fault import roundtrip_units  # noqa: PLC0415 — no cordis needed to *find* them
+
+    roundtrip_entries = roundtrip_units(ir)
+    if not entries and not fault_entries and not roundtrip_entries:
         return ("pass", "no tests emitted by the backend")
 
     failures = 0
@@ -151,6 +164,26 @@ def run_py(ir: dict) -> tuple[str, str]:
             failures += fault_failures
             summary.append(
                 f"{fault_total - fault_failures} of {fault_total} fault test(s) passed")
+
+    if roundtrip_entries:
+        from .fault import run_roundtrip_units  # noqa: PLC0415 — lazy: needs cordis
+
+        try:
+            rt_failures, rt_dossier = run_roundtrip_units(ir, roundtrip_entries)
+        except ModuleNotFoundError as error:
+            # a round-trip drives a real activation+teardown, so it needs the
+            # runtime the plain `test` blocks do not; missing it is a skip
+            reason = (f"{len(roundtrip_entries)} verified-effect round-trip(s) skipped "
+                      f"(the cordis-py runtime is not installed: {error.name!r} missing — "
+                      f"sh backends/python/setup.sh)")
+            if not entries and not fault_entries:
+                return ("skip", reason)
+            summary.append(reason)
+        else:
+            failures += rt_failures
+            rt_total = rt_dossier["counts"]["effects"]
+            summary.append(
+                f"{rt_total - rt_failures} of {rt_total} verified-effect round-trip(s) held")
 
     if failures:
         return ("fail", "; ".join(summary) or f"{failures} test(s) failed")
@@ -441,7 +474,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False) -> int:
                   f"tier only, not `{backend}` (docs/fault-tests.md)")
         return sweep_command(ir)
 
-    if not (ir.get("tests") or []) and not (ir.get("fault_tests") or []):
+    from .fault import roundtrip_units  # noqa: PLC0415 — no cordis needed to find them
+
+    if (not (ir.get("tests") or []) and not (ir.get("fault_tests") or [])
+            and not roundtrip_units(ir)):
         print("no tests to run")
         return 0
 

@@ -2714,6 +2714,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             step = {"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo}
             if setup_steps:
                 step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
             body.append(step)
         elif isinstance(stmt, EffectStmt):
             if stmt.setup:
@@ -2737,6 +2739,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     "undo": _lower_expr(stmt.undo, env, mode="undo")}
             if setup_steps:
                 step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
             body.append(step)
         elif isinstance(stmt, FailStmt):
             body.append({
@@ -2846,6 +2850,21 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
+            if getattr(mstmt, "verified", False):
+                # `verified effect` is inverse round-trip tested by activating
+                # the component and tearing it down (roadmap item 26); that
+                # round-trip is only well-defined for an *activation-body*
+                # effect, whose inverse the fiber's teardown runs. A
+                # method-body effect runs per request, so it has no such
+                # closed activate/teardown window — reject rather than accept
+                # a marker the runner cannot honour.
+                raise RevlError(
+                    filename, mstmt.line,
+                    "`verified effect` is only allowed in a component activation body",
+                    hint="inverse round-trip testing activates the component and tears it "
+                         "down; a provide-method effect runs per request and has no such "
+                         "window (docs/verified-effect.md). Drop `verified`, or move the "
+                         "effect to the activation body.")
             if isinstance(mstmt, LetEffect):
                 # item zero (docs/design-v2-instances.md): a spawn inside a
                 # provide-method is a request-scoped instance. It gets its own
