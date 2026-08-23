@@ -1,0 +1,74 @@
+name: Feature request
+description: Propose a language construct, a checker capability, a tier, or tooling.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. revl is a research language with a deliberate scope — it makes the
+        Cordis spatiotemporal-composability guarantees a type system, and it declines features that
+        do not serve that. The clearer you are about which stratum and which guarantee your proposal
+        touches, the faster it can be evaluated.
+
+        Please skim [docs/v2.0-roadmap.md](../blob/main/docs/v2.0-roadmap.md) first — the thing you
+        want may already be planned, in flight, or explicitly deferred (with the reason).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can't you express or do today? A concrete scenario beats an abstract wish.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of revl does this touch?
+      multiple: true
+      options:
+        - "Language surface / syntax (a stratum-1/2 construct)"
+        - "Components & effects (stratum 3 — the paradigm)"
+        - "Host blocks / extern boundary (stratum 4)"
+        - "The checker / a guarantee (G1–G8, A1–A8)"
+        - "A backend tier (py / ts / rust / java / wasm / go)"
+        - "The IR contract (ir_version)"
+        - "CLI / tooling (compile, audit, run, test, fmt)"
+        - "MCP server / agent surface"
+        - "Docs"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: sketch
+    attributes:
+      label: Sketch of the proposal
+      description: >
+        How might it look? If it is a language feature, show the `.rvl` you'd want to write. If it is
+        a checker capability, show a program that should be accepted or rejected and why. Rendered as
+        revl code.
+      render: rust
+      placeholder: |
+        # what I'd like to be able to write:
+        service Bus {
+          commutative emission fn publish(topic: Str, msg: Str)
+        }
+    validations:
+      required: false
+  - type: textarea
+    id: guarantee
+    attributes:
+      label: Relationship to the guarantees
+      description: >
+        revl's value is that a program which compiles satisfies G1–G8 / A1–A8. Does your proposal
+        strengthen a guarantee, add a new checked property, or sit outside the checked surface? Be
+        honest if it would weaken a guarantee — that is the hardest kind of change to accept.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing constructs you tried, other designs you weighed, or why the status quo doesn't suffice.
+    validations:
+      required: false
