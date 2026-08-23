@@ -10,10 +10,10 @@ The organizing fact: **the five tiers are disjoint by directory** (`backends/{py
 | cordis-ts | upstream | 10 test files, `tsc` + executed | thinner realm runtime coverage than py |
 | cordis-rs | upstream crate (0.3.0) | 1 scenario file (8 tests), `cargo check`/`cargo test` | none blocking — reactive isolate-linking fixed (plug-time isolation, emitter-side); realm labels fixed |
 | cordis4j | upstream (github/1na-ko) | 1 scenario file, real-jar scenarios | global-realm divergence (errata'd, xfail) |
-| cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | i64 port ✅ landed (Int is i64, overflow traps); 🚧 **rich-type service boundary IN PROGRESS (backend-wave)** — 19 matrix gaps (Str/Opt/Result/records/ADTs/Map as service signatures); named realms conform |
+| cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | i64 port ✅; rich-type service boundary ✅ (Str/Opt/Result/records/ADTs/List cross as canonical-ABI pointers) — **19→7 gaps**, the 7 genuine boundaries (Float, Map, config, host `Map.new`); wasm `spawn` now unblocked, not yet lowered |
 | cordis-go | third-party `0xdenny218/stc-go` (pinned `b3d6788`) | scenarios + v3 fixtures executed; **0 gaps in the conformance matrix**, CI-gated (`go build`) | v1/v2/v3 all emit & build; teardown-ordering divergence from cordis-rs (errata); no spawn yet |
 
-**Conformance matrix status:** all five *language* tiers — python, typescript, rust, java, **go** — are at **0 gaps**, each validated by its real compiler. Only cordis-wasm has gaps (its i32→i64 port is in flight; its remaining gaps are scalar-only-service-boundary + config/host, not extern gaps).
+**Conformance matrix status:** all five *language* tiers — python, typescript, rust, java, **go** — are at **0 gaps**, each validated by its real compiler. Only cordis-wasm has gaps — 7, all genuine tier boundaries (Float, Map, config, host `Map.new`) after both the i64 port and the rich-type service boundary landed.
 
 The through-line across every past wave: **a claim with no gate behind it** — emitters marked correct with nothing executing their output (the `Map.new()` that shipped in a golden; realm semantics asserted at runtime nowhere). The runtime-truth theme below exists to close that class for good.
 
@@ -40,9 +40,9 @@ Addressing decided: **supervision-tree** (an instance is reachable by its spawne
 - **B1 · sub-component teardown scopes** *(first-party: py runtime + emitter)* — item zero from the static audit. Today effects created in a provide-method are adopted into the component-level `Frame` and live until the component tears down; a request-scoped instance needs a nested scope. `backends/python/runtime.py` `Frame`.
 - **B2 · hierarchical realm resolution in the checker** — `src/revl/lower.py:3047` `_realm` is flat; the runtime walks the parent chain. Diverges the instant a child is plugged onto its spawner's context. Prerequisite for `spawn`, opens before per-instance realms. *(compiler, not a backend — noted here because it gates the backend work.)*
 - **B3 · wasm local/identity realms** *(first-party)* — the gate proved wasm handles *named* realms, but instance-parametric components need *local* realms (each runtime instance in its own realm without a distinct label string). wasm's provider table is flat and realms are compile-time mangling, so a runtime-determined instance count can't be expressed today. Add a realm prefix applied at resolve / publish / conflict-check (`backends/wasm/runtime.py` ~`:293`, `:332`, `:131-137`). This is the ~10-line first-party change — but it only matters once instance-parametric is accepted, hence Wave B not A.
-- **B4 · spawn lowering across tiers** — 🚧 **IN PROGRESS (backend-wave), do not pick up:** ts/rust/java/go each mirror the py phase-1 reference, executed on the real runtime (rust+go and ts+java split across two agents; wasm deferred until its rich-type service boundary lands). py proved the shape.
+- **B4 · spawn lowering across tiers** — ✅ **DONE.** ts, rust, go, java all lower `spawn`, each executed on its real runtime (all 4 spawn properties proven). Only wasm `spawn` remains (a short phase-2.5, now unblocked). Remaining beyond that: hot-swap, and an instance accessor (the handle exposes only `.dispose()`).
 
-**Wasm-to-zero (rich-type service boundary)** — 🚧 **IN PROGRESS (backend-wave), do not pick up:** the 19 remaining wasm matrix gaps are Str/Opt/Result/records/ADTs/Map as service params/returns, plus config/host/extern. The i64 port is done; wasm's v3 *functions* already lower rich types through a canonical-ABI linear-memory model, so the work extends that machinery to the service boundary. `backends/wasm/`.
+**Wasm-to-zero (rich-type service boundary)** — ✅ **DONE (19→7).** Str/Opt/Result/records/ADTs/List now cross the service boundary as canonical-ABI pointers (reusing the v3-functions linear-memory machinery), with an ABI-width-agreement guard that still rejects genuine type mismatches; validated on wasmtime. The 7 remaining are genuine tier boundaries — `type/Float` (refused tier-wide), `type/Map` (no linear-mem rep), config blocks ×2 (no instantiation-config channel), host `Map.new` ×3 — not defects.
 
 ## Wave C — New Cordis runtimes
 
@@ -56,7 +56,7 @@ The backend contract is small (install effect with inverse; provide/read keys; r
 These touch shared emit structure/IR semantics, so they conflict if run in parallel. One at a time, integrated between:
 
 - **D1 · single expression renderer per backend** — ✅ **on main.** ts/rust/java each converged their v1/component renderer and their 2.0 renderer into one shape-dispatching function (py/wasm were already single-renderer). This is the structural fix behind most of the divergences the runtime-truth wave then surfaced.
-- **D2 · uniform component IR dialect** — reduce per-backend divergence in how components lower.
+- **D2 · uniform component IR dialect** — ✅ **DONE** (main roadmap item 5, closed by `5d59834`'s tagged-ADT design). Per-backend divergence in component lowering is normalized.
 - **D3 · `call` node disambiguation** across dialects (partly addressed by D1's shape-dispatch).
 
 ## Deferred / tracked, not scheduled
