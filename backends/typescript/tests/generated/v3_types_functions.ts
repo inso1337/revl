@@ -14,6 +14,15 @@ function revlEq(a: unknown, b: unknown): boolean {
     const xs = a as unknown[], ys = b as unknown[]
     return xs.length === ys.length && xs.every((x, i) => revlEq(x, ys[i]))
   }
+  if (a instanceof Map && b instanceof Map) {
+    // revl equality is structural and order-independent (syntax-2.0 §3.4);
+    // for maps that means same key set, equal value under every key.
+    if (a.size !== b.size) return false
+    for (const [k, v] of a.entries()) {
+      if (!b.has(k) || !revlEq(v, b.get(k))) return false
+    }
+    return true
+  }
   const ka = Object.keys(a as object), kb = Object.keys(b as object)
   if (ka.length !== kb.length) return false
   return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)

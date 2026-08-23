@@ -706,3 +706,63 @@ def test_provider_struct_captures_required_services():
     # no free reference to the binding survives in the impl
     impl = out.split("impl S for CS {")[1].split("}")[0]
     assert "bus." not in impl.replace("self.bus.", "")
+
+
+# ---- Map value type (docs/stdlib-2.0.md §Map) ------------------------------
+
+MAP_SRC = """
+pub fn newTable() -> Map[Str, Int] { return Map.empty() }
+pub fn put(m: Map[Str, Int], k: Str, v: Int) -> Map[Str, Int] { return m.set(k, v) }
+pub fn build(pairs: List[Str]) -> Map[Str, Int] {
+  var m = Map.empty()
+  var i = 0
+  while (i < pairs.length()) {
+    m = m.set(pairs[i], pairs[i].length())
+    i += 1
+  }
+  return m
+}
+test "map value semantics" {
+  assert newTable().has("a") == false
+  assert (newTable().lookup("a") ?? 0 - 1) == 0 - 1
+  assert put(newTable(), "a", 1).has("a") == true
+  assert (put(newTable(), "a", 1).lookup("a") ?? 0 - 1) == 1
+  // order-independent structural equality: same mapping, two insert orders
+  assert build(["a", "bb", "ccc"]) == build(["ccc", "bb", "a"])
+  // persistent fold over one binding: extending never disturbs existing
+  // pairs, and repeated READS of the same snapshot agree (reads borrow,
+  // they do not consume)
+  var t = Map.empty()
+  t = t.set("a", 1)
+  t = t.set("b", 2)
+  assert (t.lookup("a") ?? 0 - 1) == 1
+  assert (t.lookup("a") ?? 0 - 1) == 1
+  assert (t.lookup("b") ?? 0 - 1) == 2
+  assert (t.lookup("c") ?? 0 - 1) == 0 - 1
+  assert t.has("a") == true
+  assert t.has("c") == false
+}
+"""
+
+
+@needs_cargo
+def test_cargo_check_compiles_the_map_value_type(tmp_path):
+    """docs/stdlib-2.0.md §Map: Map.empty/set/lookup/has compile on the rust
+    tier (std HashMap, cloned on write; lookup answers Option<V>)."""
+    ir = compile_source(MAP_SRC)
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_cargo_test_runs_the_map_value_semantics(tmp_path):
+    """Not just compiles: persistent set (receiver never mutates), lookup
+    absence, and ORDER-INDEPENDENT structural equality (the last assert
+    builds the same mapping in two different insertion orders)."""
+    ir = compile_source(MAP_SRC)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "1 passed" in result.stdout

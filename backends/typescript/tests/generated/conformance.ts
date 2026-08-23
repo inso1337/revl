@@ -32,6 +32,32 @@ function revlMod(a: bigint, b: bigint): bigint {
   const m = revlNonZero(b) < 0n ? -b : b
   return ((a % m) + m) % m
 }
+// The total forms (docs/arithmetic.md): the same quotient as the faulting
+// helpers, but a zero divisor yields Err(reason) instead of throwing — `fail`
+// is refused in a pure fn, so the error travels as a value. The shape is the
+// one the `adt` node renders for a built-in Result: `{ kind, value }`.
+function revlCheckedDivTrunc(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  return { kind: "Ok", value: revlI64(a / b) }
+}
+function revlCheckedDivFloor(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  const q = a / b
+  return a % b !== 0n && (a < 0n) !== (b < 0n)
+    ? { kind: "Ok", value: revlI64(q - 1n) }
+    : { kind: "Ok", value: revlI64(q) }
+}
+function revlCheckedDivEuclid(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  const q = a / b
+  if (a % b >= 0n) return { kind: "Ok", value: revlI64(q) }
+  return b > 0n ? { kind: "Ok", value: revlI64(q - 1n) } : { kind: "Ok", value: revlI64(q + 1n) }
+}
+function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
+  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  const m = b < 0n ? -b : b
+  return { kind: "Ok", value: ((a % m) + m) % m }
+}
 
 export type Outcome =
   { kind: "Found"; value: bigint }

@@ -295,6 +295,16 @@ def _expr(node, env: _Env, expected=None) -> str:
         go_elem = _go_type(elem) if elem else "any"
         rendered = ", ".join(_expr(it, env) for it in items)
         return "[]%s{%s}" % (go_elem, rendered)
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map): same positional-inference
+        # limit as the v3 tier — refuse rather than mis-emit.
+        if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
+            k, v = _v3_split_generic(expected[4:-1])
+            return "map[%s]%s{}" % (_go_type(k), _go_type(v))
+        raise EmitError(
+            "an untyped empty Map needs an expected Map type on this tier "
+            "(Go infers literals positionally, not from later use) - pin it "
+            "via a typed fn return/parameter or any annotated flow")
     if kind == "index":
         return "%s[%s]" % (_expr(node.get("target"), env),
                            _expr(node.get("index"), env))
@@ -355,6 +365,9 @@ def _comp_infer(node, env: _Env):
 # stdlib helpers referenced by component method bodies live in the shared v3
 # preamble; using any one flags the preamble + its imports into the module.
 _COMP_NEEDS_STDLIB = False
+# Map value helpers (revlMapSet/Get/Has) referenced by component bodies:
+# flags _V3_MAP_PREAMBLE (+ the Opt preamble its Get answers into).
+_COMP_NEEDS_MAP = False
 
 
 def _comp_builtin(method, recv_surface, target, args):
@@ -385,6 +398,19 @@ def _comp_builtin(method, recv_surface, target, args):
         return "revlStrCharAt(%s, %s)" % (target, args[0])
     if method == "charCodeAt":
         return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
+    # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
+    # _COMP_NEEDS_MAP at module assembly.
+    global _COMP_NEEDS_MAP
+    if method == "set":
+        _COMP_NEEDS_MAP = True
+        return "revlMapSet(%s, %s, %s)" % (target, args[0], args[1])
+    if method == "lookup":
+        _COMP_NEEDS_MAP = True
+        return "revlMapGet(%s, %s)" % (target, args[0])
+    if method == "has":
+        _COMP_NEEDS_MAP = True
+        return "revlMapHas(%s, %s)" % (target, args[0])
     raise EmitError("unknown stdlib method: %r" % (method,))
 
 
@@ -1243,6 +1269,16 @@ def _v3_builtin_ret_type(method, recv_type):
         return "List[Str]"
     if method in ("slice", "concat", "push"):
         return recv_type
+    # The Map value type (docs/stdlib-2.0.md §Map).
+    if method == "set":
+        return recv_type
+    if method == "has":
+        return "Bool"
+    if method == "lookup":
+        if isinstance(recv_type, str) and recv_type.startswith("Map[") and recv_type.endswith("]"):
+            _, v = _v3_split_generic(recv_type[4:-1])
+            return f"Opt[{v}]"
+        return None
     return None
 
 
@@ -1518,6 +1554,19 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         rendered = ", ".join(_go_v3_expr(it, ctx) for it in items)
         return f"[]{go_elem}{{{rendered}}}"
 
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map). Go infers composite
+        # literals positionally, never from later use, so an unpinned empty
+        # map is refused rather than emitted as non-compiling Go — the same
+        # honesty as an untyped empty list on tiers that cannot infer it.
+        if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
+            k, v = _v3_split_generic(expected[4:-1])
+            return f"map[{_go_v3_type(k, ctx.types)}]{_go_v3_type(v, ctx.types)}{{}}"
+        raise EmitError(
+            "an untyped empty Map needs an expected Map type on this tier "
+            "(Go infers literals positionally, not from later use) - pin it "
+            "via a typed fn return/parameter or any annotated flow")
+
     if kind == "arrow":
         names = node.get("params") or []
         declared = list(node.get("param_types") or [])
@@ -1637,6 +1686,14 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
+    # The Map value type (docs/stdlib-2.0.md §Map): persistent Go maps —
+    # `set` copies into a fresh map, `lookup` answers the sealed RevlOpt.
+    if method == "set":
+        return f"revlMapSet({target}, {args[0]}, {args[1]})"
+    if method == "lookup":
+        return f"revlMapGet({target}, {args[0]})"
+    if method == "has":
+        return f"revlMapHas({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Go `/` truncates and
     # `%` takes the dividend's sign, which is what revl specifies, so
     # div_trunc is native; the other three are helpers so every tier computes
@@ -2003,6 +2060,29 @@ type RevlErr[T any, E any] struct{ Value E }
 func (RevlErr[T, E]) isRevlResult() {}
 '''
 
+_V3_MAP_PREAMBLE = '''// ---- Map value type (docs/stdlib-2.0.md §Map): persistent Go maps -----
+func revlMapSet[K comparable, V any](m map[K]V, k K, v V) map[K]V {
+	out := make(map[K]V, len(m)+1)
+	for kk, vv := range m {
+		out[kk] = vv
+	}
+	out[k] = v
+	return out
+}
+
+func revlMapGet[K comparable, V any](m map[K]V, k K) RevlOpt[V] {
+	if v, ok := m[k]; ok {
+		return RevlSome[V]{Value: v}
+	}
+	return RevlNone[V]{}
+}
+
+func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
+	_, ok := m[k]
+	return ok
+}
+'''
+
 _V3_STDLIB_PREAMBLE = '''// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 
@@ -2154,6 +2234,12 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         "externs": externs, "tests": tests,
     })
     used_opt = ("Opt[" in blob) or ('"optfield"' in blob) or ('"optcall"' in blob)
+    # The Map value type (docs/stdlib-2.0.md §Map): its helpers answer Opt
+    # (`lookup`), so using any of them pulls the Opt preamble in too.
+    used_map = ('"maplit"' in blob) or any(
+        f'"method": "{m}"' in blob for m in ("set", "lookup", "has"))
+    if used_map:
+        used_opt = True
     # The total division forms produce a Result value without the source ever
     # spelling `Result[` — their method names put Result in the module too.
     used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
@@ -2251,6 +2337,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append(_V3_OPT_PREAMBLE)
     if used_result:
         out.append(_V3_RESULT_PREAMBLE)
+    if used_map:
+        out.append(_V3_MAP_PREAMBLE)
     if ctx.used_stdlib:
         out.append(_V3_STDLIB_PREAMBLE)
     out.extend(body)
@@ -2284,9 +2372,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     if ver == 3 and (not ir.get("components") or has_top_level):
         return _emit_v3_go(ir, package)
 
-    global _V3_MODE, _COMP_NEEDS_STDLIB
+    global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP
     _V3_MODE = (ver == 3)
     _COMP_NEEDS_STDLIB = False
+    _COMP_NEEDS_MAP = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -2320,6 +2409,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append(_HOST_RUNTIME)
     if _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
+    if _COMP_NEEDS_MAP:
+        # revlMapGet answers a RevlOpt, so the Opt preamble comes first.
+        out.append(_V3_OPT_PREAMBLE)
+        out.append(_V3_MAP_PREAMBLE)
 
     out.extend(body)
 

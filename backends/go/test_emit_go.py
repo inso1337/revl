@@ -210,3 +210,45 @@ def test_checked_in_generated_is_current(ir_path, pkg):
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
         f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+
+
+# ---- Map value type (docs/stdlib-2.0.md §Map) ------------------------------
+
+def test_map_value_helpers_are_pulled_in_and_persistent():
+    src = emit.emit(_compile('pub fn put(m: Map[Str, Int], k: Str, v: Int)'
+                             ' -> Map[Str, Int] { return m.set(k, v) }'))
+    assert "func revlMapSet[K comparable, V any](m map[K]V, k K, v V) map[K]V {" in src
+    assert "revlMapSet(m, k, v)" in src
+    # the helper copies before it puts — the receiver never mutates
+    helper = src.split("func revlMapSet")[1].split("\n}\n")[0]
+    assert "out := make(map[K]V, len(m)+1)" in helper
+    assert "for kk, vv := range m" in helper
+
+
+def test_map_lookup_answers_the_sealed_opt_and_has_bool():
+    src = emit.emit(_compile(
+        'pub fn get(m: Map[Str, Int], k: Str) -> Int { return m.lookup(k) ?? 0 }\n'
+        'pub fn member(m: Map[Str, Int], k: Str) -> Bool { return m.has(k) }\n'))
+    assert "revlMapGet(m, k)" in src and "revlMapHas(m, k)" in src
+    # lookup answers a RevlOpt, so the Opt preamble is pulled in for `??`
+    assert "type RevlOpt[T any] interface{ isRevlOpt() }" in src
+    assert "revlOptOr(revlMapGet(m, k), 0)" in src
+
+
+def test_map_empty_renders_positionally_or_refuses_honestly():
+    """Go infers composite literals from position, not later use. A typed
+    return pins the literal; an unpinned binding is refused rather than
+    emitted as non-compiling Go (docs/stdlib-2.0.md §Map)."""
+    src = emit.emit(_compile(
+        'pub fn newTable() -> Map[Str, Int] { return Map.empty() }'))
+    assert "return map[string]int64{}" in src
+    with pytest.raises(emit.EmitError, match="untyped empty Map"):
+        emit.emit(_compile('pub fn f() -> Int { var m = Map.empty() return 0 }'))
+
+
+def _compile(source: str) -> dict:
+    """revl source -> IR (the go test file only ever loaded checked-in IR)."""
+    import sys
+    sys.path.insert(0, str(ROOT / "src"))
+    from revl import compile_source
+    return compile_source(source)
