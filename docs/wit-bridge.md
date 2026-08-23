@@ -131,7 +131,7 @@ A WIT resource maps onto that nearly one-to-one:
 | WIT | revl | why |
 |---|---|---|
 | `resource r` | `type R = { handle: Int }` | an opaque proxy; identity lives host-side |
-| `constructor(…)` + implicit destructor | `extern acquire fn r_new(…) -> R undo r_drop(R)` | the resource's release is a **tracked inverse** (G4) |
+| `constructor(…)` + implicit destructor | `extern acquire fn r_new(…) -> R undo r_drop(result)` + a declared `extern emission fn r_drop(self: R)` | the resource's release is a **tracked inverse** (G4); `result` is the undo slot's implicit binding — the acquired handle |
 | a method `m: func(…)` | a service op `r_m(self: R, …)` | the handle is the first parameter; it crosses by proxy |
 | `static s: func(…)` | a service op `r_s(…)` | no handle |
 | `borrow<r>` / `own<r>` in a signature | the handle type `R` | copy-vs-move is the host concern the acquire/undo pair already tracks |

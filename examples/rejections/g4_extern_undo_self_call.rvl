@@ -1,7 +1,7 @@
 // REJECTED — G4: the teardown exists to INVERT the acquisition. Calling the
 // acquiring extern inside its own `undo` would re-acquire during cleanup.
-// (The parameter `path` is not visible here either: an extern binds no
-// names, so the slot runs with an empty variable namespace.)
+// (The parameter `path` is not visible here either: the slot's only
+// implicit binding is `result`, the acquired value.)
 //
 // expected error:
 //   extern `open_ledger`'s `undo` cannot call the extern itself

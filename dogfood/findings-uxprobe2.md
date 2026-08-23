@@ -215,3 +215,14 @@ close_ledger(1)-style constant-handle teardowns (the documented convention)
 compile unchanged; fault/replay/lifecycle suites unaffected.
 Corpus: g4_extern_undo_wrong_arg_type / _undeclared_fn / _self_call /
 _param_not_in_scope, registered in REJECTIONS asserting the hint text.
+
+Revised on review (docs/v2.0-roadmap.md item 67, 2026-08-23): the
+empty-namespace rule above was the stale half of syntax-2.0 §6 — it refused
+the landed WIT resource model, where the generated
+`extern acquire fn r_new(...) -> R undo r_drop(...)` must name the acquired
+handle. Final rule: an acquire's `undo` sees exactly ONE implicit binding,
+`result: T` (the acquired value, when the extern declares a return type);
+parameters stay invisible, and `compensate` still binds nothing. The WIT
+importer now emits `undo r_drop(result)` with `r_drop` declared alongside,
+and the corpus gained g4_extern_compensate_result (a `result` reference in
+a compensate slot, refused).

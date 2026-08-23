@@ -1001,31 +1001,68 @@ def _lower_extern_expr(expr, filename: str) -> dict:
 
 
 def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
-                       filename: str) -> None:
+                       filename: str, result_type: str | None = None) -> None:
     """The extern-level `undo`/`compensate` slot, checked.
 
     Component-site `effect ... undo ...` runs through the component
     expression machinery, so it resolves every name against the bindings
-    in scope at the effect site. An extern declares no bindings — its undo
-    expression therefore sees an EMPTY variable namespace: no locals exist,
-    and the extern's own parameters are *not* implicitly visible (no tier
-    defines teardown parameter capture; inventing that here would be
-    unsound speculation). What the slot must satisfy mirrors the
-    component-site rules plus the arity/type rigor of every other call:
+    in scope at the effect site. An extern declares no bindings, so the
+    slot's variable namespace is almost empty — with ONE exception. The
+    `undo` of an acquire extern with a declared return type binds `result`,
+    the acquired value: the teardown exists to release exactly what the
+    acquisition produced (the WIT resource model is the canonical user —
+    `extern acquire fn r_new(...) -> R undo r_drop(result)`). Nothing else
+    is visible: the extern's own parameters are *not* implicitly captured
+    (no tier defines teardown parameter capture; inventing that here would
+    be unsound speculation), and `compensate` — a best-effort follow-up to
+    a one-way emission, not an inverse — binds nothing at all. What the
+    slot must satisfy mirrors the component-site rules plus the arity/type
+    rigor of every other call:
 
     1. the callee is a plain call to a DECLARED callable (fn/extern via the
        shared signature table, host builtin, ADT constructor);
     2. self-reference is refused — the teardown exists to INVERT the
        acquisition; calling the extern again would re-acquire mid-cleanup;
-    3. arity and argument types are checked against the declared signature.
+    3. arity and argument types are checked against the declared signature,
+       with `result: T` in scope exactly when described above.
     """
     from .parser import ExprCall, ExprField, ExprVar
 
     def _walk(e):
         if isinstance(e, ExprVar):
-            # a bare name: the slot runs with NO variables in scope (an
-            # extern binds none, and its own parameters are not implicitly
-            # visible — no tier defines teardown parameter capture)
+            if e.name == "result":
+                if result_type is not None:
+                    return  # the one implicit binding: the acquired value
+                if slot == "compensate":
+                    raise RevlError(
+                        filename, e.line,
+                        f"`result` is not bound in the `compensate` slot of "
+                        f"extern `{decl_name}`",
+                        hint="`result` names the value an acquire returns; a "
+                             "compensation follows a one-way emission, which "
+                             "acquires nothing — compensate from constants or "
+                             "other declared fns")
+                raise RevlError(
+                    filename, e.line,
+                    f"`result` does not exist here — extern `{decl_name}` "
+                    "declares no return type, so there is no acquired value "
+                    "to bind",
+                    hint="declare `-> T` on the extern to give the teardown "
+                         "its `result`, or tear down from constants")
+            # any other bare name: the only implicit binding is `result`
+            # (undo of an acquire) — locals don't exist, and the extern's
+            # own parameters are not visible (no tier defines teardown
+            # parameter capture)
+            if result_type is not None:
+                raise RevlError(
+                    filename, e.line,
+                    f"`{e.name}` is not declared — the `{slot}` slot of "
+                    f"extern `{decl_name}` sees only the implicit `result` "
+                    "binding",
+                    hint="`result` is the acquired value; the extern's own "
+                         "parameters are not visible to its teardown, so "
+                         "anything else must travel as constants or through "
+                         "other declared fns")
             raise RevlError(
                 filename, e.line,
                 f"`{e.name}` is not declared — the `{slot}` slot of extern "
@@ -1053,9 +1090,9 @@ def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
                         f"`{name}` is not declared — the `{slot}` slot of "
                         f"extern `{decl_name}` may only call a declared fn, "
                         "extern, or host builtin",
-                        hint="the undo expression has no variables in scope "
-                             "(an extern binds none), so every callee must be "
-                             "a module-level declaration")
+                        hint="an extern binds no callables (only the acquire's "
+                             "`result` value is ever in scope), so every "
+                             "callee must be a module-level declaration")
             elif isinstance(e.callee, ExprField):
                 raise RevlError(
                     filename, e.line,
@@ -1082,9 +1119,11 @@ def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
                                 _walk(y)
 
     _walk(expr)
-    # empty tenv: any variable reference raises "not declared" — exactly the
-    # component-site rule, where undo sees only names bound at the site
-    check_ast(expr, None, {}, types, filename,
+    # the tenv carries exactly what the slot binds: `result: T` for the undo
+    # of an acquire with a declared return, nothing otherwise — so argument
+    # type-checking sees the acquired value at its declared type
+    tenv = {"result": result_type} if result_type is not None else {}
+    check_ast(expr, None, tenv, types, filename,
               f"{slot} of extern `{decl_name}`")
 
 
@@ -1127,7 +1166,10 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             "bodies": bodies,
         }
         if decl.undo is not None:
-            _check_extern_undo(decl.undo, decl.name, "undo", types, filename)
+            # only an acquire reaches here with `undo` (pure/emission are
+            # refused above); its declared return, if any, binds `result`
+            _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
+                               result_type=decl.returns)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
         if decl.compensate is not None:
             _check_extern_undo(decl.compensate, decl.name, "compensate",
