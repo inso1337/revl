@@ -221,6 +221,27 @@ def _run_mcp(args) -> int:
     from .mcp.server import serve
 
     if args.mcp_command == "serve":
+        # composition persistence (docs/persistence.md): a snapshot passed on
+        # the command line is re-admitted through the same gate a live restore
+        # runs — a component the current checker rejects aborts the boot loudly
+        # rather than being smuggled in.
+        if getattr(args, "restore", None):
+            from .mcp.persist import RestoreError
+            from .mcp.server import SESSION
+
+            try:
+                with open(args.restore, encoding="utf-8") as handle:
+                    snap = json.load(handle)
+            except (OSError, json.JSONDecodeError) as error:
+                print(f"error: cannot read snapshot {args.restore}: {error}",
+                      file=sys.stderr)
+                return 1
+            try:
+                SESSION.restore(snap)
+            except RestoreError as error:
+                print(f"error: cannot restore {args.restore}: {error}",
+                      file=sys.stderr)
+                return 1
         return serve()
 
     if args.mcp_command == "schema":
@@ -434,6 +455,12 @@ def main(argv: list[str] | None = None) -> int:
     mcp_serve = mcp_sub.add_parser("serve", help="run the compiler as an MCP server (stdio)")
     mcp_serve.add_argument("--files", nargs="*", default=None,
                            help="optional default composition for tools called without one")
+    # composition persistence (docs/persistence.md): boot the live session
+    # from a snapshot so an evolved composition survives a restart. The
+    # snapshot is re-admitted through the gate, never trusted blindly.
+    mcp_serve.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
+                           help="re-admit a revl_snapshot document into the session "
+                                "before serving (self-evolution across a restart)")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
