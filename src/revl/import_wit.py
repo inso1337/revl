@@ -43,7 +43,9 @@ one-to-one:
   * the resource type -> an opaque handle `type R = {{ handle: Int }}` (its
     identity lives host-side; revl carries a proxy);
   * its constructor + implicit destructor -> `extern acquire fn R_new(...) -> R
-    undo R_drop(R)`, so the resource's release is a *tracked inverse* (G4);
+    undo R_drop(result)` (`result` is the undo slot's one implicit binding:
+    the acquired handle) plus a declared `R_drop` extern, so the resource's
+    release is a *tracked inverse* (G4);
   * `borrow<R>` / `own<R>` in a signature -> the handle type `R` (a resource
     reference, not a copy);
   * each method `m: func(...)` -> a service operation `R_m(self: R, ...)`,
@@ -868,11 +870,14 @@ class _Generator:
 
     def _resources(self) -> tuple[dict[str, list[_Func]], list[str]]:
         """Project WIT resources onto revl's acquire-returned-handle model:
-        an `extern acquire fn R_new(...) -> R undo R_drop(R)` per resource
-        (its lifetime a tracked inverse, G4), and each method turned into a
-        service operation carrying the handle as its first parameter (`self`)
-        so it crosses a seam by proxy (distribute.py). Static methods carry no
-        handle. Returns (methods keyed by owning interface, acquire externs)."""
+        an `extern acquire fn R_new(...) -> R undo R_drop(result)` per
+        resource — `result` is the acquired handle, the undo slot's one
+        implicit binding — with `R_drop` declared alongside so the undo's
+        callee is a checked declaration (its lifetime a tracked inverse, G4).
+        Each method turns into a service operation carrying the handle as its
+        first parameter (`self`) so it crosses a seam by proxy
+        (distribute.py). Static methods carry no handle. Returns (methods
+        keyed by owning interface, acquire+destructor externs)."""
         methods_by_owner: dict[str, list[_Func]] = {}
         acquire_externs: list[str] = []
         for res in self.doc.resources:
@@ -883,11 +888,18 @@ class _Generator:
                             for pname, ptype in ctor)
             acquire_externs.append(
                 f"// resource {res.name}: construction paired with its WIT "
-                "destructor, so the handle's release is a tracked inverse (G4)\n"
+                "destructor, so the handle's release is a tracked inverse "
+                "(G4); `result` is the acquired handle\n"
                 f"extern acquire fn {snake}_new({sig}) -> {revl}"
-                f" undo {snake}_drop({snake})\n"
+                f" undo {snake}_drop(result)\n"
                 f"  = @{self.backend} {{ "
                 f"{self._host_comment(f'construct the WIT resource {res.name} here')} }}")
+            acquire_externs.append(
+                f"// the WIT destructor for {res.name}: the declared inverse "
+                "the `undo` above calls\n"
+                f"extern emission fn {snake}_drop(self: {revl})\n"
+                f"  = @{self.backend} {{ "
+                f"{self._host_comment(f'drop the WIT resource {res.name} here')} }}")
             if res.ctor_params is None:
                 self.notes.append(
                     f"WIT `resource {res.name}` declares no constructor; the "

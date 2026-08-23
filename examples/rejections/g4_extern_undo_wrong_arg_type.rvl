@@ -1,0 +1,13 @@
+// REJECTED — G4: the extern-level `undo` slot is a checked declaration, not
+// a dropped string. The teardown's argument is type-checked against the
+// declared inverse exactly like any other call site; a Str into an Int
+// handle would fire the wrong teardown at cleanup time.
+//
+// expected error:
+//   argument 1 of `close_ledger(...)` expects `Int`, got `Str`
+
+extern acquire fn open_ledger(path: Str) -> Int undo close_ledger("wrong-type")
+  = @py { return abs(hash(path)) % 100000 }
+
+extern pure fn close_ledger(handle: Int)
+  = @py { return None }

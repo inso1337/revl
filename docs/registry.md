@@ -1,5 +1,6 @@
 # The component registry — phase 0 design
 
+**Status:** design (2026-08-23), spec-before-code · roadmap item 49 ·
 **Status:** phase 0 (the read path) **BUILT** (2026-08-23) · roadmap item 49 ·
 companion to [service-compat.md](service-compat.md) (the search predicate),
 [queries.md](queries.md) (the envelope discipline), [holes.md](holes.md)
