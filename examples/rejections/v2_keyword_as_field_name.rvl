@@ -1,0 +1,10 @@
+// REJECTED — reserved keywords cannot name record fields (or variables,
+// parameters, methods). The diagnostic says it is a NAMING mistake with the
+// remedy, not a bare parser confusion.
+//
+// expected error:
+//   expected ident, found 'type'
+//   `type` is a reserved keyword — it cannot name a field, variable,
+//   parameter, or method; pick another name
+
+type Row = { type: Str }

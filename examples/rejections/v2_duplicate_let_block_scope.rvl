@@ -1,0 +1,18 @@
+// REJECTED — lets are FUNCTION-scoped, not block-scoped: sibling branches
+// share one namespace, so a second `let y` collides even though the first
+// lives inside an `if` body. The diagnostic states the scoping rule and the
+// two sanctioned fixes (rename, or reuse the existing binding).
+//
+// expected error:
+//   `y` is already declared in this function
+//   lets are function-scoped, not block-scoped — sibling branches share one
+//   namespace; rename or reuse the existing binding
+
+fn pick(x: Int) -> Int {
+  if (x > 0) {
+    let y = x
+    return y
+  }
+  let y = 0
+  return y
+}

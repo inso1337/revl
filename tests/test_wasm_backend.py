@@ -158,6 +158,12 @@ _COMPONENT_CASES = [
     ("match-unit-case", "type O = Found(Int) | Missing\n"
      + _component("{ let o = Missing  return match o { Found(v) => v * 2, Missing => 99 } }"),
      21, 99),
+    # `to_str` renders through the $int_to_str helper; the probe reads back
+    # the digit count (a Str does not cross the canonical-ABI probe here)
+    ("int-to-str-len", _component("{ let s = x.to_str()  return s.length() }"),
+     123, 3),
+    ("int-to-str-negative-len",
+     _component("{ let s = (0 - x).to_str()  return s.length() }"), 45, 3),
     # `??` on an Opt that never leaves the module
     ("nullish-some", _component("{ let o = Some(x)  return o ?? 7 }"), 42, 42),
     ("nullish-none", _component("{ let o = None  return o ?? 7 }"), 42, 7),
