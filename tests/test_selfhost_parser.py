@@ -89,6 +89,8 @@ def _render(n) -> str:
             return "(bool false)"
         if isinstance(v, int):
             return f"(int {v})"
+        if isinstance(v, float):
+            return f"(float {v})"
         return f"(str {v})"
     if isinstance(n, P.ExprVar):
         return f"(var {n.name})"
@@ -150,6 +152,9 @@ def _agree(parse_render, src: str) -> None:
 # ---------------------------------------------------------------- corpus
 
 ACCEPTED = [
+    # float literals (canonical decimal spellings only — see the render
+    # comment in parser.rvl about exponent/trailing-zero normalization)
+    "2.5", "0.5", "3.0", "2.5 + 1", "2.5 * 0.5 < 2.0",
     "1", '"hi"', "true", "false", "null", "x", "config.retries",
     "1 + 2 * 3", "1 * 2 + 3", "(1 + 2) * 3", "a - b - c", "a - (b - c)",
     "a / b % c", "-x", "!ok", "!!ok", "- - 1",
@@ -206,7 +211,7 @@ def test_rejected_expressions_agree(parse_render, src):
 # ---------------------------------------------------------------- fuzz
 
 ATOMS = [
-    "1", "x", '"s"', "true", "null", "hole", 'hole "w"', "hole[Int]",
+    "1", "2.5", "x", '"s"', "true", "null", "hole", 'hole "w"', "hole[Int]",
     "hole[List[Str]]", "config.k", "`t`", "`a${x}b`", "`${x + 1}`",
     "f(1)", "a.b", "xs[0]", "{a: 1}", "[1]", "z => z", "(a: Int) => a",
     "(f: (Int) -> Bool) => f", "(a: Str?) => a", "emit g(1)",
