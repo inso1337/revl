@@ -53,14 +53,23 @@ def test_value_and_host_method_namespaces_are_disjoint():
         host_verbs |= set(methods)
     assert host_verbs == {"open", "close", "query", "execute", "new",
                           "drop", "insert", "remove", "get", "run"}
-    assert set(_BUILTIN_SIG).isdisjoint(host_verbs)
-    assert set(_BUILTIN_METHODS).isdisjoint(host_verbs)
+    # `remove` is the ONE sanctioned overlap (docs/stdlib-2.0.md §Map): the
+    # persistent Map value operation shares a spelling with the v1 host stub
+    # verb. Safe because dispatch is by receiver kind — a constructor-tracked
+    # host receiver checks against the family surface before the stdlib table
+    # is consulted. Pinned here so the overlap cannot grow silently.
+    assert set(_BUILTIN_SIG) & host_verbs == {"remove"}
+    assert set(_BUILTIN_METHODS) & host_verbs == {"remove"}
 
 
 def test_map_surface_is_exactly_the_spec():
     assert _BUILTIN_SIG["set"] == ("Map", ["Str", "@elem"], "@self")
     assert _BUILTIN_SIG["lookup"] == ("Map", ["Str"], "Opt[@elem]")
     assert _BUILTIN_SIG["has"] == ("Map", ["Str"], "Bool")
+    # The iteration/remove step (docs/stdlib-2.0.md §Map).
+    assert _BUILTIN_SIG["size"] == ("Map", [], "Int")
+    assert _BUILTIN_SIG["keys"] == ("Map", [], "List[Str]")
+    assert _BUILTIN_SIG["remove"] == ("Map", ["Str"], "@self")
 
 
 # ---- typing ------------------------------------------------------------------
@@ -348,3 +357,78 @@ def test_host_stub_binding_is_untouched_by_the_fix():
         "}\n")
     assert ir["components"], "the component must compile with its host stub"
 
+
+
+# ---- the iteration/remove step (docs/stdlib-2.0.md §Map) ----------------------
+#
+# size/keys/remove graduate spec-first: keys() is iteration, in ascending
+# canonical Str order (a pure function of the key set — sorted, NOT insertion,
+# because go/rust randomize by design); remove() is persistent and TOTAL (an
+# absent key is a no-op returning an equal map); size() is a method like its
+# siblings.
+
+ITER_SURFACE = (
+    'fn count(m: Map[Str, Int]) -> Int { return m.size() }\n'
+    'fn names(m: Map[Str, Int]) -> List[Str] { return m.keys() }\n'
+    'fn drop(m: Map[Str, Int], k: Str) -> Map[Str, Int] { return m.remove(k) }\n'
+)
+
+
+def test_iter_surface_types_and_lowers_to_builtins():
+    ir = compile_source(ITER_SURFACE)
+    exprs = [s["expr"] for fn in ir["functions"] for s in fn["body"]
+             if s.get("step") == "return"]
+    assert all(e["kind"] == "builtin" for e in exprs)
+    assert [e["method"] for e in exprs] == ["size", "keys", "remove"]
+
+
+def test_size_keys_remove_reject_wrong_receiver_and_arity():
+    assert "needs a Map receiver" in _err(
+        'fn f(xs: List[Int]) -> Int { return xs.size() }\n')
+    assert "takes 0 argument(s), 1 given" in _err(
+        'fn f(m: Map[Str, Int]) -> Int { return m.size(1) }\n')
+    assert "expects `Str`" in _err(
+        'fn f(m: Map[Str, Int]) -> Map[Str, Int] { return m.remove(7) }\n')
+
+
+def test_python_iteration_remove_semantics():
+    ns = _compile_emit(ITER_SURFACE +
+                       'pub fn build(pairs: List[Str]) -> Map[Str, Int] {\n'
+                       '  var m = Map.empty()\n'
+                       '  var i = 0\n'
+                       '  while (i < pairs.length()) {\n'
+                       '    m = m.set(pairs[i], i)\n'
+                       '    i += 1\n'
+                       '  }\n'
+                       '  return m\n'
+                       '}\n')
+    count, names, drop, build = (ns[k] for k in ("count", "names", "drop",
+                                                 "build"))
+    # boundary: the empty map sizes 0 and iterates to nothing
+    empty = build([])
+    assert count(empty) == 0 and names(empty) == []
+    # insertion order differs from canonical order; keys() must not care
+    m = build(["banana", "apple", "cherry"])
+    assert names(m) == ["apple", "banana", "cherry"]
+    assert count(m) == 3
+    # remove is persistent: receiver untouched; missing key is a total no-op
+    m2 = drop(m, "apple")
+    assert m2 == {"banana": 0, "cherry": 2} and m == {
+        "banana": 0, "apple": 1, "cherry": 2}
+    assert drop(m, "nope") == m
+    assert drop(empty, "nope") == {}
+
+
+def test_the_iter_surface_emits_on_every_hosted_tier_and_wasm_refuses():
+    """One surface, five representations + one honest refusal."""
+    ir = compile_source(ITER_SURFACE)
+    out = {tier: _backend(tier).emit(ir)
+           for tier in ("python", "typescript", "go", "java", "rust")}
+    assert "sorted(" in out["python"] and "len(" in out["python"]
+    assert ".sort((" in out["typescript"] and "BigInt(" in out["typescript"]
+    assert "revlMapKeys" in out["go"] and "revlMapRemove" in out["go"]
+    assert "revlMapKeys" in out["java"] and "codePointAt" in out["java"]
+    assert "ks.sort()" in out["rust"]
+    wasm = _backend("wasm")
+    with pytest.raises(wasm.EmitError, match="not lowerable|has no representation here"):
+        wasm.emit(ir)
