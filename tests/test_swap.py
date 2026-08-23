@@ -78,6 +78,7 @@ class _Provider:
         self.calls = 0
         self._stopping = False
         self._conns: list[socket.socket] = []
+        self._lock = threading.Lock()
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._srv.bind(sock_path)
         self._srv.listen(16)
@@ -90,7 +91,11 @@ class _Provider:
                 conn, _ = self._srv.accept()
             except OSError:
                 break
-            self._conns.append(conn)
+            with self._lock:
+                if self._stopping:
+                    conn.close()  # accepted during shutdown: close it here so
+                    break         # its peer sees EOF and no conn is orphaned
+                self._conns.append(conn)
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: socket.socket) -> None:
@@ -106,12 +111,15 @@ class _Provider:
             pass
 
     def stop(self) -> None:
-        self._stopping = True
+        with self._lock:
+            self._stopping = True
+            conns = list(self._conns)  # snapshot: a conn accepted after this is
+            #                            closed by _accept's own stopping-check
         try:
             self._srv.close()
         except OSError:
             pass
-        for conn in self._conns:
+        for conn in conns:
             try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
