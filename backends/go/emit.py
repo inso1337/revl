@@ -274,6 +274,12 @@ def _expr(node, env: _Env, expected=None) -> str:
         if node.get("op") == "!":
             return "(!%s)" % operand
         if node.get("op") == "-":
+            if node.get("operands") == "Int":
+                # `-x` is `0 - x`; negating Int.MIN overflows, so it traps
+                # through the same checked subtraction as any Int `-`
+                # (docs/arithmetic.md; wasm lowers `-x` the same way).
+                env.needs_overflow = True
+                return "revlSub(0, %s)" % operand
             return "(-%s)" % operand
         raise EmitError("unsupported unary operator: %r" % (node.get("op"),))
     if kind == "if":  # ternary
@@ -1471,6 +1477,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
+            if node.get("operands") == "Int":
+                ctx.needs_overflow = True
+                return f"revlSub(0, {operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported v3 unary operator {node.get('op')!r}")
 
