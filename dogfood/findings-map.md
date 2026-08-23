@@ -52,6 +52,11 @@ Task: spec + checker + 5 emitters + tests for `Map[Str, V]` value type
   defines its own `EmitError` class, so `pytest.raises(_backend("go").EmitError)`
   fails on class identity if you call `_backend("go")` twice. Existing test
   files dodge it by loading once; worth a shared helper.
+- [slow] devwip's committed `backends/typescript/tests/generated/conformance.ts`
+  was stale against its own fixture + emitter — regenerating for the Map
+  fixture also repaired unrelated checked-div helper drift. That is the
+  recurring "stale generated golden" bug class; a CI check like go's
+  `test_checked_in_generated_is_current` would catch it for TS too.
 
 ## 3. What revl gave you
 
@@ -75,3 +80,18 @@ learning `provide {}` is the only home for fns; the refusal message named
 the forms but not the nesting rule. A "component bodies contain only
 provide/handle blocks" hint would have shortened it to zero. Full suite:
 1294 passed / 68 skipped (baseline ~1283), all from the worktree venv.
+
+## Post-final-run addendum
+
+- [nit] Running two *backends'* test files in ONE pytest process collides on
+  the module name `emit` (each backend dir has its own emit.py loaded via
+  importlib/sys.path); the later import wins and the other backend's golden
+  tests then compare against the wrong renderer (4 spurious failures, all
+  disappearing when the suites run as intended, one process per backend).
+  A unique module name per backend (`revl_py_emit`, `revl_rs_emit`, ...) or
+  an importlib util that caches per path would make combined runs safe.
+- Final counts, from this worktree's venv:
+  - root `tests/`: **1310 passed / 54 skipped** (baseline ~1283)
+  - wasm 32; go 17; java text-suite + javac-gated (skips locally without
+    a JDK shim); rust cargo map tests executed green with cargo present;
+  - typescript vitest **80/80** including 4 new Map tests on real node.

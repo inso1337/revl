@@ -36,6 +36,7 @@ export function emitFixtures(): void {
   emitFixture('v3_types_functions.ir.json', 'v3_types_functions.ts')
   emitFixture('conformance.ir.json', 'conformance.ts')
   emitFixture('v3_stdlib.ir.json', 'v3_stdlib.ts')
+  emitFixture('v3_map.ir.json', 'v3_map.ts')
   emitFixture('v3_tests.ir.json', 'v3_tests.test.ts')
 }
 
