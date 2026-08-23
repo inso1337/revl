@@ -218,6 +218,23 @@ DIVERGENCES = {
     # through `revlI64(-x)` — so every bounded tier faults on `-Int.MIN` exactly
     # as it does on any other Int overflow. Asserted positively below
     # (test_negation_of_int_min_traps + the per-tier emit checks).
+    #
+    # **Open — found during review, unpinned before now.** `Int.MIN / -1` has
+    # quotient 2^63, which does not fit i64: integer division overflows at
+    # exactly this one input (mod is fine, `Int.MIN % -1 == 0`). rust panics,
+    # wasm's `i64.div_s` traps, and typescript re-imposes the bound via
+    # `revlI64` on the quotient — all correct. But **python computes the
+    # arbitrary-precision 2^63** (out of the range it imposes everywhere else)
+    # and **go and java wrap to Int.MIN** (host `/`). Both the faulting div
+    # forms (div_trunc/floor/euclid) and the checked ones share the gap. Close
+    # it the way unary minus was closed — bound the quotient (trap for the
+    # faulting forms, Err for the checked). Pinned here so it cannot drift.
+    "Int.MIN / -1 does not trap on every tier": (
+        'pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n'
+        'pub fn f(a: Int, b: Int) -> Int { return a.div_trunc(b) }\n'
+        'test "pinned" { assert f(lo(), 0 - 1) == lo() }',
+        {"py": "fail", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
+    ),
 }
 
 
