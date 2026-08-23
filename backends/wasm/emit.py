@@ -1740,6 +1740,10 @@ class _V3Emitter:
             return expected
         if kind == "arrow":
             raise EmitError("arrow values are not lowerable on this tier — the wasm module has no closures")
+        if kind == "maplit":
+            raise EmitError(
+                "the Map value type is not lowerable on this tier yet — "
+                "no representation here; use a hosted backend")
         raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
     def _arrow_callee(self, callee: dict):
@@ -1799,6 +1803,10 @@ class _V3Emitter:
             return "Int"
         if method == "indexOf":
             raise EmitError("indexOf is not lowerable on this tier yet — use a hosted backend")
+        if method in ("set", "lookup", "has"):
+            raise EmitError(
+                f"`{method}` is not lowerable on this tier yet — the Map value "
+                f"type has no representation here; use a hosted backend")
         raise EmitError(f"unsupported builtin method {method!r}")
 
     def _record_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
@@ -1887,6 +1895,10 @@ class _V3Emitter:
             return self._match_expr(node, scope, where, expected)
         if kind == "arrow":
             raise EmitError(f"{where}: arrow values are not lowerable on this tier")
+        if kind == "maplit":
+            raise EmitError(
+                f"{where}: the Map value type is not lowerable on this tier yet — "
+                f"no representation here; use a hosted backend")
         raise EmitError(f"{where}: unsupported v3 expression kind {kind!r}")
 
     def _opt_payload(self, ty: str | None) -> str | None:
@@ -2173,6 +2185,14 @@ class _V3Emitter:
             return _E(f"(call {call} {target.wat} {arg.wat})", "Int")
         if method == "indexOf":
             raise EmitError(f"{where}: indexOf is not lowerable on this tier yet")
+        # The Map value type (docs/stdlib-2.0.md §Map): refused with the
+        # named tier error, like indexOf — the canonical-ABI model carries
+        # only Int/Bool/String/List, and a persistent map needs a richer
+        # value model than that. An honest refusal beats a miscompile.
+        if method in ("set", "lookup", "has"):
+            raise EmitError(
+                f"{where}: `{method}` is not lowerable on this tier yet — "
+                f"the Map value type has no representation here; use a hosted backend")
         raise EmitError(f"{where}: unsupported builtin method {method!r}")
 
     def _field_expr(self, node: dict, scope: _Scope, where: str) -> _E:

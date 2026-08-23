@@ -63,7 +63,8 @@ what comes back — so values flowing out of host objects remain on the audit
 surface. Receivers with no pinned family (an extern's return) type unknown;
 the lowerer refuses non-stdlib method names on them. The two method
 namespaces are collision-free by construction (checked when extending
-either: the table vs `open/close/query/execute/new/get/insert/remove/drop`).
+either: the table vs
+`open/close/query/execute/new/get/insert/remove/drop/run`).
 
 ## Versioning
 
@@ -101,7 +102,8 @@ The v1 host stub object (`let store = Map.new()`, methods
 `insert/remove/get/drop`) keeps its exact existing surface. The two
 namespaces stay collision-free **by construction**: every new value-side
 name (`empty`, `set`, `lookup`, `has`) was chosen disjoint from the host
-verb set (`open/close/query/execute/new/get/insert/remove/drop`). In
+verb set (`open/close/query/execute/new/get/insert/remove/drop/run`; `run`
+is Job's). In
 particular the reader is `lookup`, not `get` — `get` already means the host
 stub's unchecked read, and reusing the spelling would make `x.get(k)`
 uninterpretable to a human even though dispatch itself is unambiguous
