@@ -214,7 +214,7 @@ class _Driver:
 
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
                  record: bool = False, trace_path: str | None = None,
-                 withdraw: str | None = None):
+                 withdraw: str | None = None, wal_path: str | None = None):
         self.ir = ir
         self.config = config
         self.emit = emit
@@ -224,7 +224,10 @@ class _Driver:
         self.fibers: dict[str, object] = {}
         self.generation = 0
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
-        self.recorder = self._make_recorder() if record else None
+        # crash-recovery WAL (roadmap item 47): --wal implies recording, since
+        # the accumulator it persists is what recording captures.
+        self.wal_path = wal_path
+        self.recorder = self._make_recorder() if (record or wal_path) else None
 
         # -- causal trace (docs/why-runtime.md) ----------------------------
         # `trace_path`/`withdraw` turn on the causal-trace recorder: every
@@ -252,6 +255,14 @@ class _Driver:
         from .mcp.session import replay_module  # noqa: PLC0415 — lazy, no cordis
 
         return replay_module().Recorder(self.ir)
+
+    def _commit_wal(self) -> None:
+        """Activation finished cleanly — stamp the WAL's `activation-complete`
+        marker (its presence is what a restart reads as roll-forward)."""
+        if self.recorder is not None and self.wal_path is not None:
+            self.recorder.commit_wal([c["name"] for c in _components(self.ir)])
+            self._log("wal", "activation-complete",
+                      f"{self.wal_path} — recoverable (docs/crash-recovery.md)")
 
     # -- trace -------------------------------------------------------------
 
@@ -309,6 +320,10 @@ class _Driver:
             self.recorder.activation_origin()
             self.recorder.timelines.clear()
             self.recorder.instrument(module, ir)
+            if self.wal_path is not None:
+                # open the WAL before activation, so each effect is written
+                # ahead of it mattering (docs/crash-recovery.md)
+                self.recorder.open_wal(self.wal_path, self.generation)
         return module
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
@@ -504,6 +519,7 @@ class _Driver:
         module = self._emit_module(self.ir)
         print("== load composition ==")
         await self._load(self.ir, module)
+        self._commit_wal()
         print("\n== live — call provided services (`:keys` to list, `:q` or Ctrl-D to quit) ==")
         if self.recorder is not None:
             print("   recording — `:timeline`, `:inspect k`, `:back k [!]`, "
@@ -699,7 +715,8 @@ def run_command(args) -> int:
     driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
                      record=bool(getattr(args, "record", False)),
                      trace_path=getattr(args, "trace", None),
-                     withdraw=withdraw)
+                     withdraw=withdraw,
+                     wal_path=getattr(args, "wal", None))
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())
