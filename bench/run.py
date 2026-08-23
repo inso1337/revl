@@ -138,9 +138,26 @@ def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
     return {
         "text": result.get("text", ""),
         "cost": usage.get("totalCost"),
+        # the exact output-token count behind the cost — the tokens-to-green
+        # metric's real number (bench/tokens.py), which the committed corpora
+        # only carry a proxy for. cline names it differently across versions.
+        "output_tokens": _output_tokens(usage),
         "model": model_info.get("id"),
         "provider": (model_info.get("provider") if isinstance(model_info, dict) else None),
     }
+
+
+def _output_tokens(usage: dict):
+    """Model completion (output) tokens from a cline usage block, across the
+    key names cline has used. Returns None when none is present, so a run
+    against a provider that does not report it degrades to the proxy rather
+    than recording a wrong zero."""
+    for key in ("outputTokens", "completionTokens", "totalTokensOut",
+                "output_tokens", "completion_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
 
 
 def run_mock(system: str, prompt: str, spec: dict, attempt: int):
@@ -287,6 +304,7 @@ def main():
             task = OUTPUT_REMINDER.format(brief=spec["brief"], services=spec["services"])
             prompt, code, error = task, None, None
             green_at, cost_total, model_seen = None, 0.0, None
+            tokens_total, tokens_seen = 0, False  # output tokens across attempts
             for attempt in range(1, args.max_iters + 1):
                 t0 = time.time()
                 try:
@@ -305,6 +323,9 @@ def main():
                     break
                 dur = round(time.time() - t0, 2)
                 cost_total += reply.get("cost") or 0.0
+                if reply.get("output_tokens") is not None:
+                    tokens_total += reply["output_tokens"]
+                    tokens_seen = True
                 model_seen = reply.get("model") or model_seen
                 code = extract_code(reply["text"])
                 adir = run_dir / spec["id"] / variant
@@ -314,7 +335,8 @@ def main():
                 rows.append({"spec": spec["id"], "variant": variant,
                              "model": model_seen, "attempt": attempt, "ok": ok,
                              "error": error, "duration_s": dur,
-                             "cost": reply.get("cost")})
+                             "cost": reply.get("cost"),
+                             "output_tokens": reply.get("output_tokens")})
                 status = "green" if ok else "red"
                 print(f"  {spec['id']}/{variant} attempt {attempt}: {status}"
                       + (f" — {error.splitlines()[0][:100]}" if error else ""))
@@ -324,7 +346,11 @@ def main():
                 prompt = RETRY_TEMPLATE.format(task=task, code=code, error=error)
             rows.append({"spec": spec["id"], "variant": variant, "model": model_seen,
                          "summary": True, "green_at": green_at,
-                         "cost_total": round(cost_total, 6)})
+                         "cost_total": round(cost_total, 6),
+                         # tokens-to-green: the token economy's metric, recorded
+                         # beside iterations-to-green (bench/tokens.py). None when
+                         # the provider reported no token usage.
+                         "tokens_to_green": tokens_total if tokens_seen else None})
             results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
     write_summary(run_dir, rows, raw_rows, args)
@@ -339,8 +365,8 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
     revl_variants = [v for v in args.variants.split(",") if v != RAW_TS_VARIANT]
     if revl_variants:
         lines += ["## revl variants — compile-gated (residue refused at compile)", "",
-                  "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | cost |",
-                  "|---|---|---|---|---|---|"]
+                  "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | mean tokens-to-green | cost |",
+                  "|---|---|---|---|---|---|---|"]
     for variant in revl_variants:
         vs = [r for r in finals if r["variant"] == variant]
         if not vs:
@@ -349,9 +375,14 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         first = sum(1 for r in vs if r["green_at"] == 1)
         green = [r["green_at"] for r in vs if r["green_at"]]
         mean_iters = f"{sum(green) / len(green):.2f}" if green else "—"
+        # tokens-to-green over the admitted cells that reported token usage;
+        # "—" when the provider gave none (see bench/tokens.py for the proxy).
+        toks = [r["tokens_to_green"] for r in vs
+                if r["green_at"] and r.get("tokens_to_green") is not None]
+        mean_toks = f"{sum(toks) / len(toks):.0f}" if toks else "—"
         cost = sum(r.get("cost_total") or 0 for r in vs)
         lines.append(f"| {variant} | {n} | {first}/{n} ({100 * first / n:.0f}%) "
-                     f"| {len(green)}/{n} | {mean_iters} | ${cost:.2f} |")
+                     f"| {len(green)}/{n} | {mean_iters} | {mean_toks} | ${cost:.2f} |")
     unsolved = [(r["spec"], r["variant"]) for r in finals if not r["green_at"]]
     if unsolved:
         lines += ["", "Unsolved: " + ", ".join(f"{s}/{v}" for s, v in unsolved)]
