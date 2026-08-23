@@ -1417,6 +1417,14 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
         # acquisition's inverse — so the type is advisory, like any acquired
         # value's, and is never structurally compared.
         return f"Instance[{node.get('component')}]"
+    if kind == "instance-get":
+        # a provision read off a spawn handle (`s.<key>`) yields the service
+        # the target component declares at that key (docs/design-v2-instances.md).
+        # It is a host-frontier value — resolved through the handle's own local
+        # realm at runtime — so the type is advisory, like a spawn handle's own,
+        # and is never structurally compared. The key was validated to be a
+        # provision at lower time, so `service` is always present.
+        return node.get("service")
     if kind == "call":
         target = node.get("target")
         if isinstance(target, dict) and target.get("kind") == "req":
