@@ -272,14 +272,19 @@ def _run_mcp(args) -> int:
 
 
 def _run_import(args) -> int:
-    """`revl import {wit,openapi}` — the import codegen family
-    (docs/import-wit.md, docs/import-openapi.md)."""
+    """`revl import {wit,openapi,cordis}` — the import codegen family
+    (docs/import-wit.md, docs/import-openapi.md, docs/import-cordis.md)."""
     try:
         if args.import_command == "openapi":
             from .import_openapi import import_openapi_file
             source = import_openapi_file(args.file, backend=args.backend,
                                          service=args.service, pure=args.pure,
                                          emission=args.emission)
+        elif args.import_command == "cordis":
+            from .import_cordis import import_cordis_file
+            source = import_cordis_file(args.file, backend=args.backend,
+                                        service=args.service, pure=args.pure,
+                                        mark_unrecovered=args.mark_unrecovered)
         else:
             from .import_wit import import_wit_file
             source = import_wit_file(args.file, backend=args.backend, pure=args.pure)
@@ -521,6 +526,35 @@ def main(argv: list[str] | None = None) -> int:
     imp_api.add_argument("--json-diagnostics", action="store_true",
                          help="on rejection, print a structured diagnostic instead "
                               "of the human rendering")
+
+    # `revl import cordis` — a Cordis (TS) plugin's inject/provide surface
+    # (docs/import-cordis.md). Own additive block; shared file with a sibling.
+    imp_cordis = imp_sub.add_parser(
+        "cordis",
+        help="turn a Cordis (TS) plugin into revl source (docs/import-cordis.md)")
+    imp_cordis.add_argument("file", help="a Cordis plugin .ts (or .js) file")
+    imp_cordis.add_argument("--backend", default="ts", choices=("ts", "py", "rust"),
+                            help="host block backend for the generated extern stubs "
+                                 "(default: ts)")
+    imp_cordis.add_argument("--service", default=None,
+                            help="generated service name (default: from the "
+                                 "provided service key)")
+    imp_cordis.add_argument(
+        "--pure", action="append", default=[], metavar="OP",
+        help="assert that a method changes nothing, so it is emitted as a plain "
+             "`fn` instead of `emission`. Untyped TS makes no such claim; this is "
+             "your assertion and it is recorded in the output. Name it "
+             "`<Service>.<method>` or `<method>`. Repeatable")
+    imp_cordis.add_argument(
+        "--mark-unrecovered", action="store_true",
+        help="instead of refusing an operation whose signature cannot be "
+             "recovered, emit a loud `// UNRECOVERED` marker in its place so a "
+             "partial surface still compiles (nothing is ever guessed)")
+    imp_cordis.add_argument("-o", "--output", default=None,
+                            help="output path (default: stdout)")
+    imp_cordis.add_argument("--json-diagnostics", action="store_true",
+                            help="on rejection, print a structured diagnostic "
+                                 "instead of the human rendering")
 
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
