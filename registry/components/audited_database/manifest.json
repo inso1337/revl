@@ -1,0 +1,39 @@
+{
+  "boundary": {
+    "AuditedDatabase": {
+      "awaits": 0,
+      "capabilities": {},
+      "compensated": 0,
+      "emissions": [],
+      "externs": []
+    }
+  },
+  "distributability": {
+    "Database": {
+      "reasons": [
+        "query: not async fn",
+        "execute: emission (sync)",
+        "ping: not async fn"
+      ],
+      "verdict": "address-space-bound"
+    }
+  },
+  "externs": [],
+  "kind": "revl.interchange",
+  "manifest": {
+    "components": [
+      {
+        "file": "component.rvl",
+        "inject": [],
+        "name": "AuditedDatabase",
+        "provides": [
+          "db"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "AuditedDatabase"
+    ]
+  },
+  "schema_version": "1.0"
+}

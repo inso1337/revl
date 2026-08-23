@@ -1,0 +1,188 @@
+{
+  "components": {
+    "audited_database": {
+      "capabilities": [],
+      "emissions": 0,
+      "manifestHash": "c3d5fbd465c46747e52a20a9fcf78fd53b8416ba29b192d84c0965d0158e86f3",
+      "provides": {
+        "db": "Database"
+      },
+      "requires": {},
+      "services": {
+        "Database": {
+          "methods": {
+            "execute": {
+              "emission": true,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "Int"
+            },
+            "ping": {
+              "emission": false,
+              "params": [],
+              "returns": "Bool"
+            },
+            "query": {
+              "emission": false,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "List[Row]"
+            }
+          }
+        }
+      },
+      "sourceHash": "b782e70cb8f97cb523419bb68f5d113053983913601b837fc8831d92b51e6b06"
+    },
+    "mysql_database": {
+      "capabilities": [],
+      "emissions": 0,
+      "manifestHash": "3d60959611237d43c5b28a72d49dc75c9cb4159ff2bef1bddcb5d8ccfabfa18a",
+      "provides": {
+        "db": "Database"
+      },
+      "requires": {},
+      "services": {
+        "Database": {
+          "methods": {
+            "execute": {
+              "emission": true,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "Int"
+            },
+            "query": {
+              "emission": false,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "List[Row]"
+            }
+          }
+        }
+      },
+      "sourceHash": "a94e0bca91d45b3328c845b3a62ad23c1b9b29934bc08cee39445d7de264da69"
+    },
+    "pg_database": {
+      "capabilities": [],
+      "emissions": 0,
+      "manifestHash": "f3487477a17d53733e15c7689710cd5de9a51a4f6c81241f27156b3d72f9f904",
+      "provides": {
+        "db": "Database"
+      },
+      "requires": {},
+      "services": {
+        "Database": {
+          "methods": {
+            "execute": {
+              "emission": true,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "Int"
+            },
+            "query": {
+              "emission": false,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "List[Row]"
+            }
+          }
+        }
+      },
+      "sourceHash": "753b0a4ff8aecf01e0ad37cf0748c20ea7bab5aed6ea6d5381fb37ec1cd048cb"
+    },
+    "readonly_database": {
+      "capabilities": [],
+      "emissions": 0,
+      "manifestHash": "e700e6c9757e679124eebf43dd6c4fed777723722458a5f567ba9306956a95f9",
+      "provides": {
+        "db": "Database"
+      },
+      "requires": {},
+      "services": {
+        "Database": {
+          "methods": {
+            "query": {
+              "emission": false,
+              "params": [
+                {
+                  "name": "sql",
+                  "type": "Str"
+                }
+              ],
+              "returns": "List[Row]"
+            }
+          }
+        }
+      },
+      "sourceHash": "672f33de5bb0b945af213addebbfceda14a9874f6e83e66dfbe43ea599ece8ef"
+    },
+    "user_cache": {
+      "capabilities": [
+        "*"
+      ],
+      "emissions": 1,
+      "manifestHash": "d7d185fde7a4de8d2cf9aa3c3af732183615662f133f9c657dfe6554649afc08",
+      "provides": {
+        "cache": "Cache"
+      },
+      "requires": {
+        "db": "Database"
+      },
+      "services": {
+        "Cache": {
+          "methods": {
+            "get": {
+              "emission": false,
+              "params": [
+                {
+                  "name": "key",
+                  "type": "Str"
+                }
+              ],
+              "returns": "Opt[Str]"
+            },
+            "put": {
+              "emission": true,
+              "params": [
+                {
+                  "name": "key",
+                  "type": "Str"
+                },
+                {
+                  "name": "value",
+                  "type": "Str"
+                }
+              ],
+              "returns": null
+            }
+          }
+        }
+      },
+      "sourceHash": "b882efdce4fb4930b5a20c65b65dcdc0d89642808b89d8ce807c9af1965c9c2e"
+    }
+  },
+  "indexVersion": "0"
+}

@@ -10,10 +10,14 @@ execute (py, ts, go, rust, wasm; java read from its emitter — no JDK here).
 > string-unit probes pass everywhere (python, typescript, go, rust, wasm
 > executed; java verified from its emitter). The canonical `Float → Str`
 > renderer is implemented on python, typescript, go, rust and java, and their
-> float-interpolation probes pass. **wasm is fenced for `Float`
-> interpolation only** — it is code-point-correct for the string *unit*, but a
-> canonical shortest-round-trip `Float → Str` routine in hand-written WAT is
-> deferred; see *Remaining wasm WAT work* at the end of this file.
+> float-interpolation probes pass. **wasm now renders the subset it can do
+> byte-exactly** — `NaN`, `Infinity`/`-Infinity`, and every integer-valued
+> finite float with `|x| < 2^63` (including whole-number floats → `0` and
+> `-0.0` → `0`), all through a hand-written `$f64_to_str`. The one case still
+> fenced is the **exponent form** (`${1.0e21}` → `1e+21`): its ES spelling
+> needs a shortest-round-trip float→decimal (Grisu/Ryū class), so `$f64_to_str`
+> traps on `|x| ≥ 2^63` (and on non-integer floats) rather than emit a
+> divergent string; see *Remaining wasm WAT work* at the end of this file.
 
 The problem is the arithmetic problem, one level up. `Int / Int` diverged
 because the IR carried no operand type, so every backend inherited its host's
@@ -71,10 +75,15 @@ canonical `Str` form, so `${x}` renders differently per tier.
 
 | expression | py | ts | go | rust | java† | wasm |
 |-----------|----|----|----|------|------|------|
-| `${1.0e21}` | `1e+21` | `1e+21` | `1e+21` | `1000000000000000000000` | `1.0E21` | `refused` |
-| `${0.0 / 0.0}` (NaN) | `nan` | `NaN` | `NaN` | `NaN` | `NaN` | `refused` |
-| `${0.0}` (whole) | `0.0` | `0` | `0` | `0` | `0.0` | `refused` |
-| `${(0.0-1.0)*0.0}` (−0.0) | `-0.0` | `0` | `0` | `-0` | `-0.0` | `refused` |
+| `${1.0e21}` | `1e+21` | `1e+21` | `1e+21` | `1000000000000000000000` | `1.0E21` | `trap`‡ |
+| `${0.0 / 0.0}` (NaN) | `nan` | `NaN` | `NaN` | `NaN` | `NaN` | `NaN` |
+| `${0.0}` (whole) | `0.0` | `0` | `0` | `0` | `0.0` | `0` |
+| `${(0.0-1.0)*0.0}` (−0.0) | `-0.0` | `0` | `0` | `-0` | `-0.0` | `0` |
+
+`‡` wasm now renders three of these four **byte-exactly** through
+`$f64_to_str`; the exponent case (`1e21`) traps rather than emit a
+non-canonical string (see *Remaining wasm WAT work*). The values shown for
+py/ts/go/rust/java are the original measurement, before their fix landed.
 
 Renderers: py `str(float)`, ts `` `${x}` `` (Number→String), go
 `fmt.Sprintf("%v", …)`, rust `format!("{}", …)`. wasm **refuses** a `Float`
@@ -176,8 +185,10 @@ WAVE*. They assert the **chosen** answers (code points; the ECMAScript float
 form). Now that the fix has landed they are plain `pass` (the `xfail` markers
 were removed) for every tier that is fixed — the string-unit probes on all six
 tiers, and the float-interpolation probes on python/typescript/go/rust/java.
-The one remaining `xfail` is `test_float_interpolation_wasm_is_fenced`, which
-points here.
+On wasm, `test_float_interpolation_wasm_is_canonical` is now a plain pass for
+`NaN`, the whole-number float and the negative-zero cases; the one remaining
+`xfail` is `test_float_interpolation_wasm_exponent_is_fenced` (the `1e21`
+exponent case), which points here.
 
 ## How the fix was made, per tier
 
@@ -203,7 +214,13 @@ points here.
   `$str_cp_offset`, `$str_cp_slice`, `$str_cp_char_at`,
   `$str_cp_char_code_at`) so `length`/`charAt`/`charCodeAt`/`slice` count and
   index in code points; `Bytes` keeps the byte helpers. `Float` interpolation
-  is *fenced* (below).
+  is now rendered by a hand-written `$f64_to_str` for the subset it can spell
+  byte-exactly (`NaN`, `Infinity`/`-Infinity`, and integer-valued floats with
+  `|x| < 2^63`, which reuse `$int_to_str`); the exponent form is still *fenced*
+  (below). Float literals lower to `f64.const` and `+`/`-`/`*`/`/` on `Float`
+  lower to the matching `f64` op, but *only* to feed the renderer — a `Float`
+  never enters the value ABI (no slot, local, return or boundary), so those
+  positions still refuse by name.
 
 ASCII code points are identical to their UTF-16 units, so ASCII literal
 emission is byte-identical and the v1 goldens are unchanged.
@@ -211,17 +228,34 @@ emission is byte-identical and the v1 goldens are unchanged.
 ## Remaining wasm WAT work
 
 wasm is code-point-correct for the string **unit** — its `length`/`charAt`/
-`charCodeAt`/`slice` probes pass — but it **still refuses a `Float` in
-interpolation**, exactly as it did before this wave. The other tiers each
-spell one shared `Float → Str` spec (ECMAScript `Number::toString`) in host
-syntax by leaning on the host's shortest-round-trip float formatter (python
-`repr`, go `strconv.FormatFloat`, rust `{:e}`, java `Double.toString`) and
-then reformatting the digits into the ES notation. wasm has no such primitive:
-a canonical renderer needs a shortest-round-trip float→decimal conversion
-(Grisu/Ryū class) hand-written in WAT, which is a substantial piece of work on
-its own. Rather than ship a non-shortest renderer that would *diverge* from
-the other tiers — a silent wrong answer, the very thing this wave exists to
-kill — the wasm float path is left refusing, and
-`test_float_interpolation_wasm_is_fenced` stays `xfail` with this note as its
-reason. Closing it means implementing that WAT float renderer; the unit work
-is done.
+`charCodeAt`/`slice` probes pass — and it now renders a `Float` in
+interpolation for the subset it can spell **byte-exactly**. A hand-written
+`$f64_to_str` (in `backends/wasm/emit.py`, pulled into a module only when a
+`Float` is actually interpolated, so every Float-free golden stays
+byte-identical) handles:
+
+- **`NaN`** → `"NaN"` (detected as `x != x`);
+- **`Infinity` / `-Infinity`** → `"Infinity"` / `"-Infinity"`;
+- **every integer-valued finite float with `|x| < 2^63`** → the decimal
+  integer, via `i64.trunc_f64_s` + the existing `$int_to_str`. This is exactly
+  the ES `Number::toString` output for those values: no trailing `.0`, and
+  `-0.0` → `"0"` (the documented sign-loss wart). Whole-number and
+  negative-zero probes pass on real wasmtime.
+
+Float literals lower to `f64.const` (bit-exact, via Python `float.hex()`) and
+`+`/`-`/`*`/`/` on `Float` operands lower to the matching `f64` op — but only
+to feed `$f64_to_str`; no `Float` ever reaches an i32/8-byte slot, a local, a
+return, or the boundary, all of which still refuse `Float` by name.
+
+**What is still fenced — named precisely:** the **exponent form** and any
+**non-integer float**. `${1.0e21}` must render `"1e+21"`, and a value like
+`0.5` or `1e-7` must render its shortest decimal; both need a
+shortest-round-trip float→decimal conversion (Grisu/Ryū class) that is not
+implemented in hand-written WAT. Rather than ship a non-shortest renderer that
+would *diverge* from the other tiers — a silent wrong answer, the very thing
+this wave exists to kill — `$f64_to_str` **traps** (`unreachable`) on
+`|x| ≥ 2^63` and on any non-integer float. The single remaining probe,
+`test_float_interpolation_wasm_exponent_is_fenced` (`${1.0e21}`), stays
+`xfail` (strict) with this note as its reason; the trap means the fence is
+honest — wasm never emits a wrong string, it refuses at runtime. Closing it
+means implementing that WAT float→decimal renderer.
