@@ -1651,7 +1651,8 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # div_trunc is native; the other three are helpers so every tier computes
     # the same thing.
     if method == "div_trunc":
-        return f"({target} / {args[0]})"
+        ctx.needs_int_arith = True
+        return f"revlDivTrunc({target}, {args[0]})"
     if method in ("div_floor", "div_euclid", "mod"):
         ctx.needs_int_arith = True
         helper = {"div_floor": "revlDivFloor", "div_euclid": "revlDivEuclid",
@@ -1669,9 +1670,13 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
                     "checked_div_floor": "revlDivFloor(_a, _b)",
                     "checked_div_euclid": "revlDivEuclid(_a, _b)",
                     "checked_mod": "revlMod(_a, _b)"}[method]
+        overflow_err = "" if method == "checked_mod" else (
+            f'if _a == (-9223372036854775807 - 1) && _b == -1 {{ '
+            f'return RevlErr[int64, string]{{Value: "revl: Int overflow"}} }}; ')
         return (f'func(_a, _b int64) RevlResult[int64, string] {{ '
                 f'if _b == 0 {{ return RevlErr[int64, string]'
                 f'{{Value: "{_GO_DIV_ZERO_MSG}"}} }}; '
+                f'{overflow_err}'
                 f'return RevlOk[int64, string]{{Value: {quotient}}} }}'
                 f'({target}, {args[0]})')
     raise EmitError(f"unknown v3 builtin method {method!r}")
@@ -2229,7 +2234,17 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("}")
         out.append("")
     if ctx.needs_int_arith:
+        out.append("func revlDivTrunc(a, b int64) int64 {")
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn a / b")
+        out.append("}")
+        out.append("")
         out.append("func revlDivFloor(a, b int64) int64 {")
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
         out.append("\tq := a / b")
         out.append("\tif a%b != 0 && ((a < 0) != (b < 0)) {")
         out.append("\t\tq--")

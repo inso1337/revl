@@ -97,6 +97,11 @@ def _uses_bounded_int(node) -> bool:
         if (node.get("kind") == "un" and node.get("op") == "-"
                 and node.get("operands") == "Int"):
             return True
+        # integer division overflows at Int.MIN/-1 (quotient 2^63); the
+        # faulting forms are bound the same way (mod cannot overflow)
+        if (node.get("kind") == "builtin"
+                and node.get("method") in ("div_trunc", "div_floor", "div_euclid")):
+            return True
         return any(_uses_bounded_int(v) for v in node.values())
     if isinstance(node, (list, tuple)):
         return any(_uses_bounded_int(v) for v in node)
@@ -153,13 +158,13 @@ def _render_builtin(method, target: str, args: list) -> str:
     # and its `%` takes the divisor's sign, so div_floor is native and the
     # Euclidean remainder is `a % abs(b)`; truncation has to be built.
     if method == "div_trunc":
-        return (f"(lambda _a, _b: abs(_a) // abs(_b) if (_a < 0) == (_b < 0) "
-                f"else -(abs(_a) // abs(_b)))({target}, {args[0]})")
+        return (f"_revl_i64((lambda _a, _b: abs(_a) // abs(_b) if (_a < 0) == (_b < 0) "
+                f"else -(abs(_a) // abs(_b)))({target}, {args[0]}))")
     if method == "div_floor":
-        return f"({target} // {args[0]})"
+        return f"_revl_i64({target} // {args[0]})"
     if method == "div_euclid":
-        return (f"(lambda _a, _b: _a // _b if _b > 0 else -(_a // -_b))"
-                f"({target}, {args[0]})")
+        return (f"_revl_i64((lambda _a, _b: _a // _b if _b > 0 else -(_a // -_b))"
+                f"({target}, {args[0]}))")
     if method == "mod":
         return f"({target} % abs({args[0]}))"
     # The total forms (docs/arithmetic.md): same quotient as the faulting
@@ -175,8 +180,13 @@ def _render_builtin(method, target: str, args: list) -> str:
             "checked_div_euclid": "_a // _b if _b > 0 else -(_a // -_b)",
             "checked_mod": "_a % abs(_b)",
         }[method]
-        return (f"(lambda _a, _b: Ok({quotient}) if _b != 0 "
-                f"else Err({_DIV_ZERO_MSG!r}))({target}, {args[0]})")
+        if method == "checked_mod":
+            return (f"(lambda _a, _b: Ok({quotient}) if _b != 0 "
+                    f"else Err({_DIV_ZERO_MSG!r}))({target}, {args[0]})")
+        # a quotient of 2^63 (Int.MIN/-1) does not fit i64 -> Err, not a value
+        return (f"(lambda _a, _b: Err({_DIV_ZERO_MSG!r}) if _b == 0 "
+                f"else (Ok(_q) if -(2**63) <= (_q := {quotient}) <= 2**63 - 1 "
+                f"else Err('revl: Int overflow')))({target}, {args[0]})")
     raise EmitError(f"unknown builtin method {method!r}")
 
 
