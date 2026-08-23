@@ -1,0 +1,106 @@
+name: Bug report
+description: The compiler did something wrong — a program it should accept/reject didn't, or emitted code is broken.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. revl's one promise is that the checker is the admission gate, so a
+        precise reproducer is worth ten paragraphs of prose. A bug report that arrives with the
+        `.rvl` source, the target tier, and the emitted/expected output is triageable in minutes.
+
+        **Is this a soundness escape** — a program the checker *accepts* that violates a guarantee
+        (G1–G8 / A1–A8)? Please treat it as a security report and follow
+        [SECURITY.md](../blob/main/SECURITY.md) instead of filing a public issue.
+
+        **Is this a known runtime divergence?** Check
+        [docs/contract-errata.md](../blob/main/docs/contract-errata.md) first — some per-tier
+        differences are documented, not new bugs.
+  - type: textarea
+    id: rvl-source
+    attributes:
+      label: The .rvl source
+      description: >
+        The minimal source that triggers it — ideally reduced to the smallest program that still
+        reproduces. This is the single most important field. It is rendered as revl code; no backticks needed.
+      render: rust
+      placeholder: |
+        service Cache {
+          fn get(key: Str) -> Opt[Str]
+        }
+
+        component Broken provides cache: Cache {
+          # ...
+        }
+    validations:
+      required: true
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Target tier
+      description: Which backend? Select `all` if it reproduces on every tier, or `frontend / n-a` if it never reaches an emitter (a checker bug).
+      multiple: true
+      options:
+        - "frontend / n-a (checker, before any emitter)"
+        - "python (cordis-py)"
+        - "typescript (cordis)"
+        - "rust (cordis-rs)"
+        - "java (cordis4j)"
+        - "wasm (cordis-wasm)"
+        - "go (stc-go)"
+        - "all tiers"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran.
+      render: shell
+      placeholder: python -m revl compile bug.rvl --backend ts
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened (actual output)
+      description: >
+        What the compiler actually did — the emitted code, the diagnostic it printed, the stack
+        trace, or "accepted with no error" if it compiled something it shouldn't have.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: >
+        What it should have done. If you expected a rejection, which guarantee (G1–G8) or lifecycle
+        rule (A1–A8) do you believe it violates? If you expected different emitted code, show it.
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: Version & environment
+      description: >
+        revl version or commit SHA (`git rev-parse --short HEAD`), Python version, and — if a tier
+        runtime is involved — the toolchain version (node, cargo, javac, wasmtime, go).
+      placeholder: |
+        revl: 2.0.0 (or commit abc1234)
+        python: 3.12
+        toolchain: wasmtime 47.0.3
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: This is **not** a program-the-checker-correctly-accepts-that-then-misbehaves-at-runtime issue that belongs to a Cordis runtime port rather than to revl.
+          required: false
+        - label: This is **not** a soundness escape (an accepted program that breaks a guarantee) — those go through [SECURITY.md](../blob/main/SECURITY.md), not here.
+          required: false
+        - label: I checked [docs/contract-errata.md](../blob/main/docs/contract-errata.md) and this is not an already-documented divergence.
+          required: false
