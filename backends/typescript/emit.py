@@ -56,7 +56,13 @@ JS_RESERVED = {
 # `Float` is IEEE 754 binary64 and stays `number`: a different type, and the
 # two never mix in JS (`1n + 1` throws), so every operation is rendered
 # consistently typed from the IR's `operands` annotation.
-TYPE_MAP = {"Str": "string", "Int": "bigint", "Bool": "boolean", "Float": "number"}
+# `Int32` is a JS `number`: a double holds every i32 exactly (2^53 >> 2^31),
+# so the arithmetic is cheap and only the bound needs imposing. It is a
+# *distinct* representation from `Int` (bigint) on purpose — bigint and number
+# do not mix in JS, which is exactly the width-mixing the checker also forbids
+# (docs/arithmetic.md).
+TYPE_MAP = {"Str": "string", "Int": "bigint", "Int32": "number",
+            "Bool": "boolean", "Float": "number"}
 
 # Members cordis's Context already owns; a provision key colliding with one
 # would shadow framework API (or be refused by the runtime). The host knows
@@ -345,6 +351,12 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
         return f"Number({_expr(inner, ctx)})"
+    # An Int32 -> Int widening site (docs/arithmetic.md): Int32 is a `number`
+    # and Int a `bigint`, and the two never mix in JS, so the lossless widening
+    # is spelled `BigInt(...)` exactly where the frontend marked it.
+    if node.get("widen") == "Int":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"BigInt({_expr(inner, ctx)})"
     kind = node["kind"]
     scope = ctx.component_scope
 
@@ -507,6 +519,11 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             # check a program that faults on rust/java/go would quietly grow a
             # 65-bit value here.
             return f"revlI64({left} {op} {right})"
+        if op in ("+", "-", "*") and operands == "Int32":
+            # Int32 is a `number`; the double result holds the exact i32 product
+            # up to 2^53, so `revlI32` only has to re-impose the 32-bit bound
+            # (docs/arithmetic.md).
+            return f"revlI32({left} {op} {right})"
         # `%` on two bigints is already the TRUNCATED remainder (sign of the
         # dividend), which is what `%` means (§0), and it throws RangeError on
         # a zero divisor — the fault every tier gives for integer remainder at
@@ -522,6 +539,9 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                 # BigInt negation is unbounded; re-impose the i64 bound so
                 # negating Int.MIN traps like every other tier (arithmetic.md)
                 return f"revlI64(-{operand})"
+            if node.get("operands") == "Int32":
+                # `0 - Int32.MIN` overflows i32; re-impose the 32-bit bound.
+                return f"revlI32(-{operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
@@ -909,6 +929,7 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
 _TS_V3_TYPE = {
     # Int is `bigint` — see TYPE_MAP for why. Float is a separate type.
     "Int": "bigint",
+    "Int32": "number",  # a double holds every i32 exactly (docs/arithmetic.md)
     "Float": "number",
     "Bool": "boolean",
     "Str": "string",
@@ -1074,6 +1095,13 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
         return f"{_TS_INT_ARITH[method]}({target}, {args[0]})"
     if method in _TS_CHECKED_DIV:
         return f"{_TS_CHECKED_DIV[method]}({target}, {args[0]})"
+    # Int/Int32 width conversions (docs/arithmetic.md). Int is a bigint and
+    # Int32 a number: widening is `BigInt(...)`, narrowing goes through
+    # `revlI32(Number(...))`, which re-imposes the 32-bit bound and traps.
+    if method == "to_int":
+        return f"BigInt({target})"
+    if method == "to_int32":
+        return f"revlI32(Number({target}))"
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
@@ -1308,6 +1336,16 @@ function revlI64(v: bigint): bigint {
   return v
 }"""
 
+# Int32 is a `number`; the bound is imposed the same way, at 32 bits. The
+# double holds every i32 sum/product exactly, so only the range check is needed
+# (docs/arithmetic.md).
+_REVL_I32_HELPER = """const REVL_I32_MIN = -(2 ** 31)
+const REVL_I32_MAX = 2 ** 31 - 1
+function revlI32(v: number): number {
+  if (v < REVL_I32_MIN || v > REVL_I32_MAX) throw new RangeError('revl: Int32 overflow')
+  return v
+}"""
+
 # The named integer operations (docs/arithmetic.md), on bigint. BigInt `/`
 # already truncates toward zero, so `div_trunc` is native here; `%` on bigint
 # already takes the dividend's sign, which is what the truncated remainder
@@ -1432,9 +1470,29 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_SHOW_HELPER, ""])
     if _uses_bounded_int(ir) or _uses_int_arith(ir):
         out.extend([_REVL_I64_HELPER, ""])
+    if _uses_bounded_int32(ir):
+        out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
         out.extend([_REVL_INT_ARITH_HELPER, ""])
     return out
+
+
+def _uses_bounded_int32(node) -> bool:
+    """Does this IR need `revlI32` — Int32 `+`/`-`/`*`, an Int32 negation, or a
+    `to_int32` narrowing? Emitted only where used, like the i64 bound."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int32"):
+            return True
+        if (node.get("kind") == "un" and node.get("op") == "-"
+                and node.get("operands") == "Int32"):
+            return True
+        if node.get("kind") == "builtin" and node.get("method") == "to_int32":
+            return True
+        return any(_uses_bounded_int32(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_bounded_int32(v) for v in node)
+    return False
 
 
 def _uses_assert(node) -> bool:

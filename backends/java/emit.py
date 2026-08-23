@@ -49,6 +49,7 @@ CRATE = "cordis4j"
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
+    "Int32": "int",
     "Float": "double",
     "Bool": "boolean",
     "Bytes": "byte[]",
@@ -154,6 +155,7 @@ def _reject_fn_type(name: object) -> None:
 # parameter or return position stays primitive.
 _BOXED = {
     "long": "Long",
+    "int": "Integer",
     "double": "Double",
     "boolean": "Boolean",
     "void": "Void",
@@ -260,6 +262,8 @@ def _camel(name: str) -> str:
 def _zero_java_value(java_type: str) -> str:
     if java_type == "long":
         return "0L"
+    if java_type == "int":
+        return "0"
     if java_type == "double":
         return "0.0d"
     if java_type == "boolean":
@@ -527,6 +531,14 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
     # Integer division and modulo (docs/arithmetic.md). Java `/` truncates and
     # `Math.floorDiv`/`floorMod` give the rest; `floorMod` against |b| is the
     # Euclidean remainder, which is non-negative for either sign of b.
+    # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int is
+    # an explicit `(long)` cast; narrowing Int -> Int32 goes through
+    # Math.toIntExact, which throws ArithmeticException out of the int range —
+    # the same fault the other Int32 operations give.
+    if method == "to_int":
+        return f"((long) ({target}))"
+    if method == "to_int32":
+        return f"Math.toIntExact({target})"
     if method == "div_trunc":
         return f"(({target}) / ({args[0]}))"
     if method == "div_floor":
@@ -893,6 +905,12 @@ def _expr(
     if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
         return f"((double) ({_expr(inner, ctx, rename, env)}))"
+    # An Int32 -> Int widening site (docs/arithmetic.md): int -> long is an
+    # implicit JLS widening, but the marker makes it explicit so the emitted
+    # source reads the same as every other tier's.
+    if node.get("widen") == "Int":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"((long) ({_expr(inner, ctx, rename, env)}))"
     kind = node["kind"]
 
     if kind == "lit":
@@ -980,9 +998,11 @@ def _expr(
             return f"java.util.Objects.equals({left}, {right})"
         if op in ("!=", "!=="):
             return f"!java.util.Objects.equals({left}, {right})"
-        if op in ("+", "-", "*") and node.get("operands") == "Int":
-            # Int overflow traps (docs/arithmetic.md); Math.*Exact throws
-            # ArithmeticException, which is exactly the fault we want.
+        if op in ("+", "-", "*") and node.get("operands") in ("Int", "Int32"):
+            # Int/Int32 overflow traps (docs/arithmetic.md); Math.*Exact throws
+            # ArithmeticException, which is exactly the fault we want. Each has
+            # an `int` overload as well as a `long` one, so an Int32 operand
+            # (a Java `int`) resolves to the 32-bit check with no extra code.
             exact = {"+": "addExact", "-": "subtractExact", "*": "multiplyExact"}[op]
             return f"Math.{exact}({left}, {right})"
         java_op = _JAVA_V3_BIN_OPS.get(op)
@@ -995,9 +1015,10 @@ def _expr(
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
-            if node.get("operands") == "Int":
-                # negating Long.MIN overflows; Math.negateExact throws the same
-                # ArithmeticException as the other Int operations (arithmetic.md)
+            if node.get("operands") in ("Int", "Int32"):
+                # negating Long.MIN / Integer.MIN_VALUE overflows; Math.negateExact
+                # (long and int overloads) throws the same ArithmeticException as
+                # the other Int/Int32 operations (docs/arithmetic.md)
                 return f"Math.negateExact({operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")

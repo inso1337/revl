@@ -182,11 +182,21 @@ def _boundary(ir: dict) -> dict:
 
 
 def _run_fmt(args: argparse.Namespace) -> int:
-    """`revl fmt --migrate`: rewrite 1.x `$` interpolation to 2.0 templates."""
+    """`revl fmt`: canonical formatter with a self-proving IR-equivalence gate.
+
+    Default mode produces a canonical formatting; `--migrate` rewrites 1.x
+    `$` interpolation to 2.0 templates.  Either way the rewrite is admitted
+    only when compiling the original and the rewritten text yields
+    byte-identical IR (roadmap item 35); a file whose IR would change is
+    REFUSED (named, nonzero exit) rather than written.
+    """
+    from .formatter import format_source, ir_equivalent, FormatError
+
     if args.output and len(args.files) != 1:
-        print("error: `fmt --migrate -o` expects exactly one input file", file=sys.stderr)
+        print("error: `fmt -o` expects exactly one input file", file=sys.stderr)
         return 1
 
+    exit_code = 0
     for path_str in args.files:
         path = Path(path_str)
         try:
@@ -195,24 +205,53 @@ def _run_fmt(args: argparse.Namespace) -> int:
             print(f"error: cannot read {path_str}: {error}", file=sys.stderr)
             return 1
 
-        migrated, warnings = migrate_source(original, str(path))
-        for warning in warnings:
-            print(f"warning: {warning}", file=sys.stderr)
+        if args.migrate:
+            try:
+                rewritten, warnings = migrate_source(original, str(path))
+            except RevlError as error:
+                print(f"error: cannot migrate {path_str}: {error}", file=sys.stderr)
+                exit_code = 1
+                continue
+            for warning in warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+        else:
+            try:
+                rewritten = format_source(original, str(path))
+            except FormatError as error:
+                print(f"error: cannot format {path_str}: {error}", file=sys.stderr)
+                exit_code = 1
+                continue
+
+        # The self-proving gate: a rewrite ships iff the IR is unchanged.
+        # `--migrate` deliberately rewrites tokens, so it forgoes the
+        # token-identity fall-back the (whitespace-only) formatter relies on.
+        gate = ir_equivalent(original, rewritten, str(path),
+                             token_preserving=not args.migrate)
+        if not gate.admitted:
+            print(f"error: refusing {path_str}: {gate.reason}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        if getattr(args, "check", False):
+            if rewritten != original:
+                print(f"{path_str}: would reformat", file=sys.stderr)
+                exit_code = 1
+            continue
 
         if args.output:
             try:
-                Path(args.output).write_bytes(migrated.encode("utf-8"))
+                Path(args.output).write_bytes(rewritten.encode("utf-8"))
             except OSError as error:
                 print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
                 return 1
-        elif migrated != original:
+        elif rewritten != original:
             try:
-                path.write_bytes(migrated.encode("utf-8"))
+                path.write_bytes(rewritten.encode("utf-8"))
             except OSError as error:
                 print(f"error: cannot write {path_str}: {error}", file=sys.stderr)
                 return 1
 
-    return 0
+    return exit_code
 
 
 def _run_mcp(args) -> int:
@@ -444,19 +483,23 @@ def main(argv: list[str] | None = None) -> int:
                                  metavar="METHOD",
                                  help="a method the service would lose (repeatable)")
 
-    fmt = sub.add_parser("fmt", help="format .rvl sources (migration §9)")
+    fmt = sub.add_parser("fmt", help="canonically format .rvl sources (IR-equivalence gated)")
     fmt.add_argument(
         "--migrate",
         action="store_true",
-        required=True,
-        help="rewrite 1.x `$` interpolation to backtick templates",
+        help="rewrite 1.x `$` interpolation to backtick templates instead of formatting",
+    )
+    fmt.add_argument(
+        "--check",
+        action="store_true",
+        help="do not write; exit nonzero if any file is not already canonical",
     )
     fmt.add_argument("files", nargs="+")
     fmt.add_argument(
         "-o",
         "--output",
         default=None,
-        help="write migrated source to this path instead of in place (single input)",
+        help="write the result to this path instead of in place (single input)",
     )
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
