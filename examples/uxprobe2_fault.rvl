@@ -1,11 +1,12 @@
 // Fault path (A8 / L-Raise): a component whose activation fails mid-body.
 // `fault test` declares the failure and asserts the revert left nothing behind.
-// Negative controls we ran while writing this (see dogfood/findings-uxprobe2.md):
-//   * an undo that is NOT the inverse (`undo scratch.insert("leak", "1")`)
-//     still PASSES `assert no residue` in a fault test, while the identical
-//     leak under a plain lifecycle test is caught
-//     ("residue — host resources never released: map#1"). The fault-path
-//     residue assertion is weaker than the lifecycle one.
+// Historical note (dogfood/findings-uxprobe2.md): an undo that is NOT the
+// inverse (`undo scratch.insert("leak", "1")`) used to still PASS
+// `assert no residue` here, while the identical leak under a plain lifecycle
+// test was caught ("residue — host resources never released: map#1"). The
+// fault harness now reads the same host trace the lifecycle detector does, so
+// the non-inverse undo fails this test too (R1 accounting;
+// tests/test_fault_tests.py::test_a_non_inverse_undo_fails_the_fault_test).
 
 service Ping {
   fn ping(tag: Str) -> Str
