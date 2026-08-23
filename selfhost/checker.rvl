@@ -149,8 +149,9 @@ fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
 
 fn infer(e: Expr, env: List[Bind]) -> Infer {
   return match e {
-    IntLit(_)  => ok_ty("Int"),
-    StrLit(_)  => ok_ty("Str"),
+    IntLit(_)   => ok_ty("Int"),
+    FloatLit(_) => ok_ty("Float"),
+    StrLit(_)   => ok_ty("Str"),
     BoolLit(_) => ok_ty("Bool"),
     NullLit    => refuse("`null` has no type in revl — absence is Opt[T]"),
     Var(n)     => ok_ty(lookup_at(env, n, 0)),
@@ -796,8 +797,9 @@ fn parts_calls(xs: List[PartN], i: Int,
 
 fn calls_in(e: Expr, acc: List[Str]) -> List[Str] {
   return match e {
-    IntLit(_)  => acc,
-    StrLit(_)  => acc,
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
     BoolLit(_) => acc,
     NullLit    => acc,
     Var(_)     => acc,
@@ -951,8 +953,9 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
 
 fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {
   return match e {
-    IntLit(_)  => ck,
-    StrLit(_)  => ck,
+    IntLit(_)   => ck,
+    FloatLit(_) => ck,
+    StrLit(_)   => ck,
     BoolLit(_) => ck,
     NullLit    => ck,
     Var(_)     => ck,
