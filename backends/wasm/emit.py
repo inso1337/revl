@@ -26,13 +26,17 @@ this emitter deliberately uses both widths and `_wasm_ty` is the single place
 that decides which. `Float` remains refused by name.
 
 Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
-Violations are EmitError, never silent degradation. The component tier carries
-scalars across a service boundary (Int service params/returns,
-`await Job.run(name)`); the v3 functions tier additionally lowers
-Str/List/record values through a canonical-ABI-shaped linear-memory
-representation. Config blocks, host builtins outside `await Job.run`,
-method-time effects, and variant values are still rejected with a precise
-reason.
+Violations are EmitError, never silent degradation. The service boundary
+(coeffect imports, `provide:<key>.<op>` exports) carries the SAME canonical-ABI
+representation the v3 functions tier uses: an `Int` is an i64 value, a `Bool`
+an i32 value, and every Str/List/record/variant/Opt/Result an i32 *pointer*
+into the module's linear memory (`_boundary_wty`). A value whose wasm width
+disagrees with its declared service type (a `List` from an `Int`-declared
+op) stays refused — a real mismatch, not a silent narrowing. `@wasm`-bodied
+externs lower to internal `(func $name …)`. Config blocks (no instantiation
+channel), host builtins outside `await Job.run` (e.g. `Map.new` — the tier has
+no Map representation), method-time effects, and `Float`/`Map` at the boundary
+are still rejected with a precise reason.
 
 `emit(ir) -> dict[name, wat]` — one WAT module per component, plus a
 `functions` module for IR v3 type/function documents.
@@ -122,15 +126,6 @@ def _ident(name: Any, what: str) -> str:
     return name
 
 
-def _int_only(type_name: Any, where: str) -> None:
-    if type_name not in ("Int", None):
-        raise EmitError(
-            f"{where}: type {type_name!r} is not lowerable — the cordis-wasm "
-            f"tier carries scalars across a service boundary (Int in, Int out); "
-            f"keep string-shaped services on the hosted backends"
-        )
-
-
 class _ComponentEmitter:
     """A component document -> one WAT module.
 
@@ -173,7 +168,9 @@ class _ComponentEmitter:
                 json.dumps(self.intercept[key], sort_keys=True)
             except (TypeError, ValueError) as exc:
                 raise EmitError(f"{self.name}: intercept metadata for {key!r} is not JSON: {exc}")
-        self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
+        # (key, op) -> (param wasm types, result wasm type or None) — the
+        # coeffect import's ABI, one width per declared param/return.
+        self.imports: dict[tuple[str, str], tuple[list[str | None], str | None]] = {}
         self.globals: list[tuple[str, str]] = []   # (name, wasm type)
         self.uses_job = False
         # job name -> interned i32 id (see _job_id)
@@ -183,10 +180,16 @@ class _ComponentEmitter:
         self.externs = {ext.get("name"): ext for ext in (externs or [])}
         self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
         self.needed_fns: list[str] = []   # top-level fns this component calls
+        self.needed_externs: list[str] = []  # @wasm externs this component calls
         self.uses_v3 = False              # a delegated expression was lowered
         self.extra_locals: set[str] = set()  # v3 scratch locals for one method
         self.func_uses_v3 = False
         self.activation_locals: list[str] = []
+        # a rich type (Str/List/record/variant/Opt/Result) crossed the service
+        # boundary as a linear-memory pointer, so the module has to export a
+        # memory even when its own body allocates nothing (an identity
+        # `fn f(x: Str) -> Str = x` just forwards a pointer the host owns).
+        self.boundary_uses_memory = False
 
     # -- v2 realms -----------------------------------------------------------
 
@@ -222,9 +225,40 @@ class _ComponentEmitter:
             lines.append(f'  (@custom "revl:intercept" "{payload}")')
         return lines
 
+    # -- service boundary widths ---------------------------------------------
+
+    def _boundary_wty(self, ty: str | None, where: str) -> str | None:
+        """The wasm ABI type a service param/return of declared type `ty` uses.
+
+        This is the whole port: the v3 functions tier already lowers
+        Str/List/record/variant/Opt/Result through a canonical-ABI linear-memory
+        representation, so the service boundary carries the SAME representation —
+        `Int` is an i64 value, `Bool` an i32 value, and every compound type an
+        i32 *pointer* into the module's memory. Anything the v3 value model has
+        no representation for (`Float`, `Map`, function types) is refused here by
+        `_check_type` — a genuine boundary, not a silent narrowing. `None`/`Unit`
+        means the slot is absent (a void operation, no param/result).
+        """
+        if _is_unit_type(ty):
+            return None
+        # `_check_type` is the v3 tier's single lowerability gate: it accepts
+        # Int/Bool/Str/Bytes/List/record/variant/Opt/Result and refuses Float,
+        # Map, and function types with a named reason.
+        self.v3._check_type(ty, where)
+        if not _is_scalar_type(ty):
+            self.boundary_uses_memory = True
+        return _wasm_ty(ty)
+
     # -- service lookup ------------------------------------------------------
 
-    def _op_spec(self, key: str, op: str, where: str) -> tuple[int, bool]:
+    def _op_spec(self, key: str, op: str, where: str) -> tuple[list[str | None], str | None]:
+        """Resolve a coeffect op, registering its import ABI.
+
+        Returns the declared (param types, return type) — the revl types, so a
+        call site can width-check each argument and carry the result's type. The
+        wasm widths of those types are stored in ``self.imports`` for the import
+        section to render.
+        """
         service_name = self.requires.get(key)
         service = self.services.get(service_name)
         if service is None:
@@ -232,13 +266,15 @@ class _ComponentEmitter:
         spec = (service.get("methods") or {}).get(op)
         if spec is None:
             raise EmitError(f"{where}: {key}.{op} is not a method of {service_name}")
-        for param in spec.get("params") or []:
-            _int_only(param.get("type"), f"{where}: {key}.{op} param {param.get('name')!r}")
-        _int_only(spec.get("returns"), f"{where}: {key}.{op} return")
-        arity = len(spec.get("params") or [])
-        has_result = spec.get("returns") is not None
-        self.imports[(key, op)] = (arity, has_result)
-        return arity, has_result
+        param_types = [param.get("type") for param in spec.get("params") or []]
+        return_type = spec.get("returns")
+        param_wtys = [
+            self._boundary_wty(pty, f"{where}: {key}.{op} param {i}")
+            for i, pty in enumerate(param_types)
+        ]
+        result_wty = self._boundary_wty(return_type, f"{where}: {key}.{op} return")
+        self.imports[(key, op)] = (param_wtys, result_wty)
+        return param_types, return_type
 
     # -- expressions ---------------------------------------------------------
 
@@ -294,24 +330,28 @@ class _ComponentEmitter:
                 )
             key = _ident(target.get("name"), f"{where}: req")
             op = _ident(node.get("method"), f"{where}: method")
-            arity, has_result = self._op_spec(key, op, where)
+            param_types, return_type = self._op_spec(key, op, where)
             args = node.get("args") or []
-            if len(args) != arity:
-                raise EmitError(f"{where}: {key}.{op} takes {arity} argument(s)")
+            if len(args) != len(param_types):
+                raise EmitError(f"{where}: {key}.{op} takes {len(param_types)} argument(s)")
             parts = []
-            for arg in args:
+            for arg, ptype in zip(args, param_types):
                 value = self._lower(arg, scope, types, where)
                 if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: void expression used as an argument")
-                if not _is_scalar_type(value.ty):
+                # ABI-width agreement: a rich type crosses as a pointer when the
+                # declared param is that rich type, but a value whose wasm width
+                # disagrees with the declared param (a List where the op is
+                # declared over Int) is a real mismatch and stays refused.
+                if _wasm_ty(value.ty) != _wasm_ty(ptype):
                     raise EmitError(
                         f"{where}: a {value.ty!r} argument cannot cross this tier's "
-                        f"scalar coeffect boundary — {key}.{op} is declared over Int; "
-                        f"keep compound values inside the module"
+                        f"scalar coeffect boundary — {key}.{op} is declared over "
+                        f"{ptype!r}; keep compound values inside the module"
                     )
                 parts.append(value.wat)
             call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
-            return _E(call, "Int" if has_result else None)
+            return _E(call, return_type)
         if kind == "config":
             raise EmitError(f"{where}: config is not available on this tier")
         if kind == "host":
@@ -468,11 +508,18 @@ class _ComponentEmitter:
         if kind == "fn":
             name = _ident(node.get("name"), f"{where}: function")
             if name not in self.fn_by_name and name in self.externs:
-                available = ", ".join(sorted((self.externs[name].get("bodies") or {}))) or "none"
-                raise EmitError(
-                    f"{where}: extern `{name}` has no @wasm body — not portable "
-                    f"to this backend (available: {available})"
-                )
+                ext = self.externs[name]
+                if _extern_wasm_body(ext) is None:
+                    available = ", ".join(sorted((ext.get("bodies") or {}))) or "none"
+                    raise EmitError(
+                        f"{where}: extern `{name}` has no @wasm body — not portable "
+                        f"to this backend (available: {available})"
+                    )
+                # a @wasm-bodied extern lowers to an internal `(func $name …)`
+                # emitted into this component's own module, so `call $name`
+                # resolves and the component stays self-contained
+                if name not in self.needed_externs:
+                    self.needed_externs.append(name)
             return {
                 "kind": "call",
                 "callee": {"kind": "var", "name": name},
@@ -634,9 +681,6 @@ class _ComponentEmitter:
             if spec is None:
                 raise EmitError(f"{where}: {mname!r} is not a method of {service_name}")
             spec_params = spec.get("params") or []
-            for param in spec_params:
-                _int_only(param.get("type"), f"{where}: {key}.{mname} param")
-            _int_only(spec.get("returns"), f"{where}: {key}.{mname} return")
             params = [_ident(p, f"{where}: param") for p in method.get("params") or []]
             if len(params) != len(spec_params):
                 raise EmitError(f"{where}: method {mname!r} arity does not match the service")
@@ -651,14 +695,19 @@ class _ComponentEmitter:
             mtypes: dict[str, str | None] = {name: "Int" for name in scope}
             decl = []
             for i, param in enumerate(params):
-                # a service parameter is declared `Int` (`_int_only`), and an
-                # `Int` is 64-bit — this is a *value*, not an address
-                decl.append(f"(param $p_{param} i64)")
+                # each service parameter crosses at the width of its declared
+                # type: an `Int` is a 64-bit *value*, a Str/List/record/variant/
+                # Opt/Result is an i32 *pointer* into this module's memory.
+                ptype = spec_params[i].get("type")
+                pwty = self._boundary_wty(ptype, f"{where}: {key}.{mname} param {param!r}")
+                decl.append(f"(param $p_{param} {pwty})")
                 mscope[param] = f"(local.get $p_{param})"
-                mtypes[param] = "Int"
-            has_result = spec.get("returns") is not None
+                mtypes[param] = ptype
+            result_wty = self._boundary_wty(spec.get("returns"),
+                                            f"{where}: {key}.{mname} return")
+            has_result = result_wty is not None
             if has_result:
-                decl.append("(result i64)")
+                decl.append(f"(result {result_wty})")
 
             body_lines = []
             mlocals: list[str] = []
@@ -680,7 +729,11 @@ class _ComponentEmitter:
                     value = self._lower(mstep["expr"], mscope, mtypes, mwhere)
                     if has_result and _is_unit_type(value.ty):
                         raise EmitError(f"{mwhere}: void expression returned from a typed method")
-                    if has_result and not _is_scalar_type(value.ty):
+                    # ABI-width agreement: a rich value crosses as a pointer when
+                    # the operation is declared over that rich type, but a value
+                    # whose wasm width disagrees with the declared return (a List
+                    # from an Int-declared op) is a real mismatch and stays refused.
+                    if has_result and _wasm_ty(value.ty) != result_wty:
                         raise EmitError(
                             f"{mwhere}: a {value.ty!r} value cannot cross this tier's "
                             f"scalar service boundary — the operation is declared "
@@ -758,11 +811,16 @@ class _ComponentEmitter:
         # module, so `call $name` resolves and the component stays a single
         # self-contained artifact for the runtime to instantiate
         fn_defs = [self.v3._emit_function(self.fn_by_name[name]) for name in self.needed_fns]
+        # @wasm-bodied externs this component calls, emitted as internal funcs
+        extern_defs = [_emit_extern_func(self.externs[name], self.v3._check_type)
+                       for name in self.needed_externs]
+        fn_defs = extern_defs + fn_defs
         rendered = "\n".join(provide_funcs + fn_defs + segments
                              + [wat for _index, wat in inverses])
         # linear memory is pulled in only when something actually reaches for
         # it, so a scalar-only component emits no memory at all
-        needs_memory = self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)
+        needs_memory = (self.boundary_uses_memory
+                        or (self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)))
         # the checked-arithmetic and named-division helpers are *not* memory:
         # `x + 1` traps on overflow through `$int_add` in a component that
         # never touches linear memory, so they get their own gate. (Before
@@ -774,13 +832,14 @@ class _ComponentEmitter:
                  f";; component {self.name}",
                  "(module"]
         lines.extend(self._realm_sections())
-        for (key, op), (arity, has_result) in sorted(self.imports.items()):
-            # service params/returns are `Int` (`_int_only`), so the coeffect
-            # ABI is i64 in and i64 out — a coeffect carries values, not
-            # addresses, and truncating one at the boundary would be exactly
-            # the silent narrowing this port exists to remove
-            params = " ".join(["(param i64)"] * arity)
-            result = " (result i64)" if has_result else ""
+        for (key, op), (param_wtys, result_wty) in sorted(self.imports.items()):
+            # the coeffect ABI is one width per declared param/return: an `Int`
+            # is an i64 *value*, a Str/List/record/variant/Opt/Result is an i32
+            # *pointer* into this module's memory (the same canonical-ABI shape
+            # the v3 functions tier uses). Truncating a value, or narrowing a
+            # pointer, at the boundary would be the silent mismatch this guards.
+            params = " ".join(f"(param {w})" for w in param_wtys)
+            result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
         if self.uses_job:
@@ -937,6 +996,46 @@ def _refuse_float_operands(node: Any, where: str) -> None:
             f"Int/Bool, and the operands of `{node.get('op')}` are Float")
 
 
+def _extern_wasm_body(ext: dict) -> str | None:
+    """The `@wasm` body text of an extern, or None if it has none.
+
+    An extern's implementation on a backend is the body tagged for that backend
+    (`bodies.rs` on rust, `bodies.wasm` here); a `@wasm` body is raw WAT for the
+    function's body, referencing each parameter as `$p_<name>` — the same
+    spelling a v3 `fn` gives its params — and leaving the result on the stack.
+    """
+    body = (ext.get("bodies") or {}).get("wasm")
+    return body if isinstance(body, str) else None
+
+
+def _emit_extern_func(ext: dict, check_type) -> str:
+    """Render a `@wasm`-bodied extern as an internal `(func $name …)`.
+
+    Widths follow the same rule as every other value on this tier (`_wasm_ty`):
+    an `Int` param/return is an i64 value, a Str/List/record/variant/Opt/Result
+    is an i32 pointer. `check_type` is the caller's lowerability gate so a
+    Float/Map/function-typed extern is refused the same way an ordinary value of
+    that type is, rather than emitting an unvalidated body.
+    """
+    name = _ident(ext.get("name"), "extern name")
+    body = (_extern_wasm_body(ext) or "").strip()
+    decl: list[str] = []
+    for param in ext.get("params") or []:
+        pname = _ident(param.get("name"), f"extern {name}: parameter")
+        ptype = param.get("type")
+        check_type(ptype, f"extern {name}: param {pname}")
+        if not _is_unit_type(ptype):
+            decl.append(f"(param $p_{pname} {_wasm_ty(ptype)})")
+    rtype = ext.get("returns")
+    check_type(rtype, f"extern {name}: return")
+    if not _is_unit_type(rtype):
+        decl.append(f"(result {_wasm_ty(rtype)})")
+    header = f"(func ${name}"
+    if decl:
+        header += " " + " ".join(decl)
+    return f"  {header}\n    {body or 'nop'})"
+
+
 def _is_unit_type(ty: str | None) -> bool:
     return ty in (None, "Unit")
 
@@ -1056,6 +1155,17 @@ class _V3Emitter:
             }
             for fn in self.functions
         }
+        # a @wasm-bodied extern is a callable too: it lowers to an internal
+        # `(func $name …)` (see `_emit_extern_func`), so its call site resolves
+        # the same way a `fn` call does — through this signature table.
+        self.extern_sigs = {
+            ext.get("name"): {
+                "params": [p.get("type") for p in (ext.get("params") or [])],
+                "returns": ext.get("returns"),
+            }
+            for ext in self.externs
+            if _extern_wasm_body(ext) is not None
+        }
         self.literal_offsets: dict[str, int] = {}
         self.data_segments: list[tuple[int, bytes]] = []
         self.heap_start = 0
@@ -1130,11 +1240,18 @@ class _V3Emitter:
         return lines
 
     def _unsupported_comments(self) -> list[str]:
-        lines = []
-        if self.externs:
-            names = ", ".join(_ident(ext.get("name"), "extern name") for ext in self.externs)
-            lines.append(f"  ;; unsupported on this tier: externs {names} (no @wasm body)")
-        return lines
+        # only externs with no @wasm body are unsupported now; a @wasm-bodied
+        # one is emitted as a real `(func $name …)` in `emit()`.
+        bodyless = [ext for ext in self.externs if _extern_wasm_body(ext) is None]
+        if not bodyless:
+            return []
+        names = ", ".join(_ident(ext.get("name"), "extern name") for ext in bodyless)
+        return [f"  ;; unsupported on this tier: externs {names} (no @wasm body)"]
+
+    def _extern_funcs(self) -> list[str]:
+        """The @wasm-bodied externs, rendered as internal functions."""
+        return [_emit_extern_func(ext, self._check_type)
+                for ext in self.externs if _extern_wasm_body(ext) is not None]
 
     # -- type/layout helpers --------------------------------------------------
 
@@ -2268,7 +2385,7 @@ class _V3Emitter:
             ty = (expected if self._tagged_layout(expected) is not None
                   else f"Opt[{self._infer_type(payload, scope) or 'Int'}]")
             return self._make_tagged(ty, "Some", payload, scope, where)
-        sig = self.fn_sigs.get(name)
+        sig = self.fn_sigs.get(name) or self.extern_sigs.get(name)
         if sig is None:
             raise EmitError(f"{where}: callee {name!r} is not a lowerable function")
         args = node.get("args") or []
@@ -3017,6 +3134,9 @@ class _V3Emitter:
             lines.append("")
         for fn in self.functions:
             lines.append(self._emit_function(fn))
+            lines.append("")
+        for extern_func in self._extern_funcs():
+            lines.append(extern_func)
             lines.append("")
         # Each `test` block lowers to an exported zero-arg function returning
         # Bool: 1 = every assert held; a failed assert traps before the tail

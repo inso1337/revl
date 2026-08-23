@@ -100,6 +100,14 @@ class Session:
         # snapshotted, because there is nothing to replay through the gate.
         self.origin: dict | None = None
         self.previous_origin: dict | None = None  # origin `rollback` restores
+        # the server-side working source an agent edits with `revl_edit`
+        # (deltas, not documents — docs/mcp-bridge.md, roadmap item 50). None
+        # means "no uncommitted edits": the working source re-derives from
+        # `origin`, i.e. from what is actually running. It is set only while an
+        # edit has advanced the source but not yet swapped (open holes remain),
+        # and cleared on every generation change below, since a swap/rollback
+        # makes any older draft stale.
+        self.draft: dict | None = None
         # which generation is live: a fresh boot is 1, every swap/rollback moves
         # it on. This is the "which world" a live query answers for — see
         # `live_state` and docs/queries.md §9.
@@ -143,6 +151,7 @@ class Session:
         self._driver = driver_class(ir, self.config, emit, runtime_mod, Context, FiberState)
         self.ir = ir
         self.origin = origin
+        self.draft = None
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
         self._run(self._driver._load(ir, self._prepare_module(ir)))
@@ -174,6 +183,7 @@ class Session:
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = ir
         self.origin = origin
+        self.draft = None  # a new generation makes any uncommitted edit stale
         self._generation += 1
         self._run(driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True)
@@ -414,6 +424,7 @@ class Session:
         self.previous = None
         self.origin = None
         self.previous_origin = None
+        self.draft = None
         self._generation = 0
         return {
             "unloaded": True,

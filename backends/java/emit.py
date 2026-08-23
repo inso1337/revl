@@ -430,10 +430,18 @@ def _java_test_method_name(name: object, index: int, used: set[str]) -> str:
 class _V3Ctx:
     """Names and type layouts visible to v3 expression emitters."""
 
-    def __init__(self, types: dict, functions: list, externs: list) -> None:
+    def __init__(self, types: dict, functions: list, externs: list,
+                 components: list | None = None) -> None:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # Every component in the document, keyed by name, so a `spawn`
+        # acquisition can resolve its target template's config layout (the
+        # plugin-constructor argument order) and provided keys (the services to
+        # isolate into fresh local realms). Empty for non-spawning documents.
+        self.spawn_targets: dict[str, dict] = {
+            comp.get("name"): comp for comp in components or []
+        }
         self.case_owners: dict[str, str] = {}
         for tname, spec in self.types.items():
             if spec.get("kind") == "variant":
@@ -1224,7 +1232,63 @@ def _expr(
             f"({kind!r}); unwrap with `match` or `??` for now"
         )
 
+    if kind == "spawn":
+        return _v3_spawn(node, ctx, rename, env)
+
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
+
+
+def _v3_spawn(
+    node: dict,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None,
+    env: "_Env | None",
+) -> str:
+    """Lower an instance-parametric `spawn` acquisition (docs/design-v2-instances.md).
+
+    `spawn` is the acquisition of a `let-effect` step, so this renders the
+    expression that step binds to the handle. It plugs the target *template* as
+    a CHILD instance of the spawner — each key the template provides isolated
+    into a FRESH LOCAL realm (a per-spawn-unique label, so two instances of one
+    component never collide on a provision) — and returns a `RevlSpawnHandle`
+    wrapping that instance's own teardown scope. The step's `undo`
+    (`<handle>.dispose()`) reclaims it early, in LIFO order; if it never runs,
+    the instance is torn down with the spawner (the parent scope is the safety
+    net). Mirrors the rust/cordis (ts) lowering that already landed.
+    """
+    target = node.get("component")
+    if not isinstance(target, str) or not target.isidentifier():
+        raise EmitError(f"bad spawn component {target!r}")
+    template = ctx.spawn_targets.get(target)
+    if template is None:
+        raise EmitError(
+            f"spawn target {target!r} is not a component in this document"
+        )
+    cname = _ident(target, "component")
+    # Config values in the target's DECLARED order — the order its plugin
+    # constructor takes them (`_emit_plugin_ctors`). A field the spawn omits
+    # (only possible when it has a default; the lowerer requires the rest) is
+    # filled with that default, matching the full-argument constructor.
+    supplied = node.get("config") or {}
+    ctor_args = []
+    for field in template.get("config") or []:
+        fname = field.get("name")
+        if fname in supplied:
+            ctor_args.append(_expr(supplied[fname], ctx, rename, env))
+        else:
+            ctor_args.append(_config_default_lit(field, _java_v3_type))
+    # Each provided key -> the service to isolate into its own fresh local
+    # realm at plug time (`Context.isolate(<Svc>.class, <fresh label>)`).
+    provides = template.get("provides") or {}
+    realm_classes = ", ".join(
+        f"{_ident(provides[key], 'service')}.class"
+        for key in node.get("realms") or []
+    )
+    ctx_expr = rename.get("ctx", "ctx") if rename else "ctx"
+    return (
+        f"RevlSpawnHandle.spawn({ctx_expr}, new {cname}Plugin("
+        f"{', '.join(ctor_args)}), new Class<?>[]{{{realm_classes}}})"
+    )
 
 
 def _v3_match_expr(
@@ -1978,6 +2042,11 @@ def _host_of(component: dict, bind: str) -> str:
     for s in component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
             acquire = s.get("acquire") or {}
+            # A `spawn` acquisition binds a live-instance handle, not a host
+            # resource: its type is the emitted `RevlSpawnHandle`, so a
+            # provide-method that captured it can call `.dispose()`.
+            if acquire.get("kind") == "spawn":
+                return "RevlSpawnHandle"
             return (acquire.get("fn") or "").split(".")[0] or "Object"
     return "Object"
 
@@ -2308,9 +2377,10 @@ def _emit_component_modern(
     types: dict | None = None,
     functions: list | None = None,
     externs: list | None = None,
+    components: list | None = None,
 ) -> list[str]:
     env = _Env(component, services)
-    v3_ctx = _V3Ctx(types or {}, functions or [], externs or [])
+    v3_ctx = _V3Ctx(types or {}, functions or [], externs or [], components or [])
     name = component["name"]
     cname = _ident(name, "component")
     isolate = component.get("isolate") or {}
@@ -2428,6 +2498,7 @@ def _emit_component(
     types: dict | None = None,
     functions: list | None = None,
     externs: list | None = None,
+    components: list | None = None,
     *,
     render_type=_java_type,
 ) -> list[str]:
@@ -2439,7 +2510,8 @@ def _emit_component(
     `f(Object)`, which javac reports as the class not being abstract.
     """
     if _component_needs_modern(component):
-        return _emit_component_modern(component, services, types, functions, externs)
+        return _emit_component_modern(
+            component, services, types, functions, externs, components)
     env = _Env(component, services)
     name = component["name"]
     cname = _ident(name, "component")
@@ -2623,6 +2695,75 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _uses_spawn(ir: dict) -> bool:
+    """True when any component body contains a `spawn` acquisition node — gates
+    the `RevlSpawnHandle` helper. Non-spawning documents skip it entirely and
+    stay byte-identical to the pre-feature output (v1 goldens unaffected)."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "spawn":
+                return True
+            return any(walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(walk(value) for value in node)
+        return False
+
+    return walk(ir.get("components"))
+
+
+def _emit_spawn_handle() -> list[str]:
+    """The value a `spawn` acquisition binds: a live component instance
+    (docs/design-v2-instances.md, phase 1), reclaimed by its own `dispose()`.
+
+    `spawn` plugs the target template as a CHILD instance of the spawner: each
+    key it provides is isolated into a FRESH LOCAL realm (a per-spawn-unique
+    label — so two instances of one component coexist without a duplicate-key
+    collision, and only the spawner, holding the handle, reaches its instance),
+    and the template is applied on that isolated context. The returned handle
+    owns the instance's own teardown scope. `dispose()` runs that scope's LIFO
+    teardown NOW, independent of the spawner — a request-scoped instance is
+    reclaimed when the request ends, not deferred to the component's teardown.
+    It is idempotent (the instance disposable is taken exactly once), so the
+    spawner's own `undo` inverse — and the parent scope's safety net that stops
+    an un-disposed instance outliving its spawner — are harmless no-ops once the
+    instance is already gone."""
+    return [
+        "/** A live spawned-component instance (docs/design-v2-instances.md). */",
+        "static final class RevlSpawnHandle {",
+        "    private static final java.util.concurrent.atomic.AtomicLong SPAWN_SEQ =",
+        "        new java.util.concurrent.atomic.AtomicLong();",
+        "    private final java.util.concurrent.atomic.AtomicReference<Disposable> instance;",
+        "",
+        "    private RevlSpawnHandle(Disposable instance) {",
+        "        this.instance = new java.util.concurrent.atomic.AtomicReference<>(instance);",
+        "    }",
+        "",
+        "    /** Plug `plugin` as a child instance: each provided service is",
+        "     * isolated into a fresh local realm (a per-spawn-unique label, so",
+        "     * two instances never collide), then the template is applied on",
+        "     * that isolated context. */",
+        "    static RevlSpawnHandle spawn(Context ctx, Plugin plugin, Class<?>[] realms) {",
+        "        String realm = \"revl$spawn$\" + SPAWN_SEQ.getAndIncrement();",
+        "        Context child = ctx;",
+        "        for (Class<?> service : realms) {",
+        "            child = child.isolate(service, realm);",
+        "        }",
+        "        return new RevlSpawnHandle(plugin.apply(child));",
+        "    }",
+        "",
+        "    /** Reclaim the instance now — run its own LIFO teardown. Idempotent. */",
+        "    long dispose() {",
+        "        Disposable taken = instance.getAndSet(null);",
+        "        if (taken != null) {",
+        "            taken.dispose();",
+        "        }",
+        "        return 0L;",
+        "    }",
+        "}",
+        "",
+    ]
+
+
 def _emit_v3(ir: dict, package_name: str) -> str:
     services = ir.get("services") or {}
     components = ir.get("components") or []
@@ -2663,9 +2804,11 @@ def _emit_v3(ir: dict, package_name: str) -> str:
         out.extend(["    " + line if line else line for line in _emit_v3_functions(functions, types, externs)])
     if tests:
         out.extend(["    " + line if line else line for line in _emit_v3_tests(tests, types, functions, externs)])
+    if _uses_spawn(ir):
+        out.extend(["    " + line if line else line for line in _emit_spawn_handle()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
-            component, services, types, functions, externs,
+            component, services, types, functions, externs, components,
             render_type=_java_v3_type)])
     out.append("}")
     return "\n".join(out).rstrip() + "\n"
