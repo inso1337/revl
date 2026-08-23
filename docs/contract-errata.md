@@ -444,6 +444,41 @@ rejection.
   nullary constructor now types as its ADT, so `match FirstTime { ... }` is
   checked; only genuinely unknown scrutinees are silent.
 
+## G8 audit-surface gaps (fenced, not closed)
+
+The G8 boundary surface (`revl audit`, and the `host:`/`emit:` crossing tokens
+`revl audit --diff` gates on) is meant to be the *enumerable* set of host
+reaches — "everything that reaches the host must appear on the audit surface"
+(docs/rejections.md, G8). One enumeration gap is known and fenced here, the way
+the runtime divergences above are; the adversarial suite pins it.
+
+- **G8 enumeration is incomplete for first-class host reaches** (found by the
+  gate threat-model program, docs/threat-model.md; pinned
+  `tests/test_adversarial_gate.py::test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface`,
+  `xfail(strict)`). A host `extern` reached **only** through a first-class
+  function value — `indirect(ship, a)` rather than `ship(a)` — does **not**
+  appear in `revl audit`'s per-component `externs` list, so it produces no
+  `host:<component>:<extern>` crossing token. *Trigger:* a bare-`emission`
+  provide-method (declared capability already `*`) whose body hands an emission
+  extern to a dispatcher instead of calling it by name; contrast the direct
+  call, which surfaces `host:C:ship`. *Blast radius:* (a) `revl audit`
+  under-reports the host boundary of that component — a reviewer sees fewer
+  host blocks than run; (b) `revl audit --diff` (the authority-drift gate)
+  cannot detect a widening that adds such a reach, because the added crossing
+  has no token. *What is NOT affected — the compensating control:* the
+  load-bearing G4 defence holds. The operation is still correctly flagged
+  `readOnlyHint: false` / `destructiveHint: true` at the MCP tool layer (the
+  emission fixed point propagates `*` through the first-class reference), and
+  the same launder in a *plain* (read-only) operation is *refused* at compile
+  time — so no operation is ever mislabelled read-only, and this stays within a
+  bare emission's already-declared `*` authority rather than exceeding it. It
+  is an *enumeration* incompleteness, not a read-only lie. *Fix:* teach
+  `_boundary` (`src/revl/__main__.py`) to fold first-class emission references
+  into the per-component `externs`/`capabilities` surface, reusing the
+  first-class reachability the G4 fixed point (`emission_analysis.py`,
+  `lower._emitting_capabilities`) already computes; when it lands, the pinned
+  test flips green and this fence closes.
+
 ## Contract rejection coverage (the executable spec)
 
 `examples/rejections/` plus the REJECTIONS table in `tests/test_frontend.py` is

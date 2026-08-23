@@ -29,13 +29,15 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import weakref
 from typing import Any, Callable, Optional
 
 __all__ = [
     "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
-    "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "add_trace",
-    "arm_fault_probe", "disarm_fault_probe", "fmt", "plug", "realm_label",
-    "remove_trace", "resolved_config", "set_trace", "spawn", "trace_observers",
+    "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "StateIncompatible",
+    "add_trace", "arm_fault_probe", "disarm_fault_probe", "fmt", "live_instances",
+    "plug", "realm_label", "remove_trace", "resolved_config", "set_trace",
+    "spawn", "trace_observers",
 ]
 
 
@@ -84,6 +86,82 @@ def plug(ctx, component: dict, config=None):
 # instance-parametric components (docs/design-v2-instances.md)
 # ---------------------------------------------------------------------------
 
+# -- live-instance state migration (roadmap item 10, hot-swap with instances) -
+#
+# Hot-swapping a template `T` to `T'` while instances of `T` are live must
+# reconcile each live instance's *state* onto `T'` (docs/design-v2-instances.md
+# "Not in phase 1", question 6). The swap engine (src/revl/mcp/session.py) drives
+# the reconciliation; this section is the runtime substrate it stands on:
+#
+#   * a **live-instance registry** so the engine can enumerate the live
+#     instances of a swapped template (`live_instances(name)`);
+#   * per-activation **resource tracking** so an instance's migratable state —
+#     the stateful host resources it acquired (its `Map`, …) — can be captured
+#     and restored (`SpawnHandle.capture_state` / `.restore_state`).
+#
+# All of it is inert unless something spawns: no spawn ⇒ no registry entries, and
+# the activation hook only records resources while a body is actually running.
+
+#: fibers whose body is *currently* activating — a stack, innermost last. A host
+#: resource created inside a body (`Map.new()`) registers onto the top frame, so
+#: it is attributed to the activation (hence the instance) that acquired it.
+_ACTIVATING: list["Frame"] = []
+
+#: ctx -> the Frame of the activation on that context. Weak-keyed so a torn-down
+#: instance's frame is collected with its context. A `SpawnHandle` finds its
+#: instance's frame here, via the fiber context it already holds.
+_FRAME_BY_CTX: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+#: component name -> the live `SpawnHandle`s of that template, in spawn order.
+#: A list (not a set): the swap engine correlates old instances to the new ones
+#: the successor template spawns *positionally*, and spawn order is deterministic.
+_LIVE_INSTANCES: "dict[str, list[SpawnHandle]]" = {}
+
+
+def _register_resource(resource: Any) -> None:
+    """Attribute a freshly-created host resource to the activation acquiring it.
+
+    Called from `_Closable.__init__`; a no-op when nothing is activating (a
+    resource made outside any component body — e.g. a bare test — is not
+    instance state and is simply not tracked)."""
+    if _ACTIVATING:
+        _ACTIVATING[-1]._resources.append(resource)
+
+
+def _frame_for_ctx(ctx: Any) -> "Optional[Frame]":
+    try:
+        return _FRAME_BY_CTX.get(ctx)
+    except TypeError:  # pragma: no cover — non-weakrefable ctx
+        return None
+
+
+def live_instances(component: str) -> "list[SpawnHandle]":
+    """The live instances of a template, in spawn order (the swap engine's
+    enumeration point). A copy, so disposal during iteration is safe."""
+    return list(_LIVE_INSTANCES.get(component, ()))
+
+
+def _remember_instance(handle: "SpawnHandle") -> None:
+    _LIVE_INSTANCES.setdefault(handle.component, []).append(handle)
+
+
+def _forget_instance(handle: "SpawnHandle") -> None:
+    bucket = _LIVE_INSTANCES.get(handle.component)
+    if bucket is not None:
+        try:
+            bucket.remove(handle)
+        except ValueError:
+            pass
+        if not bucket:
+            _LIVE_INSTANCES.pop(handle.component, None)
+
+
+class StateIncompatible(RuntimeError):
+    """A live instance's captured state cannot migrate onto the successor
+    template — the successor dropped or retyped a resource the instance held.
+    Raised by `SpawnHandle.restore_state`; the swap engine turns it into an
+    admission-style rejection and rolls back rather than dropping the state."""
+
 
 class SpawnHandle:
     """The value a `spawn` acquisition binds: a live component instance, torn
@@ -97,7 +175,7 @@ class SpawnHandle:
     (`yield lambda: s.dispose()`, or the frame-adopted safety net for a
     method-body spawn) is a harmless no-op once the instance is already gone."""
 
-    __slots__ = ("_fiber", "component", "_disposed")
+    __slots__ = ("_fiber", "component", "_disposed", "__weakref__")
 
     def __init__(self, fiber, component: str) -> None:
         self._fiber = fiber
@@ -112,7 +190,74 @@ class SpawnHandle:
         if self._disposed:
             return None
         self._disposed = True
+        _forget_instance(self)
         return self._fiber.dispose()
+
+    # -- state migration (hot-swap with live instances) --------------------
+
+    def _frame(self) -> "Optional[Frame]":
+        """The instance's activation frame, which tracks the stateful host
+        resources it acquired. `None` if the instance never activated (its
+        provisions never came up) — nothing to migrate."""
+        return _frame_for_ctx(self._fiber.ctx)
+
+    def capture_state(self) -> list:
+        """Snapshot this live instance's migratable state: the ordered vector
+        of `(resource_type, state)` for each stateful host resource the
+        instance acquired during activation. `state` is `None` for a resource
+        with no `__revl_state__` (e.g. a `Pool`, whose checkout bookkeeping is
+        transient) — its *type* is still pinned so the compat gate can require
+        the successor to acquire an equivalent one.
+
+        The vector's order is acquisition order (source order of the
+        instance's `let-effect` steps), which the successor reproduces
+        deterministically — that is what makes the positional restore sound."""
+        frame = self._frame()
+        resources = list(frame._resources) if frame is not None else []
+        captured = []
+        for res in resources:
+            snap = res.__revl_state__() if hasattr(res, "__revl_state__") else None
+            captured.append((type(res), snap))
+        return captured
+
+    def check_state(self, captured: list) -> None:
+        """The state-compat gate, without mutating anything: raise
+        `StateIncompatible` if a `capture_state()` vector cannot migrate onto
+        this (fresh) instance, else return.
+
+        The successor must have acquired a resource vector of the *same length*
+        and, at each position, of the *same type*. Any divergence — a dropped
+        resource, a retyped one, a changed count — means the successor cannot
+        hold the predecessor's state, and silently losing it would be residue.
+        Kept separate from `restore_state` so a whole cohort can be *checked*
+        before any of it is *applied* — that is what makes a rejected migration
+        roll back with nothing half-written."""
+        resources = self._resource_vector()
+        if len(resources) != len(captured):
+            raise StateIncompatible(
+                f"instance of {self.component!r} held {len(captured)} stateful "
+                f"resource(s); the successor acquires {len(resources)} — state "
+                f"cannot migrate without dropping or inventing a resource")
+        for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
+            if type(res) is not old_type:
+                raise StateIncompatible(
+                    f"instance of {self.component!r}: resource #{pos} was "
+                    f"{old_type.__name__}, the successor acquires "
+                    f"{type(res).__name__} — retyped state cannot migrate")
+
+    def restore_state(self, captured: list) -> None:
+        """Migrate a checked `capture_state()` vector onto this instance: write
+        each captured state back through its resource's `__revl_restore__`.
+        Re-runs `check_state` so a direct caller is still gated."""
+        self.check_state(captured)
+        resources = self._resource_vector()
+        for res, (_old_type, snap) in zip(resources, captured):
+            if snap is not None:
+                res.__revl_restore__(snap)
+
+    def _resource_vector(self) -> list:
+        frame = self._frame()
+        return list(frame._resources) if frame is not None else []
 
     def get(self, key: str):
         """Read a provision the instance published, in *its* local realm.
@@ -133,7 +278,9 @@ def spawn(ctx, component: dict, config, realms):
     for key in realms or ():
         scoped = scoped.isolate(key)  # no label -> a fresh local realm per spawn
     fiber = scoped.plugin(component, dict(config or {}))
-    return SpawnHandle(fiber, component.get("name"))
+    handle = SpawnHandle(fiber, component.get("name"))
+    _remember_instance(handle)  # so a hot-swap can enumerate live instances
+    return handle
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +494,15 @@ class Frame:
         self.ctx = ctx
         self.name = name
         self._adopted: list = []
+        # stateful host resources this activation acquires (`Map.new()`, …), in
+        # acquisition order — the instance's migratable state for a hot-swap
+        # (see the state-migration section above). Populated by
+        # `_register_resource` while `_body` runs, under `install`'s hook.
+        self._resources: list = []
+        try:
+            _FRAME_BY_CTX[ctx] = self  # so a SpawnHandle can find this frame
+        except TypeError:  # pragma: no cover — non-weakrefable ctx
+            pass
         # An emitted `apply` resolves its config immediately before building
         # the Frame, so this is where the resolution finally learns which
         # component it belongs to (ConfigSchema itself is name-less in
@@ -354,11 +510,51 @@ class Frame:
         self.config = _flush_config_trace(name)
 
     def install(self, body: Callable) -> Any:
-        """Install the component body (a generator function) as one effect."""
+        """Install the component body (a generator function) as one effect.
+
+        The body is wrapped so this frame is the *current activation* while its
+        steps run — that is how a `Map.new()` in the body attributes itself to
+        this instance's migratable state. The wrapper re-yields every value
+        untouched (including `frame.drain` and any probe-tagged disposer), so
+        the LIFO/R1 contract and fault-probe instrumentation are unchanged; it
+        only brackets each step with a push/pop of the activation stack."""
         probe = _fault_probe
         if probe is not None and probe.component == self.name:
             body = probe.instrument(body, self)
-        return self.ctx.effect(body, f"{self.name}/body")
+        return self.ctx.effect(self._tracked(body), f"{self.name}/body")
+
+    def _tracked(self, body: Callable) -> Callable:
+        """Wrap `body` so `self` is the top activation frame while its code
+        runs between yields. Preserves sync-vs-async-generator identity, which
+        cordis's effect dispatch switches on."""
+        frame = self
+
+        if inspect.isasyncgenfunction(body):
+            async def _async_tracked():
+                iterator = body().__aiter__()
+                while True:
+                    _ACTIVATING.append(frame)
+                    try:
+                        value = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        _ACTIVATING.pop()
+                    yield value
+            return _async_tracked
+
+        def _tracked_gen():
+            iterator = iter(body())
+            while True:
+                _ACTIVATING.append(frame)
+                try:
+                    value = next(iterator)
+                except StopIteration:
+                    break
+                finally:
+                    _ACTIVATING.pop()
+                yield value
+        return _tracked_gen
 
     def adopt(self, effect: Any) -> Any:
         """Join an effect created while ACTIVE to this component's accumulator."""
@@ -515,6 +711,10 @@ class _Closable:
         cls._serial += 1
         self.serial = cls._serial
         self.closed = False
+        # attribute this resource to the activation acquiring it, so a hot-swap
+        # of the owning instance can capture and migrate its state. Inert
+        # outside a component body (a bare `Map.new()` in a test tracks nothing).
+        _register_resource(self)
 
     @property
     def _tag(self) -> str:
@@ -853,3 +1053,18 @@ class Map(_Closable):
         self._check_open("remove")
         self.data.pop(key, None)
         _record(f"{self._tag}.remove {key}")
+
+    # -- migratable state (hot-swap with live instances) -------------------
+    # A Map *is* an instance's state: its entries. `__revl_state__` snapshots
+    # them and `__revl_restore__` writes them into a fresh Map under the
+    # successor template, so a hot-swap of the owning instance preserves the
+    # store rather than starting cold. A resource without this pair (e.g. a
+    # `Pool`, whose checkouts are transient) migrates as a fresh equivalent.
+
+    def __revl_state__(self) -> dict:
+        self._check_open("__revl_state__")
+        return dict(self.data)
+
+    def __revl_restore__(self, state: dict) -> None:
+        self._check_open("__revl_restore__")
+        self.data = dict(state)
