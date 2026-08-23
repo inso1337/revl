@@ -1,0 +1,22 @@
+// REJECTED — provide-methods take no purity modifiers: they are plain `fn`,
+// and emission-ness is inherited from the service declaration (the G4 upper
+// bound). The diagnostic names the rule instead of dying as a bare parser
+// error (findings-uxprobe.md R1).
+//
+// expected error:
+//   expected fn, found 'emission'
+//   provider methods are plain `fn` — emission-ness is inherited from the
+//   service declaration (G4 upper bound); write `fn <name>(...)`
+
+service KV {
+  fn put(key: Str, value: Str)
+}
+
+component C provides kv: KV {
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    emission fn put(key, value) {
+      effect store.insert(key, value)
+    }
+  }
+}
