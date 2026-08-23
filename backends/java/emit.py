@@ -523,9 +523,9 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
     if method == "slice":
         return f"revlSlice({target}, {args[0]}, {args[1]})"
     if method == "charAt":
-        return f"String.valueOf(String.valueOf({target}).charAt((int)({args[0]})))"
+        return f"revlCharAt(String.valueOf({target}), {args[0]})"
     if method == "charCodeAt":
-        return f"(long) String.valueOf({target}).charAt((int)({args[0]}))"
+        return f"revlCharCodeAt(String.valueOf({target}), {args[0]})"
     if method == "concat":
         return f"revlConcat({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Java `/` truncates and
@@ -579,17 +579,23 @@ def _emit_stdlib_helpers() -> list[str]:
     return copies (persistent, docs/stdlib-2.0.md)."""
     return [
         "// revl stdlib surface (docs/stdlib-2.0.md) — typed static overloads.",
-        "private static long revlLength(String s) { return s.length(); }",
+        "// A Str counts and indexes in Unicode code points (docs/strings.md);",
+        "// Java's String APIs are UTF-16, so the String overloads go through",
+        "// codePointCount/offsetByCodePoints. The List overloads are unchanged.",
+        "private static long revlLength(String s) { return s.codePointCount(0, s.length()); }",
         "private static long revlLength(java.util.List<?> xs) { return xs.size(); }",
         "private static long revlLength(Object x) {",
-        "    return (x instanceof java.util.List<?>) ? ((java.util.List<?>) x).size() : String.valueOf(x).length();",
+        "    if (x instanceof java.util.List<?>) { return ((java.util.List<?>) x).size(); }",
+        "    String s = String.valueOf(x);",
+        "    return s.codePointCount(0, s.length());",
         "}",
-        "// JS slice semantics: out-of-range bounds clamp, never throw.",
+        "// JS slice semantics: out-of-range bounds clamp, never throw. Bounds",
+        "// are code-point offsets for a Str.",
         "private static String revlSlice(String s, long a, long b) {",
-        "    int len = s.length();",
+        "    int len = s.codePointCount(0, s.length());",
         "    int a2 = (int) Math.min(Math.max(a, 0L), len);",
         "    int b2 = (int) Math.max(Math.min(Math.max(b, 0L), len), a2);",
-        "    return s.substring(a2, b2);",
+        "    return s.substring(s.offsetByCodePoints(0, a2), s.offsetByCodePoints(0, b2));",
         "}",
         "private static <T> java.util.List<T> revlSlice(java.util.List<T> xs, long a, long b) {",
         "    int len = xs.size();",
@@ -597,8 +603,21 @@ def _emit_stdlib_helpers() -> list[str]:
         "    int b2 = (int) Math.max(Math.min(Math.max(b, 0L), len), a2);",
         "    return java.util.List.copyOf(xs.subList(a2, b2));",
         "}",
-        "private static long revlIndexOf(String s, String needle) { return s.indexOf(needle); }",
+        "private static long revlIndexOf(String s, String needle) {",
+        "    int i = s.indexOf(needle);",
+        "    return i < 0 ? -1 : s.codePointCount(0, i);",
+        "}",
         "private static <T> long revlIndexOf(java.util.List<T> xs, T v) { return xs.indexOf(v); }",
+        "// charAt/charCodeAt are Str-only; the index and the returned scalar",
+        "// are code points, not UTF-16 units (docs/strings.md).",
+        "private static String revlCharAt(String s, long i) {",
+        "    int len = s.codePointCount(0, s.length());",
+        "    if (i < 0 || i >= len) { return \"\"; }",
+        "    return new String(Character.toChars(s.codePointAt(s.offsetByCodePoints(0, (int) i))));",
+        "}",
+        "private static long revlCharCodeAt(String s, long i) {",
+        "    return (long) s.codePointAt(s.offsetByCodePoints(0, (int) i));",
+        "}",
         "private static String revlConcat(String a, String b) { return a.concat(b); }",
         "private static <T> java.util.List<T> revlConcat(java.util.List<T> a, java.util.List<T> b) {",
         "    return java.util.stream.Stream.concat(a.stream(), b.stream()).toList();",
@@ -659,6 +678,100 @@ def _uses_stdlib(ir: dict) -> bool:
     walk(ir.get("functions"))
     walk(ir.get("tests"))
     return found
+
+
+def _is_float_expr(node: object) -> bool:
+    """Node-local proof that an expression is a `Float`: a Float literal, a `/`
+    (true division), a Float-annotated arithmetic node, or a unary minus of
+    one — the shared proof the other tiers use (docs/strings.md)."""
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        value = node.get("value")
+        return isinstance(value, float) and not isinstance(value, bool)
+    if kind == "bin":
+        return node.get("op") == "/" or node.get("operands") == "Float"
+    if kind == "un":
+        return node.get("op") == "-" and _is_float_expr(node.get("operand"))
+    return False
+
+
+def _uses_float_interp(ir: dict) -> bool:
+    """True when any `${…}` interpolates a provably-`Float` expression, so the
+    canonical Float renderer is emitted only where it is used."""
+    found = False
+
+    def walk(node) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") == "interp":
+                for part in node.get("parts") or []:
+                    if (isinstance(part, (list, tuple)) and len(part) == 2
+                            and part[0] == "expr" and _is_float_expr(part[1])):
+                        found = True
+                        return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(ir.get("components"))
+    walk(ir.get("functions"))
+    walk(ir.get("tests"))
+    return found
+
+
+def _emit_ftoa_helper() -> list[str]:
+    """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md).
+    Double.toString supplies the shortest round-trip digits; this reformats
+    them into the ES notation so `${aFloat}` agrees with every other tier."""
+    return [
+        "// Canonical Float -> Str (docs/strings.md): ECMAScript Number::toString.",
+        "private static String revlFtoa(double x) {",
+        "    if (Double.isNaN(x)) { return \"NaN\"; }",
+        "    if (Double.isInfinite(x)) { return x < 0 ? \"-Infinity\" : \"Infinity\"; }",
+        "    if (x == 0.0) { return \"0\"; }",
+        "    String sign = x < 0 ? \"-\" : \"\";",
+        "    String s = Double.toString(Math.abs(x));",
+        "    String mant = s;",
+        "    long exp = 0;",
+        "    int e = s.indexOf('E');",
+        "    if (e >= 0) { mant = s.substring(0, e); exp = Long.parseLong(s.substring(e + 1)); }",
+        "    String intpart = mant, frac = \"\";",
+        "    int d = mant.indexOf('.');",
+        "    if (d >= 0) { intpart = mant.substring(0, d); frac = mant.substring(d + 1); }",
+        "    String digits = intpart + frac;",
+        "    long point = intpart.length() + exp;",
+        "    int lead = 0;",
+        "    while (lead + 1 < digits.length() && digits.charAt(lead) == '0') { lead++; point--; }",
+        "    digits = digits.substring(lead);",
+        "    int end = digits.length();",
+        "    while (end > 1 && digits.charAt(end - 1) == '0') { end--; }",
+        "    digits = digits.substring(0, end);",
+        "    if (digits.equals(\"0\")) { return \"0\"; }",
+        "    long k = digits.length();",
+        "    long n = point;",
+        "    String body;",
+        "    if (k <= n && n <= 21) {",
+        "        body = digits + \"0\".repeat((int) (n - k));",
+        "    } else if (0 < n && n <= 21) {",
+        "        int p = (int) n;",
+        "        body = digits.substring(0, p) + \".\" + digits.substring(p);",
+        "    } else if (-6 < n && n <= 0) {",
+        "        body = \"0.\" + \"0\".repeat((int) (-n)) + digits;",
+        "    } else {",
+        "        long ee = n - 1;",
+        "        String m = k > 1 ? digits.substring(0, 1) + \".\" + digits.substring(1) : digits;",
+        "        String esign = ee < 0 ? \"-\" : \"+\";",
+        "        body = m + \"e\" + esign + Math.abs(ee);",
+        "    }",
+        "    return sign + body;",
+        "}",
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -1094,6 +1207,11 @@ def _expr(
         for part_kind, value in parts:
             if part_kind == "text":
                 segs.append(_string(value))
+            elif _is_float_expr(value):
+                # A Float renders through the canonical ECMAScript form, not
+                # String.valueOf (which gives "1.0E21"/"0.0"/"-0.0"); see
+                # docs/strings.md.
+                segs.append(f"revlFtoa({_expr(value, ctx, rename, env)})")
             else:  # ["expr", ir_node] — a full expression, stringified
                 segs.append(f"String.valueOf({_expr(value, ctx, rename, env)})")
         if not segs:
@@ -2470,6 +2588,8 @@ def _emit_v1(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_float_interp(ir):
+        out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -2495,6 +2615,8 @@ def _emit_v2(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_float_interp(ir):
+        out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(component, ir.get("services") or {})])
     out.append("}")
@@ -2531,6 +2653,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     out.extend(["    " + line if line else line for line in _emit_host_stubs(ir)])
     if _uses_stdlib(ir):
         out.extend(["    " + line if line else line for line in _emit_stdlib_helpers()])
+    if _uses_float_interp(ir):
+        out.extend(["    " + line if line else line for line in _emit_ftoa_helper()])
     if _uses_checked_div(ir):
         out.extend(["    " + line if line else line for line in _emit_checked_div_helpers()])
     if externs:

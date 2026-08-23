@@ -563,13 +563,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
 
     if kind == "len":
         # `xs.length` in field position (lower.py emits `len` rather than
-        # `field` when the receiver is a sized type). revl types it `Int`, and
-        # the JS `.length` is a `number`, so it converts at the boundary.
+        # `field` when the receiver is a sized type). revl types it `Int`. For
+        # a `Str` the count is in code points, not UTF-16 units, so it routes
+        # through `revlLen` (which leaves a List/Bytes receiver on `.length`).
         target_node = node.get("target")
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"BigInt({target}.length)"
+        return f"revlLen({target})"
 
     if kind == "builtin":
         target_node = node.get("target")
@@ -1074,17 +1075,20 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     JS needs a `number`. Neither direction is implicit in JS, so both convert
     here — `BigInt(...)` on the way out, `Number(...)` on the way in.
     """
+    # `Str` methods count and index in Unicode code points (docs/strings.md);
+    # the JS UTF-16 APIs would count code units. `length`/`slice`/`indexOf` are
+    # shared with List/Bytes, so they route through helpers that dispatch on
+    # the receiver at runtime; `charAt`/`charCodeAt` are Str-only.
     if method == "length":
-        return f"BigInt({target}.length)"
+        return f"revlLen({target})"
     if method == "push":
         return f"[...{target}, {args[0]}]"
     if method == "slice":
-        return (f"{target}.slice({_int_as_number(arg_nodes[0], ctx)}, "
-                f"{_int_as_number(arg_nodes[1], ctx)})")
+        return f"revlSlice({target}, {args[0]}, {args[1]})"
     if method == "charAt":
-        return f"{target}.charAt({_int_as_number(arg_nodes[0], ctx)})"
+        return f"revlCharAt({target}, {args[0]})"
     if method == "charCodeAt":
-        return f"BigInt({target}.charCodeAt({_int_as_number(arg_nodes[0], ctx)}))"
+        return f"revlCharCodeAt({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). JS `/` is true division
     # and `%` takes the dividend's sign, so every one of these is built rather
     # than inherited — through helpers, so the divisor is evaluated once and a
@@ -1105,7 +1109,7 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     if method == "concat":
         return f"{target}.concat({args[0]})"
     if method == "indexOf":
-        return f"BigInt({target}.indexOf({args[0]}))"
+        return f"revlIndexOf({target}, {args[0]})"
     if method == "split":
         return f"{target}.split({args[0]})"
     if method == "join":
@@ -1474,6 +1478,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_I32_HELPER, ""])
     if _uses_int_arith(ir):
         out.extend([_REVL_INT_ARITH_HELPER, ""])
+    if _uses_str_methods(ir):
+        out.extend([_REVL_STR_HELPER, ""])
     return out
 
 
@@ -1542,6 +1548,56 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
   return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)
     && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
 }"""
+
+
+# A `Str` is a sequence of Unicode code points (docs/strings.md); a JS string
+# is UTF-16, so its `.length`/`.charAt`/`.charCodeAt`/`.slice`/`.indexOf` count
+# and index in code units — 2 for one astral char. These helpers reinterpret a
+# string through its code points (`Array.from` iterates by code point) while
+# leaving List/Bytes receivers on their native element operations, so
+# `"😀".length()` is 1 and `charCodeAt(0)` is the scalar 128512, not a
+# surrogate. Receiver type is not known statically on this tier, so the branch
+# is at runtime on `typeof x === "string"`.
+_REVL_STR_HELPER = """function revlLen(x: string | ArrayLike<unknown>): bigint {
+  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
+}
+function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+  const i = Number(a), j = Number(b)
+  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+}
+function revlCharAt(s: string, i: bigint): string {
+  const c = Array.from(s)[Number(i)]
+  return c === undefined ? "" : c
+}
+function revlCharCodeAt(s: string, i: bigint): bigint {
+  const c = Array.from(s)[Number(i)]
+  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
+}
+function revlIndexOf(x: string | unknown[], v: unknown): bigint {
+  if (typeof x === "string") {
+    const at = x.indexOf(v as string)
+    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
+  }
+  return BigInt(x.indexOf(v))
+}"""
+
+_STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "indexOf"}
+
+
+def _uses_str_methods(node) -> bool:
+    """Does this IR call one of the code-point string helpers — a `length`
+    field-read (`len`) or a `length`/`slice`/`charAt`/`charCodeAt`/`indexOf`
+    builtin? These share a receiver with List/Bytes, so the helper dispatches
+    at runtime; it is emitted only where one of these forms appears."""
+    if isinstance(node, dict):
+        if node.get("kind") == "len":
+            return True
+        if node.get("kind") == "builtin" and node.get("method") in _STR_METHOD_NAMES:
+            return True
+        return any(_uses_str_methods(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_str_methods(v) for v in node)
+    return False
 
 
 def _uses_equality(node) -> bool:
