@@ -35,8 +35,14 @@ from pathlib import Path
 from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
+from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java")
+
+# fiber states that count as "settled" — a lifecycle transition has come to
+# rest, so it is worth one causal-trace record. UNLOADING/LOADING are
+# in-flight and never recorded on their own.
+_SETTLED_DOWN = ("DISPOSED", "PENDING", "FAILED")
 RUNNABLE_BACKENDS = ("py",)
 
 
@@ -207,7 +213,8 @@ class _Driver:
     demo/live.py, generalized off the IR manifest."""
 
     def __init__(self, ir, config, emit, runtime_mod, Context, FiberState,
-                 record: bool = False):
+                 record: bool = False, trace_path: str | None = None,
+                 withdraw: str | None = None):
         self.ir = ir
         self.config = config
         self.emit = emit
@@ -218,6 +225,21 @@ class _Driver:
         self.generation = 0
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
         self.recorder = self._make_recorder() if record else None
+
+        # -- causal trace (docs/why-runtime.md) ----------------------------
+        # `trace_path`/`withdraw` turn on the causal-trace recorder: every
+        # settled lifecycle transition is written with the cause chain behind
+        # it, so `revl why <c> --trace run.jsonl` can explain the run post
+        # hoc, and the withdrawal oracle can diff prediction vs actuality.
+        self.trace_path = trace_path
+        self.withdraw = withdraw
+        self.tracing = trace_path is not None or withdraw is not None
+        self._events: list[dict] = []
+        self._seq = 0
+        # while non-None, `_on_fiber` records the transitions it observes into
+        # this list (name, from_state, to_state), in the order they settle
+        self._observing: dict | None = None
+        self._settled: list[tuple] = []
 
         self.runtime.set_trace(self._on_host)
         self.root.on("internal/status", self._on_fiber)
@@ -241,8 +263,23 @@ class _Driver:
         self._log("host", head, rest)
 
     def _on_fiber(self, _this, fiber, old) -> None:
-        self._log("fiber", fiber.name,
-                  f"{self.FiberState(old).name} -> {self.FiberState(fiber.state).name}")
+        new = self.FiberState(fiber.state).name
+        self._log("fiber", fiber.name, f"{self.FiberState(old).name} -> {new}")
+        # observation window (open during a `--withdraw`): capture each fiber
+        # the moment it comes to rest in a down state. `from` is the fiber's
+        # state at the START of the window, so a UNLOADING waypoint collapses
+        # into the single ACTIVE -> DISPOSED/PENDING move the trace records.
+        if self._observing is not None and new in _SETTLED_DOWN:
+            frm = self._observing.get(fiber.name, self.FiberState(old).name)
+            self._settled.append((fiber.name, frm, new))
+
+    # -- causal trace ------------------------------------------------------
+
+    def _record(self, event: str, component: str, transition: str,
+                cause: dict) -> None:
+        self._events.append(why_runtime.make_event(
+            self._seq, self.generation, event, component, transition, cause))
+        self._seq += 1
 
     def _hooks(self) -> dict:
         return {name: len(cbs) for name, cbs in self.root.events._hooks.items() if cbs}
@@ -276,6 +313,7 @@ class _Driver:
 
     async def _load(self, ir: dict, module: types.ModuleType) -> None:
         by_name = {c["name"]: c for c in _components(ir)}
+        load_causes = why_runtime.load_causes(ir) if self.tracing else {}
         for name in _load_order(ir):
             comp = by_name[name]
             requires = ", ".join(comp.get("requires") or {}) or "-"
@@ -291,6 +329,15 @@ class _Driver:
                     self._log("note", name, "still LOADING after 2s")
             if fiber.state == self.FiberState.PENDING:
                 self._log("note", name, f"PENDING — unmet requirement ({requires})")
+            if self.tracing:
+                # a component comes up because its providers were already up
+                # (load order is providers-first); a component with no
+                # resolved injection roots at boot. The cause is read from the
+                # linked provider graph, the transition from what actually
+                # happened to the fiber.
+                self._record(why_runtime.LOAD, name,
+                             f"PENDING -> {self.FiberState(fiber.state).name}",
+                             load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
 
     async def _dispose_all(self, ir: dict) -> None:
@@ -302,6 +349,42 @@ class _Driver:
             await fiber.dispose()
             await self._flush()
         await self._flush()
+
+    # -- withdrawal + the prediction-vs-actuality oracle -------------------
+
+    async def _perform_withdrawal(self, component: str) -> dict | None:
+        """Withdraw one live component and record the causal cascade the
+        runtime *actually* produces, then run the oracle against the static
+        prediction. Returns the oracle report (or ``None`` on a bad name)."""
+        fiber = self.fibers.get(component)
+        if fiber is None:
+            self._log("error", "withdraw",
+                      f"no live component named {component!r} "
+                      f"(have: {', '.join(sorted(self.fibers)) or 'none'})")
+            return None
+
+        self._log("withdraw", component, "operator withdraws — observe the cascade")
+        # observation window: snapshot every fiber's pre-state, then dispose
+        # the target and let the reactive graph settle. What comes down, and
+        # in what order, is the runtime's answer — not the prediction's.
+        self._observing = {n: self.FiberState(f.state).name
+                           for n, f in self.fibers.items()}
+        self._settled = []
+        cascade_causes = why_runtime.withdrawal_causes(self.ir, component)
+        await fiber.dispose()
+        await self._flush()
+        self._observing = None
+
+        trigger = why_runtime.cause_trigger(
+            f"withdrawn by operator (revl run --withdraw {component})")
+        for name, frm, to in self._settled:
+            cause = (trigger if name == component
+                     else cascade_causes.get(name)
+                     or why_runtime.cause_provider_withdrawn(component, "?"))
+            self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
+
+        report = why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
+        return report
 
     # -- REPL --------------------------------------------------------------
 
@@ -454,6 +537,23 @@ class _Driver:
             await self._teardown()
         return 0
 
+    # -- one-shot withdrawal (records the causal trace + runs the oracle) --
+
+    async def withdraw_once(self) -> int:
+        """Load, withdraw the named component while recording the causal
+        cascade, run the oracle, tear down. A conformance defect is reported
+        loudly but does not fail the run — the withdrawal itself succeeded;
+        the oracle's verdict is the product (docs/why-runtime.md)."""
+        module = self._emit_module(self.ir)
+        print("== load composition ==")
+        await self._load(self.ir, module)
+        print(f"\n== withdraw {self.withdraw} — record the causal cascade ==")
+        report = await self._perform_withdrawal(self.withdraw)
+        if report is not None:
+            print("\n" + why_runtime.render_oracle(report))
+        await self._teardown()
+        return 0
+
     # -- watch -------------------------------------------------------------
 
     async def watch(self, files: list[str]) -> int:
@@ -524,6 +624,10 @@ class _Driver:
               if all(ok for _, ok, _ in checks)
               else "  RESIDUE LEFT — see FAILs above")
         self.runtime.set_trace(None)
+        if self.trace_path is not None:
+            why_runtime.write_trace(self._events, self.trace_path)
+            self._log("trace", "written",
+                      f"{len(self._events)} causal event(s) -> {self.trace_path}")
 
 
 # --------------------------------------------------------------------------
@@ -591,9 +695,14 @@ def run_command(args) -> int:
               file=sys.stderr)
         return 3
 
+    withdraw = getattr(args, "withdraw", None)
     driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
-                     record=bool(getattr(args, "record", False)))
+                     record=bool(getattr(args, "record", False)),
+                     trace_path=getattr(args, "trace", None),
+                     withdraw=withdraw)
     try:
+        if withdraw is not None:
+            return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
         return asyncio.run(driver.hold_repl())
