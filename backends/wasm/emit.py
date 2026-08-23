@@ -368,6 +368,11 @@ class _ComponentEmitter:
             return self._scalar_operator(node, scope, types, where)
         if kind in self._DELEGATED:
             return self._delegate(node, scope, types, where)
+        if kind == "record_update":
+            raise EmitError(
+                f"{where}: functional record update `{{r | f = e}}` is not "
+                "emitted by the wasm backend yet (implemented tiers: python, "
+                "typescript) — see docs/records.md §6; lift it into a helper fn instead")
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
     def _scalar_operator(self, node: Any, scope: dict[str, str],
@@ -2286,6 +2291,11 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: the Map value type is not lowerable on this tier yet — "
                 f"no representation here; use a hosted backend")
+        if kind == "record_update":
+            raise EmitError(
+                f"{where}: functional record update `{{r | f = e}}` is not "
+                "emitted by the wasm backend yet (implemented tiers: python, "
+                "typescript) — see docs/records.md §6; lift it into a helper fn instead")
         raise EmitError(f"{where}: unsupported v3 expression kind {kind!r}")
 
     def _opt_payload(self, ty: str | None) -> str | None:

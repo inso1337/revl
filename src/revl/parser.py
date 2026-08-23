@@ -363,6 +363,33 @@ class ExprRecord:
 
 
 @dataclass
+class ExprRecordUpdate:
+    """`{base | f1 = e1, f2 = e2}` — functional record update.
+
+    Semantics (docs/records.md §2): evaluates `base`, then produces a *fresh*
+    value of `base`'s record type with the named fields replaced; `base` is
+    untouched, exactly like `Map.set`. The result's type is `base`'s type.
+    """
+    base: object
+    updates: list  # [(field_name, expr)]
+    line: int
+
+
+@dataclass
+class ExprBlockArm:
+    """A match arm whose body is a statement block: `=> { let x = e; expr }`.
+
+    v1 subset (docs/records.md §4): the block may contain only `let`
+    statements (single-assignment, pure) and must end in an expression, whose
+    value is the arm's value. Parsed and typechecked; lowering is deferred —
+    see docs/records.md §6.
+    """
+    stmts: list  # [LetStmt]
+    tail: object
+    line: int
+
+
+@dataclass
 class ExprList:
     items: list
     line: int
@@ -2118,7 +2145,10 @@ class Parser:
         while not self.at("}"):
             pattern, bind = self._match_pattern()
             self.expect("=>")
-            body = self.pure_expr()
+            if self.at("{") and self._block_arm_ahead():
+                body: object = self._match_block_arm(self.peek().line)
+            else:
+                body = self.pure_expr()
             arms.append((pattern, bind, body))
             if self.at(","):
                 self.next()
@@ -2126,6 +2156,76 @@ class Parser:
                 break
         self.expect("}")
         return ExprMatch(scrutinee, arms, line)
+
+    def _record_update_ahead(self) -> bool:
+        """Current token is `{` — is this `{base | f = e, …}` (functional
+        record update, docs/records.md §1) rather than a record literal?
+
+        A record literal's top level can never contain a bare `|` (field
+        values are bracket-balanced), so a depth-1 `|` before the matching
+        `}` settles it."""
+        i = self.pos + 1  # skip the `{`
+        depth = 1
+        while i < len(self.toks):
+            kind = self.toks[i].kind
+            if kind in ("{", "(", "["):
+                depth += 1
+            elif kind in ("}", ")", "]"):
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif kind == "|" and depth == 1:
+                return True
+            elif kind == "eof":
+                return False
+            i += 1
+        return False
+
+    def _block_arm_ahead(self) -> bool:
+        """Current token is `{` right after a match arm's `=>` — statement
+        block (docs/records.md §4) or record literal?
+
+        A block arm contains a statement keyword (`let`, `var`) at its top
+        level; a record literal starts `ident :`. Either test settles it."""
+        i = self.pos + 1  # skip the `{`
+        depth = 1
+        while i < len(self.toks):
+            tok = self.toks[i]
+            if tok.kind in ("{", "(", "["):
+                depth += 1
+            elif tok.kind in ("}", ")", "]"):
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif depth == 1 and tok.kind == "kw" and tok.value in ("let", "var"):
+                return True
+            elif depth == 1 and tok.kind == "ident" and self.toks[i + 1].kind == ":":
+                return False
+            elif tok.kind == "eof":
+                return False
+            i += 1
+        return False
+
+    def _match_block_arm(self, line: int):
+        """`{ let x = e; … ; expr }` — the v1 block-arm subset: only `let`
+        statements, then exactly one trailing expression whose value is the
+        arm's value."""
+        self.expect("{")
+        stmts = []
+        while self.at("kw", "let") or self.at("kw", "var"):
+            stmt = self.fn_stmt()
+            if not isinstance(stmt, LetStmt):
+                raise self.err(getattr(stmt, "line", line),
+                               f"a match block arm may contain only `let` statements "
+                               f"(docs/records.md §4), found `{stmt.__class__.__name__}`")
+            if stmt.mutable:
+                raise self.err(stmt.line,
+                               "a match block arm may not declare `var` — arm blocks "
+                               "are pure `let` sequences (docs/records.md §4)")
+            stmts.append(stmt)
+        tail = self.pure_expr()
+        self.expect("}")
+        return ExprBlockArm(stmts, tail, line)
 
     def _match_pattern(self):
         tok = self.peek()
@@ -2200,6 +2300,19 @@ class Parser:
                 pass
             return node
         if tok.kind == "{":
+            if self._record_update_ahead():
+                self.next()
+                base = self.pure_expr()
+                self.expect("|")
+                updates = []
+                while not self.at("}"):
+                    fname = self.expect("ident").value
+                    self.expect("=")
+                    updates.append((fname, self.pure_expr()))
+                    if self.at(","):
+                        self.next()
+                self.expect("}")
+                return ExprRecordUpdate(base, updates, tok.line)
             self.next()
             fields = []
             while not self.at("}"):
