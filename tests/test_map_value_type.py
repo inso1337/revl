@@ -231,3 +231,114 @@ def test_go_refuses_an_unpinned_empty_map():
                        match="needs an expected Map type on this tier"):
         go.emit(ir)
 
+
+# ---- review round 2 regressions ----------------------------------------------
+#
+# Two escaped bugs, both reproduced end-to-end by review:
+#   BUG 1: `let m = Map.empty()` bound `m` as a HOST object (the constructor
+#     root `Map` is a host callable), so every later m.set/lookup/has lowered
+#     as a verbatim *field* call — unchecked at compile time, and a runtime
+#     crash (`_revl_field` KeyError) on every tier.
+#   BUG 2: Never-as-wildcard soundness hole — Map[Str, Never] satisfied ANY
+#     Map[Str, X] in compatible(), so a Str could be planted under an
+#     Int-typed map and `lookup` would then claim Opt[Int]. Wrong-answer
+#     class. The same escape existed for the List empty literal
+#     (`[].push("s")` typed List[Never], flowed into List[Int]) — pre-existing,
+#     fenced in the same fix.
+
+def test_let_bound_set_with_wrong_value_is_refused_not_planted():
+    """The reviewer's verbatim repro: compiled clean before, crashed at
+    runtime with a Str stored under an Int-typed map."""
+    err = _err(
+        'fn planted(k: Str) -> Map[Str, Int] {\n'
+        '  let m = Map.empty()\n'
+        '  let m2: Map[Str, Int] = m.set(k, "oops")\n'
+        '  return m2\n'
+        '}\n')
+    assert "`let m2: Map[Str, Int]` expects `Map[Str, Int]`, got `Map[Str, Str]`" in err
+
+
+def test_let_bound_flow_lowers_to_checked_builtins_and_runs():
+    """The exact let-bound flow must produce builtin IR (checked), never a
+    field call — and the emitted code must actually run."""
+    src = ('fn put(k: Str, v: Int) -> Map[Str, Int] {\n'
+           '  let m = Map.empty()\n'
+           '  let m2 = m.set(k, v)\n'
+           '  return m2\n'
+           '}\n')
+    ir = compile_source(src)
+    lets = [s for s in ir["functions"][0]["body"] if s.get("step") == "let"]
+    assert lets[-1]["value"]["kind"] == "builtin"
+    assert lets[-1]["value"]["method"] == "set"
+    ns = _compile_emit(src)
+    assert ns["put"]("a", 1) == {"a": 1}
+
+
+def test_direct_chain_lowering_is_a_builtin():
+    """`Map.empty().set(...)` written inline took the same unchecked verbatim
+    path (masked until now: nothing executed it)."""
+    ir = compile_source(
+        'fn f() -> Map[Str, Int] { return Map.empty().set("a", 1) }\n')
+    body = ir["functions"][0]["body"]
+
+    def kinds(n):
+        if isinstance(n, dict):
+            if "kind" in n:
+                yield n["kind"]
+            for v in n.values():
+                yield from kinds(v)
+        elif isinstance(n, list):
+            for x in n:
+                yield from kinds(x)
+
+    ks = set(kinds(body))
+    assert "builtin" in ks and "call" not in ks and "field" not in ks
+
+
+def test_bottom_typed_receiver_learning_closes_both_flows():
+    """The checker-side hole, independent of lowering: V must be learned from
+    the concrete argument when the receiver's V is bottom."""
+    # return-position flow
+    err = _err('fn f(m: Map[Str, Never], k: Str) -> Map[Str, Int]'
+               ' { return m.set(k, "oops") }')
+    assert "expects `Map[Str, Int]`, got `Map[Str, Str]`" in err
+    # expected-type flow through an unannotated intermediate
+    err = _err('fn g(m: Map[Str, Never], k: Str) -> Map[Str, Str]'
+               ' { let m2 = m.set(k, 1) return m2 }')
+    assert "expects `Map[Str, Str]`, got `Map[Str, Int]`" in err
+    # correct values flow fine in both positions
+    compile_source('fn f(m: Map[Str, Never], k: Str) -> Map[Str, Int]'
+                   ' { return m.set(k, 1) }\n')
+    compile_source('fn g(m: Map[Str, Never], k: Str) -> Map[Str, Str]'
+                   ' { let m2 = m.set(k, "v") return m2 }\n')
+
+
+def test_the_list_empty_literal_hole_is_fenced_the_same_way():
+    """Honest fence note: `[]` had the IDENTICAL Never-wildcard escape before
+    Map ever existed (`[].push("s")` flowed into List[Int]). Same learning
+    rule closes it; correct uses keep compiling."""
+    err = _err('fn g() -> List[Int]'
+               ' { let xs: List[Int] = [].push("s") return xs }\n')
+    assert "expects `List[Int]`, got `List[Str]`" in err
+    err = _err('fn h() -> List[Int] { return [].push("s") }\n')
+    assert "expects `List[Int]`, got `List[Str]`" in err
+    compile_source('fn ok() -> List[Int] { return [].push(1) }\n')
+
+
+def test_host_stub_binding_is_untouched_by_the_fix():
+    """The bug-1 fix narrows `_is_host_valued`; the genuine host acquisition
+    (`Map.new()`) must still bind as host and stay verbatim. If the mark
+    broke, `store.insert` would be refused as an unknown stdlib builtin."""
+    ir = compile_source(
+        "service KV { fn put(key: Str, value: Str) }\n"
+        "component C provides kv: KV {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide kv {\n"
+        "    fn put(key: Str, value: Str) {\n"
+        "      effect store.insert(key, value)\n"
+        "      undo   store.remove(key)\n"
+        "    }\n"
+        "  }\n"
+        "}\n")
+    assert ir["components"], "the component must compile with its host stub"
+

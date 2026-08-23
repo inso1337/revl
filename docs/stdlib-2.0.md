@@ -130,6 +130,18 @@ like what they are: an empty persistent value vs a stateful host object.
   the compatibility relation, so the empty map flows into any `Map[Str,
   V]` — the same trick the untyped empty list literal plays — and `set`
   widens it from there.
+- **Bottom-typed receivers learn `V` from use.** Because `Never` is a
+  wildcard, `set` on a `Map[Str, Never]` receiver would otherwise prove
+  nothing about its value argument and return another `Map[Str, Never]` —
+  which flows into *any* `Map[Str, X]`, planting any value under any
+  declared map type. So when the receiver's `V` is bottom, `set` unifies
+  `V` against its concrete value argument and returns `Map[Str, learned]`;
+  the check position then sees e.g. `Map[Str, Str]` where `Map[Str, Int]`
+  is expected and refuses. The same learning rule governs `push` on the
+  List empty literal (`[].push("s")` is `List[Str]`, refused where
+  `List[Int]` is expected) — the identical escape existed there first.
+  A let bound to `Map.empty()` is an ordinary VALUE binding: its method
+  calls go through the checked builtin path, never the verbatim host path.
 
 ### Per-tier representation
 

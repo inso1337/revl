@@ -642,6 +642,28 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         expected = {"@elem": elem, "@member": elem if thead == "List" else ("Str" if thead == "Str" else None), "@self": target_type}.get(spec, spec)
         if filename and expected and actual and not compatible(expected, actual):
             raise mismatch(filename, line, f"builtin `{method}` argument", expected, actual)
+    if ret == "@self" and elem == "Never":
+        # Bottom-typed receiver — the empty literal `[]` / `Map.empty()`.
+        # Its element type is a wildcard, so the argument checks above
+        # proved NOTHING (compatible(Never, anything) is True), and the
+        # @self result would flow into ANY Map[Str, X] / List[T] the same
+        # way. Learn the element type from a concrete argument and carry it
+        # in the rebuilt container, so `[].push("s")` types as List[Str]
+        # and is refused where List[Int] is expected. When no argument
+        # offers a concrete type (holes, unknowns), behavior is unchanged.
+        learned = None
+        for spec, actual in zip(params, arg_types):
+            if not actual or _is_wildcard(actual):
+                continue
+            if spec == "@elem":
+                learned = actual
+            elif spec == "@self":
+                ahead, aargs = parse_type(actual)
+                if ahead == thead and aargs and not _is_wildcard(aargs[-1]):
+                    learned = aargs[-1]
+        if learned is not None:
+            return format_type(thead,
+                               [learned] if thead == "List" else [targs[0], learned])
     if ret == "@self":
         return target_type
     if ret == "@elem":
