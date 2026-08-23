@@ -154,3 +154,19 @@ provide/handle blocks" hint would have shortened it to zero. Full suite:
   - wasm 32; go 17; java text-suite + javac-gated (skips locally without
     a JDK shim); rust cargo map tests executed green with cargo present;
   - typescript vitest **80/80** including 4 new Map tests on real node.
+
+## Diagnostic-hints addendum (agent/diag-hints) — each friction row, fixed
+
+Every item below was a friction entry in this or a sibling findings file;
+each now has a hint, and a rejection-corpus fixture pinning it:
+
+| finding (source) | was | now |
+|---|---|---|
+| `emission fn` in `provide` (uxprobe R1) | bare `expected fn, found 'emission'` | hint: provider methods are plain `fn` — emission-ness inherited from the service declaration (G4 upper bound) |
+| keyword as record-field/ident (this file: "expected ident, found 'emission'/'requires'") | bare parser confusion | hint: `<kw>` is a reserved keyword — cannot name a field/variable/parameter/method; pick another name |
+| `;` as statement separator (this file, time-to-green) | stack-shaped `expected an expression, found ';'` from deep in `_primary` | lexer refuses the character at source with the rule: statements are newline-separated |
+| duplicate-let across branches (shadow/map sessions) | `` `y` is already declared in this function`` with no why | hint states the rule: lets are function-scoped, not block-scoped — sibling branches share one namespace; rename or reuse |
+
+All four pinned as `examples/rejections/v2_*.rvl` + REJECTIONS rows
+(asserting the HINT text, not just the message), so the guidance cannot
+silently regress.

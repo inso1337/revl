@@ -221,6 +221,10 @@ def _render_builtin(method, target: str, args: list) -> str:
         return (f"(lambda _a, _b: Err({_DIV_ZERO_MSG!r}) if _b == 0 "
                 f"else (Ok(_q) if -(2**63) <= (_q := {quotient}) <= 2**63 - 1 "
                 f"else Err('revl: Int overflow')))({target}, {args[0]})")
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): python ints on
+    # this tier are already i64-clamped, so str() is the exact decimal.
+    if method == "to_str":
+        return f"str({target})"
     raise EmitError(f"unknown builtin method {method!r}")
 
 

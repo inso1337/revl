@@ -1124,6 +1124,10 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
         return f"{target}.get({args[0]})"
     if method == "has":
         return f"{target}.has({args[0]})"
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): Int is a
+    # bigint on this tier, and BigInt.prototype.toString is exact decimal.
+    if method == "to_str":
+        return f"{target}.toString()"
     raise EmitError(f"unknown builtin method {method!r}")
 
 

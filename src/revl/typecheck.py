@@ -565,6 +565,11 @@ _BUILTIN_SIG = {
     "set": ("Map", ["Str", "@elem"], "@self"),
     "lookup": ("Map", ["Str"], "Opt[@elem]"),
     "has": ("Map", ["Str"], "Bool"),
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): decimal
+    # spelling, total over the whole i64 range including Int.MIN. A method
+    # on the Int family — the same dispatch div_trunc rides — because revl
+    # has no free-function namespace to pollute.
+    "to_str": ("Int", [], "Str"),
 }
 
 

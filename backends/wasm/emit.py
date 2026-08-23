@@ -1857,6 +1857,10 @@ class _V3Emitter:
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError("charCodeAt is only lowerable on Str/Bytes values")
             return "Int"
+        if method == "to_str":
+            if target_ty != "Int":
+                raise EmitError("to_str is only lowerable on Int values")
+            return "Str"
         if method == "indexOf":
             raise EmitError("indexOf is not lowerable on this tier yet — use a hosted backend")
         if method in ("set", "lookup", "has"):
@@ -2266,6 +2270,14 @@ class _V3Emitter:
                     "div_euclid": "$int_div_euclid",
                     "mod": "$int_mod"}[method]
             return _E(f"(call {call} {target.wat} {arg.wat})", "Int")
+        if method == "to_str":
+            # The rendering builtin (docs/stdlib-2.0.md §Int.to_str). The runtime
+            # helper already exists for templates; it renders Int.MIN exactly
+            # by dividing the negated bit pattern as unsigned.
+            if target_ty != "Int":
+                raise EmitError(f"{where}: to_str is only lowerable on Int")
+            target = self._expr(target_node, scope, where, "Int")
+            return _E(f"(call $int_to_str {target.wat})", "Str")
         if method == "indexOf":
             raise EmitError(f"{where}: indexOf is not lowerable on this tier yet")
         # The Map value type (docs/stdlib-2.0.md §Map): refused with the
