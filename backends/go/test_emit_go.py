@@ -83,16 +83,45 @@ def test_package_name_alias():
     assert "package usercache" in a
 
 
-def test_spawn_ir_is_rejected():
-    with pytest.raises(emit.EmitError):
-        emit.emit({"ir_version": 2, "components": [{"name": "X", "spawn": {}}]})
+SPAWN = HERE / "scenarios" / "emitted" / "spawn" / "spawn.ir.json"
 
 
-def test_spawn_ir_is_rejected_under_v3():
-    # spawn/instance-parametric IR also lives under ir_version 3, but is a
-    # separate feature out of scope here — it must still be refused by name.
-    with pytest.raises(emit.EmitError):
-        emit.emit({"ir_version": 3, "components": [{"name": "X", "spawn": {}}]})
+def test_spawn_lowers_to_isolated_child_fiber():
+    # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is now
+    # lowered, not rejected. The executable proof lives in
+    # scenarios/emitted/spawn/gen_exec_test.go; here we assert the structure.
+    src = emit.emit(_load(SPAWN), package="spawn")
+    # The handle type + per-target plug helper are emitted.
+    assert "type RevlSpawnHandle struct {" in src
+    assert "func revlSpawnWorker(parent *stc.Context, cfg WorkerConfig) *RevlSpawnHandle {" in src
+    # Each provided key is isolated into a FRESH LOCAL realm (a distinct
+    # *stc.Realm minted per call — NOT interned by name like a global realm).
+    assert "child := parent.Child()" in src
+    assert "child.Isolate(_keyCounter, stc.NewRealm(stc.RootRealm()," in src
+    # The template is plugged as a CHILD FIBER of the spawner.
+    assert "fiber := child.Load(Worker(cfg))" in src
+    assert "return newRevlSpawnHandle(fiber, child)" in src
+    # The spawn acquisition binds a handle, and config flows through the spawn.
+    assert "var w1 *RevlSpawnHandle" in src
+    assert 'w1 = revlSpawnWorker(ctx, WorkerConfig{Tag: "a", Id: 1})' in src
+    # The handle's inverse (`undo w1.dispose()`) tears the instance down.
+    assert "return func() error { w1.Dispose(); return nil }" in src
+
+
+def test_spawn_handle_dispose_is_idempotent():
+    # Dispose takes the fiber exactly once (nil-guarded), so the spawner's own
+    # undo is a harmless no-op once the instance is already gone.
+    src = emit.emit(_load(SPAWN), package="spawn")
+    assert "func (h *RevlSpawnHandle) Dispose() error {" in src
+    assert "h.fiber = nil" in src
+
+
+def test_no_spawn_no_handle_type():
+    # The handle and helpers are emitted ONLY when the document spawns, so
+    # non-spawning programs stay byte-identical.
+    src = emit.emit(_load(USER_CACHE), package="usercache")
+    assert "RevlSpawnHandle" not in src
+    assert "revlSpawn" not in src
 
 
 def test_ir_version_gate():
