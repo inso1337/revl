@@ -54,6 +54,20 @@ These are **excluded and named in diagnostics** ([syntax-2.0.md](syntax-2.0.md)
 | `try { } catch { }` | failure is typed | `Result[T, E]`, or `fail` in a component body |
 | `async` arrows in pure code, generators | excluded | `async fn` in a *service* |
 
+## Small print (four things that are not TS)
+
+- **`let`/`var` bind function-wide, not block-wide.** A `let` inside an `if`
+  or `while` block is still in scope after the block ends. (Shadowing an outer
+  name is refused, so this is safe.)
+- **Statements are separated by newlines; `;` is not a separator.** One
+  statement per line is the whole rule.
+- **Strings have no escape sequences.** `"a\nb"` is four characters —
+  backslash, `n` and all. Build multi-line output by concatenation and
+  `` `${…}` `` templates.
+- **A component activation body records effects only** (`let x = effect …
+  undo …`, `emit`, `fail`, `if`, `return`) — plain computation does not belong
+  there. Put helper functions at top level and delegate from `provide { }`.
+
 ## Null safety (read this twice)
 
 There is **no `null`**. Absence is `Opt[T]` — the ADT `Some(value) | None`.
@@ -157,7 +171,32 @@ extern pure fn sha256(data: Bytes) -> Str
 ```
 
 `pure` / `acquire` (needs `undo`) / `emission` (may have `compensate`).
-Unclassified → no compile.
+Unclassified → no compile. The inverse/compensation slots sit on the
+*declaration*, between the return type and the first host body:
+
+```revl
+extern pure fn close_ledger(h: Int) = @py { pass }
+
+extern acquire fn open_ledger(path: Str) -> Int undo close_ledger(1)
+  = @py { return abs(hash(path)) % 100000 }
+```
+
+| classification | `undo <expr>` | `compensate <expr>` |
+|---|---|---|
+| `pure` | refused (nothing to invert) | refused |
+| `acquire` | **required** | optional |
+| `emission` | refused (one-way crossing) | optional |
+
+The same slots exist where you *call*: `effect E undo U` in a component body,
+and an emission call site takes a best-effort cleanup after `compensate`:
+
+```revl fragment
+provide audit {
+  fn record(line) {
+    emit bus.send(line) compensate bus.send(`retract ${line}`)
+  }
+}
+```
 
 ## Rules that bite (learned the hard way)
 
@@ -182,6 +221,22 @@ single most common rejection when a component writes anywhere.
 
 ```revl fragment
 fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+```
+
+**Provide-methods take plain `fn` — no purity modifiers.** You cannot restate
+`emission` (or `async`) on a provider: emission-ness is inherited from the
+service declaration, which is the upper bound on every provider. Writing
+`emission fn submit(…)` inside a `provide` block is refused before typechecking
+— the modifier lives only in the service:
+
+```revl fragment
+provide queue {
+  fn submit(id, payload) {        // plain `fn`; `emission` comes from JobQueue
+    effect store.insert(id, payload)
+    undo   store.remove(id)
+    emit audit.record(`job ${id}`)
+  }
+}
 ```
 
 **Method bodies take plain bindings.** Name intermediates instead of nesting:
@@ -248,6 +303,74 @@ test "add works" {
 
 `verified` opts into the totality tier (no unbounded recursion/loops); `test`
 blocks run under `revl test`.
+
+## Driving a live composition: lifecycle and fault tests
+
+`test` blocks check pure functions. Two more test kinds assert the paradigm's
+own guarantees over a *live* composition (they need the cordis-py runtime;
+`sh backends/python/setup.sh` installs it):
+
+**`lifecycle test`** — load, call through provision keys, unload, and assert
+nothing was left behind ([syntax-2.0.md](syntax-2.0.md) §7.1):
+
+```revl
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+
+lifecycle test "a submitted job reverts cleanly" {
+  load C
+  call cache.put("k", "v")
+  let hit = call cache.get("k")
+  assert hit == Some("v")
+  unload C
+  assert no_residue
+}
+```
+
+The statements are `load X` (optionally `with { field: value, … }` for the
+component's config), `call key.op(args)` (bind its result with `let`),
+`unload X`, and `assert no_residue`.
+
+**`fault test "…" for Component`** — declares that activation *fails* at a
+named step, then asserts the revert left nothing behind
+([fault-tests.md](fault-tests.md)):
+
+```revl
+service P { fn ping(tag: Str) -> Str }
+
+component Fragile provides p: P {
+  let scratch = effect Map.new() undo scratch.drop()
+  fail "deliberate L-Raise at activation"
+  provide p { fn ping(tag) = tag }
+}
+
+fault test "mid-activation failure reverts its acquisition" for Fragile {
+  fail at step 2
+  assert no residue
+}
+```
+
+`fail at step N` pairs with the Nth effect form (or `fail`) in the component's
+activation body; the body may also say `assert effect <name>`. A fault test
+body allows only `fail at …` and `assert …` — nothing else parses.
+
+**Typed holes** round out the drafting loop: `let cap: Int = hole "worker pool
+size"` compiles, the obligation is listed with its expected type, and admission
+refuses the draft until you fill it ([holes.md](holes.md)).
 
 ## Reading error messages
 
