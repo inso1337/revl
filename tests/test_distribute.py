@@ -54,9 +54,7 @@ service Database {
 def test_resource_return_crosses_by_handle(tmp_path):
     verdicts = _dist(tmp_path, """
 type Socket = { fd: Int }
-extern pure fn close_sock(handle: Int)
-  = @py { return None }
-extern acquire fn open_sock(port: Int) -> Socket undo close_sock(0)
+extern acquire fn open_sock(port: Int) -> Socket undo close_sock(sock)
   = @py { return {"fd": port} }
 service Net {
   async fn accept() -> Socket
