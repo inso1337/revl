@@ -32,6 +32,14 @@ provider hot-swap, governance is `intercept` metadata, cost lands on the G8
 audit, and a failed generation can carry `compensate`. Nondeterminism stays
 *outside* the checked layer, where it cannot poison the metatheory.
 
+The same "no language feature needed" reading answers the workflow-engine
+pattern — a *query* is a provided pure `fn` served here with a compiler-proven
+`readOnlyHint`, a *signal* is a `revl_call` on a provided operation, and a
+provider-change event is a reactive coeffect (R2/R3). See
+[docs/signals-and-queries.md](signals-and-queries.md), which also decides the
+one gap (external event subscription: a bus is a service, not new grammar) and
+shows how a durable signal rides item 47's crash-recovery WAL.
+
 ## 1. `revl mcp schema` — services → tools
 
 Every operation a composition **provides** becomes a tool definition whose
