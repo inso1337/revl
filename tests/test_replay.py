@@ -612,6 +612,19 @@ def test_the_replay_tools_are_advertised_with_honest_annotations():
 
 
 def test_replay_tools_say_recording_must_be_switched_on_at_load():
+    # Deterministic precondition instead of relying on prior tests' shared
+    # global session: a fresh session loaded WITHOUT record, so revl_timeline
+    # reports that recording must be switched on regardless of test order.
+    import revl.mcp.server as _server
+    from revl.mcp.session import Session as _Session
+    _server.SESSION = _Session()
+    _call("revl_load", {"source": (
+        "service Notes { fn put(k: Str, v: Str) }\n"
+        "component N provides notes: Notes {\n"
+        "  let m = effect Map.new() undo m.drop()\n"
+        "  provide notes { fn put(k, v) { effect m.insert(k, v) undo m.remove(k) } }\n"
+        "}"
+    )})
     payload = _call("revl_timeline", {})
     assert payload["ok"] is False
     assert "record" in payload["diagnostics"][0]["message"]

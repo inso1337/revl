@@ -269,24 +269,28 @@ FAIL store unwinds in order [Store dies at step 4]
 
 ---
 
-## 8. Known divergences found by this feature
+## 8. Divergences found by this feature
 
-**cordis-py: an `await` in the body defeats A8's "lands FAILED".**
+**cordis-py: an `await` in the body defeated A8's "lands FAILED" — RESOLVED.**
 
 A component body containing an `await` step compiles to an *async* generator
-(A1's iteration boundary). cordis-py runs an async effect setup as a task and
-routes its failure to `_make_effect_guard`, which auto-disposes the effect —
-the accumulated inverses **do** run, newest first, and no residue is left — but
-the exception never reaches the fiber's error slot, so the fiber stays `ACTIVE`
-instead of landing `FAILED`. A synchronous body raises straight out of `apply`
-into `_start_reload`'s handler and lands `FAILED` correctly.
+(A1's iteration boundary). cordis-py *used to* run an async effect setup as a
+task and route its failure to `_make_effect_guard`, which auto-disposes the
+effect — the accumulated inverses ran, newest first, with no residue — but the
+exception never reached the fiber's error slot, so the fiber stayed `ACTIVE`
+instead of landing `FAILED`. A synchronous body raised straight out of `apply`
+into `_start_reload`'s handler and landed `FAILED` correctly.
 
 The first `fault test` written against an `await`-containing component found
-this. Reproduced with no revl code in the loop: a hand-built IR with
-`let-effect` / `await` / `fail`, emitted and plugged directly, ends `ACTIVE`
-with `map.drop` in the trace.
+this, reproduced with no revl code in the loop (a hand-built IR with
+`let-effect` / `await` / `fail`, emitted and plugged directly, ended `ACTIVE`
+with `map.drop` in the trace).
 
-This is not worked around. `assert failed` fails on such a component, and the
-message says the inverses did run and only the fiber state is wrong. It belongs
-with the `assertActive` residue bug in `docs/contract-errata.md` as an upstream
-runtime defect, not a revl one.
+**Fixed upstream** in the pinned runtime
+(`inso1337/cordis-py@harden-fiber-lifecycle` commit `1316174`, folded into
+geohotstan/cordis-py#1): an async setup failure is now routed to the fiber's
+error slot exactly as the sync path is, so the fiber lands `FAILED` with the
+error recorded while the inverses still run LIFO. `assert failed` now holds on
+an `await`-containing component, and
+`test_fault_tests.py::test_an_await_body_lands_failed_like_a_sync_body` pins
+it. See `docs/contract-errata.md` (entry now marked RESOLVED).

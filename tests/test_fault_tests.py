@@ -509,17 +509,17 @@ fault test "db dies" for Store { fail at step 3  assert no residue }
 
 
 @needs_cordis
-def test_an_await_body_reports_the_known_cordis_py_divergence(capsys):
-    """Regression lock on a *reported upstream defect*, not on desired behaviour.
+def test_an_await_body_lands_failed_like_a_sync_body(capsys):
+    """A8 holds for async bodies: an `await`-containing component whose setup
+    fails lands FAILED with the error recorded, exactly as a sync body does.
 
-    A body with an `await` step compiles to an async generator, and cordis-py
-    routes an async setup failure to its effect guard (auto-dispose) instead of
-    the fiber's error slot: the inverses run LIFO and leave no residue, but the
-    fiber stays ACTIVE instead of landing FAILED. See docs/fault-tests.md §8.
-
-    This asserts the *report* is precise, and it is meant to go red the day
-    cordis-py fixes it — at which point delete the xfail framing here and the
-    §8 entry, not the `assert failed` clause.
+    A body with an `await` step compiles to an async generator. cordis-py once
+    routed an async setup failure to its effect guard (auto-dispose) — the
+    inverses ran LIFO and left no residue, but the fiber stayed ACTIVE instead
+    of landing FAILED. Fixed in the pinned runtime
+    (inso1337/cordis-py@harden-fiber-lifecycle 1316174, folded into
+    geohotstan/cordis-py#1): the failure now reaches the fiber's error slot, so
+    the fiber lands FAILED. See docs/fault-tests.md §8, docs/contract-errata.md.
     """
     from revl.test import test_command
 
@@ -544,11 +544,9 @@ fault test "async body dies at the pool" for Migrator {
 ''', "async.rvl")
     code = test_command(ir, "py")
     out = capsys.readouterr().out
-    assert code == 1, out
-    # exactly one clause failed, and it is the state clause
-    assert "did not land FAILED — it is ACTIVE" in out
-    assert "compiles to an async generator" in out
-    assert "the inverses DID run" in out
-    # `no residue` and `inverses lifo` still held: the unwind itself is correct
-    assert "residue in the" not in out
+    # the async body now lands FAILED, so every clause holds and the test passes
+    assert code == 0, out
+    assert "PASS async body dies at the pool" in out
+    # the old divergence message is gone
+    assert "did not land FAILED" not in out
     assert "out of LIFO order" not in out
