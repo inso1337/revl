@@ -130,6 +130,7 @@ The four moments worth pausing on:
 | `components/user_cache.rvl` | the consumer: requires `db`, provides `cache` |
 | `variants/pg_database.hotswap.rvl` | the good edit `--script` applies (extra acquisition, bigger pool) |
 | `variants/pg_database.rejected.rvl` | the bad edit `--script` applies (acquisition with no inverse, G4) |
+| `crash_recovery.py` | crash recovery (item 47): write a WAL, simulate a `kill -9`, recover from the log alone to a stated verdict (`docs/crash-recovery.md`) |
 
 ### How a swap compiles: the runtime-admission gate
 

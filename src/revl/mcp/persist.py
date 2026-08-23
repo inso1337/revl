@@ -211,3 +211,20 @@ def restore(session, snap: dict) -> dict:
         "reAdmitted": True,
         **state,
     }
+
+
+# ------------------------------------------------------ crash recovery (item 47)
+
+def resume(session, snap: dict) -> dict:
+    """Roll-forward's other half (roadmap item 47, docs/crash-recovery.md).
+
+    When crash recovery reads a WAL whose activation *completed* before the
+    crash, the composition's shape is durable and there is no in-flight boundary
+    state to undo — recovery resumes by re-admitting the persisted generation.
+    That re-admission is exactly item 15's :func:`restore`: it replays admission
+    through the current gate, so a generation the current checker now rejects
+    fails loudly rather than resuming on stale authority. This is the named
+    composition seam `revl.recovery` calls; it adds nothing to `restore` but the
+    intent, so the two halves stay honest about who owns what."""
+    result = restore(session, snap)
+    return {**result, "resumedForCrashRecovery": True}

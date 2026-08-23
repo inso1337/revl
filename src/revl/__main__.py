@@ -598,6 +598,47 @@ def _run_why(args) -> int:
     return 0
 
 
+def _run_recover(args) -> int:
+    """`revl recover --wal FILE` — crash recovery over a write-ahead log
+    (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
+    runs the reconstructible boundary inverses (roll-back) or resumes the
+    persisted generation (roll-forward), and prints a checked verdict with a
+    residue proof. Exit status follows the residue: 0 when clean, 1 when honest
+    residue remains."""
+    # the recovery module reads `replay.WriteAheadLog`, a backend module — put
+    # backends/python on the path exactly as `run` does, but *without* needing a
+    # cordis runtime (recovery works from the durable log, the process is dead).
+    backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+
+    from .recovery import recover, render, RecoveryError  # noqa: PLC0415
+
+    session = snapshot = None
+    if getattr(args, "restore", None):
+        try:
+            with open(args.restore, encoding="utf-8") as handle:
+                snapshot = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read snapshot {args.restore}: {error}",
+                  file=sys.stderr)
+            return 1
+        from .mcp.session import Session  # noqa: PLC0415 — lazy: cordis only if resuming
+        session = Session()
+
+    try:
+        report = recover(args.wal, session=session, snapshot=snapshot)
+    except RecoveryError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render(report))
+    return 0 if report.get("residue", {}).get("clean") else 1
+
+
 def _run_explain(args) -> int:
     """`revl explain <code>` — the other half of a structured diagnostic. A
     rejection hands back a code; this turns the code back into the guarantee
@@ -871,6 +912,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--record", action="store_true",
                      help="record the effect accumulator so the REPL can step "
                           "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
+    run.add_argument("--wal", default=None, metavar="FILE",
+                     help="persist the effect accumulator as a durable write-ahead "
+                          "log (implies --record). On restart, `revl recover --wal "
+                          "FILE` rolls forward or back and states a checked verdict "
+                          "(docs/crash-recovery.md)")
     run.add_argument("--trace", default=None, metavar="FILE",
                      help="write a causal lifecycle trace (JSONL) — every "
                           "transition carries the cause chain behind it, "
@@ -887,6 +933,19 @@ def main(argv: list[str] | None = None) -> int:
                      help="TOML/JSON placement map: split components across processes and wire the seams")
     run.add_argument("--once", action="store_true",
                      help="with --placement: bring the composition up, run probes, then tear down and exit")
+
+    recover = sub.add_parser(
+        "recover",
+        help="crash recovery: read a `revl run --wal` write-ahead log and roll "
+             "forward (resume the persisted generation) or roll back (run the "
+             "boundary inverses LIFO), ending in a checked verdict + residue "
+             "proof (docs/crash-recovery.md)")
+    recover.add_argument("--wal", required=True, metavar="FILE",
+                         help="a write-ahead log written by `revl run --wal`")
+    recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
+                         help="on roll-forward, the item-15 snapshot to re-admit "
+                              "so recovery resumes the persisted generation")
+    recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     why = sub.add_parser(
         "why",
@@ -914,6 +973,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "why":
         return _run_why(args)
+
+    if args.command == "recover":
+        return _run_recover(args)
 
     if args.command == "serve":
         return _run_serve(args)
