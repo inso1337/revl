@@ -59,6 +59,7 @@ import time
 from pathlib import Path
 
 from .compiler import compile_files
+from .distribute import distributability
 from .errors import RevlError
 
 KNOWN_BACKENDS = ("py", "node", "rust", "java", "go")
@@ -70,6 +71,12 @@ _JAVA_DIR = _BACKENDS_DIR / "java"
 _GO_DIR = _BACKENDS_DIR / "go"
 _GO_RUNNER = _GO_DIR / "placement_runner"
 _PROBE_RE = re.compile(r"^\s*(\w+)\.(\w+)\((.*)\)\s*$")
+
+
+def _interactive() -> bool:
+    """Whether a live placement should hold an interactive swap REPL rather
+    than just waiting for Ctrl-C. A seam a test can pin without a real TTY."""
+    return sys.stdin.isatty()
 
 
 def _load_placement(path: str) -> dict:
@@ -97,6 +104,75 @@ def _parse_probe(expr: str) -> dict:
     arg_str = arg_str.strip()
     args = [a.strip().strip("'\"") for a in arg_str.split(",")] if arg_str else []
     return {"key": key, "method": method, "args": args}
+
+
+# --------------------------------------------------------------------------
+# live swap: admission gate (roadmap §23, `revl swap <component> --to <backend>`)
+# --------------------------------------------------------------------------
+
+
+def swap_admission(files, running_ir: dict, component: str, backend: str):
+    """Admit a candidate provider for `component`, re-hosted on `backend`,
+    against the *running* manifest. Returns ``(candidate_ir, None)`` when the
+    swap is admissible, or ``(None, diagnostic)`` when it is refused — in which
+    case the caller must leave the running composition untouched (no blip).
+
+    Two guarantees, both read off the IR with no runtime:
+
+    * **structural compatibility** — recompiling the candidate with
+      ``manifest=running_ir, replacing=(component,)`` links it *against the
+      running composition* (the same admission gate a py-tier hot-swap uses).
+      Every running consumer's call site was checked against the old interface
+      and is never recompiled, so a candidate that drops or narrows an
+      operation a consumer still calls is refused here with a guarantee-naming
+      diagnostic (G2/G3, `differs from the running manifest in a way that
+      breaks <consumer>`).
+    * **the seam is crossable** — a tier swap moves the component into its own
+      process, so every service it *provides and another component consumes*
+      must be transport-safe (async, value-typed; docs/interop-bridge.md §4).
+      An address-space-bound service (a sync `fn`, an `emission`, or a resource
+      return) cannot be re-pointed across a process boundary, so the swap is
+      refused before anything is booted.
+
+    A pure tier swap (same source, new backend) satisfies the first trivially;
+    the check still runs, because passing it *is* the cross-tier guarantee.
+    """
+    try:
+        candidate = compile_files(list(files), manifest=running_ir,
+                                  replacing=(component,))
+    except RevlError as exc:
+        return None, str(exc)
+
+    running_comp = next((c for c in running_ir.get("components") or []
+                         if c.get("name") == component), None)
+    if running_comp is None:
+        return None, (f"{component!r} is not a component of the running "
+                      f"composition (nothing to swap)")
+
+    provided = running_comp.get("provides") or {}
+    consumed_services = set()
+    for other in running_ir.get("components") or []:
+        if other.get("name") == component:
+            continue
+        for service in (other.get("requires") or {}).values():
+            consumed_services.add(service)
+
+    verdicts = distributability(candidate)
+    for key, service in provided.items():
+        if service not in consumed_services:
+            continue
+        verdict = (verdicts.get(service) or {}).get("verdict")
+        if verdict and verdict != "transport-safe":
+            reasons = ", ".join((verdicts.get(service) or {}).get("reasons") or [])
+            return None, (
+                f"cannot swap {component!r} to the {backend} tier: service "
+                f"`{service}` (key {key!r}) is address-space-bound"
+                + (f" ({reasons})" if reasons else "")
+                + " — a tier swap re-points it across a process seam, and only "
+                  "a transport-safe (async, value-typed) service crosses "
+                  "cleanly (docs/interop-bridge.md §4)")
+
+    return candidate, None
 
 
 # --------------------------------------------------------------------------
@@ -436,48 +512,6 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             }
         specs[pname] = spec
 
-    # per-backend build steps (once)
-    cleanup: list[str] = []
-    java_mode = "stub"
-    java_out = java21_bin = cordis_classes = rust_bin = go_bin = None
-    try:
-        if any(b == "node" for b in backends.values()):
-            ts_module = _emit_ts_module(ir, tmp)
-            cleanup.append(ts_module)
-            for pname, spec in specs.items():
-                if backends[pname] == "node":
-                    spec["module"] = ts_module
-        if any(b == "java" for b in backends.values()):
-            java21_bin = _find_jdk21()
-            cordis_classes = _find_cordis4j_classes()
-            if java21_bin and cordis_classes:
-                java_mode = "real"
-                java_out = _build_java_real(ir, tmp, java21_bin, cordis_classes)
-            else:
-                java_out = _build_java(ir, tmp)
-        if any(b == "rust" for b in backends.values()):
-            rust_bin = _build_rust(ir, tmp)
-        if any(b == "go" for b in backends.values()):
-            go_bin = _build_go(ir, tmp)
-    except (RevlError, RuntimeError, OSError) as exc:
-        return abort(str(exc))
-
-    # per-backend spec adaptation + spawn command + stop mode
-    def command_for(pname: str, spec_file: Path) -> tuple[list, dict | None, str]:
-        backend = backends[pname]
-        if backend == "node":
-            return ["node", str(_TS_DIR / "placement_runner.ts"), str(spec_file)], None, "term"
-        if backend == "rust":
-            return [rust_bin, str(spec_file)], None, "stdin"
-        if backend == "go":
-            return [go_bin, str(spec_file)], None, "term"
-        if backend == "java":
-            if java_mode == "real":
-                cp = f"{cordis_classes}{os.pathsep}{java_out}"
-                return [str(Path(java21_bin) / "java"), "-cp", cp, "RealPlacementRunner", str(spec_file)], None, "term"
-            return ["java", "-cp", java_out, "PlacementRunner", str(spec_file)], None, "term"
-        return [sys.executable, "-m", "revl._process_runner", str(spec_file)], env, "term"
-
     import revl  # noqa: PLC0415
     src_dir = str(Path(revl.__file__).resolve().parents[1])
     # keep the inherited PYTHONPATH, but drop empty entries: an empty entry is
@@ -486,9 +520,41 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([src_dir, *inherited])}
 
-    for pname, spec in specs.items():
-        backend = backends[pname]
-        if backend == "rust":
+    # per-backend build steps, done lazily and cached: the initial placement
+    # builds every backend it uses, and a later `revl swap ... --to <backend>`
+    # reuses those or builds a new target on demand (booting the candidate
+    # provider in its own process on the target tier — roadmap §23 step 1).
+    cleanup: list[str] = []
+    built: dict[str, object] = {}
+
+    def ensure_backend(backend: str) -> None:
+        if backend in built:
+            return
+        if backend == "node":
+            module = _emit_ts_module(ir, tmp)
+            cleanup.append(module)
+            built["node"] = module
+        elif backend == "rust":
+            built["rust"] = _build_rust(ir, tmp)
+        elif backend == "go":
+            built["go"] = _build_go(ir, tmp)
+        elif backend == "java":
+            java21_bin = _find_jdk21()
+            cordis_classes = _find_cordis4j_classes()
+            if java21_bin and cordis_classes:
+                built["java"] = ("real", _build_java_real(ir, tmp, java21_bin, cordis_classes),
+                                 java21_bin, cordis_classes)
+            else:
+                built["java"] = ("stub", _build_java(ir, tmp), None, None)
+        else:  # py needs no build step
+            built["py"] = True
+
+    def adapt_spec(spec: dict, backend: str) -> None:
+        """Backend-specific spec shaping, applied just before the spec is
+        written. Kept identical to what the initial spawn loop always did."""
+        if backend == "node":
+            spec["module"] = built["node"]
+        elif backend == "rust":
             spec["components"] = [_snake(c) for c in spec["components"]]
             spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
         elif backend == "go":
@@ -497,55 +563,237 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
         elif backend == "java":
             spec["module"] = "revl.Components"
-            iface_keys = set(spec["proxies"]) | set(spec.get("serve", {}).get("keys", [])) | set(spec["provides"])
-            spec["ifaces"] = {k: f"revl.Components${key_service[k]}" for k in iface_keys if k in key_service}
+            iface_keys = (set(spec["proxies"]) | set(spec.get("serve", {}).get("keys", []))
+                          | set(spec["provides"]))
+            spec["ifaces"] = {k: f"revl.Components${key_service[k]}"
+                              for k in iface_keys if k in key_service}
+
+    def command_for(backend: str, spec_file: Path) -> tuple[list, dict | None, str]:
+        if backend == "node":
+            return ["node", str(_TS_DIR / "placement_runner.ts"), str(spec_file)], None, "term"
+        if backend == "rust":
+            return [built["rust"], str(spec_file)], None, "stdin"
+        if backend == "go":
+            return [built["go"], str(spec_file)], None, "term"
+        if backend == "java":
+            mode, out, java21_bin, cordis_classes = built["java"]
+            if mode == "real":
+                cp = f"{cordis_classes}{os.pathsep}{out}"
+                return [str(Path(java21_bin) / "java"), "-cp", cp, "RealPlacementRunner",
+                        str(spec_file)], None, "term"
+            return ["java", "-cp", out, "PlacementRunner", str(spec_file)], None, "term"
+        return [sys.executable, "-m", "revl._process_runner", str(spec_file)], env, "term"
+
+    try:
+        for backend in backends.values():
+            ensure_backend(backend)
+    except (RevlError, RuntimeError, OSError) as exc:
+        return abort(str(exc))
+
+    for pname, spec in specs.items():
+        adapt_spec(spec, backends[pname])
 
     summary = "  ".join(f"{p}[{backends[p]}]=[{','.join(processes[p].get('components') or [])}]" for p in processes)
     print(f"placement: {summary}", flush=True)
-    if any(b == "java" for b in backends.values()):
-        note = ("real cordis4j (reactive)" if java_mode == "real"
+    if "java" in built:
+        note = ("real cordis4j (reactive)" if built["java"][0] == "real"
                 else "stub (non-reactive; set REVL_CORDIS4J_CLASSES + a JDK 21 for reactive withdrawal)")
         print(f"  java runtime: {note}", flush=True)
 
+    # conductor-side state a live swap must keep coherent, keyed by process
     children: dict[str, tuple] = {}
-    for pname, spec in specs.items():
-        spec_file = tmp / f"{pname}.spec.json"
-        spec_file.write_text(json.dumps(spec), encoding="utf-8")
-        cmd, proc_env, stop_mode = command_for(pname, spec_file)
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=proc_env, text=True,
-        )
-        children[pname] = (proc, stop_mode)
-
     up: set[str] = set()
+    repointed: set[tuple[str, str]] = set()
+    down: set[str] = set()
+    threads: list[threading.Thread] = []
+    _re_repoint = re.compile(r"^\[(?P<p>[^\]]+)\] REPOINTED (?P<k>\S+) ->")
 
     def pump(pname: str, proc: subprocess.Popen) -> None:
         for line in proc.stdout:
             sys.stdout.write(line)
             sys.stdout.flush()
-            if line.strip() == f"[{pname}] UP":
+            text = line.strip()
+            if text == f"[{pname}] UP":
                 up.add(pname)
+            elif text == f"[{pname}] DOWN":
+                down.add(pname)
+            else:
+                m = _re_repoint.match(text)
+                if m and m.group("p") == pname:
+                    repointed.add((pname, m.group("k")))
 
-    threads = [threading.Thread(target=pump, args=(p, proc), daemon=True) for p, (proc, _) in children.items()]
-    for thread in threads:
+    def spawn(pname: str, backend: str, spec: dict) -> None:
+        spec_file = tmp / f"{pname}.spec.json"
+        spec_file.write_text(json.dumps(spec), encoding="utf-8")
+        cmd, proc_env, stop_mode = command_for(backend, spec_file)
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=proc_env, text=True,
+        )
+        children[pname] = (proc, stop_mode)
+        thread = threading.Thread(target=pump, args=(pname, proc), daemon=True)
         thread.start()
+        threads.append(thread)
+
+    def _wait_for(pred, timeout: float = 60.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            time.sleep(0.05)
+        return pred()
+
+    swap_seq = [0]
+
+    def do_swap(component: str, to_backend: str) -> None:
+        """`revl swap <component> --to <backend>`: boot -> admit -> re-point ->
+        drain + tear the old provider down, proving no residue (docs/swap.md).
+
+        v1 scope: the swapped component must be the only one in its process
+        (its process is the provider being replaced), and its provided services
+        must already cross a seam. A mid-stream call is *drained* against the
+        old provider (the client holds its lock across the in-flight call), not
+        handed over mid-flight — that refinement is deferred (docs/swap.md)."""
+        if component not in placed:
+            print(f"swap refused: no component {component!r} in this placement "
+                  f"(have: {', '.join(sorted(placed))})", flush=True)
+            return
+        if to_backend not in KNOWN_BACKENDS:
+            print(f"swap refused: unknown backend {to_backend!r} "
+                  f"({', '.join(KNOWN_BACKENDS)})", flush=True)
+            return
+        old = placed[component]
+        housemates = [c for c, p in placed.items() if p == old]
+        if housemates != [component]:
+            others = ", ".join(c for c in housemates if c != component)
+            print(f"swap refused (v1): {component!r} shares process {old!r} with "
+                  f"{others}; v1 swaps a component that is alone in its process "
+                  f"(docs/swap.md).", flush=True)
+            return
+
+        # --- admission gate: refuse without touching the running composition
+        candidate, error = swap_admission(files, ir, component, to_backend)
+        if error is not None:
+            for i, text in enumerate(error.splitlines()):
+                print(f"  {'swap refused:' if i == 0 else '             '} {text}", flush=True)
+            print("  running composition untouched — the candidate never booted.", flush=True)
+            return
+        try:
+            ensure_backend(to_backend)
+        except (RevlError, RuntimeError, OSError) as exc:
+            print(f"swap refused: could not build the {to_backend} tier:\n{exc}", flush=True)
+            print("  running composition untouched.", flush=True)
+            return
+
+        # --- boot the successor provider on the target tier, on a new socket
+        swap_seq[0] += 1
+        succ = f"{component}__t{swap_seq[0]}"
+        new_sock = str(tmp / f"{succ}.sock")
+        old_serve = specs[old].get("serve") or {}
+        serve_keys = old_serve.get("keys") or [k for k in provides[old]]
+        succ_spec = {
+            "name": succ,
+            "backend": to_backend,
+            "files": [str(f) for f in files],
+            "components": [component],  # the swapped component, alone (v1 scope)
+            "config": config,
+            "provides": list(provides[old]),
+            "proxies": {k: dict(v) for k, v in (specs[old].get("proxies") or {}).items()},
+            "probe": [],
+            "serve": {
+                "socket": new_sock,
+                "keys": serve_keys,
+                "methods": {k: methods.get(provides[old][k], []) for k in serve_keys},
+            },
+        }
+        adapt_spec(succ_spec, to_backend)
+        print(f"swap: booting {component} on the {to_backend} tier ({succ}) ...", flush=True)
+        spawn(succ, to_backend, succ_spec)
+        if not _wait_for(lambda: succ in up, 60):
+            print(f"swap refused: successor {succ} did not come up — tearing it "
+                  f"back down; running composition untouched.", flush=True)
+            sproc, smode = children.pop(succ, (None, None))
+            if sproc is not None:
+                _stop_all({succ: (sproc, smode)})
+            return
+
+        # --- re-point every consumer of these keys onto the successor socket
+        for key in serve_keys:
+            for qname, qspec in specs.items():
+                if qname in (old, succ):
+                    continue
+                if key in (qspec.get("proxies") or {}):
+                    qproc = children[qname][0]
+                    try:
+                        qproc.stdin.write(json.dumps({"op": "repoint", "key": key,
+                                                      "socket": new_sock}) + "\n")
+                        qproc.stdin.flush()
+                    except OSError as exc:
+                        print(f"swap: could not signal {qname}: {exc}", flush=True)
+                        continue
+                    if _wait_for(lambda: (qname, key) in repointed, 30):
+                        qspec["proxies"][key]["socket"] = new_sock
+                    else:
+                        print(f"swap: {qname} did not acknowledge repoint of {key!r}", flush=True)
+
+        # --- drain + tear the old provider down (LIFO inside its process), and
+        # let it prove no residue, then adopt the successor into placement state
+        oldproc, oldmode = children.pop(old)
+        _stop_all({old: (oldproc, oldmode)})
+        _wait_for(lambda: old in down, 10)
+        for key in serve_keys:
+            owner[key] = succ
+        placed[component] = succ
+        provides[succ] = provides.pop(old)
+        requires[succ] = requires.pop(old)
+        backends[succ] = to_backend
+        specs[succ] = succ_spec
+        specs.pop(old, None)
+        print(f"swap: {component} now on {to_backend} ({succ}); the old provider "
+              f"unwound with a no-residue proof above.", flush=True)
+
+    def swap_repl() -> None:
+        print("(placement up — `swap <component> --to <backend>`, `:keys`, "
+              "`:q`/Ctrl-D to tear down)", flush=True)
+        while True:
+            try:
+                line = input("swap> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print(flush=True)
+                break
+            if not line:
+                continue
+            if line in (":q", ":quit", ":exit"):
+                break
+            if line in (":keys", ":help"):
+                for c, p in sorted(placed.items()):
+                    print(f"  {c}  on {backends.get(p, '?')} ({p})", flush=True)
+                continue
+            parts = line.split()
+            if parts[0] != "swap" or "--to" not in parts or len(parts) < 4:
+                print("usage: swap <component> --to <backend>", flush=True)
+                continue
+            component = parts[1]
+            to_backend = parts[parts.index("--to") + 1]
+            do_swap(component, to_backend)
+
+    for pname, spec in specs.items():
+        spawn(pname, backends[pname], spec)
 
     rc = 0
     try:
         if once:
-            for _ in range(600):  # up to ~60s (java/rust builds already ran; this waits for activation)
-                if len(up) == len(children):
-                    break
-                time.sleep(0.1)
+            _wait_for(lambda: len(up) == len(children), 60)
             if len(up) != len(children):
                 missing = ", ".join(p for p in children if p not in up)
                 print(f"error: processes did not come up: {missing}", file=sys.stderr)
                 rc = 1
             _stop_all(children)
+        elif _interactive():
+            swap_repl()
         else:
             print("(placement up; Ctrl-C to tear down)", flush=True)
-            for proc, _ in children.values():
+            for proc, _ in list(children.values()):
                 proc.wait()
     except KeyboardInterrupt:
         pass

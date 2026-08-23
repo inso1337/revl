@@ -1811,6 +1811,11 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
     # operands are bound once, since a block evaluates them exactly once.
     if method in _CHECKED_DIVS:
         return _v3_checked_div(method, target, args[0])
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): i64::to_string
+    # is exact decimal over the whole range, Int.MIN included, and String is
+    # this tier's Str.
+    if method == "to_str":
+        return f"({target}).to_string()"
     raise EmitError(f"unknown builtin method {method!r}")
 
 
