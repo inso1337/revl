@@ -32,13 +32,30 @@ hand-roll. Be specific; skepticism is more credible than praise.
 Count your compile→refuse→fix cycles. Note the longest single debugging stall
 and what would have shortened it.
 
+### 5. Cost ledger (why the run cost what it cost)
+Time-to-green says how long; this says *where it went and why*. List every
+wasted cycle — a cycle that a better diagnostic, doc, tool, or missing feature
+would have made unnecessary — one line each, classified by cause:
+`diagnostic` (message didn't say how to fix) | `docs-gap` (had to read source
+to learn a documented-feeling fact) | `env` (venv/setup/vintage drift) |
+`tooling` (slow loop, missing fast path, hard-to-find code) |
+`missing-feature` (worked around a language/stdlib gap) |
+`spec-ambiguity` (brief, spec, and code disagreed).
+End with the single change that would have cut the most cost. Do NOT
+self-estimate tokens — the orchestrator records measured token count and
+duration per run from harness telemetry into `dogfood/COSTS.md`; your job is
+the causal story those numbers need.
+
 ## Rules of engagement
-- Work in your own worktree off `devwip`; never touch other worktrees.
-- Tests: `/Users/inso/revl-work/.venv/bin/python -m pytest tests/ -q`; CLI via
-  `PYTHONPATH=<worktree>/src`.
+- Work in your own worktree off current `origin/devwip`; never touch other
+  worktrees.
+- Tests: the repo-root `.venv` python with `PYTHONPATH=<worktree>/src`;
+  cordis-gated execution tests need a `backends/python/.venv` (run
+  `sh backends/python/setup.sh`, or borrow a sibling worktree's).
 - Differential-oracle rule: when porting a compiler phase, the reference in
   `src/revl/` is ground truth. Byte-identical output or identical verdicts on
   the corpus, or it does not merge.
-- Conventional commits ending `Co-Authored-By: Claude Opus 4.8
-  <noreply@anthropic.com>`. Do NOT push; the orchestrator reviews and merges.
+- Conventional commits matching the repo's log style. NO attribution trailers
+  of any kind (no Co-Authored-By). Push your own `agent/*` branch; never push
+  `devwip` or merge — the orchestrator reviews on a merge preview and merges.
 - On API 429: pause, retry, never abandon with work uncommitted.
