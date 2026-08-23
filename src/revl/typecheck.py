@@ -565,6 +565,14 @@ _BUILTIN_SIG = {
     "set": ("Map", ["Str", "@elem"], "@self"),
     "lookup": ("Map", ["Str"], "Opt[@elem]"),
     "has": ("Map", ["Str"], "Bool"),
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): size and keys are
+    # methods like their siblings (no free-function namespace); keys() yields
+    # ascending canonical Str order — a pure function of the key set, pinned
+    # per tier by tests. remove() is persistent (new map) and TOTAL: an
+    # absent key is a no-op returning an equal map, never an error.
+    "size": ("Map", [], "Int"),
+    "keys": ("Map", [], "List[Str]"),
+    "remove": ("Map", ["Str"], "@self"),
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): decimal
     # spelling, total over the whole i64 range including Int.MIN. A method
     # on the Int family — the same dispatch div_trunc rides — because revl
