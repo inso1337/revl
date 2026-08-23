@@ -551,6 +551,53 @@ def _run_query(args, ir: dict) -> int:
     return 0 if result.get("ok") else 1
 
 
+def _run_why(args) -> int:
+    """`revl why <component> --trace run.jsonl` — the runtime companion to the
+    compile-time why-traces: the cause chain behind a component's recorded
+    lifecycle transition, and (with --check) the prediction-vs-actuality
+    oracle (docs/why-runtime.md)."""
+    from . import why_runtime
+
+    try:
+        trace = why_runtime.Trace.load(args.trace)
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read trace {args.trace}: {error}", file=sys.stderr)
+        return 1
+
+    frames = trace.cause_chain(args.component)
+    report = None
+    if args.check is not None:
+        try:
+            ir = compile_files(args.check)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        report = why_runtime.oracle(ir, args.component, trace)
+
+    if args.json:
+        payload = {
+            "component": args.component,
+            "chain": [
+                {"component": f.component, "event": f.event,
+                 "transition": f.transition, "cause": f.cause, "note": f.note}
+                for f in frames
+            ],
+        }
+        if report is not None:
+            payload["oracle"] = report
+        print(json.dumps(payload, indent=2))
+    else:
+        print(why_runtime.render_chain(args.component, frames))
+        if report is not None:
+            print("\n" + why_runtime.render_oracle(report))
+
+    if report is not None and report.get("ok") and report.get("conforms") is False:
+        return 1
+    if not frames or (frames and frames[0].cause.get("kind") == "unrecorded"):
+        return 1
+    return 0
+
+
 def _run_explain(args) -> int:
     """`revl explain <code>` — the other half of a structured diagnostic. A
     rejection hands back a code; this turns the code back into the guarantee
@@ -810,12 +857,35 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--record", action="store_true",
                      help="record the effect accumulator so the REPL can step "
                           "backwards over it (`:timeline`, `:back k`) — see docs/replay.md")
+    run.add_argument("--trace", default=None, metavar="FILE",
+                     help="write a causal lifecycle trace (JSONL) — every "
+                          "transition carries the cause chain behind it, "
+                          "queryable with `revl why <c> --trace FILE` "
+                          "(docs/why-runtime.md)")
+    run.add_argument("--withdraw", default=None, metavar="COMPONENT",
+                     help="one-shot: boot, withdraw this live component while "
+                          "recording the causal cascade, then diff the actual "
+                          "cascade against the static `withdraw` prediction "
+                          "(the runtime oracle) and tear down")
     run.add_argument("--plan", action="store_true",
                      help="print the load plan (order, config, callable keys) and exit, without a runtime")
     run.add_argument("--placement", default=None,
                      help="TOML/JSON placement map: split components across processes and wire the seams")
     run.add_argument("--once", action="store_true",
                      help="with --placement: bring the composition up, run probes, then tear down and exit")
+
+    why = sub.add_parser(
+        "why",
+        help="explain a recorded lifecycle transition — the cause chain for a "
+             "component in a `revl run --trace` JSONL trace (docs/why-runtime.md)")
+    why.add_argument("component", help="the component whose transition to explain")
+    why.add_argument("--trace", required=True, metavar="FILE",
+                     help="a JSONL causal trace written by `revl run --trace`")
+    why.add_argument("--check", nargs="+", default=None, metavar="FILE",
+                     help="also run the oracle: compile these source files and "
+                          "diff the static `withdraw` prediction against the "
+                          "recorded cascade; a mismatch is a defect (nonzero exit)")
+    why.add_argument("--json", action="store_true", help="machine-readable output")
 
     args = parser.parse_args(argv)
 
@@ -827,6 +897,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return run_command(args)
+
+    if args.command == "why":
+        return _run_why(args)
 
     if args.command == "serve":
         return _run_serve(args)
