@@ -252,6 +252,8 @@ python -m revl test app.rvl                  # run in-file test blocks (--backen
 python -m revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
 python -m revl run app.rvl                   # boot on cordis-py; hold live with a REPL over provided services
 python -m revl run app.rvl --backend rust --once  # boot the composition as a cordis-rs process; LIFO teardown + no-residue proof; exit
+python -m revl run app.rvl --backend java --once  # same round-trip on a JVM (cordis4j runtime)
+python -m revl run app.rvl --backend wasm --once  # same round-trip on cordis-wasm (wasmtime); the substrate tier
 python -m revl run app.rvl --watch           # recompile on edit; a rejected change keeps the run alive
 python -m revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
 python -m revl plan cand.rvl --manifest running.json -o change.plan  # an executable plan artifact (docs/apply.md)
@@ -289,7 +291,35 @@ registry/reflect check) → exit. The **interactive REPL over provided rust
 services is not yet wired** (it needs the driver to hold an RPC client against
 the runner's stub for the session); without `--once` on a TTY the rust driver
 says so and completes the same once round-trip rather than pretending to hold a
-REPL. `ts`/`java` remain accepted-but-unwired for `run` and say so.
+REPL.
+
+The **java and wasm tiers are runnable on the same contract** — each boots the
+composition as its own process and runs the identical `--once` round-trip (boot
+→ LIFO teardown → no-residue proof → exit), behind its own runtime gate:
+
+- **`--backend java`** emits `revl.Components` → `javac` → boots the composition
+  on a JVM running the once-runner (`backends/java/placement/RunOnce.java`) on
+  the in-repo cordis4j runtime, and proves no residue the tier-neutral way —
+  after teardown no provided service still resolves through `ctx.get`. Gated
+  live by `tests/test_run_java.py`; a machine with no working JDK skips with the
+  reason (macOS ships a `javac` shim that errors until a JDK is installed, so the
+  gate checks that `javac`/`java` actually respond). The reactive real-cordis4j
+  runtime (JDK 21 + `REVL_CORDIS4J_CLASSES`) with peer-death-as-withdrawal stays
+  the domain of `--placement` and the java scenarios — a single-process `run
+  --once` has no peer to withdraw, so the stub runtime carries its full contract.
+- **`--backend wasm`** emits WAT → boots the composition on the **cordis-wasm**
+  runtime (backed by **wasmtime**) via the once-harness
+  (`backends/wasm/run_harness.py`), and proves no residue by asserting the live
+  runtime holds nothing after teardown (`rt.fibers` empty and the coeffect table
+  `rt.table` empty). Gated live by `tests/test_run_wasm.py`; no wasmtime/runtime
+  → skip with the reason. The substrate tier is the strictest emitter (`config`,
+  host builtins, non-Int component services, and more are hard `EmitError`;
+  [backends/wasm/README.md](../backends/wasm/README.md)), so a composition that
+  uses one is an emit failure here, not a boot.
+
+`ts` remains accepted-but-unwired for `run` and says so. On every non-py tier the
+REPL is unwired for the same reason it is on rust; without `--once` the driver
+notes the gap and completes the once round-trip.
 
 Non-interactive round-trip (boot → trace → exit):
 

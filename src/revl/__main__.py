@@ -1080,8 +1080,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--once", action="store_true",
                      help="bring the composition up, then tear down LIFO and exit "
                           "(with --placement: run probes across processes first; "
-                          "with --backend rust: boot the cordis-rs process, prove "
-                          "no residue, exit)")
+                          "with --backend rust/java/wasm: boot the tier's process "
+                          "(cordis-rs / cordis4j on a JVM / cordis-wasm on wasmtime), "
+                          "prove no residue, exit)")
 
     recover = sub.add_parser(
         "recover",

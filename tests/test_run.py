@@ -112,13 +112,17 @@ def test_run_preflights_with_the_required_field_supplied(tmp_path):
     result = _run_cli([USER_CACHE, "--backend", "py", "--config", str(cfg)])
     assert "missing required config" not in result.stderr
 def test_run_refuses_a_backend_that_is_not_wired_yet():
-    """Multi-runtime is by design (--backend is a real selector). py and rust
-    run today (rust as a cordis-rs process — test_run_rust.py); ts/java must
-    still say so rather than pretend."""
+    """Multi-runtime is by design (--backend is a real selector). py, rust, java
+    and wasm run today (each non-py tier as a separate process — see
+    test_run_rust.py / test_run_java.py / test_run_wasm.py); ts must still say so
+    rather than pretend."""
     result = _run_cli([USER_CACHE, "--backend", "ts"])
     assert result.returncode == 2, result.stderr
     assert "not wired yet" in result.stderr
-    assert "only py/rust runs today" in result.stderr
+    # the refusal names the tiers that DO run today (RUNNABLE_BACKENDS) — ts is
+    # not among them
+    assert "runs today" in result.stderr
+    assert "ts tier emits" in result.stderr
 
 
 def test_required_config_problem_uses_the_ir_schema():
