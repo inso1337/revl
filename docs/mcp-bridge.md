@@ -162,6 +162,7 @@ the same admission gate a human's `revl compile` does.
 | `revl_audit` | what can this composition touch? |
 | `revl_tools` | project its provided services to MCP tools (§1) |
 | `revl_grammar` | the language surface, prompt-sized |
+| `revl_resolve` | is there already a component to **import** for this need? ([below](#import-before-you-regenerate--revl_resolve)) |
 
 Rejections come back structured, so the agent reacts to a *code*, not prose:
 
@@ -177,6 +178,46 @@ Rejections come back structured, so the agent reacts to a *code*, not prose:
 
 The same projection is available to humans and CI as
 `revl compile --json-diagnostics`.
+
+### Import before you regenerate — `revl_resolve`
+
+Before an agent writes a component, it should ask whether one already exists
+(roadmap item 49, [docs/registry.md](registry.md)). `revl_resolve` takes the
+**need** — a `service` declaration as source, a hole's fill spec (verbatim from
+`revl_check`'s `fillSpec`), or the service shape the index stores — and returns
+the components whose provided service is **§5-compatible** with it:
+
+```jsonc
+revl_resolve {need: "service Store { fn query(sql: Str) -> List[Row]
+                                      emission fn execute(sql: Str) -> Int }"}
+-> {"ok": true, "query": "resolve", "precision": "exact",
+    "candidates": [
+      {"name": "pg_database",
+       "source":   "<full component.rvl>",     // inline …
+       "manifest": { "kind": "revl.interchange", … },  // … and inline
+       "why": "provides `Database` as `db`: §5-compatible (exact interface match)"}
+    ]}
+```
+
+Two properties make it a discovery verb an agent can trust:
+
+- **Matching is admission, never text.** A candidate is returned iff its
+  provided service passes the same structural-compatibility gate a hot-swap
+  runs (`admission._service_compatible`, the predicate
+  `refuse_admission -> _admit_service_replacement` uses). Rename the need's
+  service and the match is unchanged; remove a method a consumer calls and the
+  candidate is filtered out. No name matching, no keyword scoring.
+- **`source` and `manifest` ride inline.** The loop is need → `revl_resolve` →
+  `revl_admit`/`revl_swap` in exactly two calls; the matched source is never
+  fetched in a third. Pass a `manifest` (the running composition's IR) to
+  upgrade "compatible somewhere" to "admissible **here**" — a key the
+  composition already provides is withheld (G2).
+
+Candidates are ranked least-authority first (smallest capability set, then
+tighter interface fit, then stronger evidence — a gauntlet dossier over
+audit-only — then smaller source). The index is a local git-backed repository
+(`registry/`); phase 0 is the read path only — publishing and versioning are
+later phases.
 
 ### The live session — check, load, call, swap, prove
 
