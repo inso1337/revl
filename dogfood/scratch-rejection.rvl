@@ -1,0 +1,22 @@
+// ux-probe rejection experiment: get is declared PLAIN but its provider
+// body calls an emission. The G4 upper-bound rule must refuse this.
+
+service Database {
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]   // deliberately plain
+  emission fn put(key: Str, value: Str)
+}
+
+component BadCache requires db: Database provides cache: Cache {
+  provide cache {
+    fn get(key) {
+      emit db.execute(`SELECT ${key}`)
+      return None
+    }
+    fn put(key, value) {
+    }
+  }
+}

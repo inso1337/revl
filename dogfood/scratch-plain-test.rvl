@@ -1,0 +1,21 @@
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component PlainCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+
+test "round trip via plain test block" {
+  call cache.put("k", "v")
+  let hit = call cache.get("k")
+  assert hit == Some("v")
+}
