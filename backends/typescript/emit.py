@@ -374,6 +374,16 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         )
         return "{" + fields + "}"
 
+    if kind == "record_update":
+        # functional record update (docs/records.md §2): spread the base,
+        # then let the updated fields override it — a fresh object either way
+        base = _expr(node.get("base"), ctx)
+        overrides = ", ".join(
+            f"{_ident(k, 'record field')}: {_expr(v, ctx)}"
+            for k, v in node.get("updates") or []
+        )
+        return "{ ..." + base + (f", {overrides}" if overrides else "") + " }"
+
     if kind == "list":
         return "[" + ", ".join(_expr(item, ctx) for item in node.get("items") or []) + "]"
 

@@ -420,6 +420,15 @@ class _ComponentEmitter:
                 f"{name!r}: {self._expr(value, where)}"
                 for name, value in expr.get("fields") or []
             ) + "}"
+        if kind == "record_update":
+            # functional record update (docs/records.md §2): a fresh dict
+            # spreading the base, then the updated fields overriding it
+            base = self._expr(expr.get("base"), where)
+            parts = [f"**{base}"] + [
+                f"{name!r}: {self._expr(value, where)}"
+                for name, value in expr.get("updates") or []
+            ]
+            return "{" + ", ".join(parts) + "}"
         if kind == "list":
             return "[" + ", ".join(self._expr(item, where) for item in expr.get("items") or []) + "]"
         if kind == "arrow":
@@ -1058,6 +1067,15 @@ def _expr(node: dict) -> str:
         return f"lambda {lambda_params}: {_expr(node['body'])}"
     if kind == "match":
         return _match_expr(_expr(node["scrutinee"]), node["arms"])
+    if kind == "record_update":
+        # functional record update (docs/records.md §2): fresh dict spreading
+        # the base, updated fields overriding it
+        base = _expr(node.get("base"))
+        parts = [f"**{base}"] + [
+            f"{name!r}: {_expr(value)}"
+            for name, value in node.get("updates") or []
+        ]
+        return "{" + ", ".join(parts) + "}"
     if kind == "interp":
         return _interp_fstring(node["parts"])
     if kind == "optfield":

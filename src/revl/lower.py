@@ -54,6 +54,7 @@ from .parser import (
     FailStmt,
     ExprArrow,
     ExprBin,
+    ExprBlockArm,
     ExprCall,
     ExprField,
     ExprHole,
@@ -65,6 +66,7 @@ from .parser import (
     ExprOptCall,
     ExprOptField,
     ExprRecord,
+    ExprRecordUpdate,
     ExprStmt,
     ExprUn,
     ExprVar,
@@ -460,6 +462,10 @@ def _subst_body_annotations(stmts: list, subst) -> None:
         elif isinstance(expr, ExprRecord):
             for _, value in expr.fields:
                 walk_expr(value)
+        elif isinstance(expr, ExprRecordUpdate):
+            walk_expr(expr.base)
+            for _, value in expr.updates:
+                walk_expr(value)
         elif isinstance(expr, ExprList):
             for item in expr.items:
                 walk_expr(item)
@@ -467,6 +473,10 @@ def _subst_body_annotations(stmts: list, subst) -> None:
             walk_expr(expr.scrutinee)
             for _, _, body in expr.arms:
                 walk_expr(body)
+                if isinstance(body, ExprBlockArm):
+                    for stmt in body.stmts:
+                        walk_expr(stmt.value)
+                    walk_expr(body.tail)
         elif isinstance(expr, Interp):
             for kind, part in expr.parts:
                 if kind == "expr":
@@ -585,6 +595,10 @@ def _fn_call_graph(program: Program) -> dict[str, set[str]]:
             collect_expr(expr.otherwise)
         elif isinstance(expr, ExprRecord):
             for _, value in expr.fields:
+                collect_expr(value)
+        elif isinstance(expr, ExprRecordUpdate):
+            collect_expr(expr.base)
+            for _, value in expr.updates:
                 collect_expr(value)
         elif isinstance(expr, ExprList):
             for item in expr.items:
@@ -991,6 +1005,11 @@ def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[
         for _, value in expr.fields:
             found |= _mutable_free_vars(value, scope, bound)
         return found
+    if isinstance(expr, ExprRecordUpdate):
+        found = _mutable_free_vars(expr.base, scope, bound)
+        for _, value in expr.updates:
+            found |= _mutable_free_vars(value, scope, bound)
+        return found
     if isinstance(expr, ExprList):
         found = set()
         for item in expr.items:
@@ -1005,6 +1024,18 @@ def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[
             found |= _mutable_free_vars(body, scope, arm_bound)
         return found
     return set()
+
+
+def _block_arm_unimplemented(filename: str, line: int) -> RevlError:
+    """Block-bodied match arms are specified and parsed (docs/records.md §4)
+    but no backend lowers them yet — refuse loudly rather than half-emit."""
+    return RevlError(
+        filename, line,
+        "block-bodied match arms (`=> { let … ; expr }`) parse and typecheck "
+        "but no backend emits them yet",
+        hint="lift the block into a named helper `fn` for now; implemented "
+             "tiers for this form: none yet (docs/records.md §6 tracks status)",
+    )
 
 
 class _LaxScope(dict):
@@ -2167,6 +2198,13 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return {"kind": "record",
                 "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                            for name, e in expr.fields]}
+    if isinstance(expr, ExprRecordUpdate):
+        return {"kind": "record_update",
+                "base": _lower_pure_expr(expr.base, scope, callables, alias_fns, filename, type_env, types),
+                "updates": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
+                            for name, e in expr.updates]}
+    if isinstance(expr, ExprBlockArm):
+        raise _block_arm_unimplemented(filename, expr.line)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types) for e in expr.items]}
@@ -2716,6 +2754,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "fields": [[name, _lower_component_pure_expr(e, env, scope, callables,
                                                              pure_only)]
                            for name, e in expr.fields]}
+    if isinstance(expr, ExprRecordUpdate):
+        return {"kind": "record_update",
+                "base": _lower_component_pure_expr(expr.base, env, scope, callables,
+                                                   pure_only),
+                "updates": [[name, _lower_component_pure_expr(e, env, scope, callables,
+                                                              pure_only)]
+                            for name, e in expr.updates]}
+    if isinstance(expr, ExprBlockArm):
+        raise _block_arm_unimplemented(filename, expr.line)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)

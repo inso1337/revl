@@ -323,6 +323,11 @@ def _expr(node, env: _Env, expected=None) -> str:
                              _comp_infer(target_node, env), target, args)
     if kind == "spawn":
         return _spawn_expr(node, env)
+    if kind == "record_update":
+        raise EmitError(
+            "functional record update `{r | f = e}` is not emitted by the go "
+            "backend yet (implemented tiers: python, typescript) - see "
+            "docs/records.md §6; lift it into a helper fn instead")
     raise EmitError("unsupported expr kind: %r" % (kind,))
 
 
@@ -1753,6 +1758,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if target_node.get("kind") not in _V3_GO_ATOMIC:
             target = f"({target})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
+
+    if kind == "record_update":
+        raise EmitError(
+            "functional record update `{r | f = e}` is not emitted by the go "
+            "backend yet (implemented tiers: python, typescript) - see "
+            "docs/records.md §6; lift it into a helper fn instead")
 
     if kind == "record":
         fields = node.get("fields") or []
