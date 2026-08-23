@@ -73,3 +73,69 @@ describe('generated test-block coverage', () => {
     expect(generated.endsWith('.test.ts')).toBe(true)
   })
 })
+
+// The TS twin of go's test_checked_in_generated_is_current (findings-map.md):
+// a checked-in generated module can drift from its fixture + emitter —
+// someone edits the emitter or a fixture, regenerates some outputs but not
+// others, and CI stays green while the committed module no longer describes
+// what this tree emits. Comparing against the WORKING TREE is useless here:
+// vitest's globalSetup has already re-written every generated module from
+// the fixtures by the time tests run (this file's own header documents that
+// hazard). So the pin compares each fresh emit against the module AS
+// COMMITTED (git HEAD) — a stale golden can only go green again once the
+// regenerated outputs are actually committed.
+describe('checked-in generated modules are current', () => {
+  const script = join(backend, 'scripts', 'emit-fixtures.ts')
+  const pairs = (readFileSync(script, 'utf-8').match(
+    /emitFixture\('([^']+)',\s*'([^']+)'\)/g) ?? [])
+    .map((call) => {
+      const m = call.match(/emitFixture\('([^']+)',\s*'([^']+)'\)/)!
+      return { fixture: m[1], output: m[2] }
+    })
+
+  // Scrub inherited GIT_* vars and resolve paths repo-relative: a git hook
+  // exports GIT_DIR (and in a linked worktree it points at
+  // .git/worktrees/<name>), which misdirects git calls made from here.
+  function gitShow(repoPath: string): string | null {
+    const env = { ...process.env }
+    for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key]
+    const root = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: backend, encoding: 'utf-8', env,
+    })
+    if (root.status !== 0) return null // no git available — nothing to assert
+    const shown = spawnSync('git', ['show', `HEAD:${repoPath}`], {
+      cwd: root.stdout.trim(), encoding: 'utf-8', env,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    return shown.status === 0 ? shown.stdout : null
+  }
+
+  it('found fixture/output pairs to pin (a vacuous gate protects nothing)', () => {
+    expect(pairs.length).toBeGreaterThan(0)
+  })
+
+  for (const { fixture, output } of pairs) {
+    it(`is committed current with its fixture: ${output}`, () => {
+      // Same recipe scripts/emit-fixtures.ts uses at setup time.
+      const fresh = spawnSync(
+        'python3',
+        ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
+        { cwd: backend, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
+      )
+      if (fresh.error) return // no python3 available (source tarball) — nothing to assert
+      expect(fresh.status, `emit.py failed for ${fixture}:\n${fresh.stderr}`).toBe(0)
+      const committed = gitShow(`backends/typescript/tests/generated/${output}`)
+      if (committed === null) {
+        throw new Error(
+          `tests/generated/${output} is not committed — a cold clone would ` +
+            `run whatever its own setup emits instead of this tree's proof`)
+      }
+      expect(
+        fresh.stdout,
+        `tests/generated/${output} does not match a fresh emit of ` +
+          `tests/fixtures/${fixture} + emit.py — regenerate ` +
+          `(backends/typescript/scripts/emit-fixtures.ts) and commit`,
+      ).toBe(committed)
+    })
+  }
+})

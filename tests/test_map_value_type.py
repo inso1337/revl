@@ -21,12 +21,18 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+# backends/python stays on sys.path for the EXEC'D modules (`from runtime
+# import ...`) — emit itself is loaded by path below, NOT via this entry
 sys.path.insert(0, str(ROOT / "backends" / "python"))
 
-import emit  # noqa: E402
+from _backend_import import backend_emitter  # noqa: E402
 from revl import RevlError, compile_source  # noqa: E402
 from revl.lower import _BUILTIN_METHODS  # noqa: E402
 from revl.typecheck import _BUILTIN_SIG, _HOST_FAMILIES  # noqa: E402
+
+# unique-name load: bare `import emit` binds the canonical name and collides
+# with any other backend suite in the same process (tests/_backend_import.py)
+emit = backend_emitter("python")
 
 
 def _err(source: str) -> str:
