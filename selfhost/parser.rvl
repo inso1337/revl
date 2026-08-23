@@ -39,7 +39,7 @@ type PartN    = { kind: Str, text: Str, e: Expr }
 type TemplN   = { parts: List[PartN] }
 type HoleN    = { ty: Str, msg: Str }
 
-type Expr =
+pub type Expr =
     IntLit(Str)
   | StrLit(Str)
   | BoolLit(Str)
