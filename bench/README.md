@@ -17,12 +17,43 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
 - `prompts/v2.md` — the full 2.0 grammar (fns, types, match, stdlib, tests).
 - `prompts/v2host.md` — addendum concatenated onto v2 for the `v2host`
   variant (extern host blocks).
+- `prompts/raw-ts.md` — the **paradigm baseline**: author each spec as a raw
+  Cordis (TypeScript) plugin, no revl. Same briefs, same pinned service
+  interfaces. Scored on lifecycle correctness, not compile-rate (see below).
 - `run.py` — orchestrator: prompt → model → extract code → compile with the
   real checker → on error, feed the compiler message back and retry (up to
-  `--max-iters`, default 3). **Costs real money.**
-- `rescore.py` — recompiles the *already committed* generations against the
-  current checker. No model, no provider, no cost. This is how a language
+  `--max-iters`, default 3). **Costs real money.** The `raw-ts` variant skips
+  the compile/retry loop and is probe-scored instead (`score_raw_ts.py`).
+- `rescore.py` — recompiles the *already committed* revl generations against
+  the current checker. No model, no provider, no cost. This is how a language
   change is measured against a fixed corpus.
+- `score_raw_ts.py` — the raw-ts scoring + re-score path. Mounts/unmounts each
+  committed `raw-ts/attempt-1.ts` N cycles via the item-18 residue probe
+  (`tools/residue-probe/`) and reports the leak set. Free — the probe calls no
+  model. Imported by `run.py` to score fresh generations, and runnable
+  standalone to re-score a committed corpus.
+
+### The paradigm variant — bench the paradigm, not just the syntax
+
+v1/v2/v2host ask *which revl syntax do models write best* (compile-rate). The
+`raw-ts` variant asks the prior question: *does revl earn its keep at all?* The
+same specs are authored as raw Cordis plugins and scored on **lifecycle
+correctness**, because raw TS always "compiles" — the question is what it
+*leaks* on unload. The revl variants are compile-gated (a residue-carrying
+component is refused at compile, G4 + the no-residue proof), so the raw-ts leak
+rate is precisely what that gate catches:
+
+```sh
+python3 bench/run.py --runner cline --variants raw-ts          # 30 specs, real model
+python3 bench/score_raw_ts.py --run <label> --cycles 6         # free re-score
+```
+
+The headline it produces: *"Z% of raw-TS attempts carry residue that revl would
+have refused at compile time."* A committed hand corpus
+(`results/hand-corpus/`, 6 clean + 4 leaky plugins) exercises the whole path
+and yields a real 40% on that corpus; the population Z needs a funded `cline`
+run. Prereq: `cd backends/typescript && npm install` once (the probe reuses that
+one cordis install).
 - `results/<label>/` — per-attempt `.rvl` files, `results.jsonl`,
   `summary.md`. Committed runs are the record; the directory is not
   gitignored on purpose.

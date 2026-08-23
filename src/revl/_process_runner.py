@@ -9,9 +9,22 @@ composition, and brings it up on a cordis-py Context:
   * run any probe expressions against its provided services;
   * hold until SIGTERM, then tear down (consumers first) and exit.
 
+While it holds, it also reads newline-delimited JSON *control* commands on
+stdin — the channel `revl swap <component> --to <backend>` uses to drive a
+live migration (docs/swap.md). Today one command is understood:
+
+  {"op": "repoint", "key": "<k>", "socket": "<successor.sock>"}
+
+which re-points the proxy for `<k>` from its current provider to a successor
+serving at `<socket>` — a *planned cutover*, not the peer-death withdrawal a
+provider vanishing would trigger (`bridge._Client.repoint`). The process
+acknowledges with `[name] REPOINTED <k> -> <socket>`.
+
 All output is line-prefixed with the process name so the conductor can
 interleave several of these into one readable log. `[name] UP` marks a process
-fully loaded; `[name] DOWN` marks a clean teardown.
+fully loaded; `[name] DOWN` marks a clean teardown, followed by a per-process
+no-residue proof (`[name] residue ...`) so a provider torn down by a swap
+proves it left nothing behind.
 """
 
 from __future__ import annotations
@@ -21,6 +34,7 @@ import asyncio
 import json
 import signal
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -98,10 +112,16 @@ async def run(spec: dict) -> None:
             log("fiber", fiber.name, f"{FiberState(old).name} -> {FiberState(fiber.state).name}"))
 
     fibers: list[tuple[str, object]] = []
+    # key -> the proxy's _Client, so a `repoint` control command can carry the
+    # seam to a successor without disposing the proxy fiber.
+    clients: dict[str, object] = {}
+    baseline_disposables = root.fiber._disposables.length
 
     # 1. proxies for keys provided by other processes
     for key, info in (spec.get("proxies") or {}).items():
-        fiber = root.plugin(bridge.proxy_component(key, info["methods"], info["socket"], module))
+        proxy = bridge.proxy_component(key, info["methods"], info["socket"], module)
+        clients[key] = proxy["_client"]
+        fiber = root.plugin(proxy)
         await fiber
         await _flush()
         fibers.append((f"{key}-proxy", fiber))
@@ -141,7 +161,7 @@ async def run(spec: dict) -> None:
 
     print(f"[{name}] UP", flush=True)
 
-    # 5. hold until the conductor stops us, then tear down consumers first
+    # 5. hold until the conductor stops us, then tear down consumers first.
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -149,6 +169,34 @@ async def run(spec: dict) -> None:
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):  # pragma: no cover (non-unix)
             pass
+
+    # A control channel on stdin: the conductor pushes `repoint` commands here
+    # to migrate a proxy to a successor provider (`revl swap`). Runs on a
+    # daemon thread — `_Client.repoint` is thread-safe (its own lock) — and
+    # hands results back to the loop only to log them in order.
+    def control_reader() -> None:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                cmd = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if cmd.get("op") == "repoint":
+                key, sock = cmd.get("key"), cmd.get("socket")
+                client = clients.get(key)
+                if client is None:
+                    log("repoint", key or "?", "no such proxy in this process")
+                    continue
+                try:
+                    client.repoint(sock)
+                    print(f"[{name}] REPOINTED {key} -> {sock}", flush=True)
+                except OSError as exc:
+                    log("repoint", key, f"FAILED {type(exc).__name__}: {exc}")
+
+    threading.Thread(target=control_reader, name="revl-control", daemon=True).start()
+
     await stop.wait()
 
     for label, fiber in reversed(fibers):
@@ -159,6 +207,19 @@ async def run(spec: dict) -> None:
             pass
     if server is not None:
         server.close()
+
+    # per-process no-residue proof: a provider torn down by a swap (or the
+    # whole placement stopping) must leave its Context empty — the distributed
+    # form of `revl run`'s residue report (src/revl/run.py::_teardown).
+    checks = {
+        "registry": root.registry.size == 0,
+        "provisions": root.reflect.store == {},
+        "effects": root.fiber._disposables.length == baseline_disposables,
+    }
+    detail = (f"registry={root.registry.size} provisions={sorted(root.reflect.store)} "
+              f"disposables={root.fiber._disposables.length}/{baseline_disposables}")
+    verdict = "no residue" if all(checks.values()) else "RESIDUE LEFT"
+    print(f"[{name}] residue {verdict} | {detail}", flush=True)
     print(f"[{name}] DOWN", flush=True)
 
 

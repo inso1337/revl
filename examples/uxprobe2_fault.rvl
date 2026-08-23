@@ -1,0 +1,28 @@
+// Fault path (A8 / L-Raise): a component whose activation fails mid-body.
+// `fault test` declares the failure and asserts the revert left nothing behind.
+// Negative controls we ran while writing this (see dogfood/findings-uxprobe2.md):
+//   * an undo that is NOT the inverse (`undo scratch.insert("leak", "1")`)
+//     still PASSES `assert no residue` in a fault test, while the identical
+//     leak under a plain lifecycle test is caught
+//     ("residue — host resources never released: map#1"). The fault-path
+//     residue assertion is weaker than the lifecycle one.
+
+service Ping {
+  fn ping(tag: Str) -> Str
+}
+
+component Fragile provides p: Ping {
+  let scratch = effect Map.new() undo scratch.drop()
+
+  // step 2 of activation: deliberate L-Raise — reverts step 1, lands FAILED
+  fail "deliberate activation fault (probe round 2)"
+
+  provide p {
+    fn ping(tag) = tag
+  }
+}
+
+fault test "mid-activation failure reverts its acquisition" for Fragile {
+  fail at step 2
+  assert no residue
+}
