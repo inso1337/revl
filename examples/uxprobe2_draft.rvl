@@ -1,0 +1,24 @@
+// Draft-with-holes (T3): this file COMPILES — a hole checks and never runs.
+// `revl compile` lists every obligation; admission would refuse the draft.
+// Workflow shown below the fold: fill the hole, recompile, obligations gone.
+
+service WorkerPool {
+  fn capacity() -> Int
+}
+
+fn default_workers() -> Int {
+  // the hole takes its type from the annotated let: expects `Int`
+  let cap: Int = hole "worker pool size"
+  return cap
+}
+
+component DraftPool provides pool: WorkerPool {
+  config { name: Str = "pool-0" }
+
+  provide pool {
+    fn capacity() = default_workers()
+  }
+}
+
+// FILLING THE DRAFT (no longer a draft once this line is applied):
+//   let cap: Int = hole "worker pool size"   ->   let cap: Int = 4
