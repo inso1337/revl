@@ -29,6 +29,7 @@ import sys
 from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, obligations, report
 from ..errors import RevlError
+from . import gauntlet as _gauntlet
 from .persist import RestoreError
 from .query_tools import QUERY_TOOLS
 from .schema import tools_from_ir
@@ -188,6 +189,16 @@ def _tool_unload(_arguments: dict) -> dict:
 
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
+
+
+def _tool_gauntlet(arguments: dict) -> dict:
+    """Grade a candidate: run the battery in an isolated scratch session and
+    return the verdict dossier. A rejected or misbehaving candidate is graded,
+    not thrown, and the live composition is never touched (docs/gauntlet.md)."""
+    if arguments.get("source") is None and not arguments.get("files"):
+        return _session_error("provide `source` or `files` — the gauntlet "
+                              "grades a candidate component")
+    return _gauntlet.run(SESSION, arguments)
 
 
 # -- composition persistence (docs/persistence.md) ------------------------
@@ -569,6 +580,33 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_swap,
+    },
+    {
+        "name": "revl_gauntlet",
+        "description": "Grade a candidate component instead of merely admitting "
+                       "it: run a battery in an ISOLATED scratch session the live "
+                       "composition never sees, and return a structured verdict "
+                       "dossier. It separates what was PROVED (admission, derived "
+                       "teardown), what was TESTED with counts (a real boot/unload "
+                       "no-residue lifecycle), and what remains CLAIMED (the "
+                       "enumerated G8 extern boundary). Fault-sweep and "
+                       "inverse-round-trip sections are present but report "
+                       "`pending`. A rejected or faulting candidate is graded, not "
+                       "thrown; the running system is untouched either way. "
+                       "`ok` reports that a dossier was produced; the grade is in "
+                       "`verdict` (admissible | rejected). See docs/gauntlet.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "config": {"type": "object",
+                           "description": "per-component config for the scratch boot"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_gauntlet,
     },
     {
         "name": "revl_rollback",

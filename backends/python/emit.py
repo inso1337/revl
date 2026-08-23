@@ -108,6 +108,24 @@ def _uses_bounded_int(node) -> bool:
     return False
 
 
+def _uses_bounded_int32(node) -> bool:
+    """Does this IR do Int32 `+`/`-`/`*`, negate an Int32, or narrow with
+    `to_int32`? The i32 bound helper is emitted only where it is used."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int32"):
+            return True
+        if (node.get("kind") == "un" and node.get("op") == "-"
+                and node.get("operands") == "Int32"):
+            return True
+        if node.get("kind") == "builtin" and node.get("method") == "to_int32":
+            return True
+        return any(_uses_bounded_int32(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_bounded_int32(v) for v in node)
+    return False
+
+
 def _uses_true_division(node) -> bool:
     """Does anything in this IR divide with `/`? The IEEE helper is emitted
     only where it is used, so modules that never divide stay unchanged."""
@@ -176,6 +194,13 @@ def _render_builtin(method, target: str, args: list) -> str:
                 f"({target}, {args[0]}))")
     if method == "mod":
         return f"({target} % abs({args[0]}))"
+    # Int/Int32 width conversions (docs/arithmetic.md). python has one int
+    # type, so widening Int32 -> Int is the identity; narrowing Int -> Int32
+    # re-imposes the 32-bit bound through `_revl_i32`, which traps out of range.
+    if method == "to_int":
+        return f"({target})"
+    if method == "to_int32":
+        return f"_revl_i32({target})"
     # The total forms (docs/arithmetic.md): same quotient as the faulting
     # operation, but a zero divisor yields Err(reason) instead of raising —
     # the whole point is that a pure fn cannot `fail`, so the error travels
@@ -877,6 +902,11 @@ def _expr(node: dict) -> str:
             # which is the reference tier disagreeing with all five others.
             return (f"_revl_i64({_expr(node['left'])} {node['op']} "
                     f"{_expr(node['right'])})")
+        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int32":
+            # Int32 traps at the 32-bit edge, the same imposition at half the
+            # width (docs/arithmetic.md).
+            return (f"_revl_i32({_expr(node['left'])} {node['op']} "
+                    f"{_expr(node['right'])})")
         if node["op"] == "/":
             # true division, IEEE at zero (docs/arithmetic.md)
             return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
@@ -907,6 +937,8 @@ def _expr(node: dict) -> str:
                 # rust and wasm — quietly came back as 2^63 here, out of the
                 # range python itself imposes on every other operation.
                 return f"_revl_i64(-{_expr(node['operand'])})"
+            if node.get("operands") == "Int32":
+                return f"_revl_i32(-{_expr(node['operand'])})"
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
@@ -1448,6 +1480,17 @@ def emit(ir: dict) -> str:
         out.add(0, '    """precision, so the bound is imposed here."""')
         out.add(0, "    if v < _REVL_I64_MIN or v > _REVL_I64_MAX:")
         out.add(0, "        raise OverflowError('revl: Int overflow')")
+        out.add(0, "    return v")
+        out.add(0)
+    if _uses_bounded_int32(ir):
+        out.add(0, "_REVL_I32_MIN = -(2 ** 31)")
+        out.add(0, "_REVL_I32_MAX = 2 ** 31 - 1")
+        out.add(0)
+        out.add(0, "def _revl_i32(v):")
+        out.add(0, '    """Int32 is bounded 32-bit and overflow traps '
+                   '(docs/arithmetic.md)."""')
+        out.add(0, "    if v < _REVL_I32_MIN or v > _REVL_I32_MAX:")
+        out.add(0, "        raise OverflowError('revl: Int32 overflow')")
         out.add(0, "    return v")
         out.add(0)
     if _uses_true_division(ir):
