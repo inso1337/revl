@@ -218,23 +218,13 @@ DIVERGENCES = {
     # through `revlI64(-x)` — so every bounded tier faults on `-Int.MIN` exactly
     # as it does on any other Int overflow. Asserted positively below
     # (test_negation_of_int_min_traps + the per-tier emit checks).
-    #
-    # **Open — found during review, unpinned before now.** `Int.MIN / -1` has
-    # quotient 2^63, which does not fit i64: integer division overflows at
-    # exactly this one input (mod is fine, `Int.MIN % -1 == 0`). rust panics,
-    # wasm's `i64.div_s` traps, and typescript re-imposes the bound via
-    # `revlI64` on the quotient — all correct. But **python computes the
-    # arbitrary-precision 2^63** (out of the range it imposes everywhere else)
-    # and **go and java wrap to Int.MIN** (host `/`). Both the faulting div
-    # forms (div_trunc/floor/euclid) and the checked ones share the gap. Close
-    # it the way unary minus was closed — bound the quotient (trap for the
-    # faulting forms, Err for the checked). Pinned here so it cannot drift.
-    "Int.MIN / -1 does not trap on every tier": (
-        'pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }\n'
-        'pub fn f(a: Int, b: Int) -> Int { return a.div_trunc(b) }\n'
-        'test "pinned" { assert f(lo(), 0 - 1) == lo() }',
-        {"py": "fail", "ts": "fail", "rust": "fail", "go": "pass", "java": "pass"},
-    ),
+    # ~~"Int.MIN / -1 does not trap on every tier"~~ **Closed.** Integer division
+    # overflows at exactly this input (quotient 2^63; mod is fine). python now
+    # bounds the faulting quotient through `_revl_i64`, go through `revlDivTrunc`
+    # / `revlDivFloor` (which panic), java through `Math.divideExact` /
+    # `Math.negateExact`; the checked forms return `Err("revl: Int overflow")`.
+    # rust/wasm/ts already trapped. Asserted positively below
+    # (test_div_int_min_traps + the checked-Err and per-tier emit checks).
 }
 
 
@@ -720,6 +710,61 @@ def test_bounded_tiers_emit_checked_int_negation():
     assert "revlSub(0, " in _emit("go", NEG_INT_MIN)
     assert "Math.negateExact(" in _emit("java", NEG_INT_MIN)
     assert "revlI64(-" in _emit("typescript", NEG_INT_MIN)
+
+
+# -------------------------------------------------- Int.MIN / -1 overflows too
+#
+# `Int.MIN / -1` has quotient 2^63, which does not fit i64 — the one input at
+# which integer division overflows (mod is fine: `Int.MIN % -1 == 0`). The
+# faulting div forms must fault; the checked forms must return Err, not wrap.
+
+DIV_INT_MIN = """
+pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }
+pub fn f(a: Int, b: Int) -> Int { return a.div_trunc(b) }
+test "div_trunc(Int.MIN, -1) must not produce a value" { assert f(lo(), 0 - 1) == 0 }
+"""
+
+CHECKED_DIV_INT_MIN = """
+pub fn lo() -> Int { return 0 - 9223372036854775807 - 1 }
+pub fn f(a: Int, b: Int) -> Str {
+  return match a.checked_div_trunc(b) { Ok(v) => `ok:${v}`, Err(e) => e }
+}
+test "checked_div_trunc(Int.MIN, -1) is Err, not a wrapped value" {
+  assert f(lo(), 0 - 1) == "revl: Int overflow"
+}
+"""
+
+
+@pytest.mark.parametrize("tier", BOUNDED_TIERS)
+def test_div_int_min_traps(tier: str):
+    """The faulting div form overflows at Int.MIN/-1 and must fault, not wrap
+    (go/java did; python computed 2^63). ts/rust/wasm already trapped."""
+    status, message = _run(tier, DIV_INT_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on Int.MIN/-1 division ({status}): {message}")
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_div_int_min_traps_slow(tier: str):
+    status, message = _run(tier, DIV_INT_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", f"{tier} did not trap on Int.MIN/-1 division: {message}"
+
+
+@pytest.mark.parametrize("tier", BOUNDED_TIERS)
+def test_checked_div_int_min_is_err(tier: str):
+    """The checked div form must *return* Err at Int.MIN/-1 (totalising the
+    range, not only the zero divisor), carrying the overflow message across."""
+    status, message = _run(tier, CHECKED_DIV_INT_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", (
+        f"{tier} did not return Err for checked_div_trunc(Int.MIN, -1): {message}")
 
 
 def test_wasm_int_is_i64_and_checks_the_bound():

@@ -1325,10 +1325,12 @@ function revlMod(a: bigint, b: bigint): bigint {
 // one the `adt` node renders for a built-in Result: `{ kind, value }`.
 function revlCheckedDivTrunc(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
   if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  if (a === REVL_I64_MIN && b === -1n) return { kind: "Err", value: 'revl: Int overflow' }
   return { kind: "Ok", value: revlI64(a / b) }
 }
 function revlCheckedDivFloor(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
   if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  if (a === REVL_I64_MIN && b === -1n) return { kind: "Err", value: 'revl: Int overflow' }
   const q = a / b
   return a % b !== 0n && (a < 0n) !== (b < 0n)
     ? { kind: "Ok", value: revlI64(q - 1n) }
@@ -1336,6 +1338,7 @@ function revlCheckedDivFloor(a: bigint, b: bigint): { kind: "Ok"; value: bigint 
 }
 function revlCheckedDivEuclid(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {
   if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }
+  if (a === REVL_I64_MIN && b === -1n) return { kind: "Err", value: 'revl: Int overflow' }
   const q = a / b
   if (a % b >= 0n) return { kind: "Ok", value: revlI64(q) }
   return b > 0n ? { kind: "Ok", value: revlI64(q - 1n) } : { kind: "Ok", value: revlI64(q + 1n) }

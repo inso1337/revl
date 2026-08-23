@@ -234,17 +234,16 @@ it cannot drift silently. **These are not fixed.**
   java via `Math.negateExact`, TypeScript via `revlI64(-x)`. Asserted by
   execution across py/ts/go/java and by per-tier emit checks
   (tests/test_cross_tier_execution.py::test_negation_of_int_min_traps).
-- **`Int.MIN / -1` does not trap on every tier** (open; found during review).
-  Integer division overflows at exactly this one input — the quotient is 2^63,
-  which does not fit i64 (mod is unaffected: `Int.MIN % -1 == 0`). rust panics,
-  wasm's `i64.div_s` traps, and TypeScript re-imposes the bound via `revlI64`
-  on the quotient. But **python computes the arbitrary-precision 2^63** (out of
-  the range it imposes everywhere else) and **go and java wrap to `Int.MIN`**
-  through the host `/`; both the faulting div forms (`div_trunc/floor/euclid`)
-  and the checked ones (`checked_div_*`) share the gap. Pinned per tier in
-  `DIVERGENCES` (tests/test_cross_tier_execution.py). Closing it is the same
-  shape as unary minus: bound the quotient — trap for the faulting forms, `Err`
-  for the checked ones — on python, go and java.
+- **`Int.MIN / -1`** (closed). Integer division overflows at exactly this
+  input (quotient 2^63; mod is fine, `Int.MIN % -1 == 0`). Every tier now
+  handles it: rust panics, wasm's `i64.div_s` traps, TypeScript re-imposes the
+  bound via `revlI64`, and the three that used to wrap or grow — python bounds
+  the faulting quotient through `_revl_i64`, go through `revlDivTrunc` /
+  `revlDivFloor` (panic), java through `Math.divideExact` / `Math.negateExact`.
+  The checked forms (`checked_div_*`) return `Err("revl: Int overflow")` rather
+  than a wrapped value, totalising the range as well as the zero divisor.
+  Asserted by execution (tests/test_cross_tier_execution.py::
+  test_div_int_min_traps / test_checked_div_int_min_is_err).
 
 **The root cause is closed.** An IR `bin` node used to carry `op`, `left` and
 `right` and *no type*, so no backend could distinguish `Int / Int` from
