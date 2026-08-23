@@ -196,18 +196,21 @@ def test_test_runner_strips_the_section_for_a_foreign_tier(capsys):
 # -------------------------------------------------------- static reading
 
 
-def test_injection_replaces_the_named_step():
+def test_injection_follows_the_named_step():
     ir = _with(_ONE)
     unit = fault_mod.fault_units(ir)[0]
     mutated = fault_mod._inject(ir, unit)
     body = next(c["body"] for c in mutated["components"] if c["name"] == "Store")
     original = next(c["body"] for c in ir["components"] if c["name"] == "Store")
-    assert body[2] == {"step": "fail", "message": {
+    assert body[3] == {"step": "fail", "message": {
         "kind": "lit", "value": 'fault test "t": injected failure'}}
-    # steps 1..N-1 survive untouched; step N is pushed past the failure and
-    # therefore never runs
-    assert body[:2] == original[:2]
-    assert body[3:] == original[2:]
+    # steps 1..N survive untouched — the named step runs and arms its inverse
+    # before the failure strikes; steps N+1.. are pushed past the failure and
+    # therefore never run. (The splice used to sit *before* step N, which made
+    # `fail at step 1` a vacuous experiment: the acquisition whose undo the
+    # test interrogates never executed — roadmap item 68's false green.)
+    assert body[:3] == original[:3]
+    assert body[4:] == original[3:]
     assert "fault_tests" not in mutated
     assert ir["components"][1]["body"] == original, "the source IR must not be mutated"
 
@@ -434,7 +437,8 @@ fault test "db dies mid-activation" for Store {
 
 
 @needs_cordis
-def test_a_real_activation_at_the_first_step_accumulates_nothing(capsys):
+def test_a_real_activation_at_the_first_step_reverts_that_one_acquisition(capsys):
+    # dying at step 1 now means step 1 *ran*: one inverse armed, one reverted
     code, out = _run('''
 fault test "dies immediately" for Store with { url: "postgres://replica/app" } {
   fail at effect scratch
@@ -843,6 +847,13 @@ def test_an_inverse_undo_still_passes_the_fault_test(capsys):
 # and on this branch it still PASSes, so the host trace the judge reads is not
 # fed on the injected-fault path. Constructed live during review from the
 # original findings-uxprobe2 asymmetry repro; kept verbatim.
+#
+# Resolution (item 68): the injection is the splice in fault.py::_inject, not
+# a runtime-armed raise — and it used to sit *before* step N, so at step 1 the
+# acquisition under test never executed and the trace had nothing to charge.
+# The splice now follows step N: the named step runs, arms its undo, and then
+# the failure strikes — so the map below is really acquired, its non-inverse
+# undo really runs, and the unpaired `new` is charged (R1).
 
 _LEAKY_UNDER_INJECTION = '''extern pure fn now() -> Int = @py { import time; return int(time.time()) }
 service Fragile { fn work(n: Int) -> Int }
