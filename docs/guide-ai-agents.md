@@ -264,22 +264,60 @@ returns nothing).
 ## Driving a running system (MCP)
 
 `python -m revl mcp serve` exposes the compiler over MCP, and the loop it
-enables is the point: a draft component never has to touch the filesystem.
+enables is the point: a draft component never has to touch the filesystem. This
+is your primary interface. The complete advertised verb set (from
+`src/revl/mcp/server.py` and `query_tools.py`), grouped by what you reach for:
 
-| tool | use |
-|---|---|
-| `revl_check` | does this compile? structured diagnostics if not |
-| `revl_admit` | may it enter **this running composition**? |
-| `revl_plan` | and then what? the delta a swap would produce, without applying it ([docs/plan.md](plan.md)) |
-| `revl_load` / `revl_call` | boot it in memory and actually call it |
-| `revl_swap` / `revl_rollback` | replace a generation, or undo that |
-| `revl_unload` | tear down and prove no residue (R4) |
-| `revl_grammar` | the language surface, prompt-sized |
+| verb(s) | use | detail |
+|---|---|---|
+| `revl_check` | does this compile? structured diagnostics **and open holes' `fillSpec`** if not | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_admit` | may it enter **this running composition**? | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
+| `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
+| `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor) — you send the change, not the file | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_swap` · `revl_rollback` · `revl_unload` | replace a generation, undo that, tear down + prove no residue (R4) | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_gauntlet` | grade a candidate — a verdict dossier (proved / tested / claimed) from an isolated battery run | [gauntlet.md](gauntlet.md) |
+| `revl_snapshot` · `revl_restore` | capture / re-admit your evolved composition across a restart | [persistence.md](persistence.md) |
+| `revl_timeline` · `revl_inspect_step` · `revl_step_back` · `revl_replay_bisect` · `revl_replay_forward` | walk, inspect, unwind, binary-search and re-run a recorded accumulator | [replay.md](replay.md) |
+| `revl_query_{emitters,withdraw,dependents,reach,drift}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? — over source, or against the live session | [queries.md](queries.md) |
+| `revl_history_emitted_between` · `revl_history_lifetime` | the same query envelope over a recorded run | [queries.md](queries.md) |
 
 Two properties worth relying on: a **rejected candidate cannot deploy** (the
 compile runs before the transition, so the running system keeps serving), and
 `revl_unload` **proves** the component left nothing behind before you commit
 it to disk. See [docs/mcp-bridge.md](mcp-bridge.md).
+
+### The modern agent loop — scaffold → fill → resolve → admit
+
+The verbs above compose into one workflow, and it is the discoverable path from
+a vague need to an admitted component. Nothing touches the filesystem until the
+last step:
+
+1. **Scaffold with holes.** Write the component's shape and leave the parts you
+   are unsure of as typed holes — `let cap: Int = hole "worker pool size"`. A
+   hole type-checks, so the rest of the draft still checks ([holes.md](holes.md)).
+2. **`revl_check` returns fill-specs.** A draft with holes compiles but can
+   never admit; `revl_check` comes back with each open hole's `fillSpec` — its
+   `line` and expected type. That is your worklist.
+3. **Fill via `revl_edit` deltas.** Send a `{hole: <line>, expr: "<fill>"}` edit
+   per hole — the server holds the source, so you transmit only the change, not
+   the file. Deltas accumulate across calls; a refused patch advances nothing,
+   so the working buffer never breaks. An edit that scaffolds a *new* hole comes
+   back as another obligation with its own `fillSpec`, so you can iterate holes
+   ([mcp-bridge.md §Deltas, not documents](mcp-bridge.md#deltas-not-documents--revl_edit)).
+4. **`revl_resolve` before you regenerate.** For any hole or requirement that is
+   a whole service, pass the need to `revl_resolve` — if an admission-compatible
+   component already exists, importing it beats writing one, and the matched
+   `source`/`manifest` ride back inline ([registry.md](registry.md)).
+5. **`revl_gauntlet` / `revl_admit` to land it.** When the draft is hole-free,
+   `revl_admit` answers "may this enter **this** composition?" mechanically, and
+   `revl_gauntlet` upgrades that to a graded dossier (a boot/unload no-residue
+   lifecycle in an isolated scratch session). Only what passes gets written out.
+
+The whole loop runs server-side against the admission gate, so every
+intermediate state is one the compiler already accepted.
 
 Where that is checked: the tool surface, its annotations and its structured
 rejections are gated by `tests/test_mcp.py`. Both properties above are gated

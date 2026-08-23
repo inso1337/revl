@@ -166,6 +166,24 @@ code transitively. The expression layer is **type-safe and null-safe**
 (see above); the remaining typing frontier and everything else in flight
 is tracked in the [2.0 roadmap](docs/v2.0-roadmap.md).
 
+**Language additions on the frozen core.** Each is a separate spec-then-code
+step with its own reference; the entry points below index them.
+
+| addition | one line | docs |
+|---|---|---|
+| **code-point `Str`** | a `Str`'s unit is a Unicode scalar; `charAt`/`length`/`slice` agree across tiers | [strings.md](docs/strings.md) |
+| **`Int32`** | 32-bit two's-complement integers whose `+ - *` **trap** on overflow, with `to_int`/`to_int32` width conversions | [arithmetic.md §Sized integers](docs/arithmetic.md) |
+| **`verified effect`** | an `effect … undo …` whose inverse is round-trip tested N times, not merely trusted | [verified-effect.md](docs/verified-effect.md) |
+| **`prop test`** | property tests with generators derived from parameter types | [prop-test.md](docs/prop-test.md) |
+| **`ns::` namespacing** | namespaced provision keys so a registry can wire two components without key collisions | [namespacing.md](docs/namespacing.md) |
+| **sorted `Map`** | `keys()`/`size()`/`remove()` iterate in canonical `Str` order on all six tiers — order is a function of the key set, never of history | [collections.md](docs/collections.md) |
+| **functional record update** | `{r \| f = e}` yields a fresh record with `f` replaced (python + typescript emitters) | [records.md](docs/records.md) |
+| **block-bodied match arms** | `Case => { … }` — parsed and typechecked; emitters deferred (a fence, see the doc) | [records.md](docs/records.md) |
+| **typed holes & fill-specs** | `hole[T]` type-checks, is reported as an obligation with an expected-type fill spec, and can never be admitted | [holes.md](docs/holes.md) |
+| **realm erasure** | `revl erase-report --realm R` — right-to-erasure evidence as a compiler artifact | [erase-report.md](docs/erase-report.md) |
+| **WIT bridge** | `revl import wit` / `revl export wit` — a revl service is a Wasm-component interface, both directions | [wit-bridge.md](docs/wit-bridge.md) |
+| **the component registry** | `revl_resolve` — find an admission-compatible component to import instead of regenerating one | [registry.md](docs/registry.md) |
+
 ## The toolchain is the developer surface
 
 revl treats its author — increasingly an AI agent — as a first-class user, so
@@ -185,6 +203,56 @@ reachable from the CLI and, where it makes sense, as an MCP tool.
 | **Function types** | `(Int, Str) -> Bool` — arrows leave the unchecked frontier where a type is known | [function-types.md](docs/function-types.md) |
 | **Importers** | `revl import openapi` / `revl import wit` — an external contract becomes a typed service | [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) |
 | **MCP server** | `revl mcp serve` — the whole compiler as an agent admission gate; `revl mcp schema` derives tool safety hints from the *body* | [mcp-bridge.md](docs/mcp-bridge.md) |
+
+## Command & MCP-verb reference
+
+Every subcommand wired in `src/revl/__main__.py`, one line each. The full CLI
+index with flags is [docs/guide-humans.md §Tooling](docs/guide-humans.md#tooling).
+
+| command | what it does | docs |
+|---|---|---|
+| `revl compile FILES [-o OUT]` | parse → check → link → IR; `--json-diagnostics` for CI | [backend-ir-v1.md](docs/backend-ir-v1.md) |
+| `revl explain CODE` | what a diagnostic code guarantees and the fix | [why-traces.md](docs/why-traces.md) |
+| `revl audit FILES` | composition manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate (`--accept`/`--accept-all`) | [interchange-format.md](docs/interchange-format.md) · [audit-diff.md](docs/audit-diff.md) |
+| `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (no-residue proof, crossings, other realms untouched) | [erase-report.md](docs/erase-report.md) |
+| `revl plan FILES [-o change.plan]` | dry run for a hot-swap; `-o` writes an executable plan artifact | [plan.md](docs/plan.md) |
+| `revl apply change.plan` | execute a plan against a live composition: drift-refuse, verify each step, roll back on failure | [apply.md](docs/apply.md) |
+| `revl query SUB …` | `emits-to`/`withdraw`/`depends-on`/`reaches`/`drift` over source; `emitted-between`/`touched` over a recorded run | [queries.md](docs/queries.md) |
+| `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$` interpolation; `--check` for CI | [fmt.md](docs/fmt.md) |
+| `revl test FILES` | run in-file `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](docs/prop-test.md) · [fault-tests.md](docs/fault-tests.md) |
+| `revl run FILES` | boot on a Cordis runtime; `--backend {py,rust,java,wasm}` boot live (**ts refused**), `--once`, `--watch`, `--record`, `--wal`, `--trace`, `--withdraw`, `--placement`, `--plan` | [replay.md](docs/replay.md) · [crash-recovery.md](docs/crash-recovery.md) |
+| `revl recover --wal FILE` | crash recovery: roll a write-ahead log forward or back to a checked verdict + residue proof | [crash-recovery.md](docs/crash-recovery.md) |
+| `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check` runs the withdraw oracle | [why-runtime.md](docs/why-runtime.md) |
+| `revl serve --mcp FILES` | serve a booted composition's **own** provided operations as MCP tools | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl mcp serve` | the compiler itself as an MCP server; `--restore SNAPSHOT.json` re-admits an evolved session | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl mcp schema FILES` | project provided services to MCP tool definitions | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl import {wit,openapi,cordis}` | import an external interface definition as typed revl source | [import-wit.md](docs/import-wit.md) · [import-openapi.md](docs/import-openapi.md) · [import-cordis.md](docs/import-cordis.md) |
+| `revl export wit` | generate the standard WIT interface for a revl service or composition | [wit-bridge.md](docs/wit-bridge.md) |
+
+Two interactive surfaces are not top-level subcommands: `run --record` opens a
+replay REPL (`:timeline`, `:back`, `:forward`, `:inspect`, `:bisect`; see
+[replay.md](docs/replay.md)), and `run --placement` opens a `swap>` prompt whose
+`swap <component> --to <backend>` migrates a live component across tiers
+([swap.md](docs/swap.md)).
+
+**MCP verbs** (`revl mcp serve`) — the definitive advertised set from
+`src/revl/mcp/server.py` and `query_tools.py`. Full shapes:
+[docs/mcp-bridge.md](docs/mcp-bridge.md), agent workflow:
+[docs/guide-ai-agents.md](docs/guide-ai-agents.md).
+
+| verb(s) | what they answer | docs |
+|---|---|---|
+| `revl_check` · `revl_admit` · `revl_plan` | does it compile? may it enter **this** running composition? what would the swap do? | [mcp-bridge.md](docs/mcp-bridge.md) · [plan.md](docs/plan.md) |
+| `revl_audit` · `revl_tools` · `revl_grammar` | the G8 surface, the projected tool set, the prompt-sized language surface | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl_load` · `revl_call` · `revl_state` · `revl_unload` | boot in memory, call an operation, inspect, tear down + prove no residue | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl_swap` · `revl_edit` · `revl_rollback` | swap a generation, patch server-side source with deltas, undo | [mcp-bridge.md](docs/mcp-bridge.md) |
+| `revl_gauntlet` | grade a candidate — a verdict dossier from an isolated battery run | [gauntlet.md](docs/gauntlet.md) |
+| `revl_resolve` | find an admission-compatible component to import | [registry.md](docs/registry.md) |
+| `revl_snapshot` · `revl_restore` | capture / re-admit an evolved composition across a restart | [persistence.md](docs/persistence.md) |
+| `revl_timeline` · `revl_inspect_step` · `revl_step_back` · `revl_replay_bisect` · `revl_replay_forward` | walk, inspect, unwind, binary-search and re-run a recorded accumulator | [replay.md](docs/replay.md) |
+| `revl_query_*` (`emitters`/`withdraw`/`dependents`/`reach`/`drift`) · `revl_live_query` | the five query verbs over source, or answered against the live session | [queries.md](docs/queries.md) |
+| `revl_history_emitted_between` · `revl_history_lifetime` | the query envelope over a recorded run | [queries.md](docs/queries.md) |
 
 ## Interoperability
 
@@ -338,24 +406,30 @@ or **[docs/vision.md](docs/vision.md)** for what this is *for*.
 - [stdlib-2.0.md](docs/stdlib-2.0.md) — the specified stdlib surface
 - [function-types.md](docs/function-types.md) · [holes.md](docs/holes.md) · [capabilities.md](docs/capabilities.md) — newer type-system surface
 - [generics.md](docs/generics.md) — implicit and explicit `[T]` type parameters
+- [strings.md](docs/strings.md) — a `Str`'s code-point unit and `Float` rendering · [arithmetic.md](docs/arithmetic.md) — `/`, `%`, named integer ops and `Int32`
+- [collections.md](docs/collections.md) — deterministic (sorted) `Map` iteration · [records.md](docs/records.md) — functional record update and block-bodied match arms
+- [namespacing.md](docs/namespacing.md) — namespaced provision keys
 - [design-v2-realms.md](docs/design-v2-realms.md) · [design-v2-instances.md](docs/design-v2-instances.md) — realms, interception, instances
 
 **Testing & guarantees**
 - [conformance.md](docs/conformance.md) — every construct against every tier, and how emitted code is validated
 - [fault-tests.md](docs/fault-tests.md) — L-Raise / no-residue as a language form
+- [verified-effect.md](docs/verified-effect.md) — inverse round-trip testing · [prop-test.md](docs/prop-test.md) — property tests with type-derived generators
 - [replay.md](docs/replay.md) — backwards replay over the accumulator
 - [contract-errata.md](docs/contract-errata.md) — known runtime divergences, per tier
 - [selfhost-findings.md](docs/selfhost-findings.md) — the self-hosted front end as a differential oracle: what it found, and what writing revl in revl actually cost
 
 **Working in a live system**
-- [plan.md](docs/plan.md) — a dry run for admission
+- [plan.md](docs/plan.md) — a dry run for admission · [apply.md](docs/apply.md) — execute a plan artifact · [swap.md](docs/swap.md) — migrate a live component across tiers
 - [queries.md](docs/queries.md) — ask the composition questions
-- [why-traces.md](docs/why-traces.md) — derivations behind a rejection
+- [why-traces.md](docs/why-traces.md) — derivations behind a rejection · [why-runtime.md](docs/why-runtime.md) — cause chains for a recorded run
+- [crash-recovery.md](docs/crash-recovery.md) — WAL roll-forward/back · [persistence.md](docs/persistence.md) — snapshot/restore an evolved session · [erase-report.md](docs/erase-report.md) — right-to-erasure evidence
 
 **Agents & interop**
 - [guide-ai-agents.md](docs/guide-ai-agents.md) — the agent-facing guide
-- [mcp-bridge.md](docs/mcp-bridge.md) — the compiler as an MCP server
-- [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) — importers
+- [mcp-bridge.md](docs/mcp-bridge.md) — the compiler as an MCP server · [gauntlet.md](docs/gauntlet.md) — graded admission · [registry.md](docs/registry.md) — find a component to import
+- [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) · [import-cordis.md](docs/import-cordis.md) · [wit-bridge.md](docs/wit-bridge.md) — importers and the WIT bridge
+- [interchange-format.md](docs/interchange-format.md) — the manifest + G8 audit format · [signals-and-queries.md](docs/signals-and-queries.md) — the workflow-engine pattern
 - [interop-bridge.md](docs/interop-bridge.md) — cross-tier interop
 
 **Internals**
