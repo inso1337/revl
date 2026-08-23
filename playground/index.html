@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>revl playground</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="overlay" id="overlay">
+    <div class="spinner"></div>
+    <div class="msg" id="overlay-msg">Loading Pyodide…</div>
+  </div>
+
+  <header>
+    <h1>revl playground</h1>
+    <span class="tag">compile-only v1</span>
+    <span class="tag">runs in your browser</span>
+    <span class="spacer"></span>
+    <a href="README.md">about &amp; how it loads</a>
+  </header>
+
+  <main>
+    <section class="editor-pane">
+      <div class="toolbar">
+        <label for="examples" style="font-size:13px;color:var(--muted)">example</label>
+        <select id="examples" aria-label="preloaded examples"></select>
+        <button class="run" id="run" disabled>Run</button>
+        <span class="hint">Cmd/Ctrl + Enter</span>
+      </div>
+      <textarea id="editor" spellcheck="false" autocomplete="off"
+        autocapitalize="off" wrap="off" aria-label="revl source editor"></textarea>
+    </section>
+
+    <section class="result-pane">
+      <div class="status" id="status">
+        <span>Load an example and press Run.</span>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-panel="diagnostics" aria-selected="true">
+          <span class="dot" id="dot-diagnostics"></span>Diagnostics
+        </button>
+        <button class="tab" role="tab" data-panel="audit" aria-selected="false">
+          <span class="dot" id="dot-audit"></span>G8 audit
+        </button>
+        <button class="tab" role="tab" data-panel="plan" aria-selected="false">
+          <span class="dot" id="dot-plan"></span>Plan
+        </button>
+        <button class="tab" role="tab" data-panel="ir" aria-selected="false">
+          <span class="dot" id="dot-ir"></span>IR
+        </button>
+      </div>
+      <div class="panels">
+        <div class="panel active" id="panel-diagnostics" role="tabpanel"></div>
+        <div class="panel" id="panel-audit" role="tabpanel"></div>
+        <div class="panel" id="panel-plan" role="tabpanel"></div>
+        <div class="panel" id="panel-ir" role="tabpanel"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

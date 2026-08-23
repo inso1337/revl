@@ -1,0 +1,12 @@
+// REJECTED — `%` (and the named `div_*` / `mod`) stay Int-only for now. The
+// remainder is width-agnostic in value, but its zero-divisor *fault* is not
+// uniform once Int32 is a `number` on the TypeScript tier and an i32 on wasm.
+// Rather than ship a `%` whose fault diverges, revl asks you to widen the
+// Int32 operands with `.to_int()` first (docs/arithmetic.md).
+//
+// expected error:
+//   `%` is Int-only; widen the Int32 operands with `.to_int()` first
+
+fn rem(a: Int32, b: Int32) -> Int {
+  return a % b
+}
