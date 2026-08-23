@@ -843,6 +843,7 @@ _MEMORY_TOKENS = (
 _ARITH_TOKENS = (
     "$int_add", "$int_sub", "$int_mul",
     "$int_div_floor", "$int_div_euclid", "$int_mod",
+    "$int32_add", "$int32_sub", "$int32_mul", "$int32_narrow",
 )
 
 
@@ -887,6 +888,10 @@ _BOOL_OPS = {"&&": "i32.and", "||": "i32.or"}
 #: execute `unreachable`. `/` and `%` cannot overflow into a wrong value — they
 #: trap natively on a zero divisor, which is the fault every other tier gives.
 _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int_mul"}
+#: Int32 `+ - *` trap at the i32 edge through their own checked helpers, the
+#: same discipline as `Int` at half the width (docs/arithmetic.md).
+_TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
+                       "*": "call $int32_mul"}
 _RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
 _COMPARISON_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS))
 _BINARY_OPS = frozenset(set(_CMP_SUFFIX) | set(_BOOL_OPS)
@@ -904,9 +909,14 @@ def _bin_instr(op: str, operand_ty: str | None) -> str | None:
     if op in _CMP_SUFFIX:
         if operand_ty == "Int":
             return f"i64.{_CMP_SUFFIX[op]}"
-        if operand_ty == "Bool":
+        if operand_ty in ("Bool", "Int32"):
+            # Int32 comparisons are signed i32 (lt_s/…); Bool uses eq/ne only.
             return f"i32.{_CMP_SUFFIX[op]}"
         return None
+    if operand_ty == "Int32":
+        # Only `+ - *` reach here for Int32 (docs/arithmetic.md): `/` yields
+        # Float (refused on this tier) and `%` is Int-only.
+        return _TRAPPING_INT32_OPS.get(op)
     if operand_ty != "Int":
         return None
     return _TRAPPING_INT_OPS.get(op) or _RAW_INT_OPS.get(op)
@@ -1129,7 +1139,7 @@ class _V3Emitter:
     # -- type/layout helpers --------------------------------------------------
 
     def _check_type(self, ty: str | None, where: str) -> None:
-        if ty in (None, "Unit", "Int", "Bool", "Str", "Bytes"):
+        if ty in (None, "Unit", "Int", "Int32", "Bool", "Str", "Bytes"):
             return
         if _is_fn_type(ty):
             raise EmitError(
@@ -1321,6 +1331,10 @@ class _V3Emitter:
             self._helper_int_div_floor(),
             self._helper_int_div_euclid(),
             self._helper_int_mod(),
+            self._helper_int32_add(),
+            self._helper_int32_sub(),
+            self._helper_int32_mul(),
+            self._helper_int32_narrow(),
         ]
 
     def _helper_alloc(self) -> str:
@@ -1478,6 +1492,39 @@ class _V3Emitter:
           (then unreachable))))
     (local.get $r))"""
 
+    def _helper_int32_narrow(self) -> str:
+        # The checked Int -> Int32 narrowing, and the range gate the i32
+        # arithmetic helpers below reuse. An i64 outside [-2^31, 2^31-1] traps
+        # (`unreachable`) exactly as an Int32 add/sub/mul overflow does; a
+        # wasm trap carries no payload, so `revl: Int32 overflow` is not
+        # attached to it, the same limit the i64 helpers have.
+        return """  (func $int32_narrow (param $v i64) (result i32)
+    (if (i32.or
+          (i64.lt_s (local.get $v) (i64.const -2147483648))
+          (i64.gt_s (local.get $v) (i64.const 2147483647)))
+      (then unreachable))
+    (i32.wrap_i64 (local.get $v)))"""
+
+    def _helper_int32_add(self) -> str:
+        # Two i32s cannot overflow an i64 sum, so compute wide and re-impose the
+        # 32-bit bound — the same shape go/ts use (docs/arithmetic.md).
+        return """  (func $int32_add (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.add (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))"""
+
+    def _helper_int32_sub(self) -> str:
+        return """  (func $int32_sub (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.sub (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))"""
+
+    def _helper_int32_mul(self) -> str:
+        return """  (func $int32_mul (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.mul (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))"""
+
     def _helper_int_div_floor(self) -> str:
         # wasm i64.div_s truncates; step the quotient down when the operands
         # have opposite signs and the division was inexact.
@@ -1632,6 +1679,8 @@ class _V3Emitter:
     def _infer_type(self, node: Any, scope: _Scope, expected: str | None = None) -> str | None:
         if not isinstance(node, dict) or "kind" not in node:
             raise EmitError("malformed v3 expression")
+        if node.get("widen") == "Int":
+            return "Int"  # Int32 widened to Int (docs/arithmetic.md)
         kind = node["kind"]
         if kind == "lit":
             value = node.get("value")
@@ -1668,13 +1717,15 @@ class _V3Emitter:
                 return "Str"
             if op == "+" and _is_list_type(left) and left == right:
                 return left
+            if node.get("operands") == "Int32":
+                return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
             return "Int"
         if kind == "un":
             op = node.get("op")
             if op == "!":
                 return "Bool"
             if op == "-":
-                return "Int"
+                return "Int32" if node.get("operands") == "Int32" else "Int"
             raise EmitError(f"unsupported unary operator {op!r}")
         if kind == "call":
             return self._call_type(node, scope)
@@ -1781,6 +1832,11 @@ class _V3Emitter:
         target_ty = self._infer_type(node.get("target"), scope)
         if method == "length":
             return "Int"
+        # Int/Int32 width conversions (docs/arithmetic.md).
+        if method == "to_int":
+            return "Int"
+        if method == "to_int32":
+            return "Int32"
         if method == "push":
             if not _is_list_type(target_ty):
                 raise EmitError("push is only lowerable on List values")
@@ -1848,6 +1904,14 @@ class _V3Emitter:
     def _expr(self, node: Any, scope: _Scope, where: str, expected: str | None = None) -> _E:
         if not isinstance(node, dict) or "kind" not in node:
             raise EmitError(f"{where}: malformed v3 expression {node!r}")
+        # An Int32 -> Int widening site (docs/arithmetic.md): Int32 is an i32
+        # and Int is an i64, so the lossless widening is a sign-extend, emitted
+        # where the frontend marked it. (`widen: "Float"` never reaches this
+        # tier — Float is refused by name.)
+        if node.get("widen") == "Int":
+            inner = {k: v for k, v in node.items() if k != "widen"}
+            operand = self._expr(inner, scope, where, "Int32")
+            return _E(f"(i64.extend_i32_s {operand.wat})", "Int")
         kind = node["kind"]
         if kind == "__wat":
             return _E(node.get("wat"), node.get("ty"))
@@ -1981,31 +2045,37 @@ class _V3Emitter:
             left = self._expr(left_node, scope, where, left_ty)
             right = self._expr(right_node, scope, where, right_ty)
             return _E(f"{left.wat}\n      {right.wat}\n      (call $list_concat)", left_ty)
-        if op in ("<", ">", "<=", ">=") and (left_ty != "Int" or right_ty != "Int"):
-            raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int")
+        if op in ("<", ">", "<=", ">=") and not (
+                left_ty == right_ty and left_ty in ("Int", "Int32")):
+            raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int/Int32")
         if op in ("&&", "||") and (left_ty != "Bool" or right_ty != "Bool"):
             raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
-        if op in ("==", "===", "!=", "!==") and (left_ty not in ("Int", "Bool") or right_ty not in ("Int", "Bool")):
-            raise EmitError(f"{where}: equality on this tier is lowerable for Int, Bool, and Str")
+        if op in ("==", "===", "!=", "!==") and (left_ty not in ("Int", "Int32", "Bool") or right_ty not in ("Int", "Int32", "Bool")):
+            raise EmitError(f"{where}: equality on this tier is lowerable for Int, Int32, Bool, and Str")
         if op in ("==", "===", "!=", "!==") and left_ty != right_ty:
-            # Int and Bool used to be the same wasm type, so a mixed comparison
-            # lowered to *something*. They are i64 and i32 now, and there is no
-            # comparison instruction spanning both — say so rather than emit a
-            # module that does not validate.
+            # Int (i64), Int32 (i32) and Bool (i32) are distinct wasm types, and
+            # no comparison instruction spans two widths — say so rather than
+            # emit a module that does not validate. (The checker already forbids
+            # mixing Int32 with Int, so a mixed comparison here is Int/Bool.)
             raise EmitError(
                 f"{where}: cannot compare {left_ty!r} with {right_ty!r} on this "
-                f"tier — Int is 64-bit and Bool is not")
-        if op in ("+", "-", "*", "/", "%") and (left_ty != "Int" or right_ty != "Int"):
+                f"tier — Int is 64-bit and Int32/Bool are 32-bit")
+        if op in ("+", "-", "*", "/", "%") and not (
+                left_ty == right_ty and left_ty in ("Int", "Int32")):
             _refuse_float_operands(node, where)
-            raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int")
+            raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int/Int32")
         if op not in _BINARY_OPS:
             raise EmitError(f"{where}: unsupported binary operator {op!r}")
         _refuse_float_operands(node, where)
         # `expected` is the *operand* type, which is also what picks the
         # instruction: `i64.eq` and `i32.eq` are the same comparison at two
         # widths, and only the operands say which.
-        operand_ty = "Bool" if op in _BOOL_OPS or (
-            op in _CMP_SUFFIX and left_ty == "Bool" and right_ty == "Bool") else "Int"
+        if op in _BOOL_OPS or (op in _CMP_SUFFIX and left_ty == "Bool" and right_ty == "Bool"):
+            operand_ty = "Bool"
+        elif left_ty == "Int32" and right_ty == "Int32":
+            operand_ty = "Int32"
+        else:
+            operand_ty = "Int"
         left = self._expr(left_node, scope, where, operand_ty)
         right = self._expr(right_node, scope, where, operand_ty)
         if _is_unit_type(left.ty) or _is_unit_type(right.ty):
@@ -2014,19 +2084,23 @@ class _V3Emitter:
         if instruction is None:
             raise EmitError(
                 f"{where}: {op!r} is not lowerable over {operand_ty} on this tier")
-        result_ty = "Bool" if op in _COMPARISON_OPS else "Int"
+        result_ty = "Bool" if op in _COMPARISON_OPS else operand_ty
         return _E(f"{left.wat}\n      {right.wat}\n      ({instruction})", result_ty)
 
     def _un_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         op = node.get("op")
-        operand = self._expr(node.get("operand"), scope, where, "Bool" if op == "!" else "Int")
+        operand_ty = "Bool" if op == "!" else self._infer_type(node.get("operand"), scope)
+        operand = self._expr(node.get("operand"), scope, where, operand_ty)
         if _is_unit_type(operand.ty):
             raise EmitError(f"{where}: void operand in unary expression")
         if op == "!":
             return _E(f"{operand.wat}\n      (i32.eqz)", "Bool")
         if op == "-":
-            # negation is a subtraction from zero, and `0 - Int.MIN` overflows:
-            # it goes through the checked helper like any other subtraction
+            # negation is a subtraction from zero, and `0 - MIN` overflows: it
+            # goes through the checked helper like any other subtraction, at the
+            # operand's width (docs/arithmetic.md).
+            if operand.ty == "Int32":
+                return _E(f"(i32.const 0)\n      {operand.wat}\n      (call $int32_sub)", "Int32")
             return _E(f"(i64.const 0)\n      {operand.wat}\n      (call $int_sub)", "Int")
         raise EmitError(f"{where}: unsupported unary operator {op!r}")
 
@@ -2138,6 +2212,15 @@ class _V3Emitter:
             # the count/length prefix stays a u32 in memory (the canonical-ABI
             # shape a host reads); the *value* it yields is an Int
             return _E(f"(i64.extend_i32_u (i32.load {target.wat}))", "Int")
+        # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
+        # is a sign-extend; narrowing Int -> Int32 traps out of the i32 range
+        # through `$int32_narrow` before wrapping (the fault every tier gives).
+        if method == "to_int":
+            target = self._expr(target_node, scope, where, "Int32")
+            return _E(f"(i64.extend_i32_s {target.wat})", "Int")
+        if method == "to_int32":
+            target = self._expr(target_node, scope, where, "Int")
+            return _E(f"(call $int32_narrow {target.wat})", "Int32")
         if method == "push":
             if not _is_list_type(target_ty):
                 raise EmitError(f"{where}: push is only lowerable on List values")

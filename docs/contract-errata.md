@@ -266,6 +266,50 @@ Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
 so this section is not read as "arithmetic is broken generally".
 
+## Arbitrary-precision `Integer` (fenced, designed, not built)
+
+`Int32` landed complete across all six tiers (docs/arithmetic.md, "Sized
+integers"): type, IR widen marker, codegen and trapping overflow, proven by
+cross-tier execution. Its sibling on the roadmap — **`Integer`, arbitrary
+precision** — is **not built**, and is fenced here so it never reads as clean.
+
+**Trigger.** A program that names the type `Integer` — `fn f(x: Integer)`,
+`let x: Integer = ...`. There is no `.to_integer()` conversion and no
+arbitrary-precision arithmetic; the design is docs/integer-proposal.md.
+
+**Blast radius.** `Integer` is *not* refused at a single, clear site today: it
+is an unknown capitalized type name, so the checker treats it like any
+undeclared nominal type. A binding whose value type is known (`let x: Integer =
+5`) is rejected with a type mismatch, but a bare `fn f(x: Integer) -> Integer`
+signature is **accepted** — the parameter and return infer to an unknown and
+flow untyped, exactly the gradual-frontier behaviour, and no tier can lower it.
+So the gap is a silent-accept at the signature boundary, contained to programs
+that opt into the unbuilt type. Until it is built, do not spell `Integer`.
+
+**Why it is not cheap-everywhere.** The cost is real and uneven, which is why
+it is fenced rather than half-shipped on the two easy tiers:
+
+- **cheap / native**: python `int` and TypeScript `bigint` are already
+  arbitrary precision — `+ - *` are the host operators with the i64 bound
+  *removed*, not imposed.
+- **native but not `+`**: java `BigInteger` and go `math/big.Int` carry
+  arbitrary precision but only through method calls (`.add`, `(&big.Int).Add`)
+  and reference/pooling semantics — a different emission shape from every
+  scalar op the emitters render today.
+- **new dependency**: rust needs a bignum crate (`ibig`/`malachite`); the go
+  and rust tiers are otherwise dependency-light, so this is a policy choice as
+  much as a code one.
+- **concentrated in wasm**: wasm has no bignum. It would need a bignum-in-WAT —
+  tag a pointer and keep the digits inside linear memory so confinement holds
+  (docs/integer-proposal.md) — which is a linear-memory arithmetic library, not
+  an instruction. This is the tier the whole feature's cost concentrates in,
+  and the reason `Integer` is a separate pass from `Int32`.
+
+Shipping `Integer` on python+TypeScript alone would be a 2-of-6 feature that
+reads as clean on two tiers and is absent on four — the exact failure this
+section exists to prevent. It stays one fence until it can land whole (or land
+with its own per-tier pins), tracked as roadmap item 12's second half.
+
 ## Typing gaps (fenced, not closed)
 
 The checker is sound where types are known and silent where they are not (the

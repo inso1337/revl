@@ -109,6 +109,10 @@ _BUILTIN_METHODS = {
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).
     "div_trunc": 1, "div_floor": 1, "div_euclid": 1, "mod": 1,
+    # Int/Int32 width conversions (docs/arithmetic.md). `to_int` widens an
+    # Int32 to Int (lossless); `to_int32` narrows an Int to Int32 (checked,
+    # traps out of the 32-bit range).
+    "to_int": 0, "to_int32": 0,
     # The total forms (docs/arithmetic.md): a zero divisor is the *point*
     # here, so these are deliberately absent from _DIVIDES_BY below — a
     # literal zero argument is refused for the faulting operations only.
@@ -254,7 +258,7 @@ class Env:
 
 # builtin (non-record) type heads: destructuring a value of one of these with
 # a record/list pattern is a type error, not a host pass-through
-_BUILTIN_NONRECORD = {"Str", "Int", "Bool", "Float", "Bytes", "Unit",
+_BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
                       "List", "Map", "Opt", "Result"}
 
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
@@ -1669,8 +1673,16 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
     """
     if node is None:
         return node
-    if parse_type(expected)[0] == "Float" and parse_type(actual)[0] == "Int":
+    ehead = parse_type(expected)[0]
+    ahead = parse_type(actual)[0]
+    if ehead == "Float" and ahead in ("Int", "Int32"):
         node["widen"] = "Float"
+    elif ehead == "Int" and ahead == "Int32":
+        # Int32 -> Int is a lossless *widening* the tiers that keep the two
+        # widths apart (rust i32/i64, wasm, go, java, ts number/bigint) must
+        # emit explicitly, exactly as Int -> Float is marked. `"widen": "Int"`
+        # names the target width; python absorbs it (one int type).
+        node["widen"] = "Int"
     return node
 
 
@@ -1740,7 +1752,12 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if expr.op in _TYPED_ARITH_OPS:
             left_type = infer_ast(expr.left, type_env, types, None)
             right_type = infer_ast(expr.right, type_env, types, None)
-            if left_type == "Int" and right_type == "Int":
+            if left_type == "Int32" and right_type == "Int32":
+                # Int32 arithmetic traps at the i32 edge, the same discipline
+                # `Int` has at i64 (docs/arithmetic.md). `/` still yields Float
+                # and `%` is width-agnostic; only `+ - *` need the i32 helper.
+                node["operands"] = "Int32"
+            elif left_type == "Int" and right_type == "Int":
                 node["operands"] = "Int"
             elif "Float" in (left_type, right_type):
                 node["operands"] = "Float"
@@ -1756,8 +1773,11 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # treat Float negation specially.
         if expr.op == "-":
             operand_type = infer_ast(expr.operand, type_env, types, None)
-            if operand_type == "Int":
-                node["operands"] = "Int"
+            if operand_type in ("Int", "Int32"):
+                # `-x` is `0 - x`; on Int32, `0 - Int32.MIN` overflows the i32
+                # range just as `0 - Int.MIN` overflows i64, so the bound is
+                # re-imposed at the tier (docs/arithmetic.md).
+                node["operands"] = operand_type
         return node
     if isinstance(expr, ExprCall):
         _callee = expr.callee
