@@ -56,8 +56,8 @@ Two spellings, one primitive:
 
 | spelling | means |
 |---|---|
-| `fail at step N` | the activation dies **instead of** body step `N` (1-based) |
-| `fail at effect X` | the activation dies instead of the step that binds `let X = effect …` |
+| `fail at step N` | the activation dies **at** body step `N` (1-based): the step ran, then the failure strikes at its boundary |
+| `fail at effect X` | the activation dies at the step that binds `let X = effect …` — the acquisition committed, its undo is armed, nothing after runs |
 
 **The step index is the primitive; the name is sugar resolved at lowering.**
 An index is *total* — every body step has one, including `emit`, `provide`,
@@ -71,9 +71,20 @@ above it. So both are kept, `fail at effect X` lowers to `{"step": N,
 "effect": "X"}`, and the diagnostics always print the pair
 (`Store dies at step 2 (effect \`pool\`)`).
 
-Semantics of "instead of": steps `1 … N-1` completed and accumulated their
-inverses; step `N` and everything after it never runs. `fail at step 1` is the
-degenerate case — nothing accumulated, nothing to revert.
+Semantics of "at": steps `1 … N` completed and accumulated their inverses —
+step `N`'s own acquisition has committed at the host and its undo is armed —
+and step `N+1` and everything after it never runs. This is the only placement
+a real fault can have: a probe kills an activation at a step's boundary, never
+*instead of* executing it. The injection originally sat **before** step `N`
+("the activation dies instead of step N"), which made `fail at step 1` a
+vacuous experiment — the acquisition whose unwind the test interrogates never
+executed, so a leaky undo on the very step the author pointed at passed
+`assert no residue` (roadmap item 68's false green, caught in review by
+`tests/test_fault_tests.py::test_a_non_inverse_undo_fails_under_an_injected_fault`).
+Under the current placement every `fail at step N` exercises the unwind of the
+named step itself; "die before step N" is expressed as `fail at step N-1`, and
+the empty prefix (die before anything ran) is no longer addressable — it
+proved nothing.
 
 Compile-time errors: unknown component, `N` past the end of the body, an
 `effect` name that is not a `let … effect` binding in that component, a config
@@ -85,11 +96,12 @@ field the component does not declare, a duplicate fault-test name.
 
 The harness (`src/revl/fault.py`) does not simulate anything.
 
-1. **Splice.** Deep-copy the IR and insert an IR `fail` step at index `N-1` of
-   the target component's body. `fail` is a step the frontend and all six
-   backends already carry — it is how an author writes a *deliberate* L-Raise
-   — so a fault test drives exactly the machinery the hand-written A8 scenarios
-   drive. This is the "reuse, don't invent" call the design note asked for.
+1. **Splice.** Deep-copy the IR and insert an IR `fail` step *after* step `N`
+   of the target component's body (list index `N`). `fail` is a step the
+   frontend and all six backends already carry — it is how an author writes a
+   *deliberate* L-Raise — so a fault test drives exactly the machinery the
+   hand-written A8 scenarios drive. This is the "reuse, don't invent" call the
+   design note asked for.
 2. **Emit and load.** Emit that mutated IR with the ordinary cordis-py backend
    and exec it. Load every *other* component in manifest load order first, so
    the target activates against its real providers, not stubs.
@@ -128,7 +140,7 @@ is instrumented; siblings run untouched.
 | `assert failed` | the target fiber's state is `FiberState.FAILED` |
 | `assert no residue` | (a) every accumulated inverse ran; (b) no provision the target added survived the unwind; (c) event-hook counts back to baseline; (d) after the host disposes the failed handle, registry size and root disposables are back to baseline exactly; (e) every host resource the activation acquired (`Map.new`, `Pool.open`) was released by a matching inverse (`drop`/`close`), read from the host trace — R1, the same accounting the lifecycle `assert no_residue` applies |
 | `assert inverses lifo` | the recorded run order is exactly the reverse of the recorded accumulation order |
-| `assert no emissions` | the activation performed no `emit` before the injection point |
+| `assert no emissions` | the activation performed no `emit` at or before the injection point (steps `1..N`) |
 | `assert siblings unaffected` | every other component in the composition is still `ACTIVE` |
 
 `no residue` is checked in two phases on purpose. Immediately after the unwind
@@ -157,7 +169,7 @@ component. `no residue` says nothing about it, and the harness will not let a
 green fault test imply otherwise.
 
 Every fault test — passing or failing — prints one `note:` line per emission
-that ran before the injection point:
+that ran at or before the injection point (steps `1..N`):
 
 ```
 PASS db dies mid-activation [Store dies at step 3]
@@ -188,8 +200,8 @@ upstream of every emission.
 **Proves**, for this component, on the cordis-py reference tier, at this one
 injection point:
 
-- every inverse the activation accumulated before the failure point ran, and
-  ran newest-first;
+- every inverse the activation accumulated through the injection point —
+  including the named step's own — ran, and ran newest-first;
 - no provision it installed survived, and no event hook it added survived;
 - once the host dropped the failed handle, the runtime was byte-for-byte back
   at the pre-activation baseline on all four introspections;
