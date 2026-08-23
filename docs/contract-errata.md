@@ -55,7 +55,12 @@ This goes in the compiler spec, not the runtimes.
   its docs; the py adapter's drain derives R1 from the *documented* contract
   and covers async undos. Do not remove the drain on the strength of the
   empirical ordering.
-- **cordis-py A8 async-body gap** (documented, runtime-verified): a component
+- **cordis-py A8 async-body gap** (documented, runtime-verified — **fixed in
+  the fork**: commit `1316174` on `harden-fiber-lifecycle`, the vintage
+  `backends/python/setup.sh` pins, routes the async setup failure to the
+  fiber's error slot as well, so async bodies land `FAILED`; closure locked by
+  `tests/test_fault_tests.py::test_an_await_body_lands_failed_since_the_cordis_py_fix`
+  and recorded in docs/fault-tests.md §8): a component
   body containing an `await` compiles to an *async* generator, and cordis-py
   routes an async effect-setup failure to `_make_effect_guard` (auto-dispose)
   rather than the fiber's error slot. The accumulated inverses **do** run,

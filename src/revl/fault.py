@@ -93,7 +93,8 @@ def _inverse_labels(body: list, upto: int) -> list:
 
 
 def _emissions_before(body: list, upto: int, conditional: bool = False) -> list:
-    """Emissions the activation performs before the injection point.
+    """Emissions the activation performs in steps ``1..upto`` — for a fault
+    test that is through the injection point, the named step included.
 
     Each entry is ``(description, compensated, conditional)``.  These are the
     side effects that are *not* undone by the unwind — reporting them is the
@@ -115,15 +116,21 @@ def _emissions_before(body: list, upto: int, conditional: bool = False) -> list:
 def _inject(ir: dict, unit: dict) -> dict:
     """A copy of *ir* whose target component dies at the injection point.
 
-    The spliced step *replaces* step N: steps 1..N-1 have run and accumulated
-    their inverses, and step N — along with everything after it — never runs.
+    The spliced step *follows* step N: steps 1..N have run and accumulated
+    their inverses — step N's own acquisition has committed at the host and
+    its undo is armed — and step N+1, along with everything after it, never
+    runs.  This is the only placement a real fault can have: a probe kills an
+    activation at a step's boundary, never *instead of* executing it, and a
+    splice before step N would leave the named step's acquisition untested —
+    at step 1 the whole experiment would be vacuous, so a leaky undo on the
+    very step the author points at would pass (roadmap item 68's false green).
     """
     mutated = copy.deepcopy(ir)
     name = unit["component"]
     for component in mutated.get("components") or []:
         if component.get("name") == name:
             body = component.setdefault("body", [])
-            body.insert(unit["step"] - 1, {
+            body.insert(unit["step"], {
                 "step": "fail",
                 "message": {"kind": "lit",
                             "value": f'fault test "{unit["name"]}": injected failure'},
@@ -231,8 +238,8 @@ async def _drive(ir: dict, unit: dict, emit, runtime_mod, Context, FiberState) -
     target = unit["component"]
     body = next((c.get("body") or [] for c in ir.get("components") or []
                  if c.get("name") == target), [])
-    outcome.labels = _inverse_labels(body, unit["step"] - 1)
-    outcome.emissions = _emissions_before(body, unit["step"] - 1)
+    outcome.labels = _inverse_labels(body, unit["step"])
+    outcome.emissions = _emissions_before(body, unit["step"])
     outcome.async_body = any(step.get("step") == "await" for step in body)
 
     module = types.ModuleType(f"revl_fault_{abs(hash(unit['name'])):x}")
