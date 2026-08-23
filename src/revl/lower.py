@@ -175,6 +175,24 @@ IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type
 # its own realm); rendered as "shared" in diagnostics
 SHARED_REALM = ""
 
+# key namespacing (docs/namespacing.md): a provision key may be written
+# `ns::local`. The *full* string is the key's wiring identity — G2
+# disjointness, injection resolution and the admission gate all compare the
+# qualified string, so two authors' `acme::db` and `bcorp::db` never collide.
+# The trailing segment is the code-facing binding name a `requires` introduces
+# (the consumer still writes `db.query(...)` in its body). An unqualified key
+# has an empty namespace and a binding equal to itself, so v1 programs are
+# unaffected in every respect.
+KEY_NAMESPACE_SEP = "::"
+
+
+def _key_binding(key: str) -> str:
+    """The code-facing local name of a (possibly namespaced) provision key.
+
+    `acme::db` binds `db`; an unqualified `db` binds itself. This is the name
+    a `requires` clause introduces into the component body and type env."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
+
 # A3: identifiers that must never appear verbatim in emitted code on either
 # host. Python keywords come from the keyword module; the rest is a curated
 # union of TS reserved words and backend-adapter names.
@@ -221,14 +239,19 @@ class Env:
         for cfg_field in component.config:
             self.type_env[f"config.{cfg_field.name}"] = cfg_field.type
         self.config_fields = {f.name for f in component.config}
-        self.requires = dict()  # local -> service name
-        for local, svc, line in component.requires:
+        self.requires = dict()  # binding (local name) -> service name
+        # binding -> the qualified wiring key it resolves against; for an
+        # unqualified requirement this is the binding itself (docs/namespacing.md)
+        self.require_keys: dict[str, str] = dict()
+        for key, svc, line in component.requires:
             if svc not in services:
                 raise RevlError(filename, line, f"unknown service `{svc}` in `requires` of {component.name}")
-            if local in self.requires:
-                raise RevlError(filename, line, f"duplicate requirement name `{local}` in {component.name}")
-            self.requires[local] = svc
-            self.type_env[f"req.{local}"] = svc
+            binding = _key_binding(key)
+            if binding in self.requires:
+                raise RevlError(filename, line, f"duplicate requirement name `{binding}` in {component.name}")
+            self.requires[binding] = svc
+            self.require_keys[binding] = key
+            self.type_env[f"req.{binding}"] = svc
         self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()
@@ -2779,8 +2802,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     hint="realm and metadata declarations derive the resolution context "
                          "before any dependency access (prelude rule, docs/design-v2-realms.md)",
                 )
+            # isolate/intercept name a key by its *qualified* wiring identity,
+            # the same string G2 and the linker compare (docs/namespacing.md)
+            required_keys = set(env.require_keys.values())
             if isinstance(stmt, IsolateStmt):
-                if stmt.key not in env.requires and stmt.key not in provides:
+                if stmt.key not in required_keys and stmt.key not in provides:
                     raise RevlError(
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement or provision of {comp.name}",
@@ -2791,7 +2817,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                                     f"key `{stmt.key}` is isolated twice in {comp.name}")
                 isolate[stmt.key] = stmt.realm
             else:
-                if stmt.key in provides and stmt.key not in env.requires:
+                if stmt.key in provides and stmt.key not in required_keys:
                     raise RevlError(
                         filename, stmt.line,
                         f"`intercept` applies to required keys only — `{stmt.key}` is a provision",
@@ -2799,7 +2825,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                              "whose domain is the dependency set; providers receive metadata "
                              "from their consumers' declarations",
                     )
-                if stmt.key not in env.requires:
+                if stmt.key not in required_keys:
                     raise RevlError(
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement of {comp.name}",
@@ -2906,7 +2932,10 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         "name": comp.name,
         "source": comp.source or filename,
         "config": [{"name": f.name, "type": f.type, "default": f.default} for f in comp.config],
-        "requires": dict(env.requires),
+        # the IR carries the *qualified* wiring key (G2 / injection identity),
+        # not the code-facing binding; for unqualified keys the two coincide,
+        # so v1 documents stay byte-identical (docs/namespacing.md)
+        "requires": {env.require_keys[binding]: svc for binding, svc in env.requires.items()},
         "provides": provides,
         "body": body,
     }
