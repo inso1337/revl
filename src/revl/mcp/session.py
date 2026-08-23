@@ -100,6 +100,10 @@ class Session:
         # snapshotted, because there is nothing to replay through the gate.
         self.origin: dict | None = None
         self.previous_origin: dict | None = None  # origin `rollback` restores
+        # which generation is live: a fresh boot is 1, every swap/rollback moves
+        # it on. This is the "which world" a live query answers for — see
+        # `live_state` and docs/queries.md §9.
+        self._generation = 0
 
     # -- plumbing ----------------------------------------------------------
 
@@ -140,6 +144,7 @@ class Session:
         self.ir = ir
         self.origin = origin
         self.recorder = replay_module().Recorder(ir) if record else None
+        self._generation = 1
         self._run(self._driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True) | ({"recording": True} if record else {})
 
@@ -169,6 +174,7 @@ class Session:
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = ir
         self.origin = origin
+        self._generation += 1
         self._run(driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True)
 
@@ -208,6 +214,24 @@ class Session:
             "components": sorted(c["name"] for c in _components(ir)),
             "loadOrder": list(_load_order(ir)),
             "provisions": sorted(provisions, key=lambda p: (p["key"], p["provider"])),
+        }
+
+    def live_state(self) -> dict:
+        """What the running fibers know that the static graph does not — the
+        input a live query folds into its envelope (query.as_live).
+
+        `servedKeys` is the set actually served *now* (a provider that drifted
+        to an inactive state drops out); `componentStates` is each fiber's live
+        state; `generation` is which world (post-swap) this is."""
+        driver = self._driver
+        states = {}
+        if driver is not None:
+            states = {name: driver.FiberState(fiber.state).name
+                      for name, fiber in driver.fibers.items()}
+        return {
+            "generation": self._generation,
+            "servedKeys": self._provided_keys(),
+            "componentStates": states,
         }
 
     async def _plug(self, name: str, module) -> None:
@@ -390,6 +414,7 @@ class Session:
         self.previous = None
         self.origin = None
         self.previous_origin = None
+        self._generation = 0
         return {
             "unloaded": True,
             "noResidue": all(checks.values()),

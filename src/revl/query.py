@@ -26,6 +26,16 @@ declaration), and `__main__._extern_reachability` names which externs a fn
 reaches. This module consumes both and adds only what neither has: the
 inter-component edges (a call on an injected key lands in the provider's
 provide-method) and the withdrawal cascade.
+
+The same seven-verb surface answers in three time modes (docs/queries.md §9):
+against the STATIC IR (the default), against the LIVE session as it stands
+after every swap (`live_query`/`as_live` — the verbs run against the session's
+post-swap IR, with the envelope's spent hot-swap caveat replaced and the
+served-now reality folded in), and against a RECORDED run (`emitted_between`,
+`lifetime` — the query-side of item 27's causal traces, reusing the
+`why_runtime` lifecycle trace and the `replay` effect timeline verbatim). The
+envelope's `precision`/`assumptions` already expressed how the worlds differ,
+so a result carries a `mode` and says which world it describes.
 """
 
 from __future__ import annotations
@@ -35,6 +45,25 @@ from .lower import SHARED_REALM
 # precision vocabulary — every result says which of the two it is
 EXACT = "exact"
 APPROX = "over-approximation"
+
+# mode vocabulary — every result says WHICH WORLD it describes (docs/queries.md
+# §9). One verb surface, three worlds: the static IR, the live session as it
+# stands after every swap, and a recorded run's effect timeline. `precision`
+# and `assumptions` already carried "hot swap changes the answer" and "only
+# components in this IR" — the two facts that a mode changes — so a result can
+# say which world it answers for without a second field doing all the work.
+MODE_STATIC = "static"          # against the compiled IR (the original three verbs)
+MODE_LIVE = "live"              # against the live session's real loaded state, post-swap
+MODE_HISTORICAL = "historical"  # against a recorded replay timeline / item-27 trace
+
+# the recorded-world step vocabulary, mirroring backends/python/replay.py's
+# KINDS. Named here as *data* the timeline dict already carries, not imported —
+# query.py must stay importable without the backend on the path.
+_STEP_EMISSION = "emission"
+_STEP_PROVISION = "provision"
+_STEP_EFFECT = "effect"
+_STEP_COMPENSATION = "compensation"
+_STEP_BOUNDARY = "boundary"
 
 _ASSUMPTION_EXTERN = (
     "extern host bodies are opaque: a `pure` or `acquire` extern whose host "
@@ -53,6 +82,35 @@ _ASSUMPTION_MAY = (
     "may-analysis: a site is listed when a path to the target exists, not "
     "when one is guaranteed to be taken. Branch arms, `match` arms and arrow "
     "bodies handed to builtins all count as reachable."
+)
+# live mode: the swap assumption is not merely dropped — it is *inverted*. A
+# static answer warns that a swap would change it; a live answer already stands
+# on the far side of every swap applied so far.
+_ASSUMPTION_LIVE = (
+    "this answers against the live session's actual loaded generation, not a "
+    "static IR: it is the composition as it stands after every hot swap applied "
+    "so far. The static `swap changes the answer` caveat is therefore spent — "
+    "this IS the post-swap world, and re-querying after the next swap is how "
+    "you move to the one after it."
+)
+_ASSUMPTION_LIVE_SERVED = (
+    "a provision counts as present only when it is *served right now*: a "
+    "declared key whose provider has drifted to an inactive state reads as "
+    "absent here (`live.notServedNow`), where the static query — which only "
+    "sees the graph, not the running fibers — would still count it."
+)
+# historical mode: a recorded run is neither a proof about all activations nor
+# a prediction. It is a log of one activation that happened.
+_ASSUMPTION_RECORDED = (
+    "this describes a recorded run, not the static composition or the live "
+    "session: every entry is a step the runtime actually took and wrote to the "
+    "trace. It is what happened on that one activation — not what may happen "
+    "(the static may-analysis) nor what will (the static exact prediction)."
+)
+_ASSUMPTION_RECORDING_SCOPE = (
+    "only what the recording captured is visible: a component loaded without "
+    "`record: true`, an activation that never ran, and an effect the recorder "
+    "classifies as opaque are all absent from this timeline."
 )
 
 
@@ -304,8 +362,9 @@ def _walk(node):
 
 
 def _result(query: str, question: str, precision: str, note: str,
-            assumptions: list, **payload) -> dict:
+            assumptions: list, mode: str = None, **payload) -> dict:
     return {"ok": True, "query": query, "question": question,
+            "mode": mode or MODE_STATIC,
             "precision": precision, "precisionNote": note,
             "assumptions": assumptions, **payload}
 
@@ -638,6 +697,278 @@ def drift(ir: dict, service: str, gains=(), losses=()) -> dict:
     )
 
 
+# ---------------------------------------------------------------- live mode
+#
+# The same verbs, answered against the live session's real loaded state instead
+# of a compiled-from-source IR. The trick is that there is no new machinery:
+# the linked graph the static queries read is *also* what the running session
+# holds (`session.ir` is the post-swap generation), so `withdrawal(session.ir,
+# C)` already answers for the live world. What live mode adds is the envelope
+# relabelling — the static `swap changes the answer` caveat is spent (this is
+# the post-swap world) — and the one thing only the runtime knows: which
+# provisions are *actually served now*, versus merely declared in the graph.
+
+
+def live_query(ir: dict, verb: str, live_state: dict = None,
+               *args, **kwargs) -> dict:
+    """Run query `verb` against the live composition `ir` (the session's
+    post-swap generation), then relabel the envelope as a LIVE answer.
+
+    `live_state` is what the runtime knows that the graph does not:
+    ``{"generation", "servedKeys", "componentStates"}``. It is threaded in by
+    the session-bound MCP tool; a caller with only an IR may omit it and get a
+    live-labelled answer with no served-key reality folded in."""
+    fn = _VERB_FN.get(verb)
+    if fn is None:
+        return {"ok": False, "query": "live", "error": f"unknown verb: {verb!r}",
+                "known": sorted(_VERB_FN)}
+    return as_live(fn(ir, *args, **kwargs), live_state)
+
+
+def as_live(result: dict, live_state: dict = None) -> dict:
+    """Relabel a statically computed envelope as a LIVE answer.
+
+    Same verb, same shape — but `mode` becomes ``live``, the spent hot-swap
+    assumption is replaced by the live-generation one, and where the query
+    speaks of provisions the answer is reconciled against what is *served right
+    now*. Everything a static consumer reads still reads; a live consumer gets
+    a `live` block on top."""
+    if not result.get("ok"):
+        return result
+    state = live_state or {}
+    served = set(state.get("servedKeys") or [])
+    out = dict(result)
+    out["mode"] = MODE_LIVE
+
+    assumptions = [a for a in (out.get("assumptions") or []) if a != _ASSUMPTION_SWAP]
+    assumptions = [_ASSUMPTION_LIVE] + assumptions
+    touches_provisions = out.get("query") in (
+        "withdrawal", "dependents", "reach", "emitters")
+    if touches_provisions and _ASSUMPTION_LIVE_SERVED not in assumptions:
+        assumptions.append(_ASSUMPTION_LIVE_SERVED)
+    out["assumptions"] = assumptions
+
+    out["live"] = {
+        "generation": state.get("generation"),
+        "servedKeys": sorted(served),
+        "componentStates": dict(state.get("componentStates") or {}),
+        "note": "answered against the live composition as it stands now; a "
+                "provision is present only if it is actually served.",
+    }
+    _annotate_live(out, served, state.get("componentStates") or {})
+    return out
+
+
+def _annotate_live(out: dict, served: set, states: dict) -> None:
+    """Fold served-now reality into the parts of an answer that name provisions.
+    Purely additive: every static field is untouched, new ones say what the
+    running fibers add over the graph."""
+    query = out.get("query")
+    if query == "withdrawal":
+        for prov in out.get("provides") or []:
+            prov["servedNow"] = prov["key"] in served
+        drifted = sorted(p["key"] for p in (out.get("provides") or [])
+                         if p["key"] not in served)
+        out["live"]["notServedNow"] = drifted
+        for item in out.get("cascade") or []:
+            item["providerActiveNow"] = states.get(item.get("provider")) == "ACTIVE" \
+                if states else None
+    elif query == "dependents":
+        for key in out.get("keys") or []:
+            key["servedNow"] = key["key"] in served
+    elif query == "reach":
+        injected = out.get("providers") or []
+        out["live"]["providersActiveNow"] = {
+            name: states.get(name) for name in injected} if states else {}
+
+
+# ------------------------------------------------------------ historical mode
+#
+# Queries against a *recorded* run rather than a static IR or the live session.
+# This is the query-side of item 27's causal traces (docs/why-runtime.md): the
+# lifecycle trace (`why_runtime`, JSONL of load/withdraw + cause) says when a
+# component lived, and the recorded effect timeline
+# (backends/python/replay.py) says what it did while it lived. Both formats are
+# reused verbatim — nothing here invents a parallel recording. The novel part
+# is that nobody queries a *verified effect timeline*: "which emissions crossed
+# between steps 3 and 7?" is a question you can only ask of a checked run.
+
+
+def _timelines_of(timeline) -> list:
+    """Normalise a recorded replay dict into a list of per-component timeline
+    dicts, whatever shape it came in as: a `Recorder.as_dict()`
+    (``{"components": [...]}``), a single `Timeline.as_dict()`
+    (``{"component", "steps"}``), or a bare list of the latter."""
+    if timeline is None:
+        return []
+    if isinstance(timeline, list):
+        return [t for t in timeline if isinstance(t, dict) and "steps" in t]
+    if "components" in timeline:
+        return [t for t in timeline["components"] if isinstance(t, dict)]
+    if "steps" in timeline:
+        return [timeline]
+    return []
+
+
+def emitted_between(timeline, frm: int, to: int, component: str = None) -> dict:
+    """which emissions crossed between steps X and Y? — over a recorded replay
+    timeline. An emission is a one-way boundary crossing (replay.py), so each
+    hit is a real crossing the runtime performed in the window, not a reachable
+    site. The novel historical query: a windowed read of a verified timeline."""
+    timelines = _timelines_of(timeline)
+    if not timelines:
+        return {"ok": False, "query": "emitted-between",
+                "error": "no recorded timeline given — pass a replay recording "
+                         "(revl_timeline / `session.timeline()`) to query"}
+    if not isinstance(frm, int) or not isinstance(to, int) or frm > to:
+        return {"ok": False, "query": "emitted-between",
+                "error": f"invalid window [{frm}, {to}]: need integers with from <= to"}
+
+    known = sorted(t.get("component") for t in timelines if t.get("component"))
+    if component is not None and component not in known:
+        return _unknown("emitted-between", "component", component, known)
+
+    chosen = [t for t in timelines
+              if component is None or t.get("component") == component]
+    crossings = []
+    windowSteps = 0
+    for tl in chosen:
+        name = tl.get("component")
+        for step in tl.get("steps") or []:
+            index = step.get("index")
+            if index is None or index < frm or index > to:
+                continue
+            windowSteps += 1
+            if step.get("kind") != _STEP_EMISSION:
+                continue
+            detail = step.get("detail") or {}
+            crossings.append({
+                "component": name, "step": index, "label": step.get("label"),
+                "key": detail.get("key"), "method": detail.get("method"),
+                "service": detail.get("service"), "args": detail.get("args"),
+                "site": step.get("site"), "source": step.get("source"),
+                "compensatedBy": step.get("compensatedBy"),
+                "compensated": step.get("compensatedBy") is not None,
+            })
+    crossings.sort(key=lambda c: (c["step"], c["component"] or "",
+                                  c["label"] or ""))
+    return _result(
+        "emitted-between",
+        f"which emissions crossed between steps {frm} and {to}?", EXACT,
+        "these are the emission steps the recording actually holds with "
+        f"{frm} <= index <= {to}. An emission has no inverse — it is a real "
+        "boundary crossing the runtime performed, so this is a fact about the "
+        "run, complete and minimal over the window.",
+        [_ASSUMPTION_RECORDED, _ASSUMPTION_RECORDING_SCOPE],
+        mode=MODE_HISTORICAL,
+        window={"from": frm, "to": to},
+        component=component,
+        emissions=crossings,
+        crossings=len(crossings),
+        stepsInWindow=windowSteps,
+        components=sorted({c["component"] for c in crossings if c["component"]}),
+        uncompensated=[c for c in crossings if not c["compensated"]],
+    )
+
+
+def lifetime(record: dict, component: str) -> dict:
+    """everything this component touched during its life — the historical
+    counterpart of `reaches`. Where `reaches` is a may-analysis over the static
+    IR, this reads the recorded world: item 27's lifecycle trace for *when* the
+    component lived (load -> withdraw, with the cause behind each) and the
+    recorded effect timeline for *what* it did while alive.
+
+    `record` is ``{"trace": <why_runtime events / Trace>, "timeline": <replay
+    recording>}`` — either half may be absent, but not both."""
+    record = record or {}
+    trace_in = record.get("trace")
+    timeline_in = record.get("timeline")
+    if trace_in is None and timeline_in is None:
+        return {"ok": False, "query": "lifetime",
+                "error": "give a recorded run: `trace` (an item-27 lifecycle "
+                         "JSONL / Trace) and/or `timeline` (a replay recording)"}
+
+    from . import why_runtime as wr  # noqa: PLC0415 — read-only reuse of item 27
+
+    life = None
+    known_components = set()
+    if trace_in is not None:
+        trace = trace_in
+        if not isinstance(trace, wr.Trace):
+            events = (wr.parse_trace(trace) if isinstance(trace, str)
+                      else list(trace))
+            trace = wr.Trace(events)
+        known_components |= set(trace.components())
+        transitions = trace.transitions_of(component)
+        loaded = next((e for e in transitions if e.get("event") == wr.LOAD), None)
+        withdrew = next((e for e in reversed(transitions)
+                         if e.get("event") == wr.WITHDRAW), None)
+        chain = trace.cause_chain(component,
+                                  prefer=wr.WITHDRAW if withdrew else wr.LOAD)
+        life = {
+            "loaded": _transition_view(loaded),
+            "withdrew": _transition_view(withdrew),
+            "stillLive": bool(loaded) and withdrew is None,
+            "causeChain": [{"component": f.component, "event": f.event,
+                            "transition": f.transition, "note": f.note}
+                           for f in chain],
+        }
+
+    touched = {_STEP_EFFECT: [], _STEP_PROVISION: [], _STEP_EMISSION: [],
+               _STEP_COMPENSATION: []}
+    emissions = []
+    recorded = False
+    for tl in _timelines_of(timeline_in):
+        known_components.add(tl.get("component"))
+        if tl.get("component") != component:
+            continue
+        recorded = True
+        for step in tl.get("steps") or []:
+            kind = step.get("kind")
+            entry = {"step": step.get("index"), "label": step.get("label"),
+                     "site": step.get("site"), "source": step.get("source"),
+                     "detail": step.get("detail")}
+            if kind in touched:
+                touched[kind].append(entry)
+            if kind == _STEP_EMISSION:
+                detail = step.get("detail") or {}
+                emissions.append({
+                    "step": step.get("index"),
+                    "key": detail.get("key"), "method": detail.get("method"),
+                    "service": detail.get("service"), "args": detail.get("args"),
+                    "compensated": step.get("compensatedBy") is not None})
+
+    if life is None and not recorded:
+        return _unknown("lifetime", "component", component,
+                        sorted(c for c in known_components if c))
+
+    return _result(
+        "lifetime", f"everything {component} touched during its life", EXACT,
+        "the recorded counterpart of `reaches`: not a may-analysis over the "
+        "graph but the effects and emissions this component actually produced "
+        "on the recorded run, bounded by the lifecycle trace's load and "
+        "withdraw. Complete and minimal for that run; silent about runs not "
+        "recorded.",
+        [_ASSUMPTION_RECORDED, _ASSUMPTION_RECORDING_SCOPE],
+        mode=MODE_HISTORICAL,
+        component=component,
+        life=life,
+        touched=touched,
+        emissions=emissions,
+        counts={kind: len(items) for kind, items in touched.items()},
+        recorded=recorded,
+    )
+
+
+def _transition_view(event: dict) -> dict:
+    if not event:
+        return None
+    from . import why_runtime as wr  # noqa: PLC0415
+    return {"seq": event.get("seq"), "gen": event.get("gen"),
+            "event": event.get("event"), "transition": event.get("transition"),
+            "cause": event.get("cause"), "note": wr._cause_note(event.get("cause") or {})}
+
+
 # ---------------------------------------------------------------- helpers
 
 
@@ -722,6 +1053,18 @@ QUERIES = {
     "drift": drift,
 }
 
+# the same verbs, addressed by the result `query` name — what `live_query`
+# dispatches on. Live mode runs these against the session's post-swap IR;
+# historical mode adds its own verbs (`emitted-between`, `lifetime`) that only
+# a recorded run can answer.
+_VERB_FN = {
+    "emits-to": emitters,
+    "withdraw": withdrawal,
+    "depends-on": dependents,
+    "reaches": reach,
+    "drift": drift,
+}
+
 
 # ---------------------------------------------------------------- rendering
 
@@ -735,9 +1078,59 @@ def render(result: dict) -> str:
             lines.append("  known: " + ", ".join(result["known"]))
         return "\n".join(lines)
 
-    out = [result["question"],
+    mode = result.get("mode", MODE_STATIC)
+    head = result["question"]
+    if mode != MODE_STATIC:
+        head += f"   [{mode}]"
+    out = [head,
            f"  precision: {result['precision']} — {result['precisionNote']}"]
+    if mode == MODE_LIVE and result.get("live"):
+        live = result["live"]
+        gen = live.get("generation")
+        out.append(f"  live: generation {gen if gen is not None else '?'}, "
+                   f"served now: {', '.join(live.get('servedKeys') or []) or '—'}")
+        if live.get("notServedNow"):
+            out.append("  drifted (declared but not served now): "
+                       + ", ".join(live["notServedNow"]))
     query = result["query"]
+
+    if query == "emitted-between":
+        window = result.get("window") or {}
+        out.append(f"\n  window: steps {window.get('from')}..{window.get('to')} "
+                   f"({result.get('stepsInWindow', 0)} step(s), "
+                   f"{result.get('crossings', 0)} emission crossing(s))")
+        if not result["emissions"]:
+            out.append("  no emission crossed in this window.")
+        for cross in result["emissions"]:
+            comp = f"{cross['component']}: " if cross.get("component") else ""
+            comp_mark = "  [compensated]" if cross.get("compensated") else ""
+            out.append(f"  step {cross['step']}  {comp}"
+                       f"{cross.get('key')}.{cross.get('method')}{comp_mark}")
+        if result.get("assumptions"):
+            out.append("\n  this answer assumes:")
+            out.extend(f"    - {line}" for line in result["assumptions"])
+        return "\n".join(out)
+    if query == "lifetime":
+        life = result.get("life")
+        if life:
+            for phase in ("loaded", "withdrew"):
+                ev = life.get(phase)
+                if ev:
+                    out.append(f"\n  {phase} (seq {ev.get('seq')}): "
+                               f"{ev.get('transition')} — {ev.get('note')}")
+            if life.get("stillLive"):
+                out.append("\n  still live — no withdrawal recorded")
+        counts = result.get("counts") or {}
+        out.append("\n  touched: "
+                   + ", ".join(f"{n} {k}(s)" for k, n in counts.items()) or "nothing")
+        for emit in result.get("emissions") or []:
+            out.append(f"    emitted {emit.get('key')}.{emit.get('method')} "
+                       f"(step {emit.get('step')})"
+                       + ("  [compensated]" if emit.get("compensated") else ""))
+        if result.get("assumptions"):
+            out.append("\n  this answer assumes:")
+            out.extend(f"    - {line}" for line in result["assumptions"])
+        return "\n".join(out)
 
     if query == "emitters":
         if not result["sites"]:

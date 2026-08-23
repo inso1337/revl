@@ -31,7 +31,8 @@ from ..diagnostics import FIXES, GUARANTEES, obligations, report
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
 from .persist import RestoreError
-from .query_tools import QUERY_TOOLS
+from .. import query as Q
+from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
 from .session import Session, SessionError
 
@@ -296,6 +297,79 @@ def _tool_replay_forward(arguments: dict) -> dict:
                                                      arguments["from"])}
     except SessionError as error:
         return _session_error(str(error))
+
+
+# -- session-bound query modes (docs/queries.md §9) ------------------------
+
+
+def _tool_live_query(arguments: dict) -> dict:
+    """The five query verbs, answered against the LIVE session's post-swap
+    state instead of a compiled-from-source IR (query.live_query)."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded — a live query answers against "
+                              "the running composition; call revl_load first")
+    verb = arguments.get("verb")
+    if verb not in Q._VERB_FN:
+        return _session_error(f"unknown verb {verb!r}; one of "
+                              + ", ".join(sorted(Q._VERB_FN)))
+    live_state = SESSION.live_state()
+    if verb == "drift":
+        service = arguments.get("service") or arguments.get("target")
+        if not service:
+            return _session_error("`service` is required for the drift verb")
+        return Q.live_query(
+            SESSION.ir, verb, live_state, service,
+            gains=list(arguments.get("gains") or []),
+            losses=list(arguments.get("loses") or arguments.get("losses") or []))
+    arg = arguments.get("target") or arguments.get("component")
+    if not arg:
+        return _session_error("`target` (emits-to/depends-on) or `component` "
+                              "(withdraw/reaches) is required")
+    return Q.live_query(SESSION.ir, verb, live_state, arg)
+
+
+def _tool_history_emitted_between(arguments: dict) -> dict:
+    """which emissions crossed between steps X and Y? — over the live session's
+    recording, or an inline one (query.emitted_between)."""
+    frm, to = arguments.get("from"), arguments.get("to")
+    if frm is None or to is None:
+        return _session_error("`from` and `to` (step indices) are required")
+    timeline = arguments.get("timeline")
+    if timeline is None:
+        if not SESSION.loaded or SESSION.recorder is None:
+            return _session_error("no recorded timeline — revl_load with "
+                                  "`record: true`, or pass an inline `timeline`")
+        try:
+            timeline = SESSION.timeline(None)
+        except SessionError as error:
+            return _session_error(str(error))
+    return Q.emitted_between(timeline, frm, to, arguments.get("component"))
+
+
+def _tool_history_lifetime(arguments: dict) -> dict:
+    """everything a component touched during its life — the recording for the
+    effects, an item-27 lifecycle trace for the span (query.lifetime)."""
+    component = arguments.get("component")
+    if not component:
+        return _session_error("`component` is required")
+    timeline = arguments.get("timeline")
+    if timeline is None and SESSION.loaded and SESSION.recorder is not None:
+        try:
+            timeline = SESSION.timeline(None)
+        except SessionError:
+            timeline = None
+    trace = arguments.get("trace")
+    trace_file = arguments.get("traceFile")
+    if trace is None and trace_file:
+        from .. import why_runtime as wr
+        try:
+            trace = wr.read_trace(trace_file)
+        except (OSError, ValueError) as error:
+            return _session_error(f"cannot read trace {trace_file}: {error}")
+    if timeline is None and trace is None:
+        return _session_error("no recorded run to read — load with `record: "
+                              "true`, or pass `trace`/`traceFile`/`timeline`")
+    return Q.lifetime({"trace": trace, "timeline": timeline}, component)
 
 
 def _tool_check(arguments: dict) -> dict:
@@ -791,6 +865,16 @@ TOOLS = [
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own
 TOOLS.extend(QUERY_TOOLS)
+
+# the two session-bound query modes (live / historical) carry their schema
+# next door and their handler here, because only this module holds the session
+_SESSION_QUERY_HANDLERS = {
+    "revl_live_query": _tool_live_query,
+    "revl_history_emitted_between": _tool_history_emitted_between,
+    "revl_history_lifetime": _tool_history_lifetime,
+}
+for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
+    TOOLS.append({**_schema, "handler": _SESSION_QUERY_HANDLERS[_schema["name"]]})
 
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
