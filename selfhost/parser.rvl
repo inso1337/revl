@@ -28,19 +28,22 @@ type OptCallN = { target: Expr, name: Str, args: List[Expr] }
 type FieldN   = { target: Expr, name: Str }
 type IndexN   = { target: Expr, idx: Expr }
 type IfN      = { cond: Expr, then_: Expr, els: Expr }
-type InitN    = { name: Str, value: Expr }
+pub type InitN = { name: Str, value: Expr }
 type RecN     = { fields: List[InitN] }
 type ListN    = { items: List[Expr] }
-type ParamN   = { name: Str, ty: Str }
+pub type ParamN = { name: Str, ty: Str }
+
+
 type ArrowN   = { params: List[ParamN], body: Expr }
-type ArmN     = { pat: Str, bind: Str, body: Expr }
+pub type ArmN = { pat: Str, bind: Str, body: Expr }
 type MatchN   = { scrut: Expr, arms: List[ArmN] }
-type PartN    = { kind: Str, text: Str, e: Expr }
+pub type PartN = { kind: Str, text: Str, e: Expr }
 type TemplN   = { parts: List[PartN] }
 type HoleN    = { ty: Str, msg: Str }
 
 pub type Expr =
     IntLit(Str)
+  | FloatLit(Str)
   | StrLit(Str)
   | BoolLit(Str)
   | NullLit
@@ -156,6 +159,12 @@ fn render_parts(xs: List[PartN]) -> Str {
 pub fn render(e: Expr) -> Str {
   return match e {
     IntLit(v)  => "(int ".concat(v).concat(")"),
+    // The text is kept as lexed. Parity with the reference renderer holds
+    // for canonical decimal spellings (`2.5`); an exponent or trailing-zero
+    // spelling (`1e3`, `2.50`) renders verbatim here while the reference
+    // normalizes through a host float. Corpus stays canonical; see
+    // dogfood/findings-unblock.md.
+    FloatLit(v) => "(float ".concat(v).concat(")"),
     StrLit(v)  => "(str ".concat(v).concat(")"),
     BoolLit(v) => "(bool ".concat(v).concat(")"),
     NullLit    => "(null)",
@@ -683,6 +692,7 @@ fn p_template(text: Str) -> Expr {
 fn p_primary(ts: List[Token], i: Int) -> PR {
   let t = tk(ts, i)
   if (t.kind == "int") { return { i: i + 1, e: IntLit(t.text) } }
+  if (t.kind == "float") { return { i: i + 1, e: FloatLit(t.text) } }
   if (t.kind == "string") { return { i: i + 1, e: StrLit(t.text) } }
   if (t.kind == "template") {
     let e = p_template(t.text)
@@ -778,6 +788,39 @@ pub fn parse_expr_str(src: Str) -> Expr {
 }
 
 pub fn parse_render(src: Str) -> Str { return render(parse_expr_str(src)) }
+
+// ---------------------------------------------------------- declarations
+//
+// Slice two of the self-hosting effort (the service-boundary checker in
+// checker.rvl) needs the *pieces*, not the whole program grammar: it parses
+// declaration statements and method bodies out of the same token stream and
+// reuses this ladder for every expression position. These entries expose the
+// private ladder without changing its shape — the result records are
+// checker-nameable wrappers over the internal PR / Pars / TyR.
+
+pub type AtExpr = { i: Int, e: Expr }
+pub type AtPars = { i: Int, ps: List[ParamN], ok: Bool }
+pub type AtTy   = { i: Int, ty: Str, ok: Bool }
+
+// Parse one expression starting at token index `i`.
+pub fn expr_at(ts: List[Token], i: Int) -> AtExpr {
+  let r = p_expr(ts, i)
+  return { i: r.i, e: r.e }
+}
+
+// Parse a parameter list whose opening `(` sits at index `i`.
+pub fn params_at(ts: List[Token], i: Int) -> AtPars {
+  let r = p_params(ts, i)
+  return { i: r.i, ps: r.xs, ok: r.ok }
+}
+
+// Parse one type spelling starting at index `i`, rendered as the reference
+// renders it.
+pub fn type_at(ts: List[Token], i: Int) -> AtTy {
+  let t = p_type(ts, i)
+  return { i: t.i, ty: t.ty, ok: t.ok }
+}
+
 
 // ---------------------------------------------------------------- tests
 

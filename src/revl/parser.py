@@ -598,7 +598,15 @@ class Parser:
         if not self.at(kind, value):
             wanted = what or (value if value is not None else kind)
             got = repr(tok.value) if tok.value is not None else "end of file"
-            raise RevlError(self.filename, tok.line, f"expected {wanted}, found {got}")
+            hint = None
+            if kind == "ident" and tok.kind == "kw":
+                # repeated agent pain: a reserved word used where a NAME is
+                # wanted reads as a parser confusion, not a naming mistake
+                hint = (f"`{tok.value}` is a reserved keyword — it cannot "
+                        "name a field, variable, parameter, or method; "
+                        "pick another name")
+            raise RevlError(self.filename, tok.line,
+                            f"expected {wanted}, found {got}", hint)
         return self.next()
 
     def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
@@ -2126,6 +2134,16 @@ class Parser:
             if self.at("kw", "async"):
                 self.next()
                 async_ = True
+            if self.at("kw", "emission"):
+                # repeated agent pain (findings-uxprobe R1): purity modifiers
+                # died as a bare parser error with no hint
+                tok = self.peek()
+                raise self.err(
+                    tok.line,
+                    f"expected fn, found {tok.value!r}",
+                    hint="provider methods are plain `fn` — emission-ness is "
+                         "inherited from the service declaration (G4 upper "
+                         "bound); write `fn <name>(...)`")
             self.expect("kw", "fn")
             mname = self.expect("ident").value
             self.expect("(")
