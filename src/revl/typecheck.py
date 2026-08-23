@@ -776,9 +776,10 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
     from .parser import (
-        ExprArrow, ExprBin, ExprCall, ExprField, ExprHole, ExprIf, ExprIndex,
-        ExprList, ExprLit, ExprMatch, ExprOptCall, ExprOptField, ExprRecord,
-        ExprUn, ExprVar, Interp, Lit,
+        ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
+        ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,
+        ExprOptField, ExprRecord, ExprRecordUpdate, ExprUn, ExprVar, Interp,
+        Lit,
     )
 
     line = getattr(expr, "line", 0)
@@ -947,6 +948,56 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         for _, value in expr.fields:
             infer_ast(value, tenv, types, filename)
         return None  # anonymous; named via check_ast against an expected record
+    if isinstance(expr, ExprRecordUpdate):
+        # docs/records.md §3: `base` must carry a record type; every updated
+        # field must exist there and its replacement must match the declared
+        # field type. The result's type is `base`'s type.
+        base_t = infer_ast(expr.base, tenv, types, filename)
+        if base_t is None:
+            for _, value in expr.updates:
+                infer_ast(value, tenv, types, filename)
+            return None
+        spec = types.get(base_t)
+        # Without a filename this is the non-raising oracle: report the type
+        # when it is soundly known, otherwise bow out.
+        if filename is None:
+            if spec is not None and spec.get("kind") == "record":
+                declared = spec.get("fields", {})
+                for name, value in expr.updates:
+                    if name in declared:
+                        infer_ast(value, tenv, types, filename)
+                    else:
+                        return None
+                return base_t
+            for _, value in expr.updates:
+                infer_ast(value, tenv, types, filename)
+            return None
+        if spec is None or spec.get("kind") != "record":
+            raise RevlError(
+                filename, line,
+                f"record update requires a record type, "
+                f"`{render_type(base_t) or 'unknown'}` is not one",
+                hint="`{r | f = e}` copies `r` with field `f` replaced — it only "
+                     "applies to a named record type (docs/records.md §2)",
+            )
+        declared = spec.get("fields", {})
+        for name, value in expr.updates:
+            if name not in declared:
+                raise RevlError(
+                    filename, line,
+                    f"record update names `{name}`, which is not a field of "
+                    f"`{render_type(base_t)}`",
+                    hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                )
+            check_ast(value, declared.get(name), tenv, types, filename,
+                      f"update of field `{name}`")
+        return base_t
+    if isinstance(expr, ExprBlockArm):
+        inner = dict(tenv)
+        for stmt in expr.stmts:
+            t = infer_ast(stmt.value, inner, types, filename)
+            inner[stmt.name] = t
+        return infer_ast(expr.tail, inner, types, filename)
     if isinstance(expr, ExprCall):
         arg_types = [infer_ast(a, tenv, types, filename) for a in expr.args]
         if isinstance(expr.callee, ExprVar):
@@ -1218,7 +1269,8 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
 def check_ast(expr, expected: str | None, tenv: dict, types: dict,
               filename: str, where: str) -> None:
     """Bidirectional check of a parser-AST expression against `expected`."""
-    from .parser import ExprArrow, ExprIf, ExprList, ExprMatch, ExprRecord
+    from .parser import ExprArrow, ExprBlockArm, ExprIf, ExprList, ExprMatch, \
+        ExprRecord, ExprRecordUpdate
 
     line = getattr(expr, "line", 0)
     # a hole in check position takes the expectation as its type and is done:
@@ -1282,6 +1334,29 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                 else:
                     inner.pop(bind, None)
             check_ast(body, expected, inner, types, filename, where)
+        return
+    if isinstance(expr, ExprRecordUpdate):
+        # docs/records.md §3: the result is `base`'s type, so the expectation
+        # is checked against that; the field updates are checked per-field.
+        base_t = infer_ast(expr.base, tenv, types, filename)
+        spec = types.get(base_t or "")
+        if spec is not None and spec.get("kind") == "record":
+            declared = spec.get("fields", {})
+            for name, value in expr.updates:
+                check_ast(value, declared.get(name), tenv, types, filename,
+                          f"update of field `{name}` of `{base_t}`")
+        if base_t and not compatible(expected, base_t):
+            raise mismatch(filename, line, where, expected,
+                           render_type(base_t) or base_t)
+        return
+    if isinstance(expr, ExprBlockArm):
+        # Each `let` in the arm block extends the arm's scope; the tail is
+        # checked against the expectation like any other arm body.
+        inner = dict(tenv)
+        for stmt in expr.stmts:
+            t = infer_ast(stmt.value, inner, types, filename)
+            inner[stmt.name] = t
+        check_ast(expr.tail, expected, inner, types, filename, where)
         return
     actual = infer_ast(expr, tenv, types, filename)
     if actual and not compatible(expected, actual):

@@ -1176,6 +1176,12 @@ def _expr(
             f"{_expr(node['else'], ctx, rename, env)})"
         )
 
+    if kind == "record_update":
+        raise EmitError(
+            "functional record update `{r | f = e}` is not emitted by the java "
+            "backend yet (implemented tiers: python, typescript) — see "
+            "docs/records.md §6; lift it into a helper fn instead")
+
     if kind == "record":
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
