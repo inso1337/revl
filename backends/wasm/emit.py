@@ -26,13 +26,17 @@ this emitter deliberately uses both widths and `_wasm_ty` is the single place
 that decides which. `Float` remains refused by name.
 
 Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
-Violations are EmitError, never silent degradation. The component tier carries
-scalars across a service boundary (Int service params/returns,
-`await Job.run(name)`); the v3 functions tier additionally lowers
-Str/List/record values through a canonical-ABI-shaped linear-memory
-representation. Config blocks, host builtins outside `await Job.run`,
-method-time effects, and variant values are still rejected with a precise
-reason.
+Violations are EmitError, never silent degradation. The service boundary
+(coeffect imports, `provide:<key>.<op>` exports) carries the SAME canonical-ABI
+representation the v3 functions tier uses: an `Int` is an i64 value, a `Bool`
+an i32 value, and every Str/List/record/variant/Opt/Result an i32 *pointer*
+into the module's linear memory (`_boundary_wty`). A value whose wasm width
+disagrees with its declared service type (a `List` from an `Int`-declared
+op) stays refused — a real mismatch, not a silent narrowing. `@wasm`-bodied
+externs lower to internal `(func $name …)`. Config blocks (no instantiation
+channel), host builtins outside `await Job.run` (e.g. `Map.new` — the tier has
+no Map representation), method-time effects, and `Float`/`Map` at the boundary
+are still rejected with a precise reason.
 
 `emit(ir) -> dict[name, wat]` — one WAT module per component, plus a
 `functions` module for IR v3 type/function documents.
@@ -122,15 +126,6 @@ def _ident(name: Any, what: str) -> str:
     return name
 
 
-def _int_only(type_name: Any, where: str) -> None:
-    if type_name not in ("Int", None):
-        raise EmitError(
-            f"{where}: type {type_name!r} is not lowerable — the cordis-wasm "
-            f"tier carries scalars across a service boundary (Int in, Int out); "
-            f"keep string-shaped services on the hosted backends"
-        )
-
-
 class _ComponentEmitter:
     """A component document -> one WAT module.
 
@@ -173,7 +168,9 @@ class _ComponentEmitter:
                 json.dumps(self.intercept[key], sort_keys=True)
             except (TypeError, ValueError) as exc:
                 raise EmitError(f"{self.name}: intercept metadata for {key!r} is not JSON: {exc}")
-        self.imports: dict[tuple[str, str], tuple[int, bool]] = {}  # (key, op) -> (arity, has_result)
+        # (key, op) -> (param wasm types, result wasm type or None) — the
+        # coeffect import's ABI, one width per declared param/return.
+        self.imports: dict[tuple[str, str], tuple[list[str | None], str | None]] = {}
         self.globals: list[tuple[str, str]] = []   # (name, wasm type)
         self.uses_job = False
         # job name -> interned i32 id (see _job_id)
@@ -183,10 +180,16 @@ class _ComponentEmitter:
         self.externs = {ext.get("name"): ext for ext in (externs or [])}
         self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
         self.needed_fns: list[str] = []   # top-level fns this component calls
+        self.needed_externs: list[str] = []  # @wasm externs this component calls
         self.uses_v3 = False              # a delegated expression was lowered
         self.extra_locals: set[str] = set()  # v3 scratch locals for one method
         self.func_uses_v3 = False
         self.activation_locals: list[str] = []
+        # a rich type (Str/List/record/variant/Opt/Result) crossed the service
+        # boundary as a linear-memory pointer, so the module has to export a
+        # memory even when its own body allocates nothing (an identity
+        # `fn f(x: Str) -> Str = x` just forwards a pointer the host owns).
+        self.boundary_uses_memory = False
 
     # -- v2 realms -----------------------------------------------------------
 
@@ -222,9 +225,40 @@ class _ComponentEmitter:
             lines.append(f'  (@custom "revl:intercept" "{payload}")')
         return lines
 
+    # -- service boundary widths ---------------------------------------------
+
+    def _boundary_wty(self, ty: str | None, where: str) -> str | None:
+        """The wasm ABI type a service param/return of declared type `ty` uses.
+
+        This is the whole port: the v3 functions tier already lowers
+        Str/List/record/variant/Opt/Result through a canonical-ABI linear-memory
+        representation, so the service boundary carries the SAME representation —
+        `Int` is an i64 value, `Bool` an i32 value, and every compound type an
+        i32 *pointer* into the module's memory. Anything the v3 value model has
+        no representation for (`Float`, `Map`, function types) is refused here by
+        `_check_type` — a genuine boundary, not a silent narrowing. `None`/`Unit`
+        means the slot is absent (a void operation, no param/result).
+        """
+        if _is_unit_type(ty):
+            return None
+        # `_check_type` is the v3 tier's single lowerability gate: it accepts
+        # Int/Bool/Str/Bytes/List/record/variant/Opt/Result and refuses Float,
+        # Map, and function types with a named reason.
+        self.v3._check_type(ty, where)
+        if not _is_scalar_type(ty):
+            self.boundary_uses_memory = True
+        return _wasm_ty(ty)
+
     # -- service lookup ------------------------------------------------------
 
-    def _op_spec(self, key: str, op: str, where: str) -> tuple[int, bool]:
+    def _op_spec(self, key: str, op: str, where: str) -> tuple[list[str | None], str | None]:
+        """Resolve a coeffect op, registering its import ABI.
+
+        Returns the declared (param types, return type) — the revl types, so a
+        call site can width-check each argument and carry the result's type. The
+        wasm widths of those types are stored in ``self.imports`` for the import
+        section to render.
+        """
         service_name = self.requires.get(key)
         service = self.services.get(service_name)
         if service is None:
@@ -232,13 +266,15 @@ class _ComponentEmitter:
         spec = (service.get("methods") or {}).get(op)
         if spec is None:
             raise EmitError(f"{where}: {key}.{op} is not a method of {service_name}")
-        for param in spec.get("params") or []:
-            _int_only(param.get("type"), f"{where}: {key}.{op} param {param.get('name')!r}")
-        _int_only(spec.get("returns"), f"{where}: {key}.{op} return")
-        arity = len(spec.get("params") or [])
-        has_result = spec.get("returns") is not None
-        self.imports[(key, op)] = (arity, has_result)
-        return arity, has_result
+        param_types = [param.get("type") for param in spec.get("params") or []]
+        return_type = spec.get("returns")
+        param_wtys = [
+            self._boundary_wty(pty, f"{where}: {key}.{op} param {i}")
+            for i, pty in enumerate(param_types)
+        ]
+        result_wty = self._boundary_wty(return_type, f"{where}: {key}.{op} return")
+        self.imports[(key, op)] = (param_wtys, result_wty)
+        return param_types, return_type
 
     # -- expressions ---------------------------------------------------------
 
@@ -294,24 +330,28 @@ class _ComponentEmitter:
                 )
             key = _ident(target.get("name"), f"{where}: req")
             op = _ident(node.get("method"), f"{where}: method")
-            arity, has_result = self._op_spec(key, op, where)
+            param_types, return_type = self._op_spec(key, op, where)
             args = node.get("args") or []
-            if len(args) != arity:
-                raise EmitError(f"{where}: {key}.{op} takes {arity} argument(s)")
+            if len(args) != len(param_types):
+                raise EmitError(f"{where}: {key}.{op} takes {len(param_types)} argument(s)")
             parts = []
-            for arg in args:
+            for arg, ptype in zip(args, param_types):
                 value = self._lower(arg, scope, types, where)
                 if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: void expression used as an argument")
-                if not _is_scalar_type(value.ty):
+                # ABI-width agreement: a rich type crosses as a pointer when the
+                # declared param is that rich type, but a value whose wasm width
+                # disagrees with the declared param (a List where the op is
+                # declared over Int) is a real mismatch and stays refused.
+                if _wasm_ty(value.ty) != _wasm_ty(ptype):
                     raise EmitError(
                         f"{where}: a {value.ty!r} argument cannot cross this tier's "
-                        f"scalar coeffect boundary — {key}.{op} is declared over Int; "
-                        f"keep compound values inside the module"
+                        f"scalar coeffect boundary — {key}.{op} is declared over "
+                        f"{ptype!r}; keep compound values inside the module"
                     )
                 parts.append(value.wat)
             call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
-            return _E(call, "Int" if has_result else None)
+            return _E(call, return_type)
         if kind == "config":
             raise EmitError(f"{where}: config is not available on this tier")
         if kind == "host":
@@ -468,11 +508,18 @@ class _ComponentEmitter:
         if kind == "fn":
             name = _ident(node.get("name"), f"{where}: function")
             if name not in self.fn_by_name and name in self.externs:
-                available = ", ".join(sorted((self.externs[name].get("bodies") or {}))) or "none"
-                raise EmitError(
-                    f"{where}: extern `{name}` has no @wasm body — not portable "
-                    f"to this backend (available: {available})"
-                )
+                ext = self.externs[name]
+                if _extern_wasm_body(ext) is None:
+                    available = ", ".join(sorted((ext.get("bodies") or {}))) or "none"
+                    raise EmitError(
+                        f"{where}: extern `{name}` has no @wasm body — not portable "
+                        f"to this backend (available: {available})"
+                    )
+                # a @wasm-bodied extern lowers to an internal `(func $name …)`
+                # emitted into this component's own module, so `call $name`
+                # resolves and the component stays self-contained
+                if name not in self.needed_externs:
+                    self.needed_externs.append(name)
             return {
                 "kind": "call",
                 "callee": {"kind": "var", "name": name},
@@ -634,9 +681,6 @@ class _ComponentEmitter:
             if spec is None:
                 raise EmitError(f"{where}: {mname!r} is not a method of {service_name}")
             spec_params = spec.get("params") or []
-            for param in spec_params:
-                _int_only(param.get("type"), f"{where}: {key}.{mname} param")
-            _int_only(spec.get("returns"), f"{where}: {key}.{mname} return")
             params = [_ident(p, f"{where}: param") for p in method.get("params") or []]
             if len(params) != len(spec_params):
                 raise EmitError(f"{where}: method {mname!r} arity does not match the service")
@@ -651,14 +695,19 @@ class _ComponentEmitter:
             mtypes: dict[str, str | None] = {name: "Int" for name in scope}
             decl = []
             for i, param in enumerate(params):
-                # a service parameter is declared `Int` (`_int_only`), and an
-                # `Int` is 64-bit — this is a *value*, not an address
-                decl.append(f"(param $p_{param} i64)")
+                # each service parameter crosses at the width of its declared
+                # type: an `Int` is a 64-bit *value*, a Str/List/record/variant/
+                # Opt/Result is an i32 *pointer* into this module's memory.
+                ptype = spec_params[i].get("type")
+                pwty = self._boundary_wty(ptype, f"{where}: {key}.{mname} param {param!r}")
+                decl.append(f"(param $p_{param} {pwty})")
                 mscope[param] = f"(local.get $p_{param})"
-                mtypes[param] = "Int"
-            has_result = spec.get("returns") is not None
+                mtypes[param] = ptype
+            result_wty = self._boundary_wty(spec.get("returns"),
+                                            f"{where}: {key}.{mname} return")
+            has_result = result_wty is not None
             if has_result:
-                decl.append("(result i64)")
+                decl.append(f"(result {result_wty})")
 
             body_lines = []
             mlocals: list[str] = []
@@ -680,7 +729,11 @@ class _ComponentEmitter:
                     value = self._lower(mstep["expr"], mscope, mtypes, mwhere)
                     if has_result and _is_unit_type(value.ty):
                         raise EmitError(f"{mwhere}: void expression returned from a typed method")
-                    if has_result and not _is_scalar_type(value.ty):
+                    # ABI-width agreement: a rich value crosses as a pointer when
+                    # the operation is declared over that rich type, but a value
+                    # whose wasm width disagrees with the declared return (a List
+                    # from an Int-declared op) is a real mismatch and stays refused.
+                    if has_result and _wasm_ty(value.ty) != result_wty:
                         raise EmitError(
                             f"{mwhere}: a {value.ty!r} value cannot cross this tier's "
                             f"scalar service boundary — the operation is declared "
@@ -758,11 +811,16 @@ class _ComponentEmitter:
         # module, so `call $name` resolves and the component stays a single
         # self-contained artifact for the runtime to instantiate
         fn_defs = [self.v3._emit_function(self.fn_by_name[name]) for name in self.needed_fns]
+        # @wasm-bodied externs this component calls, emitted as internal funcs
+        extern_defs = [_emit_extern_func(self.externs[name], self.v3._check_type)
+                       for name in self.needed_externs]
+        fn_defs = extern_defs + fn_defs
         rendered = "\n".join(provide_funcs + fn_defs + segments
                              + [wat for _index, wat in inverses])
         # linear memory is pulled in only when something actually reaches for
         # it, so a scalar-only component emits no memory at all
-        needs_memory = self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)
+        needs_memory = (self.boundary_uses_memory
+                        or (self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)))
         # the checked-arithmetic and named-division helpers are *not* memory:
         # `x + 1` traps on overflow through `$int_add` in a component that
         # never touches linear memory, so they get their own gate. (Before
@@ -774,13 +832,14 @@ class _ComponentEmitter:
                  f";; component {self.name}",
                  "(module"]
         lines.extend(self._realm_sections())
-        for (key, op), (arity, has_result) in sorted(self.imports.items()):
-            # service params/returns are `Int` (`_int_only`), so the coeffect
-            # ABI is i64 in and i64 out — a coeffect carries values, not
-            # addresses, and truncating one at the boundary would be exactly
-            # the silent narrowing this port exists to remove
-            params = " ".join(["(param i64)"] * arity)
-            result = " (result i64)" if has_result else ""
+        for (key, op), (param_wtys, result_wty) in sorted(self.imports.items()):
+            # the coeffect ABI is one width per declared param/return: an `Int`
+            # is an i64 *value*, a Str/List/record/variant/Opt/Result is an i32
+            # *pointer* into this module's memory (the same canonical-ABI shape
+            # the v3 functions tier uses). Truncating a value, or narrowing a
+            # pointer, at the boundary would be the silent mismatch this guards.
+            params = " ".join(f"(param {w})" for w in param_wtys)
+            result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
         if self.uses_job:
@@ -823,6 +882,11 @@ class _ComponentEmitter:
         lines.extend(provide_funcs)
         if needs_memory:
             lines.extend(self.v3._helper_funcs())
+            # `$f64_to_str` is emitted only when a Float is actually rendered,
+            # so a component that never interpolates a Float keeps a
+            # byte-identical helper preamble (the v1 goldens are unchanged).
+            if "$f64_to_str" in rendered:
+                lines.append(self.v3._helper_f64_to_str())
         elif needs_arith:
             lines.extend(self.v3._arith_helper_funcs())
         lines.extend(fn_defs)
@@ -937,6 +1001,46 @@ def _refuse_float_operands(node: Any, where: str) -> None:
             f"Int/Bool, and the operands of `{node.get('op')}` are Float")
 
 
+def _extern_wasm_body(ext: dict) -> str | None:
+    """The `@wasm` body text of an extern, or None if it has none.
+
+    An extern's implementation on a backend is the body tagged for that backend
+    (`bodies.rs` on rust, `bodies.wasm` here); a `@wasm` body is raw WAT for the
+    function's body, referencing each parameter as `$p_<name>` — the same
+    spelling a v3 `fn` gives its params — and leaving the result on the stack.
+    """
+    body = (ext.get("bodies") or {}).get("wasm")
+    return body if isinstance(body, str) else None
+
+
+def _emit_extern_func(ext: dict, check_type) -> str:
+    """Render a `@wasm`-bodied extern as an internal `(func $name …)`.
+
+    Widths follow the same rule as every other value on this tier (`_wasm_ty`):
+    an `Int` param/return is an i64 value, a Str/List/record/variant/Opt/Result
+    is an i32 pointer. `check_type` is the caller's lowerability gate so a
+    Float/Map/function-typed extern is refused the same way an ordinary value of
+    that type is, rather than emitting an unvalidated body.
+    """
+    name = _ident(ext.get("name"), "extern name")
+    body = (_extern_wasm_body(ext) or "").strip()
+    decl: list[str] = []
+    for param in ext.get("params") or []:
+        pname = _ident(param.get("name"), f"extern {name}: parameter")
+        ptype = param.get("type")
+        check_type(ptype, f"extern {name}: param {pname}")
+        if not _is_unit_type(ptype):
+            decl.append(f"(param $p_{pname} {_wasm_ty(ptype)})")
+    rtype = ext.get("returns")
+    check_type(rtype, f"extern {name}: return")
+    if not _is_unit_type(rtype):
+        decl.append(f"(result {_wasm_ty(rtype)})")
+    header = f"(func ${name}"
+    if decl:
+        header += " " + " ".join(decl)
+    return f"  {header}\n    {body or 'nop'})"
+
+
 def _is_unit_type(ty: str | None) -> bool:
     return ty in (None, "Unit")
 
@@ -989,6 +1093,17 @@ class _Scope:
     def __init__(self, slots: dict[str, str], types: dict[str, str | None]) -> None:
         self.slots = slots
         self.types = types
+
+
+def _f64_literal(value: float) -> str:
+    """The WAT `f64.const` payload for a Float literal, bit-exact.
+
+    Python's `float.hex()` is the IEEE-754 hexadecimal form WAT accepts
+    verbatim (`0x1.b1ae4d6e2ef50p+69`), so the constant that reaches wasmtime
+    is the same 64-bit pattern the source named — no decimal round-trip, no
+    ambiguity. NaN/Infinity never arrive here (they are computed, not written).
+    """
+    return float.hex(value)
 
 
 def _wat_bytes(data: bytes) -> str:
@@ -1055,6 +1170,17 @@ class _V3Emitter:
                 "returns": fn.get("returns"),
             }
             for fn in self.functions
+        }
+        # a @wasm-bodied extern is a callable too: it lowers to an internal
+        # `(func $name …)` (see `_emit_extern_func`), so its call site resolves
+        # the same way a `fn` call does — through this signature table.
+        self.extern_sigs = {
+            ext.get("name"): {
+                "params": [p.get("type") for p in (ext.get("params") or [])],
+                "returns": ext.get("returns"),
+            }
+            for ext in self.externs
+            if _extern_wasm_body(ext) is not None
         }
         self.literal_offsets: dict[str, int] = {}
         self.data_segments: list[tuple[int, bytes]] = []
@@ -1130,11 +1256,18 @@ class _V3Emitter:
         return lines
 
     def _unsupported_comments(self) -> list[str]:
-        lines = []
-        if self.externs:
-            names = ", ".join(_ident(ext.get("name"), "extern name") for ext in self.externs)
-            lines.append(f"  ;; unsupported on this tier: externs {names} (no @wasm body)")
-        return lines
+        # only externs with no @wasm body are unsupported now; a @wasm-bodied
+        # one is emitted as a real `(func $name …)` in `emit()`.
+        bodyless = [ext for ext in self.externs if _extern_wasm_body(ext) is None]
+        if not bodyless:
+            return []
+        names = ", ".join(_ident(ext.get("name"), "extern name") for ext in bodyless)
+        return [f"  ;; unsupported on this tier: externs {names} (no @wasm body)"]
+
+    def _extern_funcs(self) -> list[str]:
+        """The @wasm-bodied externs, rendered as internal functions."""
+        return [_emit_extern_func(ext, self._check_type)
+                for ext in self.externs if _extern_wasm_body(ext) is not None]
 
     # -- type/layout helpers --------------------------------------------------
 
@@ -1314,6 +1447,11 @@ class _V3Emitter:
             self._helper_str_slice(),
             self._helper_str_char_at(),
             self._helper_str_char_code_at(),
+            self._helper_str_cp_length(),
+            self._helper_str_cp_offset(),
+            self._helper_str_cp_slice(),
+            self._helper_str_cp_char_at(),
+            self._helper_str_cp_char_code_at(),
         ] + self._arith_helper_funcs() + [
             self._helper_list_push(),
             self._helper_list_concat(),
@@ -1405,6 +1543,53 @@ class _V3Emitter:
       (local.set $x (i64.div_u (local.get $x) (i64.const 10)))
       (br 0)))
     (local.get $p))"""
+
+    def _helper_f64_to_str(self) -> str:
+        # Canonical Float -> Str, the ECMAScript `Number::toString` form
+        # (docs/strings.md), for the subset this hand-written tier renders
+        # *exactly* — never approximately:
+        #   * NaN            -> "NaN"
+        #   * +/- Infinity   -> "Infinity" / "-Infinity"
+        #   * integer-valued finite floats with |x| < 2^63  -> the decimal
+        #     integer, with no trailing ".0" and with -0.0 rendered "0"
+        #     (`$int_to_str` produces exactly the digits ES prescribes for any
+        #     integer < 1e21, and every integer < 2^63 is one).
+        # A non-integer float, or |x| >= 2^63 (whose ES form is exponent
+        # notation, e.g. `1e21` -> "1e+21"), needs a shortest-round-trip
+        # decimal conversion (Grisu/Ryu class) that is not implemented here;
+        # rather than emit a string that would *diverge* from the other tiers,
+        # this path traps. That trap is the honest fence — the still-open half
+        # of docs/strings.md §"Remaining wasm WAT work".
+        #
+        # "Infinity" is written as two i32 stores of its little-endian ASCII:
+        # "Infi" = 0x69666e49, "nity" = 0x7974696e; "-Infinity" prepends 0x2d.
+        return """  (func $f64_to_str (param $x f64) (result i32)
+    (local $p i32)
+    (if (f64.ne (local.get $x) (local.get $x))
+      (then
+        (local.set $p (call $alloc_str (i32.const 3)))
+        (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 78))
+        (i32.store8 (i32.add (local.get $p) (i32.const 5)) (i32.const 97))
+        (i32.store8 (i32.add (local.get $p) (i32.const 6)) (i32.const 78))
+        (return (local.get $p))))
+    (if (f64.eq (f64.abs (local.get $x)) (f64.const inf))
+      (then
+        (if (f64.lt (local.get $x) (f64.const 0))
+          (then
+            (local.set $p (call $alloc_str (i32.const 9)))
+            (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))
+            (i32.store (i32.add (local.get $p) (i32.const 5)) (i32.const 0x69666e49))
+            (i32.store (i32.add (local.get $p) (i32.const 9)) (i32.const 0x7974696e)))
+          (else
+            (local.set $p (call $alloc_str (i32.const 8)))
+            (i32.store (i32.add (local.get $p) (i32.const 4)) (i32.const 0x69666e49))
+            (i32.store (i32.add (local.get $p) (i32.const 8)) (i32.const 0x7974696e))))
+        (return (local.get $p))))
+    (if (i32.and
+          (f64.eq (local.get $x) (f64.trunc (local.get $x)))
+          (f64.lt (f64.abs (local.get $x)) (f64.const 0x1p+63)))
+      (then (return (call $int_to_str (i64.trunc_f64_s (local.get $x))))))
+    (unreachable))"""
 
     def _helper_str_concat(self) -> str:
         return """  (func $str_concat (param $a i32) (param $b i32) (result i32)
@@ -1591,11 +1776,131 @@ class _V3Emitter:
     def _helper_str_char_code_at(self) -> str:
         # in: an address and an Int index. out: an Int (a code point), so the
         # byte that comes back has to be widened rather than returned as an i32.
+        # This is the *Bytes* form (one byte per index); Str routes through
+        # $str_cp_char_code_at, which decodes UTF-8 (docs/strings.md).
         return """  (func $str_char_code_at (param $s i32) (param $idx i64) (result i64)
     (i64.extend_i32_u
       (i32.load8_u
         (i32.add (i32.add (local.get $s) (i32.const 4))
                  (i32.wrap_i64 (local.get $idx))))))"""
+
+    # -- Str as code points (docs/strings.md) --------------------------------
+    #
+    # A `Str` is a sequence of Unicode scalar values. In memory it is UTF-8
+    # (a u32 byte-length prefix, then the bytes), so `length`/`charAt`/
+    # `charCodeAt`/`slice` count and index in *code points*, walking UTF-8
+    # continuation bytes rather than raw byte offsets. `Bytes` keeps the byte
+    # helpers above. A code point boundary is any byte whose top two bits are
+    # not `10` (i.e. `(b & 0xC0) != 0x80`).
+
+    def _helper_str_cp_length(self) -> str:
+        return """  (func $str_cp_length (param $s i32) (result i32)
+    (local $len i32) (local $i i32) (local $count i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+        (if (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80))
+          (then (local.set $count (i32.add (local.get $count) (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (local.get $count))"""
+
+    def _helper_str_cp_offset(self) -> str:
+        # Byte offset of the `$cp`-th code point (or the byte length when `$cp`
+        # is at/after the end), so a code-point index becomes a byte index.
+        return """  (func $str_cp_offset (param $s i32) (param $cp i32) (result i32)
+    (local $len i32) (local $i i32) (local $seen i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (br_if $done (i32.ge_s (local.get $seen) (local.get $cp)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (block $cont_done
+          (loop $cont
+            (br_if $cont_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (br_if $cont_done (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cont)))
+        (local.set $seen (i32.add (local.get $seen) (i32.const 1)))
+        (br $loop)))
+    (local.get $i))"""
+
+    def _helper_str_cp_slice(self) -> str:
+        # `$start`/`$end` are code-point indices (Int values). JS slice
+        # semantics: out-of-range bounds clamp into [0, cp_length], never trap.
+        return """  (func $str_cp_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $cplen i32) (local $a i32) (local $b i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $cplen (call $str_cp_length (local.get $s)))
+    (local.set $a (i32.wrap_i64 (local.get $start)))
+    (local.set $b (i32.wrap_i64 (local.get $end)))
+    (if (i32.lt_s (local.get $a) (i32.const 0)) (then (local.set $a (i32.const 0))))
+    (if (i32.gt_s (local.get $a) (local.get $cplen)) (then (local.set $a (local.get $cplen))))
+    (if (i32.lt_s (local.get $b) (local.get $a)) (then (local.set $b (local.get $a))))
+    (if (i32.gt_s (local.get $b) (local.get $cplen)) (then (local.set $b (local.get $cplen))))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $a)))
+    (local.set $to (call $str_cp_offset (local.get $s) (local.get $b)))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))"""
+
+    def _helper_str_cp_char_at(self) -> str:
+        # The whole scalar at code-point index `$idx`, as a new one-code-point
+        # Str (its UTF-8 bytes copied out), not a single byte.
+        return """  (func $str_cp_char_at (param $s i32) (param $idx i64) (result i32)
+    (local $i i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $i (i32.wrap_i64 (local.get $idx)))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $i)))
+    (local.set $to (call $str_cp_offset (local.get $s) (i32.add (local.get $i) (i32.const 1))))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))"""
+
+    def _helper_str_cp_char_code_at(self) -> str:
+        # The Unicode scalar value at code-point index `$idx`: a UTF-8 decode
+        # (1–4 bytes) rather than a raw byte read, so an astral char returns
+        # e.g. 128512, not the lead byte.
+        return """  (func $str_cp_char_code_at (param $s i32) (param $idx i64) (result i64)
+    (local $off i32) (local $base i32) (local $b0 i32)
+    (local.set $off (call $str_cp_offset (local.get $s) (i32.wrap_i64 (local.get $idx))))
+    (local.set $base (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $off)))
+    (local.set $b0 (i32.load8_u (local.get $base)))
+    (i64.extend_i32_u
+      (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0x80))
+        (then (local.get $b0))
+        (else
+          (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xE0))
+            (then
+              (i32.or
+                (i32.shl (i32.and (local.get $b0) (i32.const 0x1F)) (i32.const 6))
+                (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F))))
+            (else
+              (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xF0))
+                (then
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x0F)) (i32.const 12))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 6)))
+                    (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F))))
+                (else
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x07)) (i32.const 18))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 12)))
+                    (i32.or
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F)) (i32.const 6))
+                      (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 3))) (i32.const 0x3F))))))))))))"""
 
     # -- lists: [u32 count][pad][slot0][slot1]… , one 8-byte slot per element --
     #
@@ -1690,6 +1995,8 @@ class _V3Emitter:
                 return "Int"
             if isinstance(value, str):
                 return "Str"
+            if isinstance(value, float):
+                return "Float"
             raise EmitError(f"literal {value!r} is not lowerable on this tier")
         if kind == "var":
             name = node.get("name")
@@ -1717,6 +2024,11 @@ class _V3Emitter:
                 return "Str"
             if op == "+" and _is_list_type(left) and left == right:
                 return left
+            if node.get("operands") == "Float" and op in ("+", "-", "*", "/"):
+                # Float arithmetic on this tier lowers to f64 ops only so the
+                # result can be rendered (docs/strings.md); the value never
+                # enters the storage ABI.
+                return "Float"
             if node.get("operands") == "Int32":
                 return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
             return "Int"
@@ -1925,6 +2237,13 @@ class _V3Emitter:
                 return _E(f"(i64.const {value})", "Int")
             if isinstance(value, str):
                 return _E(self._str_ptr(value), "Str")
+            if isinstance(value, float):
+                # A Float value on this tier exists only to be rendered: it is
+                # an f64 on the wasm stack, produced here and consumed by
+                # `$f64_to_str` in interpolation. It is never stored in an
+                # i32/8-byte slot, so no Float ever reaches the value ABI —
+                # storing/returning a Float still refuses by name below.
+                return _E(f"(f64.const {_f64_literal(value)})", "Float")
             raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
         if kind == "var":
             name = node.get("name")
@@ -2060,6 +2379,22 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: cannot compare {left_ty!r} with {right_ty!r} on this "
                 f"tier — Int is 64-bit and Int32/Bool are 32-bit")
+        if op in ("+", "-", "*", "/") and node.get("operands") == "Float":
+            # Float arithmetic is lowerable *only* to feed the renderer: it
+            # produces a bare f64 on the stack (IEEE-754 semantics, matching
+            # every other tier's host), consumed by `$f64_to_str` in an
+            # interpolation. No Float ever reaches an i32 slot, a local, a
+            # return or the boundary — those positions still refuse by name
+            # (docs/strings.md §"Remaining wasm WAT work").
+            left = self._expr(left_node, scope, where, "Float")
+            right = self._expr(right_node, scope, where, "Float")
+            if left.ty != "Float" or right.ty != "Float":
+                raise EmitError(
+                    f"{where}: `{op}` marked Float but an operand is "
+                    f"{left.ty!r}/{right.ty!r} on this tier")
+            instr = {"+": "f64.add", "-": "f64.sub",
+                     "*": "f64.mul", "/": "f64.div"}[op]
+            return _E(f"{left.wat}\n      {right.wat}\n      ({instr})", "Float")
         if op in ("+", "-", "*", "/", "%") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
             _refuse_float_operands(node, where)
@@ -2143,7 +2478,7 @@ class _V3Emitter:
             ty = (expected if self._tagged_layout(expected) is not None
                   else f"Opt[{self._infer_type(payload, scope) or 'Int'}]")
             return self._make_tagged(ty, "Some", payload, scope, where)
-        sig = self.fn_sigs.get(name)
+        sig = self.fn_sigs.get(name) or self.extern_sigs.get(name)
         if sig is None:
             raise EmitError(f"{where}: callee {name!r} is not a lowerable function")
         args = node.get("args") or []
@@ -2209,8 +2544,11 @@ class _V3Emitter:
             target = self._expr(target_node, scope, where, target_ty)
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
                 raise EmitError(f"{where}: length is only lowerable on Str/Bytes/List")
-            # the count/length prefix stays a u32 in memory (the canonical-ABI
-            # shape a host reads); the *value* it yields is an Int
+            # A `Str` counts code points (docs/strings.md), decoding UTF-8; a
+            # `Bytes` or `List` counts its elements from the u32 prefix, which
+            # is the byte/element count.
+            if target_ty == "Str":
+                return _E(f"(i64.extend_i32_u (call $str_cp_length {target.wat}))", "Int")
             return _E(f"(i64.extend_i32_u (i32.load {target.wat}))", "Int")
         # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
         # is a sign-extend; narrowing Int -> Int32 traps out of the i32 range
@@ -2244,20 +2582,33 @@ class _V3Emitter:
             target = self._expr(target_node, scope, where, target_ty)
             start = self._expr(args[0], scope, where, "Int")
             end = self._expr(args[1], scope, where, "Int")
-            helper = "$str_slice" if target_ty in ("Str", "Bytes") else "$list_slice"
+            # Str slices on code-point boundaries; Bytes on byte offsets; List
+            # on element offsets (docs/strings.md).
+            if target_ty == "Str":
+                helper = "$str_cp_slice"
+            elif target_ty == "Bytes":
+                helper = "$str_slice"
+            else:
+                helper = "$list_slice"
             return _E(f"{target.wat}\n      {start.wat}\n      {end.wat}\n      (call {helper})", target_ty)
         if method == "charAt":
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError(f"{where}: charAt is only lowerable on Str/Bytes")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Int")
-            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_at)", "Str")
+            # Str returns the whole scalar at a code-point index (docs/strings.md);
+            # Bytes returns the single byte at a byte index.
+            helper = "$str_cp_char_at" if target_ty == "Str" else "$str_char_at"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Str")
         if method == "charCodeAt":
             if target_ty not in ("Str", "Bytes"):
                 raise EmitError(f"{where}: charCodeAt is only lowerable on Str/Bytes")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Int")
-            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_char_code_at)", "Int")
+            # Str decodes the UTF-8 scalar value at a code-point index; Bytes
+            # reads the raw byte (docs/strings.md).
+            helper = "$str_cp_char_code_at" if target_ty == "Str" else "$str_char_code_at"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Int")
         if method in ("div_trunc", "div_floor", "div_euclid", "mod"):
             # Integer division and modulo (docs/arithmetic.md). i64.div_s
             # already truncates; the other three go through helpers so every
@@ -2562,10 +2913,19 @@ class _V3Emitter:
                     rendered.append(piece.wat)
                 elif piece.ty == "Int":
                     rendered.append(f"{piece.wat}\n      (call $int_to_str)")
+                elif piece.ty == "Float":
+                    # Canonical Float -> Str (ECMAScript Number::toString) for
+                    # the subset this tier renders exactly: NaN, +/-Infinity,
+                    # and every integer-valued finite float with |x| < 2^63.
+                    # Non-integer floats and |x| >= 2^63 (e.g. 1e21, which the
+                    # ES form spells in exponent notation) still trap inside
+                    # `$f64_to_str` — the documented, narrowed fence
+                    # (docs/strings.md §"Remaining wasm WAT work").
+                    rendered.append(f"{piece.wat}\n      (call $f64_to_str)")
                 else:
                     raise EmitError(
-                        f"{where}: a `${{…}}` template interpolates Str or Int on this "
-                        f"tier, got {piece.ty!r}"
+                        f"{where}: a `${{…}}` template interpolates Str, Int or Float on "
+                        f"this tier, got {piece.ty!r}"
                     )
         if not rendered:
             return _E(self._str_ptr(""), "Str")
@@ -2864,25 +3224,20 @@ class _V3Emitter:
         for offset, data in self.data_segments:
             lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
         lines.append(f"  (global $__hp (mut i32) (i32.const {self.heap_start}))")
-        # tests call the same helpers their functions do ($str_eq, $alloc_str,
-        # …), so a document whose bodies are all `test` blocks still needs them
-        if self.functions or self.tests:
-            lines.extend(self._helper_funcs())
-        lines.extend(self._type_comments())
-        unsupported = self._unsupported_comments()
-        if unsupported:
-            lines.extend(unsupported)
-        if self.functions:
-            lines.append("")
-        for fn in self.functions:
-            lines.append(self._emit_function(fn))
-            lines.append("")
+        # Bodies are rendered first so the helper preamble can be decided from
+        # what they actually reference: `$f64_to_str` is pulled in only when a
+        # Float is really rendered, keeping the `functions` golden and every
+        # other Float-free module byte-identical. Rendering order (functions,
+        # then externs, then tests) is unchanged, so the emitted text is too.
+        fn_blocks = [self._emit_function(fn) for fn in self.functions]
+        extern_blocks = list(self._extern_funcs())
         # Each `test` block lowers to an exported zero-arg function returning
         # Bool: 1 = every assert held; a failed assert traps before the tail
         # (`src/revl/test.py run_wasm` invokes these via wasmtime). Lifecycle
         # tests never reach here — `_refuse_lifecycle_tests` rejects them by
         # name at the top of `emit`.
         fn_names = {fn.get("name") for fn in self.functions}
+        test_blocks: list[str] = []
         for (tname, export), test in zip(test_export_names(self.tests), self.tests):
             if export in fn_names:
                 raise EmitError(
@@ -2890,10 +3245,33 @@ class _V3Emitter:
                     f"which collides with a declared function of the same "
                     f"name — rename one of them"
                 )
-            lines.append(self._emit_function(
+            test_blocks.append(self._emit_function(
                 {"name": export, "params": [], "returns": "Bool",
                  "body": test.get("body") or []},
                 test_mode=True))
+        uses_f64 = any("$f64_to_str" in block
+                       for block in fn_blocks + extern_blocks + test_blocks)
+
+        # tests call the same helpers their functions do ($str_eq, $alloc_str,
+        # …), so a document whose bodies are all `test` blocks still needs them
+        if self.functions or self.tests:
+            lines.extend(self._helper_funcs())
+            if uses_f64:
+                lines.append(self._helper_f64_to_str())
+        lines.extend(self._type_comments())
+        unsupported = self._unsupported_comments()
+        if unsupported:
+            lines.extend(unsupported)
+        if self.functions:
+            lines.append("")
+        for block in fn_blocks:
+            lines.append(block)
+            lines.append("")
+        for block in extern_blocks:
+            lines.append(block)
+            lines.append("")
+        for block in test_blocks:
+            lines.append(block)
             lines.append("")
         lines.append(")")
         return "\n".join(lines) + "\n"

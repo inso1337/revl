@@ -138,6 +138,67 @@ def _uses_true_division(node) -> bool:
     return False
 
 
+def _uses_float_interp(node) -> bool:
+    """Does any `${…}` template interpolate a provably-`Float` expression?
+    The canonical `Float -> Str` helper is emitted only then, so modules
+    without float interpolation stay byte-identical (docs/strings.md)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "interp":
+            for part in node.get("parts") or []:
+                if isinstance(part, (list, tuple)) and len(part) == 2 \
+                        and part[0] == "expr" and _is_float_expr(part[1]):
+                    return True
+        return any(_uses_float_interp(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_float_interp(v) for v in node)
+    return False
+
+
+# Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md). `repr`
+# gives the shortest round-trip digits; this reformats them into the ES
+# notation (integer/fraction/exponent thresholds, `-0` -> `"0"`).
+_REVL_FTOA_SRC = '''def _revl_ftoa(x):
+    """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md)."""
+    if x != x:
+        return "NaN"
+    if x == float("inf"):
+        return "Infinity"
+    if x == float("-inf"):
+        return "-Infinity"
+    if x == 0:
+        return "0"
+    sign = "-" if x < 0 else ""
+    s = repr(abs(x))
+    if "e" in s or "E" in s:
+        mant, _, exp_s = s.replace("E", "e").partition("e")
+        exp = int(exp_s)
+    else:
+        mant, exp = s, 0
+    intpart, _, frac = mant.partition(".")
+    digits = intpart + frac
+    point = len(intpart) + exp
+    i = 0
+    while i < len(digits) - 1 and digits[i] == "0":
+        i += 1
+        point -= 1
+    digits = digits[i:].rstrip("0") or "0"
+    if digits == "0":
+        return "0"
+    k = len(digits)
+    n = point
+    if k <= n <= 21:
+        body = digits + "0" * (n - k)
+    elif 0 < n <= 21:
+        body = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        body = "0." + "0" * (-n) + digits
+    else:
+        e = n - 1
+        mantissa = digits if k == 1 else digits[0] + "." + digits[1:]
+        body = mantissa + "e" + ("+" if e >= 0 else "-") + str(abs(e))
+    return sign + body'''
+
+
 # The total, value-returning division forms (docs/arithmetic.md): same
 # rounding as the faulting operations, Err(reason) at a zero divisor.
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
@@ -798,18 +859,44 @@ def _emit_types(types: dict) -> "_Lines":
     return out
 
 
+def _is_float_expr(node: object) -> bool:
+    """Is this expression *syntactically* certain to be a `Float`?
+
+    Only what the node proves on its own — a Float literal, a `/` (true
+    division always yields Float), a Float-annotated arithmetic node, or a
+    unary minus of one. This mirrors the TypeScript backend's proof; the
+    emitter has no type environment, so a False answer only costs the default
+    `str()`, which is already correct for a non-Float. See docs/strings.md.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        value = node.get("value")
+        return isinstance(value, float) and not isinstance(value, bool)
+    if kind == "bin":
+        return node.get("op") == "/" or node.get("operands") == "Float"
+    if kind == "un":
+        return node.get("op") == "-" and _is_float_expr(node.get("operand"))
+    return False
+
+
 def _interp_fstring(parts) -> str:
     """Emit a `${…}` template as a string concatenation.
 
     Each interpolated segment is a full expression (`["expr", ir_node]`),
     stringified with `str(...)`; text segments are Python string literals.
     Concatenation (not an f-string) so an interpolated expression may itself
-    contain quotes or braces.
+    contain quotes or braces. A `Float` renders through `_revl_ftoa` (the
+    canonical ECMAScript `Number::toString` form), not python's `str` — `str`
+    gives `nan`/`0.0`/`-0.0`, which no other tier produces (docs/strings.md).
     """
     pieces: list[str] = []
     for kind, value in parts:
         if kind == "text":
             pieces.append(repr(value))
+        elif _is_float_expr(value):
+            pieces.append(f"_revl_ftoa({_expr(value)})")
         else:  # ["expr", ir_node]
             pieces.append(f"str({_expr(value)})")
     if not pieces:
@@ -1508,6 +1595,15 @@ def emit(ir: dict) -> str:
         out.add(0, "        return float('nan')")
         out.add(0, "    return (_revl_math.copysign(float('inf'), a)")
         out.add(0, "            * _revl_math.copysign(1.0, b))")
+        out.add(0)
+    if _uses_float_interp(ir):
+        # Canonical Float -> Str (docs/strings.md): the ECMAScript
+        # Number::toString shortest-round-trip form, so `${aFloat}` agrees with
+        # every other tier. python's own `str(float)` gives `nan`/`0.0`/`-0.0`,
+        # none of which match. `repr` supplies the shortest digits; the rest is
+        # the ES notation rule (a shared spec each tier spells in host syntax).
+        for line in _REVL_FTOA_SRC.splitlines():
+            out.add(0, line)
         out.add(0)
     out.add(0, "def _revl_field(v, name):")
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')

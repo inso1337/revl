@@ -321,7 +321,35 @@ def _expr(node, env: _Env, expected=None) -> str:
         args = [_expr(a, env) for a in node.get("args") or []]
         return _comp_builtin(node.get("method"),
                              _comp_infer(target_node, env), target, args)
+    if kind == "spawn":
+        return _spawn_expr(node, env)
     raise EmitError("unsupported expr kind: %r" % (kind,))
+
+
+def _spawn_expr(node, env: _Env) -> str:
+    """Lower an instance-parametric `spawn` acquisition to a per-target helper
+    call (docs/design-v2-instances.md, phase 1).
+
+    `spawn` is the acquisition of a `let-effect` step, so this renders the
+    single Go expression the step binds to the handle. The heavy lifting —
+    isolating each provided key into a FRESH LOCAL realm (a distinct
+    `*stc.Realm` per spawn, so two instances of one component never collide)
+    and plugging the target *template* as a CHILD FIBER of the spawner — lives
+    in the emitted `revlSpawn<Target>` helper; here we just pass the spawner's
+    context and the config that flowed through the spawn.
+    """
+    target = node.get("component")
+    if not isinstance(target, str) or not target.isidentifier():
+        raise EmitError("bad spawn component %r" % (target,))
+    parent = env.ctx_ref()
+    cfg = node.get("config") or {}
+    if cfg:
+        fields = ", ".join(
+            "%s: %s" % (_camel(k), _expr(v, env)) for k, v in cfg.items()
+        )
+        return "revlSpawn%s(%s, %sConfig{%s})" % (
+            _camel(target), parent, _camel(target), fields)
+    return "revlSpawn%s(%s)" % (_camel(target), parent)
 
 
 def _comp_infer(node, env: _Env):
@@ -452,7 +480,39 @@ def _format(template: str, args: list[str]) -> str:
 
 
 def _go_string(s: str) -> str:
-    return json.dumps(str(s))
+    """A Go double-quoted string literal, escaped *from code points*.
+
+    The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
+    Go source is UTF-8: a BMP scalar spells as `\\uXXXX` (4 hex) and an astral
+    scalar as `\\UXXXXXXXX` (8 hex). `json.dumps` instead emits the astral
+    scalar as a UTF-16 surrogate pair (`\\ud83d\\ude00`), which Go rejects as an
+    invalid Unicode code point — the reason astral literals used to fail to
+    compile here. ASCII and BMP non-ASCII stay byte-identical to the old
+    `json.dumps` output (printable ASCII verbatim; `\\uXXXX` for `é` etc.), so
+    only astral literals change and v1 goldens stay frozen.
+    """
+    s = str(s)
+    out = ['"']
+    for ch in s:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append("\\u%04x" % cp)
+        else:
+            out.append("\\U%08x" % cp)
+    out.append('"')
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -819,6 +879,9 @@ def _host_type_of_acquire(acquire):
     if acquire.get("kind") == "host":
         recv = acquire["fn"].split(".")[0]
         return _camel(recv)
+    if acquire.get("kind") == "spawn":
+        # A `spawn` acquisition binds a live instance handle, not a host object.
+        return "RevlSpawnHandle"
     return "any"
 
 
@@ -988,6 +1051,124 @@ def _emit_load_helpers(ir, out):
             out.append("\treturn %s.Load(%s(cfg))" % (target_ctx, cname))
         else:
             out.append("\treturn %s.Load(%s())" % (target_ctx, cname))
+        out.append("}")
+        out.append("")
+
+
+# --------------------------------------------------------------------------
+# instance-parametric spawn (docs/design-v2-instances.md, phase 1)
+# --------------------------------------------------------------------------
+
+def _iter_spawn_nodes(ir):
+    """Yield every `spawn` acquire node in the document (a `let-effect` step's
+    acquire whose kind is "spawn")."""
+    for comp in ir.get("components", []):
+        for step in comp.get("body", []) or []:
+            if step.get("step") == "let-effect":
+                acq = step.get("acquire") or {}
+                if acq.get("kind") == "spawn":
+                    yield acq
+
+
+def _uses_spawn(ir) -> bool:
+    return next(_iter_spawn_nodes(ir), None) is not None
+
+
+def _spawn_targets(ir):
+    """Ordered map target-name -> {"has_config", "realm_keys"} for every
+    component spawned in the document. `realm_keys` is the sorted list of keys
+    the target provides, each isolated into a fresh local realm at spawn time
+    (carried on the spawn node as `realms`)."""
+    by_name = {c["name"]: c for c in ir.get("components", [])}
+    targets: dict[str, dict] = {}
+    for acq in _iter_spawn_nodes(ir):
+        name = acq.get("component")
+        if name in targets:
+            continue
+        decl = by_name.get(name, {})
+        targets[name] = {
+            "has_config": bool(decl.get("config")),
+            "realm_keys": list(acq.get("realms") or []),
+        }
+    return targets
+
+
+def _emit_spawn_support(ir, out):
+    """Emit the `RevlSpawnHandle` type and one `revlSpawn<Target>` helper per
+    spawned component. Emitted only when the document spawns, so non-spawning
+    programs stay byte-identical."""
+    if not _uses_spawn(ir):
+        return
+    out.append("// ---- instance-parametric spawn (docs/design-v2-instances.md) ----------")
+    out.append("// A live spawned-component instance. The instance is a CHILD FIBER of its")
+    out.append("// spawner — its own nested teardown scope. Dispose() unloads that fiber,")
+    out.append("// running the instance's LIFO teardown NOW, independent of the spawner, so")
+    out.append("// a request-scoped instance is reclaimed when the request ends and is never")
+    out.append("// deferred to the component's teardown. Dispose is idempotent (the fiber is")
+    out.append("// taken once), so the spawner's own undo — w.dispose() — is a harmless no-op")
+    out.append("// once the instance is already gone: an un-disposed instance still cannot")
+    out.append("// outlive its spawner, but a disposed one is reclaimed early.")
+    out.append("type RevlSpawnHandle struct {")
+    out.append("\tmu    sync.Mutex")
+    out.append("\tfiber *stc.Fiber")
+    out.append("\tctx   *stc.Context")
+    out.append("}")
+    out.append("")
+    out.append("func newRevlSpawnHandle(fiber *stc.Fiber, ctx *stc.Context) *RevlSpawnHandle {")
+    out.append("\treturn &RevlSpawnHandle{fiber: fiber, ctx: ctx}")
+    out.append("}")
+    out.append("")
+    out.append("// Dispose unloads the instance's fiber (its LIFO teardown). Idempotent.")
+    out.append("func (h *RevlSpawnHandle) Dispose() error {")
+    out.append("\th.mu.Lock()")
+    out.append("\tf := h.fiber")
+    out.append("\th.fiber = nil")
+    out.append("\th.mu.Unlock()")
+    out.append("\tif f != nil {")
+    out.append("\t\tf.Dispose()")
+    out.append("\t}")
+    out.append("\treturn nil")
+    out.append("}")
+    out.append("")
+    out.append("// Ctx exposes the instance's own isolated context, so its spawner (the sole")
+    out.append("// holder of this handle) can resolve a provision the instance published in")
+    out.append("// its private local realm. A sibling, isolated into a different local realm,")
+    out.append("// cannot reach it — supervision-tree addressing.")
+    out.append("func (h *RevlSpawnHandle) Ctx() *stc.Context {")
+    out.append("\th.mu.Lock()")
+    out.append("\tdefer h.mu.Unlock()")
+    out.append("\treturn h.ctx")
+    out.append("}")
+    out.append("")
+    out.append("// Fiber exposes the live fiber (nil once disposed) for lifecycle assertions.")
+    out.append("func (h *RevlSpawnHandle) Fiber() *stc.Fiber {")
+    out.append("\th.mu.Lock()")
+    out.append("\tdefer h.mu.Unlock()")
+    out.append("\treturn h.fiber")
+    out.append("}")
+    out.append("")
+    for name, info in _spawn_targets(ir).items():
+        cname = _camel(name)
+        keys = info["realm_keys"]
+        if info["has_config"]:
+            sig = "func revlSpawn%s(parent *stc.Context, cfg %sConfig) *RevlSpawnHandle {" % (cname, cname)
+        else:
+            sig = "func revlSpawn%s(parent *stc.Context) *RevlSpawnHandle {" % cname
+        out.append("// revlSpawn%s plugs a fresh %s instance as a CHILD FIBER of the" % (cname, cname))
+        out.append("// spawner, each provided key isolated into its OWN fresh local realm — a")
+        out.append("// distinct *stc.Realm per call, so two instances never collide on a")
+        out.append("// provision (disjoint by construction, no label). The handle it returns")
+        out.append("// reclaims exactly this instance on Dispose().")
+        out.append(sig)
+        out.append("\tchild := parent.Child()")
+        for key in keys:
+            out.append("\tchild.Isolate(%s, stc.NewRealm(stc.RootRealm(), %s))" %
+                       (_key_var(key), _go_string("spawn:%s:%s" % (name, key))))
+        if info["has_config"]:
+            out.append("\tfiber := child.Load(%s(cfg))" % cname)
+        else:
+            out.append("\tfiber := child.Load(%s())" % cname)
+        out.append("\treturn newRevlSpawnHandle(fiber, child)")
         out.append("}")
         out.append("")
 
@@ -1233,6 +1414,7 @@ class _V3GoCtx:
         self.used_stdlib = False
         self.needs_reflect = False      # structural `==` on a non-scalar
         self.needs_float_div = False    # `/` (true division, IEEE at zero)
+        self.needs_ftoa = False         # canonical Float -> Str in interpolation
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
@@ -1789,6 +1971,13 @@ def _go_v3_interp(node: dict, ctx: _V3GoCtx) -> str:
     for part_kind, value in node.get("parts") or []:
         if part_kind == "text":
             fmt_parts.append(str(value).replace("%", "%%"))
+        elif _go_v3_infer_type(value, ctx) == "Float":
+            # A `Float` renders through the canonical ECMAScript form, not
+            # Go's `%v` (`%v` matches for these values but diverges elsewhere,
+            # e.g. `1e-07` vs `1e-7`); see docs/strings.md.
+            ctx.needs_ftoa = True
+            fmt_parts.append("%s")
+            args.append(f"revlFtoa({_go_v3_expr(value, ctx)})")
         else:
             fmt_parts.append("%v")
             args.append(_go_v3_expr(value, ctx))
@@ -2140,6 +2329,82 @@ func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
 }
 '''
 
+_V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
+// cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,
+// "1e+21"/"NaN"/"Infinity", a whole-number float as "0", negative zero as "0".
+func revlFtoa(x float64) string {
+	if math.IsNaN(x) {
+		return "NaN"
+	}
+	if math.IsInf(x, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(x, -1) {
+		return "-Infinity"
+	}
+	if x == 0 {
+		return "0"
+	}
+	sign := ""
+	if x < 0 {
+		sign = "-"
+		x = -x
+	}
+	s := strconv.FormatFloat(x, 'e', -1, 64) // shortest mantissa: d[.ddd]e±dd
+	mant := s
+	exp := 0
+	if e := strings.IndexByte(s, 'e'); e >= 0 {
+		mant = s[:e]
+		exp, _ = strconv.Atoi(s[e+1:])
+	}
+	intpart := mant
+	frac := ""
+	if d := strings.IndexByte(mant, '.'); d >= 0 {
+		intpart = mant[:d]
+		frac = mant[d+1:]
+	}
+	digits := intpart + frac
+	point := len(intpart) + exp
+	i := 0
+	for i < len(digits)-1 && digits[i] == '0' {
+		i++
+		point--
+	}
+	digits = digits[i:]
+	j := len(digits)
+	for j > 1 && digits[j-1] == '0' {
+		j--
+	}
+	digits = digits[:j]
+	if digits == "0" {
+		return "0"
+	}
+	k := len(digits)
+	n := point
+	var body string
+	switch {
+	case k <= n && n <= 21:
+		body = digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		body = digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		body = "0." + strings.Repeat("0", -n) + digits
+	default:
+		e := n - 1
+		m := digits
+		if k > 1 {
+			m = digits[:1] + "." + digits[1:]
+		}
+		esign := "+"
+		if e < 0 {
+			esign = "-"
+			e = -e
+		}
+		body = m + "e" + esign + strconv.Itoa(e)
+	}
+	return sign + body
+}'''
+
 _V3_STDLIB_PREAMBLE = '''// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
 
@@ -2311,6 +2576,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     if ctx.used_stdlib:
         imports.append('\t"strings"')
         imports.append('\t"unicode/utf8"')
+    if ctx.needs_ftoa:
+        imports.append('\t"math"')
+        imports.append('\t"strconv"')
+        imports.append('\t"strings"')
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -2319,7 +2588,7 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     out.append("")
     if imports:
         out.append("import (")
-        out.extend(sorted(imports))
+        out.extend(sorted(set(imports)))
         out.append(")")
         out.append("")
     if ctx.needs_reflect:
@@ -2333,6 +2602,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         # at compile time, where IEEE defines +Inf. Through a call it is an
         # ordinary runtime float division, which is what revl specifies.
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_ftoa:
+        out.append(_V3_FTOA_HELPER)
         out.append("")
     if ctx.needs_overflow:
         out.append("func revlAdd(a, b int64) int64 {")
@@ -2438,11 +2710,12 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
-    # spawn / instance-parametric IR lives under v3 too, but is a separate
-    # feature that is out of scope here — reject only that node, not v3 itself.
-    for comp in ir.get("components", []):
-        if comp.get("spawn") is not None or comp.get("instance") is not None:
-            raise EmitError("spawn/instance-parametric IR is out of scope")
+    # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
+    # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
+    # lowered below to a child-fiber plug on the real stc-go runtime. The old
+    # `comp["spawn"]/["instance"]` reject shape never matched the frozen IR
+    # (spawn is a step's acquire, not a component key), so it was inert; it is
+    # removed now that the lowering exists.
 
     # ir_version-3 routing:
     #   * No component, or any top-level pure declaration (functions / types /
@@ -2473,6 +2746,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     for comp in ir.get("components", []):
         _emit_component(comp, ir.get("services", {}), body)
     _emit_load_helpers(ir, body)
+    _emit_spawn_support(ir, body)
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")

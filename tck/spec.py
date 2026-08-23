@@ -16,6 +16,11 @@ Requirement sources:
   * G7     — docs/contract-errata.md, "Contract rejection coverage" (G7 is a
              runtime property of the lowering, verified by the runtime
              scenarios, not by the checker).
+  * C1     — docs/collections.md, "Decision" (Map iteration yields keys in
+             ascending canonical Str order). A runtime property: it becomes
+             checkable the moment a runtime drives map iteration, and is
+             reported *pending* until then — the clause exists ahead of the
+             iteration feature so the order can never ship uncontracted.
 
 Not every amendment is observable at the runtime layer: A2/A3/A4/A6/A7 are
 compile-time / lowering / advisory obligations on the *emitter and checker*, so
@@ -203,14 +208,11 @@ def _a8_async_ideal(obs: Observation) -> tuple[bool, str]:
                 _state(obs, "failing", "FAILED"))
 
 
-def _a8_async_py_divergence(obs: Observation) -> bool:
-    # cordis-py: an async body routes the setup failure to _make_effect_guard,
-    # so the inverses DO run LIFO with no residue (containment holds) but the
-    # fiber lands ACTIVE instead of FAILED. A8's "lands FAILED" is dropped for
-    # async bodies only.
-    inverses_ran = "map.drop" in obs.trace
-    landed_active = obs.states.get("failing") == "ACTIVE"
-    return inverses_ran and landed_active
+# A8-async divergence RESOLVED: cordis-py (harden-fiber-lifecycle 1316174, folded
+# into geohotstan/cordis-py#1) now routes an async setup failure to the fiber's
+# error slot, landing FAILED like the sync path. So a8_async_body_failure carries
+# no pinned divergence any more — it is a plain conformance check the reference
+# tier passes. See docs/contract-errata.md, docs/fault-tests.md §8.
 
 
 def _g7(obs: Observation) -> tuple[bool, str]:
@@ -222,6 +224,32 @@ def _g7(obs: Observation) -> tuple[bool, str]:
                 _tail(obs, ["map.remove k2", "map.remove k1", "map.drop",
                             "pool.close postgres://primary:5432/app"]),
                 (obs.errors == 0, f"errors={obs.errors}"))
+
+
+# ---------------------------------------------------------------------------
+# C1 — deterministic Map iteration order (docs/collections.md)
+# ---------------------------------------------------------------------------
+
+# The fixture an exercising adapter must build: keys inserted deliberately
+# out of order, so the observed iteration sequence distinguishes the chosen
+# sorted order from insertion order AND from any randomized host order.
+#   insertion order would be : banana, apple, cherry
+#   a randomized host order   : any permutation, unstable across runs
+#   the CHOSEN canonical order: apple, banana, cherry
+# The adapter drives `keys()` (or a for-over-a-map) and appends one
+# ``"iter <key>"`` trace op per key yielded, in order.
+C1_INSERT_KEYS = ("banana", "apple", "cherry")
+C1_EXPECTED = ["iter apple", "iter banana", "iter cherry"]
+
+
+def _c1_map_iteration_order(obs: Observation) -> tuple[bool, str]:
+    # ascending canonical Str order (Unicode scalar / UTF-8 byte lexicographic).
+    # sorted() over the fixture keys is the canonical order on the reference
+    # tier; the oracle pins the exact sequence so insertion/random order fail.
+    got = [e for e in obs.trace if e.startswith("iter ")]
+    ok = got == C1_EXPECTED
+    return ok, f"iteration order {got!r} " + ("==" if ok else "!=") + \
+        f" canonical {C1_EXPECTED!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -287,26 +315,29 @@ CATALOG: tuple[Case, ...] = (
     Case("a8_async_body_failure", "A8", Kind.RUNTIME,
          "mid-body failure containment (async body)",
          "The same L-Raise reading for a body containing an await: inverses run "
-         "LIFO, no residue, fiber lands FAILED.",
-         ideal=_a8_async_ideal,
-         divergences=(
-             Divergence(
-                 "async body lands ACTIVE, inverses still run (cordis-py)",
-                 frozenset({"cordis-py"}),
-                 _a8_async_py_divergence,
-                 "cordis-py routes an async effect-setup failure to "
-                 "_make_effect_guard: the accumulated inverses run LIFO with no "
-                 "residue (A8 containment holds) but the fiber lands ACTIVE "
-                 "instead of FAILED. Sync bodies are unaffected. Documented in "
-                 "docs/contract-errata.md, docs/fault-tests.md §8, "
-                 "docs/replay.md §7."),
-         )),
+         "LIFO, no residue, fiber lands FAILED. (Was a cordis-py pinned "
+         "divergence until harden-fiber-lifecycle 1316174 fixed it; now a plain "
+         "conformance check.)",
+         ideal=_a8_async_ideal),
     Case("g7_lifo_complete_teardown", "G7", Kind.RUNTIME,
          "LIFO-complete derived teardown",
          "Provisions, method-time effects, and activation inverses all recover "
          "newest-first in one drain; every dependent inverse precedes the "
          "provider's own close.",
          ideal=_g7),
+
+    Case("c1_map_iteration_order", "C1", Kind.RUNTIME,
+         "Map iteration order is sorted, not insertion",
+         "Iterating a Map (keys()/for) yields keys in ascending canonical Str "
+         "order (Unicode scalar / UTF-8 byte lexicographic) on every tier — a "
+         "pure function of the key set, never of insertion history. The fixture "
+         "inserts keys out of order (banana, apple, cherry) so the observed "
+         "sequence tells sorted order apart from insertion order and from any "
+         "randomized host order (docs/collections.md, docs/stdlib-2.0.md §Map). "
+         "Map iteration is unimplemented today, so every current adapter reports "
+         "this pending; the clause exists ahead of the feature so the order can "
+         "never ship uncontracted.",
+         ideal=_c1_map_iteration_order),
 
     # Compile-time / lowering / advisory amendments — a runtime adapter cannot
     # exercise these; they are enforced in the emitter and checker. Reported
