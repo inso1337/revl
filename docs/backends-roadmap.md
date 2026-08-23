@@ -13,7 +13,7 @@ The organizing fact: **the five tiers are disjoint by directory** (`backends/{py
 | cordis-wasm | **user wrote it** (first-party) | 1 test file, wasmtime exec | i64 port ✅; rich-type service boundary ✅ (Str/Opt/Result/records/ADTs/List cross as canonical-ABI pointers) — **19→7 gaps**, the 7 genuine boundaries (Float, Map, config, host `Map.new`); wasm `spawn` now unblocked, not yet lowered |
 | cordis-go | third-party `0xdenny218/stc-go` (pinned `b3d6788`) | scenarios + v3 fixtures executed; **0 gaps in the conformance matrix**, CI-gated (`go build`) | v1/v2/v3 all emit & build; teardown-ordering divergence from cordis-rs (errata); no spawn yet |
 
-**Conformance matrix status:** all five *language* tiers — python, typescript, rust, java, **go** — are at **0 gaps**, each validated by its real compiler. Only cordis-wasm has gaps (its i32→i64 port is in flight; its remaining gaps are scalar-only-service-boundary + config/host, not extern gaps).
+**Conformance matrix status:** all five *language* tiers — python, typescript, rust, java, **go** — are at **0 gaps**, each validated by its real compiler. Only cordis-wasm has gaps — 7, all genuine tier boundaries (Float, Map, config, host `Map.new`) after both the i64 port and the rich-type service boundary landed.
 
 The through-line across every past wave: **a claim with no gate behind it** — emitters marked correct with nothing executing their output (the `Map.new()` that shipped in a golden; realm semantics asserted at runtime nowhere). The runtime-truth theme below exists to close that class for good.
 
@@ -56,7 +56,7 @@ The backend contract is small (install effect with inverse; provide/read keys; r
 These touch shared emit structure/IR semantics, so they conflict if run in parallel. One at a time, integrated between:
 
 - **D1 · single expression renderer per backend** — ✅ **on main.** ts/rust/java each converged their v1/component renderer and their 2.0 renderer into one shape-dispatching function (py/wasm were already single-renderer). This is the structural fix behind most of the divergences the runtime-truth wave then surfaced.
-- **D2 · uniform component IR dialect** — reduce per-backend divergence in how components lower.
+- **D2 · uniform component IR dialect** — ✅ **DONE** (main roadmap item 5, closed by `5d59834`'s tagged-ADT design). Per-backend divergence in component lowering is normalized.
 - **D3 · `call` node disambiguation** across dialects (partly addressed by D1's shape-dispatch).
 
 ## Deferred / tracked, not scheduled
