@@ -426,9 +426,110 @@ def _run_plan(args) -> int:
             return 1
 
     result = build_plan(files=list(args.files), manifest=running,
-                        replacing=tuple(args.replacing))
+                        replacing=tuple(args.replacing),
+                        include_ir=bool(args.output))
+
+    if args.output:
+        # -o turns the plan into an executable artifact (docs/apply.md). Only an
+        # admitted plan can be applied; a rejection is printed, not written.
+        from .apply import build_artifact, ApplyError  # noqa: PLC0415
+
+        try:
+            artifact = build_artifact(result, running)
+        except ApplyError as error:
+            print(render(result))
+            print(f"\nerror: {error}", file=sys.stderr)
+            return 1
+        with open(args.output, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2)
+        ops = len(artifact["operations"])
+        print(f"wrote {args.output}: an applyable plan of {ops} operation(s) — "
+              f"`revl apply {args.output}` (docs/apply.md)")
+        return 0
+
     print(json.dumps(result, indent=2) if args.json else render(result))
     return 0 if result["admissible"] else 1
+
+
+def _run_apply(args) -> int:
+    """`revl apply change.plan` — boot the plan's pre-state, then execute the
+    plan against it: drift-refuse if the composition moved, verify each step
+    against its prediction, and roll the applied prefix back on any failure
+    (docs/apply.md). A one-shot: it tears the composition down afterwards and
+    reports whether the change (or its rollback) left any residue."""
+    from .apply import validate_artifact, ApplyError
+    from .mcp.session import Session, SessionError
+
+    try:
+        with open(args.plan, encoding="utf-8") as handle:
+            artifact = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.plan}: {error}", file=sys.stderr)
+        return 1
+    try:
+        validate_artifact(artifact)
+    except ApplyError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    running_ir = artifact.get("runningIR") or {}
+    if args.against:
+        # apply against a DIFFERENT current composition than the plan assumed —
+        # the honest way to exercise drift refusal from the CLI.
+        try:
+            with open(args.against, encoding="utf-8") as handle:
+                running_ir = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read {args.against}: {error}", file=sys.stderr)
+            return 1
+
+    session = Session()
+    try:
+        if running_ir.get("components"):
+            session.load(running_ir)
+        elif artifact["resultingIR"].get("components"):
+            # cold start: nothing was running, so applying is just bringing the
+            # resulting composition up.
+            state = session.load(artifact["resultingIR"])
+            report = {"applied": True, "coldStart": True,
+                      "resulting": artifact["resulting"]["components"],
+                      "state": state}
+            _print_apply(report, args)
+            unloaded = session.unload()
+            print(f"torn down — no residue: {unloaded['noResidue']}")
+            return 0
+        report = session.apply(artifact)
+    except SessionError as error:
+        # a drift refusal lands here — the composition is untouched
+        print(f"refused: {error}", file=sys.stderr)
+        if session.loaded:
+            session.unload()
+        return 1
+
+    _print_apply(report, args)
+    unloaded = session.unload()
+    print(f"\ntorn down — no residue: {unloaded['noResidue']}")
+    return 0 if report["applied"] else 1
+
+
+def _print_apply(report: dict, args) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2))
+        return
+    if report["applied"]:
+        print(f"applied: {len(report.get('steps') or [])} step(s) — resulting "
+              f"composition: {', '.join(report.get('resulting') or []) or '(empty)'}")
+        for step in report.get("steps") or []:
+            print(f"  {step['op']:<8} {step['name']:<16} -> {step['state'] or 'gone'}")
+        return
+    print(f"FAILED at `{report.get('failedAt')}`: {report['reason']}")
+    print(f"rolled back {len(report.get('rolledBack') or [])} step(s) "
+          f"(LIFO, derived inverses):")
+    for undo in report.get("rolledBack") or []:
+        print(f"  {undo['undo']:<8} {undo['name']}")
+    print(f"no residue: {report.get('noResidue')} "
+          f"(registry {report['registry']['baseline']} -> "
+          f"{report['registry']['afterRollback']})")
 
 
 def _run_query(args, ir: dict) -> int:
@@ -508,7 +609,22 @@ def main(argv: list[str] | None = None) -> int:
     plan_cmd.add_argument("--replacing", action="append", default=[], metavar="NAME",
                           help="a running component withdrawn in this admission "
                                "(renames); repeatable")
+    plan_cmd.add_argument("-o", "--output", default=None, metavar="change.plan",
+                          help="serialize an EXECUTABLE plan artifact to this path "
+                               "(basis for drift, ordered ops, resulting IR) — "
+                               "apply it with `revl apply` (docs/apply.md)")
     plan_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+
+    apply_cmd = sub.add_parser(
+        "apply", help="execute a `revl plan -o` artifact against a live composition: "
+                      "drift-refuse, verify each step, roll back on failure (docs/apply.md)")
+    apply_cmd.add_argument("plan", metavar="change.plan",
+                           help="a plan artifact written by `revl plan -o`")
+    apply_cmd.add_argument("--against", default=None, metavar="RUNNING.json",
+                           help="boot this composition as the live pre-state instead "
+                                "of the plan's own — drift is refused if it differs "
+                                "from the plan's basis")
+    apply_cmd.add_argument("--json", action="store_true", help="machine-readable output")
 
 
     query = sub.add_parser(
@@ -723,6 +839,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "plan":
         return _run_plan(args)
+
+    if args.command == "apply":
+        return _run_apply(args)
 
     try:
         ir = compile_files(args.files)
