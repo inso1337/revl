@@ -403,6 +403,43 @@ def _run_import(args) -> int:
     return 0
 
 
+def _run_export(args) -> int:
+    """`revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+
+    Slice 1 of the Component Model bridge: pure IR codegen of the standard WIT
+    interface a revl service or composition presents (the importer's type
+    mapping, run backwards). No runtime, no emission, no binary — interface
+    text only. Effects ride alongside the shape as `/// @revl:*` doc comments,
+    because WIT's type system carries shape, not lifecycle.
+    """
+    from .export_wit import export_wit  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        if getattr(args, "json_diagnostics", False):
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        source = export_wit(ir, service=args.service,
+                            composition=args.composition, package=args.package)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        try:
+            Path(args.output).write_text(source, encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+            return 1
+    else:
+        print(source, end="")
+    return 0
+
+
 def _run_plan(args) -> int:
     """`revl plan` — what admitting these files would do (docs/plan.md).
 
@@ -548,6 +585,55 @@ def _run_query(args, ir: dict) -> int:
         print(json.dumps(result, indent=2))
     else:
         print(render(result))
+    return 0 if result.get("ok") else 1
+
+
+def _run_history_query(args) -> int:
+    """`revl query {emitted-between,touched}` — the historical mode
+    (docs/queries.md §9): the same query envelope answered against a RECORDED
+    run rather than a static IR. Reads a replay-recording JSON and/or an
+    item-27 lifecycle JSONL, never source."""
+    from . import query, why_runtime  # noqa: PLC0415
+
+    def _load_json(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    if args.query_command == "emitted-between":
+        try:
+            timeline = _load_json(args.timeline)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read timeline {args.timeline}: {error}",
+                  file=sys.stderr)
+            return 1
+        result = query.emitted_between(timeline, args.frm, args.to,
+                                       args.component)
+    else:  # touched
+        record = {}
+        if args.timeline:
+            try:
+                record["timeline"] = _load_json(args.timeline)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read timeline {args.timeline}: {error}",
+                      file=sys.stderr)
+                return 1
+        if args.trace:
+            try:
+                record["trace"] = why_runtime.read_trace(args.trace)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read trace {args.trace}: {error}",
+                      file=sys.stderr)
+                return 1
+        if not record:
+            print("error: give --trace and/or --timeline (a recorded run to "
+                  "query)", file=sys.stderr)
+            return 1
+        result = query.lifetime(record, args.component)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(query.render(result))
     return 0 if result.get("ok") else 1
 
 
@@ -756,6 +842,38 @@ def main(argv: list[str] | None = None) -> int:
                                  metavar="METHOD",
                                  help="a method the service would lose (repeatable)")
 
+    # historical mode (docs/queries.md §9): the same envelope, over a RECORDED
+    # run instead of a static IR. These read files, not source, so they sit
+    # outside the compile-from-source loop above. (Live mode is session-bound —
+    # it has no one-shot CLI entry; use the MCP `revl_live_query` tool.)
+    between = query_sub.add_parser(
+        "emitted-between",
+        help="which emissions crossed between steps X and Y (a recorded replay "
+             "timeline JSON)?")
+    between.add_argument("--timeline", required=True, metavar="FILE",
+                         help="a replay recording JSON (a `revl_timeline` dump)")
+    between.add_argument("--from", dest="frm", type=int, required=True,
+                         metavar="X", help="first step index (inclusive)")
+    between.add_argument("--to", type=int, required=True, metavar="Y",
+                         help="last step index (inclusive)")
+    between.add_argument("--component", default=None,
+                         help="restrict to one component; omit for all")
+    between.add_argument("--json", action="store_true",
+                         help="machine-readable output")
+
+    touched = query_sub.add_parser(
+        "touched",
+        help="everything a component touched during its life (item-27 lifecycle "
+             "trace + optional replay recording)")
+    touched.add_argument("component", metavar="COMPONENT")
+    touched.add_argument("--trace", default=None, metavar="FILE",
+                         help="an item-27 lifecycle JSONL (`revl run --trace`) "
+                              "for the load/withdraw span")
+    touched.add_argument("--timeline", default=None, metavar="FILE",
+                         help="a replay recording JSON for the effects/emissions")
+    touched.add_argument("--json", action="store_true",
+                         help="machine-readable output")
+
     fmt = sub.add_parser("fmt", help="canonically format .rvl sources (IR-equivalence gated)")
     fmt.add_argument(
         "--migrate",
@@ -887,6 +1005,32 @@ def main(argv: list[str] | None = None) -> int:
                             help="on rejection, print a structured diagnostic "
                                  "instead of the human rendering")
 
+    # `revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+    # Additive: its own `export` group, mirroring the `import` family's shape.
+    exp_cmd = sub.add_parser(
+        "export",
+        help="export a revl service/composition as an external interface "
+             "definition (the reverse of `revl import`)")
+    exp_sub = exp_cmd.add_subparsers(dest="export_command", required=True)
+    exp_wit = exp_sub.add_parser(
+        "wit",
+        help="generate the standard WIT interface for a revl service or "
+             "composition (docs/wit-bridge.md)")
+    exp_wit.add_argument("files", nargs="+", help=".rvl source files")
+    exp_group = exp_wit.add_mutually_exclusive_group(required=True)
+    exp_group.add_argument("--service", default=None, metavar="NAME",
+                           help="export a single service by name")
+    exp_group.add_argument("--composition", action="store_true",
+                           help="export every service the composition provides")
+    exp_wit.add_argument("--package", default="revl:exported", metavar="NS:NAME",
+                         help="WIT package id for the generated file "
+                              "(default: revl:exported)")
+    exp_wit.add_argument("-o", "--output", default=None,
+                         help="output path (default: stdout)")
+    exp_wit.add_argument("--json-diagnostics", action="store_true",
+                         help="on rejection, print a structured diagnostic instead "
+                              "of the human rendering")
+
     serve = sub.add_parser(
         "serve",
         help="serve a composition's OWN provided operations as MCP tools "
@@ -986,11 +1130,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "import":
         return _run_import(args)
 
+    if args.command == "export":
+        return _run_export(args)
+
     if args.command == "plan":
         return _run_plan(args)
 
     if args.command == "apply":
         return _run_apply(args)
+
+    # historical query mode reads a recorded run (files, not source), so it is
+    # routed before the compile-from-source step every other command shares
+    if args.command == "query" and args.query_command in ("emitted-between",
+                                                           "touched"):
+        return _run_history_query(args)
 
     try:
         ir = compile_files(args.files)
