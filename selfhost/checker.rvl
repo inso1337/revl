@@ -27,8 +27,16 @@
 // arrows/match/templates (the catch-all arm types them unknown), Int-literal
 // i64 range refusal (needs big-int text parsing; see findings-shadow.md),
 // Opt/List/record heads in `compatible`.
+//
+// SLICE TWO (service boundaries) lives at the bottom of this file: method
+// signatures on service declarations, call-site argument checking against
+// those declarations, and the checkable core of the G4 upper-bound rule —
+// a plain-declared provision method whose body reaches an `emission`
+// extern (directly or through a named fn call chain) is refused.
 
-use "./parser.rvl" { Expr, parse_expr_str, is_bad }
+use "./lexer.rvl" { Token, lex_src }
+use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN,
+                    parse_expr_str, is_bad, expr_at, params_at, type_at }
 
 // ---------------------------------------------------------------- env
 
@@ -141,8 +149,9 @@ fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
 
 fn infer(e: Expr, env: List[Bind]) -> Infer {
   return match e {
-    IntLit(_)  => ok_ty("Int"),
-    StrLit(_)  => ok_ty("Str"),
+    IntLit(_)   => ok_ty("Int"),
+    FloatLit(_) => ok_ty("Float"),
+    StrLit(_)   => ok_ty("Str"),
     BoolLit(_) => ok_ty("Bool"),
     NullLit    => refuse("`null` has no type in revl — absence is Opt[T]"),
     Var(n)     => ok_ty(lookup_at(env, n, 0)),
@@ -217,4 +226,980 @@ test "equality with an unknown local is Bool" {
 
 test "null is refused" {
   assert infer_expr_str("null") == "refuse"
+}
+
+// ================================================================ slice two
+//
+// The service-boundary checker: method signatures on service declarations,
+// call-site argument checking against those declarations, and the checkable
+// core of G4's upper-bound rule. This is a *port* of src/revl/lower.py's
+// provision checks (`_component_req_call`, `_method_emissions`) and of
+// `_emitting_capabilities`' fixed point — differential oracle against the
+// reference compiler in tests/test_selfhost_checker.py, with the reference's
+// diagnostic text as ground truth.
+//
+// Scope, stated plainly:
+//   * the fixed point here is the NAME-CALL subset. First-class dispatch —
+//     a bare fn value escaping a body, commit 1a24197's `*` capability — is
+//     fenced out: `calls_in` collects callee positions only, never value
+//     positions, so no `*` ever enters the capability sets.
+//   * bodies are parsed line-sensitively (one statement per line; the lexer's
+//     tokens carry line numbers). Multi-line statements are not recovered.
+//   * plain-fn call sites carry no signature checks at all — the reference
+//     checks none there either (only required-service receivers and builtins
+//     get arity/type checks); plain fn bodies feed the call graph only.
+//
+// Symbol tables are Map[Str, V] values — services, fns, requirement keys,
+// emission capabilities. Slice one's assoc-list environment stays (five
+// bindings, byte-identical oracle); the tables below are where lookup shape
+// actually matters.
+
+type MethSig = { name: Str, params: List[ParamN], ret: Str,
+                 isEm: Bool, caps: List[Str] }
+type SvcD    = { name: Str, methods: List[MethSig] }
+// kind: emit | effect | undo | let | return | expr | skip; bind names a let.
+type Stmt    = { kind: Str, bind: Str, e: Expr }
+type FnD     = { name: Str, params: List[ParamN], extEm: Bool, body: List[Stmt] }
+type ProvM   = { name: Str, params: List[ParamN], body: List[Stmt] }
+type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
+type CompD   = { name: Str, reqs: List[Bind], provs: List[Provide],
+                 setup: List[Stmt] }
+pub type Prog = { services: List[SvcD], fns: List[FnD], comps: List[CompD],
+                  bad: Str }
+
+// ---------------------------------------------------------------- tokens
+
+fn tkc(ts: List[Token], i: Int) -> Token {
+  if (i < ts.length()) { return ts[i] }
+  return { kind: "eof", text: "", line: 0 }
+}
+
+fn atk(ts: List[Token], i: Int, k: Str) -> Bool { return tkc(ts, i).kind == k }
+
+fn atw(ts: List[Token], i: Int, w: Str) -> Bool {
+  let t = tkc(ts, i)
+  return t.kind == "kw" && t.text == w
+}
+
+fn skip_line(ts: List[Token], i: Int) -> Int {
+  if (i >= ts.length()) { return i }
+  let ln = tkc(ts, i).line
+  var j = i
+  while (j < ts.length() && tkc(ts, j).line == ln) { j += 1 }
+  return j
+}
+
+fn line_end(ts: List[Token], i: Int, hi: Int) -> Int {
+  let ln = tkc(ts, i).line
+  var j = i
+  while (j < hi && tkc(ts, j).line == ln) { j += 1 }
+  return j
+}
+
+// Index just past the `}` matching the `{` at i; -1 when unbalanced.
+fn close_brace(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (j < ts.length()) {
+    if (atk(ts, j, "{")) { depth += 1 }
+    else {
+      if (atk(ts, j, "}")) {
+        depth -= 1
+        if (depth == 0) { return j + 1 }
+      }
+    }
+    j += 1
+  }
+  return 0 - 1
+}
+
+// ---------------------------------------------------------------- lists
+
+fn quote_join(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(", ") }
+    out = out.concat("`").concat(xs[i]).concat("`")
+    i += 1
+  }
+  return out
+}
+
+fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
+
+fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) {
+    if (!contains(out, ys[i])) { out = out.push(ys[i]) }
+    i += 1
+  }
+  return out
+}
+
+fn subset_of(a: List[Str], b: List[Str]) -> Bool {
+  var i = 0
+  while (i < a.length()) {
+    if (!contains(b, a[i])) { return false }
+    i += 1
+  }
+  return true
+}
+
+fn minus_list(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    if (!contains(ys, xs[i])) { out = out.push(xs[i]) }
+    i += 1
+  }
+  return out
+}
+
+// Insertion sort ascending; diagnostics sort their extras alphabetically,
+// exactly as lower.py's `sorted(used - declared)` does.
+fn sort_strs(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    let v = xs[i]
+    var k = 0
+    var placed = false
+    var res: List[Str] = []
+    while (k < out.length()) {
+      if (!placed && out[k] > v) {
+        res = res.push(v)
+        placed = true
+      }
+      res = res.push(out[k])
+      k += 1
+    }
+    if (!placed) { res = res.push(v) }
+    out = res
+    i += 1
+  }
+  return out
+}
+
+// Small non-negative integers only — that is all a diagnostic count needs.
+// (The stdlib has no Int->Str yet; see findings-shadow2.md.)
+fn int_str(n: Int) -> Str {
+  if (n < 10) {
+    return ["0","1","2","3","4","5","6","7","8","9"][n]
+  }
+  return int_str(n.div_trunc(10)).concat(int_str(n % 10))
+}
+
+
+// Record constructors: a `var`'s fields cannot appear directly inside a
+// record literal (the var never escapes its function), so every construction
+// from mutable state goes through one of these value-taking helpers.
+fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
+
+fn mk_meths(xs: List[MethSig], i: Int, ok: Bool) -> MethsR {
+  return { xs: xs, i: i, ok: ok }
+}
+
+fn mk_fn_d(nm: Str, ps: List[ParamN], em: Bool) -> FnD {
+  return { name: nm, params: ps, extEm: em, body: [] }
+}
+
+fn mk_meth(nm: Str, ps: List[ParamN], rt: Str, em: Bool,
+           cs: List[Str]) -> MethSig {
+  return { name: nm, params: ps, ret: rt, isEm: em, caps: cs }
+}
+
+fn mk_comp(nm: Str, rq: List[Bind], pv: List[Provide],
+           su: List[Stmt]) -> CompD {
+  return { name: nm, reqs: rq, provs: pv, setup: su }
+}
+
+fn mk_ev2(l: List[Str], c: List[Str]) -> Ev { return { labels: l, caps: c } }
+
+fn mk_ctx(nm: Str, rq: Map[Str, Str], sv: Map[Str, SvcD], fn_: Map[Str, FnD],
+          cp: CapsT) -> Ctx {
+  return { compName: nm, reqMap: rq, svcs: sv, fns: fn_, caps: cp }
+}
+
+fn mk_ck2(x: Ctx, en: List[Bind], e2: Ev, m: Str) -> Ck {
+  return { ctx: x, env: en, ev: e2, msg: m }
+}
+
+// ---------------------------------------------------------------- parsing
+//
+// A small declaration layer over the same token stream. Statements are
+// line-based (see the scope note); signatures and braces are structural.
+
+fn mkstmt(kind: Str, e: Expr) -> Stmt { return { kind: kind, bind: "", e: e } }
+
+fn mk_stmt3(kind: Str, bind: Str, e: Expr) -> Stmt {
+  return { kind: kind, bind: bind, e: e }
+}
+
+// A harmless expression for `skip` statements.
+fn int_lit0() -> Expr { return IntLit("0") }
+
+type PStep = { pg: Prog, i: Int }
+
+fn bad_prog(pg: Prog, msg: Str) -> Prog {
+  if (pg.bad != "") { return pg }
+  return { services: pg.services, fns: pg.fns, comps: pg.comps, bad: msg }
+}
+
+fn push_fn(pg: Prog, f: FnD) -> Prog {
+  return { services: pg.services, fns: pg.fns.push(f), comps: pg.comps,
+           bad: pg.bad }
+}
+
+fn push_svc(pg: Prog, s: SvcD) -> Prog {
+  return { services: pg.services.push(s), fns: pg.fns, comps: pg.comps,
+           bad: pg.bad }
+}
+
+fn push_comp(pg: Prog, c: CompD) -> Prog {
+  return { services: pg.services, fns: pg.fns, comps: pg.comps.push(c),
+           bad: pg.bad }
+}
+
+// `-> T` after a parameter list, or nothing.
+type RetR = { i: Int, ret: Str }
+
+fn ret_at(ts: List[Token], i: Int) -> RetR {
+  if (atk(ts, i, "arrow")) {
+    let t = type_at(ts, i + 1)
+    return { i: t.i, ret: t.ty }
+  }
+  return { i: i, ret: "" }
+}
+
+// `extern [emission|acquire|pure] fn name(params) -> T [= @host {...}]*`
+fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  var j = i + 1
+  var em = false
+  if (atw(ts, j, "emission")) {
+    em = true
+    j += 1
+  }
+  else {
+    if (atw(ts, j, "acquire") || atw(ts, j, "pure")) { j += 1 }
+  }
+  if (!atw(ts, j, "fn")) {
+    return { pg: bad_prog(pg, "expected fn after extern"), i: skip_line(ts, j) }
+  }
+  let nm = tkc(ts, j + 1).text
+  let ps = params_at(ts, j + 3)
+  let rt = ret_at(ts, ps.i)
+  var k = rt.i
+  while (k < ts.length() && !atw(ts, k, "service") && !atw(ts, k, "component")
+         && !atw(ts, k, "extern") && !atw(ts, k, "fn") && !atk(ts, k, "eof")) {
+    if (atk(ts, k, "{")) {
+      let e = close_brace(ts, k)
+      if (e == 0 - 1) { k = ts.length() } else { k = e }
+    } else { k += 1 }
+  }
+  return mk_step(push_fn(pg, mk_fn_d(nm, ps.ps, em)), k)
+}
+
+fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  let ps = params_at(ts, i + 3)
+  let rt = ret_at(ts, ps.i)
+  if (!atk(ts, rt.i, "{")) {
+    return mk_step(bad_prog(pg, "expected { after fn signature"), rt.i)
+  }
+  let bend = close_brace(ts, rt.i)
+  if (bend == 0 - 1) {
+    return { pg: bad_prog(pg, "unbalanced braces in fn body"), i: ts.length() }
+  }
+  let body = p_stmts(ts, rt.i + 1, bend - 1, [])
+  return { pg: push_fn(pg, { name: nm, params: ps.ps, extEm: false,
+                             body: body }),
+           i: bend }
+}
+
+type MethsR = { xs: List[MethSig], i: Int, ok: Bool }
+
+fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MethSig]) -> MethsR {
+  if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
+  var j = i
+  var em = false
+  var caps: List[Str] = []
+  if (atw(ts, j, "emission")) {
+    em = true
+    j += 1
+    if (atk(ts, j, "[")) {
+      var k = j + 1
+      while (k < end && !atk(ts, k, "]")) {
+        if (atk(ts, k, "ident")) { caps = caps.push(tkc(ts, k).text) }
+        k += 1
+      }
+      j = k + 1
+    }
+  }
+  if (!atw(ts, j, "fn")) { return mk_meths(acc, j, false) }
+  let nm = tkc(ts, j + 1).text
+  let ps = params_at(ts, j + 3)
+  let rt = ret_at(ts, ps.i)
+  return p_methods(ts, rt.i, end,
+                   acc.push(mk_meth(nm, ps.ps, rt.ret, em, caps)))
+}
+
+fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  if (!atk(ts, i + 2, "{")) {
+    return { pg: bad_prog(pg, "expected { after service name"), i: i + 2 }
+  }
+  let end = close_brace(ts, i + 2)
+  if (end == 0 - 1) {
+    return { pg: bad_prog(pg, "unbalanced braces in service"), i: ts.length() }
+  }
+  let ms = p_methods(ts, i + 3, end - 1, [])
+  if (!ms.ok) {
+    return { pg: bad_prog(pg, "bad method signature in service ".concat(nm)),
+             i: end }
+  }
+  return { pg: push_svc(pg, { name: nm, methods: ms.xs }), i: end }
+}
+
+type ProvR = { provs: List[Provide], setup: List[Stmt], i: Int, ok: Bool }
+
+type ProvMR = { xs: List[ProvM], i: Int, ok: Bool }
+
+fn p_prov_methods(ts: List[Token], i: Int, end: Int,
+                  acc: List[ProvM]) -> ProvMR {
+  if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
+  if (!atw(ts, i, "fn")) { return { xs: acc, i: i, ok: false } }
+  let nm = tkc(ts, i + 1).text
+  let ps = params_at(ts, i + 3)
+  if (!atk(ts, ps.i, "{")) { return { xs: acc, i: ps.i, ok: false } }
+  let bend = close_brace(ts, ps.i)
+  if (bend == 0 - 1) { return { xs: acc, i: ts.length(), ok: false } }
+  let body = p_stmts(ts, ps.i + 1, bend - 1, [])
+  return p_prov_methods(ts, bend, end,
+                        acc.push({ name: nm, params: ps.ps, body: body }))
+}
+
+fn bind_lookup(env: List[Bind], n: Str, i: Int) -> Str {
+  if (i >= env.length()) { return "" }
+  if (env[i].name == n) { return env[i].ty }
+  return bind_lookup(env, n, i + 1)
+}
+
+fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
+  var out = a
+  var i = 0
+  while (i < bs.length()) {
+    out = out.push(bs[i])
+    i += 1
+  }
+  return out
+}
+
+// One line's worth of tokens as statement(s). `effect X undo Y` on one line
+// yields two statements; `let n = [emit|effect] expr [undo expr]` keeps the
+// binding name for the checker's environment.
+fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+  let t = tkc(ts, lo)
+  if (t.kind == "kw" && t.text == "let") {
+    let nm = tkc(ts, lo + 1).text
+    if (!atk(ts, lo + 2, "=")) {
+      return [mk_stmt3("skip", nm, int_lit0())]
+    }
+    var j = lo + 3
+    var kd = "expr"
+    if (atw(ts, j, "emit")) {
+      kd = "emit"
+      j += 1
+    }
+    else {
+      if (atw(ts, j, "effect")) {
+        kd = "effect"
+        j += 1
+      }
+    }
+    let r = expr_at(ts, j)
+    if (is_bad(r.e)) { return [mk_stmt3("skip", nm, r.e)] }
+    var out: List[Stmt] = [mk_stmt3(kd, nm, r.e)]
+    if (atw(ts, r.i, "undo")) {
+      let u = expr_at(ts, r.i + 1)
+      if (!is_bad(u.e)) { out = out.push(mkstmt("undo", u.e)) }
+    }
+    return out
+  }
+  if (t.kind == "kw" && t.text == "return") {
+    let rr = expr_at(ts, lo + 1)
+    if (is_bad(rr.e)) { return [mkstmt("skip", rr.e)] }
+    return [mkstmt("return", rr.e)]
+  }
+  if (t.kind == "kw" && t.text == "emit") {
+    let re1 = expr_at(ts, lo + 1)
+    if (is_bad(re1.e)) { return [mkstmt("skip", re1.e)] }
+    return [mkstmt("emit", re1.e)]
+  }
+  if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
+    let rf = expr_at(ts, lo + 1)
+    if (is_bad(rf.e)) { return [mkstmt("skip", rf.e)] }
+    var out2: List[Stmt] = [mkstmt(t.text, rf.e)]
+    if (atw(ts, rf.i, "undo")) {
+      let u2 = expr_at(ts, rf.i + 1)
+      if (!is_bad(u2.e)) { out2 = out2.push(mkstmt("undo", u2.e)) }
+    }
+    return out2
+  }
+  let r2 = expr_at(ts, lo)
+  if (is_bad(r2.e)) { return [mkstmt("skip", r2.e)] }
+  return [mkstmt("expr", r2.e)]
+}
+
+fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
+  if (lo >= hi || atk(ts, lo, "}")) { return acc }
+  let re = line_end(ts, lo, hi)
+  return p_stmts(ts, re, hi, append_stmts(acc, p_stmt_run(ts, lo, re)))
+}
+
+fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
+               provs: List[Provide], setup: List[Stmt]) -> ProvR {
+  if (i >= end || atk(ts, i, "}")) {
+    return { provs: provs, setup: setup, i: i, ok: true }
+  }
+  if (atw(ts, i, "provide")) {
+    let key = tkc(ts, i + 1).text
+    if (!atk(ts, i + 2, "{")) {
+      return { provs: provs, setup: setup, i: i + 2, ok: false }
+    }
+    let pend = close_brace(ts, i + 2)
+    if (pend == 0 - 1) {
+      return { provs: provs, setup: setup, i: ts.length(), ok: false }
+    }
+    let ms = p_prov_methods(ts, i + 3, pend - 1, [])
+    if (!ms.ok) {
+      return { provs: provs, setup: setup, i: pend, ok: false }
+    }
+    return p_comp_body(ts, pend, end, provh,
+                       provs.push({ key: key,
+                                    svcName: bind_lookup(provh, key, 0),
+                                    methods: ms.xs }),
+                       setup)
+  }
+  // component setup: one statement run per line, kept for the same call-site
+  // checks a provision body gets — G4 gates setup too (g4_unmarked_emission).
+  let re = line_end(ts, i, end)
+  let ss = p_stmt_run(ts, i, re)
+  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss))
+}
+
+fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  var reqs: List[Bind] = []
+  var provh: List[Bind] = []
+  while (atw(ts, j, "requires") || atw(ts, j, "provides")) {
+    let isReq = atw(ts, j, "requires")
+    var k = j + 1
+    while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
+           && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
+      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
+        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+        if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
+        k += 3
+      } else { k += 1 }
+    }
+    j = k
+  }
+  if (!atk(ts, j, "{")) {
+    return mk_step(bad_prog(pg, "expected { after component header"), j)
+  }
+  let end = close_brace(ts, j)
+  if (end == 0 - 1) {
+    return { pg: bad_prog(pg, "unbalanced braces in component"),
+             i: ts.length() }
+  }
+  let body = p_comp_body(ts, j + 1, end - 1, provh, [], [])
+  if (!body.ok) {
+    return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
+             i: end }
+  }
+  return mk_step(push_comp(pg, mk_comp(nm, reqs, body.provs, body.setup)),
+                 end)
+}
+
+fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return pg }
+  let t = tkc(ts, i)
+  if (t.kind != "kw") {
+    return p_top(ts, skip_line(ts, i),
+                 bad_prog(pg, "unexpected token at top level"))
+  }
+  if (t.text == "use" || t.text == "type" || t.text == "test") {
+    return p_top(ts, skip_line(ts, i), pg)
+  }
+  if (t.text == "extern") {
+    let s1 = p_extern(ts, i, pg)
+    return p_top(ts, s1.i, s1.pg)
+  }
+  if (t.text == "fn") {
+    let s2 = p_fn(ts, i, pg)
+    return p_top(ts, s2.i, s2.pg)
+  }
+  if (t.text == "service") {
+    let s3 = p_service(ts, i, pg)
+    return p_top(ts, s3.i, s3.pg)
+  }
+  if (t.text == "component") {
+    let s4 = p_component(ts, i, pg)
+    return p_top(ts, s4.i, s4.pg)
+  }
+  return p_top(ts, skip_line(ts, i), bad_prog(pg, "unexpected declaration"))
+}
+
+pub fn parse_prog(src: Str) -> Prog {
+  return p_top(lex_src(src), 0, { services: [], fns: [], comps: [], bad: "" })
+}
+
+// ---------------------------------------------------------------- calls
+//
+// Callee NAMES in call position, ported from lower.py's `_calls_in` — minus
+// the value-position channel. That channel is exactly what makes a first-
+// class fn reference propagate `*` (1a24197); this slice fences first-class
+// dispatch out and says so.
+
+fn callee_name(tg: Expr) -> Str {
+  return match tg { Var(n) => n, _ => "" }
+}
+
+fn exprs_calls(xs: List[Expr], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return exprs_calls(xs, i + 1, calls_in(xs[i], acc))
+}
+
+fn args_calls(xs: List[Expr], i: Int, acc: List[Str]) -> List[Str] {
+  return exprs_calls(xs, i, acc)
+}
+
+fn inits_calls(xs: List[InitN], i: Int,
+               acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return inits_calls(xs, i + 1, calls_in(xs[i].value, acc))
+}
+
+fn arms_calls(xs: List[ArmN], i: Int,
+              acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return arms_calls(xs, i + 1, calls_in(xs[i].body, acc))
+}
+
+fn parts_calls(xs: List[PartN], i: Int,
+               acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return parts_calls(xs, i + 1, calls_in(xs[i].e, acc))
+}
+
+fn calls_in(e: Expr, acc: List[Str]) -> List[Str] {
+  return match e {
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
+    BoolLit(_) => acc,
+    NullLit    => acc,
+    Var(_)     => acc,
+    Hole(_)    => acc,
+    Bad(_)     => acc,
+    Bin(b)     => calls_in(b.r, calls_in(b.l, acc)),
+    Un(u)      => calls_in(u.e, acc),
+    Emit(u)    => calls_in(u.e, acc),
+    Call(c)    => call_calls(c.target, c.args, acc),
+    Field(f)   => calls_in(f.target, acc),
+    OptField(f) => calls_in(f.target, acc),
+    OptCall(c) => args_calls(c.args, 0, calls_in(c.target, acc)),
+    Index(x)   => calls_in(x.idx, calls_in(x.target, acc)),
+    If(x)      => calls_in(x.els, calls_in(x.then_, calls_in(x.cond, acc))),
+    Rec(r)     => inits_calls(r.fields, 0, acc),
+    Lst(l)     => exprs_calls(l.items, 0, acc),
+    Arrow(a)   => calls_in(a.body, acc),
+    Match(m)   => arms_calls(m.arms, 0, calls_in(m.scrut, acc)),
+    Templ(t)   => parts_calls(t.parts, 0, acc),
+  }
+}
+
+fn call_calls(tg: Expr, args: List[Expr], acc: List[Str]) -> List[Str] {
+  let cn = callee_name(tg)
+  var a = calls_in(tg, acc)
+  if (cn != "") { a = a.push(cn) }
+  return args_calls(args, 0, a)
+}
+
+fn stmts_calls(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  return stmts_calls(ss, i + 1, calls_in(ss[i].e, acc))
+}
+
+fn body_calls(ss: List[Stmt]) -> List[Str] { return stmts_calls(ss, 0, []) }
+
+// ------------------------------------------------------ the fixed point
+//
+// Port of `_emitting_capabilities`, name-call subset: an `extern emission fn`
+// contributes itself; a named fn contributes the union of what its callees
+// contribute. Least fixed point over the call graph — caps only ever grow.
+
+type CapsT = Map[Str, List[Str]]
+
+fn caps_of(caps: CapsT, n: Str) -> List[Str] {
+  return match caps.lookup(n) { Some(v) => v, None => [] }
+}
+
+fn emit_caps(fs: List[FnD]) -> CapsT {
+  var caps: CapsT = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    if (fs[i].extEm) { caps = caps.set(fs[i].name, [fs[i].name]) }
+    i += 1
+  }
+  var changed = true
+  while (changed) {
+    changed = false
+    i = 0
+    while (i < fs.length()) {
+      let f = fs[i]
+      let reached = reached_caps(body_calls(f.body), caps, 0, [])
+      let cur = caps_of(caps, f.name)
+      if (reached.length() > 0 && !subset_of(reached, cur)) {
+        caps = caps.set(f.name, union_into(cur, reached))
+        changed = true
+      }
+      i += 1
+    }
+  }
+  return caps
+}
+
+fn reached_caps(called: List[Str], caps: CapsT, i: Int,
+                acc: List[Str]) -> List[Str] {
+  if (i >= called.length()) { return acc }
+  return reached_caps(called, caps, i + 1,
+                      union_into(acc, caps_of(caps, called[i])))
+}
+
+// ---------------------------------------------------------------- checking
+
+type Ctx = { compName: Str, reqMap: Map[Str, Str], svcs: Map[Str, SvcD],
+             fns: Map[Str, FnD], caps: CapsT }
+type Ev  = { labels: List[Str], caps: List[Str] }
+type Ck  = { ctx: Ctx, env: List[Bind], ev: Ev, msg: Str }
+
+type MethR = { m: MethSig, ok: Bool }
+
+fn no_method() -> MethSig {
+  return { name: "", params: [], ret: "", isEm: false, caps: [] }
+}
+
+fn find_method(svc: SvcD, nm: Str, i: Int) -> MethR {
+  if (i >= svc.methods.length()) {
+    return { m: no_method(), ok: false }
+  }
+  if (svc.methods[i].name == nm) {
+    return { m: svc.methods[i], ok: true }
+  }
+  return find_method(svc, nm, i + 1)
+}
+
+fn refuse_ck(ck: Ck, msg: Str) -> Ck {
+  return { ctx: ck.ctx, env: ck.env, ev: ck.ev, msg: msg }
+}
+
+fn empty_ev() -> Ev { return { labels: [], caps: [] } }
+
+fn bind_map(env: List[Bind]) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  var i = 0
+  while (i < env.length()) {
+    m = m.set(env[i].name, env[i].ty)
+    i += 1
+  }
+  return m
+}
+
+// Positional types for a provision method's parameters: the *service's*
+// declaration is the source of truth for signatures (A6), so an unannotated
+// `fn put(key, value)` still checks its body against `key: Str`.
+fn zip_env(names: List[ParamN], decls: List[ParamN], i: Int,
+           acc: List[Bind]) -> List[Bind] {
+  if (i >= names.length() || i >= decls.length()) { return acc }
+  return zip_env(names, decls, i + 1,
+                 acc.push({ name: names[i].name, ty: decls[i].ty }))
+}
+
+fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
+  if (i >= ss.length() || ck.msg != "") { return ck }
+  let s = ss[i]
+  if (s.kind == "skip") { return check_stmts(ss, i + 1, ck) }
+  var after = ck
+  if (s.kind == "let") {
+    // calls in the value count even though the statement also binds
+    after = walk_expr(s.e, s.kind == "emit", ck)
+    if (after.msg != "") { return after }
+    let inf = infer(s.e, after.env)
+    if (!inf.ok) { return refuse_ck(after, inf.msg) }
+    if (s.bind != "") {
+      after = { ctx: after.ctx, env: after.env.push({ name: s.bind, ty: inf.ty }),
+                ev: after.ev, msg: "" }
+    }
+    return check_stmts(ss, i + 1, after)
+  }
+  after = walk_expr(s.e, s.kind == "emit", ck)
+  if (after.msg != "") { return after }
+  return check_stmts(ss, i + 1, after)
+}
+
+fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {
+  return match e {
+    IntLit(_)   => ck,
+    FloatLit(_) => ck,
+    StrLit(_)   => ck,
+    BoolLit(_) => ck,
+    NullLit    => ck,
+    Var(_)     => ck,
+    Hole(_)    => ck,
+    Bad(_)     => ck,
+    Bin(b)     => walk_expr(b.r, marked, walk_expr(b.l, marked, ck)),
+    Un(u)      => walk_expr(u.e, marked, ck),
+    Emit(u)    => walk_expr(u.e, true, ck),
+    Call(c)    => call_check(c.target, c.args, marked, ck),
+    Field(f)   => walk_expr(f.target, marked, ck),
+    OptField(f) => walk_expr(f.target, marked, ck),
+    OptCall(c) => walk_args(c.args, 0, marked, walk_expr(c.target, marked, ck)),
+    Index(x)   => walk_expr(x.idx, marked, walk_expr(x.target, marked, ck)),
+    If(x)      => walk_expr(x.els, marked,
+                            walk_expr(x.then_, marked,
+                                      walk_expr(x.cond, marked, ck))),
+    Rec(r)     => walk_inits(r.fields, 0, marked, ck),
+    Lst(l)     => walk_exprs(l.items, 0, marked, ck),
+    Arrow(a)   => walk_expr(a.body, marked, ck),
+    Match(m)   => walk_arms(m.arms, 0, marked, walk_expr(m.scrut, marked, ck)),
+    Templ(t)   => walk_parts(t.parts, 0, marked, ck),
+  }
+}
+
+fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, ck: Ck) -> Ck {
+  if (i >= xs.length() || ck.msg != "") { return ck }
+  return walk_exprs(xs, i + 1, marked, walk_expr(xs[i], marked, ck))
+}
+
+fn walk_args(xs: List[Expr], i: Int, marked: Bool, ck: Ck) -> Ck {
+  return walk_exprs(xs, i, marked, ck)
+}
+
+fn walk_inits(xs: List[InitN], i: Int, marked: Bool,
+              ck: Ck) -> Ck {
+  if (i >= xs.length() || ck.msg != "") { return ck }
+  return walk_inits(xs, i + 1, marked, walk_expr(xs[i].value, marked, ck))
+}
+
+fn walk_arms(xs: List[ArmN], i: Int,
+             marked: Bool, ck: Ck) -> Ck {
+  if (i >= xs.length() || ck.msg != "") { return ck }
+  return walk_arms(xs, i + 1, marked, walk_expr(xs[i].body, marked, ck))
+}
+
+fn walk_parts(xs: List[PartN], i: Int,
+              marked: Bool, ck: Ck) -> Ck {
+  if (i >= xs.length() || ck.msg != "") { return ck }
+  return walk_parts(xs, i + 1, marked, walk_expr(xs[i].e, marked, ck))
+}
+
+fn call_check(tg: Expr, args: List[Expr], marked: Bool, ck: Ck) -> Ck {
+  return match tg {
+    Field(fl) => match fl.target {
+      Var(v) => req_call(v, fl.name, args, marked, ck),
+      _      => walk_args(args, 0, marked, walk_expr(tg, marked, ck)),
+    },
+    Var(n) => fn_call(n, args, marked, ck),
+    _      => walk_args(args, 0, marked, walk_expr(tg, marked, ck)),
+  }
+}
+
+// A call through a required key: the reference's `_component_req_call`,
+// in order (arity, then the `emit` marker, then argument types).
+fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
+            ck: Ck) -> Ck {
+  if (!ck.ctx.reqMap.has(root)) {
+    // a host object or a local (`store.insert`), not a requirement:
+    // nothing this slice checks about it
+    return walk_args(args, 0, marked, ck)
+  }
+  let svcName = match ck.ctx.reqMap.lookup(root) { Some(v) => v, None => "" }
+  var svc = { name: svcName, methods: [] }
+  if (ck.ctx.svcs.has(svcName)) {
+    svc = match ck.ctx.svcs.lookup(svcName) { Some(s) => s, None => svc }
+  }
+  let mr = find_method(svc, meth, 0)
+  if (!mr.ok) {
+    return refuse_ck(ck, "`".concat(root).concat(".").concat(meth)
+      .concat("` is not a method of service ").concat(svcName))
+  }
+  let decl = mr.m
+  if (args.length() != decl.params.length()) {
+    return refuse_ck(ck, "`".concat(root).concat(".").concat(meth)
+      .concat("` takes ").concat(int_str(decl.params.length()))
+      .concat(" argument(s), ").concat(int_str(args.length()))
+      .concat(" given"))
+  }
+  if (decl.isEm && !marked) {
+    return refuse_ck(ck, "call to emission `".concat(root).concat(".")
+      .concat(meth).concat("` must be marked `emit` (G4)"))
+  }
+  var k = 0
+  while (k < args.length()) {
+    let inf = infer(args[k], ck.env)
+    if (!inf.ok) { return refuse_ck(ck, inf.msg) }
+    let pt = decl.params[k].ty
+    if (pt != "" && inf.ty != "" && !compatible(pt, inf.ty)) {
+      return refuse_ck(ck, "`".concat(root).concat(".").concat(meth)
+        .concat("` argument `").concat(decl.params[k].name)
+        .concat("` expects `").concat(pt)
+        .concat("`, got `").concat(inf.ty).concat("`"))
+    }
+    k += 1
+  }
+  var ev = ck.ev
+  if (decl.isEm && marked) {
+    let lab = ev.labels.push(root.concat(".").concat(meth))
+    ev = mk_ev2(lab, union_into(ev.caps, [root]))
+  }
+  return walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
+}
+
+// A bare named-fn call. The reference checks neither its arity nor its
+// argument types at a provision call site (verified against lower.py: only
+// required-service receivers and builtins get that), so this collects G4
+// evidence only: reaching an emitting name labels `f()` with its caps.
+fn fn_call(name: Str, args: List[Expr], marked: Bool, ck: Ck) -> Ck {
+  var ev = ck.ev
+  if (ck.ctx.caps.has(name)) {
+    let cc = caps_of(ck.ctx.caps, name)
+    let lab = ev.labels.push(name.concat("()"))
+    ev = mk_ev2(lab, union_into(ev.caps, cc))
+  }
+  return walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
+}
+
+// The upper-bound verdict for one provision method, ported from lower.py's
+// provider check: plain declarations must reach no emission at all;
+// `emission[caps]` declarations bound *which* boundary.
+fn g4_verdict(svcName: Str, mname: Str, decl: MethSig, ev: Ev) -> Str {
+  if (!decl.isEm && decl.caps.length() == 0 && ev.labels.length() > 0) {
+    return "`".concat(svcName).concat(".").concat(mname)
+      .concat("` is declared plain, but this implementation reaches ")
+      .concat(quote_join(ev.labels))
+  }
+  if (decl.isEm && decl.caps.length() > 0) {
+    let extra = sort_strs(minus_list(ev.caps, decl.caps))
+    if (extra.length() > 0) {
+      var msg = "`".concat(svcName).concat(".").concat(mname)
+        .concat("` is declared `emission[").concat(decl.caps.join(", "))
+        .concat("]`, but this implementation emits through ")
+      var i = 0
+      while (i < extra.length()) {
+        if (i > 0) { msg = msg.concat(", ") }
+        if (extra[i] == "*") { msg = msg.concat("an unnameable host boundary") }
+        else { msg = msg.concat("`").concat(extra[i]).concat("`") }
+        i += 1
+      }
+      if (ev.labels.length() > 0) {
+        msg = msg.concat(" (reaching ").concat(quote_join(ev.labels)).concat(")")
+      }
+      return msg
+    }
+  }
+  return ""
+}
+
+// ---------------------------------------------------------------- entry
+
+// Check one program's service boundaries. "" means accepted; anything else
+// is the refusal, spelled exactly as the reference spells it.
+pub fn check_service_src(src: Str) -> Str {
+  let pg = parse_prog(src)
+  if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  var svcs: Map[Str, SvcD] = Map.empty()
+  var si = 0
+  while (si < pg.services.length()) {
+    svcs = svcs.set(pg.services[si].name, pg.services[si])
+    si += 1
+  }
+  var fnt: Map[Str, FnD] = Map.empty()
+  var fi = 0
+  while (fi < pg.fns.length()) {
+    fnt = fnt.set(pg.fns[fi].name, pg.fns[fi])
+    fi += 1
+  }
+  let caps = emit_caps(pg.fns)
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    let ctx: Ctx = mk_ctx(comp.name, bind_map(comp.reqs), svcs, fnt, caps)
+    let sck = check_stmts(comp.setup, 0,
+                          { ctx: ctx, env: [], ev: empty_ev(), msg: "" })
+    if (sck.msg != "") { return sck.msg }
+    var pi = 0
+    while (pi < comp.provs.length()) {
+      let pv = comp.provs[pi]
+      let dsvc = match svcs.lookup(pv.svcName) {
+        Some(s) => s,
+        None    => { name: pv.svcName, methods: [] },
+      }
+      var mi = 0
+      while (mi < pv.methods.length()) {
+        let pm = pv.methods[mi]
+        let mr = find_method(dsvc, pm.name, 0)
+        let env = zip_env(pm.params, mr.m.params, 0, [])
+        let ck = check_stmts(pm.body, 0,
+                             { ctx: ctx, env: env, ev: empty_ev(), msg: "" })
+        if (ck.msg != "") { return ck.msg }
+        if (mr.ok) {
+          let v = g4_verdict(pv.svcName, pm.name, mr.m, ck.ev)
+          if (v != "") { return v }
+        }
+        mi += 1
+      }
+      pi += 1
+    }
+    ci += 1
+  }
+  return ""
+}
+
+// ---------------------------------------------------------------- tests
+
+test "parse: a one-line service carries its method signature" {
+  let pg = parse_prog("service Cache { fn put(key: Str, value: Str) }")
+  assert pg.bad == ""
+  assert pg.services.length() == 1
+}
+
+test "fixed point over one-line fns reaches the emission extern" {
+  let pg = parse_prog("extern emission fn w(m: Str) -> Int fn mid(m: Str) -> Int { return w(m) }")
+  assert pg.bad == ""
+  let caps = emit_caps(pg.fns)
+  assert caps_of(caps, "mid").join(",") == "w"
+}
+
+test "plain provider reaching an emission is refused, exact wording" {
+  let v = check_service_src("service Database { emission fn execute(sql: Str) -> Int } service Cache { fn put(key: Str) } component C requires db: Database provides cache: Cache { provide cache { fn put(key) { emit db.execute(key) } } }")
+  assert v == "`Cache.put` is declared plain, but this implementation reaches `db.execute`"
+}
+
+test "scoped declaration bounds which boundary" {
+  let v = check_service_src("service Database { emission fn execute(sql: Str) -> Int } service Bus { emission fn publish(topic: Str) } service Cache { emission[db] fn put(key: Str) } component C requires db: Database, bus: Bus provides cache: Cache { provide cache { fn put(key) { emit bus.publish(key) } } }")
+  assert v.indexOf("emits through `bus`") != 0 - 1
+}
+
+test "wrong argument type at a required-service call site is refused" {
+  let v = check_service_src("service Database { fn query(sql: Str) -> Int } component P requires db: Database { let r = effect db.query(42) undo db.query(msg) }")
+  assert v == "`db.query` argument `sql` expects `Str`, got `Int`"
+}
+
+test "clean provider accepted" {
+  let v = check_service_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")
+  assert v == ""
 }
