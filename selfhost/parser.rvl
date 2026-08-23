@@ -43,6 +43,7 @@ type HoleN    = { ty: Str, msg: Str }
 
 pub type Expr =
     IntLit(Str)
+  | FloatLit(Str)
   | StrLit(Str)
   | BoolLit(Str)
   | NullLit
@@ -158,6 +159,12 @@ fn render_parts(xs: List[PartN]) -> Str {
 pub fn render(e: Expr) -> Str {
   return match e {
     IntLit(v)  => "(int ".concat(v).concat(")"),
+    // The text is kept as lexed. Parity with the reference renderer holds
+    // for canonical decimal spellings (`2.5`); an exponent or trailing-zero
+    // spelling (`1e3`, `2.50`) renders verbatim here while the reference
+    // normalizes through a host float. Corpus stays canonical; see
+    // dogfood/findings-unblock.md.
+    FloatLit(v) => "(float ".concat(v).concat(")"),
     StrLit(v)  => "(str ".concat(v).concat(")"),
     BoolLit(v) => "(bool ".concat(v).concat(")"),
     NullLit    => "(null)",
@@ -685,6 +692,7 @@ fn p_template(text: Str) -> Expr {
 fn p_primary(ts: List[Token], i: Int) -> PR {
   let t = tk(ts, i)
   if (t.kind == "int") { return { i: i + 1, e: IntLit(t.text) } }
+  if (t.kind == "float") { return { i: i + 1, e: FloatLit(t.text) } }
   if (t.kind == "string") { return { i: i + 1, e: StrLit(t.text) } }
   if (t.kind == "template") {
     let e = p_template(t.text)
