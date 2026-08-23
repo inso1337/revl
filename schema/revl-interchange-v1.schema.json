@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://revl.dev/schema/revl-interchange-v1.schema.json",
+  "title": "revl composition interchange (manifest + G8 audit)",
+  "description": "The versioned, tool-consumable verdict a revl gate produces for a composition: what each component provides, requires, and reaches (its G8 boundary surface), plus the declared host-code externs and the per-service distributability verdict. A consumer can read provides/requires/reaches from this document WITHOUT running revl. See docs/interchange-format.md for the compatibility promise.",
+  "type": "object",
+  "required": ["schema_version", "kind", "manifest", "boundary"],
+  "properties": {
+    "schema_version": {
+      "description": "MAJOR.MINOR of this interchange format. Same MAJOR is backward compatible: a consumer written for X.m keeps reading X.n (n>m); new MINOR versions only add optional members. A MAJOR bump may remove or re-shape members.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$"
+    },
+    "kind": {
+      "description": "Self-identifying tag so a consumer can tell an interchange document apart from any other JSON. Always the constant below for this format.",
+      "type": "string",
+      "enum": ["revl.interchange"]
+    },
+    "manifest": { "$ref": "#/$defs/manifest" },
+    "boundary": {
+      "description": "Per-component G8 boundary surface, keyed by component name. This is the 'reaches' half of provides/requires/reaches.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/boundaryEntry" }
+    },
+    "externs": {
+      "description": "Every declared host-code extern in the composition (the trust surface a proof cannot cover).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/extern" }
+    },
+    "distributability": {
+      "description": "Per-service verdict on whether the service may cross a process seam (interop-bridge §4), keyed by service name.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/distributabilityVerdict" }
+    },
+    "gauntlet": {
+      "description": "Optional. A gauntlet dossier (docs/gauntlet.md) carried in the same envelope. Its proved/tested/claimed/pending sections reuse the manifest+boundary vocabulary defined here, so item 31's dossier composes into this format without a schema change. Left open (additionalProperties) so the dossier can evolve independently.",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "manifest": {
+      "description": "The linker's composition manifest: the static membership, load order, and each component's provide/require/isolate/intercept surface.",
+      "type": "object",
+      "required": ["components", "loadOrder"],
+      "properties": {
+        "components": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/component" }
+        },
+        "loadOrder": {
+          "description": "Component names in dependency order (providers first). Teardown is the exact reverse (LIFO).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "templates": {
+          "description": "Optional. Instance-parametric components: spawn targets instantiated at runtime, each in its own local realm, excluded from the static composition.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "component": {
+      "type": "object",
+      "required": ["name", "inject", "provides"],
+      "properties": {
+        "name": { "type": "string" },
+        "file": { "type": "string" },
+        "inject": {
+          "description": "Provision keys this component requires (its 'requires').",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "provides": {
+          "description": "Provision keys this component provides.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "isolate": {
+          "description": "Optional. provision-key -> realm name, when a key is bound in a named local realm.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "intercept": {
+          "description": "Optional. provision-key -> interception metadata for keys this component intercepts.",
+          "type": "object",
+          "additionalProperties": { "type": "object" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "boundaryEntry": {
+      "type": "object",
+      "required": ["emissions", "capabilities", "compensated", "awaits", "externs"],
+      "properties": {
+        "emissions": {
+          "description": "Emission call sites (irreversible boundary crossings) this component performs, as `key.method` labels.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "capabilities": {
+          "description": "emission-label -> the capability scopes its declaration carries. A single-element list of \"*\" is a bare emission that promises nothing about where it goes.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "compensated": {
+          "description": "How many of this component's emissions carry a compensating undo.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "awaits": {
+          "description": "Iteration/await boundaries in this component's body.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "externs": {
+          "description": "Host-code externs this component reaches, transitively through functions. A first-class dispatch appears as name \"*\" with class \"first-class dispatch\".",
+          "type": "array",
+          "items": { "$ref": "#/$defs/extern" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "extern": {
+      "type": "object",
+      "required": ["name", "backends"],
+      "properties": {
+        "name": { "type": "string" },
+        "class": {
+          "description": "The extern's class: pure, acquire, emission, or the pseudo-class \"first-class dispatch\" for an unnameable reach. May be null when unknown.",
+          "type": ["string", "null"]
+        },
+        "backends": {
+          "description": "Backend tiers this extern has a body for (sorted).",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "distributabilityVerdict": {
+      "type": "object",
+      "required": ["verdict", "reasons"],
+      "properties": {
+        "verdict": {
+          "type": "string",
+          "enum": ["transport-safe", "address-space-bound"]
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

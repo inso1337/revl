@@ -1,19 +1,30 @@
 # revl ⇄ MCP — the agent boundary
 
-**Status:** implemented — `revl mcp {serve,schema,import}`, plus a live
-in-memory session (`revl_load`/`revl_call`/`revl_swap`/`revl_rollback`/
-`revl_unload`/`revl_state`). Tests: `tests/test_mcp.py` (projection and
-protocol) and `tests/test_mcp_session.py` (in-memory compilation and the
-live session; skips without the cordis-py runtime).
+**Status:** implemented — `revl mcp {serve,schema,import}`, a live in-memory
+session (`revl_load`/`revl_call`/`revl_swap`/`revl_rollback`/`revl_unload`/
+`revl_state`), and `revl serve --mcp app.rvl`, which serves *one booted
+composition's own* operations as tools. Tests: `tests/test_mcp.py`
+(projection and protocol), `tests/test_mcp_session.py` (in-memory compilation
+and the live session) and `tests/test_mcp_serve.py` (the served composition;
+the runtime-free wire and preflight tests run everywhere, the live-call tests
+skip without the cordis-py runtime).
 
-An AI agent meets a revl system in three roles, and all three are *boundary*
+An AI agent meets a revl system in four roles, and all four are *boundary*
 phenomena — which is why none of them needed a language feature:
 
 | the agent is… | the mechanism | where |
 |---|---|---|
-| a **consumer** of the composition | services projected to MCP tools | `revl mcp schema` |
+| a **consumer** of the composition's schema | services projected to MCP tool *definitions* | `revl mcp schema` |
+| a **caller** of a running composition | those tools served live off a booted composition | `revl serve --mcp` |
 | an **operator** of the composition | the compiler as an MCP server | `revl mcp serve` |
 | a **dependency inside** it | an LLM is a `service` with `emission` ops | ordinary revl |
+
+The first two are the same projection at two lifecycles: `revl mcp schema`
+emits the tool *definitions* (what a client would see); `revl serve --mcp`
+boots the composition and puts those same tools on the wire, each call landing
+on the live operation. Import (§2) and serve (§4) close the loop: a tool an
+agent imported *from* another MCP server can be re-served *as* a revl tool,
+now with a compiler-derived hint instead of the original author's assertion.
 
 The third needs no tooling at all: `service Assistant { emission fn
 complete(prompt: Str) -> Str }` makes a model a coeffect, so routing is
@@ -206,11 +217,77 @@ what was **tested** with counts (the no-residue lifecycle) from what remains
 inverse-round-trip sections are present but report `pending` until roadmap
 items 30 and 26 land. See [docs/gauntlet.md](gauntlet.md).
 
+## 4. `revl serve --mcp` — a composition's own operations, served live
+
+`revl mcp serve` (§3) serves the *compiler's* tools: an agent operates the
+toolchain. This is the mirror image — boot one composition and put *its
+provided operations* on the wire:
+
+```bash
+revl serve --mcp examples/user_cache.rvl
+```
+
+Every provided operation becomes a tool named `<prefix>.<key>.<op>` (the
+prefix is `--composition`, default `revl`), projected by the exact same
+`tools_from_ir` that `revl mcp schema` uses — so the tool a client *sees* and
+the tool it *calls* are the same definition, at two lifecycles. A `tools/call`
+maps the named MCP arguments back onto the declared parameter order and lands
+on `Session.call` against the running composition — the same entry point
+`revl_call` drives.
+
+**The trust claim, sharpened.** Everywhere else in MCP, `readOnlyHint` is an
+assertion by the tool's author, and nothing checks it — the tool-poisoning
+gap. A revl-served tool is the only kind whose hint is *compiler-derived*:
+
+- `readOnlyHint: true` appears only where the checker **refused** any
+  unreverted mutation, and a service declaration is a checked upper bound on
+  every provider's effects (G4), so no provider can exceed what the tool
+  advertises;
+- a `destructiveHint: true` tool names, in its `x-revl.effects`, the exact
+  emissions and capabilities the operation crosses — a declared inverse or
+  `compensate` where one exists;
+- the implementation behind the tool surface can only change through the
+  admission gate (a `revl_swap` on the operator server, §3), never by editing
+  the file under a running server.
+
+**Config-to-boot.** Standing a composition up standalone reuses `revl run`'s
+preflight: compile → refuse open holes → load `--config` → refuse a component
+missing a *required* config field (an IR `config` field with no default),
+before any runtime is imported. A mis-configured boot fails loudly at
+admission rather than advertising a tool whose fiber has silently settled onto
+`FAILED`:
+
+```bash
+$ revl serve --mcp needs_config.rvl
+error: invalid config:
+  - DB is missing required config "url" (Str)
+  components are declarations — supply their config with --config <file>.
+```
+
+Why `serve` is its own verb and not a third `mcp serve` mode: the compiler
+server's tool set is fixed, but this boots a *specific* composition, which is a
+`revl run`-shaped concern (same compile/admit/config preflight). `--mcp` names
+the transport, leaving room for other serve frontends. It shares `run`'s
+preflight, not `mcp serve`'s protocol.
+
+### Import + serve close the loop
+
+A tool imported *from* a foreign MCP server (§2) lands as `emission` unless it
+carried an explicit `readOnlyHint: true`, because revl cannot vouch for
+another author's assertion. Once that imported surface is implemented and its
+classification *verified*, re-serving it with `revl serve --mcp` hands the
+next agent a hint the compiler now stands behind — the round trip upgrades an
+unverifiable claim into a checked one.
+
 ### Wiring it up
 
 ```jsonc
 // claude_desktop_config.json / any MCP client
+// the compiler as a server (operate the toolchain):
 {"mcpServers": {"revl": {"command": "python", "args": ["-m", "revl", "mcp", "serve"]}}}
+// a composition served live (call its operations):
+{"mcpServers": {"user_cache": {"command": "python",
+  "args": ["-m", "revl", "serve", "--mcp", "examples/user_cache.rvl"]}}}
 ```
 
 ## Why this shape
