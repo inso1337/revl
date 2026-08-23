@@ -251,6 +251,7 @@ python -m revl audit app.rvl                 # manifest + G8 boundary surface
 python -m revl test app.rvl                  # run in-file test blocks (--backend ts|rust|java|wasm|all)
 python -m revl fmt --migrate old.rvl         # rewrite 1.x "$name" → `${name}`
 python -m revl run app.rvl                   # boot on cordis-py; hold live with a REPL over provided services
+python -m revl run app.rvl --backend rust --once  # boot the composition as a cordis-rs process; LIFO teardown + no-residue proof; exit
 python -m revl run app.rvl --watch           # recompile on edit; a rejected change keeps the run alive
 python -m revl run app.rvl --plan            # print the load plan (order, config, callable keys); no runtime needed
 python -m revl plan cand.rvl --manifest running.json -o change.plan  # an executable plan artifact (docs/apply.md)
@@ -267,12 +268,30 @@ python -m revl mcp import tools.json               # an MCP server -> revl sourc
 python3 tools/conformance.py                       # every construct x every backend
 ```
 
-`run` needs the cordis-py runtime (`backends/python/setup.sh`); without it the
-command says so and exits nonzero, and the end-to-end tests in `tests/test_run.py`
-skip with that reason. `--config FILE` supplies the host config a composition
-declares (a component with a missing required field refuses the run before any
-runtime loads); `--backend` selects the tier, and `revl test --all` is gated by
-`tests/test_cross_tier.py`. Non-interactive round-trip (boot → trace → exit):
+`run --backend py` needs the cordis-py runtime (`backends/python/setup.sh`);
+without it the command says so and exits nonzero, and the end-to-end tests in
+`tests/test_run.py` skip with that reason. `--config FILE` supplies the host
+config a composition declares (a component with a missing required field refuses
+the run before any runtime loads); `--backend` selects the tier, and `revl test
+--all` is gated by `tests/test_cross_tier.py`.
+
+The **rust tier is runnable** too — `--backend rust` boots the composition as a
+separate **cordis-rs process** over the same driver contract py uses, only in a
+different address space: the language-agnostic Unix-socket bridge seam the
+cross-tier work already speaks ([interop-bridge.md](interop-bridge.md)). What is
+wired and **gated live** by `tests/test_run_rust.py` (wherever a cordis-rs
+toolchain resolves — else a skip with the reason, never a green run that booted
+nothing) is the **`--once` round-trip**: emit rust → `cargo build` → boot every
+component on a real `cordis::Context` → tear down LIFO (consumers before
+providers) → prove no residue (`registry().len() == 0` and
+`reflect().services().len() == 0`, the cordis-rs mirror of the py driver's
+registry/reflect check) → exit. The **interactive REPL over provided rust
+services is not yet wired** (it needs the driver to hold an RPC client against
+the runner's stub for the session); without `--once` on a TTY the rust driver
+says so and completes the same once round-trip rather than pretending to hold a
+REPL. `ts`/`java` remain accepted-but-unwired for `run` and say so.
+
+Non-interactive round-trip (boot → trace → exit):
 
 ```bash
 python -m revl run examples/user_cache.rvl --config cfg.toml < /dev/null

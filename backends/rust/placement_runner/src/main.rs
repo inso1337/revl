@@ -223,5 +223,24 @@ fn main() {
         let _ = fiber.dispose();
         log("swap", label, "dispose");
     }
+
+    // 7. no-residue proof (once mode only, so placement's stream is unchanged):
+    //    after a LIFO teardown the live runtime must hold nothing — no plugin
+    //    left in the registry, no service left in reflect. This is the cordis-rs
+    //    mirror of the py driver's registry.size==0 / reflect.store=={} check
+    //    (src/revl/run.py `_Driver._teardown`): the tier proves the composition
+    //    left nothing behind, not merely that dispose was called.
+    if once {
+        let live_plugins = root.registry().len();
+        let live_services = root.reflect().services().len();
+        log("residue", "registry", &format!("{live_plugins} live plugin(s)"));
+        log("residue", "provisions", &format!("{live_services} service(s) provided"));
+        if live_plugins == 0 && live_services == 0 {
+            println!("[{name}] NO-RESIDUE — the composition left nothing behind");
+        } else {
+            println!("[{name}] RESIDUE-LEFT — see the residue lines above");
+        }
+    }
+
     println!("[{name}] DOWN");
 }
