@@ -393,6 +393,17 @@ def main(argv: list[str] | None = None) -> int:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    audit.add_argument(
+        "--diff", metavar="PREV.json", default=None,
+        help="authority-drift gate: re-audit the files and FAIL (nonzero) if "
+             "the new generation ADDS boundary crossings not in PREV.json")
+    audit.add_argument(
+        "--accept", action="append", default=[], metavar="CROSSING",
+        help="acknowledge one added crossing so it no longer fails --diff "
+             "(the token printed after `+`; repeatable)")
+    audit.add_argument(
+        "--accept-all", action="store_true",
+        help="acknowledge every added crossing under --diff")
 
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
@@ -624,6 +635,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "query":
         return _run_query(args, ir)
+
+    if args.command == "audit" and getattr(args, "diff", None):
+        from .audit_diff import audit_report, evaluate, render  # noqa: PLC0415
+        with open(args.diff, encoding="utf-8") as handle:
+            prev = json.load(handle)
+        new = audit_report(ir)
+        result = evaluate(prev, new, accepted=set(args.accept),
+                          accept_all=args.accept_all)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(render(result, args.diff))
+        return 1 if result["widened"] else 0
 
     if args.command == "audit":
         boundary = _boundary(ir)
