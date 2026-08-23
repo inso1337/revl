@@ -31,6 +31,20 @@ const EXEMPT = new Map([
       'accepts variant cases (`Name(payload)`) but not type-applications as ' +
       'variant members.',
   ],
+  [
+    'examples/rejections/v2_semicolon_separator.rvl',
+    'revl has no `;` statement separator; the reference lexer/parser rejects ' +
+      '`;` at the source character. Statements are newline-separated, so there ' +
+      'is no `;` token in the grammar and a stray `;` is an ERROR here, matching ' +
+      "the reference's own refusal.",
+  ],
+  [
+    'examples/rejections/v2_provide_emission_fn.rvl',
+    'a provide-method carries no purity modifier: it is a plain `fn`, and ' +
+      'emission-ness is inherited from the service (G4). The reference parser ' +
+      'rejects `emission fn` inside `provide` at parse time (expected fn, found ' +
+      "emission), so the grammar's provide_method (plain `fn`) errors here too.",
+  ],
 ]);
 
 function rvlFiles() {

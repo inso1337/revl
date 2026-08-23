@@ -348,6 +348,9 @@ module.exports = grammar({
     spawn_expression: ($) =>
       seq('spawn', field('component', $.identifier), optional(seq('with', $.record_literal))),
 
+    // At statement position `emit call()` is preferred over an expression
+    // statement wrapping a unary `emit` (only emit_statement carries the
+    // `compensate` clause); the higher precedence breaks the tie.
     emit_statement: ($) =>
       prec.right(
         seq('emit', $._expression, optional(seq('compensate', field('compensate', $._expression)))),
@@ -375,7 +378,10 @@ module.exports = grammar({
         field('name', $.identifier),
         field('parameters', $.parameters),
         optional(seq('->', field('return_type', $._type))),
-        choice(seq('=', field('body', $._expression)), field('body', $.block)),
+        choice(
+          seq('=', field('body', choice($.emit_expression, $._expression))),
+          field('body', $.block),
+        ),
       ),
 
     // provide-method / arrow parameters: names with OPTIONAL type annotations
@@ -446,6 +452,13 @@ module.exports = grammar({
         PREC.unary,
         seq(field('operator', choice('!', '-')), field('operand', $._expression)),
       ),
+
+    // `emit <call>` in value position (parser.py EmitExpr): the value of an
+    // irreversible call, e.g. `fn record(line) = emit append_line(...)`. Kept
+    // out of the general expression set so `emit` at statement position is
+    // unambiguously an emit_statement.
+    emit_expression: ($) =>
+      prec.right(seq('emit', field('operand', $._expression))),
 
     binary_expression: ($) => {
       const table = [
