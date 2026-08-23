@@ -1723,9 +1723,12 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
-    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
-    # imported on this tier, and %d on an int64 is exact decimal.
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): %d on an int64 is
+    # exact decimal. Unlike the component tier, the pure v3 module imports fmt
+    # only on demand, so flag it — otherwise a module whose sole fmt use is
+    # to_str emits fmt.Sprintf with no import (undefined: fmt).
     if method == "to_str":
+        ctx.needs_fmt = True
         return f'fmt.Sprintf("%d", {target})'
     # The Map value type (docs/stdlib-2.0.md §Map): persistent Go maps —
     # `set` copies into a fresh map, `lookup` answers the sealed RevlOpt.
