@@ -24,6 +24,17 @@ Peer death is withdrawal: a dedicated monitor connection sees EOF when the
 provider process goes away; the proxy disposes its own fiber, the provision is
 withdrawn, and every dependent deactivates with ordered teardown (R2/R3): the
 same reactive path demo/live.py shows for a local swap, now spanning processes.
+
+Peer *replacement* is re-point, not withdrawal: `_Client.repoint(new_path)` is
+a **planned cutover** (`revl swap <component> --to <backend>`, docs/swap.md). A
+successor provider is booted on another socket; the client reconnects its RPC
+and monitor connections to it atomically, under a lock so an in-flight call
+drains against the old provider first (drain-v1). The monitor is keyed by a
+*generation*: the old monitor connection's EOF, when the old provider is then
+torn down, is recognised as the expected end of a superseded generation and
+does **not** fire `on_lost` — so a swap is a re-point, not the withdrawal blip
+an unplanned death produces. The distinction is the whole point: unplanned
+death still withdraws; a planned cutover carries the provision to a successor.
 """
 
 from __future__ import annotations
@@ -201,42 +212,117 @@ async def serve(ctx, exports, path: str):
 class _Client:
     """One RPC connection plus one idle monitor connection. Provided methods
     are called synchronously in cordis-py, so the RPC round-trip is blocking;
-    the monitor connection exists only to observe the provider's death."""
+    the monitor connection exists only to observe the provider's death.
+
+    A single lock serialises `call`, `repoint` and `close` against each other.
+    Because `call` holds the lock across its blocking round-trip, a `repoint`
+    requested mid-call waits for that in-flight call to drain against the old
+    provider before the cutover — the client-granularity form of drain-v1.
+
+    The monitor is keyed by a monotonic `_generation`. Each watcher thread is
+    bound to the connection and generation it started with; on EOF it fires
+    `on_lost` **only if** it is still the current generation. A `repoint`
+    bumps the generation, so the old monitor's EOF (when the superseded
+    provider is torn down) is recognised as an expected cutover, not a death.
+    """
 
     def __init__(self, path: str, module=None) -> None:
+        self._lock = threading.RLock()
+        self._path = path
         self.rpc = _connect(path)
         self._io = self.rpc.makefile("rwb")
         self.monitor = _connect(path)
         self._module = module  # emitted module: its case classes rebuild ADTs
+        self._generation = 0
+        self._on_lost = None    # set by watch(); re-armed on each repoint
 
     def call(self, key: str, method: str, args):
-        self._io.write((json.dumps({"key": key, "method": method, "args": list(args)}) + "\n").encode())
-        self._io.flush()
-        line = self._io.readline()
+        with self._lock:
+            io = self._io
+            io.write((json.dumps({"key": key, "method": method, "args": list(args)}) + "\n").encode())
+            io.flush()
+            line = io.readline()
+            module = self._module
         if not line:
             raise ConnectionError("bridge peer closed the connection")
         reply = json.loads(line)
         if not reply.get("ok"):
             raise RuntimeError(reply.get("error", "remote error"))
-        return _decode_value(reply.get("value"), self._module)
+        return _decode_value(reply.get("value"), module)
 
     def watch(self, on_lost) -> threading.Thread:
-        """Call `on_lost()` once, from a daemon thread, when the provider dies
-        (the monitor connection hits EOF)."""
+        """Call `on_lost()` once, from a daemon thread, when the *current*
+        provider dies unplanned (its monitor connection hits EOF while still
+        the live generation). A planned `repoint` supersedes the generation, so
+        the old provider's later teardown does not trigger `on_lost`."""
+        with self._lock:
+            self._on_lost = on_lost
+            return self._spawn_watch(self.monitor, self._generation)
+
+    def _spawn_watch(self, monitor_sock, generation: int) -> threading.Thread:
         def run() -> None:
             try:
-                while self.monitor.recv(64):
+                while monitor_sock.recv(64):
                     pass
             except OSError:
                 pass
+            # EOF on this monitor connection. If a repoint has since carried us
+            # to a successor, this is the expected end of a superseded
+            # generation — stay quiet. Otherwise the current provider died
+            # unplanned: withdraw (R2/R3).
+            with self._lock:
+                superseded = generation != self._generation
+                on_lost = self._on_lost
+            if superseded or on_lost is None:
+                return
             on_lost()
 
         thread = threading.Thread(target=run, name="bridge-peer-watch", daemon=True)
         thread.start()
         return thread
 
+    def repoint(self, new_path: str) -> None:
+        """Planned cutover: reconnect this client's RPC and monitor to a
+        successor provider serving at `new_path`, without firing `on_lost`.
+
+        The successor is dialled *before* the lock is taken, so a failed
+        connect raises here and leaves the live client entirely untouched (the
+        swap can then be refused with nothing re-pointed). Under the lock — held
+        by any in-flight `call`, which therefore drains against the old provider
+        first — the new connections are swapped in and the generation is bumped;
+        subsequent calls go to the successor. The old sockets are then shut so
+        the superseded monitor thread wakes promptly and, seeing the bumped
+        generation, exits without withdrawing."""
+        new_rpc = _connect(new_path)
+        new_io = new_rpc.makefile("rwb")
+        new_monitor = _connect(new_path)
+        with self._lock:
+            old_io, old_rpc, old_monitor = self._io, self.rpc, self.monitor
+            self.rpc, self._io, self.monitor = new_rpc, new_io, new_monitor
+            self._path = new_path
+            self._generation += 1
+            generation = self._generation
+            rearm = self._on_lost is not None
+        try:
+            old_io.close()
+        except OSError:
+            pass
+        for sock in (old_rpc, old_monitor):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)  # wake the superseded watcher
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if rearm:
+            self._spawn_watch(new_monitor, generation)
+
     def close(self) -> None:
-        for sock in (self.rpc, self.monitor):
+        with self._lock:
+            socks = (self.rpc, self.monitor)
+        for sock in socks:
             try:
                 sock.close()
             except OSError:

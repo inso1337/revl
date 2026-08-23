@@ -258,6 +258,7 @@ python -m revl run app.rvl --plan            # print the load plan (order, confi
 ```bash
 python -m revl compile app.rvl --json-diagnostics  # structured rejections for CI
 python -m revl run app.rvl --placement map.toml    # split across processes/languages
+#   at the interactive swap> prompt:  swap <component> --to <backend>   (docs/swap.md)
 python -m revl mcp serve                           # the compiler as an MCP server
 python -m revl mcp schema app.rvl                  # provided services -> MCP tools
 python -m revl mcp import tools.json               # an MCP server -> revl source
@@ -283,7 +284,15 @@ easiest place to overclaim:
   static half — `tests/test_distribute.py` asserts the transport-safety
   verdict `revl audit` reports for each service. A four-language composition
   actually running is exercised by the `demo/bridge_py*.py` scripts, which no
-  test and no CI job runs. Treat it as demonstrated, not gated.
+  test and no CI job runs. Treat it as demonstrated, not gated. A live
+  placement can also **migrate a component across tiers while it runs** —
+  `swap <component> --to <backend>` at the interactive `swap>` prompt: boot the
+  candidate, admit it against the running manifest, re-point the consumers, and
+  drain + tear the old provider down with a no-residue proof
+  ([docs/swap.md](swap.md)). The re-point itself (a planned cutover carrying
+  the seam to a successor, distinct from peer-death withdrawal) is gated by
+  `tests/test_swap.py`; the full multi-process cutover needs the cordis-py
+  runtime.
 - **`mcp serve`** holds a composition **in memory** so an agent can load,
   call, swap and prove no-residue without touching the filesystem
   ([mcp-bridge.md](mcp-bridge.md)). The tool surface, its annotations and its
