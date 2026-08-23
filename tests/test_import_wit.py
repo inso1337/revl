@@ -131,6 +131,73 @@ def test_world_exports_are_provided_and_imports_are_declaration_only(tmp_path):
             "defined in another package") in source
 
 
+# -------------------------------------------------- resources (Slice 2)
+
+def test_resource_maps_to_the_acquire_returned_handle_model(tmp_path):
+    """A WIT resource is a live handle with identity — exactly revl's
+    acquire-returned resource type (distribute.py): it crosses a seam by
+    proxy, and its WIT destructor is the `undo` of an `extern acquire`."""
+    source = import_wit_file(str(FIXTURES / "resource.wit"))
+    # the handle: an opaque proxy record, identity host-side
+    assert "type Descriptor = { handle: Int }" in source
+    # construction + destructor as a tracked inverse (G4); `result` is the
+    # undo slot's one implicit binding — the acquired handle
+    assert ("extern acquire fn descriptor_new(path: Str) -> Descriptor"
+            " undo descriptor_drop(result)") in source
+    # the destructor is a declared extern, so the undo's callee is checked
+    assert "extern emission fn descriptor_drop(self: Descriptor)" in source
+    assert "crosses a seam by proxy not by copy (distribute.py)" in source
+
+    ir = _compile(source, tmp_path)
+    methods = _methods(ir, "Filesystem")
+    # a method takes the handle as its first parameter (`self`)
+    assert methods["descriptor_read"]["params"][0] == {"name": "self", "type": "Descriptor"}
+    # `@revl:pure` on the WIT method survives; the rest default to emission
+    assert methods["descriptor_tell"]["emission"] is False
+    assert methods["descriptor_read"]["emission"] is True
+    # distribute.py sees Descriptor as a resource type: it is an acquire return
+    from revl.distribute import distributability
+    assert "Descriptor" in {e["returns"] for e in ir["externs"]
+                            if e.get("class") == "acquire"}
+    verdict = distributability(ir)["Filesystem"]
+    assert verdict["verdict"] == "address-space-bound"
+    assert any("Descriptor" in reason for reason in verdict["reasons"])
+
+
+def test_borrow_and_own_map_to_the_handle_type(tmp_path):
+    """`borrow<r>` / `own<r>` are references to a resource; the reference IS
+    the handle type — copy-vs-move is the host concern the acquire/undo pair
+    already tracks."""
+    source = import_wit("""
+package a:b;
+interface i {
+  resource conn {
+    constructor();
+  }
+  send: func(c: borrow<conn>, bytes: list<u8>);
+  take: func(c: own<conn>);
+}
+""", filename="borrow.wit")
+    ir = _compile(source, tmp_path)
+    methods = _methods(ir, "I")
+    assert methods["send"]["params"][0] == {"name": "c", "type": "Conn"}
+    assert methods["take"]["params"][0] == {"name": "c", "type": "Conn"}
+
+
+def test_a_resource_with_no_constructor_still_declares_its_destructor(tmp_path):
+    source = import_wit("""
+package a:b;
+interface i {
+  resource pool { }
+  open: func() -> pool;
+}
+""", filename="pool.wit")
+    assert "extern acquire fn pool_new() -> Pool undo pool_drop(result)" in source
+    assert "declares no constructor" in source
+    ir = _compile(source, tmp_path)
+    assert "Pool" in {e["returns"] for e in ir["externs"] if e.get("class") == "acquire"}
+
+
 # --------------------------------------------------------- the emission rule
 
 NOTHING_ASSERTED = """
@@ -226,15 +293,7 @@ def _refusal(source: str) -> str:
     return str(excinfo.value)
 
 
-def test_resource_is_refused_with_the_way_forward():
-    message = _refusal((FIXTURES / "resource.wit").read_text(encoding="utf-8"))
-    assert "bad.wit:6: unsupported WIT construct: `resource descriptor`" in message
-    assert "extern acquire fn open(...) undo close(...)" in message
-
-
 @pytest.mark.parametrize("wit,expected", [
-    ("interface i { f: func(h: borrow<x>); }", "borrow<T> (a resource handle)"),
-    ("interface i { f: func(h: own<x>); }", "own<T> (an owned resource handle)"),
     ("interface i { f: func() -> stream<u8>; }", "stream<T>"),
     ("interface i { f: func() -> future<u8>; }", "future<T>"),
     ("interface i { f: func(p: tuple<u32, string>); }", "tuple<...>"),
@@ -327,8 +386,11 @@ def test_cli_backend_choice_reaches_the_host_bodies(tmp_path):
 
 
 def test_cli_reports_a_refusal_and_exits_nonzero(tmp_path, capsys):
-    assert main(["import", "wit", str(FIXTURES / "resource.wit")]) == 1
-    assert "unsupported WIT construct: `resource descriptor`" in capsys.readouterr().err
+    bad = tmp_path / "bad.wit"
+    bad.write_text("package a:b;\ninterface i { f: func(p: tuple<u32, string>); }\n",
+                   encoding="utf-8")
+    assert main(["import", "wit", str(bad)]) == 1
+    assert "unsupported WIT construct: tuple<...>" in capsys.readouterr().err
 
 
 def test_cli_missing_file(tmp_path, capsys):

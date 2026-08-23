@@ -55,20 +55,20 @@ This goes in the compiler spec, not the runtimes.
   its docs; the py adapter's drain derives R1 from the *documented* contract
   and covers async undos. Do not remove the drain on the strength of the
   empirical ordering.
-- **cordis-py A8 async-body gap** (documented, runtime-verified): a component
-  body containing an `await` compiles to an *async* generator, and cordis-py
-  routes an async effect-setup failure to `_make_effect_guard` (auto-dispose)
-  rather than the fiber's error slot. The accumulated inverses **do** run,
-  LIFO, with no residue (A8's containment holds), but the fiber lands `ACTIVE`
-  instead of `FAILED` — A8's "the component lands FAILED with the error
-  recorded" is dropped for async bodies. Found independently by the fault-test
-  and replay features (docs/fault-tests.md §8, docs/replay.md §7): reproduced
-  with hand-built IR and no revl code in the loop, and confirmed tier-side —
-  it occurs identically with recording off. Sync bodies are unaffected. The
-  fault-test harness asserts the inverses ran and reports the wrong state
-  rather than masking it; the replay test asserts *neutrality* (same verdict
-  recording on/off), so it keeps passing once cordis-py is fixed instead of
-  pinning the bug.
+- **cordis-py A8 async-body gap** (RESOLVED — fixed in the pinned runtime,
+  `inso1337/cordis-py@harden-fiber-lifecycle` commit `1316174`, folded into
+  geohotstan/cordis-py#1): a component body containing an `await` compiled to
+  an *async* generator, and cordis-py routed an async effect-setup failure to
+  `_make_effect_guard` (auto-dispose) rather than the fiber's error slot — the
+  accumulated inverses ran LIFO with no residue (A8 containment held) but the
+  fiber landed `ACTIVE` instead of `FAILED`, dropping A8's "the component lands
+  FAILED with the error recorded" for async bodies. The runtime now routes an
+  async setup failure to the fiber's error slot, matching the sync path: the
+  fiber lands `FAILED` with the error recorded while the inverses still run
+  LIFO (containment unchanged). Sync bodies were always unaffected. The
+  fault-test lock `test_an_await_body_lands_failed_like_a_sync_body` now pins
+  the fixed behavior (it was a red-on-fix characterization test); the replay
+  neutrality test was unaffected throughout. See docs/fault-tests.md §8.
 - **cordis-rs A1 divergence** (documented, runtime-verified): cordis-rs 0.3.0
   drives `plugin_async` activation to completion with `block_on` *under the
   fiber transition lock* (fiber.rs), so a divert during a component `await`
@@ -265,6 +265,50 @@ hosted tiers raise a labelled overflow error (see docs/arithmetic.md).
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
 so this section is not read as "arithmetic is broken generally".
+
+## Arbitrary-precision `Integer` (fenced, designed, not built)
+
+`Int32` landed complete across all six tiers (docs/arithmetic.md, "Sized
+integers"): type, IR widen marker, codegen and trapping overflow, proven by
+cross-tier execution. Its sibling on the roadmap — **`Integer`, arbitrary
+precision** — is **not built**, and is fenced here so it never reads as clean.
+
+**Trigger.** A program that names the type `Integer` — `fn f(x: Integer)`,
+`let x: Integer = ...`. There is no `.to_integer()` conversion and no
+arbitrary-precision arithmetic; the design is docs/integer-proposal.md.
+
+**Blast radius.** `Integer` is *not* refused at a single, clear site today: it
+is an unknown capitalized type name, so the checker treats it like any
+undeclared nominal type. A binding whose value type is known (`let x: Integer =
+5`) is rejected with a type mismatch, but a bare `fn f(x: Integer) -> Integer`
+signature is **accepted** — the parameter and return infer to an unknown and
+flow untyped, exactly the gradual-frontier behaviour, and no tier can lower it.
+So the gap is a silent-accept at the signature boundary, contained to programs
+that opt into the unbuilt type. Until it is built, do not spell `Integer`.
+
+**Why it is not cheap-everywhere.** The cost is real and uneven, which is why
+it is fenced rather than half-shipped on the two easy tiers:
+
+- **cheap / native**: python `int` and TypeScript `bigint` are already
+  arbitrary precision — `+ - *` are the host operators with the i64 bound
+  *removed*, not imposed.
+- **native but not `+`**: java `BigInteger` and go `math/big.Int` carry
+  arbitrary precision but only through method calls (`.add`, `(&big.Int).Add`)
+  and reference/pooling semantics — a different emission shape from every
+  scalar op the emitters render today.
+- **new dependency**: rust needs a bignum crate (`ibig`/`malachite`); the go
+  and rust tiers are otherwise dependency-light, so this is a policy choice as
+  much as a code one.
+- **concentrated in wasm**: wasm has no bignum. It would need a bignum-in-WAT —
+  tag a pointer and keep the digits inside linear memory so confinement holds
+  (docs/integer-proposal.md) — which is a linear-memory arithmetic library, not
+  an instruction. This is the tier the whole feature's cost concentrates in,
+  and the reason `Integer` is a separate pass from `Int32`.
+
+Shipping `Integer` on python+TypeScript alone would be a 2-of-6 feature that
+reads as clean on two tiers and is absent on four — the exact failure this
+section exists to prevent. It stays one fence until it can land whole (or land
+with its own per-tier pins), tracked as roadmap item 12's second half.
 
 ## Typing gaps (fenced, not closed)
 

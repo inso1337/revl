@@ -792,3 +792,174 @@ def test_wasm_int_is_i64_and_checks_the_bound():
     assert "(func $int_add (param $a i64) (param $b i64) (result i64)" in emitted
     assert "unreachable" in emitted
     assert "(i32.add)" not in emitted
+
+
+# =========================================================================
+# Int32 — sized integers (docs/arithmetic.md, "Sized integers")
+#
+# `Int32` is 32-bit two's complement with the same trapping discipline `Int`
+# has at 64 bits: `+ - *` and unary `-` fault at the i32 edge rather than
+# wrapping. The coercion rule is lossless-widen / checked-narrow:
+# `Int32 -> Int` is implicit (`.to_int()` spells it), `Int -> Int32` is always
+# explicit and range-checked (`.to_int32()`), so no narrowing hides. Every
+# claim below is *executed*, not asserted about text — the same floor the Int
+# rules stand on. wasm joins py/ts/go here because the whole point of the type
+# is the tier with native i32.
+# =========================================================================
+
+# tiers that can represent and run Int32 today; ts/wasm self-skip when their
+# toolchain (vitest / wasmtime) is absent, exactly as the Int tests do.
+INT32_TIERS = ("py", "ts", "go", "wasm")
+
+INT32_IN_RANGE = """
+pub fn add(a: Int32, b: Int32) -> Int32 { return a + b }
+pub fn mul(a: Int32, b: Int32) -> Int32 { return a * b }
+test "small arithmetic"  { assert add(2.to_int32(), 2.to_int32()).to_int() == 4 }
+test "near the i32 bound" { assert add(2147483646.to_int32(), 1.to_int32()).to_int() == 2147483647 }
+test "multiplication"     { assert mul(46341.to_int32(), 46340.to_int32()).to_int() == 2147441940 }
+test "negative bound"     { assert add((0 - 2147483647).to_int32(), (0 - 1).to_int32()).to_int() == 0 - 2147483648 }
+test "negation in range"  { assert (-(0 - 42).to_int32()).to_int() == 42 }
+"""
+
+INT32_OVERFLOW = """
+pub fn maxi() -> Int32 { return 2147483647.to_int32() }
+pub fn one() -> Int32 { return 1.to_int32() }
+test "int32 overflow must not produce a value" { assert (maxi() + one()).to_int() == 0 }
+"""
+
+INT32_NARROW_TRAP = """
+pub fn toobig() -> Int { return 2147483648 }
+test "narrowing out of the i32 range must not produce a value" {
+  assert toobig().to_int32().to_int() == 0
+}
+"""
+
+INT32_NEG_MIN = """
+pub fn lo() -> Int32 { return (0 - 2147483648).to_int32() }
+pub fn neg(x: Int32) -> Int32 { return -x }
+test "negating Int32.MIN must not produce a value" { assert neg(lo()).to_int() == 0 }
+"""
+
+INT32_COERCIONS = """
+pub fn widen(x: Int32) -> Int { return x }
+pub fn narrow(n: Int) -> Int32 { return n.to_int32() }
+test "Int32 widens implicitly into an Int position" { assert widen(7.to_int32()) == 7 }
+test "narrowing round-trips inside the range" { assert narrow(1000).to_int() == 1000 }
+test "narrowing preserves negatives" { assert narrow(0 - 2000000000).to_int() == 0 - 2000000000 }
+"""
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_in_range_arithmetic(tier: str):
+    status, message = _run(tier, INT32_IN_RANGE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_overflow_traps(tier: str):
+    """A tier that *returns* here wrapped at 2^31 — the failure the type exists
+    to make impossible, at half the width `Int` guards."""
+    status, message = _run(tier, INT32_OVERFLOW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on Int32 overflow ({status}) — it wrapped: {message}")
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_narrowing_out_of_range_traps(tier: str):
+    """`Int -> Int32` is checked: a value outside [-2^31, 2^31-1] faults rather
+    than silently keeping the low 32 bits."""
+    status, message = _run(tier, INT32_NARROW_TRAP)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap narrowing out of the i32 range ({status}): {message}")
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_negation_of_min_traps(tier: str):
+    """`-Int32.MIN` overflows i32 (it is `0 - Int32.MIN`), so every tier faults
+    rather than wrapping back to Int32.MIN."""
+    status, message = _run(tier, INT32_NEG_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on -Int32.MIN ({status}) — it wrapped: {message}")
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_coercions_agree(tier: str):
+    """Widen (implicit) and narrow (checked) both agree across tiers, including
+    on negatives — the coercion half of the guarantee."""
+    status, message = _run(tier, INT32_COERCIONS)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_int32_in_range_arithmetic_slow(tier: str):
+    status, message = _run(tier, INT32_IN_RANGE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_int32_overflow_traps_slow(tier: str):
+    status, message = _run(tier, INT32_OVERFLOW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", f"{tier} did not trap on Int32 overflow: {message}"
+
+
+def _emit_text(backend: str, source: str) -> str:
+    """`_emit`, but flattened to text — the wasm backend returns a dict of
+    modules, every other tier a single string."""
+    spec = importlib.util.spec_from_file_location(
+        f"emit_{backend}_i32", ROOT / "backends" / backend / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    out = module.emit(compile_source(source, "cross_tier_exec.rvl"))
+    return "\n".join(out.values()) if isinstance(out, dict) else out
+
+
+def test_every_tier_imposes_the_i32_bound_on_arithmetic():
+    """The static half: each tier renders Int32 `+` through its own 32-bit trap
+    mechanism, never a bare wrapping add. One guarantee, six spellings."""
+    checks = {
+        "rust": "checked_add",
+        "go": "revlAddI32",
+        "python": "_revl_i32(",
+        "typescript": "revlI32(",
+        "java": "Math.addExact",
+        "wasm": "$int32_add",
+    }
+    for backend, needle in checks.items():
+        emitted = _emit_text(backend, INT32_OVERFLOW)
+        assert needle in emitted, (backend, needle, emitted[:400])
+    # rust names the Int32 fault in the message where it can carry one
+    assert "revl: Int32 overflow" in _emit_text("rust", INT32_OVERFLOW)
+
+
+def test_narrowing_is_explicit_and_checked_on_every_tier():
+    """`Int -> Int32` never lowers to a silent truncation: each tier routes it
+    through its checked-narrow spelling (docs/arithmetic.md)."""
+    src = "pub fn n(x: Int) -> Int32 { return x.to_int32() }\n"
+    checks = {
+        "rust": "i32::try_from",
+        "go": "revlToI32",
+        "python": "_revl_i32(",
+        "typescript": "revlI32(Number(",
+        "java": "Math.toIntExact",
+        "wasm": "$int32_narrow",
+    }
+    for backend, needle in checks.items():
+        assert needle in _emit_text(backend, src), (backend, needle)

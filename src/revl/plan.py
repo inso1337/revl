@@ -135,15 +135,49 @@ def _parsed_entries(source: str | None, files: list[str] | None,
 
 # ---------------------------------------------------------------- the plan
 
+def _merge_resulting_ir(running_ir: dict | None, candidate_ir: dict,
+                        dropped: set) -> dict:
+    """The full resulting composition, bodies and all — running survivors
+    (minus what this admission drops) plus the newly compiled components.
+
+    `plan()` never needs this, but `revl apply` does: to load an added or
+    replaced component against a live session it needs that component's
+    *body*, and to leave the survivors reflected in the composition it needs
+    theirs. This is the same shape `lower._link` produces; the linker already
+    validated it, so this only reassembles the pieces the gate handed back.
+    """
+    running_ir = running_ir or {}
+    cand_names = {c["name"] for c in candidate_ir.get("components") or []}
+    components = [c for c in running_ir.get("components") or []
+                  if c["name"] not in dropped and c["name"] not in cand_names]
+    components += list(candidate_ir.get("components") or [])
+    externs = {e["name"]: e for e in running_ir.get("externs") or []}
+    externs.update({e["name"]: e for e in candidate_ir.get("externs") or []})
+    return {
+        "ir_version": candidate_ir.get("ir_version") or running_ir.get("ir_version"),
+        "components": components,
+        "services": {**(running_ir.get("services") or {}),
+                     **(candidate_ir.get("services") or {})},
+        "functions": {**(running_ir.get("functions") or {}),
+                      **(candidate_ir.get("functions") or {})},
+        "externs": list(externs.values()),
+        "manifest": candidate_ir.get("manifest") or running_ir.get("manifest") or {},
+    }
+
+
 def plan(source: str | None = None, files: list[str] | None = None,
          manifest: dict | None = None, modules: dict[str, str] | None = None,
-         replacing: tuple[str, ...] = ()) -> dict:
+         replacing: tuple[str, ...] = (), include_ir: bool = False) -> dict:
     """What admitting this candidate would do to the running composition.
 
     `manifest` is a compiled IR document of what is running (or its
     `manifest` + `services`); omit it and the plan describes a cold start,
     where every provision is a gain. `replacing` names components withdrawn
     in the same admission (renames), exactly as `compile_files` takes it.
+
+    With `include_ir=True` (and only on the admitted path) the result also
+    carries `resultingIR` — the full resulting composition, bodies included —
+    which is what `revl apply` executes against a live session (docs/apply.md).
 
     Returns a structured dict; `render()` turns it into the CLI's prose.
     """
@@ -391,7 +425,7 @@ def plan(source: str | None = None, files: list[str] | None = None,
         notes.append("a diverted component stays in the composition but cannot run; "
                      "its emission surface is unreachable while it is PENDING")
 
-    return {
+    result = {
         "ok": basis != "none",
         "admissible": admissible,
         "basis": basis,
@@ -443,6 +477,12 @@ def plan(source: str | None = None, files: list[str] | None = None,
             "runtime and are not visible in a manifest",
         ],
     }
+    # `revl apply` needs the resulting composition's bodies to execute the
+    # plan; only the admitted path has them, and only when asked (the plan's
+    # prose output never carries an IR).
+    if include_ir and basis == "admitted" and candidate_ir is not None:
+        result["resultingIR"] = _merge_resulting_ir(running_ir, candidate_ir, dropped)
+    return result
 
 
 def _emission_surface(running_ir: dict | None, candidate_ir: dict | None,

@@ -116,6 +116,9 @@ def test_typescript_lowers_to_bigint_toString():
 def test_go_lowers_to_fmt_verbatim_d():
     out = str(_emit_with("go"))
     assert 'fmt.Sprintf("%d", n)' in out
+    # a pure module whose sole fmt use is to_str must still import fmt,
+    # or `go build` fails with `undefined: fmt`
+    assert '"fmt"' in out
 
 
 def test_rust_lowers_to_i64_to_string():

@@ -52,12 +52,17 @@ is never imported.
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import sys
 from typing import Any, Callable, Optional
 
 __all__ = [
     "GUARANTEE", "IrreversibleStep", "KINDS", "Recorder", "ReplayError",
     "Step", "Timeline",
+    # crash recovery (roadmap item 47): the accumulator as a write-ahead log
+    "WAL_VERSION", "WAL_GUARANTEE", "WriteAheadLog", "inverse_descriptor",
+    "boundary_of",
 ]
 
 
@@ -84,6 +89,18 @@ GUARANTEE = (
     "Whether that restores state is the application's own equivalence, not "
     "something the runtime observes or asserts."
 )
+
+#: The builtins a `bisect` predicate may use.  A predicate is an expression
+#: over the `inspect` view, so it needs the comprehension/aggregate helpers and
+#: nothing that touches the world.
+_SAFE_BUILTINS = {
+    name: getattr(__import__("builtins"), name) for name in (
+        "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
+        "int", "len", "list", "max", "min", "range", "repr", "reversed",
+        "set", "sorted", "str", "sum", "tuple", "zip",
+        "True", "False", "None",
+    )
+}
 
 
 class ReplayError(RuntimeError):
@@ -236,6 +253,22 @@ class Timeline:
         self._provisions: dict = {}
         # (file, lineno) of a recorded emission -> its Step
         self._emission_sites: dict = {}
+        # crash-recovery WAL sink (roadmap item 47): when attached, each
+        # committed step is appended to a durable log as it commits. Opt-in and
+        # additive — None here means the recorder behaves exactly as before.
+        self._wal = None
+        self._wal_ir: Optional[dict] = None
+
+    # -- write-ahead log (roadmap item 47) ---------------------------------
+
+    def attach_wal(self, wal: "WriteAheadLog", ir: Optional[dict] = None) -> None:
+        """Persist each committed step to ``wal`` as it commits."""
+        self._wal = wal
+        self._wal_ir = ir
+
+    def _wal_append(self, step: Step) -> None:
+        if self._wal is not None:
+            self._wal.append_step(step, self.component)
 
     # -- recording ---------------------------------------------------------
 
@@ -264,6 +297,7 @@ class Timeline:
         )
         if file is not None:
             self._emission_sites[(file, lineno)] = step
+        self._wal_append(step)
         return step
 
     def record_yield(self, value: Any, effect_label: Optional[str]) -> tuple:
@@ -278,6 +312,7 @@ class Timeline:
             step = self._add(KIND_BOUNDARY, _lbl(effect_label, "boundary"),
                              effect_label,
                              note="A1 iteration boundary — nothing accumulated")
+            self._wal_append(step)
             return step, None
 
         if inspect.ismethod(value) and getattr(value, "__name__", "") == "drain":
@@ -287,6 +322,7 @@ class Timeline:
             step = self._add(KIND_HINGE, _lbl(effect_label, "drain"), effect_label,
                              note="Frame.drain — runtime scaffolding, not an "
                                   "author step; step-back skips it")
+            self._wal_append(step)
             return step, value
 
         key = self._provisions.pop(id(value), None)
@@ -302,6 +338,7 @@ class Timeline:
                              detail={"repr": _describe(value)},
                              note="a non-callable disposer — the recorder cannot "
                                   "run it, so step-back will not claim to")
+            self._wal_append(step)
             return step, value
         else:
             emission = self._emission_sites.get((file, lineno - 1)) if lineno else None
@@ -322,6 +359,7 @@ class Timeline:
                                  "unknown to the recorder")
 
         step.undo = _once(step, value)
+        self._wal_append(step)
         return step, step.undo
 
     # -- reading -----------------------------------------------------------
@@ -372,6 +410,156 @@ class Timeline:
             "note": ("`accumulated` is the live accumulator at or below step k, "
                      "newest first. It reflects which inverses have run, not "
                      "what the application's state actually is."),
+        }
+
+    # -- bisecting ---------------------------------------------------------
+
+    def bisect(self, predicate: str,
+               scope: Optional[dict] = None) -> dict:
+        """Binary-search the timeline for the FIRST step at which ``predicate``
+        flips from the value it had before any step ran.
+
+        ``predicate`` is a Python expression evaluated in the same scope
+        :meth:`inspect` produces — every key of the ``inspect(k)`` view is a
+        name in scope (``at``, ``atLabel``, ``activeProvisions``,
+        ``withdrawnProvisions``, ``accumulated``, ``unwound``, ``aheadOfHere``,
+        ``emissionsSoFar``, ``component``), plus ``step`` (the step dict at
+        ``k``, or ``None`` at ``k == -1``).  ``scope`` adds further read-only
+        names.
+
+        The search reconstructs the composition at a probe step with
+        :meth:`inspect` — the same view :meth:`step_back` would restore state to
+        — and never mutates the timeline, so it can run the probes in any order
+        and reach the answer in ``ceil(log2(N)) + 2`` evaluations instead of
+        ``N``.  It returns the found step's full record (who ran, what it
+        touched, which realm) and, critically, the **verified/unverified**
+        status of the effects on the path to it: bisect trusts the recorded
+        inverses, and nothing here checks that an inverse actually restores
+        state (that is roadmap item 26, `verified effect`, and it is not built),
+        so today every effect on the path reads as *unverified*.
+
+        Assumes, as ``git bisect`` does, that the predicate is **monotone** over
+        the timeline — once flipped it stays flipped.  For a non-monotone
+        predicate it still returns *a* flip boundary, but not provably the
+        first; the report says so.
+        """
+        n = len(self.steps)
+        probes: list = []
+
+        def evaluate(k: int) -> bool:
+            probes.append(k)
+            view = self.inspect(k)
+            names = dict(view)
+            names["step"] = self.steps[k].as_dict() if k >= 0 else None
+            if scope:
+                for key, value in scope.items():
+                    names.setdefault(key, value)
+            try:
+                return bool(eval(predicate,  # noqa: S307 — a dev tool, same
+                                 {"__builtins__": _SAFE_BUILTINS}, names))  # trust as the REPL
+            except Exception as exc:  # noqa: BLE001
+                raise ReplayError(
+                    f"bisect predicate {predicate!r} failed at step {k}: "
+                    f"{type(exc).__name__}: {exc}") from None
+
+        base = {
+            "component": self.component,
+            "predicate": predicate,
+            "steps": n,
+            "guarantee": GUARANTEE,
+            "note": ("bisect reconstructs each probed step with `inspect` (the "
+                     "state `step_back` would restore to) and never mutates the "
+                     "timeline; it assumes the predicate is monotone over the "
+                     "timeline, exactly as `git bisect` assumes good->bad is "
+                     "monotone."),
+        }
+
+        if n == 0:
+            return {**base, "flipped": False, "found": None, "evaluations": 0,
+                    "reason": "the timeline is empty — nothing to bisect"}
+
+        before = evaluate(-1)         # the value before any step ran
+        after = evaluate(n - 1)       # the value once every step has run
+        if after == before:
+            return {**base, "flipped": False, "found": None,
+                    "evaluations": len(probes),
+                    "valueThroughout": before,
+                    "reason": ("the predicate never flips: it is "
+                               f"{before!r} before step 0 and still {before!r} "
+                               "after the last step")}
+
+        # invariant: predicate(lo) == before, predicate(hi) != before.
+        lo, hi = -1, n - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if evaluate(mid) == before:
+                lo = mid
+            else:
+                hi = mid
+
+        step = self.steps[hi]
+        return {
+            **base,
+            "flipped": True,
+            "found": hi,
+            "fromValue": before,
+            "toValue": after,
+            "evaluations": len(probes),
+            "probes": probes,
+            "reduction": f"{n} step(s) searched in {len(probes)} evaluation(s)",
+            "step": step.as_dict(),
+            "record": self._record(step),
+            "at": self.inspect(hi),
+            "verified": self._verified_path(hi),
+        }
+
+    def _record(self, step: Step) -> dict:
+        """The 'who ran / what it touched / which realm' of one step."""
+        origin = step.origin or {}
+        phase = origin.get("phase")
+        if phase == "call":
+            who = (f"{origin.get('key')}.{origin.get('method')}"
+                   f"({', '.join(repr(a) for a in origin.get('args') or [])})")
+        elif phase == "repl":
+            who = f"REPL: {origin.get('line')}"
+        else:
+            who = "activation body"
+        return {
+            "realm": self.component,
+            "whoRan": who,
+            "origin": origin,
+            "touched": step.detail or {},
+            "label": step.label,
+            "kind": step.kind,
+            "source": step.source,
+            "site": step.site,
+        }
+
+    def _verified_path(self, k: int) -> dict:
+        """The honest verification status of the effects on the path to ``k``.
+
+        bisect trusts the recorded inverses.  Whether an inverse actually
+        restores state — `verified effect`, roadmap item 26 — is not built, so
+        a step carries no ``verified`` marker and every revertible effect on the
+        path reads as unverified.  Written to light up on its own the day a
+        step *does* carry that marker.
+        """
+        path = [s for s in self.steps if 0 <= s.index <= k and s.revertible]
+        verified = [s for s in path if s.as_dict().get("verified") is True]
+        return {
+            "status": "verified" if path and len(verified) == len(path)
+            else "unverified",
+            "effectsOnPath": len(path),
+            "verifiedOnPath": len(verified),
+            "explanation": (
+                "bisect trusts the recorded inverses. The state it bisects over "
+                "is the one those inverses define at each step (what `inspect` "
+                "reconstructs), not an independently checked state. `verified "
+                "effect` (roadmap item 26) — which would confirm an inverse "
+                "actually restores state — is not built, so every effect on the "
+                "path to the found step reads as unverified. Whether the flip "
+                "reflects true program state is the application's own "
+                "equivalence, exactly the bound in docs/replay.md §4.1."),
         }
 
     # -- stepping back -----------------------------------------------------
@@ -686,6 +874,7 @@ class Recorder:
         self.timelines: dict = {}
         self._ir = ir or {}
         self._origin: dict = {"phase": "activation"}
+        self.wal: Optional[WriteAheadLog] = None  # crash-recovery WAL (item 47)
 
     # -- setup -------------------------------------------------------------
 
@@ -719,6 +908,8 @@ class Recorder:
         def recording_apply(ctx, config):
             timeline = Timeline(name, recorder.sources)
             timeline.origin = dict(recorder._origin)
+            if recorder.wal is not None:
+                timeline.attach_wal(recorder.wal, recorder._ir)
             recorder.timelines[name] = timeline
             return apply(_RecordingContext(ctx, timeline, requires, services), config)
 
@@ -742,6 +933,23 @@ class Recorder:
     def activation_origin(self) -> None:
         self.set_origin({"phase": "activation"})
 
+    # -- crash-recovery WAL (roadmap item 47) ------------------------------
+
+    def open_wal(self, path: str, generation: Optional[int] = None) -> "WriteAheadLog":
+        """Open a durable write-ahead log; every step recorded from now on is
+        appended to it as it commits."""
+        if self.wal is not None:  # a prior generation's log (e.g. --watch reload)
+            self.wal.close()
+        self.wal = WriteAheadLog(path, self._ir, generation).open()
+        return self.wal
+
+    def commit_wal(self, components: Optional[list] = None) -> None:
+        """Mark activation complete and close the WAL. The presence of this
+        marker is what a restart reads as roll-forward vs roll-back."""
+        if self.wal is not None:
+            self.wal.commit_activation(components)
+            self.wal.close()
+
     # -- reading -----------------------------------------------------------
 
     def timeline(self, component: Optional[str] = None) -> Timeline:
@@ -763,3 +971,328 @@ class Recorder:
             "components": [t.as_dict() for t in self.timelines.values()],
             "guarantee": GUARANTEE,
         }
+
+
+# ---------------------------------------------------------------------------
+# crash recovery: the accumulator as a write-ahead log (roadmap item 47)
+# ---------------------------------------------------------------------------
+#
+# The accumulator already IS a write-ahead log: an ordered list of effects,
+# each paired with the inverse that undoes it.  Held in process memory, it dies
+# with the process — a `kill -9` mid-activation orphans whatever external state
+# the half-run activation already touched, with no record of it.  This persists
+# the accumulator, effect by effect *as each commits*, to a durable append-only
+# log so a restart can prove its way back.
+#
+# The honest analysis is the design (docs/crash-recovery.md).  After a crash
+# the process memory is gone, so an inverse that closes over an in-process
+# object (a Map handle, a fiber's provision registry) is a no-op — there is
+# nothing left for it to act on.  What the WAL's cargo really is, therefore, is
+# **boundary state**: the crossings whose referent outlives the process.  Two
+# kinds, both already classified by the frontend and the recorder:
+#
+#   * an **emission** already left the process (a row written, a message sent).
+#     Its record carries whether it was crossed *bare* or with a *compensation*
+#     declared for it (A5).
+#   * an **acquire** whose returned resource outlives the process (a file on
+#     disk persists; a socket died with the process).  The `extern acquire`
+#     classification, and the resource type it returns, is what the WAL reads to
+#     tell these apart.
+#
+# This forces one language-level requirement worth stating plainly: an inverse
+# that must run *after* a restart has to be reconstructible **from a
+# description** — a named boundary operation plus its captured concrete
+# arguments — and NOT from a closure, because the closure's captured world no
+# longer exists.  :func:`inverse_descriptor` marks each record accordingly, and
+# where an inverse is only a closure it says so honestly rather than pretending
+# a dead lambda can be re-run.
+
+WAL_VERSION = 1
+
+#: The single sentence recovery is allowed to claim.  Deliberately narrow, in
+#: the same spirit as :data:`GUARANTEE`.
+WAL_GUARANTEE = (
+    "the WAL records each committed effect's step identity, boundary "
+    "classification and inverse DESCRIPTOR (not its closure). On restart, "
+    "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+    "in-process inverses are moot (their captured memory died with the "
+    "process) and closure-only boundary inverses are reported as residue, "
+    "never silently claimed to have run."
+)
+
+# how the WAL classifies a step's referent lifetime relative to the process
+REFERENT_PROCESS_CROSSING = "process-crossing"   # an emission — already left
+REFERENT_OUTLIVES = "outlives-process"           # a file, a durable handle
+REFERENT_IN_PROCESS = "in-process"               # a Map, a registry — dies with us
+REFERENT_UNKNOWN = "unknown"                      # cannot be told; must be proven
+
+#: A coarse, *stated* policy mapping an acquired resource's type name to whether
+#: its referent outlives the process.  The language cannot know this in general
+#: (that is the honest bound — docs/crash-recovery.md §"boundary is the cargo");
+#: the policy is a host concern, defaulting to "unknown, therefore prove it".
+_OUTLIVES_HINTS = {
+    "outlives": ("File", "Path", "Dir", "Handle", "Db", "Table", "Row",
+                 "Blob", "Object", "Lock", "Lease", "Pid"),
+    "dies": ("Socket", "Conn", "Connection", "Stream", "Channel", "Fd",
+             "Pipe", "Pool", "Session", "Client"),
+}
+
+
+def _referent_of_resource(resource: Optional[str]) -> str:
+    if not resource:
+        return REFERENT_UNKNOWN
+    for hint in _OUTLIVES_HINTS["outlives"]:
+        if hint.lower() in resource.lower():
+            return REFERENT_OUTLIVES
+    for hint in _OUTLIVES_HINTS["dies"]:
+        if hint.lower() in resource.lower():
+            return REFERENT_IN_PROCESS
+    return REFERENT_UNKNOWN
+
+
+def _acquire_resources(ir: Optional[dict]) -> dict:
+    """extern name -> the resource type it acquires (its `returns`), for the
+    `extern acquire` declarations. Read straight off the IR the frontend owns;
+    never edited here."""
+    out: dict = {}
+    for ext in (ir or {}).get("externs") or []:
+        if ext.get("class") == "acquire" and ext.get("returns"):
+            out[ext["name"]] = ext["returns"]
+    return out
+
+
+def boundary_of(step: "Step", ir: Optional[dict] = None) -> dict:
+    """Classify one recorded step's boundary state — what, if anything, of it
+    outlives the process.
+
+    This is the WAL's real payload.  A pure in-process effect (an author
+    ``effect`` over a local ``Map``) classifies as ``in-process``: after a
+    crash there is nothing of it left to undo.  An emission classifies as a
+    ``process-crossing`` and carries whether a compensation was declared for
+    it.  A provision is registry state, gone with the process.
+    """
+    kind = step.kind
+    if kind == KIND_EMISSION:
+        return {
+            "class": "emission",
+            "referent": REFERENT_PROCESS_CROSSING,
+            "compensated": step.compensation is not None,
+            "detail": step.detail or {},
+        }
+    if kind == KIND_COMPENSATION:
+        return {"class": "compensation", "referent": REFERENT_PROCESS_CROSSING,
+                "for": (step.detail or {}).get("for")}
+    if kind == KIND_PROVISION:
+        return {"class": "provision", "referent": REFERENT_IN_PROCESS,
+                "key": (step.detail or {}).get("key")}
+    if kind == KIND_EFFECT:
+        # an author `effect X undo Y`. Is X an `extern acquire` whose referent
+        # outlives us? The recorder does not capture the extern name for an
+        # effect (its inverse is a closure), so absent an explicit descriptor
+        # this is an in-process effect. When the step carries an explicit
+        # acquire `resource`, decide by the stated policy.
+        resource = (step.detail or {}).get("resource")
+        if resource is not None:
+            return {"class": "acquire", "resource": resource,
+                    "referent": _referent_of_resource(resource)}
+        return {"class": "in-process", "referent": REFERENT_IN_PROCESS}
+    # boundary / hinge / opaque — nothing that outlives, nothing to reconstruct
+    return {"class": kind, "referent": REFERENT_IN_PROCESS}
+
+
+def inverse_descriptor(step: "Step", ir: Optional[dict] = None) -> dict:
+    """The inverse of ``step`` as a DESCRIPTION that survives the process, or an
+    honest flag that it is a closure and does not.
+
+    Reconstructible ⟺ the inverse is a named boundary operation with captured
+    concrete arguments — something a fresh process can re-issue against the
+    world.  The recorder captures concrete arguments for exactly one thing: an
+    **emission** (``key.method(args)`` recorded through the service proxy).
+    Every other inverse the accumulator holds — a compensation lambda, a
+    provision withdrawal (runtime-derived, R5), an author ``undo`` over a local
+    handle — is a **closure** over process memory: the recorder has its source
+    site but not a re-issuable call, so after a restart it cannot be run and
+    this says so.
+
+    A record may instead be appended with an *explicit* descriptor (see
+    :meth:`WriteAheadLog.record_boundary`) when a boundary effect knows its own
+    inverse call and arguments — that is the reconstructible path a durable
+    resource (a file to unlink, a row to delete) takes.
+    """
+    explicit = getattr(step, "inverse_op", None)
+    if explicit is not None:
+        return {"reconstructible": True, "op": explicit,
+                "why": "explicit boundary descriptor: a named call with "
+                       "captured arguments, re-issuable in a fresh process"}
+    if step.kind == KIND_EMISSION:
+        # an emission has no inverse (one-way). Its record anchors the
+        # boundary; a compensation, if any, is a *separate* step.
+        return {"reconstructible": False,
+                "reason": "an emission is a one-way crossing; it has no inverse"}
+    if not step.revertible:
+        return {"reconstructible": False,
+                "reason": f"{step.kind}: nothing of the author's to undo"}
+    return {
+        "reconstructible": False,
+        "reason": ("closure over in-process memory — the recorder holds this "
+                   "inverse's source site but not a re-issuable call with "
+                   "captured arguments, so a fresh process cannot run it"),
+        "site": step.site,
+        "source": step.source,
+    }
+
+
+def _wal_record(step: "Step", component: str, seq: int,
+                ir: Optional[dict] = None) -> dict:
+    return {
+        "record": "effect",
+        "seq": seq,
+        "component": component,
+        "stepIndex": step.index,
+        "kind": step.kind,
+        "label": step.label,
+        "site": step.site,
+        "source": step.source,
+        "origin": step.origin or {},
+        "boundary": boundary_of(step, ir),
+        "inverse": inverse_descriptor(step, ir),
+    }
+
+
+class WriteAheadLog:
+    """A durable, append-only log of committed effects and their inverse
+    descriptors (roadmap item 47).
+
+    Append-only and flushed+``fsync``'d per record, so a record that a caller
+    saw acknowledged is on disk before the effect it describes is allowed to
+    matter — the write-ahead discipline.  The on-disk format is JSON Lines: a
+    header line, one line per committed effect, and a terminal marker
+    (``activation-complete`` on a clean activation, absent after a crash).  That
+    presence-or-absence is the whole roll-forward vs roll-back decision.
+
+    A WAL never holds a live runtime object; it holds descriptions.  That is
+    the point — it has to survive the process that produced it.
+    """
+
+    def __init__(self, path: str, ir: Optional[dict] = None,
+                 generation: Optional[int] = None) -> None:
+        self.path = path
+        self._ir = ir
+        self._generation = generation
+        self._seq = 0
+        self._handle = None
+
+    # -- writing -----------------------------------------------------------
+
+    def open(self) -> "WriteAheadLog":
+        directory = os.path.dirname(os.path.abspath(self.path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        self._handle = open(self.path, "a", encoding="utf-8")
+        if self._handle.tell() == 0:
+            self._write({"record": "header", "walVersion": WAL_VERSION,
+                         "generation": self._generation,
+                         "guarantee": WAL_GUARANTEE})
+        return self
+
+    def __enter__(self) -> "WriteAheadLog":
+        return self.open()
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    def _write(self, record: dict) -> None:
+        if self._handle is None:
+            raise ReplayError("write-ahead log is not open — call open() first")
+        self._handle.write(json.dumps(record, sort_keys=True) + "\n")
+        self._handle.flush()
+        try:
+            os.fsync(self._handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+    def append_step(self, step: "Step", component: str) -> dict:
+        """Write one committed effect ahead of it mattering."""
+        record = _wal_record(step, component, self._seq, self._ir)
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def record_boundary(self, component: str, label: str, *, resource: str,
+                        inverse_op: dict, kind: str = KIND_EFFECT) -> dict:
+        """Append a boundary effect with an EXPLICIT, reconstructible inverse.
+
+        For a durable resource (a file, a row) whose inverse is a known named
+        call with captured arguments — the reconstructible path.  ``inverse_op``
+        is ``{"receiver","method","args"}``; recovery re-issues it against the
+        world in a fresh process.
+        """
+        referent = _referent_of_resource(resource)
+        record = {
+            "record": "effect", "seq": self._seq, "component": component,
+            "stepIndex": None, "kind": kind, "label": label,
+            "site": None, "source": None, "origin": {"phase": "activation"},
+            "boundary": {"class": "acquire", "resource": resource,
+                         "referent": referent},
+            "inverse": {"reconstructible": True, "op": inverse_op,
+                        "why": "explicit boundary descriptor: a named call with "
+                               "captured arguments, re-issuable in a fresh "
+                               "process"},
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def append_timeline(self, timeline: "Timeline") -> list:
+        """Write every committed step of one component's accumulator, in order."""
+        return [self.append_step(step, timeline.component)
+                for step in timeline.steps]
+
+    def commit_activation(self, components: Optional[list] = None) -> dict:
+        """Mark activation complete.  Its presence is roll-forward; its absence
+        (the crash case) is roll-back."""
+        record = {"record": "activation-complete", "generation": self._generation,
+                  "components": components or []}
+        self._write(record)
+        return record
+
+    # -- reading -----------------------------------------------------------
+
+    @staticmethod
+    def read(path: str) -> dict:
+        """Load a WAL from disk into ``{header, records, complete, torn}``.
+
+        ``complete`` is whether the terminal ``activation-complete`` marker is
+        present.  A trailing half-written line (a genuine ``kill -9`` can leave
+        one) is tolerated and reported as ``torn`` rather than crashing the
+        recovery that exists to handle exactly that.
+        """
+        header: dict = {}
+        records: list = []
+        complete = False
+        torn = False
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    torn = True   # a partial final record — the crash itself
+                    continue
+                kind = entry.get("record")
+                if kind == "header":
+                    header = entry
+                elif kind == "activation-complete":
+                    complete = True
+                    records.append(entry)
+                else:
+                    records.append(entry)
+        return {"header": header, "records": records,
+                "complete": complete, "torn": torn}
