@@ -345,3 +345,28 @@ def _drift_error(program: Program, new: ServiceDecl, drift: _Drift,
     # classification the exact-match gate carried, so downstream consumers see
     # no change of shape.
     return RevlError(program.filename, new.line, message, hint=hint, why=why)
+
+
+# ------------------------------------------------------- boundary policy (§5)
+#
+# The third leg of the gate (roadmap item 33). Where `_admit_service_replacement`
+# above checks *correctness* (a redeclared interface keeps running consumers
+# valid), the boundary policy checks *absolute authority*: does any admitted
+# component reach a capability it may not? The check is set operations over the
+# G8 audit graph, so it lives in `revl.policy`; this is the admission-side
+# entry point, additive to the §5 gate — a violation raises the same
+# `RevlError`-with-why-trace shape every other refusal here carries.
+
+
+def admit_under_policy(policy, audit: dict,
+                       mcp_components=None) -> None:
+    """Refuse admission when the composition breaches the boundary policy.
+
+    `policy` is a `revl.policy.Policy`, `audit` the `revl audit` graph
+    (`revl.audit_diff.audit_report`). Raises on the first violation (admission
+    is all-or-nothing); returns silently on a clean policy. Kept a thin
+    forwarder so the admission module names the third gate leg alongside the
+    other two, without importing the policy engine at module load."""
+    from .policy import enforce  # noqa: PLC0415 — lazy, additive to §5
+
+    enforce(policy, audit, mcp_components=mcp_components)
