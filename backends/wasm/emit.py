@@ -882,6 +882,11 @@ class _ComponentEmitter:
         lines.extend(provide_funcs)
         if needs_memory:
             lines.extend(self.v3._helper_funcs())
+            # `$f64_to_str` is emitted only when a Float is actually rendered,
+            # so a component that never interpolates a Float keeps a
+            # byte-identical helper preamble (the v1 goldens are unchanged).
+            if "$f64_to_str" in rendered:
+                lines.append(self.v3._helper_f64_to_str())
         elif needs_arith:
             lines.extend(self.v3._arith_helper_funcs())
         lines.extend(fn_defs)
@@ -1088,6 +1093,17 @@ class _Scope:
     def __init__(self, slots: dict[str, str], types: dict[str, str | None]) -> None:
         self.slots = slots
         self.types = types
+
+
+def _f64_literal(value: float) -> str:
+    """The WAT `f64.const` payload for a Float literal, bit-exact.
+
+    Python's `float.hex()` is the IEEE-754 hexadecimal form WAT accepts
+    verbatim (`0x1.b1ae4d6e2ef50p+69`), so the constant that reaches wasmtime
+    is the same 64-bit pattern the source named — no decimal round-trip, no
+    ambiguity. NaN/Infinity never arrive here (they are computed, not written).
+    """
+    return float.hex(value)
 
 
 def _wat_bytes(data: bytes) -> str:
@@ -1528,6 +1544,53 @@ class _V3Emitter:
       (br 0)))
     (local.get $p))"""
 
+    def _helper_f64_to_str(self) -> str:
+        # Canonical Float -> Str, the ECMAScript `Number::toString` form
+        # (docs/strings.md), for the subset this hand-written tier renders
+        # *exactly* — never approximately:
+        #   * NaN            -> "NaN"
+        #   * +/- Infinity   -> "Infinity" / "-Infinity"
+        #   * integer-valued finite floats with |x| < 2^63  -> the decimal
+        #     integer, with no trailing ".0" and with -0.0 rendered "0"
+        #     (`$int_to_str` produces exactly the digits ES prescribes for any
+        #     integer < 1e21, and every integer < 2^63 is one).
+        # A non-integer float, or |x| >= 2^63 (whose ES form is exponent
+        # notation, e.g. `1e21` -> "1e+21"), needs a shortest-round-trip
+        # decimal conversion (Grisu/Ryu class) that is not implemented here;
+        # rather than emit a string that would *diverge* from the other tiers,
+        # this path traps. That trap is the honest fence — the still-open half
+        # of docs/strings.md §"Remaining wasm WAT work".
+        #
+        # "Infinity" is written as two i32 stores of its little-endian ASCII:
+        # "Infi" = 0x69666e49, "nity" = 0x7974696e; "-Infinity" prepends 0x2d.
+        return """  (func $f64_to_str (param $x f64) (result i32)
+    (local $p i32)
+    (if (f64.ne (local.get $x) (local.get $x))
+      (then
+        (local.set $p (call $alloc_str (i32.const 3)))
+        (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 78))
+        (i32.store8 (i32.add (local.get $p) (i32.const 5)) (i32.const 97))
+        (i32.store8 (i32.add (local.get $p) (i32.const 6)) (i32.const 78))
+        (return (local.get $p))))
+    (if (f64.eq (f64.abs (local.get $x)) (f64.const inf))
+      (then
+        (if (f64.lt (local.get $x) (f64.const 0))
+          (then
+            (local.set $p (call $alloc_str (i32.const 9)))
+            (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))
+            (i32.store (i32.add (local.get $p) (i32.const 5)) (i32.const 0x69666e49))
+            (i32.store (i32.add (local.get $p) (i32.const 9)) (i32.const 0x7974696e)))
+          (else
+            (local.set $p (call $alloc_str (i32.const 8)))
+            (i32.store (i32.add (local.get $p) (i32.const 4)) (i32.const 0x69666e49))
+            (i32.store (i32.add (local.get $p) (i32.const 8)) (i32.const 0x7974696e))))
+        (return (local.get $p))))
+    (if (i32.and
+          (f64.eq (local.get $x) (f64.trunc (local.get $x)))
+          (f64.lt (f64.abs (local.get $x)) (f64.const 0x1p+63)))
+      (then (return (call $int_to_str (i64.trunc_f64_s (local.get $x))))))
+    (unreachable))"""
+
     def _helper_str_concat(self) -> str:
         return """  (func $str_concat (param $a i32) (param $b i32) (result i32)
     (local $la i32)
@@ -1932,6 +1995,8 @@ class _V3Emitter:
                 return "Int"
             if isinstance(value, str):
                 return "Str"
+            if isinstance(value, float):
+                return "Float"
             raise EmitError(f"literal {value!r} is not lowerable on this tier")
         if kind == "var":
             name = node.get("name")
@@ -1959,6 +2024,11 @@ class _V3Emitter:
                 return "Str"
             if op == "+" and _is_list_type(left) and left == right:
                 return left
+            if node.get("operands") == "Float" and op in ("+", "-", "*", "/"):
+                # Float arithmetic on this tier lowers to f64 ops only so the
+                # result can be rendered (docs/strings.md); the value never
+                # enters the storage ABI.
+                return "Float"
             if node.get("operands") == "Int32":
                 return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
             return "Int"
@@ -2167,6 +2237,13 @@ class _V3Emitter:
                 return _E(f"(i64.const {value})", "Int")
             if isinstance(value, str):
                 return _E(self._str_ptr(value), "Str")
+            if isinstance(value, float):
+                # A Float value on this tier exists only to be rendered: it is
+                # an f64 on the wasm stack, produced here and consumed by
+                # `$f64_to_str` in interpolation. It is never stored in an
+                # i32/8-byte slot, so no Float ever reaches the value ABI —
+                # storing/returning a Float still refuses by name below.
+                return _E(f"(f64.const {_f64_literal(value)})", "Float")
             raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
         if kind == "var":
             name = node.get("name")
@@ -2302,6 +2379,22 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: cannot compare {left_ty!r} with {right_ty!r} on this "
                 f"tier — Int is 64-bit and Int32/Bool are 32-bit")
+        if op in ("+", "-", "*", "/") and node.get("operands") == "Float":
+            # Float arithmetic is lowerable *only* to feed the renderer: it
+            # produces a bare f64 on the stack (IEEE-754 semantics, matching
+            # every other tier's host), consumed by `$f64_to_str` in an
+            # interpolation. No Float ever reaches an i32 slot, a local, a
+            # return or the boundary — those positions still refuse by name
+            # (docs/strings.md §"Remaining wasm WAT work").
+            left = self._expr(left_node, scope, where, "Float")
+            right = self._expr(right_node, scope, where, "Float")
+            if left.ty != "Float" or right.ty != "Float":
+                raise EmitError(
+                    f"{where}: `{op}` marked Float but an operand is "
+                    f"{left.ty!r}/{right.ty!r} on this tier")
+            instr = {"+": "f64.add", "-": "f64.sub",
+                     "*": "f64.mul", "/": "f64.div"}[op]
+            return _E(f"{left.wat}\n      {right.wat}\n      ({instr})", "Float")
         if op in ("+", "-", "*", "/", "%") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
             _refuse_float_operands(node, where)
@@ -2820,10 +2913,19 @@ class _V3Emitter:
                     rendered.append(piece.wat)
                 elif piece.ty == "Int":
                     rendered.append(f"{piece.wat}\n      (call $int_to_str)")
+                elif piece.ty == "Float":
+                    # Canonical Float -> Str (ECMAScript Number::toString) for
+                    # the subset this tier renders exactly: NaN, +/-Infinity,
+                    # and every integer-valued finite float with |x| < 2^63.
+                    # Non-integer floats and |x| >= 2^63 (e.g. 1e21, which the
+                    # ES form spells in exponent notation) still trap inside
+                    # `$f64_to_str` — the documented, narrowed fence
+                    # (docs/strings.md §"Remaining wasm WAT work").
+                    rendered.append(f"{piece.wat}\n      (call $f64_to_str)")
                 else:
                     raise EmitError(
-                        f"{where}: a `${{…}}` template interpolates Str or Int on this "
-                        f"tier, got {piece.ty!r}"
+                        f"{where}: a `${{…}}` template interpolates Str, Int or Float on "
+                        f"this tier, got {piece.ty!r}"
                     )
         if not rendered:
             return _E(self._str_ptr(""), "Str")
@@ -3122,28 +3224,20 @@ class _V3Emitter:
         for offset, data in self.data_segments:
             lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
         lines.append(f"  (global $__hp (mut i32) (i32.const {self.heap_start}))")
-        # tests call the same helpers their functions do ($str_eq, $alloc_str,
-        # …), so a document whose bodies are all `test` blocks still needs them
-        if self.functions or self.tests:
-            lines.extend(self._helper_funcs())
-        lines.extend(self._type_comments())
-        unsupported = self._unsupported_comments()
-        if unsupported:
-            lines.extend(unsupported)
-        if self.functions:
-            lines.append("")
-        for fn in self.functions:
-            lines.append(self._emit_function(fn))
-            lines.append("")
-        for extern_func in self._extern_funcs():
-            lines.append(extern_func)
-            lines.append("")
+        # Bodies are rendered first so the helper preamble can be decided from
+        # what they actually reference: `$f64_to_str` is pulled in only when a
+        # Float is really rendered, keeping the `functions` golden and every
+        # other Float-free module byte-identical. Rendering order (functions,
+        # then externs, then tests) is unchanged, so the emitted text is too.
+        fn_blocks = [self._emit_function(fn) for fn in self.functions]
+        extern_blocks = list(self._extern_funcs())
         # Each `test` block lowers to an exported zero-arg function returning
         # Bool: 1 = every assert held; a failed assert traps before the tail
         # (`src/revl/test.py run_wasm` invokes these via wasmtime). Lifecycle
         # tests never reach here — `_refuse_lifecycle_tests` rejects them by
         # name at the top of `emit`.
         fn_names = {fn.get("name") for fn in self.functions}
+        test_blocks: list[str] = []
         for (tname, export), test in zip(test_export_names(self.tests), self.tests):
             if export in fn_names:
                 raise EmitError(
@@ -3151,10 +3245,33 @@ class _V3Emitter:
                     f"which collides with a declared function of the same "
                     f"name — rename one of them"
                 )
-            lines.append(self._emit_function(
+            test_blocks.append(self._emit_function(
                 {"name": export, "params": [], "returns": "Bool",
                  "body": test.get("body") or []},
                 test_mode=True))
+        uses_f64 = any("$f64_to_str" in block
+                       for block in fn_blocks + extern_blocks + test_blocks)
+
+        # tests call the same helpers their functions do ($str_eq, $alloc_str,
+        # …), so a document whose bodies are all `test` blocks still needs them
+        if self.functions or self.tests:
+            lines.extend(self._helper_funcs())
+            if uses_f64:
+                lines.append(self._helper_f64_to_str())
+        lines.extend(self._type_comments())
+        unsupported = self._unsupported_comments()
+        if unsupported:
+            lines.extend(unsupported)
+        if self.functions:
+            lines.append("")
+        for block in fn_blocks:
+            lines.append(block)
+            lines.append("")
+        for block in extern_blocks:
+            lines.append(block)
+            lines.append("")
+        for block in test_blocks:
+            lines.append(block)
             lines.append("")
         lines.append(")")
         return "\n".join(lines) + "\n"
