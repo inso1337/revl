@@ -39,6 +39,7 @@ export function emitFixtures(): void {
   emitFixture('v3_map.ir.json', 'v3_map.ts')
   emitFixture('v3_tests.ir.json', 'v3_tests.test.ts')
   emitFixture('spawn.ir.json', 'spawn.ts')
+  emitFixture('instance_get.ir.json', 'instance_get.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone
