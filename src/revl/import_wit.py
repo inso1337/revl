@@ -33,11 +33,27 @@ explicit `readOnlyHint: true` avoids `emission`):
     `emission fn` backed by `extern emission fn`, and lands on the G8
     audit surface.
 
-What this importer refuses (rather than emitting something wrong): resources
-and handles (`borrow`/`own`), `stream`/`future`, `flags`, `tuple`, function
-types as values, named/multiple results, inline interfaces in a world,
-`include`, nested package blocks, and `use` from a package this file does not
-define. Each refusal names the construct, its line, and the way forward.
+WIT `resource`s are supported (Slice 2 of the Component Model bridge). A
+resource is a live handle with identity; revl already has exactly that model
+at its seams (`distribute.py`): a value returned by an `extern acquire` is a
+*resource type* whose lifetime is tied to the providing fiber, so it crosses a
+process boundary by proxy, never by copy. A WIT resource maps onto that nearly
+one-to-one:
+
+  * the resource type -> an opaque handle `type R = {{ handle: Int }}` (its
+    identity lives host-side; revl carries a proxy);
+  * its constructor + implicit destructor -> `extern acquire fn R_new(...) -> R
+    undo R_drop(R)`, so the resource's release is a *tracked inverse* (G4);
+  * `borrow<R>` / `own<R>` in a signature -> the handle type `R` (a resource
+    reference, not a copy);
+  * each method `m: func(...)` -> a service operation `R_m(self: R, ...)`,
+    `emission` unless asserted pure — a subset the exporter reverses cleanly.
+
+What this importer refuses (rather than emitting something wrong):
+`stream`/`future`, `flags`, `tuple`, function types as values, named/multiple
+results, inline interfaces in a world, `include`, nested package blocks, and
+`use` from a package this file does not define. Each refusal names the
+construct, its line, and the way forward.
 """
 
 from __future__ import annotations
@@ -78,15 +94,6 @@ _REFUSED_TYPES = {
     "tuple": ("tuple<...>",
               "revl has no tuple type; declare a WIT `record` with named "
               "fields and re-import"),
-    "borrow": ("borrow<T> (a resource handle)",
-               "revl values are copies with no identity, so a borrowed handle "
-               "has no honest revl spelling; expose the data the handle stands "
-               "for as a `record`, or wrap the resource by hand as an "
-               "`extern acquire fn ... undo ...`"),
-    "own": ("own<T> (an owned resource handle)",
-            "same as `borrow`: wrap the resource by hand as an "
-            "`extern acquire fn ... undo ...` so its release is a tracked "
-            "inverse (G4)"),
     "stream": ("stream<T>",
                "a stream is an open-ended effect, not a value; model it as a "
                "service whose operations are `emission`, written by hand"),
@@ -234,11 +241,22 @@ class _World:
 
 
 @dataclass
+class _Resource:
+    name: str
+    ctor_params: list[tuple[str, tuple]] | None   # None: no explicit constructor
+    methods: list[tuple[_Func, bool]]             # (func, is_static)
+    owner: str
+    docs: list[str]
+    line: int
+
+
+@dataclass
 class _Document:
     package: str | None = None
     types: dict[str, _TypeDef] = field(default_factory=dict)
     interfaces: list[_Interface] = field(default_factory=list)
     worlds: list[_World] = field(default_factory=list)
+    resources: list[_Resource] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ the parser
@@ -473,13 +491,8 @@ class _Parser:
         tok = self.peek()
         keyword = tok.value
         if keyword == "resource":
-            raise self.refuse(tok.line, f"`resource {self.peek(1).value}`",
-                              "a resource is a live handle with identity; revl "
-                              "values are copies without identity, so there is no "
-                              "faithful mapping. Wrap the resource by hand: "
-                              "`extern acquire fn open(...) undo close(...)` plus "
-                              "`emission` operations, so its lifetime is a tracked "
-                              "inverse (G4)")
+            self.resource_def(doc, owner)
+            return
         if keyword == "flags":
             raise self.refuse(tok.line, f"`flags {self.peek(1).value}`",
                               "revl has no bit-set type; declare a WIT `record` of "
@@ -532,6 +545,50 @@ class _Parser:
         self.expect("punct", "}")
         self._register(doc, _TypeDef(name, "variant", cases, owner, line))
 
+    def resource_def(self, doc: _Document, owner: str) -> None:
+        """`resource R { constructor(...); [static] m: func(...); ... }`.
+
+        A resource is registered as a `resource`-kind type (so signatures may
+        reference it by name, and a duplicate name still collides loudly), and
+        recorded on `doc.resources` for the generator to project onto revl's
+        acquire-returned-handle model.
+        """
+        self.next()                                   # `resource`
+        name_tok = self.expect("ident", what="a resource name")
+        name, line = name_tok.value, name_tok.line
+        ctor_params: list[tuple[str, tuple]] | None = None
+        methods: list[tuple[_Func, bool]] = []
+        if self.at("punct", ";"):                     # declaration-only resource
+            self.next()
+            self._register(doc, _TypeDef(name, "resource", None, owner, line))
+            doc.resources.append(_Resource(name, None, [], owner, [], line))
+            return
+        self.expect("punct", "{")
+        while not self.at("punct", "}"):
+            item_docs = self.take_docs()
+            tok = self.peek()
+            if tok.kind == "eof":
+                raise RevlError(self.filename, tok.line,
+                                f"unterminated `resource {name}`")
+            if tok.value == "constructor" and self.peek(1).value == "(":
+                self.next()                           # `constructor`
+                if ctor_params is not None:
+                    raise self.refuse(tok.line,
+                                      f"a second `constructor` on resource `{name}`",
+                                      "a WIT resource has at most one constructor; "
+                                      "make the extra one a `static` function")
+                ctor_params = self.params()
+                self.expect("punct", ";")
+                continue
+            is_static = False
+            if tok.value == "static" and not tok.escaped:
+                is_static = True
+                self.next()
+            methods.append((self.func_item(item_docs), is_static))
+        self.expect("punct", "}")
+        self._register(doc, _TypeDef(name, "resource", None, owner, line))
+        doc.resources.append(_Resource(name, ctor_params, methods, owner, [], line))
+
     def _register(self, doc: _Document, definition: _TypeDef) -> None:
         existing = doc.types.get(definition.name)
         if existing is None:
@@ -560,6 +617,15 @@ class _Parser:
         if name in _REFUSED_TYPES:
             what, hint = _REFUSED_TYPES[name]
             raise self.refuse(line, what, hint)
+        if name in ("borrow", "own"):
+            # A handle to a resource: the reference IS the resource type. revl
+            # crosses it by proxy (distribute.py), so `borrow<r>`/`own<r>` both
+            # map to the handle type `r` — copy-vs-move is a host concern the
+            # `extern acquire`/`undo` pair already tracks (G4).
+            self.expect("punct", "<")
+            inner = self.type_ref()
+            self.expect("punct", ">")
+            return inner
         if name in ("list", "option"):
             self.expect("punct", "<")
             inner = self.type_ref()
@@ -675,6 +741,17 @@ class _Generator:
         out: list[str] = []
         for name, spec in self.doc.types.items():
             revl = self.names.type_name(name)
+            if spec.kind == "resource":
+                # An opaque handle: identity is host-side, so revl carries a
+                # proxy that crosses a seam by reference (distribute.py). The
+                # `handle` field is the host-side token, not visible state.
+                out.append(f"type {revl} = {{ handle: Int }}")
+                self.notes.append(
+                    f"WIT `resource {name}` -> opaque handle `type {revl} = "
+                    "{ handle: Int }`: identity lives host-side, so it crosses a "
+                    "seam by proxy not by copy (distribute.py); its destructor is "
+                    f"the `undo` on `extern acquire fn {_snake(name)}_new` (G4)")
+                continue
             if spec.kind == "alias":
                 target = self.resolve(spec.payload, spec.line, (name,))
                 # `type X = Y` in revl declares a one-case *variant*, not an
@@ -789,15 +866,53 @@ class _Generator:
             f"  provide {key} {{\n" + "\n".join(methods) + "\n  }\n}")
         return out
 
+    def _resources(self) -> tuple[dict[str, list[_Func]], list[str]]:
+        """Project WIT resources onto revl's acquire-returned-handle model:
+        an `extern acquire fn R_new(...) -> R undo R_drop(R)` per resource
+        (its lifetime a tracked inverse, G4), and each method turned into a
+        service operation carrying the handle as its first parameter (`self`)
+        so it crosses a seam by proxy (distribute.py). Static methods carry no
+        handle. Returns (methods keyed by owning interface, acquire externs)."""
+        methods_by_owner: dict[str, list[_Func]] = {}
+        acquire_externs: list[str] = []
+        for res in self.doc.resources:
+            revl = self.names.type_name(res.name)
+            snake = _snake(res.name)
+            ctor = res.ctor_params if res.ctor_params is not None else []
+            sig = ", ".join(f"{_snake(pname)}: {self.resolve(ptype, res.line)}"
+                            for pname, ptype in ctor)
+            acquire_externs.append(
+                f"// resource {res.name}: construction paired with its WIT "
+                "destructor, so the handle's release is a tracked inverse (G4)\n"
+                f"extern acquire fn {snake}_new({sig}) -> {revl}"
+                f" undo {snake}_drop({snake})\n"
+                f"  = @{self.backend} {{ "
+                f"{self._host_comment(f'construct the WIT resource {res.name} here')} }}")
+            if res.ctor_params is None:
+                self.notes.append(
+                    f"WIT `resource {res.name}` declares no constructor; the "
+                    f"nullary `{snake}_new` still carries its destructor as the "
+                    "tracked inverse — wire the real construction path by hand")
+            for func, is_static in res.methods:
+                params = list(func.params)
+                if not is_static:
+                    params = [("self", ("named", res.name, res.line)), *params]
+                methods_by_owner.setdefault(res.owner, []).append(
+                    _Func(f"{snake}-{func.name}", params, func.result,
+                          func.docs, func.line))
+        return methods_by_owner, acquire_externs
+
     # -- the whole file ----------------------------------------------------
     def emit(self) -> str:
         blocks: list[str] = []
         types = self.type_decls()
+        methods_by_owner, acquire_externs = self._resources()
 
         for iface in self.doc.interfaces:
             preamble = [f"// interface {iface.name}"] + \
                        [f"// {line[:88]}" for line in iface.docs if line]
-            blocks.extend(self.block(iface.name, iface.line, iface.funcs,
+            funcs = iface.funcs + methods_by_owner.pop(iface.name, [])
+            blocks.extend(self.block(iface.name, iface.line, funcs,
                                      preamble=preamble))
 
         for world in self.doc.worlds:
@@ -819,6 +934,14 @@ class _Generator:
                           "key. `emission` is the safe",
                           "// direction here — a declaration is an upper bound, so "
                           "a provider may do less (G4)."]))
+
+        # Resources whose owner is not an emitted interface (declared in a
+        # world, or at file scope) still get their methods as a service.
+        for owner, funcs in methods_by_owner.items():
+            blocks.extend(self.block(
+                owner, self.doc.resources[0].line, funcs,
+                preamble=[f"// resource methods declared in `{owner}`"]))
+        blocks.extend(acquire_externs)
 
         unused = sorted(self.pure_requested - self.pure_used)
         if unused:

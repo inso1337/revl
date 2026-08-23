@@ -229,6 +229,9 @@ def test_initialize_and_tools_list():
                           "revl_query_emitters", "revl_query_withdraw",
                           "revl_query_dependents", "revl_query_reach",
                           "revl_query_drift",
+                          # live + historical query modes (docs/queries.md §9)
+                          "revl_live_query", "revl_history_emitted_between",
+                          "revl_history_lifetime",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
                           "revl_replay_forward", "revl_replay_bisect"}
