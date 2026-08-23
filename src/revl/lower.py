@@ -2634,10 +2634,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 raise RevlError(filename, line,
                                 f"`{expr.name}` is not a config field of {env.component.name}")
             return {"kind": "config", "field": expr.name}
-        return {"kind": "field",
-                "target": _lower_component_pure_expr(expr.target, env, scope, callables,
-                                                     pure_only),
-                "name": expr.name}
+        lowered_target = _lower_component_pure_expr(expr.target, env, scope, callables,
+                                                    pure_only)
+        # `s.<key>` on a spawn handle is a provision read, not a record field
+        # (docs/design-v2-instances.md). Only a name this component bound to a
+        # handle carries `Instance[C]`, so it stays on the supervision tree.
+        inst = _instance_handle_component(lowered_target, env)
+        if inst is not None:
+            return _lower_instance_get(lowered_target, expr.name, line, inst, env)
+        return {"kind": "field", "target": lowered_target, "name": expr.name}
     if isinstance(expr, ExprCall):
         args = [_lower_component_pure_expr(a, env, scope, callables, pure_only)
                 for a in expr.args]
@@ -3258,6 +3263,11 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                 acquire = _lower_expr(mstmt.acquire, env, mode="setup")
                 method_locals[mstmt.bind] = safe
                 env.params[mstmt.bind] = safe  # visible to later statements
+                # record the handle's `Instance[C]` type so a later `s.<key>`
+                # provision read (docs/design-v2-instances.md) resolves here too
+                handle_type = infer_ir(acquire, env.type_env, env.types, env.services)
+                if handle_type is not None:
+                    env.type_env[safe] = handle_type
                 undo = _lower_expr(mstmt.undo, env, mode="undo")
                 mbody.append({"step": "let-effect", "bind": safe,
                               "acquire": acquire, "undo": undo})
@@ -3538,6 +3548,58 @@ def _lower_spawn(expr: SpawnExpr, env: Env, mode: str) -> dict:
     }
 
 
+def _instance_handle_component(node: dict, env: Env) -> str | None:
+    """`C` if `node` is a name bound to a spawn handle typed `Instance[C]`,
+    else None.
+
+    The type is recorded only when the current component itself binds a
+    `spawn` acquisition (`env.type_env[handle] = "Instance[C]"`), so a name
+    can carry it only for a handle *this* component holds. There is no surface
+    that names another component's handle, which is exactly why `s.<key>`
+    cannot reach a sibling's or the root's provision — it keeps instance
+    addressing on the supervision tree (docs/design-v2-instances.md 1/2)."""
+    if not isinstance(node, dict) or node.get("kind") != "name":
+        return None
+    head, args = parse_type(env.type_env.get(node.get("id")))
+    if head == "Instance" and args:
+        return args[0]
+    return None
+
+
+def _lower_instance_get(target: dict, key: str, line: int,
+                        component_name: str, env: Env) -> dict:
+    """Lower `s.<key>` (a provision read off a spawn handle) to the frozen
+    `instance-get` IR node (docs/design-v2-instances.md).
+
+    `<key>` must be a key the target component *provides*; reading a key it
+    does not provide is a compile error. At runtime every tier resolves `key`
+    through the handle's stored instance context — the private local realm the
+    matching `spawn` node isolated the key into — so the read yields *that
+    instance's* provision and no other's."""
+    reg = getattr(env, "spawn_reg", None)
+    target_decl = reg["by_name"].get(component_name) if reg else None
+    provides = {k: svc for k, svc, _line in (target_decl.provides if target_decl else [])}
+    if key not in provides:
+        known = ", ".join(f"`{k}`" for k in sorted(provides)) or "<nothing>"
+        raise RevlError(
+            env.filename, line,
+            f"`{key}` is not a provision of {component_name}",
+            hint=f"a spawn handle reads only a key its component provides — "
+                 f"{component_name} provides {known}",
+        )
+    return {
+        "kind": "instance-get",
+        "target": target,
+        "component": component_name,
+        "key": key,
+        # the service type the key yields — the typing rule's result, frozen
+        # inline so no tier re-derives it (mirrors `spawn.realms` carrying the
+        # provided keys); advisory, like any host-frontier value's type
+        "service": provides[key],
+        "line": line,
+    }
+
+
 def _lower_expr(expr, env: Env, mode: str):
     """mode: 'setup' | 'undo' | 'emit'.
 
@@ -3635,6 +3697,18 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
 
     for op in ops:
         if op.args is None:
+            # The one legal bare field access in a component/method body is
+            # reading a provision off a spawn handle: `s.<key>` where
+            # `s : Instance[C]` and `<key>` is a key C provides. Only a name
+            # the current component itself bound to a handle can carry the
+            # `Instance[C]` type, so this never becomes a lookup of a sibling's
+            # or the root's provision — it is the parent reaching *its own*
+            # instance (supervision-tree addressing, docs/design-v2-instances.md
+            # decision 1/2).
+            inst = _instance_handle_component(node, env)
+            if inst is not None:
+                node = _lower_instance_get(node, op.name, op.line, inst, env)
+                continue
             raise RevlError(env.filename, op.line,
                             f"field access `.{op.name}` is not supported in v0 — only method calls")
         if node["kind"] == "req":
