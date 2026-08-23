@@ -732,3 +732,403 @@ def sweep_dossier(ir: dict, only: str | None = None) -> dict:
     gauntlet's `faultSweep` slot consumes.  Same runtime requirement as
     :func:`run_sweep`."""
     return run_sweep(ir, out=lambda _line: None, only=only)[1]
+
+
+# ===========================================================================
+# `verified effect` — inverse round-trip testing (roadmap item 26)
+# ===========================================================================
+#
+# The checker proves an inverse is *present and well-shaped* (G4:
+# inverse-or-emit), never that it is *correct*.  docs/replay.md §4.1 names the
+# gap outright: "an `undo` that is wrong, partial, or a no-op" is not caught.
+# A `verified effect` opts an activation-body effect into a test the author
+# did not write: snapshot the observable in-process state, activate the
+# component (the effect runs and accumulates its inverse), tear it down (the
+# inverse runs, LIFO), and assert the state fingerprint returned to where it
+# started — N randomized rounds, on the real cordis-py runtime.
+#
+# This is emphatically NOT a proof (docs/verified-effect.md, and the report
+# header below say so).  It upgrades "trust the author's undo" to "this undo
+# survived N round-trips."  Scope is HONEST and narrow (replay.md §4.1): the
+# fingerprint is the runtime's own observable-mutation ledger — host resources
+# acquired/released, map keys inserted/removed, pool connections
+# acquired/released.  It CANNOT see aliased references the component handed
+# out, external effects an emission crossed, or clock/random-derived values.
+# Those are out of reach and the header names them, every run.
+#
+# Machinery is shared with the fault runner: `_load_py_tier`, `plug`,
+# `_flush`.  The one new capability is the fingerprint, which is derived
+# purely from the runtime's trace ledger (the same `set_trace` stream the
+# lifecycle harness pairs for its R1 residue check) — so it needs no reach
+# into host objects and stays testable as a pure fold over a list of strings.
+#
+# DEPENDENCY NOTE (roadmap item 37, `prop test`): the roadmap intends a
+# general property-testing form with item 26 as its first instance.  Item 37
+# is NOT built; this is the specific inverse-round-trip generator, built
+# directly.  When 37 lands, the snapshot/randomize/compare loop below is the
+# machinery it generalizes (arbitrary property, arbitrary generators); the
+# `verified effect` marker becomes one derived property among many.
+
+_ROUNDTRIP_ITEM = 26
+_ROUNDTRIP_TITLE = "verified-effect inverse round-trips"
+_ROUNDTRIP_ROUNDS = 16
+
+# Named, every run, so "the fingerprint matched" is never misread as "the
+# undo is correct" (the same honesty rule OpenAPI import applies to
+# safe-by-spec: it is the author's claim, machine-checked only so far).
+_ROUNDTRIP_HEADER = (
+    "verified-effect inverse round-trips — py reference tier (roadmap item 26)\n"
+    "  This is a TEST THE AUTHOR DID NOT WRITE, not a proof. It upgrades "
+    "trust-the-author's-undo\n"
+    "  to this-undo-survived-{n}-round-trips: for each `verified effect`, activate the "
+    "component,\n"
+    "  tear it down so the inverse runs, and assert the observable-state fingerprint "
+    "returned\n"
+    "  to baseline — {n} randomized rounds.\n"
+    "  IN SCOPE: in-process observable state only — the runtime's mutation ledger "
+    "(host\n"
+    "  acquire/release, map keys, pool connections). OUT OF REACH (replay.md §4.1), "
+    "never\n"
+    "  asserted: aliased references the component handed out; external effects an "
+    "emission\n"
+    "  crossed; clock- or random-derived values. A pass does not cover those."
+)
+
+
+def _outstanding(events: list) -> dict:
+    """The net observable in-process mutations a trace `events` list leaves
+    standing — a canonical, comparable fingerprint.
+
+    Pure (a fold over the runtime's trace strings), so it is testable against
+    fabricated ledgers with no runtime.  The vocabulary is the reference
+    tier's (docs/backend-ir.md §Host builtins; runtime.Map / runtime.Pool):
+
+        "<tag>.new" / "<tag>.drop"                 a Map came into / left being
+        "<tag>.open <url>" / "<tag>.close <url>"    a Pool opened / closed
+        "<tag>.insert <key>" / "<tag>.remove <key>" a Map key set / cleared
+        "<tag>.acquire conn=<k> …" / ".release …"   a Pool connection checked out
+
+    Anything the ledger does not carry (an aliased reference, an emission that
+    crossed the boundary, a clock read) is by construction invisible here —
+    which is exactly the honesty bound in the report header.
+    """
+    live: set = set()                 # tags currently in being (open Maps/Pools)
+    keys: dict = {}                   # map tag -> set of outstanding keys
+    conns: dict = {}                  # pool tag -> set of checked-out connections
+    for event in events:
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if not tag:
+            continue
+        rest = event[len(head):].strip()
+        if verb in ("new", "open"):
+            live.add(tag)
+            keys.setdefault(tag, set())
+            conns.setdefault(tag, set())
+        elif verb in ("drop", "close"):
+            live.discard(tag)
+            keys.pop(tag, None)
+            conns.pop(tag, None)
+        elif verb == "insert":
+            if tag in keys:
+                keys[tag].add(rest)
+        elif verb == "remove":
+            if tag in keys:
+                keys[tag].discard(rest)
+        elif verb == "acquire":
+            conn = rest.split(" ", 1)[0]  # "conn=<k>"
+            if tag in conns:
+                conns[tag].add(conn)
+        elif verb == "release":
+            conn = rest.split(" ", 1)[0]
+            if tag in conns:
+                conns[tag].discard(conn)
+    return {
+        "live": sorted(live),
+        "keys": {tag: sorted(ks) for tag, ks in keys.items() if ks},
+        "conns": {tag: sorted(cs) for tag, cs in conns.items() if cs},
+    }
+
+
+def _fingerprint_delta(baseline: dict, final: dict) -> list:
+    """Human-readable descriptions of every way *final* differs from
+    *baseline* — empty means the round trip closed."""
+    diffs: list = []
+    base_live, final_live = set(baseline["live"]), set(final["live"])
+    for tag in sorted(final_live - base_live):
+        diffs.append(f"host resource `{tag}` was acquired and never released "
+                     "(its inverse did not drop/close it)")
+    for tag in sorted(base_live - final_live):
+        diffs.append(f"host resource `{tag}` present at baseline is gone "
+                     "(the inverse released something it should not have)")
+    for tag in sorted(set(baseline["keys"]) | set(final["keys"])):
+        b = set(baseline["keys"].get(tag, []))
+        f = set(final["keys"].get(tag, []))
+        for key in sorted(f - b):
+            diffs.append(f"`{tag}` still holds key {key!r} the effect inserted "
+                         "(its inverse did not remove it)")
+        for key in sorted(b - f):
+            diffs.append(f"`{tag}` lost key {key!r} that stood at baseline "
+                         "(the inverse removed more than it added)")
+    for tag in sorted(set(baseline["conns"]) | set(final["conns"])):
+        b = set(baseline["conns"].get(tag, []))
+        f = set(final["conns"].get(tag, []))
+        for conn in sorted(f - b):
+            diffs.append(f"`{tag}` left connection {conn} checked out "
+                         "(the inverse did not release it)")
+        for conn in sorted(b - f):
+            diffs.append(f"`{tag}` released baseline connection {conn} "
+                         "(the inverse released more than it acquired)")
+    return diffs
+
+
+def _verified_effect_labels(body: list) -> list:
+    """The `verified` effect steps in *body*, as short labels, in order."""
+    labels: list = []
+    for index, step in enumerate(body, 1):
+        if not step.get("verified"):
+            continue
+        kind = step.get("step")
+        if kind == "let-effect":
+            labels.append(f"step {index} (verified effect `{step.get('bind')}`)")
+        else:
+            labels.append(f"step {index} (verified anonymous effect)")
+    return labels
+
+
+def roundtrip_units(ir: dict) -> list:
+    """One unit per component that has a `verified` activation-body effect.
+
+    The marker is threaded by the frontend (`step["verified"]`), so a hand- or
+    import-produced IR gets round-trip tested too.  Shape mirrors a fault unit.
+    """
+    units: list = []
+    for component in ir.get("components") or []:
+        labels = _verified_effect_labels(component.get("body") or [])
+        if labels:
+            units.append({"component": component.get("name"), "verified": labels})
+    return units
+
+
+def _config_schema(ir: dict, component: str) -> list:
+    return next((c.get("config") or [] for c in ir.get("components") or []
+                 if c.get("name") == component), [])
+
+
+def _random_config(schema: list, rng) -> dict:
+    """A randomized, *valid* config for a component's declared fields.
+
+    Type-directed generators (the surface `verified effect` inputs vary across
+    rounds).  Deliberately conservative — positive ints, printable strings —
+    so a generated value never trips a host precondition (e.g. `Pool.open`
+    needs size >= 1 and a non-`boom://` url) and turns a round-trip round into
+    a spurious activation failure.  A field the generator does not recognize
+    is left to its default (omitted).
+    """
+    config: dict = {}
+    for field_ in schema:
+        name = field_.get("name")
+        typ = field_.get("type")
+        if typ == "Int":
+            config[name] = rng.randint(1, 64)
+        elif typ == "Bool":
+            config[name] = rng.choice([True, False])
+        elif typ in ("Float", "F64", "Num"):
+            config[name] = round(rng.uniform(1.0, 64.0), 3)
+        elif typ == "Str":
+            config[name] = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz0123456789")
+                                   for _ in range(rng.randint(3, 10)))
+        # unknown type: fall through — its default (if any) applies
+    return config
+
+
+async def _drive_roundtrip(ir: dict, component: str, configs: dict,
+                           emit, runtime_mod, Context, FiberState) -> tuple:
+    """One round: bring up providers, snapshot the ledger, activate *component*,
+    tear it down so its inverses run, and return ``(ok, detail)`` — ``ok``
+    False with a reason when the delta is non-empty or the activation could not
+    complete.
+
+    *configs* maps every component name to the config it is brought up with
+    (the target's is the randomized one; providers get valid randomized config
+    too so a provider with a required field still activates).
+    """
+    order = ((ir.get("manifest") or {}).get("loadOrder")
+             or [c["name"] for c in ir.get("components") or []])
+    config = configs.get(component) or {}
+
+    module = types.ModuleType(f"revl_roundtrip_{abs(hash(component)):x}")
+    sys.modules[module.__name__] = module
+    events: list = []
+    try:
+        source = emit.emit(ir)
+        exec(compile(source, f"<revl-roundtrip {component}>", "exec"), module.__dict__)
+
+        root = Context()
+        fibers: dict = {}
+        runtime_mod.set_trace(events.append)
+        try:
+            # providers up first, so the verified effect activates against its
+            # real dependencies (the same discipline the fault driver uses)
+            for name in order:
+                if name == component:
+                    continue
+                fibers[name] = runtime_mod.plug(root, getattr(module, name),
+                                                configs.get(name) or {})
+                await _flush()
+            await _flush()
+            baseline = _outstanding(list(events))
+
+            fiber = runtime_mod.plug(root, getattr(module, component), config)
+            await _flush()
+            if fiber.state == FiberState.LOADING:
+                try:
+                    await asyncio.wait_for(asyncio.shield(fiber), 5)
+                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    pass
+                await _flush()
+            if fiber.state != FiberState.ACTIVE:
+                state = getattr(fiber.state, "name", fiber.state)
+                return (False, f"the component did not reach ACTIVE (it is {state}) with "
+                               f"config {config!r} — the verified effect never ran to "
+                               "completion, so the round-trip is inconclusive")
+
+            # tear the target down: its accumulated inverses run, LIFO
+            await fiber.dispose()
+            await _flush()
+            final = _outstanding(list(events))
+        finally:
+            runtime_mod.set_trace(None)
+            for name in reversed(order):
+                fiber = fibers.pop(name, None)
+                if fiber is not None:
+                    try:
+                        await fiber.dispose()
+                    except Exception:  # noqa: BLE001 — cleanup must not mask a result
+                        pass
+            await _flush()
+    finally:
+        sys.modules.pop(module.__name__, None)
+
+    diffs = _fingerprint_delta(baseline, final)
+    if diffs:
+        return (False, "; ".join(diffs))
+    return (True, None)
+
+
+def _roundtrip_dossier(results: list, rounds: int) -> dict:
+    """Aggregate ``(component, labels, round_results)`` into a gauntlet-shaped
+    dossier.  ``round_results`` is ``[(ok, detail, config)]``.  Pure."""
+    components = []
+    total = passed = failed = 0
+    for component, labels, round_results in results:
+        first_fail = next(((detail, cfg) for ok, detail, cfg in round_results if not ok),
+                          None)
+        ok = first_fail is None
+        total += 1
+        passed += ok
+        failed += not ok
+        entry = {
+            "component": component,
+            "verifiedEffects": list(labels),
+            "rounds": len(round_results),
+            "status": "pass" if ok else "fail",
+        }
+        if first_fail is not None:
+            entry["counterexample"] = {"config": first_fail[1], "reason": first_fail[0]}
+        components.append(entry)
+    return {
+        "kind": "tested",
+        "status": "failed" if failed else "passed",
+        "roadmapItem": _ROUNDTRIP_ITEM,
+        "title": _ROUNDTRIP_TITLE,
+        "tier": "py",
+        "note": "each `verified effect` was round-tripped (activate, tear down, "
+                "compare the observable-state fingerprint) over "
+                f"{rounds} randomized rounds; a test the author did not write, not a "
+                "proof — in-process state only, aliases/emissions/clock out of reach "
+                "(docs/verified-effect.md).",
+        "counts": {
+            "effects": total,
+            "passed": passed,
+            "failed": failed,
+            "rounds": rounds,
+        },
+        "components": components,
+    }
+
+
+def run_roundtrip_units(ir: dict, units: list, out=None,
+                        rounds: int = _ROUNDTRIP_ROUNDS) -> tuple:
+    """Run the round-trip property for each *unit* on the py reference tier;
+    ``(failures, dossier)``.
+
+    Raises ``ModuleNotFoundError`` when cordis-py is absent — the caller
+    decides skip vs error, exactly as the fault runner does.
+    """
+    import random  # noqa: PLC0415 — stdlib, only needed when the runner runs
+
+    printer = (lambda line: print(line)) if out is None else out
+    emit, runtime_mod, Context, FiberState = _load_py_tier()
+
+    for line in _ROUNDTRIP_HEADER.format(n=rounds).split("\n"):
+        printer(line)
+
+    all_components = [c.get("name") for c in ir.get("components") or []]
+    results: list = []
+    for unit in units:
+        component = unit["component"]
+        labels = unit["verified"]
+        rng = random.Random(f"revl-roundtrip:{component}")
+        round_results: list = []
+        for round_index in range(rounds):
+            # a fresh, valid, randomized config for every component (the
+            # target's is the input surface under test; providers get one too
+            # so a provider with a required field still activates)
+            configs = {name: _random_config(_config_schema(ir, name), rng)
+                       for name in all_components}
+            config = configs[component]
+            try:
+                ok, detail = asyncio.run(_drive_roundtrip(
+                    ir, component, configs, emit, runtime_mod, Context, FiberState))
+            except Exception as error:  # noqa: BLE001 — a driver crash is a failure
+                ok, detail = False, (f"the round-trip driver raised "
+                                     f"{type(error).__name__}: {error}")
+            round_results.append((ok, detail, config))
+            if not ok:
+                break  # a shrinking-free counterexample: report the first failing config
+        results.append((component, labels, round_results))
+
+    dossier = _roundtrip_dossier(results, rounds)
+    for entry in dossier["components"]:
+        effects = ", ".join(entry["verifiedEffects"])
+        if entry["status"] == "pass":
+            printer(f"PASS {entry['component']}: {entry['rounds']} round(s), "
+                    f"inverse held for [{effects}]")
+        else:
+            ce = entry.get("counterexample") or {}
+            printer(f"FAIL {entry['component']}: inverse round-trip broke for [{effects}]")
+            printer(f"    - config {ce.get('config')!r}: {ce.get('reason')}")
+    counts = dossier["counts"]
+    printer(f"round-tripped {counts['effects']} verified effect(s): "
+            f"{counts['passed']} held, {counts['failed']} broke "
+            f"({counts['rounds']} randomized rounds each)")
+    return counts["failed"], dossier
+
+
+def roundtrip_dossier(ir: dict, rounds: int = _ROUNDTRIP_ROUNDS) -> dict:
+    """The round-trip run as a structured dossier only (no printing) — shaped
+    to drop into the gauntlet's `inverseRoundTrip` slot
+    (src/revl/mcp/gauntlet.py, roadmapItem 26).  Same runtime requirement as
+    :func:`run_roundtrip_units`; returns an empty ``passed`` dossier when the
+    document declares no `verified effect`."""
+    units = roundtrip_units(ir)
+    if not units:
+        return {
+            "kind": "tested", "status": "passed", "roadmapItem": _ROUNDTRIP_ITEM,
+            "title": _ROUNDTRIP_TITLE, "tier": "py",
+            "note": "no `verified effect` declared.",
+            "counts": {"effects": 0, "passed": 0, "failed": 0, "rounds": rounds},
+            "components": [],
+        }
+    return run_roundtrip_units(ir, units, out=lambda _line: None, rounds=rounds)[1]
