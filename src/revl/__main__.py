@@ -551,6 +551,55 @@ def _run_query(args, ir: dict) -> int:
     return 0 if result.get("ok") else 1
 
 
+def _run_history_query(args) -> int:
+    """`revl query {emitted-between,touched}` — the historical mode
+    (docs/queries.md §9): the same query envelope answered against a RECORDED
+    run rather than a static IR. Reads a replay-recording JSON and/or an
+    item-27 lifecycle JSONL, never source."""
+    from . import query, why_runtime  # noqa: PLC0415
+
+    def _load_json(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    if args.query_command == "emitted-between":
+        try:
+            timeline = _load_json(args.timeline)
+        except (OSError, ValueError) as error:
+            print(f"error: cannot read timeline {args.timeline}: {error}",
+                  file=sys.stderr)
+            return 1
+        result = query.emitted_between(timeline, args.frm, args.to,
+                                       args.component)
+    else:  # touched
+        record = {}
+        if args.timeline:
+            try:
+                record["timeline"] = _load_json(args.timeline)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read timeline {args.timeline}: {error}",
+                      file=sys.stderr)
+                return 1
+        if args.trace:
+            try:
+                record["trace"] = why_runtime.read_trace(args.trace)
+            except (OSError, ValueError) as error:
+                print(f"error: cannot read trace {args.trace}: {error}",
+                      file=sys.stderr)
+                return 1
+        if not record:
+            print("error: give --trace and/or --timeline (a recorded run to "
+                  "query)", file=sys.stderr)
+            return 1
+        result = query.lifetime(record, args.component)
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(query.render(result))
+    return 0 if result.get("ok") else 1
+
+
 def _run_why(args) -> int:
     """`revl why <component> --trace run.jsonl` — the runtime companion to the
     compile-time why-traces: the cause chain behind a component's recorded
@@ -755,6 +804,38 @@ def main(argv: list[str] | None = None) -> int:
             sub_cmd.add_argument("--loses", action="append", default=[],
                                  metavar="METHOD",
                                  help="a method the service would lose (repeatable)")
+
+    # historical mode (docs/queries.md §9): the same envelope, over a RECORDED
+    # run instead of a static IR. These read files, not source, so they sit
+    # outside the compile-from-source loop above. (Live mode is session-bound —
+    # it has no one-shot CLI entry; use the MCP `revl_live_query` tool.)
+    between = query_sub.add_parser(
+        "emitted-between",
+        help="which emissions crossed between steps X and Y (a recorded replay "
+             "timeline JSON)?")
+    between.add_argument("--timeline", required=True, metavar="FILE",
+                         help="a replay recording JSON (a `revl_timeline` dump)")
+    between.add_argument("--from", dest="frm", type=int, required=True,
+                         metavar="X", help="first step index (inclusive)")
+    between.add_argument("--to", type=int, required=True, metavar="Y",
+                         help="last step index (inclusive)")
+    between.add_argument("--component", default=None,
+                         help="restrict to one component; omit for all")
+    between.add_argument("--json", action="store_true",
+                         help="machine-readable output")
+
+    touched = query_sub.add_parser(
+        "touched",
+        help="everything a component touched during its life (item-27 lifecycle "
+             "trace + optional replay recording)")
+    touched.add_argument("component", metavar="COMPONENT")
+    touched.add_argument("--trace", default=None, metavar="FILE",
+                         help="an item-27 lifecycle JSONL (`revl run --trace`) "
+                              "for the load/withdraw span")
+    touched.add_argument("--timeline", default=None, metavar="FILE",
+                         help="a replay recording JSON for the effects/emissions")
+    touched.add_argument("--json", action="store_true",
+                         help="machine-readable output")
 
     fmt = sub.add_parser("fmt", help="canonically format .rvl sources (IR-equivalence gated)")
     fmt.add_argument(
@@ -991,6 +1072,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "apply":
         return _run_apply(args)
+
+    # historical query mode reads a recorded run (files, not source), so it is
+    # routed before the compile-from-source step every other command shares
+    if args.command == "query" and args.query_command in ("emitted-between",
+                                                           "touched"):
+        return _run_history_query(args)
 
     try:
         ir = compile_files(args.files)
