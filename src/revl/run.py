@@ -18,8 +18,11 @@ interpreter that has no cordis at all.
 The frontend stays pure: the backend emitter and the cordis-py runtime are
 imported lazily, inside ``run_command``, so ``compile``/``audit``/``test``/
 ``fmt`` and ``run --plan`` all work with no runtime installed. Only ``py`` is a
-runnable tier today; ``--backend {ts,rust,java}`` is accepted but reports that
-it is not wired yet (multi-runtime is a roadmap item, not a promise here).
+runnable in-process tier; ``rust`` is runnable too, as a separate cordis-rs
+process over the bridge seam (see :mod:`revl.run_rust` — --once boots and tears
+down a real composition with a no-residue proof). ``--backend {ts,java}`` is
+accepted but reports that it is not wired yet (multi-runtime is a roadmap item,
+not a promise here).
 """
 
 from __future__ import annotations
@@ -43,7 +46,10 @@ KNOWN_BACKENDS = ("py", "ts", "rust", "java")
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
 # in-flight and never recorded on their own.
 _SETTLED_DOWN = ("DISPOSED", "PENDING", "FAILED")
-RUNNABLE_BACKENDS = ("py",)
+# py boots cordis-py in-process (the _Driver below); rust boots the composition
+# as a separate cordis-rs process over the same bridge seam (see run_rust.py) —
+# --once (boot -> LIFO teardown -> no-residue proof -> exit) is wired there.
+RUNNABLE_BACKENDS = ("py", "rust")
 
 
 # --------------------------------------------------------------------------
@@ -694,6 +700,15 @@ def run_command(args) -> int:
     if problem is not None:
         print(f"error: {problem}", file=sys.stderr)
         return 1
+
+    if backend == "rust":
+        # the rust tier boots as a separate cordis-rs process over the bridge
+        # seam, not in-process — the same driver contract, a different address
+        # space (docs/interop-bridge.md, docs/swap.md). --once is wired.
+        from .run_rust import run_rust  # noqa: PLC0415 — lazy: no cargo needed to compile/plan
+        return run_rust(ir, config, args.files,
+                        once=bool(getattr(args, "once", False)),
+                        interactive=sys.stdin.isatty())
 
     backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
     if str(backend_dir) not in sys.path:
