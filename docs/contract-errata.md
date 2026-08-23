@@ -227,19 +227,23 @@ it cannot drift silently. **These are not fixed.**
   `BigInt`, not a type annotation — `Int` now maps to `bigint` on that tier,
   which imposes the 64-bit bound and traps on overflow the way python does.
   docs/arithmetic.md records the Int/Float boundary rules the port settled.
-- **Unary minus does not trap on every tier** (open; python closed). Negating
-  `Int.MIN` overflows — it is `0 - Int.MIN` — and the tiers split three ways.
-  python let `-x` lower to the host's unary minus, so `-Int.MIN` came back as
-  2^63, out of the range python itself imposes on every other operation; it
-  now routes Int negation through `_revl_i64` and traps with the usual
-  message. wasm already spelled negation as a subtraction from zero through
-  its checked helper, and rust's native `-` panics in the debug builds
-  `cargo test` runs. But **go and java negate with the host operator, which
-  wraps** (`-Int.MIN == Int.MIN`; JLS 15.15.4 for java), and **TypeScript's
-  `bigint` negation has no bound check**, so the result simply leaves the
-  range as 2^63. Closing those means emitting the checked form on each tier,
-  as wasm already does; until then the behaviour is pinned per tier in
-  `DIVERGENCES` (tests/test_cross_tier_execution.py).
+- **Unary minus on `Int.MIN`** (closed). Negating `Int.MIN` overflows (it is
+  `0 - Int.MIN`), and the tiers used to split three ways. Every tier now
+  faults: python via `_revl_i64`, wasm via checked `0 - x`, rust's native `-`
+  panic, and — the three that used to wrap or grow — go via `revlSub(0, x)`,
+  java via `Math.negateExact`, TypeScript via `revlI64(-x)`. Asserted by
+  execution across py/ts/go/java and by per-tier emit checks
+  (tests/test_cross_tier_execution.py::test_negation_of_int_min_traps).
+- **`Int.MIN / -1`** (closed). Integer division overflows at exactly this
+  input (quotient 2^63; mod is fine, `Int.MIN % -1 == 0`). Every tier now
+  handles it: rust panics, wasm's `i64.div_s` traps, TypeScript re-imposes the
+  bound via `revlI64`, and the three that used to wrap or grow — python bounds
+  the faulting quotient through `_revl_i64`, go through `revlDivTrunc` /
+  `revlDivFloor` (panic), java through `Math.divideExact` / `Math.negateExact`.
+  The checked forms (`checked_div_*`) return `Err("revl: Int overflow")` rather
+  than a wrapped value, totalising the range as well as the zero divisor.
+  Asserted by execution (tests/test_cross_tier_execution.py::
+  test_div_int_min_traps / test_checked_div_int_min_is_err).
 
 **The root cause is closed.** An IR `bin` node used to carry `op`, `left` and
 `right` and *no type*, so no backend could distinguish `Int / Int` from

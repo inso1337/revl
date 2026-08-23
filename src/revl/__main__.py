@@ -221,6 +221,27 @@ def _run_mcp(args) -> int:
     from .mcp.server import serve
 
     if args.mcp_command == "serve":
+        # composition persistence (docs/persistence.md): a snapshot passed on
+        # the command line is re-admitted through the same gate a live restore
+        # runs — a component the current checker rejects aborts the boot loudly
+        # rather than being smuggled in.
+        if getattr(args, "restore", None):
+            from .mcp.persist import RestoreError
+            from .mcp.server import SESSION
+
+            try:
+                with open(args.restore, encoding="utf-8") as handle:
+                    snap = json.load(handle)
+            except (OSError, json.JSONDecodeError) as error:
+                print(f"error: cannot read snapshot {args.restore}: {error}",
+                      file=sys.stderr)
+                return 1
+            try:
+                SESSION.restore(snap)
+            except RestoreError as error:
+                print(f"error: cannot restore {args.restore}: {error}",
+                      file=sys.stderr)
+                return 1
         return serve()
 
     if args.mcp_command == "schema":
@@ -251,14 +272,19 @@ def _run_mcp(args) -> int:
 
 
 def _run_import(args) -> int:
-    """`revl import {wit,openapi}` — the import codegen family
-    (docs/import-wit.md, docs/import-openapi.md)."""
+    """`revl import {wit,openapi,cordis}` — the import codegen family
+    (docs/import-wit.md, docs/import-openapi.md, docs/import-cordis.md)."""
     try:
         if args.import_command == "openapi":
             from .import_openapi import import_openapi_file
             source = import_openapi_file(args.file, backend=args.backend,
                                          service=args.service, pure=args.pure,
                                          emission=args.emission)
+        elif args.import_command == "cordis":
+            from .import_cordis import import_cordis_file
+            source = import_cordis_file(args.file, backend=args.backend,
+                                        service=args.service, pure=args.pure,
+                                        mark_unrecovered=args.mark_unrecovered)
         else:
             from .import_wit import import_wit_file
             source = import_wit_file(args.file, backend=args.backend, pure=args.pure)
@@ -367,6 +393,17 @@ def main(argv: list[str] | None = None) -> int:
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
+    audit.add_argument(
+        "--diff", metavar="PREV.json", default=None,
+        help="authority-drift gate: re-audit the files and FAIL (nonzero) if "
+             "the new generation ADDS boundary crossings not in PREV.json")
+    audit.add_argument(
+        "--accept", action="append", default=[], metavar="CROSSING",
+        help="acknowledge one added crossing so it no longer fails --diff "
+             "(the token printed after `+`; repeatable)")
+    audit.add_argument(
+        "--accept-all", action="store_true",
+        help="acknowledge every added crossing under --diff")
 
     plan_cmd = sub.add_parser(
         "plan", help="dry run for admission: the delta a swap would produce, without applying it")
@@ -434,6 +471,12 @@ def main(argv: list[str] | None = None) -> int:
     mcp_serve = mcp_sub.add_parser("serve", help="run the compiler as an MCP server (stdio)")
     mcp_serve.add_argument("--files", nargs="*", default=None,
                            help="optional default composition for tools called without one")
+    # composition persistence (docs/persistence.md): boot the live session
+    # from a snapshot so an evolved composition survives a restart. The
+    # snapshot is re-admitted through the gate, never trusted blindly.
+    mcp_serve.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
+                           help="re-admit a revl_snapshot document into the session "
+                                "before serving (self-evolution across a restart)")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -494,6 +537,35 @@ def main(argv: list[str] | None = None) -> int:
     imp_api.add_argument("--json-diagnostics", action="store_true",
                          help="on rejection, print a structured diagnostic instead "
                               "of the human rendering")
+
+    # `revl import cordis` — a Cordis (TS) plugin's inject/provide surface
+    # (docs/import-cordis.md). Own additive block; shared file with a sibling.
+    imp_cordis = imp_sub.add_parser(
+        "cordis",
+        help="turn a Cordis (TS) plugin into revl source (docs/import-cordis.md)")
+    imp_cordis.add_argument("file", help="a Cordis plugin .ts (or .js) file")
+    imp_cordis.add_argument("--backend", default="ts", choices=("ts", "py", "rust"),
+                            help="host block backend for the generated extern stubs "
+                                 "(default: ts)")
+    imp_cordis.add_argument("--service", default=None,
+                            help="generated service name (default: from the "
+                                 "provided service key)")
+    imp_cordis.add_argument(
+        "--pure", action="append", default=[], metavar="OP",
+        help="assert that a method changes nothing, so it is emitted as a plain "
+             "`fn` instead of `emission`. Untyped TS makes no such claim; this is "
+             "your assertion and it is recorded in the output. Name it "
+             "`<Service>.<method>` or `<method>`. Repeatable")
+    imp_cordis.add_argument(
+        "--mark-unrecovered", action="store_true",
+        help="instead of refusing an operation whose signature cannot be "
+             "recovered, emit a loud `// UNRECOVERED` marker in its place so a "
+             "partial surface still compiles (nothing is ever guessed)")
+    imp_cordis.add_argument("-o", "--output", default=None,
+                            help="output path (default: stdout)")
+    imp_cordis.add_argument("--json-diagnostics", action="store_true",
+                            help="on rejection, print a structured diagnostic "
+                                 "instead of the human rendering")
 
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
@@ -563,6 +635,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "query":
         return _run_query(args, ir)
+
+    if args.command == "audit" and getattr(args, "diff", None):
+        from .audit_diff import audit_report, evaluate, render  # noqa: PLC0415
+        with open(args.diff, encoding="utf-8") as handle:
+            prev = json.load(handle)
+        new = audit_report(ir)
+        result = evaluate(prev, new, accepted=set(args.accept),
+                          accept_all=args.accept_all)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(render(result, args.diff))
+        return 1 if result["widened"] else 0
 
     if args.command == "audit":
         boundary = _boundary(ir)

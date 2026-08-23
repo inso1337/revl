@@ -990,6 +990,10 @@ def _expr(
         if node.get("op") == "!":
             return f"(!{operand})"
         if node.get("op") == "-":
+            if node.get("operands") == "Int":
+                # negating Long.MIN overflows; Math.negateExact throws the same
+                # ArithmeticException as the other Int operations (arithmetic.md)
+                return f"Math.negateExact({operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported unary operator {node.get('op')!r}")
 
@@ -1360,16 +1364,19 @@ def _emit_checked_div_helpers() -> list[str]:
         "// Err(reason) instead of the fault the unchecked operations raise.",
         "private static RevlResult<Long, String> revlCheckedDivTrunc(long a, long b) {",
         f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        '    if (a == Long.MIN_VALUE && b == -1L) { return new RevlResult.Err<>("revl: Int overflow"); }',
         "    return new RevlResult.Ok<>(a / b);",
         "}",
         "private static RevlResult<Long, String> revlCheckedDivFloor(long a, long b) {",
         f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        '    if (a == Long.MIN_VALUE && b == -1L) { return new RevlResult.Err<>("revl: Int overflow"); }',
         "    long q = a / b;",
         "    if (a % b != 0L && ((a < 0L) != (b < 0L))) { q -= 1L; }",
         "    return new RevlResult.Ok<>(q);",
         "}",
         "private static RevlResult<Long, String> revlCheckedDivEuclid(long a, long b) {",
         f'    if (b == 0L) {{ return new RevlResult.Err<>("{_DIV_ZERO_MSG}"); }}',
+        '    if (a == Long.MIN_VALUE && b == -1L) { return new RevlResult.Err<>("revl: Int overflow"); }',
         "    return new RevlResult.Ok<>(b > 0L ? Math.floorDiv(a, b)",
         "                                      : -Math.floorDiv(a, -b));",
         "}",

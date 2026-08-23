@@ -221,6 +221,8 @@ def test_initialize_and_tools_list():
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_load", "revl_call",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
+                          # composition persistence (docs/persistence.md)
+                          "revl_snapshot", "revl_restore",
                           # composition queries (docs/queries.md)
                           "revl_query_emitters", "revl_query_withdraw",
                           "revl_query_dependents", "revl_query_reach",

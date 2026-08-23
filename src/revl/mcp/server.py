@@ -29,6 +29,7 @@ import sys
 from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, obligations, report
 from ..errors import RevlError
+from .persist import RestoreError
 from .query_tools import QUERY_TOOLS
 from .schema import tools_from_ir
 from .session import Session, SessionError
@@ -93,6 +94,17 @@ def _session_error(message: str, **extra) -> dict:
     }], **extra}
 
 
+def _origin(arguments: dict) -> dict:
+    """The admission inputs of a load/swap, kept so the composition can later
+    be snapshotted for re-admission (docs/persistence.md)."""
+    origin = {}
+    for key in ("source", "files", "modules"):
+        value = arguments.get(key)
+        if value is not None:
+            origin[key] = value
+    return origin
+
+
 def _tool_load(arguments: dict) -> dict:
     """Boot a composition in memory (nothing is written to disk)."""
     try:
@@ -102,7 +114,8 @@ def _tool_load(arguments: dict) -> dict:
         return report(error)
     try:
         state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")))
+                             record=bool(arguments.get("record")),
+                             origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
     return {"ok": True, **_summary(ir), **state}
@@ -153,7 +166,7 @@ def _tool_swap(arguments: dict) -> dict:
                             "its own — pass the full source set to swap")
         return rejected
     try:
-        state = SESSION.swap(full)
+        state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
     return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
@@ -175,6 +188,48 @@ def _tool_unload(_arguments: dict) -> dict:
 
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
+
+
+# -- composition persistence (docs/persistence.md) ------------------------
+
+def _tool_snapshot(_arguments: dict) -> dict:
+    """Capture the live composition as re-admittable JSON (sources + manifest).
+
+    This is not a runtime dump: it is the inputs a fresh boot would need to
+    put the same composition back through the admission gate."""
+    try:
+        return {"ok": True, "snapshot": SESSION.snapshot()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_restore(arguments: dict) -> dict:
+    """Re-admit a snapshot into an empty session by replaying admission.
+
+    A component the *current* checker rejects fails the restore loudly with
+    its diagnostic — a snapshot cannot smuggle a now-rejected component past a
+    newer checker. The running system is untouched on failure."""
+    snap = arguments.get("snapshot")
+    if snap is None:
+        return _session_error("`snapshot` (a document from revl_snapshot) is required")
+    try:
+        return {"ok": True, **SESSION.restore(snap)}
+    except RestoreError as error:
+        # a rejected re-admission is a *result*: surface the diagnostic, and
+        # make clear nothing was loaded
+        payload = {"ok": False, "restored": False, "reAdmitted": False,
+                   "note": "the component was rejected by the current checker "
+                           "and was not loaded — the snapshot cannot bypass "
+                           "the admission gate"}
+        if error.diagnostic is not None:
+            payload["diagnostics"] = [error.diagnostic]
+        else:
+            payload["diagnostics"] = [{
+                "severity": "error", "code": "REVL", "category": "session",
+                "message": str(error)}]
+        return payload
+    except SessionError as error:
+        return _session_error(str(error))
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -538,6 +593,39 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_state,
+    },
+    {
+        "name": "revl_snapshot",
+        "description": "Capture the running composition as re-admittable JSON: the "
+                       "SOURCES of the currently-admitted components plus the "
+                       "manifest and meta. Not a runtime dump — it is the inputs a "
+                       "fresh boot needs to put the same composition back through "
+                       "the admission gate, so self-evolution survives a restart. "
+                       "Pair with revl_restore.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_snapshot,
+    },
+    {
+        "name": "revl_restore",
+        "description": "Re-admit a snapshot (from revl_snapshot) into an empty "
+                       "session by REPLAYING ADMISSION: the sources are recompiled "
+                       "through the same gate a live revl_load runs, never rehydrated "
+                       "from the stored manifest. A component the current checker "
+                       "rejects fails the restore loudly with its diagnostic — a "
+                       "snapshot cannot smuggle a now-rejected component past a newer "
+                       "checker. Requires nothing loaded.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "snapshot": {"type": "object",
+                             "description": "a document produced by revl_snapshot "
+                                            "({sources, manifest, meta})"},
+            },
+            "required": ["snapshot"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_restore,
     },
     {
         "name": "revl_timeline",
