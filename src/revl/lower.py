@@ -118,6 +118,8 @@ _BUILTIN_METHODS = {
     # host verb set (open/close/query/execute/new/get/insert/remove/drop):
     # the two method namespaces stay collision-free by construction.
     "set": 2, "lookup": 1, "has": 1,
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
+    "to_str": 0,
 }
 
 
