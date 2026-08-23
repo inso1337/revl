@@ -55,20 +55,20 @@ This goes in the compiler spec, not the runtimes.
   its docs; the py adapter's drain derives R1 from the *documented* contract
   and covers async undos. Do not remove the drain on the strength of the
   empirical ordering.
-- **cordis-py A8 async-body gap** (documented, runtime-verified): a component
-  body containing an `await` compiles to an *async* generator, and cordis-py
-  routes an async effect-setup failure to `_make_effect_guard` (auto-dispose)
-  rather than the fiber's error slot. The accumulated inverses **do** run,
-  LIFO, with no residue (A8's containment holds), but the fiber lands `ACTIVE`
-  instead of `FAILED` — A8's "the component lands FAILED with the error
-  recorded" is dropped for async bodies. Found independently by the fault-test
-  and replay features (docs/fault-tests.md §8, docs/replay.md §7): reproduced
-  with hand-built IR and no revl code in the loop, and confirmed tier-side —
-  it occurs identically with recording off. Sync bodies are unaffected. The
-  fault-test harness asserts the inverses ran and reports the wrong state
-  rather than masking it; the replay test asserts *neutrality* (same verdict
-  recording on/off), so it keeps passing once cordis-py is fixed instead of
-  pinning the bug.
+- **cordis-py A8 async-body gap** (RESOLVED — fixed in the pinned runtime,
+  `inso1337/cordis-py@harden-fiber-lifecycle` commit `1316174`, folded into
+  geohotstan/cordis-py#1): a component body containing an `await` compiled to
+  an *async* generator, and cordis-py routed an async effect-setup failure to
+  `_make_effect_guard` (auto-dispose) rather than the fiber's error slot — the
+  accumulated inverses ran LIFO with no residue (A8 containment held) but the
+  fiber landed `ACTIVE` instead of `FAILED`, dropping A8's "the component lands
+  FAILED with the error recorded" for async bodies. The runtime now routes an
+  async setup failure to the fiber's error slot, matching the sync path: the
+  fiber lands `FAILED` with the error recorded while the inverses still run
+  LIFO (containment unchanged). Sync bodies were always unaffected. The
+  fault-test lock `test_an_await_body_lands_failed_like_a_sync_body` now pins
+  the fixed behavior (it was a red-on-fix characterization test); the replay
+  neutrality test was unaffected throughout. See docs/fault-tests.md §8.
 - **cordis-rs A1 divergence** (documented, runtime-verified): cordis-rs 0.3.0
   drives `plugin_async` activation to completion with `block_on` *under the
   fiber transition lock* (fiber.rs), so a divert during a component `await`
