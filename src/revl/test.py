@@ -398,8 +398,49 @@ RUNNERS: dict[str, callable] = {
 _TAG = {"pass": "ok", "skip": "skipped", "fail": "FAIL"}
 
 
-def test_command(ir: dict, backend: str) -> int:
-    """Run the document's `test` blocks on the chosen tier(s); exit code."""
+def sweep_command(ir: dict) -> int:
+    """`revl test --sweep`: the exhaustive fault sweep (docs/fault-tests.md).
+
+    A `fault test` proves A8/R4 at one author-chosen point; the sweep injects
+    failure at *every* top-level step of *every* component and runs the full
+    assertion set at each. It runs on the py reference tier — the only tier
+    that executes fault tests — so, like a single fault test, a missing
+    cordis-py runtime is a *skip with a reason*, never a pass.
+    """
+    if not _cordis_available():
+        print("[sweep] skipped: the fault sweep activates components for real "
+              "and needs the cordis-py runtime, which this interpreter does "
+              "not have\n"
+              "        set it up:  sh backends/python/setup.sh\n"
+              "        then rerun under that interpreter:  "
+              "backends/python/.venv/bin/python -m revl test --sweep")
+        return 0
+
+    from .fault import run_sweep  # noqa: PLC0415 — lazy: needs cordis
+
+    if not (ir.get("components") or []):
+        print("[sweep] no components to sweep")
+        return 0
+    failures, _dossier = run_sweep(ir)
+    if failures:
+        print(f"[sweep] {failures} step(s) left residue or broke containment",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def test_command(ir: dict, backend: str, sweep: bool = False) -> int:
+    """Run the document's `test` blocks on the chosen tier(s); exit code.
+
+    With ``sweep`` set, run the exhaustive fault sweep instead (py tier only —
+    the only tier that executes fault tests); ``--backend`` does not apply.
+    """
+    if sweep:
+        if backend not in ("py", "all"):
+            print(f"[sweep] note: the fault sweep runs on the py reference "
+                  f"tier only, not `{backend}` (docs/fault-tests.md)")
+        return sweep_command(ir)
+
     if not (ir.get("tests") or []) and not (ir.get("fault_tests") or []):
         print("no tests to run")
         return 0

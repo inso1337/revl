@@ -310,6 +310,61 @@ def _run_mcp(args) -> int:
     return 0
 
 
+def _run_serve(args) -> int:
+    """`revl serve --mcp FILES` — serve a composition's OWN provided operations
+    as MCP tools (the fourth quadrant of the bridge, docs/mcp-bridge.md).
+
+    Placement note: this boots one composition and stands it up, so it shares
+    `revl run`'s admission-and-config preflight (compile -> refuse holes ->
+    load config -> refuse a missing required field) rather than living under
+    `revl mcp serve`, whose tool set is the fixed compiler surface. `--mcp`
+    names the transport, leaving room for other serve frontends later.
+    """
+    from .run import _load_config, _required_config_problem  # noqa: PLC0415
+
+    if not getattr(args, "mcp", False):
+        print("error: `revl serve` needs a transport — pass --mcp to serve over "
+              "the MCP stdio protocol", file=sys.stderr)
+        return 2
+
+    from .holes import refuse_admission  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+        # booting is admission: a draft with open obligations may not become a
+        # running composition, however it was compiled (docs/holes.md)
+        refuse_admission(ir)
+        config = _load_config(getattr(args, "config", None))
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"error: cannot read config: {error}", file=sys.stderr)
+        return 1
+
+    if not (ir.get("components") or []):
+        print("nothing to serve: no components in the composition", file=sys.stderr)
+        return 0
+
+    # config-to-boot preflight: the same rule `revl run` enforces before a
+    # runtime is touched — a component admitted with a missing required config
+    # field refuses the boot loudly, rather than settling a fiber onto FAILED
+    # behind a tool the client can already see advertised.
+    problem = _required_config_problem(ir, config)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return 1
+
+    from .mcp.composed import serve_composition  # noqa: PLC0415
+    from .mcp.session import SessionError  # noqa: PLC0415
+
+    try:
+        return serve_composition(ir, config, composition=args.composition)
+    except SessionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+
+
 def _run_import(args) -> int:
     """`revl import {wit,openapi,cordis}` — the import codegen family
     (docs/import-wit.md, docs/import-openapi.md, docs/import-cordis.md)."""
@@ -508,6 +563,10 @@ def main(argv: list[str] | None = None) -> int:
                       choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "
                            "`all` runs every tier whose toolchain is present")
+    test.add_argument("--sweep", action="store_true",
+                      help="fault sweep: inject failure at every step of every "
+                           "component and check L-Raise / no-residue / LIFO / "
+                           "siblings at each (py tier; docs/fault-tests.md)")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -610,6 +669,19 @@ def main(argv: list[str] | None = None) -> int:
                             help="on rejection, print a structured diagnostic "
                                  "instead of the human rendering")
 
+    serve = sub.add_parser(
+        "serve",
+        help="serve a composition's OWN provided operations as MCP tools "
+             "(the fourth quadrant: hints derived by the compiler)")
+    serve.add_argument("files", nargs="+")
+    serve.add_argument("--mcp", action="store_true",
+                       help="serve over the MCP stdio protocol (required)")
+    serve.add_argument("--config", default=None,
+                       help="TOML/JSON file of `component-name = { ... }` config "
+                            "tables — supplied to each component at boot")
+    serve.add_argument("--composition", default="revl",
+                       help="tool-name prefix (tools are `<prefix>.<key>.<op>`)")
+
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
@@ -639,6 +711,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return run_command(args)
+
+    if args.command == "serve":
+        return _run_serve(args)
 
     if args.command == "mcp":
         return _run_mcp(args)
@@ -674,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {rendered}", file=sys.stderr)
 
     if args.command == "test":
-        return test_command(ir, args.backend)
+        return test_command(ir, args.backend, sweep=getattr(args, "sweep", False))
 
     if args.command == "query":
         return _run_query(args, ir)
@@ -702,9 +777,15 @@ def main(argv: list[str] | None = None) -> int:
             for ext in ir.get("externs") or []
         ]
         if args.json:
-            print(json.dumps({"manifest": manifest, "boundary": boundary,
-                              "externs": declared_externs,
-                              "distributability": distribution}, indent=2))
+            # The manifest + G8 audit as the versioned interchange format
+            # (docs/interchange-format.md, roadmap item 28): `stamp` adds the
+            # `schema_version`/`kind` header additively, over the same body
+            # earlier consumers already read.
+            from .interchange import stamp  # noqa: PLC0415
+            print(json.dumps(stamp(
+                {"manifest": manifest, "boundary": boundary,
+                 "externs": declared_externs,
+                 "distributability": distribution}), indent=2))
             return 0
         print("composition (providers first):", " -> ".join(manifest.get("loadOrder") or []))
         for entry in manifest.get("components") or []:

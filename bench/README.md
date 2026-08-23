@@ -27,6 +27,11 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
 - `rescore.py` — recompiles the *already committed* revl generations against
   the current checker. No model, no provider, no cost. This is how a language
   change is measured against a fixed corpus.
+- `demand.py` — refusal telemetry. Extends `rescore.py`'s failure taxonomy
+  into a **ranked demand table**: what the models keep reaching for and being
+  refused (unknown stdlib methods, invented syntax forms, missing types),
+  ranked by frequency across the committed corpora. Orders the stdlib/syntax
+  roadmap by *measured* demand. Free — reads committed data, no model.
 - `score_raw_ts.py` — the raw-ts scoring + re-score path. Mounts/unmounts each
   committed `raw-ts/attempt-1.ts` N cycles via the item-18 residue probe
   (`tools/residue-probe/`) and reports the leak set. Free — the probe calls no
@@ -100,6 +105,58 @@ records for further analysis.
 
 The headline is `attempt-1` only — the file the model produced before it ever
 saw a compiler message. Later attempts are the error-feedback loop.
+
+## Turning refusals into a feature-request queue
+
+The failure taxonomy answers *what broke*. `demand.py` answers the next
+question — *what do the models keep reaching for that revl won't give them* —
+and ranks it, so the stdlib/syntax roadmap is ordered by measured demand
+rather than by guess (the same "measured, not assumed" move the `Int32` entry
+made). Every refused attempt in `results/` is one data point of demand.
+
+```bash
+python3 bench/demand.py                       # rank across both model runs
+python3 bench/demand.py --attempts all        # every attempt (the default)
+python3 bench/demand.py --kind stdlib         # only stdlib-method demand
+python3 bench/demand.py --json demand.json    # machine-readable ranking
+```
+
+Two things separate the demand table from the taxonomy:
+
+- **It sub-classifies below `(code, category)`.** The taxonomy lumps the
+  refusal `no builtin method take` and the parse error `found 'kv'` into one
+  `(G6, guarantee)` bucket; the miner splits them into a *stdlib-method* demand
+  for `take` and a *syntax-form* demand for `kv`, because they order two
+  different roadmaps.
+- **It mines the reached-for symbol** out of each message — the method, the
+  syntax token, the type name — so a row reads "`take` was reached for N
+  times", the thing you would add, not "a G6 fired".
+
+Each row is one reached-for symbol: its *kind* (`stdlib-method`,
+`syntax-form`, `host-method`, `missing-type`, or a `guarantee:<code>` bucket
+for refusals with no symbol to mine), a refusal count, the contributing
+diagnostic codes, and a representative example. Rows are ranked by descending
+count with a total-order tie-break, so the ordering is deterministic. The
+`Roadmap-actionable rows` block at the bottom filters to the stdlib / syntax /
+host / type kinds — the ones an author can act on directly. Like `rescore.py`,
+the header names the compiler sha the demand was measured at.
+
+### Opt-in second source: the live MCP session
+
+The committed corpus is the always-on source. A live MCP session emits the
+same structured diagnostics (`revl_check`/`revl_load` return them), and an
+operator can capture that stream and fold it in as a **second** demand source:
+
+```bash
+python3 bench/demand.py --mcp-diagnostics session.jsonl
+```
+
+It is **off by default and read-only** — it never touches the live session,
+only a capture file (JSONL or a JSON array; it accepts a bare diagnostic, a
+`report()` `{diagnostics: […]}` document, or a restore-error `{diagnostic: …}`
+shape). Refusals that came from the MCP source are tagged `(mcp)` in the table
+and carry a `sources` breakdown in the JSON, so corpus demand and live demand
+stay distinguishable.
 
 Note what a re-score can and cannot say. It measures **the corpus against a
 compiler**, so it is the right tool for "did this language change break
