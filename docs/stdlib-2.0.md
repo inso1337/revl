@@ -95,7 +95,10 @@ The grain follows `List`: operations are methods on the value (`m.set(k, v)`
 rebinds, exactly like `out = out.push(v)`), because revl has no mutation and
 no free-function namespace to pollute. There is deliberately no `remove`,
 no `length`, no iteration yet — symbol tables need build/read/member, and
-the surface grows by specification, not by accretion.
+the surface grows by specification, not by accretion. Iteration is absent,
+but its **order is already decided** ahead of shipping — see *Iteration
+order* below and **docs/collections.md** — because that is the moment the
+tiers would otherwise diverge for free.
 
 ### Coexistence with the host `Map.new()`
 
@@ -127,6 +130,14 @@ like what they are: an empty persistent value vs a stateful host object.
   §3.4), specialized order-independently: two maps are equal iff they have
   the same key set and equal values under every key — `{a=1, b=2} ==
   {b=2, a=1}`. Insertion order is never observable through `==`.
+- **Iteration order is sorted, not insertion.** When iteration ships,
+  `keys()` (and any `for`-over-a-map) yields keys in ascending **canonical
+  `Str` order** — Unicode scalar value, equivalently UTF-8 byte
+  lexicographic — on every tier. Order is a pure function of the key set,
+  never of construction history, which is the same line `==` already draws.
+  The full decision, the three options costed per tier, and the canonical
+  order live in **docs/collections.md**; the short form is the subsection
+  below.
 - **`Map.empty()` types as `Map[Str, Never]`.** `Never` is the bottom of
   the compatibility relation, so the empty map flows into any `Map[Str,
   V]` — the same trick the untyped empty list literal plays — and `set`
@@ -143,6 +154,34 @@ like what they are: an empty persistent value vs a stateful host object.
   `List[Int]` is expected) — the identical escape existed there first.
   A let bound to `Map.empty()` is an ordinary VALUE binding: its method
   calls go through the checked builtin path, never the verbatim host path.
+
+### Iteration order (decided before iteration ships)
+
+`Map` has no iteration today, which is exactly why the order is fixed now:
+the instant `keys()` exists the tiers diverge by default — python/typescript
+maps iterate in insertion order, go and rust randomize *by design*, java is
+unspecified. Deciding after the fact would pin the divergence as errata.
+
+The contract is **ascending canonical `Str` order** (Option B below). Three
+options were weighed:
+
+| option | determinism | per-tier cost |
+|---|---|---|
+| insertion order | deterministic | free on python/ts; go needs an ordered wrapper, rust needs `IndexMap`/std wrapper (both invasive), java swaps to `LinkedHashMap` (cheap) |
+| **sorted-key order** (chosen) | deterministic | a sort at iteration on every tier, **no representation change**; ts/java need a code-point comparator for supplementary-plane keys |
+| unspecified | **not** deterministic | free everywhere, but forfeits cross-tier executable equality for any program that iterates — rejected |
+
+Sorted wins on the house's own terms: it keeps order a function of *content*
+(the line `==` already draws), it *specifies* one order rather than
+inheriting python/ts container behavior (the docs/arithmetic.md doctrine),
+and it needs no change to the representation table below — the two costly
+retrofits (go's wrapper, rust's non-std crate) are avoided. The only
+precondition, orderable keys, is already met: keys are `Str`. Full costing,
+the canonical order (Unicode scalar / UTF-8 byte lexicographic, with the
+ts/java UTF-16 comparator note), and the per-tier implementation sketch are
+in **docs/collections.md**. The order is pinned as TCK case
+`c1_map_iteration_order` (requirement C1), reported *pending* until a
+runtime drives real map iteration.
 
 ### Per-tier representation
 
