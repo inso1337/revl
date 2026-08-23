@@ -403,6 +403,43 @@ def _run_import(args) -> int:
     return 0
 
 
+def _run_export(args) -> int:
+    """`revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+
+    Slice 1 of the Component Model bridge: pure IR codegen of the standard WIT
+    interface a revl service or composition presents (the importer's type
+    mapping, run backwards). No runtime, no emission, no binary — interface
+    text only. Effects ride alongside the shape as `/// @revl:*` doc comments,
+    because WIT's type system carries shape, not lifecycle.
+    """
+    from .export_wit import export_wit  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        if getattr(args, "json_diagnostics", False):
+            print(json.dumps(report(error), indent=2))
+        else:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        source = export_wit(ir, service=args.service,
+                            composition=args.composition, package=args.package)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        try:
+            Path(args.output).write_text(source, encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot write {args.output}: {error}", file=sys.stderr)
+            return 1
+    else:
+        print(source, end="")
+    return 0
+
+
 def _run_plan(args) -> int:
     """`revl plan` — what admitting these files would do (docs/plan.md).
 
@@ -887,6 +924,32 @@ def main(argv: list[str] | None = None) -> int:
                             help="on rejection, print a structured diagnostic "
                                  "instead of the human rendering")
 
+    # `revl export wit` — the reverse of `revl import wit` (docs/wit-bridge.md).
+    # Additive: its own `export` group, mirroring the `import` family's shape.
+    exp_cmd = sub.add_parser(
+        "export",
+        help="export a revl service/composition as an external interface "
+             "definition (the reverse of `revl import`)")
+    exp_sub = exp_cmd.add_subparsers(dest="export_command", required=True)
+    exp_wit = exp_sub.add_parser(
+        "wit",
+        help="generate the standard WIT interface for a revl service or "
+             "composition (docs/wit-bridge.md)")
+    exp_wit.add_argument("files", nargs="+", help=".rvl source files")
+    exp_group = exp_wit.add_mutually_exclusive_group(required=True)
+    exp_group.add_argument("--service", default=None, metavar="NAME",
+                           help="export a single service by name")
+    exp_group.add_argument("--composition", action="store_true",
+                           help="export every service the composition provides")
+    exp_wit.add_argument("--package", default="revl:exported", metavar="NS:NAME",
+                         help="WIT package id for the generated file "
+                              "(default: revl:exported)")
+    exp_wit.add_argument("-o", "--output", default=None,
+                         help="output path (default: stdout)")
+    exp_wit.add_argument("--json-diagnostics", action="store_true",
+                         help="on rejection, print a structured diagnostic instead "
+                              "of the human rendering")
+
     serve = sub.add_parser(
         "serve",
         help="serve a composition's OWN provided operations as MCP tools "
@@ -985,6 +1048,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "import":
         return _run_import(args)
+
+    if args.command == "export":
+        return _run_export(args)
 
     if args.command == "plan":
         return _run_plan(args)
