@@ -173,6 +173,24 @@
     (if (result i64) (i64.lt_s (local.get $m) (i64.const 0))
       (then (i64.add (local.get $m) (local.get $ab)))
       (else (local.get $m))))
+  (func $int32_add (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.add (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_sub (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.sub (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_mul (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.mul (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_narrow (param $v i64) (result i32)
+    (if (i32.or
+          (i64.lt_s (local.get $v) (i64.const -2147483648))
+          (i64.gt_s (local.get $v) (i64.const 2147483647)))
+      (then unreachable))
+    (i32.wrap_i64 (local.get $v)))
   (func $list_push (param $list i32) (param $elem i64) (result i32)
     (local $n i32)
     (local $p i32)
