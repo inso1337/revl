@@ -78,8 +78,10 @@ non-exempt file produces an `ERROR` (or `MISSING`) node**:
 node check.mjs          # or: npm run check
 ```
 
-Current result: **78 / 79 files parse with zero `ERROR` nodes**, with **1 named
-exemption**.
+Current result: **83 / 86 files parse with zero `ERROR` nodes**, with **3 named
+exemptions**. Every file the **reference parser accepts** parses clean here —
+the exemptions are all among the files the reference itself rejects at parse
+time.
 
 `tree-sitter test` additionally runs the structural fixtures in
 [`test/corpus/`](test/corpus).
@@ -87,20 +89,23 @@ exemption**.
 ### Exemptions
 
 An exemption is legitimate only when the **reference parser itself rejects the
-file at parse time** with a construct that a context-free LR grammar cannot
-express. No file is silently skipped — `check.mjs` parses and reports every one.
+file at parse time** with a construct that is genuinely absent from revl's
+context-free syntax. No file is silently skipped — `check.mjs` parses and
+reports every one.
 
 | File | Reason |
 | --- | --- |
-| `examples/rejections/t19_union_type.rvl` | `type Payload = List[Row] \| Str` — revl has **no union types**; `\|` separates the *cases* of a variant (constructor names), not type applications. The reference parser rejects this at parse time. The grammar accepts variant cases (`Name(payload)`) but not a `\|`-separated list of type applications, so it produces an `ERROR` here — matching the reference's own refusal. |
+| `examples/rejections/t19_union_type.rvl` | `type Payload = List[Row] \| Str` — revl has **no union types**; `\|` separates the *cases* of a variant (constructor names), not type applications. The grammar accepts variant cases (`Name(payload)`) but not a `\|`-separated list of type applications, so it produces an `ERROR` here — matching the reference's own refusal. |
+| `examples/rejections/v2_semicolon_separator.rvl` | revl has **no `;` statement separator** (statements are newline-separated). There is no `;` token in the grammar, so a stray `;` is an `ERROR`, matching the reference lexer's refusal. |
+| `examples/rejections/v2_provide_emission_fn.rvl` | a provide-method carries **no purity modifier** — it is a plain `fn`, emission-ness is inherited from the service (G4). The reference rejects `emission fn` inside `provide` at parse time, so `provide_method` (plain `fn`) errors here too. |
 
 ### A note on the reference's other parse-time refusals
 
-The reference parser rejects **eleven** corpus files at parse time. Ten of them
-are refused for **context-sensitive** reasons an LR grammar does not enforce —
-they are syntactically well-formed, so this grammar parses them cleanly (with
-zero `ERROR` nodes), which is the correct behavior for a syntax highlighter
-(highlight the code even when it is semantically invalid). These ten are:
+The reference parser rejects several other corpus files at parse time for
+**context-sensitive** reasons an LR grammar does not enforce — they are
+syntactically well-formed, so this grammar parses them cleanly (with zero
+`ERROR` nodes), which is the correct behavior for a syntax highlighter
+(highlight the code even when it is semantically invalid). These include:
 
 - `a1_await_in_method` — `await` outside a component body (position rule).
 - `g4_missing_undo` — `effect` without `undo` (G4 pairing rule).
