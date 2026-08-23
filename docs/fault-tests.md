@@ -126,7 +126,7 @@ is instrumented; siblings run untouched.
 | assertion | check |
 |---|---|
 | `assert failed` | the target fiber's state is `FiberState.FAILED` |
-| `assert no residue` | (a) every accumulated inverse ran; (b) no provision the target added survived the unwind; (c) event-hook counts back to baseline; (d) after the host disposes the failed handle, registry size and root disposables are back to baseline exactly |
+| `assert no residue` | (a) every accumulated inverse ran; (b) no provision the target added survived the unwind; (c) event-hook counts back to baseline; (d) after the host disposes the failed handle, registry size and root disposables are back to baseline exactly; (e) every host resource the activation acquired (`Map.new`, `Pool.open`) was released by a matching inverse (`drop`/`close`), read from the host trace — R1, the same accounting the lifecycle `assert no_residue` applies |
 | `assert inverses lifo` | the recorded run order is exactly the reverse of the recorded accumulation order |
 | `assert no emissions` | the activation performed no `emit` before the injection point |
 | `assert siblings unaffected` | every other component in the composition is still `ACTIVE` |
@@ -138,6 +138,15 @@ owns, not residue. So provisions and listeners are checked there, and registry
 and effects are checked after the harness disposes the handle, which is what a
 host does with a failed plugin. The harness always prints the registry
 delta so the distinction is visible rather than assumed.
+
+Check (e) exists because the four runtime counters cannot see an acquisition
+whose undo is not its inverse: `undo scratch.insert("leak", "1")` runs fine,
+drains nothing extra, and returns every counter to baseline while the stub
+stays live in the host process. Only the acquire/release pairing over the
+host trace catches it — before it was added, such a component passed a fault
+test and failed the lifecycle test, which made fault tests untrustworthy as
+leak coverage. The trace capture opens after the baseline snapshot, so
+resources siblings acquired and hold are not charged to this test.
 
 ---
 
