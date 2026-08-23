@@ -109,6 +109,25 @@ def test_rejects_unknown_ir_version():
         emit.emit({"ir_version": 4, "components": [{"name": "X", "body": []}]})
 
 
+def test_emit_with_compensate_keeps_the_compensation():
+    """An `emit` carrying a `compensate` must route through the modern path.
+    The simple renderer emitted the emission but silently dropped its
+    compensation — a lost teardown (G7 residue) that javac never catches
+    because the output still compiles. Regression: the compensation call
+    must appear in the emitted Java."""
+    src = (
+        "service Bus { emission fn send(n: Int) -> Int }\n"
+        "service S { fn f(x: Int) -> Int }\n"
+        "component C requires bus: Bus provides s: S {\n"
+        "  emit bus.send(1) compensate bus.send(0)\n"
+        "  provide s { fn f(x) = x }\n"
+        "}\n"
+    )
+    out = emit.emit(compile_source(src)).replace(" ", "")
+    assert "send(1" in out, "emission missing"
+    assert "send(0" in out, "compensation dropped — G7 residue on the java tier"
+
+
 def test_version_gate_accepts_ir_1_2_3():
     v1 = {
         "ir_version": 1,

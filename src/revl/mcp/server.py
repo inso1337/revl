@@ -577,6 +577,44 @@ absence is Opt[T]; declared types are checked at every boundary.
 """
 
 
+def _resolve_registry_dir(arguments: dict) -> str:
+    """Where the git-backed registry lives: an explicit `registry` argument,
+    then $REVL_REGISTRY, then the `registry/` directory shipped in the repo."""
+    import os  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    return (arguments.get("registry")
+            or os.environ.get("REVL_REGISTRY")
+            or str(Path(__file__).resolve().parents[3] / "registry"))
+
+
+def _tool_resolve(arguments: dict) -> dict:
+    """Rank the registry's §5-admissible providers for a need — the read half
+    of the component registry (roadmap item 49, docs/registry.md §2). Source and
+    manifest ride inline so need -> resolve -> admit is two round-trips."""
+    from ..registry import Registry, resolve as registry_resolve  # noqa: PLC0415
+
+    need = arguments.get("need")
+    if need is None:
+        return _session_error(
+            "`need` is required — a `service` declaration (source), a hole's "
+            "fill spec (from revl_check), or a service shape object")
+    registry_dir = _resolve_registry_dir(arguments)
+    from pathlib import Path  # noqa: PLC0415
+    if not (Path(registry_dir) / "index.json").exists():
+        # §3: absent entirely when no index is configured — not an error.
+        return {"ok": True, "query": "resolve", "candidates": [],
+                "assumptions": [f"no registry index at {registry_dir}; "
+                                "set `registry` or $REVL_REGISTRY"]}
+    try:
+        registry = Registry.from_dir(registry_dir)
+        return registry_resolve(registry, need,
+                                manifest=arguments.get("manifest"),
+                                limit=int(arguments.get("limit", 5)))
+    except RevlError as error:
+        return report(error)
+
+
 def _tool_grammar(_arguments: dict) -> dict:
     # `fixes` is the `revl explain` payload: for every guarantee, the rewrite
     # that satisfies it — so an agent that gets a code back can act without
@@ -987,6 +1025,45 @@ TOOLS = [
         "handler": _tool_grammar,
     },
 ]
+
+# the component registry read path (docs/registry.md, roadmap item 49) —
+# appended additively so the tool literal above stays owned by the core verbs
+TOOLS.append({
+    "name": "revl_resolve",
+    "description": "Find a component to IMPORT instead of regenerating one. "
+                   "Give the NEED — a `service` declaration (source), a hole's "
+                   "fill spec (verbatim from revl_check), or a service shape "
+                   "object — and it returns ranked candidates whose provided "
+                   "service is §5-compatible with the need, each carrying its "
+                   "SOURCE and MANIFEST inline so the next call is revl_admit / "
+                   "revl_swap (two round-trips, never a browse session). Matching "
+                   "is admission, never text: the same structural-compatibility "
+                   "gate a hot-swap runs, pointed at the index — a candidate the "
+                   "gate would refuse is not returned. Pass `manifest` (the "
+                   "running composition's IR) to upgrade the answer from "
+                   "'compatible somewhere' to 'admissible here': a key the "
+                   "composition already provides is withheld (G2). Ranking is "
+                   "least-authority-first (smallest capability set, then tighter "
+                   "interface fit, then stronger evidence, then smaller source).",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "need": {"description": "a `service` declaration source, a fill spec "
+                                    "object, or a service shape object"},
+            "manifest": {"type": "object",
+                         "description": "the running composition's IR — candidates "
+                                        "are additionally checked admissible here"},
+            "limit": {"type": "integer",
+                      "description": "max candidates to return (default 5)"},
+            "registry": {"type": "string",
+                         "description": "registry directory (default $REVL_REGISTRY "
+                                        "or the repo's registry/)"},
+        },
+        "required": ["need"],
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    "handler": _tool_resolve,
+})
 
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own

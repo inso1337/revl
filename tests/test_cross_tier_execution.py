@@ -1093,11 +1093,23 @@ FLOAT_INTERP_PROBES = {
 # Float -> Str in interpolation is the canonical ECMAScript Number::toString
 # form on every tier that renders it (item 51, docs/strings.md): python/go/rust/
 # java each spell the shared renderer in host syntax; ts's `${x}` already is it.
-# wasm is the one FENCED tier — it still refuses a Float in interpolation
-# (a canonical shortest-round-trip Float->Str routine in hand-written WAT is the
-# documented remaining wasm work, docs/strings.md §"Remaining wasm WAT work") —
-# so its float probes stay xfail below while every other tier is a plain assert.
+# wasm now renders the subset it can do *exactly* in hand-written WAT — NaN,
+# +/-Infinity, and every integer-valued float with |x| < 2^63 (rendered through
+# `$f64_to_str`, which reuses `$int_to_str`). The three probes in that subset
+# are plain asserts below. The one still-fenced case is the exponent form
+# (`${1.0e21}` -> "1e+21"): its ES spelling needs a shortest-round-trip
+# float->decimal (Grisu/Ryu class) that is not implemented in WAT, so
+# `$f64_to_str` traps on |x| >= 2^63 rather than emit a divergent string. That
+# one probe stays xfail (docs/strings.md §"Remaining wasm WAT work").
 FLOAT_SLOW_TIERS = ("rust", "java")
+
+# The subset wasm renders byte-exactly today, and the one case still fenced.
+WASM_FLOAT_CANONICAL = (
+    "NaN spelling",
+    "negative zero loses its sign in text",
+    "whole-number float has no trailing point",
+)
+WASM_FLOAT_FENCED = ("large magnitude uses exponent",)
 
 
 @pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
@@ -1124,16 +1136,34 @@ def test_float_interpolation_is_canonical_slow(tier: str, name: str):
 
 @pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
                     reason="set REVL_CROSS_TIER_SLOW=1 (wasmtime is slow)")
+@pytest.mark.parametrize("name", sorted(WASM_FLOAT_CANONICAL))
+def test_float_interpolation_wasm_is_canonical(name: str):
+    """wasm now renders these Float cases in the canonical ECMAScript form,
+    byte-for-byte, via a hand-written `$f64_to_str` (item 51, docs/strings.md):
+    NaN, integer-valued floats (whole-number and negative-zero both -> "0").
+    The module's own `assert f() == "..."` traps on any divergence, so a pass
+    here is wasmtime confirming the exact canonical bytes."""
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run("wasm", source)
+    if status == "skip":
+        pytest.skip(f"wasm: {message}")
+    assert status == "pass", f"wasm renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (wasmtime is slow)")
 @pytest.mark.xfail(
-    reason="item 51: wasm is FENCED for Float interpolation — it still refuses "
-    "a Float in a template. A canonical shortest-round-trip Float->Str routine "
-    "in hand-written WAT is the documented remaining wasm work (docs/strings.md "
-    '§"Remaining wasm WAT work"). wasm IS code-point-correct for the string '
-    "unit (its method probes pass); only Float rendering is deferred.",
-    strict=False,
+    reason="item 51: wasm renders NaN/Infinity and every integer-valued float "
+    "|x| < 2^63 canonically, but the exponent form (`${1.0e21}` -> \"1e+21\") "
+    "needs a shortest-round-trip float->decimal (Grisu/Ryu class) not "
+    "implemented in hand-written WAT. `$f64_to_str` traps on |x| >= 2^63 "
+    "rather than emit a string that would diverge from the other tiers — the "
+    "narrowed remaining wasm work (docs/strings.md §\"Remaining wasm WAT "
+    "work\"). Named unsupported inputs: non-integer floats, and |x| >= 2^63.",
+    strict=True,
 )
-@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
-def test_float_interpolation_wasm_is_fenced(name: str):
+@pytest.mark.parametrize("name", sorted(WASM_FLOAT_FENCED))
+def test_float_interpolation_wasm_exponent_is_fenced(name: str):
     source, _note = FLOAT_INTERP_PROBES[name]
     status, message = _run("wasm", source)
     if status == "skip":
