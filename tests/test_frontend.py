@@ -87,6 +87,8 @@ REJECTIONS = {
     "v2_isolate_after_effect.rvl": "`isolate` must precede every effect, emit, await, and provide statement",
     "v2_let_reassignment.rvl": "cannot reassign `n` — it is `let` (single-assignment)",
     "v2_match_nonexhaustive.rvl": "non-exhaustive match: missing case `Invalid`",
+    "v2_map_set_value_mismatch.rvl": "builtin `set` argument expects `Int`, got `Str`",
+    "v2_map_value_unknown_method.rvl": "no builtin method `fetch`",
     "v2_var_in_record.rvl": "`var` `n` cannot be used in a record literal",
     "v2_undeclared_fn_var.rvl": "`missing` is not declared in this function",
     "v2_use_cycle.rvl": "import cycle:",

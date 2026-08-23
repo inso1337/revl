@@ -1695,6 +1695,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         return ("vec![" + ", ".join(
             _render_expr(item, ctx, rename) for item in node.get("items") or []) + "]")
 
+    if kind == "maplit":
+        # `Map.empty()` (docs/stdlib-2.0.md §Map). rustc infers the map's
+        # parameters from later use, so an empty literal is context-free.
+        return "std::collections::HashMap::new()"
+
     if kind == "arrow":
         params = ", ".join(_ident(p, "arrow parameter") for p in node.get("params") or [])
         return f"move |{params}| {{ {_render_expr(node['body'], ctx, rename)} }}"
@@ -1777,6 +1782,15 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"{target}.revl_join(&{args[0]})"
     if method == "repeat":
         return f"{target}.revl_repeat({args[0]})"
+    # The Map value type (docs/stdlib-2.0.md §Map): a std HashMap, cloned on
+    # write. Every revl value type derives Clone on this tier, so the copy
+    # is total; `lookup` answers Option<V> (the tier's Opt) via cloned().
+    if method == "set":
+        return f"{{ let mut c = {target}.clone(); c.insert({args[0]}, {args[1]}); c }}"
+    if method == "lookup":
+        return f"{target}.get(&{args[0]}).cloned()"
+    if method == "has":
+        return f"{target}.contains_key(&{args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Rust `/` already
     # truncates and carries div_euclid/rem_euclid in std (stable since 1.38);
     # div_floor is spelled out rather than using the much newer

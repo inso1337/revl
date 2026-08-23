@@ -623,6 +623,24 @@ def test_v3_indexof_rejected_by_tier():
         emit.emit(compile_source('fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }'))
 
 
+def test_v3_map_value_type_rejected_by_tier():
+    """DELIBERATE BOUNDARY: the Map VALUE type (docs/stdlib-2.0.md §Map) has
+    no representation on this tier — the canonical-ABI model carries only
+    Int/Bool/String/List. A Map parameter or return is refused outright at
+    the type level; every map *operation* form refuses with the named tier
+    error too (defense in depth for any path that might otherwise reach the
+    value engine). None of these may silently emit garbage."""
+    emit = _emitter()
+    for src in (
+        'fn f() -> Map[Str, Int] { return Map.empty() }',
+        'fn f(m: Map[Str, Int]) -> Map[Str, Int] { return m.set("k", 1) }',
+        'fn f(m: Map[Str, Int], k: Str) -> Int { return m.lookup(k) ?? 0 }',
+        'fn f(m: Map[Str, Int], k: Str) -> Bool { return m.has(k) }',
+    ):
+        with pytest.raises(emit.EmitError, match="not lowerable"):
+            emit.emit(compile_source(src))
+
+
 # ---------------------------------------------------------------------------
 # `Int` is 64-bit two's complement and overflow TRAPS (docs/arithmetic.md).
 #
