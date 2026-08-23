@@ -1,0 +1,220 @@
+// The revl expression type-checker, slice one, in revl — stage three of the
+// self-hosting effort and the second half of a *second* differential oracle:
+// this file and src/revl/typecheck.py's `infer_ast` are two independent
+// implementations of one operator-typing algebra, forced to agree on every
+// input (tests/test_selfhost_checker.py). Neither is the spec; a disagreement
+// is always a real defect in one of them.
+//
+// Scope is deliberately small — the arithmetic core:
+//   * literal typing (Int / Str / Bool literals; `null` is refused, as in
+//     the reference, because absence is `Opt[T]`);
+//   * binop operand/result rules for + - * / % and the comparison families,
+//     following docs/arithmetic.md exactly: `/` is TRUE division and yields
+//     Float even on two Ints; `%` stays Int-on-Int; the div_trunc family is
+//     named, not spelled `/`;
+//   * a type environment as an assoc list (List of {name, ty} pairs) — fine
+//     for a spike; do not read this as an endorsement for the real port.
+//
+// Parity contract (mirrors infer_ast's two modes):
+//   * verdicts: "refuse" here <=> RevlError there. revl's pure stratum has no
+//     exceptions, so refusal-as-value is the agreement on rejected input;
+//   * types: identical inferred-type strings. Unknown ("None" in the
+//     reference) renders as "" internally and "?" at the boundary — the same
+//     gradual frontier the reference documents: sound where types are known,
+//     silent where they are not.
+//
+// Deliberately out of slice: unary operators, && || ??, calls/index/field,
+// arrows/match/templates (the catch-all arm types them unknown), Int-literal
+// i64 range refusal (needs big-int text parsing; see findings-shadow.md),
+// Opt/List/record heads in `compatible`.
+
+use "./parser.rvl" { Expr, parse_expr_str, is_bad }
+
+// ---------------------------------------------------------------- env
+
+type Bind = { name: Str, ty: Str }
+
+fn lookup_at(env: List[Bind], n: Str, i: Int) -> Str {
+  if (i >= env.length()) { return "" }
+  let b = env[i]
+  if (b.name == n) { return b.ty }
+  return lookup_at(env, n, i + 1)
+}
+
+// The spike's fixed environment. Both sides of the oracle use exactly these
+// five bindings (see ENV in tests/test_selfhost_checker.py).
+pub fn base_env() -> List[Bind] {
+  return [
+    { name: "x", ty: "Int" },
+    { name: "y", ty: "Int" },
+    { name: "f", ty: "Float" },
+    { name: "s", ty: "Str" },
+    { name: "flag", ty: "Bool" },
+  ]
+}
+
+// ---------------------------------------------------------------- result
+
+// ty "" is the unknown of the gradual frontier; ok false is a definite
+// refusal (the reference raises RevlError at these).
+type Infer = { ty: Str, ok: Bool, msg: Str }
+
+fn ok_ty(t: Str) -> Infer { return { ty: t, ok: true, msg: "" } }
+
+fn refuse(msg: Str) -> Infer { return { ty: "", ok: false, msg: msg } }
+
+// ---------------------------------------------------------------- algebra
+
+fn is_numeric(t: Str) -> Bool { return t == "Int" || t == "Float" }
+
+fn orderable(t: Str) -> Bool { return is_numeric(t) || t == "Str" }
+
+// May a value of type `actual` flow into a position typed `expected`?
+// Slice-restricted port of typecheck.compatible: wildcards pass, equal names
+// pass, Int widens to Float. No Opt/FN/generic heads exist in this slice.
+fn compatible(expected: Str, actual: Str) -> Bool {
+  if (expected == "" || actual == "") { return true }
+  if (expected == actual) { return true }
+  if (expected == "Float" && actual == "Int") { return true }
+  return false
+}
+
+// The equality family accepts either direction (reference checks
+// compatible(lt, rt) or compatible(rt, lt)).
+fn eq_compatible(lt: Str, rt: Str) -> Bool {
+  return compatible(lt, rt) || compatible(rt, lt)
+}
+
+// Port of typecheck._binop_type for the slice's operators.
+fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
+  if (op == "==" || op == "!=") {
+    if (!eq_compatible(lt, rt)) {
+      return refuse("incompatible operands for ".concat(op))
+    }
+    return ok_ty("Bool")
+  }
+  if (op == "<" || op == "<=" || op == ">" || op == ">=") {
+    if (lt != "" && !orderable(lt)) {
+      return refuse("`".concat(op).concat("` cannot order this operand"))
+    }
+    if (rt != "" && !orderable(rt)) {
+      return refuse("`".concat(op).concat("` cannot order this operand"))
+    }
+    return ok_ty("Bool")
+  }
+  if (op == "+") {
+    if (lt == "Str" || rt == "Str") {
+      // string concatenation path: the other side must be Str or numeric;
+      // only both-Str *knows* it is a Str result (the reference returns
+      // unknown when a numeric side will be coerced by the backend later)
+      if (lt != "" && lt != "Str" && !is_numeric(lt)) {
+        return refuse("operand of string `+`")
+      }
+      if (rt != "" && rt != "Str" && !is_numeric(rt)) {
+        return refuse("operand of string `+`")
+      }
+      if (lt == "Str" && rt == "Str") { return ok_ty("Str") }
+      return ok_ty("")
+    }
+  }
+  if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+    if (lt != "" && !is_numeric(lt)) {
+      return refuse("operand of `".concat(op).concat("`"))
+    }
+    if (rt != "" && !is_numeric(rt)) {
+      return refuse("operand of `".concat(op).concat("`"))
+    }
+    if (op == "/") {
+      // TRUE division: Float even on two Ints (docs/arithmetic.md §0);
+      // integer division is div_trunc/div_floor/div_euclid, never `/`.
+      if (is_numeric(lt) && is_numeric(rt)) { return ok_ty("Float") }
+      return ok_ty("")
+    }
+    if (lt == "Float" || rt == "Float") { return ok_ty("Float") }
+    if (lt == "Int" && rt == "Int") { return ok_ty("Int") }
+    return ok_ty("")
+  }
+  return ok_ty("")
+}
+
+// ---------------------------------------------------------------- inference
+
+fn infer(e: Expr, env: List[Bind]) -> Infer {
+  return match e {
+    IntLit(_)  => ok_ty("Int"),
+    StrLit(_)  => ok_ty("Str"),
+    BoolLit(_) => ok_ty("Bool"),
+    NullLit    => refuse("`null` has no type in revl — absence is Opt[T]"),
+    Var(n)     => ok_ty(lookup_at(env, n, 0)),
+    Bin(b)     => infer_bin(b.op, b.l, b.r, env),
+    _          => ok_ty(""),   // outside the slice: walked, not typed
+  }
+}
+
+fn infer_bin(op: Str, l: Expr, r: Expr, env: List[Bind]) -> Infer {
+  let lhs = infer(l, env)
+  if (!lhs.ok) { return lhs }
+  let rhs = infer(r, env)
+  if (!rhs.ok) { return rhs }
+  return binop_type(op, lhs.ty, rhs.ty)
+}
+
+// ---------------------------------------------------------------- entry
+
+// Type one expression against base_env(). Returns "(bad)" on a parse error,
+// "refuse" on a definite checker refusal, "?" where the reference would
+// return None (unknown), else the inferred type's spelling.
+pub fn infer_expr_str(src: Str) -> Str {
+  let e = parse_expr_str(src)
+  if (is_bad(e)) { return "(bad)" }
+  let r = infer(e, base_env())
+  if (!r.ok) { return "refuse" }
+  if (r.ty == "") { return "?" }
+  return r.ty
+}
+
+// ---------------------------------------------------------------- tests
+
+test "`/` is Float even on two Ints" {
+  assert infer_expr_str("7 / 2") == "Float"
+}
+
+test "% keeps Int on Int" {
+  assert infer_expr_str("7 % 2") == "Int"
+}
+
+test "Float contaminates +" {
+  assert infer_expr_str("f + 1") == "Float"
+}
+
+test "string + number is accepted but unknown" {
+  assert infer_expr_str("s + 1") == "?"
+}
+
+test "string + string is Str" {
+  assert infer_expr_str("s + s") == "Str"
+}
+
+test "bool operand of / is refused" {
+  assert infer_expr_str("flag / flag") == "refuse"
+}
+
+test "ordering yields Bool" {
+  assert infer_expr_str("x < f") == "Bool"
+}
+
+test "ordering refuses Bool operands" {
+  assert infer_expr_str("flag < 1") == "refuse"
+}
+
+test "equality across incompatible types is refused" {
+  assert infer_expr_str("x == s") == "refuse"
+}
+
+test "equality with an unknown local is Bool" {
+  assert infer_expr_str("q == x") == "Bool"
+}
+
+test "null is refused" {
+  assert infer_expr_str("null") == "refuse"
+}
