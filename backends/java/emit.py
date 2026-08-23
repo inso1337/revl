@@ -2111,6 +2111,13 @@ def _component_needs_modern(component: dict) -> bool:
             return True
         if step.get("step") in {"if", "fail", "await", "return"}:
             return True
+        # An `emit` carrying a `compensate` MUST take the modern path: the
+        # simple renderer emits the emission but silently drops its
+        # compensation — a lost teardown (G7 residue). The generic
+        # `_contains_expr` key-scan below misses a compensate whose expression
+        # is a plain call, so guard it explicitly by step shape.
+        if step.get("step") == "emit" and step.get("compensate") is not None:
+            return True
         if step.get("step") == "provide":
             for method in step.get("methods") or []:
                 for stmt in method.get("body") or []:
