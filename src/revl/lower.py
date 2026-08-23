@@ -1000,95 +1000,7 @@ def _lower_extern_expr(expr, filename: str) -> dict:
     return _lower_pure_expr(expr, _LaxScope(), set(), {}, filename)
 
 
-def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
-                       filename: str) -> None:
-    """The extern-level `undo`/`compensate` slot, checked.
-
-    Component-site `effect ... undo ...` runs through the component
-    expression machinery, so it resolves every name against the bindings
-    in scope at the effect site. An extern declares no bindings — its undo
-    expression therefore sees an EMPTY variable namespace: no locals exist,
-    and the extern's own parameters are *not* implicitly visible (no tier
-    defines teardown parameter capture; inventing that here would be
-    unsound speculation). What the slot must satisfy mirrors the
-    component-site rules plus the arity/type rigor of every other call:
-
-    1. the callee is a plain call to a DECLARED callable (fn/extern via the
-       shared signature table, host builtin, ADT constructor);
-    2. self-reference is refused — the teardown exists to INVERT the
-       acquisition; calling the extern again would re-acquire mid-cleanup;
-    3. arity and argument types are checked against the declared signature.
-    """
-    from .parser import ExprCall, ExprField, ExprVar
-
-    def _walk(e):
-        if isinstance(e, ExprVar):
-            # a bare name: the slot runs with NO variables in scope (an
-            # extern binds none, and its own parameters are not implicitly
-            # visible — no tier defines teardown parameter capture)
-            raise RevlError(
-                filename, e.line,
-                f"`{e.name}` is not declared — the `{slot}` slot of extern "
-                f"`{decl_name}` runs with no variables in scope",
-                hint="an extern's own parameters are not visible to its "
-                     "teardown; the undo must work from constants or from "
-                     "other declared fns")
-        if isinstance(e, ExprCall):
-            if isinstance(e.callee, ExprVar):
-                name = e.callee.name
-                if name == decl_name:
-                    raise RevlError(
-                        filename, e.line,
-                        f"extern `{decl_name}`'s `{slot}` cannot call the "
-                        "extern itself",
-                        hint="the teardown runs to invert this acquisition — "
-                             "calling it again would re-acquire during "
-                             "cleanup; call the declared inverse instead")
-                if (name not in (types.get(FNS_KEY) or {})
-                        and name not in (types.get(CASES_KEY) or {})
-                        and name not in _HOST_CALLABLES
-                        and name not in _BUILTIN_CONSTRUCTORS):
-                    raise RevlError(
-                        filename, e.line,
-                        f"`{name}` is not declared — the `{slot}` slot of "
-                        f"extern `{decl_name}` may only call a declared fn, "
-                        "extern, or host builtin",
-                        hint="the undo expression has no variables in scope "
-                             "(an extern binds none), so every callee must be "
-                             "a module-level declaration")
-            elif isinstance(e.callee, ExprField):
-                raise RevlError(
-                    filename, e.line,
-                    f"the `{slot}` slot of extern `{decl_name}` must be a "
-                    "plain call to a declared fn or extern",
-                    hint="host objects cannot be acquired inside a teardown "
-                         "expression; call the declared inverse directly")
-            for a in e.args:
-                _walk(a)
-            return
-        # generic recursion over the dataclass children (bin operands, record
-        # fields, match arms, template parts, ...)
-        for f in type(e).__dataclass_fields__:
-            v = getattr(e, f)
-            if hasattr(v, "__dataclass_fields__"):
-                _walk(v)
-            elif isinstance(v, (list, tuple)):
-                for x in v:
-                    if hasattr(x, "__dataclass_fields__"):
-                        _walk(x)
-                    elif isinstance(x, (list, tuple)):
-                        for y in x:
-                            if hasattr(y, "__dataclass_fields__"):
-                                _walk(y)
-
-    _walk(expr)
-    # empty tenv: any variable reference raises "not declared" — exactly the
-    # component-site rule, where undo sees only names bound at the site
-    check_ast(expr, None, {}, types, filename,
-              f"{slot} of extern `{decl_name}`")
-
-
-def _lower_externs(program: Program, filename: str, types: dict) -> list:
+def _lower_externs(program: Program, filename: str) -> list:
     externs: list[dict] = []
     seen: set[str] = set()
     for decl in program.externs:
@@ -1127,11 +1039,8 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             "bodies": bodies,
         }
         if decl.undo is not None:
-            _check_extern_undo(decl.undo, decl.name, "undo", types, filename)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
         if decl.compensate is not None:
-            _check_extern_undo(decl.compensate, decl.name, "compensate",
-                               types, filename)
             entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
         externs.append(entry)
     return externs
@@ -2219,7 +2128,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename, types)
+    externs = _lower_externs(program, program.filename)
     # One fixed point, two consumers: `emitting_caps` is what it computes
     # (docs/capabilities.md), `witness` is why (why.py). Evidence never
     # decides a rejection, it only explains one.

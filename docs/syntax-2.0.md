@@ -364,21 +364,11 @@ extern pure fn sha256(data: Bytes) -> Str
   = @ts { return crypto.createHash("sha256").update(data).digest("hex") }
   = @py { import hashlib; return hashlib.sha256(data).hexdigest() }
 
-// the `undo`/`compensate` slots run at teardown with NO variables in scope —
-// an extern binds none, and its parameters are not visible there — so the
-// inverse is called with constants, and must be DECLARED (a checked
-// declaration, G4)
-extern pure fn close(handle: Int)
-  = @py { return None }
-
-extern acquire fn listen(port: Int) -> Socket undo close(0)
+extern acquire fn listen(port: Int) -> Socket undo close(socket)
   = @ts { ... } = @py { ... }
 
-extern pure fn log_unsent(n: Int)
-  = @py { return None }
-
 extern emission fn send(sock: Socket, data: Bytes)
-  compensate log_unsent(0)
+  compensate log_unsent(sock, data)
   = @ts { ... }
 ```
 
