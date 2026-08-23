@@ -455,8 +455,11 @@ def test_python_backend_runs_nullish_and_template():
     backend_dir = ROOT / "backends" / "python"
     sys.path.insert(0, str(backend_dir))
     try:
+        from _backend_import import backend_emitter
         from revl.compiler import compile_source
-        import emit  # backend module
+        # unique-name load: bare `import emit` collides across backends
+        # in one pytest process (tests/_backend_import.py)
+        emit = backend_emitter("python")
 
         src = (
             "type U = { name: Str }\n"
@@ -495,8 +498,11 @@ def test_multiline_template_emits_valid_python():
     backend_dir = ROOT / "backends" / "python"
     sys.path.insert(0, str(backend_dir))
     try:
+        from _backend_import import backend_emitter
         from revl.compiler import compile_source
-        import emit
+        # unique-name load: bare `import emit` collides across backends
+        # in one pytest process (tests/_backend_import.py)
+        emit = backend_emitter("python")
 
         module = types.ModuleType("t")
         # a raw newline inside a `${}` template used to emit an unterminated
@@ -587,8 +593,11 @@ def test_python_backend_runs_adt_result_opt_match():
     backend_dir = ROOT / "backends" / "python"
     sys.path.insert(0, str(backend_dir))
     try:
+        from _backend_import import backend_emitter
         from revl.compiler import compile_source
-        import emit
+        # unique-name load: bare `import emit` collides across backends
+        # in one pytest process (tests/_backend_import.py)
+        emit = backend_emitter("python")
 
         src = (
             "type O = Found(Int) | Missing\n"
@@ -618,8 +627,11 @@ def test_python_backend_runs_checked_division():
     backend_dir = ROOT / "backends" / "python"
     sys.path.insert(0, str(backend_dir))
     try:
+        from _backend_import import backend_emitter
         from revl.compiler import compile_source
-        import emit
+        # unique-name load: bare `import emit` collides across backends
+        # in one pytest process (tests/_backend_import.py)
+        emit = backend_emitter("python")
 
         src = (
             "pub fn qt(a: Int, b: Int) -> Result[Int, Str] "

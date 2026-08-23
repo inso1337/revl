@@ -76,7 +76,7 @@ class _Provider:
     def __init__(self, sock_path: str, version: str) -> None:
         self.version = version
         self.calls = 0
-        self._stop = False
+        self._stopping = False
         self._conns: list[socket.socket] = []
         self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._srv.bind(sock_path)
@@ -85,7 +85,7 @@ class _Provider:
         self._thread.start()
 
     def _accept(self) -> None:
-        while not self._stop:
+        while not self._stopping:
             try:
                 conn, _ = self._srv.accept()
             except OSError:
@@ -106,7 +106,7 @@ class _Provider:
             pass
 
     def stop(self) -> None:
-        self._stop = True
+        self._stopping = True
         try:
             self._srv.close()
         except OSError:
@@ -130,12 +130,12 @@ class _Caller(threading.Thread):
     def __init__(self, client) -> None:
         super().__init__(daemon=True)
         self._client = client
-        self._stop = False
+        self._stopping = False
         self.results: list[str] = []
         self.errors: list[str] = []
 
     def run(self) -> None:
-        while not self._stop:
+        while not self._stopping:
             try:
                 self.results.append(self._client.call("cache", "get", []))
             except Exception as exc:  # noqa: BLE001 — record, do not crash
@@ -143,7 +143,7 @@ class _Caller(threading.Thread):
             time.sleep(0.001)
 
     def stop(self) -> None:
-        self._stop = True
+        self._stopping = True
         self.join(timeout=5)
 
 
