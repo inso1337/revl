@@ -11,6 +11,14 @@ python3 "$here/emit.py" "$root/examples/user_cache.ir.json" usercache \
 python3 "$here/emit.py" "$root/backends/typescript/tests/fixtures/tenants.ir.json" tenants \
   > "$here/scenarios/emitted/tenants/gen.go"
 
+# --- instance-parametric spawn (docs/design-v2-instances.md, phase 1) ------
+# spawn.ir.json is compiled from scenarios/spawn.rvl by the frozen frontend
+# (`revl compile`); the emitter lowers its `spawn` acquisitions to child-fiber
+# plugs on the real stc-go runtime (gen_exec_test.go proves the four DoD
+# properties by RUNNING).
+python3 "$here/emit.py" "$here/scenarios/emitted/spawn/spawn.ir.json" spawn \
+  > "$here/scenarios/emitted/spawn/gen.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -26,6 +34,7 @@ python3 "$here/emit.py" "$fx/v3_stdlib.ir.json"           stdlib \
 if command -v gofmt >/dev/null 2>&1; then
   gofmt -w "$here/scenarios/emitted/usercache/gen.go" \
            "$here/scenarios/emitted/tenants/gen.go" \
+           "$here/scenarios/emitted/spawn/gen.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

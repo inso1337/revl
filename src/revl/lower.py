@@ -54,6 +54,7 @@ from .parser import (
     FailStmt,
     ExprArrow,
     ExprBin,
+    ExprBlockArm,
     ExprCall,
     ExprField,
     ExprHole,
@@ -65,6 +66,7 @@ from .parser import (
     ExprOptCall,
     ExprOptField,
     ExprRecord,
+    ExprRecordUpdate,
     ExprStmt,
     ExprUn,
     ExprVar,
@@ -82,6 +84,7 @@ from .parser import (
     Lit,
     Postfix,
     Program,
+    PropTestDecl,
     ProvideStmt,
     RecordPattern,
     ResidueStmt,
@@ -109,6 +112,10 @@ _BUILTIN_METHODS = {
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).
     "div_trunc": 1, "div_floor": 1, "div_euclid": 1, "mod": 1,
+    # Int/Int32 width conversions (docs/arithmetic.md). `to_int` widens an
+    # Int32 to Int (lossless); `to_int32` narrows an Int to Int32 (checked,
+    # traps out of the 32-bit range).
+    "to_int": 0, "to_int32": 0,
     # The total forms (docs/arithmetic.md): a zero divisor is the *point*
     # here, so these are deliberately absent from _DIVIDES_BY below — a
     # literal zero argument is refused for the faulting operations only.
@@ -118,6 +125,9 @@ _BUILTIN_METHODS = {
     # host verb set (open/close/query/execute/new/get/insert/remove/drop):
     # the two method namespaces stay collision-free by construction.
     "set": 2, "lookup": 1, "has": 1,
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): same namespace
+    # discipline — disjoint from the host verb set by construction.
+    "size": 0, "keys": 0, "remove": 1,
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
     "to_str": 0,
 }
@@ -170,6 +180,24 @@ IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type
 # its own realm); rendered as "shared" in diagnostics
 SHARED_REALM = ""
 
+# key namespacing (docs/namespacing.md): a provision key may be written
+# `ns::local`. The *full* string is the key's wiring identity — G2
+# disjointness, injection resolution and the admission gate all compare the
+# qualified string, so two authors' `acme::db` and `bcorp::db` never collide.
+# The trailing segment is the code-facing binding name a `requires` introduces
+# (the consumer still writes `db.query(...)` in its body). An unqualified key
+# has an empty namespace and a binding equal to itself, so v1 programs are
+# unaffected in every respect.
+KEY_NAMESPACE_SEP = "::"
+
+
+def _key_binding(key: str) -> str:
+    """The code-facing local name of a (possibly namespaced) provision key.
+
+    `acme::db` binds `db`; an unqualified `db` binds itself. This is the name
+    a `requires` clause introduces into the component body and type env."""
+    return key.rsplit(KEY_NAMESPACE_SEP, 1)[-1]
+
 # A3: identifiers that must never appear verbatim in emitted code on either
 # host. Python keywords come from the keyword module; the rest is a curated
 # union of TS reserved words and backend-adapter names.
@@ -216,17 +244,28 @@ class Env:
         for cfg_field in component.config:
             self.type_env[f"config.{cfg_field.name}"] = cfg_field.type
         self.config_fields = {f.name for f in component.config}
-        self.requires = dict()  # local -> service name
-        for local, svc, line in component.requires:
+        self.requires = dict()  # binding (local name) -> service name
+        # binding -> the qualified wiring key it resolves against; for an
+        # unqualified requirement this is the binding itself (docs/namespacing.md)
+        self.require_keys: dict[str, str] = dict()
+        for key, svc, line in component.requires:
             if svc not in services:
                 raise RevlError(filename, line, f"unknown service `{svc}` in `requires` of {component.name}")
-            if local in self.requires:
-                raise RevlError(filename, line, f"duplicate requirement name `{local}` in {component.name}")
-            self.requires[local] = svc
-            self.type_env[f"req.{local}"] = svc
+            binding = _key_binding(key)
+            if binding in self.requires:
+                raise RevlError(filename, line, f"duplicate requirement name `{binding}` in {component.name}")
+            self.requires[binding] = svc
+            self.require_keys[binding] = key
+            self.type_env[f"req.{binding}"] = svc
         self.locals: dict[str, str] = {}  # surface name -> host-safe IR name (A3)
         self.params: dict[str, str] = {}
         self._taken: set[str] = set()
+        # host provenance (docs/stdlib-2.0.md §Map): component locals bound to
+        # a host acquisition (`let store = effect Map.new()`). Their method
+        # calls belong to the host stub surface and stay verbatim — checked
+        # BEFORE the stdlib builtin table, so a value-type method that shares
+        # a spelling with a host verb (`remove`) cannot capture them.
+        self.host_locals: set[str] = set()
 
     def bind_local(self, name: str, line: int) -> str:
         if name in self.locals or name in self.requires or name in self.params:
@@ -254,7 +293,7 @@ class Env:
 
 # builtin (non-record) type heads: destructuring a value of one of these with
 # a record/list pattern is a type error, not a host pass-through
-_BUILTIN_NONRECORD = {"Str", "Int", "Bool", "Float", "Bytes", "Unit",
+_BUILTIN_NONRECORD = {"Str", "Int", "Int32", "Bool", "Float", "Bytes", "Unit",
                       "List", "Map", "Opt", "Result"}
 
 # host roots a pure fn may call without an explicit binding (DESIGN §7 builtins)
@@ -432,6 +471,10 @@ def _subst_body_annotations(stmts: list, subst) -> None:
         elif isinstance(expr, ExprRecord):
             for _, value in expr.fields:
                 walk_expr(value)
+        elif isinstance(expr, ExprRecordUpdate):
+            walk_expr(expr.base)
+            for _, value in expr.updates:
+                walk_expr(value)
         elif isinstance(expr, ExprList):
             for item in expr.items:
                 walk_expr(item)
@@ -439,6 +482,10 @@ def _subst_body_annotations(stmts: list, subst) -> None:
             walk_expr(expr.scrutinee)
             for _, _, body in expr.arms:
                 walk_expr(body)
+                if isinstance(body, ExprBlockArm):
+                    for stmt in body.stmts:
+                        walk_expr(stmt.value)
+                    walk_expr(body.tail)
         elif isinstance(expr, Interp):
             for kind, part in expr.parts:
                 if kind == "expr":
@@ -557,6 +604,10 @@ def _fn_call_graph(program: Program) -> dict[str, set[str]]:
             collect_expr(expr.otherwise)
         elif isinstance(expr, ExprRecord):
             for _, value in expr.fields:
+                collect_expr(value)
+        elif isinstance(expr, ExprRecordUpdate):
+            collect_expr(expr.base)
+            for _, value in expr.updates:
                 collect_expr(value)
         elif isinstance(expr, ExprList):
             for item in expr.items:
@@ -963,6 +1014,11 @@ def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[
         for _, value in expr.fields:
             found |= _mutable_free_vars(value, scope, bound)
         return found
+    if isinstance(expr, ExprRecordUpdate):
+        found = _mutable_free_vars(expr.base, scope, bound)
+        for _, value in expr.updates:
+            found |= _mutable_free_vars(value, scope, bound)
+        return found
     if isinstance(expr, ExprList):
         found = set()
         for item in expr.items:
@@ -977,6 +1033,18 @@ def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[
             found |= _mutable_free_vars(body, scope, arm_bound)
         return found
     return set()
+
+
+def _block_arm_unimplemented(filename: str, line: int) -> RevlError:
+    """Block-bodied match arms are specified and parsed (docs/records.md §4)
+    but no backend lowers them yet — refuse loudly rather than half-emit."""
+    return RevlError(
+        filename, line,
+        "block-bodied match arms (`=> { let … ; expr }`) parse and typecheck "
+        "but no backend emits them yet",
+        hint="lift the block into a named helper `fn` for now; implemented "
+             "tiers for this form: none yet (docs/records.md §6 tracks status)",
+    )
 
 
 class _LaxScope(dict):
@@ -995,7 +1063,134 @@ def _lower_extern_expr(expr, filename: str) -> dict:
     return _lower_pure_expr(expr, _LaxScope(), set(), {}, filename)
 
 
-def _lower_externs(program: Program, filename: str) -> list:
+def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
+                       filename: str, result_type: str | None = None) -> None:
+    """The extern-level `undo`/`compensate` slot, checked.
+
+    Component-site `effect ... undo ...` runs through the component
+    expression machinery, so it resolves every name against the bindings
+    in scope at the effect site. An extern declares no bindings, so the
+    slot's variable namespace is almost empty — with ONE exception. The
+    `undo` of an acquire extern with a declared return type binds `result`,
+    the acquired value: the teardown exists to release exactly what the
+    acquisition produced (the WIT resource model is the canonical user —
+    `extern acquire fn r_new(...) -> R undo r_drop(result)`). Nothing else
+    is visible: the extern's own parameters are *not* implicitly captured
+    (no tier defines teardown parameter capture; inventing that here would
+    be unsound speculation), and `compensate` — a best-effort follow-up to
+    a one-way emission, not an inverse — binds nothing at all. What the
+    slot must satisfy mirrors the component-site rules plus the arity/type
+    rigor of every other call:
+
+    1. the callee is a plain call to a DECLARED callable (fn/extern via the
+       shared signature table, host builtin, ADT constructor);
+    2. self-reference is refused — the teardown exists to INVERT the
+       acquisition; calling the extern again would re-acquire mid-cleanup;
+    3. arity and argument types are checked against the declared signature,
+       with `result: T` in scope exactly when described above.
+    """
+    from .parser import ExprCall, ExprField, ExprVar
+
+    def _walk(e):
+        if isinstance(e, ExprVar):
+            if e.name == "result":
+                if result_type is not None:
+                    return  # the one implicit binding: the acquired value
+                if slot == "compensate":
+                    raise RevlError(
+                        filename, e.line,
+                        f"`result` is not bound in the `compensate` slot of "
+                        f"extern `{decl_name}`",
+                        hint="`result` names the value an acquire returns; a "
+                             "compensation follows a one-way emission, which "
+                             "acquires nothing — compensate from constants or "
+                             "other declared fns")
+                raise RevlError(
+                    filename, e.line,
+                    f"`result` does not exist here — extern `{decl_name}` "
+                    "declares no return type, so there is no acquired value "
+                    "to bind",
+                    hint="declare `-> T` on the extern to give the teardown "
+                         "its `result`, or tear down from constants")
+            # any other bare name: the only implicit binding is `result`
+            # (undo of an acquire) — locals don't exist, and the extern's
+            # own parameters are not visible (no tier defines teardown
+            # parameter capture)
+            if result_type is not None:
+                raise RevlError(
+                    filename, e.line,
+                    f"`{e.name}` is not declared — the `{slot}` slot of "
+                    f"extern `{decl_name}` sees only the implicit `result` "
+                    "binding",
+                    hint="`result` is the acquired value; the extern's own "
+                         "parameters are not visible to its teardown, so "
+                         "anything else must travel as constants or through "
+                         "other declared fns")
+            raise RevlError(
+                filename, e.line,
+                f"`{e.name}` is not declared — the `{slot}` slot of extern "
+                f"`{decl_name}` runs with no variables in scope",
+                hint="an extern's own parameters are not visible to its "
+                     "teardown; the undo must work from constants or from "
+                     "other declared fns")
+        if isinstance(e, ExprCall):
+            if isinstance(e.callee, ExprVar):
+                name = e.callee.name
+                if name == decl_name:
+                    raise RevlError(
+                        filename, e.line,
+                        f"extern `{decl_name}`'s `{slot}` cannot call the "
+                        "extern itself",
+                        hint="the teardown runs to invert this acquisition — "
+                             "calling it again would re-acquire during "
+                             "cleanup; call the declared inverse instead")
+                if (name not in (types.get(FNS_KEY) or {})
+                        and name not in (types.get(CASES_KEY) or {})
+                        and name not in _HOST_CALLABLES
+                        and name not in _BUILTIN_CONSTRUCTORS):
+                    raise RevlError(
+                        filename, e.line,
+                        f"`{name}` is not declared — the `{slot}` slot of "
+                        f"extern `{decl_name}` may only call a declared fn, "
+                        "extern, or host builtin",
+                        hint="an extern binds no callables (only the acquire's "
+                             "`result` value is ever in scope), so every "
+                             "callee must be a module-level declaration")
+            elif isinstance(e.callee, ExprField):
+                raise RevlError(
+                    filename, e.line,
+                    f"the `{slot}` slot of extern `{decl_name}` must be a "
+                    "plain call to a declared fn or extern",
+                    hint="host objects cannot be acquired inside a teardown "
+                         "expression; call the declared inverse directly")
+            for a in e.args:
+                _walk(a)
+            return
+        # generic recursion over the dataclass children (bin operands, record
+        # fields, match arms, template parts, ...)
+        for f in type(e).__dataclass_fields__:
+            v = getattr(e, f)
+            if hasattr(v, "__dataclass_fields__"):
+                _walk(v)
+            elif isinstance(v, (list, tuple)):
+                for x in v:
+                    if hasattr(x, "__dataclass_fields__"):
+                        _walk(x)
+                    elif isinstance(x, (list, tuple)):
+                        for y in x:
+                            if hasattr(y, "__dataclass_fields__"):
+                                _walk(y)
+
+    _walk(expr)
+    # the tenv carries exactly what the slot binds: `result: T` for the undo
+    # of an acquire with a declared return, nothing otherwise — so argument
+    # type-checking sees the acquired value at its declared type
+    tenv = {"result": result_type} if result_type is not None else {}
+    check_ast(expr, None, tenv, types, filename,
+              f"{slot} of extern `{decl_name}`")
+
+
+def _lower_externs(program: Program, filename: str, types: dict) -> list:
     externs: list[dict] = []
     seen: set[str] = set()
     for decl in program.externs:
@@ -1034,8 +1229,14 @@ def _lower_externs(program: Program, filename: str) -> list:
             "bodies": bodies,
         }
         if decl.undo is not None:
+            # only an acquire reaches here with `undo` (pure/emission are
+            # refused above); its declared return, if any, binds `result`
+            _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
+                               result_type=decl.returns)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
         if decl.compensate is not None:
+            _check_extern_undo(decl.compensate, decl.name, "compensate",
+                               types, filename)
             entry["compensate"] = _lower_extern_expr(decl.compensate, filename)
         externs.append(entry)
     return externs
@@ -1073,6 +1274,116 @@ def _lower_tests(program: Program, filename: str, types: dict,
             _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
         tests.append({"name": decl.name, "body": body})
     return tests
+
+
+# ---------------------------------------------------------------- prop tests
+#
+# `prop test "name" (params) { assert … }` (roadmap item 37): the parameters
+# are *generated inputs*, and the body is a pure property that must hold for
+# every generated value.  Lowering does two things a plain `test` does not:
+#
+#   * it validates that every parameter type is one the generator can DERIVE a
+#     value from (a primitive, an `Opt`/`List`/`Result` of one, or a declared
+#     record/ADT), so an ungeneratable parameter is a compile error rather than
+#     a runtime surprise; and
+#   * it records the parameters (with their resolved types) alongside the
+#     lowered body in a `prop_tests` IR section, from which the py runner
+#     (src/revl/fault.py) derives the generators and the shrinker.
+#
+# The body itself lowers exactly as a `fn`/`test` body does, with the
+# parameters in scope — so `assert` reads identically to everywhere else.
+_GENERATABLE_PRIMITIVES = {"Int", "Int32", "Bool", "Str", "Float", "F64", "Num"}
+
+
+def _check_generatable(filename: str, line: int, type_name: str, types: dict,
+                       propname: str, record_stack: tuple = (),
+                       variant_seen: frozenset = frozenset()) -> None:
+    """Reject a prop-test parameter (or nested) type the generator cannot make.
+
+    Generatable: a primitive; `Opt[T]`/`List[T]` of a generatable argument; a
+    declared record whose fields are generatable; a declared ADT whose case
+    payloads are generatable.  A record that (transitively) contains
+    itself is genuinely non-constructible and is named as such; recursive ADTs
+    are fine (they have a base case, and the runner bounds generation depth).
+    """
+    head, args = parse_type(type_name)
+    if head in _GENERATABLE_PRIMITIVES and not args:
+        return
+    if head == "Opt" and len(args) == 1:
+        _check_generatable(filename, line, args[0], types, propname,
+                           record_stack, variant_seen)
+        return
+    if head == "List" and len(args) == 1:
+        _check_generatable(filename, line, args[0], types, propname,
+                           record_stack, variant_seen)
+        return
+    spec = types.get(head) if head and not args else None
+    if spec and spec.get("kind") == "record":
+        if head in record_stack:
+            cycle = " -> ".join(record_stack + (head,))
+            raise RevlError(
+                filename, line,
+                f"prop test `{propname}`: record type `{head}` contains itself "
+                f"({cycle}) and cannot be generated",
+                hint="a record always holds all its fields, so a self-containing record "
+                     "has no finite value; break the cycle with an `Opt[...]` or `List[...]`")
+        for ftype in spec.get("fields", {}).values():
+            _check_generatable(filename, line, ftype, types, propname,
+                               record_stack + (head,), variant_seen)
+        return
+    if spec and spec.get("kind") == "variant":
+        if head in variant_seen:
+            # already validated on this path — a recursive ADT is fine (it has a
+            # base case; the depth-bounded generator handles it). Stop rather
+            # than descend forever.
+            return
+        for case in spec.get("cases") or []:
+            if case.get("payload") is not None:
+                # a case payload may reference the ADT recursively — the record
+                # cycle stack is not carried across the ADT boundary (that split
+                # is a valid base/recursive one), but the variant set is, to
+                # terminate on a self-referential ADT
+                _check_generatable(filename, line, case["payload"], types, propname,
+                                   (), variant_seen | {head})
+        return
+    raise RevlError(
+        filename, line,
+        f"prop test `{propname}`: parameter type `{type_name}` cannot be generated",
+        hint="a prop-test parameter must be a type the checker can derive inputs from: "
+             "`Int`/`Int32`/`Bool`/`Str`/`Float`, an `Opt[...]`/`List[...]` of one, or a "
+             "declared record/ADT (docs/prop-test.md)")
+
+
+def _lower_prop_tests(program: Program, filename: str, types: dict,
+                      services: dict | None = None) -> list:
+    """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
+    if not program.prop_tests:
+        return []
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+                 | {fn.name for fn in program.fn_decls}
+                 | {ext.name for ext in program.externs})
+    units: list[dict] = []
+    seen: set[str] = set()
+    for decl in program.prop_tests:
+        if decl.name in seen:
+            raise RevlError(filename, decl.line, f"duplicate prop test `{decl.name}`")
+        seen.add(decl.name)
+        scope: dict[str, bool] = {}
+        type_env: dict[str, str] = {}
+        for param in decl.params:
+            check_type_wellformed(filename, param.line, param.type)
+            _check_generatable(filename, param.line, param.type, types, decl.name)
+            scope[param.name] = False
+            type_env[param.name] = param.type
+        body: list[dict] = []
+        for stmt in decl.body:
+            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
+        units.append({
+            "name": decl.name,
+            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "body": body,
+        })
+    return units
 
 
 # `fail at effect X` is sugar: it resolves to the index of the body step that
@@ -1648,6 +1959,30 @@ def _retarget_holes(node, source: str) -> None:
 _TYPED_ARITH_OPS = ("/", "%", "+", "-", "*")
 
 
+def _str_literal_value(value):
+    """Canonical IR form for a `Str` literal: a sequence of Unicode scalar
+    values (code points), never UTF-16 surrogate pairs (docs/strings.md,
+    roadmap item 51 — the string wave).
+
+    The lexer stores raw source characters and a Python `str` is already a
+    code-point sequence, so for a well-formed program this is the identity.
+    It is stated explicitly here because it is the invariant every backend's
+    literal escaper depends on: each emitter reads this value and must escape
+    *from code points* (`\\u{1F600}` on rust, `\\U0001F600` on go, the raw
+    scalar in wasm's UTF-8 pool), never re-encode it as UTF-16. A lone
+    surrogate reaching this point would mean an upstream path re-introduced
+    UTF-16 — the exact defect that made astral literals uncompilable on go and
+    rust — so it is rejected here rather than emitted as invalid source.
+    """
+    if isinstance(value, str):
+        for ch in value:
+            if 0xD800 <= ord(ch) <= 0xDFFF:
+                raise ValueError(
+                    "string literal carries a lone surrogate; a Str literal is "
+                    "a sequence of Unicode code points (docs/strings.md)")
+    return value
+
+
 def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> dict | None:
     """Mark an implicit `Int` -> `Float` coercion site in the IR.
 
@@ -1669,8 +2004,16 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
     """
     if node is None:
         return node
-    if parse_type(expected)[0] == "Float" and parse_type(actual)[0] == "Int":
+    ehead = parse_type(expected)[0]
+    ahead = parse_type(actual)[0]
+    if ehead == "Float" and ahead in ("Int", "Int32"):
         node["widen"] = "Float"
+    elif ehead == "Int" and ahead == "Int32":
+        # Int32 -> Int is a lossless *widening* the tiers that keep the two
+        # widths apart (rust i32/i64, wasm, go, java, ts number/bigint) must
+        # emit explicitly, exactly as Int -> Float is marked. `"widen": "Int"`
+        # names the target width; python absorbs it (one int type).
+        node["widen"] = "Int"
     return node
 
 
@@ -1720,7 +2063,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, expr.line)
-        return {"kind": "lit", "value": expr.value}
+        return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
@@ -1740,7 +2083,12 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if expr.op in _TYPED_ARITH_OPS:
             left_type = infer_ast(expr.left, type_env, types, None)
             right_type = infer_ast(expr.right, type_env, types, None)
-            if left_type == "Int" and right_type == "Int":
+            if left_type == "Int32" and right_type == "Int32":
+                # Int32 arithmetic traps at the i32 edge, the same discipline
+                # `Int` has at i64 (docs/arithmetic.md). `/` still yields Float
+                # and `%` is width-agnostic; only `+ - *` need the i32 helper.
+                node["operands"] = "Int32"
+            elif left_type == "Int" and right_type == "Int":
                 node["operands"] = "Int"
             elif "Float" in (left_type, right_type):
                 node["operands"] = "Float"
@@ -1756,8 +2104,11 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         # treat Float negation specially.
         if expr.op == "-":
             operand_type = infer_ast(expr.operand, type_env, types, None)
-            if operand_type == "Int":
-                node["operands"] = "Int"
+            if operand_type in ("Int", "Int32"):
+                # `-x` is `0 - x`; on Int32, `0 - Int32.MIN` overflows the i32
+                # range just as `0 - Int.MIN` overflows i64, so the bound is
+                # re-imposed at the tier (docs/arithmetic.md).
+                node["operands"] = operand_type
         return node
     if isinstance(expr, ExprCall):
         _callee = expr.callee
@@ -1856,6 +2207,13 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return {"kind": "record",
                 "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                            for name, e in expr.fields]}
+    if isinstance(expr, ExprRecordUpdate):
+        return {"kind": "record_update",
+                "base": _lower_pure_expr(expr.base, scope, callables, alias_fns, filename, type_env, types),
+                "updates": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
+                            for name, e in expr.updates]}
+    if isinstance(expr, ExprBlockArm):
+        raise _block_arm_unimplemented(filename, expr.line)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types) for e in expr.items]}
@@ -1997,7 +2355,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
-    externs = _lower_externs(program, program.filename)
+    externs = _lower_externs(program, program.filename, types)
     # One fixed point, two consumers: `emitting_caps` is what it computes
     # (docs/capabilities.md), `witness` is why (why.py). Evidence never
     # decides a rejection, it only explains one.
@@ -2042,6 +2400,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
     tests = _lower_tests(program, program.filename, types, services)
+    prop_tests = _lower_prop_tests(program, program.filename, types, services)
 
     uses_components_2 = any(
         isinstance(stmt, (FailStmt, IfStmt))
@@ -2060,6 +2419,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # itself a guard, so a consumer that predates the section refuses the
     # whole document instead of silently dropping the fault tests
     uses_v3 = uses_v3 or bool(fault_tests)
+    # a `prop_tests` section is likewise additive v3 (roadmap item 37)
+    uses_v3 = uses_v3 or bool(prop_tests)
 
     def _has_builtin(node) -> bool:
         if isinstance(node, dict):
@@ -2121,337 +2482,27 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     if fault_tests:
         result["fault_tests"] = fault_tests
+    if prop_tests:
+        result["prop_tests"] = prop_tests
     return result
 
 
-def _service_from_ir(name: str, spec: dict) -> ServiceDecl:
-    """Rebuild a checkable ServiceDecl from a v1 IR services entry."""
-    from .parser import MethodDecl
-
-    methods = {}
-    for mname, mspec in (spec.get("methods") or {}).items():
-        params = [(p.get("name"), p.get("type")) for p in mspec.get("params") or []]
-        methods[mname] = MethodDecl(
-            mname,
-            params,
-            mspec.get("returns"),
-            bool(mspec.get("emission")),
-            0,
-            async_=bool(mspec.get("async")),
-            commutative=bool(mspec.get("commutative")),
-            capabilities=(tuple(mspec["capabilities"])
-                          if mspec.get("capabilities") is not None else None),
-        )
-    return ServiceDecl(name, methods, 0, commutative=bool(spec.get("commutative")))
-
-
-def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
-    def shape(svc: ServiceDecl):
-        return (
-            svc.commutative,
-            {
-                m.name: (tuple(m.params), m.returns, m.emission, m.async_,
-                         m.commutative, m.capabilities)
-                for m in svc.methods.values()
-            },
-        )
-
-    return shape(a) == shape(b)
-
-
-# ------------------------------------------------- admission compatibility (§5)
-#
-# The runtime-admission gate (compile_files with a running manifest) used to
-# demand that a redeclared service be *structurally identical* to the one the
-# running composition already carries (`_service_equal`). §5/§6.6 of the
-# roadmap calls this out: exact match, no structural compatibility.
-#
-# We replace exact-match with a *compatibility relation*. The relation is not
-# a generic subtype rule; it is grounded in what admission is protecting — the
-# running components that already touch the interface — and it is oriented by
-# the direction in which each such component uses it:
-#
-#   * A running CONSUMER injected the key and called methods on it. Its call
-#     sites were type-checked against the *old* interface and are never
-#     recompiled. For them to keep type-checking against the new interface a
-#     method may be *added*, a parameter may only *widen* (contravariant: a
-#     value the consumer passed still fits), a return may only *narrow*
-#     (covariant: the consumer still uses the result at the old type), and an
-#     `emission` may be *dropped* but never *introduced* (an unmarked call site
-#     silently crossing the boundary breaks G4/G8; tightening purity is safe).
-#     A method a consumer might call may not be removed.
-#
-#   * A running PROVIDER implements the interface, in full: A6 requires a
-#     provider to implement *every* method of the service it provides, with
-#     matching arity/`async`/parameter/return types and a checked emission
-#     classification, so it conforms to exactly the old interface. A provider
-#     is retained only when this admission does not replace it; a swap that
-#     re-provides the key withdraws the old provider (G2 forbids two providers
-#     of one key), so the common hot-swap has *no* retained provider. Where a
-#     provider *is* retained, the interface cannot change at all — an added
-#     method is an unfilled obligation, a retyped one fails A6, a re-scoped
-#     emission may outlaw one the provider makes — so the only admissible
-#     replacement is identity. The relaxation above is therefore sound only
-#     when the provider is being replaced by one checked against the new shape.
-#
-# The manifest carries `inject`/`provides` as key lists, and `compile_files`
-# threads a key -> service map (`provision_services`) alongside it, so the
-# check is *consumer/provider-relative*: it identifies which running
-# components touch this service, applies the strict (identity) rule when a
-# provider is retained and the consumer-subtype rule when it is not, and — when
-# it can prove nothing running touches the service — admits any change at all
-# (there is nothing to break). Where a key cannot be resolved to a service the
-# gate stays conservative: it assumes the service is both provided and consumed,
-# because soundness beats the relaxation.
-
-
-@dataclass(frozen=True)
-class _Drift:
-    """One reason a replacement interface is not compatible."""
-    method: str | None      # the offending method, or None for a service-wide clash
-    kind: str               # added | removed | signature | emission | commutative
-    reason: str             # human-readable "what and why"
-
-
-def _caps_widen(old_caps: tuple | None, new_caps: tuple | None) -> bool:
-    """Does the new emission touch *more* capabilities than the old one?
-
-    `None` is bare `emission` — "any capability", the widest set — so a bare
-    emission never widens (it was already unbounded) and narrowing *to* a
-    bare emission from a scoped one always does."""
-    if old_caps is None:
-        return False
-    if new_caps is None:
-        return True
-    return not set(new_caps) <= set(old_caps)
-
-
-def _caps_str(caps: tuple | None) -> str:
-    return "any" if caps is None else "[" + ", ".join(caps) + "]"
-
-
-def _service_compatible(new: ServiceDecl, old: ServiceDecl,
-                        providers_retained: bool) -> _Drift | None:
-    """Is `new` an admissible replacement for the running `old`?
-
-    Returns `None` when compatible, else the first `_Drift` that breaks it.
-
-    Two regimes, because the two sides of an interface use it in opposite
-    directions:
-
-    * ``providers_retained`` — a running provider is *not* part of this swap
-      and keeps implementing the interface. A provider is validated against
-      the *whole* service (A6: every method implemented, arity/async/parameter
-      and return types matched, emission/capability classification checked), so
-      it conforms to exactly ``old``. Nothing about the interface may change:
-      an added method is an unfilled obligation, a retyped one fails A6, a
-      newly-scoped emission may outlaw an emission it makes. The only
-      admissible replacement is *identity* — this is the pre-§5 behaviour, and
-      it is the sound one whenever the provider stays.
-
-    * otherwise — the provider is being replaced by one checked against
-      ``new`` in this very compilation, so only running *consumers* constrain
-      the change. Their call sites were type-checked against ``old`` and are
-      never recompiled, so ``new`` must keep them valid: a method may be
-      added, a parameter may only *widen* (contravariant — a value a consumer
-      passed still fits), a return may only *narrow* (covariant — the consumer
-      still uses the result at the old type), an ``emission`` may be *dropped*
-      but never introduced (an unmarked call site silently crossing the
-      boundary breaks G4/G8; tightening purity is safe), and ``async`` /
-      commutativity are fixed (they change how a call site is written).
-    """
-    if _service_equal(new, old):
-        return None
-    strict = providers_retained
-    if old.commutative != new.commutative:
-        verb = "drops" if old.commutative else "adds"
-        return _Drift(None, "commutative",
-                      f"the service {verb} its `commutative` promise, which "
-                      f"reorders every provider's calls")
-    if strict:
-        added = [m for m in new.methods if m not in old.methods]
-        if added:
-            return _Drift(added[0], "added",
-                          f"method `{added[0]}` is added, but the running "
-                          f"provider does not implement it (A6 completeness)")
-    for mname, om in old.methods.items():
-        nm = new.methods.get(mname)
-        if nm is None:
-            return _Drift(mname, "removed",
-                          f"method `{mname}` is removed, but a running consumer "
-                          f"may still call it")
-        if len(nm.params) != len(om.params):
-            return _Drift(mname, "signature",
-                          f"`{mname}` now takes {len(nm.params)} parameter(s), "
-                          f"was {len(om.params)} — existing call sites pass "
-                          f"{len(om.params)}")
-        for (opn, opt), (npn, npt) in zip(om.params, nm.params):
-            if opt == npt:
-                continue
-            if strict:
-                return _Drift(mname, "signature",
-                              f"`{mname}` parameter `{npn}` changes from "
-                              f"`{opt}` to `{npt}`, but a running provider "
-                              f"implements it at `{opt}` (A6)")
-            if opt is None:
-                # old accepted anything here; a newly-typed position may reject
-                # a value the consumer passes
-                return _Drift(mname, "signature",
-                              f"`{mname}` parameter `{npn}` is now `{npt}`, was "
-                              f"untyped — it may reject a value a consumer passes")
-            if npt is None:
-                continue  # widened to untyped: accepts everything old did
-            if not compatible(npt, opt):
-                # contravariant: a value the consumer passed must still fit
-                return _Drift(mname, "signature",
-                              f"`{mname}` parameter `{npn}` narrows from `{opt}` "
-                              f"to `{npt}` — a value a consumer passes no longer "
-                              f"fits")
-        if om.returns != nm.returns:
-            if strict:
-                return _Drift(mname, "signature",
-                              f"`{mname}` return changes from `{om.returns}` to "
-                              f"`{nm.returns}`, but a running provider implements "
-                              f"it at `{om.returns}` (A6)")
-            if om.returns is None:
-                pass  # old returned nothing usable; a new return is ignored
-            elif nm.returns is None:
-                return _Drift(mname, "signature",
-                              f"`{mname}` no longer returns a value (was "
-                              f"`{om.returns}`), but a consumer uses the result")
-            elif not compatible(om.returns, nm.returns):
-                # covariant: the consumer still uses the result at the old type
-                return _Drift(mname, "signature",
-                              f"`{mname}` return widens from `{om.returns}` to "
-                              f"`{nm.returns}` — a consumer uses the result as "
-                              f"`{om.returns}`")
-        if nm.emission and not om.emission:
-            return _Drift(mname, "emission",
-                          f"`{mname}` becomes an `emission` — a running "
-                          f"consumer's call site is unmarked and would silently "
-                          f"cross the boundary (G4/G8)")
-        if om.emission and not nm.emission and strict:
-            # dropping an emission is safe for a consumer, but a retained
-            # provider was validated against the emission classification
-            return _Drift(mname, "emission",
-                          f"`{mname}` is no longer an `emission`, but a running "
-                          f"provider implements it as one (A6)")
-        if nm.emission and om.emission and _caps_widen(om.capabilities, nm.capabilities):
-            return _Drift(mname, "emission",
-                          f"`{mname}` widens its emission capabilities from "
-                          f"{_caps_str(om.capabilities)} to "
-                          f"{_caps_str(nm.capabilities)}")
-        if nm.emission and om.emission and strict \
-                and _caps_widen(nm.capabilities, om.capabilities):
-            # narrowing the capability scope may outlaw an emission the retained
-            # provider already makes (G4)
-            return _Drift(mname, "emission",
-                          f"`{mname}` narrows its emission capabilities from "
-                          f"{_caps_str(om.capabilities)} to "
-                          f"{_caps_str(nm.capabilities)}, but a running provider "
-                          f"emits under the old scope (G4)")
-        if nm.async_ != om.async_:
-            verb = "becomes" if nm.async_ else "is no longer"
-            return _Drift(mname, "signature",
-                          f"`{mname}` {verb} `async` — a consumer's call site "
-                          f"awaits it differently")
-        if nm.commutative != om.commutative:
-            verb = "adds" if nm.commutative else "drops"
-            return _Drift(mname, "commutative",
-                          f"`{mname}` {verb} its `commutative` promise")
-    return None
-
-
-@dataclass(frozen=True)
-class _Touchers:
-    """Which running components touch a service, from the manifest's key lists."""
-    consumers: tuple[str, ...]      # retained components that inject the service
-    providers: tuple[str, ...]      # retained components that provide it
-    unresolved: bool                # a touched key could not be mapped to a service
-
-
-def _service_touchers(service_name: str, ambient: dict) -> _Touchers:
-    """Running consumers and providers of `service_name`, read off the ambient
-    manifest's `inject`/`provides` key lists via the `provision_services`
-    key -> service map that `compile_files` supplies.
-
-    `unresolved` is True when a component injects or provides a key we cannot
-    resolve to a service: we then cannot rule out that it touches this one, so
-    the caller stays conservative."""
-    key_service = ambient.get("provision_services") or {}
-    consumers: list[str] = []
-    providers: list[str] = []
-    unresolved = False
-    for entry in ambient.get("components") or []:
-        name = entry.get("name")
-        for key in entry.get("inject") or []:
-            svc = key_service.get(key)
-            if svc == service_name:
-                consumers.append(name)
-            elif svc is None:
-                unresolved = True
-        for key in entry.get("provides") or []:
-            svc = key_service.get(key)
-            if svc == service_name:
-                providers.append(name)
-            elif svc is None:
-                unresolved = True
-    return _Touchers(tuple(dict.fromkeys(consumers)),
-                     tuple(dict.fromkeys(providers)), unresolved)
-
-
-def _admit_service_replacement(program: Program, new: ServiceDecl,
-                               old: ServiceDecl, ambient: dict) -> None:
-    """Gate a service redeclared against the running manifest (§5/§6.6).
-
-    Admits the replacement when it is compatible with every running component
-    that touches the interface — or when nothing running touches it at all.
-    Raises a drift diagnostic naming the offending method, why it broke, and
-    the affected running component otherwise."""
-    touch = _service_touchers(new.name, ambient)
-    # a retained provider (or an unresolved key that might be one) pins the
-    # shared methods' parameter/return types to the old interface (A6)
-    providers_retained = bool(touch.providers) or touch.unresolved
-    drift = _service_compatible(new, old, providers_retained)
-    if drift is None:
-        return
-    # nothing running consumes or provides this service, and every touched key
-    # resolved: the change breaks no one, so it is admissible however it drifts
-    if not touch.consumers and not touch.providers and not touch.unresolved:
-        return
-    raise _drift_error(program, new, drift, touch)
-
-
-def _drift_error(program: Program, new: ServiceDecl, drift: _Drift,
-                 touch: _Touchers) -> RevlError:
-    # name every running component that touches the interface — a removed or
-    # retyped method may strand a consumer's call site or a retained provider's
-    # `provide` block, so both are "affected"
-    affected = tuple(dict.fromkeys(touch.consumers + touch.providers))
-    who = (", ".join(f"`{n}`" for n in affected)
-           if affected else "a running consumer")
-    # the phrase "differs from the running manifest" is load-bearing: the
-    # structured-diagnostics table classifies it as an admission (G2) rejection
-    message = (f"service `{new.name}` differs from the running manifest in a "
-               f"way that breaks {who}: {drift.reason}")
-    hint = ("an admitted component may add methods and widen an interface, but "
-            "it may not break a running consumer's or provider's use of it "
-            "(interface drift, DESIGN §6.6)")
-    steps = [
-        TraceStep(new.name, "service", program.filename, new.line,
-                  f"{drift.kind}: {drift.reason}"),
-    ]
-    for name in affected:
-        role = "consumer" if name in touch.consumers else "provider"
-        steps.append(TraceStep(name, role, None, None,
-                               f"running {role} of `{new.name}`"))
-    why = WhyTrace(kind="interface-drift", subject=new.name, shape=SET,
-                   steps=steps)
-    # the code/category are left to diagnostics.classify: the load-bearing
-    # phrase above routes every admission drift to (G2, "admission"), the same
-    # classification the exact-match gate carried, so downstream consumers see
-    # no change of shape.
-    return RevlError(program.filename, new.line, message, hint=hint, why=why)
+# Admission gate and service-compatibility relation (DESIGN.md §5/§6.6) live
+# in `admission.py` (roadmap item 17). Re-exported here so `revl.lower` keeps
+# its public import surface: the check-and-lower spine, `plan.py`, and the
+# service-compat tests all import these names from `revl.lower`.
+from .admission import (  # noqa: E402,F401
+    _Drift,
+    _Touchers,
+    _admit_service_replacement,
+    _caps_str,
+    _caps_widen,
+    _drift_error,
+    _service_compatible,
+    _service_equal,
+    _service_from_ir,
+    _service_touchers,
+)
 
 
 # ---------------------------------------------------------------- components
@@ -2552,7 +2603,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
     if isinstance(expr, ExprLit):
         if expr.value is None:
             raise null_error(filename, line)
-        return {"kind": "lit", "value": expr.value}
+        return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, Interp):
         return _lower_expr(expr, env, mode=getattr(env, "_expr_mode", "setup"))
     if isinstance(expr, ExprVar):
@@ -2618,6 +2669,14 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                             for a in args],
                            filename, line)
                 return {"kind": "host", "fn": f"{root}.{method}", "args": args}
+            # host provenance (docs/stdlib-2.0.md §Map): a local bound to a
+            # host acquisition keeps its stub verb surface verbatim — checked
+            # BEFORE the builtin table so the sanctioned `remove` overlap
+            # dispatches by receiver kind, never by name alone.
+            if scope.get(root) in env.host_locals:
+                return {"kind": "call",
+                        "target": {"kind": "name", "id": scope[root]},
+                        "method": method, "args": args}
             if root in env.requires:
                 if pure_only:
                     raise RevlError(
@@ -2712,6 +2771,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "fields": [[name, _lower_component_pure_expr(e, env, scope, callables,
                                                              pure_only)]
                            for name, e in expr.fields]}
+    if isinstance(expr, ExprRecordUpdate):
+        return {"kind": "record_update",
+                "base": _lower_component_pure_expr(expr.base, env, scope, callables,
+                                                   pure_only),
+                "updates": [[name, _lower_component_pure_expr(e, env, scope, callables,
+                                                              pure_only)]
+                            for name, e in expr.updates]}
+    if isinstance(expr, ExprBlockArm):
+        raise _block_arm_unimplemented(filename, expr.line)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
@@ -2864,316 +2932,20 @@ def _config_default_type(value) -> str | None:
     return None
 
 
-def _calls_in(node, found: set, values: set | None = None) -> None:
-    """Function/extern names a lowered node calls. Component bodies lower a
-    call to `{kind: fn, name}`; pure fn bodies to `{kind: call, callee:
-    {kind: var, name}}`.
-
-    With `values` (a set, filled in place), a *first-class* reference — a
-    bare `{kind: var, name}` naming a callable in value position, where the
-    function value itself flows instead of a call happening — is recorded
-    too. Call-callee positions are excluded: `f(x)` is a call (already in
-    `found`), not a value escaping. This is how the emission analysis sees
-    an emitting callable being handed to code that may dispatch it.
-    """
-    if isinstance(node, dict):
-        kind = node.get("kind")
-        if kind == "fn" and isinstance(node.get("name"), str):
-            found.add(node["name"])
-        callee = node.get("callee")
-        if kind == "call" and isinstance(callee, dict) \
-                and callee.get("kind") == "var" and isinstance(callee.get("name"), str):
-            found.add(callee["name"])
-        elif values is not None and kind == "var" \
-                and isinstance(node.get("name"), str):
-            values.add(node["name"])
-        for key, value in node.items():
-            if key == "callee" and kind == "call":
-                continue  # the callee is a call target, not a flowing value
-            _calls_in(value, found, values)
-    elif isinstance(node, list):
-        for value in node:
-            _calls_in(value, found, values)
-
-
-def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
-    """Names whose call reaches an irreversible host effect: `emission`
-    externs, and functions that reach one transitively. An `acquire` extern
-    is *revertible* (it carries an inverse), so it is deliberately not one.
-
-    `witness` (optional, filled in place) records *why* each derived name is
-    in the set: `witness[caller] = callee`, the edge that put it there. The
-    verdict is unchanged either way — this is only the evidence the fixed
-    point would otherwise throw away (why.py)."""
-    return set(_emitting_capabilities(fns, externs, witness))
-
-
-def _emitting_capabilities(fns: list, externs: list,
-                           witness: dict | None = None) -> dict[str, set]:
-    """`_emitting_fns` refined from a boolean to a *set*: name -> the
-    capabilities its call reaches (docs/capabilities.md).
-
-    A host capability is named by the `emission` extern itself — that extern
-    *is* the boundary — so `extern emission fn send` contributes `send`, and a
-    `fn` contributes the union of what it calls, not its own name. The fixed
-    point is the same least one `_emitting_fns` took, now over sets instead of
-    a flag, which is why a capability propagates through a chain of `fn`s.
-
-    `witness` is filled in place as the same walk proceeds — the set and the
-    derivation come from one traversal, so they cannot disagree."""
-    caps: dict[str, set] = {ext["name"]: {ext["name"]}
-                            for ext in externs if ext.get("class") == "emission"}
-    calls: dict[str, set] = {}
-    passed: dict[str, set] = {}  # first-class callable references per fn body
-    for fn in fns:
-        called: set = set()
-        values: set = set()
-        _calls_in(fn.get("body") or [], called, values=values)
-        calls[fn["name"]] = called
-        passed[fn["name"]] = values
-
-    changed = True
-    while changed:  # least fixed point over the call graph
-        changed = False
-        for name, called in calls.items():
-            reached: set = set()
-            for callee in called:
-                reached |= caps.get(callee, set())
-            # A first-class reference to an emitting callable: the function
-            # *value* escapes this body and may be dispatched by whoever
-            # receives it (an arrow-typed parameter, a stored binding), so
-            # what it runs is not statically boundable here. `*` is
-            # deliberately the capability no `emission[...]` list can name
-            # (docs/capabilities.md), so the may-emit propagates through the
-            # fixed point exactly like a real emission — a plain service
-            # method whose body hands an emitting callable to a dispatcher is
-            # refused by the same G4 check as one that calls the extern
-            # directly. A dispatching helper that only ever receives pure
-            # functions stays clean: nothing emitting is ever referenced as a
-            # value on any path that reaches it. The concrete names travel
-            # too (`reached |= caps[ref]`): `*` marks the dispatch as
-            # unnameable for the declaration checks, while the G8 audit
-            # surface still reports which boundaries the chain reaches.
-            for ref in sorted(passed.get(name, ())):
-                if caps.get(ref):
-                    reached.add("*")
-                    reached |= caps[ref]
-                    if witness is not None:
-                        witness.setdefault(name, ref)
-            if reached and not reached <= caps.get(name, set()):
-                if witness is not None and name not in caps:
-                    # of the callees that prove the point, take the one with
-                    # the shortest onward chain (ties by name): the author is
-                    # asked to read the shortest derivation, deterministically.
-                    # A body flagged only by the first-class-value edge has no
-                    # emitting name-callee; its witness is already recorded.
-                    culprits = sorted(c for c in called if caps.get(c))
-                    if culprits:
-                        witness[name] = min(
-                            culprits,
-                            key=lambda callee: _witness_depth(callee, witness))
-                caps.setdefault(name, set()).update(reached)
-                changed = True
-    return caps
-
-
-def _capability_hint(service: str, method: str, declared, extra: list[str]) -> str:
-    """The repair for a provider that exceeds its declared capability set."""
-    nameable = [cap for cap in extra if cap != "*"]
-    if not nameable:  # nothing to widen *to* — the boundary has no name
-        return (f"only a named boundary can be granted — give the emission a "
-                f"capability (a required key or an `emission` extern) or declare "
-                f"`emission fn {method}(...)` without a scope in service "
-                f"`{service}` (G4)")
-    widened = list(declared) + [cap for cap in nameable if cap not in declared]
-    return (f"a capability-scoped emission bounds *where* a provider may cross "
-            f"the boundary — widen the declaration to "
-            f"`emission[{', '.join(widened)}] fn {method}(...)` in service "
-            f"`{service}`, or route this emission through a declared "
-            f"capability (G4)")
-
-
-def _witness_depth(name: str, witness: dict) -> int:
-    """Hops from `name` down to the emission that made it emitting. The
-    witness graph is acyclic by construction — an entry is only ever written
-    for a name that was *not* yet emitting, pointing at one that was — but
-    the guard keeps a malformed map from hanging the compiler."""
-    depth, seen = 0, {name}
-    while name in witness:
-        name = witness[name]
-        if name in seen:
-            break
-        seen.add(name)
-        depth += 1
-    return depth
-
-
-def _emission_chain(name: str, witness: dict) -> list[str]:
-    """`name` followed to the emission it reaches, e.g.
-    ["writeThrough", "audit_log", "audit_write"]."""
-    chain, seen = [name], {name}
-    while name in witness:
-        name = witness[name]
-        if name in seen:
-            break
-        seen.add(name)
-        chain.append(name)
-    return chain
-
-
-class _EmissionEvidence:
-    """The G4 fixed point's evidence: the witness edge behind each derived
-    emitting name, plus enough of the declaration table to give every hop in
-    a chain a source location.
-
-    Deliberately a companion of `_emitting_fns` rather than a change to it:
-    the set that decides the verdict stays exactly what it was."""
-
-    def __init__(self, program: Program) -> None:
-        self.witness: dict[str, str] = {}
-        self._files = getattr(program, "decl_files", None) or {}
-        self._fallback_file = program.filename
-        self._decls: dict[str, object] = {}
-        for decl in program.fn_decls:
-            self._decls.setdefault(decl.name, decl)
-        for decl in program.externs:
-            self._decls.setdefault(decl.name, decl)
-        self.emission_externs = {
-            decl.name for decl in program.externs
-            if decl.classification == "emission"
-        }
-
-    def locate(self, decl) -> tuple[str | None, int | None]:
-        if decl is None:
-            return (None, None)
-        return (self._files.get(id(decl)) or self._fallback_file or None,
-                getattr(decl, "line", None))
-
-    def capabilities_of(self, name: str) -> tuple:
-        """Which capabilities `name`'s emission reaches.
-
-        Empty today: G4's `emitting_fns` is a plain set, so "emission" is all
-        the analysis knows. This is the single seam for the capability-set
-        work — the moment a declaration carries a `capabilities` attribute
-        every why-trace starts showing it, in the rendering and in the JSON
-        alike, with no other edit (see `TraceStep.capabilities`)."""
-        return tuple(getattr(self._decls.get(name), "capabilities", ()) or ())
-
-    def step_for(self, name: str, last: bool) -> TraceStep:
-        decl = self._decls.get(name)
-        file, line = self.locate(decl)
-        emission = last or name in self.emission_externs
-        return TraceStep(name, "emission" if emission else "call", file, line,
-                         "emission" if emission else None,
-                         self.capabilities_of(name))
-
-    def chain_steps(self, name: str) -> list[TraceStep]:
-        chain = _emission_chain(name, self.witness)
-        return [self.step_for(hop, index == len(chain) - 1)
-                for index, hop in enumerate(chain)]
-
-
-def _method_emissions(body: list, env: "Env",
-                      steps_out: dict | None = None) -> tuple[list[str], set]:
-    """What calling a provide-method irreversibly causes: `emit` steps and
-    reachable emitting functions/externs. Teardown-position emissions count
-    — calling the method schedules them.
-
-    Returns `(evidence, capabilities)`: the human-readable call sites, and the
-    *set* of boundaries they cross (docs/capabilities.md). A call through a
-    required key `db` is capability `db` — the key is composition-wide (G2
-    makes it unique), so it names the same boundary to every reader; host code
-    is named by the `emission` extern it reaches.
-
-    `steps_out` (optional, filled in place) maps each returned label to the
-    derivation behind it: a list of `TraceStep`s running from the callee the
-    method names down to the emission it reaches. Additive out-parameter for
-    the same reason `_emitting_fns` takes one — the labels, and so the
-    message, are byte-identical whether or not evidence is collected."""
-    found: list[str] = []
-    seen: set = set()
-    caps: set = set()
-
-    def note(label: str, steps: list | None = None) -> None:
-        if label not in seen:
-            seen.add(label)
-            found.append(label)
-            if steps_out is not None and steps is not None:
-                steps_out[label] = steps
-
-    def service_emission_step(local: str | None, method: str | None) -> list:
-        """The terminal step for `local.method`, an `emission fn` on the
-        service bound to `local`."""
-        service = env.services.get(env.requires.get(local) or "")
-        decl = service.methods.get(method) if service is not None else None
-        evidence = getattr(env, "emission_evidence", None)
-        # a MethodDecl has a line but no file of its own; its service does
-        file, _ = evidence.locate(service) if evidence is not None else (None, None)
-        line = getattr(decl, "line", None)
-        label = f"{local}.{method}"
-        detail = "emission" if service is None else f"emission `{service.name}.{method}`"
-        # same seam as `_EmissionEvidence.capabilities_of`, for the service
-        # side: whatever the operation declares it may reach, the trace shows
-        capabilities = tuple(getattr(decl, "capabilities", ()) or ())
-        return [TraceStep(label, "emission", file, line, detail, capabilities)]
-
-    def walk(node):
-        if isinstance(node, dict):
-            if node.get("step") == "emit":
-                expr = node.get("expr") or {}
-                target = expr.get("target") or {}
-                if target.get("kind") == "req":
-                    note(f"{target.get('name')}.{expr.get('method')}",
-                         service_emission_step(target.get("name"), expr.get("method")))
-                    caps.add(target.get("name"))
-                else:
-                    note("a host emission")
-                    # every host emission reaches a named `emission` extern
-                    # (`_is_emission_call` admits nothing else); `*` is the
-                    # unreachable-in-practice fallback, and it is deliberately
-                    # a capability no `emission[...]` list can name, so an
-                    # unnameable boundary fails the bound rather than passing it
-                    reached: set = set()
-                    _calls_in(expr, reached)
-                    if not reached & env.emitting_fns:
-                        caps.add("*")
-            # an emission may also appear in value position (`let r = emit …`)
-            target = node.get("target")
-            if node.get("kind") == "call" and isinstance(target, dict) \
-                    and target.get("kind") == "req":
-                service = env.services.get(env.requires.get(target.get("name")) or "")
-                decl = (service.methods.get(node.get("method"))
-                        if service is not None else None)
-                if decl is not None and decl.emission:
-                    note(f"{target.get('name')}.{node.get('method')}",
-                         service_emission_step(target.get("name"), node.get("method")))
-                    caps.add(target.get("name"))
-            calls: set = set()
-            values: set = set()
-            _calls_in(node, calls, values=values)
-            for name in sorted(calls & env.emitting_fns):
-                evidence = getattr(env, "emission_evidence", None)
-                note(f"{name}()",
-                     evidence.chain_steps(name) if evidence is not None else None)
-                caps.update(env.emitting_caps.get(name) or {"*"})
-            # a first-class reference to an emitting callable: the value may
-            # be dispatched by whoever receives it (an arrow-typed parameter,
-            # a stored binding), so the method reaches code no bound can
-            # name — same verdict as calling it, one indirection later
-            for name in sorted(values & env.emitting_fns):
-                evidence = getattr(env, "emission_evidence", None)
-                note(f"{name} (passed as a function value)",
-                     evidence.chain_steps(name) if evidence is not None else None)
-                caps.update(env.emitting_caps.get(name) or set())
-                caps.add("*")
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    walk(body)
-    return found, caps
+# Emission reachability, capability sets, and the G4 evidence trail live in
+# `emission_analysis.py` (roadmap item 17). Re-exported here so `revl.lower`
+# keeps its public import surface: the spine, `query.py`, `__main__.py`, and
+# the capability tests all import these names from `revl.lower`.
+from .emission_analysis import (  # noqa: E402,F401
+    _EmissionEvidence,
+    _calls_in,
+    _capability_hint,
+    _emission_chain,
+    _emitting_capabilities,
+    _emitting_fns,
+    _method_emissions,
+    _witness_depth,
+)
 
 
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
@@ -3227,8 +2999,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     hint="realm and metadata declarations derive the resolution context "
                          "before any dependency access (prelude rule, docs/design-v2-realms.md)",
                 )
+            # isolate/intercept name a key by its *qualified* wiring identity,
+            # the same string G2 and the linker compare (docs/namespacing.md)
+            required_keys = set(env.require_keys.values())
             if isinstance(stmt, IsolateStmt):
-                if stmt.key not in env.requires and stmt.key not in provides:
+                if stmt.key not in required_keys and stmt.key not in provides:
                     raise RevlError(
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement or provision of {comp.name}",
@@ -3239,7 +3014,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                                     f"key `{stmt.key}` is isolated twice in {comp.name}")
                 isolate[stmt.key] = stmt.realm
             else:
-                if stmt.key in provides and stmt.key not in env.requires:
+                if stmt.key in provides and stmt.key not in required_keys:
                     raise RevlError(
                         filename, stmt.line,
                         f"`intercept` applies to required keys only — `{stmt.key}` is a provision",
@@ -3247,7 +3022,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                              "whose domain is the dependency set; providers receive metadata "
                              "from their consumers' declarations",
                     )
-                if stmt.key not in env.requires:
+                if stmt.key not in required_keys:
                     raise RevlError(
                         filename, stmt.line,
                         f"`{stmt.key}` is not a declared requirement of {comp.name}",
@@ -3295,6 +3070,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")
             safe = env.bind_local(stmt.bind, stmt.line)
+            # host provenance: an effect-acquired HOST object (`Map.new()`)
+            # keeps its verb surface verbatim, exempt from the stdlib table —
+            # see Env.host_locals.
+            if acquire.get("kind") == "host":
+                env.host_locals.add(safe)
             acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
@@ -3302,6 +3082,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             step = {"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo}
             if setup_steps:
                 step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
             body.append(step)
         elif isinstance(stmt, EffectStmt):
             if stmt.setup:
@@ -3325,6 +3107,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     "undo": _lower_expr(stmt.undo, env, mode="undo")}
             if setup_steps:
                 step["setup"] = setup_steps
+            if getattr(stmt, "verified", False):
+                step["verified"] = True
             body.append(step)
         elif isinstance(stmt, FailStmt):
             body.append({
@@ -3350,7 +3134,10 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         "name": comp.name,
         "source": comp.source or filename,
         "config": [{"name": f.name, "type": f.type, "default": f.default} for f in comp.config],
-        "requires": dict(env.requires),
+        # the IR carries the *qualified* wiring key (G2 / injection identity),
+        # not the code-facing binding; for unqualified keys the two coincide,
+        # so v1 documents stay byte-identical (docs/namespacing.md)
+        "requires": {env.require_keys[binding]: svc for binding, svc in env.requires.items()},
         "provides": provides,
         "body": body,
     }
@@ -3434,6 +3221,21 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         for mstmt in method.body:
             if returned:
                 raise RevlError(filename, mstmt.line, "unreachable statement after `return`")
+            if getattr(mstmt, "verified", False):
+                # `verified effect` is inverse round-trip tested by activating
+                # the component and tearing it down (roadmap item 26); that
+                # round-trip is only well-defined for an *activation-body*
+                # effect, whose inverse the fiber's teardown runs. A
+                # method-body effect runs per request, so it has no such
+                # closed activate/teardown window — reject rather than accept
+                # a marker the runner cannot honour.
+                raise RevlError(
+                    filename, mstmt.line,
+                    "`verified effect` is only allowed in a component activation body",
+                    hint="inverse round-trip testing activates the component and tears it "
+                         "down; a provide-method effect runs per request and has no such "
+                         "window (docs/verified-effect.md). Drop `verified`, or move the "
+                         "effect to the activation body.")
             if isinstance(mstmt, LetEffect):
                 # item zero (docs/design-v2-instances.md): a spawn inside a
                 # provide-method is a request-scoped instance. It gets its own
@@ -3750,7 +3552,7 @@ def _lower_expr(expr, env: Env, mode: str):
     if isinstance(expr, Lit):
         if expr.value is None:
             raise null_error(env.filename, expr.line)
-        return {"kind": "lit", "value": expr.value}
+        return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, Interp):
         template = []
         args = []

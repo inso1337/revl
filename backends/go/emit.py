@@ -66,6 +66,7 @@ def _realm_helper_name() -> str:
 _PRIM = {
     "Str": "string",
     "Int": "int",
+    "Int32": "int32",
     "Float": "float64",
     "Bool": "bool",
     "Unit": "",
@@ -124,7 +125,7 @@ def _go_return(t):
 def _go_zero(surface) -> str:
     """A Go zero value for a surface type — used to pad Opt/Result spreads."""
     gt = _go_type(surface)
-    if gt in ("int", "int64", "float64"):
+    if gt in ("int", "int32", "int64", "float64"):
         return "0"
     if gt == "string":
         return '""'
@@ -320,7 +321,40 @@ def _expr(node, env: _Env, expected=None) -> str:
         args = [_expr(a, env) for a in node.get("args") or []]
         return _comp_builtin(node.get("method"),
                              _comp_infer(target_node, env), target, args)
+    if kind == "spawn":
+        return _spawn_expr(node, env)
+    if kind == "record_update":
+        raise EmitError(
+            "functional record update `{r | f = e}` is not emitted by the go "
+            "backend yet (implemented tiers: python, typescript) - see "
+            "docs/records.md §6; lift it into a helper fn instead")
     raise EmitError("unsupported expr kind: %r" % (kind,))
+
+
+def _spawn_expr(node, env: _Env) -> str:
+    """Lower an instance-parametric `spawn` acquisition to a per-target helper
+    call (docs/design-v2-instances.md, phase 1).
+
+    `spawn` is the acquisition of a `let-effect` step, so this renders the
+    single Go expression the step binds to the handle. The heavy lifting —
+    isolating each provided key into a FRESH LOCAL realm (a distinct
+    `*stc.Realm` per spawn, so two instances of one component never collide)
+    and plugging the target *template* as a CHILD FIBER of the spawner — lives
+    in the emitted `revlSpawn<Target>` helper; here we just pass the spawner's
+    context and the config that flowed through the spawn.
+    """
+    target = node.get("component")
+    if not isinstance(target, str) or not target.isidentifier():
+        raise EmitError("bad spawn component %r" % (target,))
+    parent = env.ctx_ref()
+    cfg = node.get("config") or {}
+    if cfg:
+        fields = ", ".join(
+            "%s: %s" % (_camel(k), _expr(v, env)) for k, v in cfg.items()
+        )
+        return "revlSpawn%s(%s, %sConfig{%s})" % (
+            _camel(target), parent, _camel(target), fields)
+    return "revlSpawn%s(%s)" % (_camel(target), parent)
 
 
 def _comp_infer(node, env: _Env):
@@ -421,6 +455,18 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "has":
         _COMP_NEEDS_MAP = True
         return "revlMapHas(%s, %s)" % (target, args[0])
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): the same helpers,
+    # in _V3_MAP_PREAMBLE. revlMapKeys sorts a copy of the key set into
+    # canonical (UTF-8 byte) order — go's range order is randomized.
+    if method == "size":
+        _COMP_NEEDS_MAP = True
+        return "int64(len(%s))" % target
+    if method == "keys":
+        _COMP_NEEDS_MAP = True
+        return "revlMapKeys(%s)" % (target,)
+    if method == "remove":
+        _COMP_NEEDS_MAP = True
+        return "revlMapRemove(%s, %s)" % (target, args[0])
     raise EmitError("unknown stdlib method: %r" % (method,))
 
 
@@ -451,7 +497,39 @@ def _format(template: str, args: list[str]) -> str:
 
 
 def _go_string(s: str) -> str:
-    return json.dumps(str(s))
+    """A Go double-quoted string literal, escaped *from code points*.
+
+    The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
+    Go source is UTF-8: a BMP scalar spells as `\\uXXXX` (4 hex) and an astral
+    scalar as `\\UXXXXXXXX` (8 hex). `json.dumps` instead emits the astral
+    scalar as a UTF-16 surrogate pair (`\\ud83d\\ude00`), which Go rejects as an
+    invalid Unicode code point — the reason astral literals used to fail to
+    compile here. ASCII and BMP non-ASCII stay byte-identical to the old
+    `json.dumps` output (printable ASCII verbatim; `\\uXXXX` for `é` etc.), so
+    only astral literals change and v1 goldens stay frozen.
+    """
+    s = str(s)
+    out = ['"']
+    for ch in s:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append("\\u%04x" % cp)
+        else:
+            out.append("\\U%08x" % cp)
+    out.append('"')
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------
@@ -818,6 +896,9 @@ def _host_type_of_acquire(acquire):
     if acquire.get("kind") == "host":
         recv = acquire["fn"].split(".")[0]
         return _camel(recv)
+    if acquire.get("kind") == "spawn":
+        # A `spawn` acquisition binds a live instance handle, not a host object.
+        return "RevlSpawnHandle"
     return "any"
 
 
@@ -991,6 +1072,124 @@ def _emit_load_helpers(ir, out):
         out.append("")
 
 
+# --------------------------------------------------------------------------
+# instance-parametric spawn (docs/design-v2-instances.md, phase 1)
+# --------------------------------------------------------------------------
+
+def _iter_spawn_nodes(ir):
+    """Yield every `spawn` acquire node in the document (a `let-effect` step's
+    acquire whose kind is "spawn")."""
+    for comp in ir.get("components", []):
+        for step in comp.get("body", []) or []:
+            if step.get("step") == "let-effect":
+                acq = step.get("acquire") or {}
+                if acq.get("kind") == "spawn":
+                    yield acq
+
+
+def _uses_spawn(ir) -> bool:
+    return next(_iter_spawn_nodes(ir), None) is not None
+
+
+def _spawn_targets(ir):
+    """Ordered map target-name -> {"has_config", "realm_keys"} for every
+    component spawned in the document. `realm_keys` is the sorted list of keys
+    the target provides, each isolated into a fresh local realm at spawn time
+    (carried on the spawn node as `realms`)."""
+    by_name = {c["name"]: c for c in ir.get("components", [])}
+    targets: dict[str, dict] = {}
+    for acq in _iter_spawn_nodes(ir):
+        name = acq.get("component")
+        if name in targets:
+            continue
+        decl = by_name.get(name, {})
+        targets[name] = {
+            "has_config": bool(decl.get("config")),
+            "realm_keys": list(acq.get("realms") or []),
+        }
+    return targets
+
+
+def _emit_spawn_support(ir, out):
+    """Emit the `RevlSpawnHandle` type and one `revlSpawn<Target>` helper per
+    spawned component. Emitted only when the document spawns, so non-spawning
+    programs stay byte-identical."""
+    if not _uses_spawn(ir):
+        return
+    out.append("// ---- instance-parametric spawn (docs/design-v2-instances.md) ----------")
+    out.append("// A live spawned-component instance. The instance is a CHILD FIBER of its")
+    out.append("// spawner — its own nested teardown scope. Dispose() unloads that fiber,")
+    out.append("// running the instance's LIFO teardown NOW, independent of the spawner, so")
+    out.append("// a request-scoped instance is reclaimed when the request ends and is never")
+    out.append("// deferred to the component's teardown. Dispose is idempotent (the fiber is")
+    out.append("// taken once), so the spawner's own undo — w.dispose() — is a harmless no-op")
+    out.append("// once the instance is already gone: an un-disposed instance still cannot")
+    out.append("// outlive its spawner, but a disposed one is reclaimed early.")
+    out.append("type RevlSpawnHandle struct {")
+    out.append("\tmu    sync.Mutex")
+    out.append("\tfiber *stc.Fiber")
+    out.append("\tctx   *stc.Context")
+    out.append("}")
+    out.append("")
+    out.append("func newRevlSpawnHandle(fiber *stc.Fiber, ctx *stc.Context) *RevlSpawnHandle {")
+    out.append("\treturn &RevlSpawnHandle{fiber: fiber, ctx: ctx}")
+    out.append("}")
+    out.append("")
+    out.append("// Dispose unloads the instance's fiber (its LIFO teardown). Idempotent.")
+    out.append("func (h *RevlSpawnHandle) Dispose() error {")
+    out.append("\th.mu.Lock()")
+    out.append("\tf := h.fiber")
+    out.append("\th.fiber = nil")
+    out.append("\th.mu.Unlock()")
+    out.append("\tif f != nil {")
+    out.append("\t\tf.Dispose()")
+    out.append("\t}")
+    out.append("\treturn nil")
+    out.append("}")
+    out.append("")
+    out.append("// Ctx exposes the instance's own isolated context, so its spawner (the sole")
+    out.append("// holder of this handle) can resolve a provision the instance published in")
+    out.append("// its private local realm. A sibling, isolated into a different local realm,")
+    out.append("// cannot reach it — supervision-tree addressing.")
+    out.append("func (h *RevlSpawnHandle) Ctx() *stc.Context {")
+    out.append("\th.mu.Lock()")
+    out.append("\tdefer h.mu.Unlock()")
+    out.append("\treturn h.ctx")
+    out.append("}")
+    out.append("")
+    out.append("// Fiber exposes the live fiber (nil once disposed) for lifecycle assertions.")
+    out.append("func (h *RevlSpawnHandle) Fiber() *stc.Fiber {")
+    out.append("\th.mu.Lock()")
+    out.append("\tdefer h.mu.Unlock()")
+    out.append("\treturn h.fiber")
+    out.append("}")
+    out.append("")
+    for name, info in _spawn_targets(ir).items():
+        cname = _camel(name)
+        keys = info["realm_keys"]
+        if info["has_config"]:
+            sig = "func revlSpawn%s(parent *stc.Context, cfg %sConfig) *RevlSpawnHandle {" % (cname, cname)
+        else:
+            sig = "func revlSpawn%s(parent *stc.Context) *RevlSpawnHandle {" % cname
+        out.append("// revlSpawn%s plugs a fresh %s instance as a CHILD FIBER of the" % (cname, cname))
+        out.append("// spawner, each provided key isolated into its OWN fresh local realm — a")
+        out.append("// distinct *stc.Realm per call, so two instances never collide on a")
+        out.append("// provision (disjoint by construction, no label). The handle it returns")
+        out.append("// reclaims exactly this instance on Dispose().")
+        out.append(sig)
+        out.append("\tchild := parent.Child()")
+        for key in keys:
+            out.append("\tchild.Isolate(%s, stc.NewRealm(stc.RootRealm(), %s))" %
+                       (_key_var(key), _go_string("spawn:%s:%s" % (name, key))))
+        if info["has_config"]:
+            out.append("\tfiber := child.Load(%s(cfg))" % cname)
+        else:
+            out.append("\tfiber := child.Load(%s())" % cname)
+        out.append("\treturn newRevlSpawnHandle(fiber, child)")
+        out.append("}")
+        out.append("")
+
+
 def _go_literal(v) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -1126,6 +1325,7 @@ _GO_RESERVED = {
 
 _V3_PRIM = {
     "Int": "int64",
+    "Int32": "int32",
     "Str": "string",
     "Bool": "bool",
     "Float": "float64",
@@ -1231,8 +1431,10 @@ class _V3GoCtx:
         self.used_stdlib = False
         self.needs_reflect = False      # structural `==` on a non-scalar
         self.needs_float_div = False    # `/` (true division, IEEE at zero)
+        self.needs_ftoa = False         # canonical Float -> Str in interpolation
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
+        self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
         for name, spec in self.types.items():
             if spec.get("kind") == "record":
                 key = tuple(sorted((spec.get("fields") or {}).keys()))
@@ -1267,8 +1469,10 @@ _GO_DIV_ZERO_MSG = "revl: division by zero"
 
 def _v3_builtin_ret_type(method, recv_type):
     if method in ("length", "indexOf", "charCodeAt",
-                  "div_trunc", "div_floor", "div_euclid", "mod"):
+                  "div_trunc", "div_floor", "div_euclid", "mod", "to_int"):
         return "Int"
+    if method == "to_int32":
+        return "Int32"
     # The total forms (docs/arithmetic.md) produce a Result value.
     if method in ("checked_div_trunc", "checked_div_floor",
                   "checked_div_euclid", "checked_mod"):
@@ -1282,6 +1486,12 @@ def _v3_builtin_ret_type(method, recv_type):
     # The Map value type (docs/stdlib-2.0.md §Map).
     if method == "set":
         return recv_type
+    if method == "remove":
+        return recv_type
+    if method == "size":
+        return "Int"
+    if method == "keys":
+        return "List[Str]"
     if method == "has":
         return "Bool"
     if method == "lookup":
@@ -1300,6 +1510,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
     # without this, `let x: Float = 3` declared `var x int64 = float64(3)`.
     if node.get("widen") == "Float":
         return "Float"
+    if node.get("widen") == "Int":
+        return "Int"  # Int32 widened to Int
     kind = node.get("kind")
     if kind == "lit":
         v = node.get("value")
@@ -1341,6 +1553,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         op = node.get("op")
         if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
             return "Bool"
+        if node.get("operands") == "Int32" and op in ("+", "-", "*"):
+            return "Int32"  # Int32 arithmetic stays Int32 (docs/arithmetic.md)
         if op == "+":
             lt = _go_v3_infer_type(node.get("left"), ctx)
             rt = _go_v3_infer_type(node.get("right"), ctx)
@@ -1380,7 +1594,7 @@ _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
 # Types Go can compare with `==` without it being either wrong or a compile
 # error. Everything else (records, lists, ADTs, Opt/Result) goes through
 # revlEq.
-_GO_SCALARS = {"Int", "Float", "Str", "Bool"}
+_GO_SCALARS = {"Int", "Int32", "Float", "Str", "Bool"}
 
 
 def _go_v3_lit(node: dict) -> str:
@@ -1454,6 +1668,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
         return f"float64({_go_v3_expr(inner, ctx, expected)})"
+    # An Int32 -> Int widening site (docs/arithmetic.md): int32 does not
+    # implicitly convert to int64 in Go, so the lossless widening is spelled
+    # out where the frontend marked it.
+    if node.get("widen") == "Int":
+        inner = {k: v for k, v in node.items() if k != "widen"}
+        return f"int64({_go_v3_expr(inner, ctx, expected)})"
     kind = node["kind"]
 
     if kind == "lit":
@@ -1501,13 +1721,19 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             ctx.needs_overflow = True
             helper = {"+": "revlAdd", "-": "revlSub", "*": "revlMul"}[op]
             return f"{helper}({left}, {right})"
+        if op in ("+", "-", "*") and node.get("operands") == "Int32":
+            # Int32 traps at the i32 edge; Go's int32 wraps, so the helpers
+            # detect it exactly as the i64 ones do (docs/arithmetic.md).
+            ctx.needs_overflow32 = True
+            helper = {"+": "revlAddI32", "-": "revlSubI32", "*": "revlMulI32"}[op]
+            return f"{helper}({left}, {right})"
         if op == "/":
             # `/` is true division and yields Float (docs/arithmetic.md). Go
             # `/` on two int64 is integer division, and a *constant* `1.0/0.0`
             # is a compile error where IEEE defines +Inf — the helper makes it
             # a runtime float division, which is both.
             ctx.needs_float_div = True
-            if node.get("operands") == "Int":
+            if node.get("operands") in ("Int", "Int32"):
                 return f"revlDiv(float64({left}), float64({right}))"
             return f"revlDiv({left}, {right})"
         return f"({left} {go_op} {right})"
@@ -1520,6 +1746,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             if node.get("operands") == "Int":
                 ctx.needs_overflow = True
                 return f"revlSub(0, {operand})"
+            if node.get("operands") == "Int32":
+                ctx.needs_overflow32 = True
+                return f"revlSubI32(0, {operand})"
             return f"(-{operand})"
         raise EmitError(f"unsupported v3 unary operator {node.get('op')!r}")
 
@@ -1547,6 +1776,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if target_node.get("kind") not in _V3_GO_ATOMIC:
             target = f"({target})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
+
+    if kind == "record_update":
+        raise EmitError(
+            "functional record update `{r | f = e}` is not emitted by the go "
+            "backend yet (implemented tiers: python, typescript) - see "
+            "docs/records.md §6; lift it into a helper fn instead")
 
     if kind == "record":
         fields = node.get("fields") or []
@@ -1699,9 +1934,12 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
-    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
-    # imported on this tier, and %d on an int64 is exact decimal.
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): %d on an int64 is
+    # exact decimal. Unlike the component tier, the pure v3 module imports fmt
+    # only on demand, so flag it — otherwise a module whose sole fmt use is
+    # to_str emits fmt.Sprintf with no import (undefined: fmt).
     if method == "to_str":
+        ctx.needs_fmt = True
         return f'fmt.Sprintf("%d", {target})'
     # The Map value type (docs/stdlib-2.0.md §Map): persistent Go maps —
     # `set` copies into a fresh map, `lookup` answers the sealed RevlOpt.
@@ -1711,10 +1949,26 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlMapGet({target}, {args[0]})"
     if method == "has":
         return f"revlMapHas({target}, {args[0]})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): the same helpers
+    # as the component tier, in _V3_MAP_PREAMBLE.
+    if method == "size":
+        return f"int64(len({target}))"
+    if method == "keys":
+        return f"revlMapKeys({target})"
+    if method == "remove":
+        return f"revlMapRemove({target}, {args[0]})"
     # Integer division and modulo (docs/arithmetic.md). Go `/` truncates and
     # `%` takes the dividend's sign, which is what revl specifies, so
     # div_trunc is native; the other three are helpers so every tier computes
     # the same thing.
+    # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
+    # is a plain int64 conversion; narrowing Int -> Int32 re-imposes the 32-bit
+    # bound through revlToI32, which panics out of range.
+    if method == "to_int":
+        return f"int64({target})"
+    if method == "to_int32":
+        ctx.needs_overflow32 = True
+        return f"revlToI32({target})"
     if method == "div_trunc":
         ctx.needs_int_arith = True
         return f"revlDivTrunc({target}, {args[0]})"
@@ -1754,6 +2008,13 @@ def _go_v3_interp(node: dict, ctx: _V3GoCtx) -> str:
     for part_kind, value in node.get("parts") or []:
         if part_kind == "text":
             fmt_parts.append(str(value).replace("%", "%%"))
+        elif _go_v3_infer_type(value, ctx) == "Float":
+            # A `Float` renders through the canonical ECMAScript form, not
+            # Go's `%v` (`%v` matches for these values but diverges elsewhere,
+            # e.g. `1e-07` vs `1e-7`); see docs/strings.md.
+            ctx.needs_ftoa = True
+            fmt_parts.append("%s")
+            args.append(f"revlFtoa({_go_v3_expr(value, ctx)})")
         else:
             fmt_parts.append("%v")
             args.append(_go_v3_expr(value, ctx))
@@ -2103,7 +2364,109 @@ func revlMapHas[K comparable, V any](m map[K]V, k K) bool {
 	_, ok := m[k]
 	return ok
 }
+
+func revlMapRemove[K comparable, V any](m map[K]V, k K) map[K]V {
+	out := make(map[K]V, len(m))
+	for kk, vv := range m {
+		if kk != k {
+			out[kk] = vv
+		}
+	}
+	return out
+}
+
+// revlMapKeys yields the keys in ascending canonical Str order (UTF-8 byte
+// lexicographic — go string < is exactly that). A plain insertion sort over
+// a copied slice: no sort import, and symbol-table keys come in small sets.
+func revlMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
+	return keys
+}
 '''
+
+_V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
+// cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,
+// "1e+21"/"NaN"/"Infinity", a whole-number float as "0", negative zero as "0".
+func revlFtoa(x float64) string {
+	if math.IsNaN(x) {
+		return "NaN"
+	}
+	if math.IsInf(x, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(x, -1) {
+		return "-Infinity"
+	}
+	if x == 0 {
+		return "0"
+	}
+	sign := ""
+	if x < 0 {
+		sign = "-"
+		x = -x
+	}
+	s := strconv.FormatFloat(x, 'e', -1, 64) // shortest mantissa: d[.ddd]e±dd
+	mant := s
+	exp := 0
+	if e := strings.IndexByte(s, 'e'); e >= 0 {
+		mant = s[:e]
+		exp, _ = strconv.Atoi(s[e+1:])
+	}
+	intpart := mant
+	frac := ""
+	if d := strings.IndexByte(mant, '.'); d >= 0 {
+		intpart = mant[:d]
+		frac = mant[d+1:]
+	}
+	digits := intpart + frac
+	point := len(intpart) + exp
+	i := 0
+	for i < len(digits)-1 && digits[i] == '0' {
+		i++
+		point--
+	}
+	digits = digits[i:]
+	j := len(digits)
+	for j > 1 && digits[j-1] == '0' {
+		j--
+	}
+	digits = digits[:j]
+	if digits == "0" {
+		return "0"
+	}
+	k := len(digits)
+	n := point
+	var body string
+	switch {
+	case k <= n && n <= 21:
+		body = digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		body = digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		body = "0." + strings.Repeat("0", -n) + digits
+	default:
+		e := n - 1
+		m := digits
+		if k > 1 {
+			m = digits[:1] + "." + digits[1:]
+		}
+		esign := "+"
+		if e < 0 {
+			esign = "-"
+			e = -e
+		}
+		body = m + "e" + esign + strconv.Itoa(e)
+	}
+	return sign + body
+}'''
 
 _V3_STDLIB_PREAMBLE = '''// ---- stdlib builtins (docs/stdlib-2.0.md); positions are code-point based
 func revlStrLen(s string) int64 { return int64(utf8.RuneCountInString(s)) }
@@ -2259,7 +2622,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     # The Map value type (docs/stdlib-2.0.md §Map): its helpers answer Opt
     # (`lookup`), so using any of them pulls the Opt preamble in too.
     used_map = ('"maplit"' in blob) or any(
-        f'"method": "{m}"' in blob for m in ("set", "lookup", "has"))
+        f'"method": "{m}"' in blob for m in ("set", "lookup", "has",
+                                             "size", "keys", "remove"))
     if used_map:
         used_opt = True
     # The total division forms produce a Result value without the source ever
@@ -2276,6 +2640,10 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     if ctx.used_stdlib:
         imports.append('\t"strings"')
         imports.append('\t"unicode/utf8"')
+    if ctx.needs_ftoa:
+        imports.append('\t"math"')
+        imports.append('\t"strconv"')
+        imports.append('\t"strings"')
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -2284,7 +2652,7 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     out.append("")
     if imports:
         out.append("import (")
-        out.extend(sorted(imports))
+        out.extend(sorted(set(imports)))
         out.append(")")
         out.append("")
     if ctx.needs_reflect:
@@ -2298,6 +2666,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         # at compile time, where IEEE defines +Inf. Through a call it is an
         # ordinary runtime float division, which is what revl specifies.
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_ftoa:
+        out.append(_V3_FTOA_HELPER)
         out.append("")
     if ctx.needs_overflow:
         out.append("func revlAdd(a, b int64) int64 {")
@@ -2325,6 +2696,24 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append('\t\tpanic("revl: Int overflow")')
         out.append("\t}")
         out.append("\treturn p")
+        out.append("}")
+        out.append("")
+    if ctx.needs_overflow32:
+        # Int32 traps at the i32 edge (docs/arithmetic.md). Go's int32 wraps,
+        # so each op is computed in int64 (which cannot overflow for two i32
+        # inputs) and range-checked before narrowing. revlToI32 is the checked
+        # Int -> Int32 narrowing.
+        out.append("func revlAddI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) + int64(b)) }")
+        out.append("func revlSubI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) - int64(b)) }")
+        out.append("func revlMulI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) * int64(b)) }")
+        out.append("func revlToI32(v int64) int32 {")
+        out.append("\tif v < -2147483648 || v > 2147483647 {")
+        out.append('\t\tpanic("revl: Int32 overflow")')
+        out.append("\t}")
+        out.append("\treturn int32(v)")
         out.append("}")
         out.append("")
     if ctx.needs_int_arith:
@@ -2385,11 +2774,12 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
-    # spawn / instance-parametric IR lives under v3 too, but is a separate
-    # feature that is out of scope here — reject only that node, not v3 itself.
-    for comp in ir.get("components", []):
-        if comp.get("spawn") is not None or comp.get("instance") is not None:
-            raise EmitError("spawn/instance-parametric IR is out of scope")
+    # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
+    # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
+    # lowered below to a child-fiber plug on the real stc-go runtime. The old
+    # `comp["spawn"]/["instance"]` reject shape never matched the frozen IR
+    # (spawn is a step's acquire, not a component key), so it was inert; it is
+    # removed now that the lowering exists.
 
     # ir_version-3 routing:
     #   * No component, or any top-level pure declaration (functions / types /
@@ -2420,6 +2810,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     for comp in ir.get("components", []):
         _emit_component(comp, ir.get("services", {}), body)
     _emit_load_helpers(ir, body)
+    _emit_spawn_support(ir, body)
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")

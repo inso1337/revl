@@ -1,0 +1,13 @@
+// REJECTED — `Int -> Int32` can lose bits (an Int outside [-2^31, 2^31-1] does
+// not fit), so it is never an implicit coercion. revl already refuses lossy
+// implicit narrowing for range (an out-of-range literal is a compile error);
+// width is the same rule. The widening direction is implicit — an Int32 flows
+// into an Int position freely — but narrowing must be spelled `.to_int32()`,
+// which re-imposes the 32-bit bound at runtime (docs/arithmetic.md).
+//
+// expected error:
+//   this function's return expects `Int32`, got `Int`
+
+fn narrow(n: Int) -> Int32 {
+  return n
+}

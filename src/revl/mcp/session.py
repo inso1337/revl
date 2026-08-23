@@ -100,6 +100,18 @@ class Session:
         # snapshotted, because there is nothing to replay through the gate.
         self.origin: dict | None = None
         self.previous_origin: dict | None = None  # origin `rollback` restores
+        # the server-side working source an agent edits with `revl_edit`
+        # (deltas, not documents — docs/mcp-bridge.md, roadmap item 50). None
+        # means "no uncommitted edits": the working source re-derives from
+        # `origin`, i.e. from what is actually running. It is set only while an
+        # edit has advanced the source but not yet swapped (open holes remain),
+        # and cleared on every generation change below, since a swap/rollback
+        # makes any older draft stale.
+        self.draft: dict | None = None
+        # which generation is live: a fresh boot is 1, every swap/rollback moves
+        # it on. This is the "which world" a live query answers for — see
+        # `live_state` and docs/queries.md §9.
+        self._generation = 0
 
     # -- plumbing ----------------------------------------------------------
 
@@ -139,7 +151,9 @@ class Session:
         self._driver = driver_class(ir, self.config, emit, runtime_mod, Context, FiberState)
         self.ir = ir
         self.origin = origin
+        self.draft = None
         self.recorder = replay_module().Recorder(ir) if record else None
+        self._generation = 1
         self._run(self._driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True) | ({"recording": True} if record else {})
 
@@ -169,6 +183,8 @@ class Session:
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = ir
         self.origin = origin
+        self.draft = None  # a new generation makes any uncommitted edit stale
+        self._generation += 1
         self._run(driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True)
 
@@ -178,6 +194,193 @@ class Session:
         restored, self.previous = self.previous, None
         restored_origin, self.previous_origin = self.previous_origin, None
         return self.swap(restored, origin=restored_origin) | {"rolledBack": True}
+
+    # -- apply a plan artifact (docs/apply.md) -----------------------------
+
+    def _provided_keys(self) -> list[str]:
+        """The keys currently *served* — a declared key whose provider is
+        inactive reads as absent, which is what drift and step-verification
+        both want to see."""
+        driver = self._driver
+        if driver is None:
+            return []
+        return sorted(k for k, v in driver._namespace().items() if v is not None)
+
+    def _live_fingerprint(self) -> dict:
+        """The live composition in the same shape `apply.fingerprint` derives
+        from an IR — but provisions are the ones *actually served now*, so a
+        component that has drifted to PENDING since planning shows up as a
+        vanished provision, not a phantom one."""
+        from ..run import _components, _load_order  # noqa: PLC0415 — lazy
+
+        ir = self.ir or {}
+        served = set(self._provided_keys())
+        provisions = []
+        for comp in _components(ir):
+            for key in comp.get("provides") or {}:
+                if key in served:
+                    provisions.append({"key": key, "provider": comp["name"]})
+        return {
+            "components": sorted(c["name"] for c in _components(ir)),
+            "loadOrder": list(_load_order(ir)),
+            "provisions": sorted(provisions, key=lambda p: (p["key"], p["provider"])),
+        }
+
+    def live_state(self) -> dict:
+        """What the running fibers know that the static graph does not — the
+        input a live query folds into its envelope (query.as_live).
+
+        `servedKeys` is the set actually served *now* (a provider that drifted
+        to an inactive state drops out); `componentStates` is each fiber's live
+        state; `generation` is which world (post-swap) this is."""
+        driver = self._driver
+        states = {}
+        if driver is not None:
+            states = {name: driver.FiberState(fiber.state).name
+                      for name, fiber in driver.fibers.items()}
+        return {
+            "generation": self._generation,
+            "servedKeys": self._provided_keys(),
+            "componentStates": states,
+        }
+
+    async def _plug(self, name: str, module) -> None:
+        """Bring one component up from `module`, awaiting an async body exactly
+        as `run._Driver._load` does for the whole composition."""
+        driver = self._driver
+        body = getattr(module, name, None)
+        if body is None:
+            raise SessionError(
+                f"the composition has no component `{name}` to load — the plan "
+                "artifact is inconsistent with its resulting IR")
+        fiber = driver.root.plugin(body, driver.config.get(name, {}))
+        driver.fibers[name] = fiber
+        await driver._flush()
+        if fiber.state == driver.FiberState.LOADING:
+            try:
+                await asyncio.wait_for(asyncio.shield(fiber), 2)
+            except asyncio.TimeoutError:
+                pass
+        await driver._flush()
+
+    def _apply_one(self, op: dict, module) -> dict:
+        """Perform one plan operation and read the live effect back."""
+        driver = self._driver
+        name = op["name"]
+        if op["op"] == "dispose":
+            fiber = driver.fibers.pop(name, None)
+            if fiber is not None:
+                self._run(fiber.dispose())
+                self._run(driver._flush())
+            return {"name": name, "absent": name not in driver.fibers,
+                    "state": None, "providedKeys": self._provided_keys()}
+        if op["op"] == "load":
+            self._run(self._plug(name, module))
+            fiber = driver.fibers.get(name)
+            state = driver.FiberState(fiber.state).name if fiber is not None else None
+            return {"name": name, "absent": fiber is None, "state": state,
+                    "providedKeys": self._provided_keys()}
+        raise SessionError(f"unknown apply operation {op['op']!r}")
+
+    def _rollback_apply(self, applied: list[dict], running_module,
+                        running_ir: dict) -> list[dict]:
+        """Undo the applied prefix, last-in-first-out, by derived inverses: a
+        load's inverse is a dispose, a teardown's inverse is a re-load of the
+        withdrawn body from the pre-apply composition."""
+        driver = self._driver
+        rolled: list[dict] = []
+        for op in reversed(applied):
+            name = op["name"]
+            if op["op"] == "load":
+                fiber = driver.fibers.pop(name, None)
+                if fiber is not None:
+                    self._run(fiber.dispose())
+                    self._run(driver._flush())
+                rolled.append({"undo": "dispose", "name": name})
+            else:  # dispose -> re-load the component that was torn down
+                self._run(self._plug(name, running_module))
+                rolled.append({"undo": "restore", "name": name})
+        driver.ir = self.ir = running_ir
+        self._run(driver._flush())
+        return rolled
+
+    def apply(self, artifact: dict) -> dict:
+        """Execute a `revl plan -o` artifact against this live composition.
+
+        Refuses on drift; verifies each step's effect against the plan's
+        prediction; on any failure rolls the applied prefix back by derived
+        LIFO inverses and proves no residue. See docs/apply.md.
+        """
+        from .. import apply as apply_mod  # noqa: PLC0415 — lazy, no cordis
+
+        apply_mod.validate_artifact(artifact)
+        driver = self._require()
+
+        # (a) drift — the composition may have moved since the plan was computed
+        diff = apply_mod.drift(artifact["basis"], self._live_fingerprint())
+        if diff is not None:
+            raise SessionError(apply_mod.render_drift(diff))
+
+        running_ir = self.ir
+        resulting_ir = artifact["resultingIR"]
+        operations = artifact["operations"]
+
+        registry_baseline = driver.root.registry.size
+        result_module = driver._emit_module(resulting_ir)
+        running_module = (driver._emit_module(running_ir)
+                          if any(o["op"] == "dispose" for o in operations) else None)
+        # the driver now reflects the resulting composition so its namespace
+        # sees the keys under change; a rollback restores this to `running_ir`.
+        driver.ir = self.ir = resulting_ir
+
+        applied: list[dict] = []
+        steps: list[dict] = []
+        current: dict | None = None
+        reason: str | None = None
+        try:
+            for op in operations:
+                current = op
+                observed = self._apply_one(op, result_module)
+                applied.append(op)
+                steps.append({"op": op["op"], "name": op["name"],
+                              "state": observed.get("state"),
+                              "providedKeys": observed.get("providedKeys")})
+                mismatch = apply_mod.verify_step(op, observed)
+                if mismatch is not None:
+                    reason = mismatch
+                    break
+            else:
+                current = None
+                reason = apply_mod.verify_final(
+                    artifact, self._live_fingerprint(), self._provided_keys())
+        except Exception as error:  # noqa: BLE001 — any failure triggers rollback
+            reason = f"{type(error).__name__}: {error}"
+
+        if reason is not None:
+            rolled = self._rollback_apply(applied, running_module, running_ir)
+            residue_ok = (
+                driver.root.registry.size == registry_baseline
+                and apply_mod._canon(self._live_fingerprint())
+                == apply_mod._canon(artifact["basis"]))
+            return {
+                "applied": False,
+                "failedAt": (current or {}).get("name"),
+                "reason": reason,
+                "steps": steps,
+                "rolledBack": rolled,
+                "noResidue": residue_ok,
+                "registry": {"baseline": registry_baseline,
+                             "afterRollback": driver.root.registry.size},
+                "state": self.state(drain=True),
+            }
+
+        self.previous = None  # a completed apply is not a swap to roll back to
+        return {
+            "applied": True,
+            "steps": steps,
+            "resulting": artifact["resulting"]["components"],
+            "state": self.state(drain=True),
+        }
 
     # -- persistence (docs/persistence.md) ---------------------------------
 
@@ -221,6 +424,8 @@ class Session:
         self.previous = None
         self.origin = None
         self.previous_origin = None
+        self.draft = None
+        self._generation = 0
         return {
             "unloaded": True,
             "noResidue": all(checks.values()),
@@ -293,6 +498,20 @@ class Session:
 
     def inspect_step(self, component: str | None, at: int) -> dict:
         return self._timeline(component).inspect(at)
+
+    def bisect(self, component: str | None, predicate: str) -> dict:
+        """Binary-search the recorded timeline for the first step at which
+        `predicate` flips — git-bisect for an execution. Read-only: the
+        predicate is evaluated over the `inspect` reconstruction of each probed
+        step, so the timeline is never mutated and the answer is reached in
+        log2(N) evaluations. The report carries the found step's full record and
+        the verified/unverified status of the effects on the path to it."""
+        replay = replay_module()
+        timeline = self._timeline(component)
+        try:
+            return timeline.bisect(predicate)
+        except replay.ReplayError as error:
+            raise SessionError(str(error)) from None
 
     def step_back(self, component: str | None, to: int,
                   force: bool = False) -> dict:

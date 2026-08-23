@@ -55,7 +55,7 @@ from .errors import RevlError
 FNS_KEY = "__fns__"      # {name: {"params": [type...], "returns": type|None}}
 CASES_KEY = "__cases__"  # {case: {"adt": name, "payload": type|None}}
 
-_NUMERIC = {"Int", "Float"}
+_NUMERIC = {"Int", "Float", "Int32"}
 _SIZED_HEADS = {"Str", "Bytes", "List"}
 
 
@@ -195,7 +195,7 @@ def is_tparam_name(name: str, declared: dict) -> bool:
 # type heads that always name a concrete type; an explicit `[T]` parameter may
 # not shadow one (nor a user-declared type). See `validate_explicit_tparams`.
 _BUILTIN_TYPE_NAMES = {
-    "Int", "Float", "Str", "Bool", "Bytes", "Unit",
+    "Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
     "Opt", "List", "Map", "Result", "Any", "Never",
 }
 
@@ -333,6 +333,12 @@ def compatible(expected: str | None, actual: str | None) -> bool:
     ahead, aargs = parse_type(actual)
     if ehead == "Float" and ahead == "Int":
         return True  # numeric widening
+    # Int32 widens losslessly into Int and (through Int) into Float. Both are
+    # implicit at value-flow positions; the reverse (Int -> Int32) can lose
+    # bits and is refused here, so it must be spelled `.to_int32()`
+    # (docs/arithmetic.md, "Sized integers").
+    if ehead in ("Int", "Float") and ahead == "Int32":
+        return True
     if ehead == FN_HEAD:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
@@ -474,8 +480,39 @@ def _binop_type(op: str, lt: str | None, rt: str | None,
             if lt in _NUMERIC and rt in _NUMERIC:
                 return "Float"
             return None
+        # `+ - * %` do not silently mix widths. Int32 widens to Int only at
+        # value-flow positions (let/return/argument), never inside arithmetic:
+        # a mixed-width binop is a request to make the conversion visible, not a
+        # place to hide one. `.to_int()` widens, `.to_int32()` narrows
+        # (docs/arithmetic.md). `/` is exempt above — it always yields Float, so
+        # both sides widen to Float regardless and nothing is lost.
+        if "Int32" in (lt, rt) and lt != rt and lt is not None and rt is not None:
+            if filename:
+                raise RevlError(
+                    filename, line,
+                    f"`{op}` does not mix `{render_type(lt)}` and "
+                    f"`{render_type(rt)}`",
+                    hint="convert explicitly — `.to_int()` widens an Int32 to "
+                         "Int, `.to_int32()` narrows an Int to Int32 "
+                         "(docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+            return None
+        if op == "%" and (lt == "Int32" or rt == "Int32"):
+            # `%` (and the named `div_*`/`mod`) stay Int-only in this pass: the
+            # remainder is width-agnostic in value but its zero-divisor *fault*
+            # is not uniform once Int32 is a `number` on ts / an i32 on wasm.
+            # Widen with `.to_int()` to take a remainder (docs/arithmetic.md).
+            if filename:
+                raise RevlError(
+                    filename, line,
+                    "`%` is Int-only; widen the Int32 operands with `.to_int()` "
+                    "first (docs/arithmetic.md)",
+                    code="T1", category="type-mismatch")
+            return None
         if lt == "Float" or rt == "Float":
             return "Float"
+        if lt == "Int32" and rt == "Int32":
+            return "Int32"
         if lt == "Int" and rt == "Int":
             return "Int"
         return None
@@ -500,6 +537,14 @@ _BUILTIN_SIG = {
     "div_trunc": ("Int", ["Int"], "Int"),
     "div_floor": ("Int", ["Int"], "Int"),
     "div_euclid": ("Int", ["Int"], "Int"),
+    # Width conversions between Int and Int32 (docs/arithmetic.md, "Sized
+    # integers"). `.to_int()` is the explicit spelling of the lossless Int32 ->
+    # Int widening (which is also implicit at value-flow positions).
+    # `.to_int32()` narrows Int -> Int32; it can lose bits, so it is ALWAYS
+    # explicit and re-imposes the 32-bit bound at runtime, trapping
+    # `revl: Int32 overflow` exactly as Int traps at the i64 edge.
+    "to_int": ("Int32", [], "Int"),
+    "to_int32": ("Int", [], "Int32"),
     # The total, value-returning forms (docs/arithmetic.md, "Still open"):
     # same rounding convention as their faulting counterparts, but a zero
     # divisor yields `Err(reason)` instead of faulting — `fail` cannot serve
@@ -520,6 +565,14 @@ _BUILTIN_SIG = {
     "set": ("Map", ["Str", "@elem"], "@self"),
     "lookup": ("Map", ["Str"], "Opt[@elem]"),
     "has": ("Map", ["Str"], "Bool"),
+    # The iteration/remove step (docs/stdlib-2.0.md §Map): size and keys are
+    # methods like their siblings (no free-function namespace); keys() yields
+    # ascending canonical Str order — a pure function of the key set, pinned
+    # per tier by tests. remove() is persistent (new map) and TOTAL: an
+    # absent key is a no-op returning an equal map, never an error.
+    "size": ("Map", [], "Int"),
+    "keys": ("Map", [], "List[Str]"),
+    "remove": ("Map", ["Str"], "@self"),
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): decimal
     # spelling, total over the whole i64 range including Int.MIN. A method
     # on the Int family — the same dispatch div_trunc rides — because revl
@@ -633,7 +686,7 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
         if family == "sized" and thead not in _SIZED_HEADS:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
-        if family in ("List", "Str", "Int", "Map") and thead != family:
+        if family in ("List", "Str", "Int", "Int32", "Map") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
     # `@elem` is the element/value parameter: a List's single argument for
@@ -731,9 +784,10 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
     from .parser import (
-        ExprArrow, ExprBin, ExprCall, ExprField, ExprHole, ExprIf, ExprIndex,
-        ExprList, ExprLit, ExprMatch, ExprOptCall, ExprOptField, ExprRecord,
-        ExprUn, ExprVar, Interp, Lit,
+        ExprArrow, ExprBin, ExprBlockArm, ExprCall, ExprField, ExprHole,
+        ExprIf, ExprIndex, ExprList, ExprLit, ExprMatch, ExprOptCall,
+        ExprOptField, ExprRecord, ExprRecordUpdate, ExprUn, ExprVar, Interp,
+        Lit,
     )
 
     line = getattr(expr, "line", 0)
@@ -902,6 +956,56 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
         for _, value in expr.fields:
             infer_ast(value, tenv, types, filename)
         return None  # anonymous; named via check_ast against an expected record
+    if isinstance(expr, ExprRecordUpdate):
+        # docs/records.md §3: `base` must carry a record type; every updated
+        # field must exist there and its replacement must match the declared
+        # field type. The result's type is `base`'s type.
+        base_t = infer_ast(expr.base, tenv, types, filename)
+        if base_t is None:
+            for _, value in expr.updates:
+                infer_ast(value, tenv, types, filename)
+            return None
+        spec = types.get(base_t)
+        # Without a filename this is the non-raising oracle: report the type
+        # when it is soundly known, otherwise bow out.
+        if filename is None:
+            if spec is not None and spec.get("kind") == "record":
+                declared = spec.get("fields", {})
+                for name, value in expr.updates:
+                    if name in declared:
+                        infer_ast(value, tenv, types, filename)
+                    else:
+                        return None
+                return base_t
+            for _, value in expr.updates:
+                infer_ast(value, tenv, types, filename)
+            return None
+        if spec is None or spec.get("kind") != "record":
+            raise RevlError(
+                filename, line,
+                f"record update requires a record type, "
+                f"`{render_type(base_t) or 'unknown'}` is not one",
+                hint="`{r | f = e}` copies `r` with field `f` replaced — it only "
+                     "applies to a named record type (docs/records.md §2)",
+            )
+        declared = spec.get("fields", {})
+        for name, value in expr.updates:
+            if name not in declared:
+                raise RevlError(
+                    filename, line,
+                    f"record update names `{name}`, which is not a field of "
+                    f"`{render_type(base_t)}`",
+                    hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                )
+            check_ast(value, declared.get(name), tenv, types, filename,
+                      f"update of field `{name}`")
+        return base_t
+    if isinstance(expr, ExprBlockArm):
+        inner = dict(tenv)
+        for stmt in expr.stmts:
+            t = infer_ast(stmt.value, inner, types, filename)
+            inner[stmt.name] = t
+        return infer_ast(expr.tail, inner, types, filename)
     if isinstance(expr, ExprCall):
         arg_types = [infer_ast(a, tenv, types, filename) for a in expr.args]
         if isinstance(expr.callee, ExprVar):
@@ -1173,7 +1277,8 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
 def check_ast(expr, expected: str | None, tenv: dict, types: dict,
               filename: str, where: str) -> None:
     """Bidirectional check of a parser-AST expression against `expected`."""
-    from .parser import ExprArrow, ExprIf, ExprList, ExprMatch, ExprRecord
+    from .parser import ExprArrow, ExprBlockArm, ExprIf, ExprList, ExprMatch, \
+        ExprRecord, ExprRecordUpdate
 
     line = getattr(expr, "line", 0)
     # a hole in check position takes the expectation as its type and is done:
@@ -1237,6 +1342,29 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                 else:
                     inner.pop(bind, None)
             check_ast(body, expected, inner, types, filename, where)
+        return
+    if isinstance(expr, ExprRecordUpdate):
+        # docs/records.md §3: the result is `base`'s type, so the expectation
+        # is checked against that; the field updates are checked per-field.
+        base_t = infer_ast(expr.base, tenv, types, filename)
+        spec = types.get(base_t or "")
+        if spec is not None and spec.get("kind") == "record":
+            declared = spec.get("fields", {})
+            for name, value in expr.updates:
+                check_ast(value, declared.get(name), tenv, types, filename,
+                          f"update of field `{name}` of `{base_t}`")
+        if base_t and not compatible(expected, base_t):
+            raise mismatch(filename, line, where, expected,
+                           render_type(base_t) or base_t)
+        return
+    if isinstance(expr, ExprBlockArm):
+        # Each `let` in the arm block extends the arm's scope; the tail is
+        # checked against the expectation like any other arm body.
+        inner = dict(tenv)
+        for stmt in expr.stmts:
+            t = infer_ast(stmt.value, inner, types, filename)
+            inner[stmt.name] = t
+        check_ast(expr.tail, expected, inner, types, filename, where)
         return
     actual = infer_ast(expr, tenv, types, filename)
     if actual and not compatible(expected, actual):

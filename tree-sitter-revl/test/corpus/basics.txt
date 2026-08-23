@@ -1,0 +1,104 @@
+================================================================
+service with an emission method
+================================================================
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (service_declaration
+    name: (identifier)
+    body: (service_body
+      (method_signature
+        name: (identifier)
+        parameters: (typed_parameters
+          (typed_parameter name: (identifier) type: (type_identifier (identifier))))
+        return_type: (generic_type name: (identifier) (type_identifier (identifier))))
+      (method_signature
+        (method_modifier)
+        name: (identifier)
+        parameters: (typed_parameters
+          (typed_parameter name: (identifier) type: (type_identifier (identifier))))
+        return_type: (type_identifier (identifier))))))
+
+================================================================
+component with effect, provide, and template emit
+================================================================
+
+component UserCache requires db: Database provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      emit db.execute(`INSERT ${key}`)
+    }
+  }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (component_declaration
+    name: (identifier)
+    (requires_clause (binding local: (identifier) service: (identifier)))
+    (provides_clause (binding local: (identifier) service: (identifier)))
+    body: (component_body
+      (let_statement
+        binding: (identifier)
+        value: (effect_expression
+          (call_expression
+            function: (member_expression object: (identifier) property: (identifier))
+            arguments: (arguments))
+          undo: (call_expression
+            function: (member_expression object: (identifier) property: (identifier))
+            arguments: (arguments))))
+      (provide_statement
+        key: (identifier)
+        (provide_method
+          name: (identifier)
+          parameters: (parameters (parameter name: (identifier)) (parameter name: (identifier)))
+          body: (block
+            (emit_statement
+              (call_expression
+                function: (member_expression object: (identifier) property: (identifier))
+                arguments: (arguments (template_string))))))))))
+
+================================================================
+variant type and match
+================================================================
+
+type Found = Hit(Row) | Missing
+
+fn describe(f: Found) -> Str {
+  return match f {
+    Hit(r) => r.name,
+    _ => "none",
+  }
+}
+
+----------------------------------------------------------------
+
+(source_file
+  (type_declaration
+    name: (identifier)
+    value: (variant_type
+      (variant_case name: (identifier) payload: (type_identifier (identifier)))
+      (variant_case name: (identifier))))
+  (function_declaration
+    name: (identifier)
+    parameters: (typed_parameters
+      (typed_parameter name: (identifier) type: (type_identifier (identifier))))
+    return_type: (type_identifier (identifier))
+    body: (block
+      (return_statement
+        (match_expression
+          value: (identifier)
+          (match_arm
+            pattern: (match_pattern case: (identifier) binding: (identifier))
+            value: (member_expression object: (identifier) property: (identifier)))
+          (match_arm
+            pattern: (match_pattern case: (identifier))
+            value: (string)))))))

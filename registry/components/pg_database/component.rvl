@@ -1,0 +1,20 @@
+// A Postgres-backed Database provider. The plain hot-swap target: its provided
+// interface is exactly the Database a UserCache consumes. No emission of its
+// own (the provide bodies call the pool through effects), so its capability set
+// is empty — least authority, which ranks it first (docs/registry.md §2.1).
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component PgDatabase provides db: Database {
+  config { url: Str = "pg://", pool_size: Int = 10 }
+
+  let pool = effect Pool.open(config.url, config.pool_size) undo pool.close()
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}

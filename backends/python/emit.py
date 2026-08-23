@@ -108,6 +108,24 @@ def _uses_bounded_int(node) -> bool:
     return False
 
 
+def _uses_bounded_int32(node) -> bool:
+    """Does this IR do Int32 `+`/`-`/`*`, negate an Int32, or narrow with
+    `to_int32`? The i32 bound helper is emitted only where it is used."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "bin" and node.get("op") in ("+", "-", "*")
+                and node.get("operands") == "Int32"):
+            return True
+        if (node.get("kind") == "un" and node.get("op") == "-"
+                and node.get("operands") == "Int32"):
+            return True
+        if node.get("kind") == "builtin" and node.get("method") == "to_int32":
+            return True
+        return any(_uses_bounded_int32(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_bounded_int32(v) for v in node)
+    return False
+
+
 def _uses_true_division(node) -> bool:
     """Does anything in this IR divide with `/`? The IEEE helper is emitted
     only where it is used, so modules that never divide stay unchanged."""
@@ -118,6 +136,67 @@ def _uses_true_division(node) -> bool:
     if isinstance(node, (list, tuple)):
         return any(_uses_true_division(v) for v in node)
     return False
+
+
+def _uses_float_interp(node) -> bool:
+    """Does any `${…}` template interpolate a provably-`Float` expression?
+    The canonical `Float -> Str` helper is emitted only then, so modules
+    without float interpolation stay byte-identical (docs/strings.md)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "interp":
+            for part in node.get("parts") or []:
+                if isinstance(part, (list, tuple)) and len(part) == 2 \
+                        and part[0] == "expr" and _is_float_expr(part[1]):
+                    return True
+        return any(_uses_float_interp(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_float_interp(v) for v in node)
+    return False
+
+
+# Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md). `repr`
+# gives the shortest round-trip digits; this reformats them into the ES
+# notation (integer/fraction/exponent thresholds, `-0` -> `"0"`).
+_REVL_FTOA_SRC = '''def _revl_ftoa(x):
+    """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md)."""
+    if x != x:
+        return "NaN"
+    if x == float("inf"):
+        return "Infinity"
+    if x == float("-inf"):
+        return "-Infinity"
+    if x == 0:
+        return "0"
+    sign = "-" if x < 0 else ""
+    s = repr(abs(x))
+    if "e" in s or "E" in s:
+        mant, _, exp_s = s.replace("E", "e").partition("e")
+        exp = int(exp_s)
+    else:
+        mant, exp = s, 0
+    intpart, _, frac = mant.partition(".")
+    digits = intpart + frac
+    point = len(intpart) + exp
+    i = 0
+    while i < len(digits) - 1 and digits[i] == "0":
+        i += 1
+        point -= 1
+    digits = digits[i:].rstrip("0") or "0"
+    if digits == "0":
+        return "0"
+    k = len(digits)
+    n = point
+    if k <= n <= 21:
+        body = digits + "0" * (n - k)
+    elif 0 < n <= 21:
+        body = digits[:n] + "." + digits[n:]
+    elif -6 < n <= 0:
+        body = "0." + "0" * (-n) + digits
+    else:
+        e = n - 1
+        mantissa = digits if k == 1 else digits[0] + "." + digits[1:]
+        body = mantissa + "e" + ("+" if e >= 0 else "-") + str(abs(e))
+    return sign + body'''
 
 
 # The total, value-returning division forms (docs/arithmetic.md): same
@@ -163,6 +242,16 @@ def _render_builtin(method, target: str, args: list) -> str:
         return f"{target}.get({args[0]})"
     if method == "has":
         return f"({args[0]} in {target})"
+    # The iteration/remove step (docs/stdlib-2.0.md §Map). python str
+    # comparison IS canonical (code-point) order, so sorted() is exact;
+    # remove copies without the key, receiver untouched.
+    if method == "size":
+        return f"len({target})"
+    if method == "keys":
+        return f"sorted({target})"
+    if method == "remove":
+        return (f"(dict((kk, vv) for kk, vv in {target}.items() "
+                f"if kk != {args[0]}))")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
     # and its `%` takes the divisor's sign, so div_floor is native and the
     # Euclidean remainder is `a % abs(b)`; truncation has to be built.
@@ -176,6 +265,13 @@ def _render_builtin(method, target: str, args: list) -> str:
                 f"({target}, {args[0]}))")
     if method == "mod":
         return f"({target} % abs({args[0]}))"
+    # Int/Int32 width conversions (docs/arithmetic.md). python has one int
+    # type, so widening Int32 -> Int is the identity; narrowing Int -> Int32
+    # re-imposes the 32-bit bound through `_revl_i32`, which traps out of range.
+    if method == "to_int":
+        return f"({target})"
+    if method == "to_int32":
+        return f"_revl_i32({target})"
     # The total forms (docs/arithmetic.md): same quotient as the faulting
     # operation, but a zero divisor yields Err(reason) instead of raising —
     # the whole point is that a pure fn cannot `fail`, so the error travels
@@ -334,6 +430,15 @@ class _ComponentEmitter:
                 f"{name!r}: {self._expr(value, where)}"
                 for name, value in expr.get("fields") or []
             ) + "}"
+        if kind == "record_update":
+            # functional record update (docs/records.md §2): a fresh dict
+            # spreading the base, then the updated fields overriding it
+            base = self._expr(expr.get("base"), where)
+            parts = [f"**{base}"] + [
+                f"{name!r}: {self._expr(value, where)}"
+                for name, value in expr.get("updates") or []
+            ]
+            return "{" + ", ".join(parts) + "}"
         if kind == "list":
             return "[" + ", ".join(self._expr(item, where) for item in expr.get("items") or []) + "]"
         if kind == "arrow":
@@ -773,18 +878,44 @@ def _emit_types(types: dict) -> "_Lines":
     return out
 
 
+def _is_float_expr(node: object) -> bool:
+    """Is this expression *syntactically* certain to be a `Float`?
+
+    Only what the node proves on its own — a Float literal, a `/` (true
+    division always yields Float), a Float-annotated arithmetic node, or a
+    unary minus of one. This mirrors the TypeScript backend's proof; the
+    emitter has no type environment, so a False answer only costs the default
+    `str()`, which is already correct for a non-Float. See docs/strings.md.
+    """
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "lit":
+        value = node.get("value")
+        return isinstance(value, float) and not isinstance(value, bool)
+    if kind == "bin":
+        return node.get("op") == "/" or node.get("operands") == "Float"
+    if kind == "un":
+        return node.get("op") == "-" and _is_float_expr(node.get("operand"))
+    return False
+
+
 def _interp_fstring(parts) -> str:
     """Emit a `${…}` template as a string concatenation.
 
     Each interpolated segment is a full expression (`["expr", ir_node]`),
     stringified with `str(...)`; text segments are Python string literals.
     Concatenation (not an f-string) so an interpolated expression may itself
-    contain quotes or braces.
+    contain quotes or braces. A `Float` renders through `_revl_ftoa` (the
+    canonical ECMAScript `Number::toString` form), not python's `str` — `str`
+    gives `nan`/`0.0`/`-0.0`, which no other tier produces (docs/strings.md).
     """
     pieces: list[str] = []
     for kind, value in parts:
         if kind == "text":
             pieces.append(repr(value))
+        elif _is_float_expr(value):
+            pieces.append(f"_revl_ftoa({_expr(value)})")
         else:  # ["expr", ir_node]
             pieces.append(f"str({_expr(value)})")
     if not pieces:
@@ -877,6 +1008,11 @@ def _expr(node: dict) -> str:
             # which is the reference tier disagreeing with all five others.
             return (f"_revl_i64({_expr(node['left'])} {node['op']} "
                     f"{_expr(node['right'])})")
+        if node["op"] in ("+", "-", "*") and node.get("operands") == "Int32":
+            # Int32 traps at the 32-bit edge, the same imposition at half the
+            # width (docs/arithmetic.md).
+            return (f"_revl_i32({_expr(node['left'])} {node['op']} "
+                    f"{_expr(node['right'])})")
         if node["op"] == "/":
             # true division, IEEE at zero (docs/arithmetic.md)
             return f"_revl_div({_expr(node['left'])}, {_expr(node['right'])})"
@@ -907,6 +1043,8 @@ def _expr(node: dict) -> str:
                 # rust and wasm — quietly came back as 2^63 here, out of the
                 # range python itself imposes on every other operation.
                 return f"_revl_i64(-{_expr(node['operand'])})"
+            if node.get("operands") == "Int32":
+                return f"_revl_i32(-{_expr(node['operand'])})"
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
@@ -939,6 +1077,15 @@ def _expr(node: dict) -> str:
         return f"lambda {lambda_params}: {_expr(node['body'])}"
     if kind == "match":
         return _match_expr(_expr(node["scrutinee"]), node["arms"])
+    if kind == "record_update":
+        # functional record update (docs/records.md §2): fresh dict spreading
+        # the base, updated fields overriding it
+        base = _expr(node.get("base"))
+        parts = [f"**{base}"] + [
+            f"{name!r}: {_expr(value)}"
+            for name, value in node.get("updates") or []
+        ]
+        return "{" + ", ".join(parts) + "}"
     if kind == "interp":
         return _interp_fstring(node["parts"])
     if kind == "optfield":
@@ -1450,6 +1597,17 @@ def emit(ir: dict) -> str:
         out.add(0, "        raise OverflowError('revl: Int overflow')")
         out.add(0, "    return v")
         out.add(0)
+    if _uses_bounded_int32(ir):
+        out.add(0, "_REVL_I32_MIN = -(2 ** 31)")
+        out.add(0, "_REVL_I32_MAX = 2 ** 31 - 1")
+        out.add(0)
+        out.add(0, "def _revl_i32(v):")
+        out.add(0, '    """Int32 is bounded 32-bit and overflow traps '
+                   '(docs/arithmetic.md)."""')
+        out.add(0, "    if v < _REVL_I32_MIN or v > _REVL_I32_MAX:")
+        out.add(0, "        raise OverflowError('revl: Int32 overflow')")
+        out.add(0, "    return v")
+        out.add(0)
     if _uses_true_division(ir):
         # `/` is IEEE true division (docs/arithmetic.md): a zero divisor gives
         # +/-inf, and 0/0 gives NaN. Python is the only tier that raises
@@ -1465,6 +1623,15 @@ def emit(ir: dict) -> str:
         out.add(0, "        return float('nan')")
         out.add(0, "    return (_revl_math.copysign(float('inf'), a)")
         out.add(0, "            * _revl_math.copysign(1.0, b))")
+        out.add(0)
+    if _uses_float_interp(ir):
+        # Canonical Float -> Str (docs/strings.md): the ECMAScript
+        # Number::toString shortest-round-trip form, so `${aFloat}` agrees with
+        # every other tier. python's own `str(float)` gives `nan`/`0.0`/`-0.0`,
+        # none of which match. `repr` supplies the shortest digits; the rest is
+        # the ES notation rule (a shared spec each tier spells in host syntax).
+        for line in _REVL_FTOA_SRC.splitlines():
+            out.add(0, line)
         out.add(0)
     out.add(0, "def _revl_field(v, name):")
     out.add(0, '    """Record literals are dicts, ADT payloads are objects."""')

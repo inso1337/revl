@@ -68,6 +68,41 @@ test "call argument widens" { assert ident(3) == 3.0 }
 test "annotated let widens" { assert widen_let() == 3.0 }
 test "return widens" { assert widen_return(4) == 4.0 }
 """,
+
+    # The C1 contract (docs/collections.md, docs/stdlib-2.0.md §Map): keys()
+    # yields ascending canonical Str order — a pure function of the key set,
+    # never of insertion history (go/rust randomize by design; the fixture
+    # inserts out of order so any insertion- or hash-order tier fails here).
+    # size/remove ride along: remove is persistent (the receiver keeps its
+    # entry) and total (a missing key is a no-op), and both are exercised at
+    # the empty-map boundary.
+    "map iteration is canonical order": """
+fn emptyTable() -> Map[Str, Int] { return Map.empty() }
+pub fn build(pairs: List[Str]) -> Map[Str, Int] {
+  var m = emptyTable()
+  var i = 0
+  while (i < pairs.length()) {
+    m = m.set(pairs[i], i)
+    i += 1
+  }
+  return m
+}
+pub fn ordered(pairs: List[Str]) -> List[Str] { return build(pairs).keys() }
+test "iteration is canonical, not insertion order" {
+  assert ordered(["banana", "apple", "cherry"]) == ["apple", "banana", "cherry"]
+}
+test "size counts entries" { assert build(["a", "bb"]).size() == 2 }
+test "empty map sizes zero and iterates to nothing" {
+  assert emptyTable().size() == 0 && emptyTable().keys().length() == 0
+}
+test "remove is persistent and total" {
+  let m = build(["a", "b"])
+  let m2 = m.remove("a")
+  let m3 = m.remove("nope")
+  assert m.has("a") && !m2.has("a") && m2.size() == 1
+  assert m3 == m
+}
+""",
 }
 
 # go joins the fast set: the v3 tier is dependency-free Go, so `go test`
@@ -792,3 +827,380 @@ def test_wasm_int_is_i64_and_checks_the_bound():
     assert "(func $int_add (param $a i64) (param $b i64) (result i64)" in emitted
     assert "unreachable" in emitted
     assert "(i32.add)" not in emitted
+
+
+# =========================================================================
+# Int32 — sized integers (docs/arithmetic.md, "Sized integers")
+#
+# `Int32` is 32-bit two's complement with the same trapping discipline `Int`
+# has at 64 bits: `+ - *` and unary `-` fault at the i32 edge rather than
+# wrapping. The coercion rule is lossless-widen / checked-narrow:
+# `Int32 -> Int` is implicit (`.to_int()` spells it), `Int -> Int32` is always
+# explicit and range-checked (`.to_int32()`), so no narrowing hides. Every
+# claim below is *executed*, not asserted about text — the same floor the Int
+# rules stand on. wasm joins py/ts/go here because the whole point of the type
+# is the tier with native i32.
+# =========================================================================
+
+# tiers that can represent and run Int32 today; ts/wasm self-skip when their
+# toolchain (vitest / wasmtime) is absent, exactly as the Int tests do.
+INT32_TIERS = ("py", "ts", "go", "wasm")
+
+INT32_IN_RANGE = """
+pub fn add(a: Int32, b: Int32) -> Int32 { return a + b }
+pub fn mul(a: Int32, b: Int32) -> Int32 { return a * b }
+test "small arithmetic"  { assert add(2.to_int32(), 2.to_int32()).to_int() == 4 }
+test "near the i32 bound" { assert add(2147483646.to_int32(), 1.to_int32()).to_int() == 2147483647 }
+test "multiplication"     { assert mul(46341.to_int32(), 46340.to_int32()).to_int() == 2147441940 }
+test "negative bound"     { assert add((0 - 2147483647).to_int32(), (0 - 1).to_int32()).to_int() == 0 - 2147483648 }
+test "negation in range"  { assert (-(0 - 42).to_int32()).to_int() == 42 }
+"""
+
+INT32_OVERFLOW = """
+pub fn maxi() -> Int32 { return 2147483647.to_int32() }
+pub fn one() -> Int32 { return 1.to_int32() }
+test "int32 overflow must not produce a value" { assert (maxi() + one()).to_int() == 0 }
+"""
+
+INT32_NARROW_TRAP = """
+pub fn toobig() -> Int { return 2147483648 }
+test "narrowing out of the i32 range must not produce a value" {
+  assert toobig().to_int32().to_int() == 0
+}
+"""
+
+INT32_NEG_MIN = """
+pub fn lo() -> Int32 { return (0 - 2147483648).to_int32() }
+pub fn neg(x: Int32) -> Int32 { return -x }
+test "negating Int32.MIN must not produce a value" { assert neg(lo()).to_int() == 0 }
+"""
+
+INT32_COERCIONS = """
+pub fn widen(x: Int32) -> Int { return x }
+pub fn narrow(n: Int) -> Int32 { return n.to_int32() }
+test "Int32 widens implicitly into an Int position" { assert widen(7.to_int32()) == 7 }
+test "narrowing round-trips inside the range" { assert narrow(1000).to_int() == 1000 }
+test "narrowing preserves negatives" { assert narrow(0 - 2000000000).to_int() == 0 - 2000000000 }
+"""
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_in_range_arithmetic(tier: str):
+    status, message = _run(tier, INT32_IN_RANGE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_overflow_traps(tier: str):
+    """A tier that *returns* here wrapped at 2^31 — the failure the type exists
+    to make impossible, at half the width `Int` guards."""
+    status, message = _run(tier, INT32_OVERFLOW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on Int32 overflow ({status}) — it wrapped: {message}")
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_narrowing_out_of_range_traps(tier: str):
+    """`Int -> Int32` is checked: a value outside [-2^31, 2^31-1] faults rather
+    than silently keeping the low 32 bits."""
+    status, message = _run(tier, INT32_NARROW_TRAP)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap narrowing out of the i32 range ({status}): {message}")
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_negation_of_min_traps(tier: str):
+    """`-Int32.MIN` overflows i32 (it is `0 - Int32.MIN`), so every tier faults
+    rather than wrapping back to Int32.MIN."""
+    status, message = _run(tier, INT32_NEG_MIN)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", (
+        f"{tier} did not trap on -Int32.MIN ({status}) — it wrapped: {message}")
+
+
+@pytest.mark.parametrize("tier", INT32_TIERS)
+def test_int32_coercions_agree(tier: str):
+    """Widen (implicit) and narrow (checked) both agree across tiers, including
+    on negatives — the coercion half of the guarantee."""
+    status, message = _run(tier, INT32_COERCIONS)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_int32_in_range_arithmetic_slow(tier: str):
+    status, message = _run(tier, INT32_IN_RANGE)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("tier", BOUNDED_SLOW)
+def test_int32_overflow_traps_slow(tier: str):
+    status, message = _run(tier, INT32_OVERFLOW)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "fail", f"{tier} did not trap on Int32 overflow: {message}"
+
+
+def _emit_text(backend: str, source: str) -> str:
+    """`_emit`, but flattened to text — the wasm backend returns a dict of
+    modules, every other tier a single string."""
+    spec = importlib.util.spec_from_file_location(
+        f"emit_{backend}_i32", ROOT / "backends" / backend / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    out = module.emit(compile_source(source, "cross_tier_exec.rvl"))
+    return "\n".join(out.values()) if isinstance(out, dict) else out
+
+
+def test_every_tier_imposes_the_i32_bound_on_arithmetic():
+    """The static half: each tier renders Int32 `+` through its own 32-bit trap
+    mechanism, never a bare wrapping add. One guarantee, six spellings."""
+    checks = {
+        "rust": "checked_add",
+        "go": "revlAddI32",
+        "python": "_revl_i32(",
+        "typescript": "revlI32(",
+        "java": "Math.addExact",
+        "wasm": "$int32_add",
+    }
+    for backend, needle in checks.items():
+        emitted = _emit_text(backend, INT32_OVERFLOW)
+        assert needle in emitted, (backend, needle, emitted[:400])
+    # rust names the Int32 fault in the message where it can carry one
+    assert "revl: Int32 overflow" in _emit_text("rust", INT32_OVERFLOW)
+
+
+def test_narrowing_is_explicit_and_checked_on_every_tier():
+    """`Int -> Int32` never lowers to a silent truncation: each tier routes it
+    through its checked-narrow spelling (docs/arithmetic.md)."""
+    src = "pub fn n(x: Int) -> Int32 { return x.to_int32() }\n"
+    checks = {
+        "rust": "i32::try_from",
+        "go": "revlToI32",
+        "python": "_revl_i32(",
+        "typescript": "revlI32(Number(",
+        "java": "Math.toIntExact",
+        "wasm": "$int32_narrow",
+    }
+    for backend, needle in checks.items():
+        assert needle in _emit_text(backend, src), (backend, needle)
+
+
+# ============================================================ THE STRING WAVE
+#
+# Roadmap item 51 (the string wave) — "Str gets the treatment Int got". The
+# stdlib spec never says what a string's *unit* is, and the lowerings already
+# disagree, so `"😀".length()` is a different number on different tiers with
+# every test passing, because every test was ASCII. This is the Int -> Float
+# class of silent wrong answer, one level up: "every emitter agreed on a
+# shape" never implied "every tier agrees on a value".
+#
+# These probes assert the CHOSEN unit — code points (docs/strings.md). The fix
+# has landed, so they are plain asserts: `"😀"` is U+1F600 — 1 code point,
+# 2 UTF-16 units (D83D DE00), 4 UTF-8 bytes (F0 9F 98 80), the one input that
+# separates all three units — and every tier now answers 1 for its length.
+#
+# What each tier had to do (measured divergence -> fix; docs/strings.md):
+#   length():      py 1 (reference) · ts 2 -> [...s].length · go/rust
+#                  literal-rejected -> valid `\U…`/`\u{…}` escapes · java 2 ->
+#                  codePointCount · wasm 4 -> UTF-8-decoding WAT helper
+#   charCodeAt(0): py 128512 · ts 55357 (hi-surrogate) -> codePointAt · go/rust
+#                  rej -> free once the literal compiles · java 55357 ->
+#                  codePointAt · wasm 240 (byte) -> UTF-8 decode
+# The IR stored the astral literal as a code point already; the go/rust
+# emitters re-encoded it as lone-surrogate `\uXXXX` via `json.dumps`, which
+# neither language accepts — now they escape from code points (`\U0001F600`,
+# `\u{1F600}`). java is not executed here (no JDK); its column is verified from
+# backends/java/emit.py (codePointCount/offsetByCodePoints/codePointAt).
+
+STRING_UNIT_PROBES = {
+    # name: (source asserting the CODE-POINT answer, human note)
+    "length counts code points": (
+        'pub fn f() -> Int { return "😀".length() }\n'
+        'test "one astral char is one code point" { assert f() == 1 }',
+        "py=1 · ts=2 · go/rust=literal-rejected · java=2 · wasm=4",
+    ),
+    "charCodeAt yields the scalar value": (
+        'pub fn f() -> Int { return "😀".charCodeAt(0) }\n'
+        'test "charCodeAt is the Unicode scalar" { assert f() == 128512 }',
+        "py=128512 · ts=55357(hi-surrogate) · go/rust=rej · java=55357 · wasm=240(byte)",
+    ),
+    "charAt keeps the whole scalar": (
+        'pub fn f() -> Bool { return "😀".charAt(0) == "😀" }\n'
+        'test "charAt(0) is the whole char, not half a surrogate" { assert f() }',
+        "py=true · ts=false · go/rust=rej · java=false · wasm=false",
+    ),
+    "slice cuts on code-point boundaries": (
+        'pub fn f() -> Bool { return "a😀b".slice(1, 2) == "😀" }\n'
+        'test "slice(1,2) is the middle code point" { assert f() }',
+        "py=true · ts=false · go/rust=rej · java=false · wasm=false",
+    ),
+}
+
+# wasm needs wasmtime and is slow to spin up; group it with the compiled tiers.
+STRING_SLOW_TIERS = ("rust", "java", "wasm")
+
+
+# The string wave is fixed (item 51, docs/strings.md): every tier answers in
+# code points, so these are plain asserts now. The IR stores string literals as
+# code points and each backend escapes from them (go `\U…`, rust `\u{…}`); ts
+# and java route length/charAt/charCodeAt/slice/indexOf through code-point APIs;
+# wasm decodes UTF-8 in its WAT string helpers. python was the reference.
+@pytest.mark.parametrize("name", sorted(STRING_UNIT_PROBES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_string_unit_is_code_points(tier: str, name: str):
+    source, _note = STRING_UNIT_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} does not answer in code points for {name!r}: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac/wasmtime are slow)")
+@pytest.mark.parametrize("name", sorted(STRING_UNIT_PROBES))
+@pytest.mark.parametrize("tier", STRING_SLOW_TIERS)
+def test_string_unit_is_code_points_slow(tier: str, name: str):
+    source, _note = STRING_UNIT_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} does not answer in code points for {name!r}: {message}"
+
+
+# ------------------------------------------ float rendering in interpolation
+#
+# The other half of the string wave: `${aFloat}` inside a template has no
+# canonical spelling, so the same Float renders differently on every tier —
+# a template that logs or hashes a Float is a silent cross-tier divergence
+# exactly like the unit is. Measured today:
+#
+#   `${1.0e21}`         py/ts/go "1e+21" · rust "1000000000000000000000" ·
+#                       java "1.0E21"† · wasm REFUSED ("literal .. not lowerable")
+#   `${0.0 / 0.0}` (NaN) py "nan" · ts/go/rust/java "NaN"† · wasm refused
+#   `${(0.0-1.0)*0.0}` (-0.0) py "-0.0" · rust "-0" · ts/go "0" · java "-0.0"† · wasm refused
+#   `${0.0}`  (whole)   py "0.0" · ts/go/rust "0" · java "0.0"† · wasm refused
+#
+# Decision (docs/strings.md): one canonical Float -> Str, the ECMAScript
+# Number::toString shortest-round-trip form — the JS-prior tiebreak, the same
+# one that made `/` "spelled as TS spells it". That is "1e+21", "NaN",
+# "Infinity"/"-Infinity", and negative zero rendered "0". These probes assert
+# that canonical and xfail until every tier renders it.
+
+FLOAT_INTERP_PROBES = {
+    "large magnitude uses exponent": (
+        'pub fn f() -> Str { return `${1.0e21}` }\n'
+        'test "1e21 renders as 1e+21" { assert f() == "1e+21" }',
+        'py/ts/go "1e+21" · rust "1000000000000000000000" · java "1.0E21" · wasm refused',
+    ),
+    "NaN spelling": (
+        'pub fn f() -> Str { return `${0.0 / 0.0}` }\n'
+        'test "NaN renders as NaN" { assert f() == "NaN" }',
+        'py "nan" · ts/go/rust/java "NaN" · wasm refused',
+    ),
+    "whole-number float has no trailing point": (
+        'pub fn f() -> Str { return `${0.0}` }\n'
+        'test "0.0 renders as 0" { assert f() == "0" }',
+        'py "0.0" · ts/go/rust "0" · java "0.0" · wasm refused',
+    ),
+    "negative zero loses its sign in text": (
+        'pub fn f() -> Str { return `${(0.0 - 1.0) * 0.0}` }\n'
+        'test "-0.0 renders as 0" { assert f() == "0" }',
+        'py "-0.0" · rust "-0" · ts/go "0" · java "-0.0" · wasm refused',
+    ),
+}
+
+
+# Float -> Str in interpolation is the canonical ECMAScript Number::toString
+# form on every tier that renders it (item 51, docs/strings.md): python/go/rust/
+# java each spell the shared renderer in host syntax; ts's `${x}` already is it.
+# wasm now renders the subset it can do *exactly* in hand-written WAT — NaN,
+# +/-Infinity, and every integer-valued float with |x| < 2^63 (rendered through
+# `$f64_to_str`, which reuses `$int_to_str`). The three probes in that subset
+# are plain asserts below. The one still-fenced case is the exponent form
+# (`${1.0e21}` -> "1e+21"): its ES spelling needs a shortest-round-trip
+# float->decimal (Grisu/Ryu class) that is not implemented in WAT, so
+# `$f64_to_str` traps on |x| >= 2^63 rather than emit a divergent string. That
+# one probe stays xfail (docs/strings.md §"Remaining wasm WAT work").
+FLOAT_SLOW_TIERS = ("rust", "java")
+
+# The subset wasm renders byte-exactly today, and the one case still fenced.
+WASM_FLOAT_CANONICAL = (
+    "NaN spelling",
+    "negative zero loses its sign in text",
+    "whole-number float has no trailing point",
+)
+WASM_FLOAT_FENCED = ("large magnitude uses exponent",)
+
+
+@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
+@pytest.mark.parametrize("tier", FAST_TIERS)
+def test_float_interpolation_is_canonical(tier: str, name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo/javac are slow)")
+@pytest.mark.parametrize("name", sorted(FLOAT_INTERP_PROBES))
+@pytest.mark.parametrize("tier", FLOAT_SLOW_TIERS)
+def test_float_interpolation_is_canonical_slow(tier: str, name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run(tier, source)
+    if status == "skip":
+        pytest.skip(f"{tier}: {message}")
+    assert status == "pass", f"{tier} renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (wasmtime is slow)")
+@pytest.mark.parametrize("name", sorted(WASM_FLOAT_CANONICAL))
+def test_float_interpolation_wasm_is_canonical(name: str):
+    """wasm now renders these Float cases in the canonical ECMAScript form,
+    byte-for-byte, via a hand-written `$f64_to_str` (item 51, docs/strings.md):
+    NaN, integer-valued floats (whole-number and negative-zero both -> "0").
+    The module's own `assert f() == "..."` traps on any divergence, so a pass
+    here is wasmtime confirming the exact canonical bytes."""
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run("wasm", source)
+    if status == "skip":
+        pytest.skip(f"wasm: {message}")
+    assert status == "pass", f"wasm renders the Float differently: {message}"
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (wasmtime is slow)")
+@pytest.mark.xfail(
+    reason="item 51: wasm renders NaN/Infinity and every integer-valued float "
+    "|x| < 2^63 canonically, but the exponent form (`${1.0e21}` -> \"1e+21\") "
+    "needs a shortest-round-trip float->decimal (Grisu/Ryu class) not "
+    "implemented in hand-written WAT. `$f64_to_str` traps on |x| >= 2^63 "
+    "rather than emit a string that would diverge from the other tiers — the "
+    "narrowed remaining wasm work (docs/strings.md §\"Remaining wasm WAT "
+    "work\"). Named unsupported inputs: non-integer floats, and |x| >= 2^63.",
+    strict=True,
+)
+@pytest.mark.parametrize("name", sorted(WASM_FLOAT_FENCED))
+def test_float_interpolation_wasm_exponent_is_fenced(name: str):
+    source, _note = FLOAT_INTERP_PROBES[name]
+    status, message = _run("wasm", source)
+    if status == "skip":
+        pytest.skip(f"wasm: {message}")
+    assert status == "pass", f"wasm renders the Float differently: {message}"

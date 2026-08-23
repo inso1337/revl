@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Exposed as a reusable workflow so the release job can gate the PyPI publish
+  # on the *same* suite that gates main (see .github/workflows/publish.yml).
+  # A version on PyPI must be a claim this whole matrix passed. No job below
+  # changes; this only lets the workflow be `uses:`-called from the tag build.
+  workflow_call:
 
 jobs:
   frontend:
@@ -202,6 +207,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - uses: astral-sh/setup-uv@v4
       - name: Install wasmtime (pinned)
         run: |
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v47.0.3/wasmtime-v47.0.3-x86_64-linux.tar.xz -o /tmp/wasmtime.tar.xz
@@ -210,7 +216,8 @@ jobs:
           echo "/tmp/wasmtime/wasmtime-v47.0.3-x86_64-linux" >> "$GITHUB_PATH"
       - run: pip install -e ".[test]"
       # the typescript validator drives tsc through the compiler API, so it
-      # needs the backend's own node_modules
+      # needs the backend's own node_modules — this same install also carries
+      # the cordis-ts runtime the py<->node placement seam boots on below
       - run: cd backends/typescript && npm ci
       # a tier whose validator cannot run reports `unavailable`, and
       # `--validate` still exits 0 — right on a laptop, wrong here. Fail the
@@ -219,3 +226,29 @@ jobs:
       # the baselined gate: new toolchain rejections fail, and a baselined
       # failure that starts passing fails too, so the list can only shrink
       - run: pytest tests/test_conformance_validate.py -q
+      # Roadmap item 25 — placement across the tier seams, on every commit.
+      # The conformance gate above proves each tier's emitted code survives its
+      # own compiler; it does NOT boot a composition SPLIT across tiers and run
+      # a call over the Unix-socket bridge between them. That cross-tier seam
+      # (py<->node/rust/java/go) — the one roadmap item 23's `revl swap`
+      # live-migrates over — was exercised only where a dev happened to have
+      # every toolchain (docs/guide-humans.md calls the running placement
+      # "demonstrated, not gated"). This job is the one place all five
+      # placement runtimes exist at once, so gate it here.
+      #
+      # `revl run --placement` spawns py-placed processes as this interpreter,
+      # so the conductor needs the cordis-py runtime — install it the way the
+      # `--placement` preflight itself advertises, then run the smoke under it.
+      - run: sh backends/python/setup.sh
+      # ci/placement_smoke.sh boots examples/user_cache.rvl split py<->node,
+      # py<->rust, py<->go and py<->java (`--once`: boot, cross the seam via a
+      # probe, tear down, exit). It fails the build on a seam that will not come
+      # up, a probe that errors across the bridge, or a teardown that leaves
+      # residue — `--once`'s exit code alone catches only the first, so the
+      # script scans the trace for the other two. The py<->java seam runs on the
+      # in-repo stub runtime here (no REVL_CORDIS4J_CLASSES); it still crosses
+      # the socket bridge, which is what the smoke proves. wasm has no placement
+      # runner, so there is no py<->wasm seam to cover.
+      - run: bash ci/placement_smoke.sh
+        env:
+          REVL_PY: backends/python/.venv/bin/python

@@ -1,0 +1,42 @@
+// `verified effect` — inverse round-trip testing (roadmap item 26,
+// docs/verified-effect.md, syntax-2.0 §7).
+//
+// The checker proves an inverse is *present and well-shaped* (G4), never that
+// it is *correct* — "an undo that is wrong, partial, or a no-op" is the gap
+// docs/replay.md §4.1 names outright. A `verified effect` opts an
+// activation-body effect into a test nobody wrote: `revl test` activates the
+// component, tears it down so the inverse runs, and asserts the observable
+// in-process state returned to baseline — N randomized rounds, on the real
+// py runtime. Not a proof; in-process state only (aliases, external effects
+// and clock values are out of reach). See docs/verified-effect.md.
+
+service Store {
+  fn seed(k: Str) -> Int
+  fn unseed(k: Str) -> Int
+}
+
+service Ready {
+  fn ok() -> Str
+}
+
+component Backing provides s: Store {
+  let data = effect Map.new() undo data.drop()
+
+  provide s {
+    fn seed(k)   = data.insert(k, 1)
+    fn unseed(k) = data.remove(k)
+  }
+}
+
+// Seeder's activation seeds a key into the shared store; its inverse unseeds
+// it. `verified` marks the pair for round-trip testing. `config.tag` is the
+// randomized input surface — every round activates with a fresh tag.
+component Seeder requires s: Store provides r: Ready {
+  config { tag: Str }
+
+  let hold = verified effect s.seed(config.tag) undo s.unseed(config.tag)
+
+  provide r {
+    fn ok() = "ok"
+  }
+}

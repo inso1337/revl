@@ -203,3 +203,109 @@ QUERY_TOOLS = [
         "handler": _tool_drift,
     },
 ]
+
+
+# --------------------------------------------------------------------------
+# Session-bound query modes (docs/queries.md §9). The static tools above answer
+# against a compiled-from-source IR. These two families answer against the OTHER
+# two worlds: the live session as it stands after every swap, and a recorded
+# run. They carry no `handler` here — the handlers live in `server.py`, which
+# owns the session — but their schemas belong with the query surface. The
+# envelope is the same one the static tools use; `mode` says which world.
+# --------------------------------------------------------------------------
+
+_VERBS = ["emits-to", "withdraw", "depends-on", "reaches", "drift"]
+
+LIVE_QUERY_TOOLS = [
+    {
+        "name": "revl_live_query",
+        "description":
+            "THE QUERY SURFACE, ANSWERED AGAINST THE LIVE SESSION. Runs one of "
+            "the five verbs (`verb`: emits-to | withdraw | depends-on | reaches "
+            "| drift) against the composition CURRENTLY LOADED — the generation "
+            "as it stands after every revl_swap, not a static IR. The result is "
+            "the same envelope, with `mode: live`: the static \"a hot swap would "
+            "change this\" caveat is spent (this IS the post-swap world), and a "
+            "`live` block adds what only the runtime knows — which provisions are "
+            "actually SERVED right now, so a key whose provider has drifted to an "
+            "inactive state reads as absent (`live.notServedNow`). Requires "
+            "revl_load. Use this, not revl_query_*, once a composition is running.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "verb": {"type": "string", "enum": _VERBS,
+                         "description": "which of the five query verbs to run"},
+                "target": {"type": "string",
+                           "description": "the verb's argument for emits-to / "
+                                          "depends-on (a key, key.method, service "
+                                          "or extern)"},
+                "component": {"type": "string",
+                              "description": "the verb's argument for withdraw / "
+                                             "reaches (a component name)"},
+                "service": {"type": "string",
+                            "description": "the service, for drift"},
+                "gains": {**_METHOD_LIST,
+                          "description": "drift: methods the service would gain"},
+                "loses": {**_METHOD_LIST,
+                          "description": "drift: methods the service would lose"},
+            },
+            "required": ["verb"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+]
+
+HISTORY_QUERY_TOOLS = [
+    {
+        "name": "revl_history_emitted_between",
+        "description":
+            "WHICH EMISSIONS CROSSED BETWEEN STEPS X AND Y? A windowed read of a "
+            "RECORDED run's effect timeline (revl_load with `record: true`, then "
+            "revl_timeline). An emission is a one-way boundary crossing, so each "
+            "hit is a real crossing the runtime performed in [from, to] — not a "
+            "reachable site. EXACT for the recorded world; `mode: historical`. "
+            "The query nobody could ask before: a windowed read of a *verified* "
+            "effect timeline.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from": {"type": "integer", "description": "first step index (inclusive)"},
+                "to": {"type": "integer", "description": "last step index (inclusive)"},
+                "component": {"type": "string",
+                              "description": "restrict to one component; omit for all"},
+                "timeline": {"type": "object",
+                             "description": "an inline replay recording to query "
+                                            "instead of the live session's"},
+            },
+            "required": ["from", "to"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+    {
+        "name": "revl_history_lifetime",
+        "description":
+            "EVERYTHING THIS COMPONENT TOUCHED DURING ITS LIFE. The recorded "
+            "counterpart of revl_query_reach: not a may-analysis over the graph "
+            "but the effects and emissions the component ACTUALLY produced on a "
+            "recorded run, bounded by item 27's lifecycle trace (when it loaded, "
+            "when it withdrew, and why). Reads the live session's recording for "
+            "the effects and, if given, a `revl run --trace` JSONL for the "
+            "lifecycle. `mode: historical`, EXACT for that run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "trace": {"type": "array", "items": {"type": "object"},
+                          "description": "inline item-27 lifecycle events (a "
+                                         "why_runtime JSONL parsed to objects)"},
+                "traceFile": {"type": "string",
+                              "description": "path to a `revl run --trace` JSONL file"},
+                "timeline": {"type": "object",
+                             "description": "an inline replay recording to use "
+                                            "instead of the live session's"},
+            },
+            "required": ["component"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+]

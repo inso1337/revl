@@ -1,0 +1,38 @@
+{
+  "boundary": {
+    "PgDatabase": {
+      "awaits": 0,
+      "capabilities": {},
+      "compensated": 0,
+      "emissions": [],
+      "externs": []
+    }
+  },
+  "distributability": {
+    "Database": {
+      "reasons": [
+        "query: not async fn",
+        "execute: emission (sync)"
+      ],
+      "verdict": "address-space-bound"
+    }
+  },
+  "externs": [],
+  "kind": "revl.interchange",
+  "manifest": {
+    "components": [
+      {
+        "file": "component.rvl",
+        "inject": [],
+        "name": "PgDatabase",
+        "provides": [
+          "db"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "PgDatabase"
+    ]
+  },
+  "schema_version": "1.0"
+}

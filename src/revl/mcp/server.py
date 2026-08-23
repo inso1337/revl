@@ -27,10 +27,14 @@ import json
 import sys
 
 from ..compiler import compile_files, compile_source
-from ..diagnostics import FIXES, GUARANTEES, obligations, report
+from ..diagnostics import FIXES, GUARANTEES, report
+from . import fillspec
+from . import edit as _edit
 from ..errors import RevlError
+from . import gauntlet as _gauntlet
 from .persist import RestoreError
-from .query_tools import QUERY_TOOLS
+from .. import query as Q
+from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
 from .session import Session, SessionError
 
@@ -137,10 +141,23 @@ def _tool_call(arguments: dict) -> dict:
 
 def _tool_swap(arguments: dict) -> dict:
     """Admit a candidate against what is running, then hot-swap it in. A
-    rejected candidate changes nothing — that is the whole point."""
+    rejected candidate changes nothing — that is the whole point.
+
+    The source may be sent inline (`source`/`files`/`modules`) *or* referred to
+    by name: with none of those supplied, swap re-admits the source the server
+    already holds for the running composition (the audit's #1 finding — an
+    agent that just edited server-side with `revl_edit`, or wants to re-admit
+    the running generation, need not re-serialize the whole file). Full inline
+    source is still accepted, unchanged.
+    """
     if not SESSION.loaded:
         return _session_error("nothing is loaded — call revl_load first")
     replacing = tuple(arguments.get("replacing") or ())
+
+    inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    if not inline:
+        return _swap_server_side(replacing)
+
     try:
         _compile(arguments.get("source"), arguments.get("files"),
                  manifest=SESSION.ir, modules=arguments.get("modules"),
@@ -172,6 +189,50 @@ def _tool_swap(arguments: dict) -> dict:
     return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
 
 
+def _swap_server_side(replacing: tuple) -> dict:
+    """Swap the source the session already holds — no inline source resent."""
+    vs = _edit.virtual_source(SESSION)
+    if vs.get("source") is None:
+        return _session_error(
+            "no server-side source to swap by name — this composition was not "
+            "loaded from inline source, so there is nothing the session can "
+            "re-admit without you passing `source`/`files`")
+    try:
+        _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = False
+        rejected["swapped"] = False
+        rejected["note"] = "the running composition is untouched"
+        return rejected
+    try:
+        full = _edit.compile_virtual(vs)
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = True
+        rejected["swapped"] = False
+        rejected["note"] = ("the server-side source admits but is not a complete "
+                            "composition on its own")
+        return rejected
+    try:
+        state = SESSION.swap(full, origin=_edit._origin_from(vs))
+    except SessionError as error:
+        return _session_error(str(error))
+    return {"ok": True, "admitted": True, "swapped": True,
+            "fromServerSide": True, **_summary(full), **state}
+
+
+def _tool_edit(arguments: dict) -> dict:
+    """Patch the server-side source of the running composition and re-admit —
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
+    try:
+        return _edit.apply_edit(SESSION, arguments)
+    except _edit.EditError as error:
+        return _session_error(str(error), edited=False, swapped=False)
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback()}
@@ -188,6 +249,16 @@ def _tool_unload(_arguments: dict) -> dict:
 
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
+
+
+def _tool_gauntlet(arguments: dict) -> dict:
+    """Grade a candidate: run the battery in an isolated scratch session and
+    return the verdict dossier. A rejected or misbehaving candidate is graded,
+    not thrown, and the live composition is never touched (docs/gauntlet.md)."""
+    if arguments.get("source") is None and not arguments.get("files"):
+        return _session_error("provide `source` or `files` — the gauntlet "
+                              "grades a candidate component")
+    return _gauntlet.run(SESSION, arguments)
 
 
 # -- composition persistence (docs/persistence.md) ------------------------
@@ -264,6 +335,19 @@ def _tool_step_back(arguments: dict) -> dict:
         return _session_error(str(error), refused=True)
 
 
+def _tool_replay_bisect(arguments: dict) -> dict:
+    predicate = arguments.get("assert") or arguments.get("predicate")
+    if not predicate:
+        return _session_error("`assert` is required — a predicate expression "
+                              "over the `inspect` view (e.g. \"emissionsSoFar\" "
+                              "or \"'db' in activeProvisions\")")
+    try:
+        return {"ok": True, **SESSION.bisect(arguments.get("component"),
+                                             predicate)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_replay_forward(arguments: dict) -> dict:
     if "from" not in arguments:
         return _session_error("`from` is required")
@@ -272,6 +356,79 @@ def _tool_replay_forward(arguments: dict) -> dict:
                                                      arguments["from"])}
     except SessionError as error:
         return _session_error(str(error))
+
+
+# -- session-bound query modes (docs/queries.md §9) ------------------------
+
+
+def _tool_live_query(arguments: dict) -> dict:
+    """The five query verbs, answered against the LIVE session's post-swap
+    state instead of a compiled-from-source IR (query.live_query)."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded — a live query answers against "
+                              "the running composition; call revl_load first")
+    verb = arguments.get("verb")
+    if verb not in Q._VERB_FN:
+        return _session_error(f"unknown verb {verb!r}; one of "
+                              + ", ".join(sorted(Q._VERB_FN)))
+    live_state = SESSION.live_state()
+    if verb == "drift":
+        service = arguments.get("service") or arguments.get("target")
+        if not service:
+            return _session_error("`service` is required for the drift verb")
+        return Q.live_query(
+            SESSION.ir, verb, live_state, service,
+            gains=list(arguments.get("gains") or []),
+            losses=list(arguments.get("loses") or arguments.get("losses") or []))
+    arg = arguments.get("target") or arguments.get("component")
+    if not arg:
+        return _session_error("`target` (emits-to/depends-on) or `component` "
+                              "(withdraw/reaches) is required")
+    return Q.live_query(SESSION.ir, verb, live_state, arg)
+
+
+def _tool_history_emitted_between(arguments: dict) -> dict:
+    """which emissions crossed between steps X and Y? — over the live session's
+    recording, or an inline one (query.emitted_between)."""
+    frm, to = arguments.get("from"), arguments.get("to")
+    if frm is None or to is None:
+        return _session_error("`from` and `to` (step indices) are required")
+    timeline = arguments.get("timeline")
+    if timeline is None:
+        if not SESSION.loaded or SESSION.recorder is None:
+            return _session_error("no recorded timeline — revl_load with "
+                                  "`record: true`, or pass an inline `timeline`")
+        try:
+            timeline = SESSION.timeline(None)
+        except SessionError as error:
+            return _session_error(str(error))
+    return Q.emitted_between(timeline, frm, to, arguments.get("component"))
+
+
+def _tool_history_lifetime(arguments: dict) -> dict:
+    """everything a component touched during its life — the recording for the
+    effects, an item-27 lifecycle trace for the span (query.lifetime)."""
+    component = arguments.get("component")
+    if not component:
+        return _session_error("`component` is required")
+    timeline = arguments.get("timeline")
+    if timeline is None and SESSION.loaded and SESSION.recorder is not None:
+        try:
+            timeline = SESSION.timeline(None)
+        except SessionError:
+            timeline = None
+    trace = arguments.get("trace")
+    trace_file = arguments.get("traceFile")
+    if trace is None and trace_file:
+        from .. import why_runtime as wr
+        try:
+            trace = wr.read_trace(trace_file)
+        except (OSError, ValueError) as error:
+            return _session_error(f"cannot read trace {trace_file}: {error}")
+    if timeline is None and trace is None:
+        return _session_error("no recorded run to read — load with `record: "
+                              "true`, or pass `trace`/`traceFile`/`timeline`")
+    return Q.lifetime({"trace": trace, "timeline": timeline}, component)
 
 
 def _tool_check(arguments: dict) -> dict:
@@ -283,9 +440,13 @@ def _tool_check(arguments: dict) -> dict:
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
-    # and not admissible until these are closed".
+    # and not admissible until these are closed". Each obligation carries a
+    # `fillSpec` — the expected type, the emission upper bound, the in-scope
+    # bindings and the reachable service signatures the checker already knew at
+    # that position — so the hole can be filled directly (docs/holes.md §8).
+    holes = fillspec.enrich(ir) if ir.get("holes") else []
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": obligations(ir.get("holes") or [])["holes"]}
+            "holes": holes}
 
 
 def _tool_admit(arguments: dict) -> dict:
@@ -414,6 +575,44 @@ declared (G1); no cycles or duplicate providers (G2/G3); teardown cannot
 register effects (G5); expressions are pure (G6); `null` has no type —
 absence is Opt[T]; declared types are checked at every boundary.
 """
+
+
+def _resolve_registry_dir(arguments: dict) -> str:
+    """Where the git-backed registry lives: an explicit `registry` argument,
+    then $REVL_REGISTRY, then the `registry/` directory shipped in the repo."""
+    import os  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    return (arguments.get("registry")
+            or os.environ.get("REVL_REGISTRY")
+            or str(Path(__file__).resolve().parents[3] / "registry"))
+
+
+def _tool_resolve(arguments: dict) -> dict:
+    """Rank the registry's §5-admissible providers for a need — the read half
+    of the component registry (roadmap item 49, docs/registry.md §2). Source and
+    manifest ride inline so need -> resolve -> admit is two round-trips."""
+    from ..registry import Registry, resolve as registry_resolve  # noqa: PLC0415
+
+    need = arguments.get("need")
+    if need is None:
+        return _session_error(
+            "`need` is required — a `service` declaration (source), a hole's "
+            "fill spec (from revl_check), or a service shape object")
+    registry_dir = _resolve_registry_dir(arguments)
+    from pathlib import Path  # noqa: PLC0415
+    if not (Path(registry_dir) / "index.json").exists():
+        # §3: absent entirely when no index is configured — not an error.
+        return {"ok": True, "query": "resolve", "candidates": [],
+                "assumptions": [f"no registry index at {registry_dir}; "
+                                "set `registry` or $REVL_REGISTRY"]}
+    try:
+        registry = Registry.from_dir(registry_dir)
+        return registry_resolve(registry, need,
+                                manifest=arguments.get("manifest"),
+                                limit=int(arguments.get("limit", 5)))
+    except RevlError as error:
+        return report(error)
 
 
 def _tool_grammar(_arguments: dict) -> dict:
@@ -560,7 +759,12 @@ TOOLS = [
         "name": "revl_swap",
         "description": "Admit a candidate against the RUNNING composition and hot-swap "
                        "it in. A rejected candidate leaves the running system untouched. "
-                       "This is the acting half of revl_admit.",
+                       "This is the acting half of revl_admit. Source may be sent inline "
+                       "(`source`/`files`/`modules`) OR referred to by name: call it with "
+                       "NONE of those and swap re-admits the source the server already "
+                       "holds for the running composition — so an agent that edited "
+                       "server-side with revl_edit, or wants to re-admit the running "
+                       "generation, need not re-serialize the whole file.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -569,6 +773,91 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_swap,
+    },
+    {
+        "name": "revl_edit",
+        "description": "Patch the SERVER-SIDE source of the running composition and "
+                       "re-admit — deltas, not documents. Instead of re-sending the "
+                       "whole composition to change one line (revl_swap's cost, which "
+                       "scales with the running system), send a small structured patch "
+                       "against a named buffer the server already holds. Each edit is "
+                       "one of: {hole, expr} (fill the typed hole on that source line — "
+                       "pairs with revl_check's fillSpec, which reports each hole's "
+                       "line); {range: [start, end], replacement} (replace a character "
+                       "span); or {anchor, replacement} (replace a literal snippet, no "
+                       "offsets). Re-admission runs the SAME gate as revl_swap: a patch "
+                       "that breaks a guarantee is refused with its diagnostic and the "
+                       "running system is untouched. A patch that compiles clean is "
+                       "hot-swapped in; one that still has open holes advances the "
+                       "server-side source (so the next edit builds on it) but swaps "
+                       "nothing. Returns the admission verdict / holes / diagnostic — "
+                       "never the whole source.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "description": "the patch: one or more edits applied in order",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "hole": {"type": "integer",
+                                     "description": "1-based source line of the typed "
+                                                    "hole to fill (from a fillSpec)"},
+                            "expr": {"type": "string",
+                                     "description": "the fill expression (with `hole`)"},
+                            "range": {"type": "array", "items": {"type": "integer"},
+                                      "description": "[start] or [start, end] character "
+                                                     "offsets to replace"},
+                            "anchor": {"type": "string",
+                                       "description": "literal substring to replace "
+                                                      "(no offset arithmetic)"},
+                            "replacement": {"type": "string",
+                                            "description": "text to substitute (with "
+                                                           "`range`/`anchor`)"},
+                            "count": {"type": "integer",
+                                      "description": "max anchor sites to replace "
+                                                     "(omit for all)"},
+                        },
+                    },
+                },
+                "target": {"type": "string",
+                           "description": "which server-side buffer to edit: omit for the "
+                                          "main inline source, or name an in-memory module"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+            "required": ["edits"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_edit,
+    },
+    {
+        "name": "revl_gauntlet",
+        "description": "Grade a candidate component instead of merely admitting "
+                       "it: run a battery in an ISOLATED scratch session the live "
+                       "composition never sees, and return a structured verdict "
+                       "dossier. It separates what was PROVED (admission, derived "
+                       "teardown), what was TESTED with counts (a real boot/unload "
+                       "no-residue lifecycle), and what remains CLAIMED (the "
+                       "enumerated G8 extern boundary). Fault-sweep and "
+                       "inverse-round-trip sections are present but report "
+                       "`pending`. A rejected or faulting candidate is graded, not "
+                       "thrown; the running system is untouched either way. "
+                       "`ok` reports that a dossier was produced; the grade is in "
+                       "`verdict` (admissible | rejected). See docs/gauntlet.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "config": {"type": "object",
+                           "description": "per-component config for the scratch boot"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_gauntlet,
     },
     {
         "name": "revl_rollback",
@@ -683,6 +972,34 @@ TOOLS = [
         "handler": _tool_step_back,
     },
     {
+        "name": "revl_replay_bisect",
+        "description": "git-bisect for an execution: binary-search the recorded "
+                       "timeline for the FIRST step at which `assert` flips, in "
+                       "log2(N) evaluations instead of N. `assert` is a predicate "
+                       "expression over the same `inspect` view — names like "
+                       "`activeProvisions`, `emissionsSoFar`, `accumulated`, "
+                       "`step`. Read-only: it reconstructs each probed step, "
+                       "never mutating the timeline. Returns the found step's "
+                       "full record (who ran, what it touched, which realm) and "
+                       "the verified/unverified status of the effects on the path "
+                       "— today always UNVERIFIED, because `verified effect` "
+                       "(roadmap item 26) is not built, so the bisect trusts the "
+                       "recorded inverses rather than checking them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "assert": {"type": "string",
+                           "description": "predicate expression over the inspect "
+                                          "view; the first step where it flips is "
+                                          "the answer"},
+            },
+            "required": ["assert"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_replay_bisect,
+    },
+    {
         "name": "revl_replay_forward",
         "description": "Re-run the tail after step k by re-invoking the service calls "
                        "that produced it — how you re-test after a fix. Activation-body "
@@ -709,9 +1026,58 @@ TOOLS = [
     },
 ]
 
+# the component registry read path (docs/registry.md, roadmap item 49) —
+# appended additively so the tool literal above stays owned by the core verbs
+TOOLS.append({
+    "name": "revl_resolve",
+    "description": "Find a component to IMPORT instead of regenerating one. "
+                   "Give the NEED — a `service` declaration (source), a hole's "
+                   "fill spec (verbatim from revl_check), or a service shape "
+                   "object — and it returns ranked candidates whose provided "
+                   "service is §5-compatible with the need, each carrying its "
+                   "SOURCE and MANIFEST inline so the next call is revl_admit / "
+                   "revl_swap (two round-trips, never a browse session). Matching "
+                   "is admission, never text: the same structural-compatibility "
+                   "gate a hot-swap runs, pointed at the index — a candidate the "
+                   "gate would refuse is not returned. Pass `manifest` (the "
+                   "running composition's IR) to upgrade the answer from "
+                   "'compatible somewhere' to 'admissible here': a key the "
+                   "composition already provides is withheld (G2). Ranking is "
+                   "least-authority-first (smallest capability set, then tighter "
+                   "interface fit, then stronger evidence, then smaller source).",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "need": {"description": "a `service` declaration source, a fill spec "
+                                    "object, or a service shape object"},
+            "manifest": {"type": "object",
+                         "description": "the running composition's IR — candidates "
+                                        "are additionally checked admissible here"},
+            "limit": {"type": "integer",
+                      "description": "max candidates to return (default 5)"},
+            "registry": {"type": "string",
+                         "description": "registry directory (default $REVL_REGISTRY "
+                                        "or the repo's registry/)"},
+        },
+        "required": ["need"],
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    "handler": _tool_resolve,
+})
+
 # composition queries (docs/queries.md) — defined next door so this module
 # stays the protocol layer and the query surface can grow on its own
 TOOLS.extend(QUERY_TOOLS)
+
+# the two session-bound query modes (live / historical) carry their schema
+# next door and their handler here, because only this module holds the session
+_SESSION_QUERY_HANDLERS = {
+    "revl_live_query": _tool_live_query,
+    "revl_history_emitted_between": _tool_history_emitted_between,
+    "revl_history_lifetime": _tool_history_lifetime,
+}
+for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
+    TOOLS.append({**_schema, "handler": _SESSION_QUERY_HANDLERS[_schema["name"]]})
 
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]

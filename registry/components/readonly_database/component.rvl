@@ -1,0 +1,19 @@
+// A read-only Database provider: it REMOVES `execute`. Incompatible with a
+// Database need whose consumer still emits `db.execute(...)` — that call site
+// would dangle — so the §5 gate refuses it and `revl_resolve` never returns it
+// for such a need (docs/registry.md §2). It is here precisely so the filter has
+// something to reject.
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+}
+
+component ReadOnlyDatabase provides db: Database {
+  config { url: Str = "ro://", pool_size: Int = 4 }
+
+  let pool = effect Pool.open(config.url, config.pool_size) undo pool.close()
+
+  provide db {
+    fn query(sql) = pool.query(sql)
+  }
+}

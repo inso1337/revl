@@ -1,0 +1,15 @@
+// REJECTED — G4: `result` names the value an ACQUIRE returns, so it exists
+// only in the `undo` slot of an `extern acquire` with a declared return.
+// A `compensate` follows a one-way emission, which acquires nothing — the
+// slot binds no names at all, and a compensation runs from constants or
+// through other declared fns.
+//
+// expected error:
+//   `result` is not bound in the `compensate` slot of extern `send`
+
+extern pure fn log_unsent(n: Int)
+  = @py { return None }
+
+extern emission fn send(data: Str) -> Int
+  compensate log_unsent(result)
+  = @py { return 1 }
