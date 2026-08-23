@@ -1,0 +1,11 @@
+{
+  "name": "revl-residue-probe",
+  "private": true,
+  "version": "0.0.1",
+  "description": "No-residue lifecycle linter for foreign Cordis (TS) plugins — the adoption wedge",
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs",
+    "probe": "node run.mjs"
+  }
+}

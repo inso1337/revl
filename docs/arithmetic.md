@@ -238,12 +238,10 @@ range python imposes a line earlier, silently. It now goes through `_revl_i64`
 like any other subtraction, and the closure is asserted by execution. wasm had
 this right from the start: its emitter spells negation as a subtraction from
 zero through the checked helper, and rust's own `-` panics at the edge in the
-debug builds `cargo test` runs. The remaining tiers do not trap — go and java
-negate with the host operator, which wraps (`-Int.MIN == Int.MIN`), and
-TypeScript's `bigint` negation has no bound check, so the value simply leaves
-the range. That split is recorded as a pinned divergence
-(`tests/test_cross_tier_execution.py`, docs/contract-errata.md), not papered
-over.
+debug builds `cargo test` runs. The three tiers that used to wrap or grow now
+follow suit — go emits `revlSub(0, x)`, java `Math.negateExact(x)`, TypeScript
+`revlI64(-x)` — so `-Int.MIN` faults on every tier, asserted by execution
+across py/ts/go/java (`tests/test_cross_tier_execution.py`). No tier wraps.
 
 ### What the wasm port took
 

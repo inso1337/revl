@@ -93,6 +93,13 @@ class Session:
         self.previous: dict | None = None  # the generation `rollback` restores
         self.config: dict = {}
         self.recorder = None  # replay.Recorder, when loaded with record=True
+        # the admission inputs that produced the live composition — the
+        # *sources*, kept so the composition can be snapshotted for
+        # re-admission (docs/persistence.md). None when a composition was
+        # loaded without them (e.g. a hand-built IR); such a session cannot be
+        # snapshotted, because there is nothing to replay through the gate.
+        self.origin: dict | None = None
+        self.previous_origin: dict | None = None  # origin `rollback` restores
 
     # -- plumbing ----------------------------------------------------------
 
@@ -113,7 +120,7 @@ class Session:
     # -- lifecycle ---------------------------------------------------------
 
     def load(self, ir: dict, config: dict | None = None,
-             record: bool = False) -> dict:
+             record: bool = False, origin: dict | None = None) -> dict:
         if self._driver is not None:
             raise SessionError("a composition is already loaded — swap or unload it")
         # booting is admission: a draft with open obligations is checkable but
@@ -131,6 +138,7 @@ class Session:
         self.config = config or {}
         self._driver = driver_class(ir, self.config, emit, runtime_mod, Context, FiberState)
         self.ir = ir
+        self.origin = origin
         self.recorder = replay_module().Recorder(ir) if record else None
         self._run(self._driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True) | ({"recording": True} if record else {})
@@ -152,13 +160,15 @@ class Session:
             self.recorder.instrument(module, ir)
         return module
 
-    def swap(self, ir: dict) -> dict:
+    def swap(self, ir: dict, origin: dict | None = None) -> dict:
         """Replace the running composition. The caller has already had the
         candidate admitted; this performs the transition."""
         driver = self._require()
         self.previous = self.ir
+        self.previous_origin = self.origin
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = ir
+        self.origin = origin
         self._run(driver._load(ir, self._prepare_module(ir)))
         return self.state(drain=True)
 
@@ -166,7 +176,25 @@ class Session:
         if self.previous is None:
             raise SessionError("no previous generation to roll back to")
         restored, self.previous = self.previous, None
-        return self.swap(restored) | {"rolledBack": True}
+        restored_origin, self.previous_origin = self.previous_origin, None
+        return self.swap(restored, origin=restored_origin) | {"rolledBack": True}
+
+    # -- persistence (docs/persistence.md) ---------------------------------
+
+    def snapshot(self) -> dict:
+        """`{sources, manifest, meta}` for the live composition — the inputs
+        needed to *re-admit* it, not a dump of runtime objects."""
+        from .persist import snapshot as _snapshot  # noqa: PLC0415 — lazy
+
+        return _snapshot(self)
+
+    def restore(self, snap: dict) -> dict:
+        """Re-admit a snapshot into this (empty) session by replaying
+        admission — compile through the gate, then boot. A component the
+        current checker rejects fails loudly and loads nothing."""
+        from .persist import restore as _restore  # noqa: PLC0415 — lazy
+
+        return _restore(self, snap)
 
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
@@ -191,6 +219,8 @@ class Session:
         self._driver = None
         self.ir = None
         self.previous = None
+        self.origin = None
+        self.previous_origin = None
         return {
             "unloaded": True,
             "noResidue": all(checks.values()),
