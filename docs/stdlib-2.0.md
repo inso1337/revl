@@ -32,6 +32,7 @@ revl refuses.)
 | `set(k, v)` | 2 | Map | **persistent** put — new map, receiver unchanged (§Map below) | `{**x, k: v}` | IIFE copy + `set` |
 | `lookup(k)` | 1 | Map | value under `k` as `Opt[V]` | `x.get(k)` | `x.get(k)` |
 | `has(k)` | 1 | Map | key membership | `k in x` | `x.has(k)` |
+| `to_str()` | 0 | Int | decimal rendering, `-` for negatives | `str(x)` | `x.toString()` |
 
 - `push`/`concat` are **persistent** (value semantics) — consistent with
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:
@@ -170,6 +171,21 @@ context — a typed return position (`fn newTable() -> Map[Str, Int] { return
 Map.empty() }`), a parameter, or any annotated flow. Unpinned, it refuses
 at emit time with a message saying so, mirroring how an untyped empty list
 literal already behaves on tiers that cannot infer it.
+
+### `Int.to_str()`: the rendering builtin
+
+`n.to_str()` renders an `Int` as its decimal spelling: ASCII digits, a
+leading `-` for negatives, no plus sign, no separators, `0` for zero. It is
+**total** — including `Int.MIN`, whose magnitude has no positive
+representative; every tier must render `-9223372036854775808` exactly (the
+wasm helper does it with unsigned division on the negated bit pattern, the
+one trick that survives the wrap).
+
+It is a *method*, not a free function, on purpose: revl has no free-function
+namespace to pollute (the same grain that made Map's surface methods), and
+an Int-only receiver family is already how the checker dispatches Int-only
+builtins (`div_trunc` and friends). The name follows the type, not the
+host — `to_str`, spelled after the revl type `Str`, on every tier.
 
 ## Versioning
 

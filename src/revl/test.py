@@ -70,20 +70,44 @@ def _fault_note(ir: dict, tier: str) -> str:
     return f"; {len(units)} fault test(s) skipped (py tier only)"
 
 
+def _cordis_available() -> bool:
+    """Can THIS interpreter import the cordis-py runtime? (Seam for tests —
+    monkeypatch to simulate the missing-runtime environment.)"""
+    return importlib.util.find_spec("cordis") is not None
+
+
+_PY_RUNTIME_REMEDY = (
+    "preflight: this document's py-tier tests drive the cordis-py runtime "
+    "(a `lifecycle test`), which this interpreter does not have\n"
+    "       set it up:  sh backends/python/setup.sh\n"
+    "       then rerun under that interpreter:  "
+    "backends/python/.venv/bin/python -m revl test")
+
+
 def run_py(ir: dict) -> tuple[str, str]:
     """Exec the cordis-py output in-process (the original runner)."""
     emit = _emitter("python")
+    backend_dir = str(BACKENDS / "python")
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    source = emit.emit(ir)
+    # Preflight before any test runs. The py emitter imports cordis LAZILY,
+    # inside each `lifecycle test` body (not at module scope — a document may
+    # mix pure and lifecycle blocks), so exec succeeds on an interpreter
+    # without the runtime and the absence used to surface per-test as
+    # `FAIL <name>: ModuleNotFoundError ... 0 of N passed` — a stack-shaped
+    # verdict for an environment problem whose remedy is one command
+    # (findings-uxprobe.md, longest stall).
+    if "from cordis import" in source and not _cordis_available():
+        return ("fail", _PY_RUNTIME_REMEDY)
     module = types.ModuleType("revl_test_module")
     # Register before exec: the emitter renders record types as @dataclass,
     # and dataclasses._process_class resolves each field via
     # sys.modules[cls.__module__] — an unregistered module raises
     # AttributeError on any file that declares a record type (CPython 3.12+).
     sys.modules[module.__name__] = module
-    backend_dir = str(BACKENDS / "python")
-    if backend_dir not in sys.path:
-        sys.path.insert(0, backend_dir)
     try:
-        exec(compile(emit.emit(ir), "<revl-test>", "exec"), module.__dict__)
+        exec(compile(source, "<revl-test>", "exec"), module.__dict__)
     finally:
         sys.modules.pop(module.__name__, None)
     entries = getattr(module, "REVL_TESTS", None) or []

@@ -404,6 +404,10 @@ def _comp_builtin(method, recv_surface, target, args):
         return "revlStrCharAt(%s, %s)" % (target, args[0])
     if method == "charCodeAt":
         return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
+    # imported on this tier, and %d on an int64 is exact decimal.
+    if method == "to_str":
+        return 'fmt.Sprintf("%d", %s)' % target
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
     # _COMP_NEEDS_MAP at module assembly.
@@ -1695,6 +1699,10 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
+    # imported on this tier, and %d on an int64 is exact decimal.
+    if method == "to_str":
+        return f'fmt.Sprintf("%d", {target})'
     # The Map value type (docs/stdlib-2.0.md §Map): persistent Go maps —
     # `set` copies into a fresh map, `lookup` answers the sealed RevlOpt.
     if method == "set":
