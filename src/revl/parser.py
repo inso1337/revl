@@ -97,6 +97,7 @@ class LetEffect:
     undo: object
     line: int
     setup: list = field(default_factory=list)
+    verified: bool = False
 
 
 @dataclass
@@ -105,6 +106,7 @@ class EffectStmt:
     undo: object
     line: int
     setup: list = field(default_factory=list)
+    verified: bool = False
 
 
 @dataclass
@@ -361,6 +363,33 @@ class ExprRecord:
 
 
 @dataclass
+class ExprRecordUpdate:
+    """`{base | f1 = e1, f2 = e2}` — functional record update.
+
+    Semantics (docs/records.md §2): evaluates `base`, then produces a *fresh*
+    value of `base`'s record type with the named fields replaced; `base` is
+    untouched, exactly like `Map.set`. The result's type is `base`'s type.
+    """
+    base: object
+    updates: list  # [(field_name, expr)]
+    line: int
+
+
+@dataclass
+class ExprBlockArm:
+    """A match arm whose body is a statement block: `=> { let x = e; expr }`.
+
+    v1 subset (docs/records.md §4): the block may contain only `let`
+    statements (single-assignment, pure) and must end in an expression, whose
+    value is the arm's value. Parsed and typechecked; lowering is deferred —
+    see docs/records.md §6.
+    """
+    stmts: list  # [LetStmt]
+    tail: object
+    line: int
+
+
+@dataclass
 class ExprList:
     items: list
     line: int
@@ -544,6 +573,28 @@ class FaultTestDecl:
 
 
 @dataclass
+class PropTestDecl:
+    """`prop test "name" (a: Int, b: Money) { assert … }` (roadmap item 37).
+
+    A property test: the parameters are *generated inputs*, and the body is a
+    pure assertion over them that must hold for every generated value.  The
+    generators are DERIVED from the parameter types the checker already knows
+    (records, ADTs — every constructor, `Opt`/`List` nesting, the i64 edge
+    values); on failure the runner *shrinks* the input to a minimal
+    counterexample.  See docs/prop-test.md.
+
+    Precedent: `verified effect` (item 26) is the specific inverse-round-trip
+    instance of this general form; `lifecycle`/`fault` set the pattern of a
+    modifier/head changing a test's stratum without a new top-level keyword.
+    """
+
+    name: str
+    params: list[FnParam]   # generated-input surface (name + declared type)
+    body: list              # pure statements, at least one `assert`
+    line: int
+
+
+@dataclass
 class Program:
     filename: str
     services: list[ServiceDecl] = field(default_factory=list)
@@ -554,6 +605,7 @@ class Program:
     externs: list[ExternDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
+    prop_tests: list[PropTestDecl] = field(default_factory=list)
     # Set by compile_files so the checker can resolve module-private vs
     # imported names without merging all files into one global namespace.
     fn_scopes: dict[int, set[str]] = field(default_factory=dict)
@@ -692,6 +744,15 @@ class Parser:
                 # as an ordinary identifier (and the self-hosted lexer's
                 # KEYWORDS table needs no sync).
                 program.fault_tests.append(self.fault_test_decl())
+
+            elif self.at("ident", "prop") and self.toks[self.pos + 1].kind == "kw" \
+                    and self.toks[self.pos + 1].value == "test":
+                # `prop` is a *contextual* keyword: like `fault`, it only heads a
+                # declaration when immediately followed by `test`, so adding
+                # `prop test` cannot break a program that already uses `prop` as
+                # an ordinary identifier, and the self-hosted lexer's KEYWORDS
+                # table needs no sync (roadmap item 37).
+                program.prop_tests.append(self.prop_test_decl())
 
             elif self.at("ident", "lifecycle"):
                 # contextual keyword: `lifecycle` is a modifier on `test`
@@ -925,6 +986,25 @@ class Parser:
             rendered = f"Opt[{rendered}]"  # T? sugar (syntax-2.0 §2)
         return rendered
 
+    def _provision_key(self, what: str = "a provision key") -> str:
+        """A provision key, optionally namespace-qualified as `ns::key`
+        (docs/namespacing.md).
+
+        The `::` separator is two adjacent `:` tokens, so this is a pure
+        parser addition — the lexer is untouched. An unqualified key returns
+        its bare identifier verbatim, so v1 programs lower byte-for-byte as
+        before; a qualified key returns the joined `ns::local` string, which
+        is the key's wiring identity (G2 / injection resolution)."""
+        first = self.expect("ident", what=what).value
+        # `ns::local`: a `:` immediately followed by another `:`. A single
+        # `:` here is the ordinary `key: Service` separator and is left alone.
+        if self.at(":") and self.toks[self.pos + 1].kind == ":":
+            self.next()  # first `:`
+            self.next()  # second `:`
+            local = self.expect("ident", what="a key after `::`").value
+            return f"{first}::{local}"
+        return first
+
     def component(self) -> ComponentDecl:
         line = self.expect("kw", "component").line
         name = self.expect("ident").value
@@ -935,7 +1015,7 @@ class Parser:
             target = requires if kw == "requires" else provides
             while True:
                 bline = self.peek().line
-                local = self.expect("ident").value
+                local = self._provision_key(what="a requirement or provision key")
                 self.expect(":")
                 svc = self.expect("ident").value
                 target.append((local, svc, bline))
@@ -1010,7 +1090,19 @@ class Parser:
             self.expect("=")
             # `let x = effect … undo …` binds an acquisition; anything else
             # binds a plain value, so a method can name an intermediate
-            # result instead of nesting every call into one expression
+            # result instead of nesting every call into one expression. A
+            # `verified` modifier (syntax-2.0 §7) marks the acquisition for
+            # inverse round-trip testing (roadmap item 26).
+            verified_effect = False
+            if not mutable and self.at("kw", "verified"):
+                self.next()
+                if not self.at("kw", "effect"):
+                    tok2 = self.peek()
+                    raise self.err(tok2.line,
+                                   f"expected `effect` after `verified`, found {tok2.value!r}",
+                                   hint="`verified` marks an effect acquisition for inverse "
+                                        "round-trip testing: `let x = verified effect … undo …`")
+                verified_effect = True
             if not mutable and self.at("kw", "effect"):
                 if declared is not None:
                     # an acquisition binds a *host-valued* object, which the
@@ -1025,7 +1117,13 @@ class Parser:
                              "src/revl/typecheck.py); drop the annotation",
                     )
                 acquire, undo, line, setup = self.effect_form(tok.line)
-                return LetEffect(bind, acquire, undo, line, setup)
+                return LetEffect(bind, acquire, undo, line, setup, verified_effect)
+            if verified_effect:
+                tok2 = self.peek()
+                raise self.err(tok2.line,
+                               f"expected `effect` after `verified`, found {tok2.value!r}",
+                               hint="`verified` marks an effect acquisition for inverse "
+                                    "round-trip testing: `let x = verified effect … undo …`")
             if not in_method:
                 raise self.err(
                     tok.line,
@@ -1036,6 +1134,20 @@ class Parser:
                          "into a `fn` (G6)",
                 )
             return LetStmt(bind, self.pure_expr(), mutable, tok.line, declared)
+        if tok.kind == "kw" and tok.value == "verified":
+            # `verified effect … undo …` — the effect is marked for inverse
+            # round-trip testing (syntax-2.0 §7, roadmap item 26). `verified`
+            # heads a body statement only before `effect`; `verified fn` is a
+            # top-level declaration, never a body statement.
+            self.next()
+            if not self.at("kw", "effect"):
+                tok2 = self.peek()
+                raise self.err(tok2.line,
+                               f"expected `effect` after `verified`, found {tok2.value!r}",
+                               hint="inside a body, `verified` marks an effect for inverse "
+                                    "round-trip testing: `verified effect … undo …`")
+            acquire, undo, line, setup = self.effect_form(tok.line)
+            return EffectStmt(acquire, undo, line, setup, verified=True)
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup)
@@ -1090,14 +1202,14 @@ class Parser:
             if in_method:
                 raise self.err(tok.line, "`isolate` is not allowed inside a method body")
             self.next()
-            key = self.expect("ident").value
+            key = self._provision_key()
             self.expect("kw", "in")
             return IsolateStmt(key, self.realm_label(), tok.line)
         if tok.kind == "kw" and tok.value == "intercept":
             if in_method:
                 raise self.err(tok.line, "`intercept` is not allowed inside a method body")
             self.next()
-            key = self.expect("ident").value
+            key = self._provision_key()
             self.expect("kw", "with")
             return InterceptStmt(key, self.record_literal(), tok.line)
         if tok.kind == "kw" and tok.value == "provide":
@@ -1499,7 +1611,7 @@ class Parser:
                            hint="a lifecycle binding names the result of a service call: "
                                 "`let x = call key.op(args)`")
         self.next()
-        key = self.expect("ident", what="a provision key").value
+        key = self._provision_key()
         self.expect(".")
         method = self.expect("ident", what="an operation name").value
         self.expect("(")
@@ -1634,6 +1746,54 @@ class Parser:
                  "`failed`, `no residue`, `inverses lifo`, `no emissions`, "
                  "`siblings unaffected`",
         )
+
+    # -- property tests (docs/prop-test.md, roadmap item 37) ---------------
+
+    def prop_test_decl(self) -> PropTestDecl:
+        """prop test STR (name: Type, …) { assert … }
+
+        `prop` and `test` are matched by spelling/keyword before this is
+        entered; the parameter list is exactly a `fn` parameter list (each an
+        input to be *generated* from its type), and the body is the same pure
+        statement grammar a plain `test` body is — so `assert` reads as it does
+        everywhere else, only checked over many generated inputs.
+        """
+        line = self.next().line              # `prop`
+        self.expect("kw", "test")
+        name_tok = self.expect("string", what="a prop-test name")
+        name = name_tok.value
+        if not name:
+            raise self.err(name_tok.line, "a prop test name cannot be empty")
+        self.expect("(", what="`(` — a prop test's parameters are its generated inputs")
+        params: list[FnParam] = []
+        seen: set[str] = set()
+        while not self.at(")"):
+            pline = self.peek().line
+            pname = self.expect("ident", what="a parameter name").value
+            if pname in seen:
+                raise self.err(pline, f"duplicate parameter `{pname}` in prop test `{name}`")
+            seen.add(pname)
+            self.expect(":", what="`:` and a type — a prop-test parameter is a generated input")
+            ptype = self.type_()
+            params.append(FnParam(pname, ptype, pline))
+            if self.at(","):
+                self.next()
+        self.expect(")")
+        if not params:
+            raise self.err(line, f"prop test `{name}` has no parameters",
+                           hint="a prop test's parameters are its generated inputs: "
+                                'write e.g. `prop test "commutes" (a: Int, b: Int) { … }`')
+        self.expect("{")
+        body = []
+        while not self.at("}"):
+            self._reject_lifecycle_stmt_here()
+            body.append(self.fn_stmt())
+        self.expect("}")
+        if not any(isinstance(stmt, AssertStmt) for stmt in body):
+            raise self.err(line, f"prop test `{name}` asserts nothing",
+                           hint="a prop test states a property to hold for every generated "
+                                "input: add at least one `assert <bool expr>`")
+        return PropTestDecl(name, params, body, line)
 
     def fn_stmt(self):
         tok = self.peek()
@@ -1985,7 +2145,10 @@ class Parser:
         while not self.at("}"):
             pattern, bind = self._match_pattern()
             self.expect("=>")
-            body = self.pure_expr()
+            if self.at("{") and self._block_arm_ahead():
+                body: object = self._match_block_arm(self.peek().line)
+            else:
+                body = self.pure_expr()
             arms.append((pattern, bind, body))
             if self.at(","):
                 self.next()
@@ -1993,6 +2156,76 @@ class Parser:
                 break
         self.expect("}")
         return ExprMatch(scrutinee, arms, line)
+
+    def _record_update_ahead(self) -> bool:
+        """Current token is `{` — is this `{base | f = e, …}` (functional
+        record update, docs/records.md §1) rather than a record literal?
+
+        A record literal's top level can never contain a bare `|` (field
+        values are bracket-balanced), so a depth-1 `|` before the matching
+        `}` settles it."""
+        i = self.pos + 1  # skip the `{`
+        depth = 1
+        while i < len(self.toks):
+            kind = self.toks[i].kind
+            if kind in ("{", "(", "["):
+                depth += 1
+            elif kind in ("}", ")", "]"):
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif kind == "|" and depth == 1:
+                return True
+            elif kind == "eof":
+                return False
+            i += 1
+        return False
+
+    def _block_arm_ahead(self) -> bool:
+        """Current token is `{` right after a match arm's `=>` — statement
+        block (docs/records.md §4) or record literal?
+
+        A block arm contains a statement keyword (`let`, `var`) at its top
+        level; a record literal starts `ident :`. Either test settles it."""
+        i = self.pos + 1  # skip the `{`
+        depth = 1
+        while i < len(self.toks):
+            tok = self.toks[i]
+            if tok.kind in ("{", "(", "["):
+                depth += 1
+            elif tok.kind in ("}", ")", "]"):
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif depth == 1 and tok.kind == "kw" and tok.value in ("let", "var"):
+                return True
+            elif depth == 1 and tok.kind == "ident" and self.toks[i + 1].kind == ":":
+                return False
+            elif tok.kind == "eof":
+                return False
+            i += 1
+        return False
+
+    def _match_block_arm(self, line: int):
+        """`{ let x = e; … ; expr }` — the v1 block-arm subset: only `let`
+        statements, then exactly one trailing expression whose value is the
+        arm's value."""
+        self.expect("{")
+        stmts = []
+        while self.at("kw", "let") or self.at("kw", "var"):
+            stmt = self.fn_stmt()
+            if not isinstance(stmt, LetStmt):
+                raise self.err(getattr(stmt, "line", line),
+                               f"a match block arm may contain only `let` statements "
+                               f"(docs/records.md §4), found `{stmt.__class__.__name__}`")
+            if stmt.mutable:
+                raise self.err(stmt.line,
+                               "a match block arm may not declare `var` — arm blocks "
+                               "are pure `let` sequences (docs/records.md §4)")
+            stmts.append(stmt)
+        tail = self.pure_expr()
+        self.expect("}")
+        return ExprBlockArm(stmts, tail, line)
 
     def _match_pattern(self):
         tok = self.peek()
@@ -2067,6 +2300,19 @@ class Parser:
                 pass
             return node
         if tok.kind == "{":
+            if self._record_update_ahead():
+                self.next()
+                base = self.pure_expr()
+                self.expect("|")
+                updates = []
+                while not self.at("}"):
+                    fname = self.expect("ident").value
+                    self.expect("=")
+                    updates.append((fname, self.pure_expr()))
+                    if self.at(","):
+                        self.next()
+                self.expect("}")
+                return ExprRecordUpdate(base, updates, tok.line)
             self.next()
             fields = []
             while not self.at("}"):
@@ -2125,7 +2371,7 @@ class Parser:
 
     def provide(self) -> ProvideStmt:
         line = self.expect("kw", "provide").line
-        key = self.expect("ident").value
+        key = self._provision_key()
         self.expect("{")
         methods: list[ProvideMethod] = []
         while not self.at("}"):

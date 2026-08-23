@@ -120,6 +120,96 @@
       (i32.load8_u
         (i32.add (i32.add (local.get $s) (i32.const 4))
                  (i32.wrap_i64 (local.get $idx))))))
+  (func $str_cp_length (param $s i32) (result i32)
+    (local $len i32) (local $i i32) (local $count i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+        (if (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80))
+          (then (local.set $count (i32.add (local.get $count) (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (local.get $count))
+  (func $str_cp_offset (param $s i32) (param $cp i32) (result i32)
+    (local $len i32) (local $i i32) (local $seen i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (br_if $done (i32.ge_s (local.get $seen) (local.get $cp)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (block $cont_done
+          (loop $cont
+            (br_if $cont_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (br_if $cont_done (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cont)))
+        (local.set $seen (i32.add (local.get $seen) (i32.const 1)))
+        (br $loop)))
+    (local.get $i))
+  (func $str_cp_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $cplen i32) (local $a i32) (local $b i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $cplen (call $str_cp_length (local.get $s)))
+    (local.set $a (i32.wrap_i64 (local.get $start)))
+    (local.set $b (i32.wrap_i64 (local.get $end)))
+    (if (i32.lt_s (local.get $a) (i32.const 0)) (then (local.set $a (i32.const 0))))
+    (if (i32.gt_s (local.get $a) (local.get $cplen)) (then (local.set $a (local.get $cplen))))
+    (if (i32.lt_s (local.get $b) (local.get $a)) (then (local.set $b (local.get $a))))
+    (if (i32.gt_s (local.get $b) (local.get $cplen)) (then (local.set $b (local.get $cplen))))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $a)))
+    (local.set $to (call $str_cp_offset (local.get $s) (local.get $b)))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))
+  (func $str_cp_char_at (param $s i32) (param $idx i64) (result i32)
+    (local $i i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $i (i32.wrap_i64 (local.get $idx)))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $i)))
+    (local.set $to (call $str_cp_offset (local.get $s) (i32.add (local.get $i) (i32.const 1))))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))
+  (func $str_cp_char_code_at (param $s i32) (param $idx i64) (result i64)
+    (local $off i32) (local $base i32) (local $b0 i32)
+    (local.set $off (call $str_cp_offset (local.get $s) (i32.wrap_i64 (local.get $idx))))
+    (local.set $base (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $off)))
+    (local.set $b0 (i32.load8_u (local.get $base)))
+    (i64.extend_i32_u
+      (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0x80))
+        (then (local.get $b0))
+        (else
+          (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xE0))
+            (then
+              (i32.or
+                (i32.shl (i32.and (local.get $b0) (i32.const 0x1F)) (i32.const 6))
+                (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F))))
+            (else
+              (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xF0))
+                (then
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x0F)) (i32.const 12))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 6)))
+                    (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F))))
+                (else
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x07)) (i32.const 18))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 12)))
+                    (i32.or
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F)) (i32.const 6))
+                      (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 3))) (i32.const 0x3F))))))))))))
   (func $int_add (param $a i64) (param $b i64) (result i64)
     (local $r i64)
     (local.set $r (i64.add (local.get $a) (local.get $b)))
@@ -173,6 +263,24 @@
     (if (result i64) (i64.lt_s (local.get $m) (i64.const 0))
       (then (i64.add (local.get $m) (local.get $ab)))
       (else (local.get $m))))
+  (func $int32_add (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.add (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_sub (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.sub (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_mul (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.mul (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_narrow (param $v i64) (result i32)
+    (if (i32.or
+          (i64.lt_s (local.get $v) (i64.const -2147483648))
+          (i64.gt_s (local.get $v) (i64.const 2147483647)))
+      (then unreachable))
+    (i32.wrap_i64 (local.get $v)))
   (func $list_push (param $list i32) (param $elem i64) (result i32)
     (local $n i32)
     (local $p i32)

@@ -132,14 +132,20 @@ would silently cross the boundary (G4/G8)
 * `compiler._provision_services` / the `provision_services` ambient field —
   the key → service map the touchers read.
 
-## Scope for this pass
+## The rest of §5's "Do" (now landed)
 
-**Key namespacing** — the other half of §5's "Do" — is **deferred**. It needs
-new surface syntax and would collide with the active parser/selfhost work; the
-compatibility check is the valuable, self-contained core and lands on its own.
+**Key namespacing** — the other half of §5's "Do" — was deferred with this
+pass and has since landed; see `docs/namespacing.md`. A provision key may be
+written `ns::key`, the linker's per-`(key, realm)` table compares the qualified
+string, and the admission gate reads the same qualified keys off the IR — so
+two authors' `acme::db` and `bcorp::db` coexist while the compatibility
+relation above still runs per service. Unqualified keys are unchanged, so this
+document's examples and every v1 golden are byte-identical. Together the two
+halves satisfy the multi-author-registry precondition `docs/registry-probe.md`
+named for item 49.
 
-**Known follow-up (out of scope here):** `plan._interface_drift` still previews
-drift with a plain structural `!=` over the two `services` tables, so a
-*compatible* swap that the gate now admits is still reported by `revl plan` as
-"interface drift (would be refused)". `plan.py` is owned by another surface;
-aligning its preview with this relation is a separate change.
+**`plan._interface_drift`** no longer previews drift with a plain structural
+`!=` over the two `services` tables: it runs this document's relation
+(`lower._service_compatible` via the same touchers the gate uses), so a
+*compatible* swap the gate admits is reported by `revl plan` with no drift, and
+a genuine break is named the same way the G2 rejection names it.

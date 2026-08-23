@@ -4,6 +4,10 @@
 [--replacing NAME] [--json]`, the library entry point `revl.plan.plan()`, and
 the MCP tool `revl_plan`. Tests: `tests/test_plan.py`.
 
+To *execute* a plan rather than just print it, serialize one with `-o
+change.plan` and apply it with `revl apply` — drift-refused, step-verified, and
+rolled back by derived LIFO inverses on failure. See [docs/apply.md](apply.md).
+
 Admission is binary. `compile_files(files, manifest=running_ir)` either links
 the candidate against the running composition or raises, and `revl_swap` acts
 on that answer. What it never told you is **what happens next** — which

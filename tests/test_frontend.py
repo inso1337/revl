@@ -102,6 +102,11 @@ REJECTIONS = {
     "v2_fail_in_pure_fn.rvl": "`fail` is only allowed in a component activation body (A8)",
     "arith_zero_divisor.rvl": "`mod` by a literal zero is undefined",
     "t20_int_literal_range.rvl": "Int literal `9223372036854775808` is outside the 64-bit range",
+    # Int32 (docs/arithmetic.md, "Sized integers"): lossless-widen /
+    # checked-narrow, and no silent width-mixing in arithmetic.
+    "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",
+    "t22_int32_width_mix.rvl": "`+` does not mix `Int32` and `Int`",
+    "t23_int32_remainder.rvl": "`%` is Int-only; widen the Int32 operands with `.to_int()` first",
     "host_method_not_on_surface.rvl": "`Map` has no method `putt`",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
@@ -110,6 +115,11 @@ REJECTIONS = {
     "g2_provision_conflict.rvl": "provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (G2)",
     "g3_dependency_cycle.rvl": "dependency cycle: Alpha -> Beta -> Alpha (G3)",
     "g4_missing_undo.rvl": "effect has no `undo` and `Pool.open` is not pure",
+    "g4_extern_undo_wrong_arg_type.rvl": "argument 1 of `close_ledger(...)` expects `Int`, got `Str`",
+    "g4_extern_undo_undeclared_fn.rvl": "`ghost_fn` is not declared — the `undo` slot of extern `open_ledger` may only call a declared fn",
+    "g4_extern_undo_self_call.rvl": "extern `open_ledger`'s `undo` cannot call the extern itself",
+    "g4_extern_undo_param_not_in_scope.rvl": "`path` is not declared — the `undo` slot of extern `open_ledger` sees only the implicit `result` binding",
+    "g4_extern_compensate_result.rvl": "`result` is not bound in the `compensate` slot of extern `send`",
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",

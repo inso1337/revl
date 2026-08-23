@@ -1,0 +1,37 @@
+{
+  "boundary": {
+    "ReadOnlyDatabase": {
+      "awaits": 0,
+      "capabilities": {},
+      "compensated": 0,
+      "emissions": [],
+      "externs": []
+    }
+  },
+  "distributability": {
+    "Database": {
+      "reasons": [
+        "query: not async fn"
+      ],
+      "verdict": "address-space-bound"
+    }
+  },
+  "externs": [],
+  "kind": "revl.interchange",
+  "manifest": {
+    "components": [
+      {
+        "file": "component.rvl",
+        "inject": [],
+        "name": "ReadOnlyDatabase",
+        "provides": [
+          "db"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "ReadOnlyDatabase"
+    ]
+  },
+  "schema_version": "1.0"
+}

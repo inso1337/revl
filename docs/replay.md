@@ -118,6 +118,15 @@ Practically, the things it will *not* catch:
   `acquire`-classified extern touched;
 * time — a value derived from a clock does not come back.
 
+The runtime never closes this gap — but an author can opt one effect into a
+partial check of it. A `verified effect` (syntax-2.0 §7, roadmap item 26) makes
+`revl test` auto-generate an inverse round-trip: activate the component, tear it
+down so the inverse runs, and assert the observable in-process state returned to
+baseline, over N randomized rounds. It is a *test the author did not write*, not
+a proof, and its scope is exactly this section's — in-process state only; the
+first item above is what it catches, the others stay out of reach. See
+`docs/verified-effect.md`.
+
 ### 4.2 Compensation is not inversion
 
 Paper §6.1. An A5 `compensate` clause is *a second boundary crossing chosen to
@@ -259,11 +268,14 @@ revl_timeline       { component? }               # the recording
 revl_inspect_step   { component?, at }           # the composition at step k
 revl_step_back      { component?, to, force? }   # unwind, stay live
 revl_replay_forward { component?, from }         # re-run the tail
+revl_replay_bisect  { component?, assert }       # git-bisect for the execution
 ```
 
 `revl_step_back` and `revl_replay_forward` are annotated `destructiveHint:
 true` — they run real inverses and real calls against a live system.
-`revl_timeline` and `revl_inspect_step` are `readOnlyHint: true`.
+`revl_timeline`, `revl_inspect_step` and `revl_replay_bisect` are
+`readOnlyHint: true` — bisect reconstructs each probed step rather than
+unwinding to it, so it never mutates the timeline.
 
 A refused unwind comes back as `{ok: false, refused: true}` with the
 diagnostic above — a result, not a crash.
@@ -275,26 +287,82 @@ revl run app.rvl --record
 revl> :timeline
 revl> :inspect 2
 revl> :back 2
-revl> :back 2 !        # force across uncompensated emissions
+revl> :back 2 !                    # force across uncompensated emissions
 revl> :forward 2
+revl> :bisect len(emissionsSoFar) > 0     # first step an emission crossed
+revl> :bisect @UserCache 'db' in activeProvisions
 ```
+
+### Bisect — git-bisect for an execution
+
+The timeline records every step and `step_back k` restores any prefix; what
+bisect adds is the **search**. `:bisect <expr>` (MCP: `revl_replay_bisect`)
+binary-searches the recorded timeline for the **first** step at which an
+asserted predicate flips from the value it had before any step ran —
+`ceil(log2(N)) + 2` evaluations instead of one per step. The answer is a step
+index together with its full record: *who ran* (the call, REPL line, or
+activation body that produced it), *what it touched* (its `detail` — key,
+service, args, source line), and *which realm* (the component whose timeline it
+belongs to).
+
+The predicate is a Python expression evaluated in **the same scope `:inspect`
+produces**: every field of the `inspect(k)` view is a name in scope —
+`activeProvisions`, `withdrawnProvisions`, `accumulated`, `unwound`,
+`aheadOfHere`, `emissionsSoFar`, `at`, `atLabel`, `component` — plus `step`,
+the step dict at `k`. So `len(emissionsSoFar) > 0` finds the first boundary
+crossing, `'db' in activeProvisions` finds the first step a service is
+provided, and `len(accumulated) >= 5` finds the depth-5 point.
+
+Bisect reconstructs each probed step with `inspect` — the same view
+`step_back` would restore state to — rather than physically unwinding to it, so
+the timeline is never mutated, the probes can run in any order, and the search
+is genuinely `log2(N)`. Like `git bisect`, it **assumes the predicate is
+monotone** over the timeline (once flipped, stays flipped); for a non-monotone
+predicate it still returns *a* flip boundary, but not provably the first.
+
+**The inverse-trust bound, restated for bisect.** This is the honest limit and
+the report carries it verbatim. Bisect trusts the recorded inverses: the state
+it bisects over at each step is the one those inverses *define* (which
+provisions are active, what is accumulated), exactly as in §4.1 — **not** an
+independently checked state. Nothing here verifies that an inverse actually
+restores what it claims to. That verification is `verified effect` (roadmap
+item 26), and **it is not built**. So every effect on the path to the found
+step reads as *unverified*, and the report says so:
+
+```json
+"verified": {
+  "status": "unverified",
+  "effectsOnPath": 4,
+  "verifiedOnPath": 0,
+  "explanation": "bisect trusts the recorded inverses. … `verified effect`
+                  (roadmap item 26) … is not built, so every effect on the
+                  path to the found step reads as unverified. …"
+}
+```
+
+`status` becomes `verified` only when every revertible step on the path carries
+a `verified` marker — which no step carries today. The field is written to
+light up on its own the day item 26 lands; until then a bisect answer is "the
+first step at which the predicate flips over the inverse-defined
+reconstruction," and no more than that. Do not read trustworthiness into it
+that the machinery cannot yet back.
 
 ## 7. Status
 
 The engine is python-tier only, which is where the reference runtime lives.
 
-`tests/test_replay.py` has 39 tests in two layers.
+`tests/test_replay.py` has 49 tests in two layers.
 
-**28 against a stub context.** These drive the pipeline — revl source →
-frontend IR → the cordis-py emitter → the recorder → the timeline → step-back
-and forward replay — against `FakeContext`, a stand-in implementing the slice
+**36 against a stub context.** These drive the pipeline — revl source →
+frontend IR → the cordis-py emitter → the recorder → the timeline → step-back,
+forward replay and bisect — against `FakeContext`, a stand-in implementing the slice
 of the cordis context protocol an emitted component actually uses: an effect's
 generator runs to completion at registration, its yielded disposers run LIFO
 within the effect, and disposal is single-flight. They use the real
 `runtime.Map`/`Pool` host builtins and assert against the real trace. They run
 on any interpreter, with or without a runtime installed.
 
-**11 against real cordis-py**, through the production path — `revl.mcp.Session`,
+**13 against real cordis-py**, through the production path — `revl.mcp.Session`,
 a real `cordis.Context`, real fibers. They are marked `@needs_cordis` and skip
 where the runtime is absent. To run them:
 

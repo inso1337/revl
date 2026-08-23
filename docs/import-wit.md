@@ -128,6 +128,8 @@ can offer.
 | `variant v { a(t), b }` | `type V = A(T) \| B` | |
 | `enum e { a, b }` | `type E = A \| B` | a payload-free ADT |
 | `type x = <t>;` | *inlined at use sites* | see below |
+| `resource r { … }` | `type R = { handle: Int }` + `extern acquire fn r_new(…) -> R undo r_drop(result)` (with `extern emission fn r_drop(self: R)` declared alongside) + methods as `r_m(self: R, …)` | a live handle onto revl's acquire-returned-handle model; `result` is the undo slot's implicit binding — the acquired handle; see docs/wit-bridge.md §3 |
+| `borrow<r>`, `own<r>` | the handle type `R` | a resource *reference*; copy-vs-move is tracked by the acquire/undo pair |
 | `interface i { … }` | `service I` + `extern`s + `component IProvider provides i: I` | |
 | `world w { export f: func(…) }` | `service W` + provider | a world export is what a revl consumer may call |
 | `world w { import f: func(…) }` | `service WImports`, **declaration only** | a world import is what the component expects to be *given*; revl code provides it, so no extern is invented |
@@ -168,10 +170,11 @@ Alias cycles are reported as cycles rather than recursed into.
 The rule is: **refuse rather than emit something wrong.** Each refusal names
 the construct, the line it appeared on, and the way forward.
 
+> **`resource`, `borrow<T>` and `own<T>` are no longer refused** — they map
+> onto revl's acquire-returned-handle model. See docs/wit-bridge.md §3.
+
 | Refused | Why | What to do instead |
 |---|---|---|
-| `resource` | a live handle with identity; revl values are copies without identity, so there is no faithful mapping | wrap it by hand: `extern acquire fn open(...) undo close(...)` plus `emission` operations, so its lifetime is a tracked inverse (G4) |
-| `borrow<T>`, `own<T>` | same reason — handles | expose the data the handle stands for as a `record` |
 | `stream<T>` | an open-ended effect, not a value | model it as a service whose operations are `emission` |
 | `future<T>`, `f: async func(...)` | revl spells asynchrony as `async fn` on a service operation | declare that operation by hand |
 | `flags` | revl has no bit-set type | a `record` of `bool`s, or a `list<enum>` |
@@ -184,11 +187,12 @@ the construct, the line it appeared on, and the way forward.
 | two items generating one service name | same namespace argument | rename one in the WIT |
 | `option<option<T>>` | `Opt[Opt[T]]` cannot distinguish the two absences | declare a `variant` naming both cases |
 
-Refusing `resource` means the WASI worlds built around handles
-(`wasi:filesystem`, `wasi:sockets`) do not import wholesale. That is the
-honest outcome: their central abstraction is identity, which revl's value
-model does not have, and a generated approximation would be worse than a
-hand-written `extern acquire`/`undo` pair.
+The WASI worlds built around handles (`wasi:filesystem`, `wasi:sockets`) now
+import, because their central abstraction — a resource, a handle with identity
+— is exactly revl's acquire-returned resource type: a value an `extern acquire`
+returns, whose lifetime is a tracked inverse (`undo`) and which crosses a seam
+by proxy, not by copy (`src/revl/distribute.py`). The mapping and its
+round-trip are documented in docs/wit-bridge.md §3.
 
 ## 4. `--backend`, and one thing the roadmap assumed
 
@@ -219,11 +223,13 @@ still waits on the wasm tier growing non-i32 lowering.
   payloads, `option`, `result<T, E>`, `result<_, E>`, `list<string>`, a type
   alias, and a world with inline exports, inline imports and interface
   references.
-- `tests/fixtures/wit/resource.wit` — a refusal fixture.
+- `tests/fixtures/wit/resource.wit` — a resource with a constructor, an
+  emission method, a `@revl:pure` method, and a free function returning the
+  handle (docs/wit-bridge.md §3).
 
 ```console
-$ ./.venv/bin/pytest tests/test_import_wit.py -q     # 39 passed
-$ ./.venv/bin/pytest tests/ -q                       # 325 passed, 6 skipped
+$ ./.venv/bin/pytest tests/test_import_wit.py tests/test_export_wit.py -q
+$ ./.venv/bin/pytest tests/ -q
 ```
 
 ## 6. The rest of the family

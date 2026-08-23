@@ -346,6 +346,85 @@ arguments (generic signatures are instantiated first, so a `T` bound to
 written. Pinned positively: a test asserts the marker is present in the IR,
 and one per tier pins the emitted conversion text.
 
+## Sized integers: `Int32`
+
+`Int` is the right default — it indexes, counts and sizes things, which is the
+scalar case, and there the 64-bit check costs about 9%. But a *vectorisable*
+loop pays much more, because the overflow branch defeats auto-vectorisation,
+and even without the check an i32 kernel is ~34% faster than i64 because SIMD
+gets twice the lanes. `Int32` is the escape hatch for numeric kernels that want
+the width — not a change to the default, and not a licence to wrap.
+
+**`Int32` is 32-bit two's complement, and overflow traps** — the same
+discipline `Int` has at 64 bits, at half the width. `a + b`, `a - b`, `a * b`
+and `-a` fault at the i32 edge rather than wrapping; the fault is
+`revl: Int32 overflow` on the tiers that can carry a message.
+
+| tier | `Int32` is | how `+ - *` trap |
+|---|---|---|
+| python | `int` + `_revl_i32` bound | the bound is imposed (arbitrary precision) |
+| typescript | `number` (a double holds every i32 exactly) | `revlI32` re-imposes the bound |
+| rust | `i32` | `checked_add/sub/mul(..).expect("revl: Int32 overflow")` |
+| java | `int` | `Math.addExact/subtractExact/multiplyExact` (the `int` overloads) |
+| go | `int32` | `revlAddI32/SubI32/MulI32` (compute wide, re-impose the bound) |
+| wasm | `i32` | `$int32_add/sub/mul` (compute in i64, narrow through `$int32_narrow`, `unreachable`) |
+
+wasm is the tier the type is *for* — it has native `i32`, and a slot round-trips
+an `Int32` bit-exactly (zero-extended in, wrapped out), so `Int32` lives in
+records and lists there as well as in registers. As with `Int`, the wasm trap
+carries no payload, so it faults without the message.
+
+### The coercion rule: widen implicitly, narrow explicitly
+
+The lattice is `Int32 → Int`, each step lossless. Widening runs that way and is
+**implicit** at every value-flow position — a call argument, a `let`/`return`
+target, a field — exactly as `Int → Float` widens. The IR marks each site
+(`"widen": "Int"`, beside the existing `"widen": "Float"`) so the tiers that
+keep the widths apart emit the conversion (`as i64`, `(long)`, `int64(..)`,
+`BigInt(..)`, `i64.extend_i32_s`) instead of letting a host rule absorb it.
+
+Narrowing — `Int → Int32` — can lose bits, so it is **always explicit and
+checked**. There is no silent truncation and no `Int32` literal suffix: an
+`Int32` value comes from `.to_int32()`, which re-imposes the 32-bit bound at
+runtime and faults out of range, or from an `Int32`-typed parameter. `.to_int()`
+spells the widening where you want it visible.
+
+```revl fragment
+let count: Int32 = total.to_int32()   // checked narrow; faults if total > 2^31-1
+let wide: Int = count                 // implicit widen, Int32 -> Int
+let back: Int = count.to_int() + 1    // .to_int() makes the widen explicit
+```
+
+This mirrors the range rule the language already applies: an out-of-range
+literal is a compile error rather than a silent reinterpretation, and a
+narrowing that can lose bits is refused rather than performed quietly. Three
+worked rejections pin it — implicit narrowing
+(`examples/rejections/t21_int32_narrow_implicit.rvl`), width-mixing in
+arithmetic (`t22_int32_width_mix.rvl`), and `%` on `Int32` (`t23`).
+
+### What is not `Int32` yet
+
+`+ - *`, unary `-`, the comparisons and the two conversions are the surface.
+Three things stay Int-only in this pass, each because extending it would ship a
+per-tier divergence rather than close one:
+
+- **`%` and the named `div_*` / `mod`.** The remainder is width-agnostic in
+  value, but its zero-divisor *fault* is not uniform once `Int32` is a `number`
+  on TypeScript and an i32 on wasm. Widen with `.to_int()` to take a remainder.
+- **Mixed-width arithmetic.** `Int32 + Int` is refused: the widening is
+  implicit at value positions, not inside a binop, so the conversion stays a
+  visible request. (`/` is exempt — it always yields `Float`, so both sides
+  widen to `Float` and nothing is lost.)
+- **A flat-storage guarantee.** The SIMD argument wants contiguous `Int32`
+  arrays; that is a data-layout promise larger than the type, and it is not
+  made here.
+
+Every claim above is *executed*, not asserted about text:
+`tests/test_cross_tier_execution.py` runs in-range arithmetic, overflow that
+must fault, checked narrowing that must fault out of range, `-Int32.MIN`, and
+the widen/narrow coercions on py/ts/go/wasm, with rust/java behind
+`REVL_CROSS_TIER_SLOW=1`.
+
 ## Division by zero
 
 IEEE defines it as a *value*, not a fault: `1.0 / 0.0` is `+infinity`,

@@ -1,0 +1,63 @@
+// Fixture for tests/test_erase_report.py — two isolated realms, `alpha`
+// and `beta`, that share a service type but never a provision (G2:
+// disjointness is per-(key, realm)). Realm `alpha` makes real boundary
+// crossings: one emission is compensated, one is bare. Realm `beta` is
+// entirely independent, so an erasure of `alpha` cannot cascade into it —
+// that is what the report's `survivors` set proves.
+
+service Sink {
+  emission fn commit(line: Str)
+  emission fn rollback(line: Str)
+  emission fn bare(line: Str)
+}
+
+component AlphaSink provides sink: Sink {
+  isolate sink in realm("alpha")
+  let cells = effect Map.new() undo cells.drop()
+  provide sink {
+    fn commit(line) {
+      effect cells.insert("last", line)
+      undo   cells.remove("last")
+    }
+    fn rollback(line) {
+      effect cells.remove("last")
+      undo   cells.insert("last", line)
+    }
+    fn bare(line) {
+      effect cells.insert("bare", line)
+      undo   cells.remove("bare")
+    }
+  }
+}
+
+component AlphaApp requires sink: Sink {
+  isolate sink in realm("alpha")
+  intercept sink with { tags: ["alpha"] }
+  emit sink.commit("write") compensate sink.rollback("write")
+  emit sink.bare("leak")
+}
+
+component BetaSink provides sink: Sink {
+  isolate sink in realm("beta")
+  let cells = effect Map.new() undo cells.drop()
+  provide sink {
+    fn commit(line) {
+      effect cells.insert("last", line)
+      undo   cells.remove("last")
+    }
+    fn rollback(line) {
+      effect cells.remove("last")
+      undo   cells.insert("last", line)
+    }
+    fn bare(line) {
+      effect cells.insert("bare", line)
+      undo   cells.remove("bare")
+    }
+  }
+}
+
+component BetaApp requires sink: Sink {
+  isolate sink in realm("beta")
+  intercept sink with { tags: ["beta"] }
+  emit sink.commit("write") compensate sink.rollback("write")
+}

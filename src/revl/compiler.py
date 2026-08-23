@@ -270,6 +270,12 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             if id(decl) not in emitted_ids:
                 merged.tests.append(decl)
                 emitted_ids.add(id(decl))
+        # prop tests are pure-declaration tests like plain `test` blocks: they
+        # ride with the same closure (roadmap item 37)
+        for decl in module.program.prop_tests:
+            if id(decl) not in emitted_ids:
+                merged.prop_tests.append(decl)
+                emitted_ids.add(id(decl))
 
     # Build checker scopes for every emitted function so a module-private
     # declaration from another module is not accidentally callable.

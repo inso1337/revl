@@ -3,13 +3,36 @@
 import type { Context } from 'cordis'
 import { host } from '../../runtime.ts'
 
+function revlLen(x: string | ArrayLike<unknown>): bigint {
+  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
+}
+function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+  const i = Number(a), j = Number(b)
+  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+}
+function revlCharAt(s: string, i: bigint): string {
+  const c = Array.from(s)[Number(i)]
+  return c === undefined ? "" : c
+}
+function revlCharCodeAt(s: string, i: bigint): bigint {
+  const c = Array.from(s)[Number(i)]
+  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
+}
+function revlIndexOf(x: string | unknown[], v: unknown): bigint {
+  if (typeof x === "string") {
+    const at = x.indexOf(v as string)
+    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)
+  }
+  return BigInt(x.indexOf(v))
+}
+
 export interface Row {
   id: bigint
   name: string
 }
 
 export function strLen(s: string): bigint {
-    return BigInt(s.length)
+    return revlLen(s)
 }
 
 export function pushed(xs: bigint[], x: bigint): bigint[] {
@@ -17,7 +40,7 @@ export function pushed(xs: bigint[], x: bigint): bigint[] {
 }
 
 export function sliced(xs: bigint[]): bigint[] {
-    return xs.slice(1, 3)
+    return revlSlice(xs, 1n, 3n)
 }
 
 export function concatLists(a: bigint[], b: bigint[]): bigint[] {
@@ -37,15 +60,15 @@ export function repeated(s: string, n: bigint): string {
 }
 
 export function indexOfSub(s: string, sub: string): bigint {
-    return BigInt(s.indexOf(sub))
+    return revlIndexOf(s, sub)
 }
 
 export function charAtOf(s: string, i: bigint): string {
-    return s.charAt(Number(i))
+    return revlCharAt(s, i)
 }
 
 export function codeAtOf(s: string, i: bigint): bigint {
-    return BigInt(s.charCodeAt(Number(i)))
+    return revlCharCodeAt(s, i)
 }
 
 export function greetN(name: string, n: bigint): string {
@@ -86,7 +109,7 @@ export function resultFold(r: { kind: "Ok"; value: bigint } | { kind: "Err"; val
     case "Ok":
       return ((v) => (v))($revl_match_2.value)
     case "Err":
-      return ((e) => ((-BigInt(e.length))))($revl_match_2.value)
+      return ((e) => ((-revlLen(e))))($revl_match_2.value)
     default:
       throw new TypeError("non-exhaustive match")
   }

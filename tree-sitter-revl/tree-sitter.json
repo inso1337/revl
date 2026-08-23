@@ -1,0 +1,30 @@
+{
+  "grammars": [
+    {
+      "name": "revl",
+      "camelcase": "Revl",
+      "scope": "source.revl",
+      "file-types": ["rvl"],
+      "highlights": ["queries/highlights.scm"],
+      "injection-regex": "^revl$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "tree-sitter grammar for the revl language",
+    "links": {
+      "repository": "https://github.com/revl-lang/tree-sitter-revl"
+    }
+  },
+  "bindings": {
+    "c": false,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": false,
+    "swift": false,
+    "kotlin": false,
+    "zig": false
+  }
+}
