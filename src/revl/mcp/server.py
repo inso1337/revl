@@ -27,7 +27,8 @@ import json
 import sys
 
 from ..compiler import compile_files, compile_source
-from ..diagnostics import FIXES, GUARANTEES, obligations, report
+from ..diagnostics import FIXES, GUARANTEES, report
+from . import fillspec
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
 from .persist import RestoreError
@@ -381,9 +382,13 @@ def _tool_check(arguments: dict) -> dict:
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
-    # and not admissible until these are closed".
+    # and not admissible until these are closed". Each obligation carries a
+    # `fillSpec` — the expected type, the emission upper bound, the in-scope
+    # bindings and the reachable service signatures the checker already knew at
+    # that position — so the hole can be filled directly (docs/holes.md §8).
+    holes = fillspec.enrich(ir) if ir.get("holes") else []
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": obligations(ir.get("holes") or [])["holes"]}
+            "holes": holes}
 
 
 def _tool_admit(arguments: dict) -> dict:
