@@ -1,11 +1,12 @@
 # revl ⇄ MCP — the agent boundary
 
 **Status:** implemented — `revl mcp {serve,schema,import}`, a live in-memory
-session (`revl_load`/`revl_call`/`revl_swap`/`revl_rollback`/`revl_unload`/
-`revl_state`), and `revl serve --mcp app.rvl`, which serves *one booted
-composition's own* operations as tools. Tests: `tests/test_mcp.py`
+session (`revl_load`/`revl_call`/`revl_swap`/`revl_edit`/`revl_rollback`/
+`revl_unload`/`revl_state`), and `revl serve --mcp app.rvl`, which serves *one
+booted composition's own* operations as tools. Tests: `tests/test_mcp.py`
 (projection and protocol), `tests/test_mcp_session.py` (in-memory compilation
-and the live session) and `tests/test_mcp_serve.py` (the served composition;
+and the live session), `tests/test_mcp_edit.py` (the delta-patch verb) and
+`tests/test_mcp_serve.py` (the served composition;
 the runtime-free wire and preflight tests run everywhere, the live-call tests
 skip without the cordis-py runtime).
 
@@ -187,7 +188,8 @@ has no file yet, and only write out what has already proven itself.
 |---|---|
 | `revl_load` | boot a composition in memory; returns fiber states, provided keys, trace |
 | `revl_call` | invoke a provided operation — how you *test* what you just loaded |
-| `revl_swap` | admit a candidate against what is running, then hot-swap it |
+| `revl_swap` | admit a candidate against what is running, then hot-swap it (full source, or by name — see *Deltas, not documents*) |
+| `revl_edit` | patch the **server-side** source of the running composition and re-admit — a delta, not the whole file ([below](#deltas-not-documents--revl_edit)) |
 | `revl_rollback` | restore the generation before the last swap |
 | `revl_unload` | tear down and report the residue checks (R4) |
 | `revl_state` | what is loaded, and the trace since the last call |
@@ -215,6 +217,78 @@ baseline, so an agent can demonstrate its component leaves nothing behind
 
 Multi-module candidates work too: `modules` supplies in-memory sources for
 `use` imports, keyed by the path the import names.
+
+### Deltas, not documents — `revl_edit`
+
+The house principle of this protocol is that **state lives server-side and
+agents pass names, not contents**. `revl_swap {source: <edited>}` breaks it: to
+change one line it re-serializes the *entire composition*, so the cost scales
+with the size of the running system, not the size of the change. The
+token-surface audit ([`bench/results/token-surface-audit.md`](../bench/results/token-surface-audit.md),
+finding #1) measured this as the single highest-value protocol leak — the price
+grows precisely as self-evolving compositions get larger.
+
+The session already holds the running composition's source server-side (it kept
+the admission inputs so the composition can be snapshotted). `revl_edit` makes
+that source *addressable and editable*: an agent sends a small structured patch
+against a named buffer, and the server applies it, recompiles, and re-admits —
+**without the client resending the file**.
+
+The patch is a list of `edits`, each one of three narrow forms — two carry the
+model, the third is ergonomic sugar:
+
+| form | shape | for |
+|---|---|---|
+| hole fill | `{hole: <line>, expr: "<fill>"}` | fill the typed hole on that line — pairs with `revl_check`'s `fillSpec`, which reports each open hole's `line` and expected type |
+| text range | `{range: [start, end], replacement: "<text>"}` | replace the half-open character span `[start, end)` — the precise, general edit |
+| anchor | `{anchor: "<literal>", replacement: "<text>"}` | replace a literal snippet with no offset arithmetic — the ergonomic common case |
+
+Re-admission is **never bypassed**: every form ends at the identical gate
+`revl_swap` runs (`compile_source`/`compile_files` with `manifest=` the running
+IR, then `refuse_admission`). So a patch that would violate a guarantee is
+refused with its structured diagnostic and the running system is untouched —
+exactly as a full-source swap of the same bytes would be. The verdict is what
+comes back — admission result, open holes, or the diagnostic — **never the whole
+source**.
+
+```
+revl_load  {source}                                        -> size() -> 0
+revl_edit  {edits: [{anchor: "fn size() = 0",
+                     replacement: "fn size() = 42"}]}       -> admitted, swapped
+revl_call  {key: cache, method: size}                      -> 42
+revl_edit  {edits: [{anchor: "fn size() = 42",
+                     replacement: 'fn size() = "nope"'}]}   -> T1 refused, untouched
+revl_call  {key: cache, method: size}                      -> 42   ← still serving
+```
+
+A patch may **iterate through holes**. An edit that scaffolds a `hole` compiles
+but does not swap — a hole may never enter a running composition — so it comes
+back as an obligation carrying its `fillSpec`, and it *advances the server-side
+source* so the next edit builds on it. A follow-up `{hole: <line>, expr: …}`
+fills that hole by the very line the fillSpec reported, and then it admits and
+swaps. Deltas accumulate across the calls; nothing is resent. An edit that fails
+to compile or admit advances nothing — the working buffer stays at its last good
+state, so a refused patch never leaves a broken draft behind.
+
+**Swap by name.** The same server-side source backs an additive extension to
+`revl_swap`: called with *no* inline `source`/`files`/`modules`, it re-admits
+the source the session already holds (what `revl_edit` left, or the running
+generation itself). Full inline source is still accepted, unchanged — the
+name-referenced form is purely additive.
+
+**The measured win.** The delta is a fixed cost; the full-source swap is not.
+Using the audit's own BPE proxy (`bench/tokens.py`) on the arguments an agent
+serializes to change one `size()` line:
+
+| running system | full-source `revl_swap` | `revl_edit` delta | saving |
+|---|--:|--:|--:|
+| one component | 97 tok | 30 tok | 67 tok (69%) |
+| nine components | 559 tok | 30 tok | 529 tok (95%) |
+
+The `revl_edit` cost is *constant* in the size of the composition — the agent
+serializes only the change — while the swap cost grows with every component
+admitted. That is the "documents, not deltas" tax the audit ranked #1, paid
+down to a fixed price.
 
 Where `revl_swap` is binary — admit or refuse — `revl_gauntlet` is the graded
 form: candidate in, dossier out. It runs the same admission gate plus a real

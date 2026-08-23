@@ -60,8 +60,19 @@ name. This is the Go analog of the Rust backend's `_revl_realm` fix.
 - **ir_version 1 & 2** components: effect/inverse, `let`-effect binds, config
   with defaults, provide/inject, provide-method bodies (`return` / `effect` /
   `emit` / `format`), block-level effects, `isolate`/realms, `intercept`.
+- **Instance-parametric `spawn`** (ir_version 3, docs/design-v2-instances.md
+  phase 1): a `spawn` acquisition lowers to a `revlSpawn<Target>` helper that
+  plugs the target *template* as a **child fiber** of the spawner, each
+  provided key isolated into a **fresh local realm** (a distinct `*stc.Realm`
+  minted per spawn — never interned by name like a global realm — so two
+  instances of one component never collide on a provision). The bound handle
+  (`RevlSpawnHandle`) reclaims exactly that instance on `Dispose()`, running
+  the instance's own LIFO teardown; disposal is idempotent, so the spawner's
+  `undo w.dispose()` is a harmless no-op once the instance is gone and a
+  safety net otherwise (an un-disposed instance cannot outlive its spawner).
+  Proven on the real stc-go runtime by `scenarios/emitted/spawn/`.
 - **Out of scope** (rejected with a clear `EmitError`): ir_version 3 pure
-  functions/records/variants/match; `spawn`/instance-parametric IR.
+  functions/records/variants/match.
 
 ## Verify
 

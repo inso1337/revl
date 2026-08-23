@@ -29,6 +29,7 @@ import sys
 from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, report
 from . import fillspec
+from . import edit as _edit
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
 from .persist import RestoreError
@@ -140,10 +141,23 @@ def _tool_call(arguments: dict) -> dict:
 
 def _tool_swap(arguments: dict) -> dict:
     """Admit a candidate against what is running, then hot-swap it in. A
-    rejected candidate changes nothing — that is the whole point."""
+    rejected candidate changes nothing — that is the whole point.
+
+    The source may be sent inline (`source`/`files`/`modules`) *or* referred to
+    by name: with none of those supplied, swap re-admits the source the server
+    already holds for the running composition (the audit's #1 finding — an
+    agent that just edited server-side with `revl_edit`, or wants to re-admit
+    the running generation, need not re-serialize the whole file). Full inline
+    source is still accepted, unchanged.
+    """
     if not SESSION.loaded:
         return _session_error("nothing is loaded — call revl_load first")
     replacing = tuple(arguments.get("replacing") or ())
+
+    inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    if not inline:
+        return _swap_server_side(replacing)
+
     try:
         _compile(arguments.get("source"), arguments.get("files"),
                  manifest=SESSION.ir, modules=arguments.get("modules"),
@@ -173,6 +187,50 @@ def _tool_swap(arguments: dict) -> dict:
     except SessionError as error:
         return _session_error(str(error))
     return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+
+
+def _swap_server_side(replacing: tuple) -> dict:
+    """Swap the source the session already holds — no inline source resent."""
+    vs = _edit.virtual_source(SESSION)
+    if vs.get("source") is None:
+        return _session_error(
+            "no server-side source to swap by name — this composition was not "
+            "loaded from inline source, so there is nothing the session can "
+            "re-admit without you passing `source`/`files`")
+    try:
+        _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = False
+        rejected["swapped"] = False
+        rejected["note"] = "the running composition is untouched"
+        return rejected
+    try:
+        full = _edit.compile_virtual(vs)
+    except RevlError as error:
+        rejected = report(error)
+        rejected["admitted"] = True
+        rejected["swapped"] = False
+        rejected["note"] = ("the server-side source admits but is not a complete "
+                            "composition on its own")
+        return rejected
+    try:
+        state = SESSION.swap(full, origin=_edit._origin_from(vs))
+    except SessionError as error:
+        return _session_error(str(error))
+    return {"ok": True, "admitted": True, "swapped": True,
+            "fromServerSide": True, **_summary(full), **state}
+
+
+def _tool_edit(arguments: dict) -> dict:
+    """Patch the server-side source of the running composition and re-admit —
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
+    try:
+        return _edit.apply_edit(SESSION, arguments)
+    except _edit.EditError as error:
+        return _session_error(str(error), edited=False, swapped=False)
+    except SessionError as error:
+        return _session_error(str(error))
 
 
 def _tool_rollback(_arguments: dict) -> dict:
@@ -663,7 +721,12 @@ TOOLS = [
         "name": "revl_swap",
         "description": "Admit a candidate against the RUNNING composition and hot-swap "
                        "it in. A rejected candidate leaves the running system untouched. "
-                       "This is the acting half of revl_admit.",
+                       "This is the acting half of revl_admit. Source may be sent inline "
+                       "(`source`/`files`/`modules`) OR referred to by name: call it with "
+                       "NONE of those and swap re-admits the source the server already "
+                       "holds for the running composition — so an agent that edited "
+                       "server-side with revl_edit, or wants to re-admit the running "
+                       "generation, need not re-serialize the whole file.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -672,6 +735,64 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_swap,
+    },
+    {
+        "name": "revl_edit",
+        "description": "Patch the SERVER-SIDE source of the running composition and "
+                       "re-admit — deltas, not documents. Instead of re-sending the "
+                       "whole composition to change one line (revl_swap's cost, which "
+                       "scales with the running system), send a small structured patch "
+                       "against a named buffer the server already holds. Each edit is "
+                       "one of: {hole, expr} (fill the typed hole on that source line — "
+                       "pairs with revl_check's fillSpec, which reports each hole's "
+                       "line); {range: [start, end], replacement} (replace a character "
+                       "span); or {anchor, replacement} (replace a literal snippet, no "
+                       "offsets). Re-admission runs the SAME gate as revl_swap: a patch "
+                       "that breaks a guarantee is refused with its diagnostic and the "
+                       "running system is untouched. A patch that compiles clean is "
+                       "hot-swapped in; one that still has open holes advances the "
+                       "server-side source (so the next edit builds on it) but swaps "
+                       "nothing. Returns the admission verdict / holes / diagnostic — "
+                       "never the whole source.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "description": "the patch: one or more edits applied in order",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "hole": {"type": "integer",
+                                     "description": "1-based source line of the typed "
+                                                    "hole to fill (from a fillSpec)"},
+                            "expr": {"type": "string",
+                                     "description": "the fill expression (with `hole`)"},
+                            "range": {"type": "array", "items": {"type": "integer"},
+                                      "description": "[start] or [start, end] character "
+                                                     "offsets to replace"},
+                            "anchor": {"type": "string",
+                                       "description": "literal substring to replace "
+                                                      "(no offset arithmetic)"},
+                            "replacement": {"type": "string",
+                                            "description": "text to substitute (with "
+                                                           "`range`/`anchor`)"},
+                            "count": {"type": "integer",
+                                      "description": "max anchor sites to replace "
+                                                     "(omit for all)"},
+                        },
+                    },
+                },
+                "target": {"type": "string",
+                           "description": "which server-side buffer to edit: omit for the "
+                                          "main inline source, or name an in-memory module"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+            "required": ["edits"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_edit,
     },
     {
         "name": "revl_gauntlet",

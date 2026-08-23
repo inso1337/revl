@@ -1,0 +1,286 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Probe": {
+      "methods": {
+        "mark": {
+          "params": [
+            {
+              "name": "m",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    },
+    "Counter": {
+      "methods": {
+        "value": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    },
+    "Ctl": {
+      "methods": {
+        "retire_a": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Worker",
+      "source": "spawn.rvl",
+      "config": [
+        {
+          "name": "tag",
+          "type": "Str",
+          "default": null
+        },
+        {
+          "name": "id",
+          "type": "Int",
+          "default": null
+        }
+      ],
+      "requires": {
+        "probe": "Probe"
+      },
+      "provides": {
+        "counter": "Counter"
+      },
+      "body": [
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "probe"
+            },
+            "method": "mark",
+            "args": [
+              {
+                "kind": "format",
+                "template": "up:$0",
+                "args": [
+                  {
+                    "kind": "config",
+                    "field": "tag"
+                  }
+                ]
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "probe"
+            },
+            "method": "mark",
+            "args": [
+              {
+                "kind": "format",
+                "template": "d1:$0",
+                "args": [
+                  {
+                    "kind": "config",
+                    "field": "tag"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "probe"
+            },
+            "method": "mark",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "up2"
+              }
+            ]
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "req",
+              "name": "probe"
+            },
+            "method": "mark",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "d2"
+              }
+            ]
+          }
+        },
+        {
+          "step": "provide",
+          "name": "counter",
+          "service": "Counter",
+          "methods": [
+            {
+              "name": "value",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "config",
+                    "field": "id"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Supervisor",
+      "source": "spawn.rvl",
+      "config": [],
+      "requires": {
+        "probe": "Probe"
+      },
+      "provides": {
+        "ctl": "Ctl"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "w1",
+          "acquire": {
+            "kind": "spawn",
+            "component": "Worker",
+            "config": {
+              "tag": {
+                "kind": "lit",
+                "value": "a"
+              },
+              "id": {
+                "kind": "lit",
+                "value": 1
+              }
+            },
+            "realms": [
+              "counter"
+            ],
+            "line": 22
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "w1"
+            },
+            "method": "dispose",
+            "args": []
+          }
+        },
+        {
+          "step": "let-effect",
+          "bind": "w2",
+          "acquire": {
+            "kind": "spawn",
+            "component": "Worker",
+            "config": {
+              "tag": {
+                "kind": "lit",
+                "value": "b"
+              },
+              "id": {
+                "kind": "lit",
+                "value": 2
+              }
+            },
+            "realms": [
+              "counter"
+            ],
+            "line": 23
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "w2"
+            },
+            "method": "dispose",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "ctl",
+          "service": "Ctl",
+          "methods": [
+            {
+              "name": "retire_a",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "r",
+                  "value": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "w1"
+                    },
+                    "method": "dispose",
+                    "args": []
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Supervisor",
+        "file": "spawn.rvl",
+        "inject": [
+          "probe"
+        ],
+        "provides": [
+          "ctl"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Supervisor"
+    ],
+    "templates": [
+      "Worker"
+    ]
+  }
+}
