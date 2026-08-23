@@ -148,6 +148,51 @@ def test_run_without_the_runtime_skips_like_the_other_backends(tmp_path):
     assert "-m revl run" in result.stderr
 
 
+# ----------------------------------------------------- `revl test` preflight
+
+def test_py_tier_preflights_the_missing_cordis_runtime(monkeypatch):
+    """uxprobe's longest stall (findings-uxprobe.md): a lifecycle-test
+    document run under an interpreter without the cordis-py runtime used to
+    FAIL per-test (`FAIL <name>: ModuleNotFoundError ...  0 of N passed`) —
+    a stack-shaped verdict for an environment problem that has a one-line
+    remedy. The runner now preflights before any test runs and names it."""
+    import revl.test as revl_test  # noqa: PLC0415
+
+    monkeypatch.setattr(revl_test, "_cordis_available", lambda: False)
+    ir = compile_files([str(ROOT / "examples" / "lifecycle_cache.rvl")])
+    outcome, message = revl_test.run_py(ir)
+    assert outcome == "fail"
+    assert message.startswith("preflight:")
+    assert "sh backends/python/setup.sh" in message
+    assert "backends/python/.venv/bin/python -m revl test" in message
+    # none of the stack-shaped shape may leak through
+    assert "ModuleNotFoundError" not in message
+    assert "0 of" not in message
+
+
+def test_py_tier_runtime_gate_is_keyed_to_the_document(monkeypatch):
+    """The gate fires only when the emitted source actually drives cordis
+    (a `lifecycle test`). A pure-fn document's tests must still RUN — and
+    pass — on a cordis-less interpreter, not get swept into the preflight."""
+    import revl.test as revl_test  # noqa: PLC0415
+
+    monkeypatch.setattr(revl_test, "_cordis_available", lambda: False)
+    doc = ROOT / "dogfood" / "_dogfix_pure_test_fixture.rvl"
+    doc.write_text(
+        "fn add(a: Int, b: Int) -> Int { return a + b }\n"
+        "\n"
+        "test \"adds\" {\n"
+        "  assert add(1, 2) == 3\n"
+        "}\n", encoding="utf-8")
+    try:
+        ir = compile_files([str(doc)])
+        outcome, message = revl_test.run_py(ir)
+        assert outcome == "pass", message
+        assert "1 test(s) passed" in message
+    finally:
+        doc.unlink(missing_ok=True)
+
+
 # ------------------------------------------------------------ real runtime
 #
 # The golden path: `revl run manifest --backend py` boots the composition,
