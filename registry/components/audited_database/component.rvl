@@ -1,0 +1,22 @@
+// A Database provider that ADDS `ping()` to the interface. A compatible
+// evolution: a consumer type-checked against the smaller Database still
+// type-checks against this superset, so §5 admits it — but it is not an exact
+// match, so it ranks below the exact providers (docs/registry.md §2.2).
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+  fn ping() -> Bool
+}
+
+component AuditedDatabase provides db: Database {
+  config { url: Str = "pg://", pool_size: Int = 4 }
+
+  let pool = effect Pool.open(config.url, config.pool_size) undo pool.close()
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+    fn ping()       = true
+  }
+}

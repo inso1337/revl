@@ -1,0 +1,53 @@
+{
+  "boundary": {
+    "UserCache": {
+      "awaits": 0,
+      "capabilities": {
+        "db.execute": [
+          "*"
+        ]
+      },
+      "compensated": 0,
+      "emissions": [
+        "db.execute"
+      ],
+      "externs": []
+    }
+  },
+  "distributability": {
+    "Cache": {
+      "reasons": [
+        "get: not async fn",
+        "put: emission (sync)"
+      ],
+      "verdict": "address-space-bound"
+    },
+    "Database": {
+      "reasons": [
+        "query: not async fn",
+        "execute: emission (sync)"
+      ],
+      "verdict": "address-space-bound"
+    }
+  },
+  "externs": [],
+  "kind": "revl.interchange",
+  "manifest": {
+    "components": [
+      {
+        "file": "component.rvl",
+        "inject": [
+          "db"
+        ],
+        "name": "UserCache",
+        "provides": [
+          "cache"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "UserCache"
+    ]
+  },
+  "schema_version": "1.0"
+}

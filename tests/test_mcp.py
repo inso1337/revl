@@ -236,7 +236,9 @@ def test_initialize_and_tools_list():
                           "revl_history_lifetime",
                           # backwards replay (docs/replay.md)
                           "revl_timeline", "revl_inspect_step", "revl_step_back",
-                          "revl_replay_forward", "revl_replay_bisect"}
+                          "revl_replay_forward", "revl_replay_bisect",
+                          # the component registry read path (docs/registry.md)
+                          "revl_resolve"}
     # inspection tools are read-only; the ones that move a running system say so
     assert tools["revl_check"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_swap"]["annotations"]["destructiveHint"] is True

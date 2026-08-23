@@ -1,0 +1,103 @@
+{
+  "candidate": {
+    "components": [
+      {
+        "name": "MysqlDatabase",
+        "provides": [
+          "db"
+        ],
+        "requires": []
+      }
+    ],
+    "irVersion": 1,
+    "loadOrder": [
+      "MysqlDatabase"
+    ],
+    "services": [
+      "Database"
+    ]
+  },
+  "claimed": {
+    "boundary": {
+      "components": {
+        "MysqlDatabase": {
+          "awaits": 0,
+          "capabilities": {},
+          "compensated": 0,
+          "emissions": [],
+          "externs": []
+        }
+      },
+      "count": 0,
+      "externs": [],
+      "kind": "claimed",
+      "note": "the G8 boundary: every host operation the candidate reaches. Enumerated, not proved \u2014 revl cannot see inside an extern, so this is the list of claims the composition rests on.",
+      "status": "enumerated"
+    }
+  },
+  "note": "admission proves the candidate may run; the lifecycle battery tested that it boots and unloads clean; the boundary enumerates what remains claimed.",
+  "ok": true,
+  "pending": {
+    "faultSweep": {
+      "counts": null,
+      "note": "Will inject a fault at each effect boundary in turn and confirm the derived teardown still leaves no residue, moving a class of recovery claims from `claimed` to `tested`. Not built yet; this slot reports `pending` until roadmap item 30 lands, at which point it fills in without any change to the dossier shape.",
+      "roadmapItem": 30,
+      "status": "pending",
+      "title": "fault sweep at every step"
+    },
+    "inverseRoundTrip": {
+      "counts": null,
+      "note": "Will run each effect's undo and confirm it round-trips the pre-state, moving reversibility from a structural claim to a `tested` observation with counts. Not built yet; this slot reports `pending` until roadmap item 26 lands, at which point it fills in without any change to the dossier shape.",
+      "roadmapItem": 26,
+      "status": "pending",
+      "title": "verified-effect inverse round-trips"
+    }
+  },
+  "proved": {
+    "admission": {
+      "against": "cold",
+      "kind": "proved",
+      "note": "the candidate links against a clean composition (cold start).",
+      "status": "proved"
+    },
+    "teardown": {
+      "kind": "proved",
+      "note": "teardown is the reverse of load order (LIFO); derived by the compiler from G2/G5, not observed \u2014 every effect carries its own undo and a teardown step registers no new effect.",
+      "status": "derived",
+      "teardownOrder": [
+        "MysqlDatabase"
+      ]
+    }
+  },
+  "scratch": {
+    "booted": true,
+    "isolated": true,
+    "note": "the battery ran in a throwaway Session; the live composition was read for admission only and never mutated."
+  },
+  "tested": {
+    "lifecycle": {
+      "checks": {
+        "effects": true,
+        "listeners": true,
+        "provisions": true,
+        "registry": true
+      },
+      "counts": {
+        "checks": 4,
+        "failed": 0,
+        "passed": 4
+      },
+      "detail": {
+        "disposables": 1,
+        "disposablesBaseline": 1,
+        "provisions": [],
+        "registrySize": 0
+      },
+      "kind": "tested",
+      "ran": true,
+      "status": "passed",
+      "test": "boot/unload no-residue (R4)"
+    }
+  },
+  "verdict": "admissible"
+}
