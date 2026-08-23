@@ -29,8 +29,9 @@ TIERS = ("python", "typescript", "rust", "java", "wasm")
 # tier -> reason, for constructs a backend deliberately cannot express
 EXPECTED_LIMITS = {
     "method_bindings": {},          # every tier must take this one
-    "str_service": {
-        "wasm": "the cordis-wasm tier is i32-only (docs/v2.0-roadmap.md)",
+    "str_service": {},              # wasm gained Str at the service boundary — all six tiers now
+    "reference_composition": {      # this comp uses host Map.new, a genuine wasm boundary
+        "wasm": "host builtin Map.new — the wasm tier expresses state through coeffects",
     },
 }
 
@@ -89,16 +90,18 @@ def test_method_bindings_are_expressible_on_every_tier():
     assert failures == {}, f"tiers that refused a portable construct: {failures}"
 
 
-def test_string_typed_services_reach_every_tier_but_wasm():
+def test_string_typed_services_reach_every_tier():
+    """Str-typed services now reach all six tiers, including wasm — which
+    carries Str across the service boundary as a canonical-ABI pointer."""
     failures = _emit_all(compile_source(STR_SERVICE), "str_service")
     assert failures == {}, f"unexpected refusals: {failures}"
 
 
-def test_wasm_still_refuses_str_for_the_documented_reason():
-    """An expected limit must stay expected — if wasm gains string support
-    this test fails and EXPECTED_LIMITS gets updated deliberately."""
-    with pytest.raises(Exception, match="i32-only|not lowerable"):
-        _emitter("wasm").emit(compile_source(STR_SERVICE))
+def test_wasm_now_emits_str_at_the_service_boundary():
+    """Was a documented limit (wasm was i32-only at the boundary); wasm gained
+    Str via linear-memory pointers, so it must now emit a Str-typed service
+    rather than refuse it. The inverse of the old refusal assertion."""
+    _emitter("wasm").emit(compile_source(STR_SERVICE))
 
 
 def test_the_reference_composition_emits_on_every_hosted_tier():
@@ -120,5 +123,5 @@ component MemCache requires log: Log provides cache: Cache {
 }
 """
     )
-    failures = _emit_all(ir, "str_service")
+    failures = _emit_all(ir, "reference_composition")
     assert failures == {}, f"unexpected refusals: {failures}"
