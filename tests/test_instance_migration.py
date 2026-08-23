@@ -127,7 +127,7 @@ def test_state_migrates_onto_a_compatible_successor():
         # the swap reports the migration it performed
         assert state.get("migration") == {
             "policy": "generational",
-            "templates": {"Worker": {"instances": 1, "migrated": True}},
+            "templates": {"Worker": {"instances": 1, "migrated": True, "resources": 1}},
         }, state.get("migration")
         # running T' now ...
         assert session.call("admin", "ver", [])["result"] == 2
@@ -179,5 +179,78 @@ component G provides greeter: Greeter {
                              origin={"source": src2})
         assert "migration" not in state
         assert session.call("greeter", "hi", [])["result"] == 2
+    finally:
+        session.unload()
+
+
+# ---------------------------------------------------------------------------
+# CHARACTERIZATION of a KNOWN, UNCLOSED hazard: same-typed positional collision.
+# The state-compat gate checks same-LENGTH / same-TYPE-per-position; it does NOT
+# check that a same-typed resource keeps its ROLE. A successor that REORDERS two
+# same-typed resources (Maps `a` and `b`, acquired in the opposite order) PASSES
+# the gate, and positional correlation migrates each one's state into the OTHER's
+# slot — a SILENT WRONG-STATE migration. Fix = stable-key correlation + a declared
+# `handoff` surface (roadmap item 53). This test PINS the current wrong behaviour;
+# when correlation becomes key-based it will FAIL, which is the signal to close it.
+# See docs/design-v2-instances.md, "reorder hazard".
+# ---------------------------------------------------------------------------
+
+_TWO_MAP_SRC = """
+service TwoStore {
+  fn getA(k: Str) -> Opt[Str]
+  fn putA(k: Str, v: Str)
+  fn getB(k: Str) -> Opt[Str]
+  fn putB(k: Str, v: Str)
+}
+service Admin2 {
+  fn seedA(v: Str)
+  fn seedB(v: Str)
+  fn readA() -> Opt[Str]
+  fn readB() -> Opt[Str]
+}
+component Worker provides store: TwoStore {
+%s
+  provide store {
+    fn getA(k) = a.get(k)
+    fn putA(k, v) { effect a.insert(k, v) undo a.remove(k) }
+    fn getB(k) = b.get(k)
+    fn putB(k, v) { effect b.insert(k, v) undo b.remove(k) }
+  }
+}
+component Supervisor provides admin: Admin2 {
+  let w = effect spawn Worker undo w.dispose()
+  provide admin {
+    fn seedA(v) = w.store.putA("k", v)
+    fn seedB(v) = w.store.putB("k", v)
+    fn readA() = w.store.getA("k")
+    fn readB() = w.store.getB("k")
+  }
+}
+"""
+
+_ORDER_AB = "  let a = effect Map.new() undo a.drop()\n  let b = effect Map.new() undo b.drop()"
+_ORDER_BA = "  let b = effect Map.new() undo b.drop()\n  let a = effect Map.new() undo a.drop()"
+
+
+def test_reorder_hazard_same_typed_resources_migrate_to_the_wrong_slot():
+    """KNOWN hazard, pinned: two same-typed resources reordered in the successor
+    pass the state-compat gate but cross their state under positional migration.
+    Asserts the WRONG (crossed) result so a future stable-key fix trips this."""
+    session = Session()
+    src_ab = _TWO_MAP_SRC % _ORDER_AB
+    session.load(compile_source(src_ab, "mig.rvl"), origin={"source": src_ab})
+    try:
+        session.call("admin", "seedA", ["A-STATE"])
+        session.call("admin", "seedB", ["B-STATE"])
+        assert session.call("admin", "readA", [])["result"] == "A-STATE"
+        assert session.call("admin", "readB", [])["result"] == "B-STATE"
+
+        src_ba = _TWO_MAP_SRC % _ORDER_BA
+        session.swap(compile_source(src_ba, "mig.rvl"), origin={"source": src_ba})
+
+        # THE HAZARD: gate passed ([Map, Map] == [Map, Map]) but positional
+        # correlation crossed the state — each store now reads the OTHER's value.
+        assert session.call("admin", "readA", [])["result"] == "B-STATE"
+        assert session.call("admin", "readB", [])["result"] == "A-STATE"
     finally:
         session.unload()

@@ -280,7 +280,11 @@ class Session:
         for name, pairs in plan.items():
             for handle, cap in pairs:
                 handle.restore_state(cap)
-            report["templates"][name] = {"instances": len(pairs), "migrated": True}
+            # operator visibility (item 53 rule, success case): name the count
+            # of resources actually carried, so the report is honest about what moved.
+            report["templates"][name] = {
+                "instances": len(pairs), "migrated": True,
+                "resources": sum(len(cap) for _, cap in pairs)}
         return report
 
     def _abort_swap(self, old_ir: dict, pre: dict,
