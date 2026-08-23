@@ -549,6 +549,135 @@ def test_replay_forward_deduplicates_a_repeated_call():
                                "args": ["a", "1"]}]
 
 
+# ------------------------------------------------------------------- bisect
+#
+# git-bisect for an execution: binary-search the recorded timeline for the
+# FIRST step at which an asserted predicate flips, in log2(N) evaluations.
+
+
+def _notes_timeline(n: int):
+    harness = Harness(NOTES)
+    for i in range(n):
+        harness.call("notes", "put", f"k{i}", str(i))
+    return harness, harness.timeline("N")
+
+
+def _has(args):
+    # a predicate that flips once the insert carrying `args` is accumulated
+    return (f"any((s.get('origin') or {{}}).get('args') == {args!r} "
+            "for s in accumulated)")
+
+
+def test_bisect_finds_the_flip_in_log2_evaluations():
+    import math
+
+    harness, timeline = _notes_timeline(32)
+    n = len(timeline.steps)
+    # the insert of k20 sits at a known step; find the first step it is present
+    target = [s for s in timeline.steps
+              if (s.origin or {}).get("args") == ["k20", "20"]][0]
+
+    report = timeline.bisect(_has(["k20", "20"]))
+
+    assert report["flipped"] is True
+    assert report["found"] == target.index
+    # the headline claim: far fewer evaluations than the naive scan of N
+    assert report["evaluations"] <= math.ceil(math.log2(n)) + 2
+    assert report["evaluations"] < n
+    # and the found index really is the boundary: false at found-1, true at found
+    assert timeline.inspect(report["found"] - 1)
+    scope = _has(["k20", "20"])
+    assert _eval_over_view(timeline, report["found"], scope) is True
+    assert _eval_over_view(timeline, report["found"] - 1, scope) is False
+
+
+def _eval_over_view(timeline, k, predicate):
+    view = dict(timeline.inspect(k))
+    view["step"] = timeline.steps[k].as_dict() if k >= 0 else None
+    return bool(eval(predicate,  # noqa: S307
+                     {"__builtins__": replay._SAFE_BUILTINS}, view))
+
+
+def test_bisect_returns_the_full_record_of_the_found_step():
+    """who ran, what it touched, which realm."""
+    harness = Harness(USER_CACHE, PG_CONFIG)
+    harness.call("cache", "put", "a", "1")
+    timeline = harness.timeline("UserCache")
+
+    report = timeline.bisect("len(emissionsSoFar) > 0")
+
+    assert report["flipped"] is True
+    record = report["record"]
+    assert record["realm"] == "UserCache"                    # which realm
+    assert record["whoRan"] == "cache.put('a', '1')"         # who ran
+    assert record["touched"]["service"] == "Database"        # what it touched
+    assert record["touched"]["args"] == ["INSERT INTO cache_log VALUES (a)"]
+    assert report["step"]["kind"] == "emission"
+
+
+def test_bisect_reports_the_unverified_status_of_the_bisect_path():
+    """The bound that must be told: bisect trusts the recorded inverses, and
+    `verified effect` (roadmap item 26) is not built, so the effects on the
+    path are unverified."""
+    _harness, timeline = _notes_timeline(8)
+    report = timeline.bisect(_has(["k5", "5"]))
+
+    verified = report["verified"]
+    assert verified["status"] == "unverified"
+    assert verified["effectsOnPath"] > 0
+    assert verified["verifiedOnPath"] == 0
+    assert "roadmap item 26" in verified["explanation"]
+    # no recorded step carries a `verified` marker today
+    assert all("verified" not in s.as_dict() for s in timeline.steps)
+
+
+def test_bisect_when_the_predicate_never_flips():
+    _harness, timeline = _notes_timeline(6)
+    report = timeline.bisect("False")
+
+    assert report["flipped"] is False
+    assert report["found"] is None
+    assert report["valueThroughout"] is False
+    assert "never flips" in report["reason"]
+
+
+def test_bisect_when_the_predicate_flips_at_step_zero():
+    _harness, timeline = _notes_timeline(6)
+    # true at and after step 0, false only before activation (-1)
+    report = timeline.bisect("at >= 0")
+
+    assert report["flipped"] is True
+    assert report["found"] == 0
+    assert report["fromValue"] is False
+    assert report["toValue"] is True
+
+
+def test_bisect_on_an_empty_timeline_flips_nothing():
+    harness = Harness(NOTES)  # a bare component with no accumulated steps? it has some
+    empty = replay.Timeline("Nothing")
+    report = empty.bisect("True")
+    assert report["flipped"] is False
+    assert report["found"] is None
+    assert report["evaluations"] == 0
+
+
+def test_bisect_reports_a_bad_predicate_as_a_replay_error():
+    _harness, timeline = _notes_timeline(4)
+    with pytest.raises(replay.ReplayError, match="predicate"):
+        timeline.bisect("no_such_name_here")
+
+
+def test_bisect_never_mutates_the_timeline():
+    """It reconstructs each probe with inspect; nothing is unwound, so the
+    recording is byte-for-byte identical before and after."""
+    _harness, timeline = _notes_timeline(10)
+    before = [s.as_dict() for s in timeline.steps]
+    timeline.bisect(_has(["k7", "7"]))
+    after = [s.as_dict() for s in timeline.steps]
+    assert before == after
+    assert not any(s.undone for s in timeline.steps)
+
+
 # ------------------------------------------------------------------ honesty
 
 
@@ -601,13 +730,16 @@ def test_the_replay_tools_are_advertised_with_honest_annotations():
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     for name in ("revl_timeline", "revl_inspect_step", "revl_step_back",
-                 "revl_replay_forward"):
+                 "revl_replay_forward", "revl_replay_bisect"):
         assert name in tools
     assert tools["revl_timeline"]["annotations"]["readOnlyHint"] is True
     assert tools["revl_inspect_step"]["annotations"]["readOnlyHint"] is True
     # stepping back runs inverses against a live system
     assert tools["revl_step_back"]["annotations"]["destructiveHint"] is True
     assert tools["revl_replay_forward"]["annotations"]["destructiveHint"] is True
+    # bisect reconstructs each probe (inspect) and never mutates the timeline
+    assert tools["revl_replay_bisect"]["annotations"]["readOnlyHint"] is True
+    assert tools["revl_replay_bisect"]["annotations"]["destructiveHint"] is False
     assert "record" in tools["revl_load"]["inputSchema"]["properties"]
 
 
@@ -634,6 +766,7 @@ def test_replay_tools_validate_their_arguments():
     assert _call("revl_step_back", {})["diagnostics"][0]["message"].startswith("`to`")
     assert _call("revl_inspect_step", {})["diagnostics"][0]["message"].startswith("`at`")
     assert _call("revl_replay_forward", {})["diagnostics"][0]["message"].startswith("`from`")
+    assert _call("revl_replay_bisect", {})["diagnostics"][0]["message"].startswith("`assert`")
 
 
 # ------------------------------------------------------------------ CLI surface
@@ -649,6 +782,11 @@ def test_the_repl_replay_commands_parse():
     assert _replay_command(":back -1") == ("back", -1, False, None)
     assert _replay_command(":back 2 !") == ("back", 2, True, None)
     assert _replay_command(":forward 2 N") == ("forward", 2, False, "N")
+    # :bisect carries a free-form predicate in the `at` slot, not an index
+    assert _replay_command(":bisect len(emissionsSoFar) > 0") == (
+        "bisect", "len(emissionsSoFar) > 0", False, None)
+    assert _replay_command(":bisect @UserCache 'db' in activeProvisions") == (
+        "bisect", "'db' in activeProvisions", False, "UserCache")
     # anything else is an ordinary REPL expression, not a command
     assert _replay_command("cache.get('k')") is None
     assert _replay_command("") is None
@@ -661,6 +799,8 @@ def test_a_replay_command_missing_its_index_says_so():
         _replay_command(":back")
     with pytest.raises(ValueError, match="integer step index"):
         _replay_command(":inspect middle")
+    with pytest.raises(ValueError, match="predicate expression"):
+        _replay_command(":bisect")
 
 
 def test_run_accepts_record_without_a_runtime_installed():
@@ -837,6 +977,45 @@ def test_real_cordis_replay_forward_re_runs_the_call(session):
     assert plan["replayed"][0]["key"] == "ping"
     # the re-run accumulated fresh steps rather than resurrecting the old ones
     assert len(session.timeline("P")["steps"]) > before
+
+
+@needs_cordis
+def test_real_cordis_bisect_finds_the_first_emission_step(session):
+    """Through the production path — a real cordis.Context, real fibers —
+    bisect binary-searches the recorded timeline and finds the step where the
+    predicate flips, reporting it unverified without ever mutating the
+    timeline."""
+    real(session, USER_CACHE, PG_CONFIG)
+    session.call("cache", "put", ["a", "1"])
+    before = session.timeline("UserCache")["steps"]
+
+    report = session.bisect("UserCache", "len(emissionsSoFar) > 0")
+
+    assert report["flipped"] is True
+    assert report["step"]["kind"] == "emission"
+    assert report["record"]["realm"] == "UserCache"
+    assert report["record"]["whoRan"] == "cache.put('a', '1')"
+    assert report["verified"]["status"] == "unverified"
+    # read-only: the recording is untouched, so a later step_back still works
+    assert session.timeline("UserCache")["steps"] == before
+    # the log2 advantage is proved on a large timeline in the stub layer; on
+    # this 5-step one it is at worst a wash, never worse than the naive scan
+    assert report["evaluations"] <= len(before)
+
+
+@needs_cordis
+def test_real_cordis_bisect_is_exposed_as_an_mcp_tool():
+    import revl.mcp.server as _server
+    from revl.mcp.session import Session as _Session
+    _server.SESSION = _Session()
+    _call("revl_load", {"source": USER_CACHE, "config": PG_CONFIG,
+                        "record": True})
+    _call("revl_call", {"key": "cache", "method": "put", "args": ["a", "1"]})
+    payload = _call("revl_replay_bisect",
+                    {"component": "UserCache", "assert": "len(emissionsSoFar) > 0"})
+    assert payload["ok"] is True
+    assert payload["flipped"] is True
+    assert payload["verified"]["status"] == "unverified"
 
 
 # -- recording must not change what it observes ----------------------------

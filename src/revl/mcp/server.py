@@ -275,6 +275,19 @@ def _tool_step_back(arguments: dict) -> dict:
         return _session_error(str(error), refused=True)
 
 
+def _tool_replay_bisect(arguments: dict) -> dict:
+    predicate = arguments.get("assert") or arguments.get("predicate")
+    if not predicate:
+        return _session_error("`assert` is required — a predicate expression "
+                              "over the `inspect` view (e.g. \"emissionsSoFar\" "
+                              "or \"'db' in activeProvisions\")")
+    try:
+        return {"ok": True, **SESSION.bisect(arguments.get("component"),
+                                             predicate)}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_replay_forward(arguments: dict) -> dict:
     if "from" not in arguments:
         return _session_error("`from` is required")
@@ -719,6 +732,34 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_step_back,
+    },
+    {
+        "name": "revl_replay_bisect",
+        "description": "git-bisect for an execution: binary-search the recorded "
+                       "timeline for the FIRST step at which `assert` flips, in "
+                       "log2(N) evaluations instead of N. `assert` is a predicate "
+                       "expression over the same `inspect` view — names like "
+                       "`activeProvisions`, `emissionsSoFar`, `accumulated`, "
+                       "`step`. Read-only: it reconstructs each probed step, "
+                       "never mutating the timeline. Returns the found step's "
+                       "full record (who ran, what it touched, which realm) and "
+                       "the verified/unverified status of the effects on the path "
+                       "— today always UNVERIFIED, because `verified effect` "
+                       "(roadmap item 26) is not built, so the bisect trusts the "
+                       "recorded inverses rather than checking them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string"},
+                "assert": {"type": "string",
+                           "description": "predicate expression over the inspect "
+                                          "view; the first step where it flips is "
+                                          "the answer"},
+            },
+            "required": ["assert"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_replay_bisect,
     },
     {
         "name": "revl_replay_forward",
