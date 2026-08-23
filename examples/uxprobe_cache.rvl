@@ -1,0 +1,67 @@
+// ux-probe: rate-limited caching composition, built agent-first.
+// Cache is backed by a Map host object; RateLimiter holds mutable state
+// acquired via effect setup (the tenants.rvl idiom).
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+service RateLimiter {
+  fn allow(key: Str) -> Bool
+}
+
+component MapCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+
+component FixedWindowLimiter provides limiter: RateLimiter {
+  let allowlist = effect Map.new() undo allowlist.drop()
+
+  // activation-time effect setup (tenants.rvl idiom): seed mutable state,
+  // each acquisition paired with its inverse
+  effect allowlist.insert("alpha", "ok") undo allowlist.remove("alpha")
+  effect allowlist.insert("beta", "ok")  undo allowlist.remove("beta")
+
+  provide limiter {
+    fn allow(key) = allowlist.get(key) != None
+  }
+}
+
+lifecycle test "cache put/get round-trip reverts cleanly" {
+  load MapCache
+  call cache.put("k", "v")
+  let hit = call cache.get("k")
+  assert hit == Some("v")
+  unload MapCache
+  assert no_residue
+}
+
+lifecycle test "limiter seeds state at activation and leaves nothing behind" {
+  load FixedWindowLimiter
+  let a = call limiter.allow("alpha")
+  assert a == true
+  let z = call limiter.allow("zed")
+  assert z == false
+  unload FixedWindowLimiter
+  assert no_residue
+}
+
+lifecycle test "LIFO teardown: both components unload without residue" {
+  load MapCache
+  load FixedWindowLimiter
+  call cache.put("user", "42")
+  let gated = call limiter.allow("beta")
+  assert gated == true
+  unload FixedWindowLimiter
+  unload MapCache
+  assert no_residue
+}
