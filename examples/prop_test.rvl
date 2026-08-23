@@ -1,0 +1,47 @@
+// `prop test` — property testing with type-derived generators (roadmap item
+// 37, docs/prop-test.md, syntax-2.0 §7).
+//
+// A `prop test` states a property that must hold for EVERY value of its
+// parameters. The parameters are *generated inputs*, and the generators are
+// DERIVED from the parameter types the checker already knows: the i64 edge
+// values for `Int`, both arms of every `Opt`, empty and non-empty `List`s,
+// every constructor of an ADT, and each field of a record. On failure the
+// runner SHRINKS the offending input to a minimal counterexample.
+//
+// Scope is the py reference tier (like `fault test` / `verified effect`): the
+// property body is a pure function of its parameters, so it needs no live
+// component. Run it with `revl test examples/prop_test.rvl`.
+
+type Money = { cents: Int, currency: Str }
+
+// an ADT with a base case (`Point`) and two payload cases: the generator
+// visits every constructor, and shrinking collapses a payload case toward the
+// base case
+type Shape = Circle(Int) | Rect(Int) | Point
+
+// a pure helper the property may call — prop bodies are ordinary pure code
+fn amount(m: Money) -> Int { return m.cents }
+
+// P1 — structural reflexivity over EVERY generated shape: records, Lists,
+// Opts and ADTs are all exercised here, so this drives the derived generators
+// across their whole surface (every ADT constructor, both Opt arms, empty and
+// non-empty Lists).
+prop test "structural reflexivity" (m: Money, tags: List[Str], hint: Opt[Int], s: Shape) {
+  assert m == m
+  assert tags == tags
+  assert hint == hint
+  assert s == s
+}
+
+// P2 — a real algebraic law: `<` is antisymmetric on Int, checked across the
+// i64 edge values the generator guarantees to visit (0, ±1, ±2, i64 min/max
+// and their neighbours) plus random rounds.
+prop test "less-than is antisymmetric" (a: Int, b: Int) {
+  assert !(a < b && b < a)
+}
+
+// P3 — reading a record field back is identity. Records are generated with
+// each field varied through its own edges, so this holds for every Money.
+prop test "field round-trips" (m: Money) {
+  assert amount(m) == m.cents
+}

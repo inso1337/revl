@@ -77,6 +77,14 @@ def _fault_note(ir: dict, tier: str) -> str:
               f"inverse round-trip testing runs on the py reference tier only "
               f"(docs/verified-effect.md)")
         note += f"; {n} verified-effect round-trip(s) skipped (py tier only)"
+    from .fault import prop_units  # noqa: PLC0415 — no cordis needed to count them
+
+    props = prop_units(ir)
+    if props:
+        print(f"[{tier}] note: {len(props)} prop test(s) not run on this tier — "
+              f"property testing runs on the py reference tier only "
+              f"(docs/prop-test.md)")
+        note += f"; {len(props)} prop test(s) skipped (py tier only)"
     return note
 
 
@@ -100,32 +108,41 @@ def run_py(ir: dict) -> tuple[str, str]:
     backend_dir = str(BACKENDS / "python")
     if backend_dir not in sys.path:
         sys.path.insert(0, backend_dir)
-    source = emit.emit(ir)
-    # Preflight before any test runs. The py emitter imports cordis LAZILY,
-    # inside each `lifecycle test` body (not at module scope — a document may
-    # mix pure and lifecycle blocks), so exec succeeds on an interpreter
-    # without the runtime and the absence used to surface per-test as
-    # `FAIL <name>: ModuleNotFoundError ... 0 of N passed` — a stack-shaped
-    # verdict for an environment problem whose remedy is one command
-    # (findings-uxprobe.md, longest stall).
-    if "from cordis import" in source and not _cordis_available():
-        return ("fail", _PY_RUNTIME_REMEDY)
-    module = types.ModuleType("revl_test_module")
-    # Register before exec: the emitter renders record types as @dataclass,
-    # and dataclasses._process_class resolves each field via
-    # sys.modules[cls.__module__] — an unregistered module raises
-    # AttributeError on any file that declares a record type (CPython 3.12+).
-    sys.modules[module.__name__] = module
-    try:
-        exec(compile(source, "<revl-test>", "exec"), module.__dict__)
-    finally:
-        sys.modules.pop(module.__name__, None)
-    entries = getattr(module, "REVL_TESTS", None) or []
-    fault_entries = _fault(ir, module)
-    from .fault import roundtrip_units  # noqa: PLC0415 — no cordis needed to *find* them
+    from .fault import prop_units, roundtrip_units  # noqa: PLC0415 — no cordis to find them
 
+    prop_entries = prop_units(ir)
     roundtrip_entries = roundtrip_units(ir)
-    if not entries and not fault_entries and not roundtrip_entries:
+    # A `prop test`'s body is pure — the emitter lowers and runs it standalone
+    # (src/revl/fault.py) — so a document that is *only* prop tests has no base
+    # module to emit; skip the base emit rather than trip the "no content" guard.
+    base_emittable = any(ir.get(section) for section in
+                         ("components", "types", "functions", "externs", "tests"))
+    module = None
+    entries: list = []
+    if base_emittable:
+        source = emit.emit(ir)
+        # Preflight before any test runs. The py emitter imports cordis LAZILY,
+        # inside each `lifecycle test` body (not at module scope — a document may
+        # mix pure and lifecycle blocks), so exec succeeds on an interpreter
+        # without the runtime and the absence used to surface per-test as
+        # `FAIL <name>: ModuleNotFoundError ... 0 of N passed` — a stack-shaped
+        # verdict for an environment problem whose remedy is one command
+        # (findings-uxprobe.md, longest stall).
+        if "from cordis import" in source and not _cordis_available():
+            return ("fail", _PY_RUNTIME_REMEDY)
+        module = types.ModuleType("revl_test_module")
+        # Register before exec: the emitter renders record types as @dataclass,
+        # and dataclasses._process_class resolves each field via
+        # sys.modules[cls.__module__] — an unregistered module raises
+        # AttributeError on any file that declares a record type (CPython 3.12+).
+        sys.modules[module.__name__] = module
+        try:
+            exec(compile(source, "<revl-test>", "exec"), module.__dict__)
+        finally:
+            sys.modules.pop(module.__name__, None)
+        entries = getattr(module, "REVL_TESTS", None) or []
+    fault_entries = _fault(ir, module)
+    if not entries and not fault_entries and not roundtrip_entries and not prop_entries:
         return ("pass", "no tests emitted by the backend")
 
     failures = 0
@@ -184,6 +201,15 @@ def run_py(ir: dict) -> tuple[str, str]:
             rt_total = rt_dossier["counts"]["effects"]
             summary.append(
                 f"{rt_total - rt_failures} of {rt_total} verified-effect round-trip(s) held")
+
+    if prop_entries:
+        from .fault import run_prop_units  # noqa: PLC0415 — needs only the emitter
+
+        prop_failures, prop_dossier = run_prop_units(ir, prop_entries)
+        failures += prop_failures
+        prop_total = prop_dossier["counts"]["props"]
+        summary.append(
+            f"{prop_total - prop_failures} of {prop_total} prop test(s) held")
 
     if failures:
         return ("fail", "; ".join(summary) or f"{failures} test(s) failed")
@@ -474,10 +500,10 @@ def test_command(ir: dict, backend: str, sweep: bool = False) -> int:
                   f"tier only, not `{backend}` (docs/fault-tests.md)")
         return sweep_command(ir)
 
-    from .fault import roundtrip_units  # noqa: PLC0415 — no cordis needed to find them
+    from .fault import prop_units, roundtrip_units  # noqa: PLC0415 — no cordis to find them
 
     if (not (ir.get("tests") or []) and not (ir.get("fault_tests") or [])
-            and not roundtrip_units(ir)):
+            and not roundtrip_units(ir) and not prop_units(ir)):
         print("no tests to run")
         return 0
 

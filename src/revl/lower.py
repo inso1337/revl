@@ -82,6 +82,7 @@ from .parser import (
     Lit,
     Postfix,
     Program,
+    PropTestDecl,
     ProvideStmt,
     RecordPattern,
     ResidueStmt,
@@ -1079,6 +1080,116 @@ def _lower_tests(program: Program, filename: str, types: dict,
     return tests
 
 
+# ---------------------------------------------------------------- prop tests
+#
+# `prop test "name" (params) { assert … }` (roadmap item 37): the parameters
+# are *generated inputs*, and the body is a pure property that must hold for
+# every generated value.  Lowering does two things a plain `test` does not:
+#
+#   * it validates that every parameter type is one the generator can DERIVE a
+#     value from (a primitive, an `Opt`/`List`/`Result` of one, or a declared
+#     record/ADT), so an ungeneratable parameter is a compile error rather than
+#     a runtime surprise; and
+#   * it records the parameters (with their resolved types) alongside the
+#     lowered body in a `prop_tests` IR section, from which the py runner
+#     (src/revl/fault.py) derives the generators and the shrinker.
+#
+# The body itself lowers exactly as a `fn`/`test` body does, with the
+# parameters in scope — so `assert` reads identically to everywhere else.
+_GENERATABLE_PRIMITIVES = {"Int", "Int32", "Bool", "Str", "Float", "F64", "Num"}
+
+
+def _check_generatable(filename: str, line: int, type_name: str, types: dict,
+                       propname: str, record_stack: tuple = (),
+                       variant_seen: frozenset = frozenset()) -> None:
+    """Reject a prop-test parameter (or nested) type the generator cannot make.
+
+    Generatable: a primitive; `Opt[T]`/`List[T]` of a generatable argument; a
+    declared record whose fields are generatable; a declared ADT whose case
+    payloads are generatable.  A record that (transitively) contains
+    itself is genuinely non-constructible and is named as such; recursive ADTs
+    are fine (they have a base case, and the runner bounds generation depth).
+    """
+    head, args = parse_type(type_name)
+    if head in _GENERATABLE_PRIMITIVES and not args:
+        return
+    if head == "Opt" and len(args) == 1:
+        _check_generatable(filename, line, args[0], types, propname,
+                           record_stack, variant_seen)
+        return
+    if head == "List" and len(args) == 1:
+        _check_generatable(filename, line, args[0], types, propname,
+                           record_stack, variant_seen)
+        return
+    spec = types.get(head) if head and not args else None
+    if spec and spec.get("kind") == "record":
+        if head in record_stack:
+            cycle = " -> ".join(record_stack + (head,))
+            raise RevlError(
+                filename, line,
+                f"prop test `{propname}`: record type `{head}` contains itself "
+                f"({cycle}) and cannot be generated",
+                hint="a record always holds all its fields, so a self-containing record "
+                     "has no finite value; break the cycle with an `Opt[...]` or `List[...]`")
+        for ftype in spec.get("fields", {}).values():
+            _check_generatable(filename, line, ftype, types, propname,
+                               record_stack + (head,), variant_seen)
+        return
+    if spec and spec.get("kind") == "variant":
+        if head in variant_seen:
+            # already validated on this path — a recursive ADT is fine (it has a
+            # base case; the depth-bounded generator handles it). Stop rather
+            # than descend forever.
+            return
+        for case in spec.get("cases") or []:
+            if case.get("payload") is not None:
+                # a case payload may reference the ADT recursively — the record
+                # cycle stack is not carried across the ADT boundary (that split
+                # is a valid base/recursive one), but the variant set is, to
+                # terminate on a self-referential ADT
+                _check_generatable(filename, line, case["payload"], types, propname,
+                                   (), variant_seen | {head})
+        return
+    raise RevlError(
+        filename, line,
+        f"prop test `{propname}`: parameter type `{type_name}` cannot be generated",
+        hint="a prop-test parameter must be a type the checker can derive inputs from: "
+             "`Int`/`Int32`/`Bool`/`Str`/`Float`, an `Opt[...]`/`List[...]` of one, or a "
+             "declared record/ADT (docs/prop-test.md)")
+
+
+def _lower_prop_tests(program: Program, filename: str, types: dict,
+                      services: dict | None = None) -> list:
+    """Lower `prop test` blocks to IR prop units (docs/prop-test.md)."""
+    if not program.prop_tests:
+        return []
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+                 | {fn.name for fn in program.fn_decls}
+                 | {ext.name for ext in program.externs})
+    units: list[dict] = []
+    seen: set[str] = set()
+    for decl in program.prop_tests:
+        if decl.name in seen:
+            raise RevlError(filename, decl.line, f"duplicate prop test `{decl.name}`")
+        seen.add(decl.name)
+        scope: dict[str, bool] = {}
+        type_env: dict[str, str] = {}
+        for param in decl.params:
+            check_type_wellformed(filename, param.line, param.type)
+            _check_generatable(filename, param.line, param.type, types, decl.name)
+            scope[param.name] = False
+            type_env[param.name] = param.type
+        body: list[dict] = []
+        for stmt in decl.body:
+            _lower_pure_stmt(stmt, scope, callables, {}, body, filename, type_env, types)
+        units.append({
+            "name": decl.name,
+            "params": [{"name": p.name, "type": p.type} for p in decl.params],
+            "body": body,
+        })
+    return units
+
+
 # `fail at effect X` is sugar: it resolves to the index of the body step that
 # binds X, so every backend and the runner see exactly one addressing scheme
 # (a step index).  Index is the primitive because it is total — *every* body
@@ -2062,6 +2173,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
     tests = _lower_tests(program, program.filename, types, services)
+    prop_tests = _lower_prop_tests(program, program.filename, types, services)
 
     uses_components_2 = any(
         isinstance(stmt, (FailStmt, IfStmt))
@@ -2080,6 +2192,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # itself a guard, so a consumer that predates the section refuses the
     # whole document instead of silently dropping the fault tests
     uses_v3 = uses_v3 or bool(fault_tests)
+    # a `prop_tests` section is likewise additive v3 (roadmap item 37)
+    uses_v3 = uses_v3 or bool(prop_tests)
 
     def _has_builtin(node) -> bool:
         if isinstance(node, dict):
@@ -2141,6 +2255,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 
     if fault_tests:
         result["fault_tests"] = fault_tests
+    if prop_tests:
+        result["prop_tests"] = prop_tests
     return result
 
 
