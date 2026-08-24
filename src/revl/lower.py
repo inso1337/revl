@@ -44,6 +44,7 @@ from .typecheck import (
     _check_method_namespace_disjoint,
 )
 from .parser import (
+    AdvanceStmt,
     AssertStmt,
     AssignStmt,
     AwaitStmt,
@@ -1661,6 +1662,11 @@ def _lower_lifecycle_body(decl: TestDecl, program: Program, services: dict, file
         elif isinstance(stmt, CallStmt):
             body.append(_lower_lifecycle_call(stmt, provided, components, services, filename,
                                               scope, callables, type_env, types))
+        elif isinstance(stmt, AdvanceStmt):
+            # item 102: drive the clock coeffect (item 57) forward. Nothing else
+            # in a lifecycle test moves the clock, so this is what makes a
+            # timer's firing an assertable timeline step.
+            body.append({"step": "advance", "ms": stmt.ms})
         elif isinstance(stmt, ResidueStmt):
             body.append({"step": "assert_no_residue"})
         elif isinstance(stmt, AssertStmt):

@@ -24,6 +24,8 @@ and the documented follow-on: go/rust/wasm refuse timers honestly.
 """
 
 import importlib.util
+import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -36,7 +38,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.lower import _collect_emit_caps  # noqa: E402
-from revl.parser import Parser, TimerStmt, EmitStmt  # noqa: E402
+from revl.parser import Parser, TimerStmt, EmitStmt, AdvanceStmt  # noqa: E402
 
 
 def _emitter(backend: str):
@@ -384,3 +386,187 @@ def test_test_harness_reports_a_clean_follow_on_skip():
         verdict, reason = runner(ir)
         assert verdict == "skip"
         assert "not yet lowerable" in reason and tier in reason
+
+
+# =====================================================================
+# item 102: `advance` — driving the clock coeffect from inside a lifecycle test
+# =====================================================================
+#
+# Item 57 made the clock a coeffect and proved the *revertible-schedule* half
+# inside a `lifecycle test`. But a firing was not expressible in the language:
+# nothing in a lifecycle test could move the clock. Item 102 adds the `advance
+# <n><unit>` lifecycle statement, so a timer's firing becomes an assertable
+# timeline step ("fires on the 3rd tick") on the reference tiers (py + ts).
+
+EXAMPLES = ROOT / "examples"
+CORDIS_PY = ROOT / "backends" / "python" / ".venv" / "bin" / "python"
+VITEST = ROOT / "backends" / "typescript" / "node_modules" / ".bin" / "vitest"
+
+_ADVANCE_DOC = """
+service Counter { fn count() -> Int  emission fn tick() }
+component TickCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+  provide counter {
+    fn count() = store.size()
+    fn tick() {
+      let key = `k${store.size()}`
+      effect store.insert(key, "x")
+      undo   store.remove(key)
+    }
+  }
+}
+component Beat requires counter: Counter { every 10s { emit counter.tick() } }
+lifecycle test "beat fires on each tick" {
+  load TickCounter
+  load Beat
+  advance 35s
+  let n = call counter.count()
+  assert n == 3
+  unload Beat
+  unload TickCounter
+  assert no_residue
+}
+"""
+
+
+def _advance_stmt(src: str) -> AdvanceStmt:
+    prog = Parser(f'lifecycle test "t" {{ {src} }}', "<t>").parse()
+    return prog.tests[0].body[0]
+
+
+# ---------------------------------------------------------------- parse + lower
+
+@pytest.mark.parametrize("src,ms", [
+    ("advance 250ms", 250),
+    ("advance 30s", 30_000),
+    ("advance 5m", 300_000),
+    ("advance 2h", 7_200_000),
+    ("advance 1d", 86_400_000),
+])
+def test_advance_parses_with_item57_duration_units(src, ms):
+    stmt = _advance_stmt(src)
+    assert isinstance(stmt, AdvanceStmt)
+    assert stmt.ms == ms
+
+
+def test_advance_lowers_to_additive_clock_step():
+    ir = compile_source(_ADVANCE_DOC, "<t>")
+    lc = next(t for t in ir["tests"] if t.get("lifecycle"))
+    advances = [s for s in lc["body"] if s.get("step") == "advance"]
+    assert advances == [{"step": "advance", "ms": 35_000}]
+    # additive: the IR version is unchanged by the new lifecycle step
+    assert ir.get("ir_version") == 3
+
+
+def test_advance_only_in_a_lifecycle_body():
+    with pytest.raises(RevlError, match="only allowed in a `lifecycle test` body"):
+        compile_source('test "t" { advance 30s }', "<t>")
+
+
+@pytest.mark.parametrize("src,match", [
+    ("advance 30", "duration unit"),
+    ("advance s", "whole-number duration"),
+    ("advance 0s", "must be positive"),
+])
+def test_bad_advance_is_refused(src, match):
+    with pytest.raises(RevlError, match=match):
+        compile_source(f'lifecycle test "t" {{ {src} }}', "<t>")
+
+
+# --------------------------------------------------------- emitted-code shape
+
+def test_python_emit_advances_and_resets_the_clock():
+    src = _emitter("python").emit(compile_source(_ADVANCE_DOC, "<t>"))
+    # the clock coeffect is imported, reset for isolation, and advanced
+    assert "from runtime import" in src and "Clock" in src
+    assert "Clock.reset()" in src
+    assert "Clock.advance(35000)" in src
+
+
+def test_typescript_emit_advances_and_resets_the_clock():
+    src = _emitter("typescript").emit(compile_source(_ADVANCE_DOC, "<t>"))
+    assert "host.clockReset()" in src
+    assert "host.clockAdvance(35000)" in src
+
+
+def test_a_timer_free_lifecycle_test_is_unchanged_by_item102():
+    """The `Clock` import and per-test reset appear only for a test that
+    actually advances the clock — a plain lifecycle test is byte-identical to
+    its pre-item-102 output."""
+    plain = ("service S { fn ping() -> Int }\n"
+             "component C provides s: S { provide s { fn ping() = 1 } }\n"
+             'lifecycle test "t" { load C  let x = call s.ping()  assert x == 1  '
+             "unload C  assert no_residue }")
+    for backend, needle in [("python", "Clock"), ("typescript", "clock")]:
+        src = _emitter(backend).emit(compile_source(plain, "<t>"))
+        assert needle not in src
+
+
+# --------------------------------------------- execution: firing is assertable
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
+def test_py_lifecycle_test_observes_deterministic_firing():
+    """The exit test on the py reference tier: an `every`/`after` timer's body
+    runs after the clock is advanced, and unload cancels residue-free."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [str(CORDIS_PY), "-m", "revl", "test", str(EXAMPLES / "lifecycle_timer.rvl")],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS an every-timer fires on each advanced tick" in result.stdout
+    assert "PASS an after-timer fires once when its delay elapses" in result.stdout
+    assert "[py] pass: 2 test(s) passed" in result.stdout
+
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed")
+def test_py_a_wrong_firing_count_is_actually_caught(tmp_path):
+    """An assertion that can only pass is not an assertion: assert the wrong
+    tick count and the lifecycle test must FAIL."""
+    src = (EXAMPLES / "lifecycle_timer.rvl").read_text(encoding="utf-8")
+    broken = src.replace("assert ticks == 3", "assert ticks == 99")
+    assert broken != src
+    path = tmp_path / "broken_timer.rvl"
+    path.write_text(broken, encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [str(CORDIS_PY), "-m", "revl", "test", str(path)],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAIL an every-timer fires on each advanced tick" in result.stdout
+
+
+@pytest.mark.skipif(not VITEST.exists(),
+                    reason="vitest not installed in backends/typescript")
+def test_ts_lifecycle_test_observes_deterministic_firing():
+    """The exit test on the ts reference tier — the same firing, driven by
+    `host.clockAdvance` on cordis-ts."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "revl", "test", "--backend", "ts",
+         str(EXAMPLES / "lifecycle_timer.rvl")],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[ts] pass:" in result.stdout
+
+
+# ------------------------------------ documented follow-on: non-reference tiers
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_advance_refuses_honestly_on_non_reference_tiers(tier):
+    """go/rust are a documented follow-on (alongside item 99's timer work):
+    their lifecycle emitters refuse an `advance` step by name rather than
+    silently mis-lowering it. (A timer-bearing document is already refused at
+    the `timer` step; this covers a lifecycle test that advances directly.)"""
+    ir = compile_source(
+        "service S { fn ping() -> Int }\n"
+        "component C provides s: S { provide s { fn ping() = 1 } }\n"
+        'lifecycle test "t" { load C  advance 5s  unload C  assert no_residue }',
+        "<t>")
+    with pytest.raises(Exception) as exc:
+        _emitter(tier).emit(ir)
+    assert "advance" in str(exc.value)

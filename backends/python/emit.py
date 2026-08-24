@@ -1643,6 +1643,11 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     out.add(0)
     out.add(1, "async def _run():")
     out.add(2, "root = Context()")
+    if _lifecycle_uses_clock(test):
+        # item 102: the clock coeffect is a module-global; reset it so this
+        # test's `advance` steps start from t=0 and see only its own timers,
+        # independent of any earlier lifecycle test in the file.
+        out.add(2, "Clock.reset()")
     out.add(2, "events = []")
     out.add(2, "_revl_fibers = {}")
     out.add(2, "set_trace(events.append)")
@@ -1685,6 +1690,13 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         bind = step.get("bind")
         out.add(indent, f"{_ident(bind, 'lifecycle binding')} = {call}" if bind else call)
         out.add(indent, "await _revl_settle()")
+    elif kind == "advance":
+        # item 102: drive the clock coeffect forward. A firing is a
+        # deterministic timeline step, so `_revl_settle` after it lets the
+        # fired body's async work (if any) run to quiescence before the next
+        # statement observes it (docs/time-coeffect.md §advance).
+        out.add(indent, f"Clock.advance({int(step['ms'])})")
+        out.add(indent, "await _revl_settle()")
     elif kind == "assert_no_residue":
         out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
     elif kind == "assert":
@@ -1692,6 +1704,17 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         out.add(indent, f"assert {rendered}, {where + ': assertion failed'!r}")
     else:  # pragma: no cover — the lowerer emits nothing else
         raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
+
+
+def _lifecycle_uses_clock(test: dict) -> bool:
+    """True iff a lifecycle test drives the clock coeffect (an `advance` step).
+
+    Only such a test needs the `Clock` import and the per-test reset — a
+    lifecycle test with no `advance` stays byte-identical to its pre-item-102
+    output."""
+    return any(step.get("step") == "advance" for step in test.get("body") or [])
+
+
 def _find_host_roots(nodes) -> set[str]:
     """Host builtins referenced by pure fn/test bodies.
 
@@ -1829,6 +1852,10 @@ def emit(ir: dict) -> str:
         # `retry_idempotent` (item 44) gives the driver its auto-retry right for
         # idempotent emissions — see `_REVL_IDEMPOTENT` and `_revl_call` below.
         | ({"plug", "set_trace", "retry_idempotent"} if lifecycle else set())
+        # item 102: only a lifecycle test with an `advance` step drives the
+        # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
+        # then — a timer-free document's output is unchanged.
+        | ({"Clock"} if any(_lifecycle_uses_clock(t) for t in lifecycle) else set())
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
