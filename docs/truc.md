@@ -200,6 +200,45 @@ and compose it, `ship` to publish one back. The hard part — a machine-checkabl
 notion of "does this piece fit, and is it honest about what it does" — the
 language already had. truc gives it a front door, a vocabulary, and a name.
 
+## 6. The fixpoint: truc assembles truc
+
+The dogfood has a capstone. truc is built from eight components under
+`src/revl/truc/components/`; those eight are, themselves, a truc project. The
+manifest is committed at [`src/revl/truc/bootstrap/truc.toml`](../src/revl/truc/bootstrap/truc.toml)
+— its `[assembly]` lists truc's own components as the composition. Run truc's
+assemble path on it and **truc admits truc**: every one of truc's components is
+admitted through revl's G2/G4 gate — the same gate truc runs on every other
+assembly — and they compose into truc's running composition. Nothing new
+implements this; it is the ordinary `assemble` loop pointed at truc itself.
+
+Two properties make it a fixpoint and not just a demo:
+
+- **Regenerate-or-red.** The self-assembly is pinned to a committed
+  composition, [`bootstrap/assembly.golden.json`](../src/revl/truc/bootstrap/assembly.golden.json)
+  — the eight components, their provide/inject wiring, and the load order the
+  gate settled. `tests/test_truc_bootstrap.py` re-runs the assembly and asserts
+  byte-equality with that golden. If truc's ability to assemble truc ever
+  breaks or drifts, CI goes red — the same discipline as `registry.verify` and
+  the conformance baselines. The gate here (`compile_files`, stepped by
+  `_host.admit_all`) is frontend Python, so the check runs in the normal
+  `pytest tests/` suite with no runtime to install: it never silently skips.
+
+- **The gate is exercised *on truc*.** Inject a second provider of `plan` into
+  truc's own component set and `assemble` refuses it — a `G2` provision
+  conflict, with the why-trace naming both providers, and nothing composed.
+  truc would refuse a broken truc, admitted by the very gate it admits everyone
+  else with. And `revl audit` on the eight shows the split truc advertises
+  about *other* people's assemblies, now about itself: the Planner — the
+  resolver brain — reaches only pure host code and holds zero authority, while
+  the four rim components carry every emission.
+
+The chicken-and-egg never bites, because the gate is host-side and always
+present: admitting truc's own components needs only the installed `revl`
+package, never a prior truc (see [the architecture](design/truc-architecture.md)
+§7). Every boot of truc already compiles its whole composition — that compile
+*is* an admission — so truc passes its own gate each time it runs. The bootstrap
+test only makes the fixpoint a pinned, regenerate-or-red guarantee.
+
 ---
 
 *For the manifest schema, the host-extern fetch design, and how `assemble`
