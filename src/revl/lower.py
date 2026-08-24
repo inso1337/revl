@@ -604,7 +604,10 @@ def _validate_declared_types(program: Program, filename: str) -> None:
     zero-arg generic reaches the type algebra and crashes it."""
     for fn in program.fn_decls:
         for p in fn.params:
-            check_type_wellformed(filename, p.line, p.type)
+            # A module `fn` parameter is the one v1 position that admits an
+            # async function type `(…) -> Async[T]` (item 92).
+            check_type_wellformed(filename, p.line, p.type,
+                                  allow_async_param=not fn.verified)
         check_type_wellformed(filename, fn.line, fn.returns)
     for ext in program.externs:
         for p in ext.params:
