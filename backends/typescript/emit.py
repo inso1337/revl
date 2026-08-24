@@ -62,7 +62,7 @@ JS_RESERVED = {
 # do not mix in JS, which is exactly the width-mixing the checker also forbids
 # (docs/arithmetic.md).
 TYPE_MAP = {"Str": "string", "Int": "bigint", "Int32": "number",
-            "Bool": "boolean", "Float": "number"}
+            "Bool": "boolean", "Float": "number", "Bytes": "Uint8Array"}
 
 # Members cordis's Context already owns; a provision key colliding with one
 # would shadow framework API (or be refused by the runtime). The host knows
@@ -1637,14 +1637,33 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
 # string through its code points (`Array.from` iterates by code point) while
 # leaving List/Bytes receivers on their native element operations, so
 # `"😀".length()` is 1 and `charCodeAt(0)` is the scalar 128512, not a
-# surrogate. Receiver type is not known statically on this tier, so the branch
-# is at runtime on `typeof x === "string"`.
+# surrogate. The runtime dispatch is on `typeof x === "string"`.
+#
+# `revlSlice` is *overloaded* rather than one union signature: the frontend
+# statically knows the receiver kind (Str/List/Bytes) and spells it into the
+# emitted signatures (fn params, config fields, service interfaces), so TS
+# resolves each call site to `string` / `T[]` / `Uint8Array` and a method
+# chained on the result — `rest.slice(10, len).split(" ")`,
+# `parts.slice(1, n).join(" ")`, `xs.slice(0, 2).push(v)` — typechecks. One
+# union return `string | T[]` made every such chain a `tsc` error (FR-7: the
+# TS tier emitted code its own compiler rejected). The `unknown` overload
+# keeps a receiver whose kind genuinely cannot be pinned (an untyped/`any`
+# position — previously the union signature still accepted it) compiling to
+# the union rather than failing overload resolution, and the last signature
+# is the implementation: it keeps the runtime dispatch for that same case,
+# where lying with a cast would be worse than admitting the union.
 _REVL_STR_HELPER = """function revlLen(x: string | ArrayLike<unknown>): bigint {
   return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
 }
-function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+function revlSlice(x: string, a: bigint, b: bigint): string
+function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array
+function revlSlice<T>(x: T[], a: bigint, b: bigint): T[]
+function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[]
+function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {
   const i = Number(a), j = Number(b)
-  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+  return typeof x === "string"
+    ? Array.from(x).slice(i, j).join("")
+    : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = Array.from(s)[Number(i)]
