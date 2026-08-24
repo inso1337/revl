@@ -1,0 +1,14 @@
+// REJECTED — item 71: an update on an anonymous record literal may only name a
+// field the literal actually has. `a` is `{ h: Str }`, so `missing` is not a
+// field of it; the update is refused, naming the structural shape it was checked
+// against. This used to escape checking entirely (docs/contract-errata.md,
+// "Record updates on receivers with no named type" — now RESOLVED).
+//
+// expected error:
+//   `missing`, which is not a field of `{h: Str}`
+
+fn main() -> Int {
+  let a = { h: "x" }
+  let b = { a | missing = "y" }
+  return 0
+}

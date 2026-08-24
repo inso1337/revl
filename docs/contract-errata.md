@@ -570,29 +570,42 @@ sampled.
   `xs[0]`, `s.charAt(0)` and a `_` arm stay accepted). A soundness check with
   no false-positive test is a check nobody can safely tighten later.
 
-## Record updates on receivers with no named type (unchecked)
+## Record updates on receivers with no named type (RESOLVED — item 71)
 
-`{ r | f = e }` is field-checked only when `r`'s type is *known*: a declared
-record parameter, a named binding, or a value read from a typed position. A
-receiver whose type the checker cannot recover — in practice, a `let`-bound
-**anonymous record literal** (`let a = { h: "x" }`) — has no name to look up,
-so the update's field names and value types are **not checked**, and neither
-are later reads through the binding. Verified trigger:
+✅ **Closed by structural record types (roadmap item 71).** `{ r | f = e }` was
+field-checked only when `r`'s type was *known*: a declared record parameter, a
+named binding, or a value read from a typed position. A receiver whose type the
+checker could not recover — in practice, a `let`-bound **anonymous record
+literal** (`let a = { h: "x" }`) — had no name to look up, so the update's field
+names and value types were **not checked**, and neither were later reads through
+the binding. The trigger below compiled, an Int flowing into a Str-shaped
+record:
 
-```rvl,accept
+```rvl,reject
 type C = { h: Str }
 fn main() -> Int {
   let a = { h: "x" }
-  let b = { a | h = 5 }   // Int into a Str-shaped record: compiles
+  let b = { a | h = 5 }   // now refused: update of field `h` expects `Str`, got `Int`
   assert b.h == 5
   return 0
 }
 ```
 
-Blast radius: wrong-answer-class, local to records built and consumed as
-anonymous literals; any flow through a *declared* boundary (parameter,
-service method, annotated let) recovers checking immediately. Closing it
-means giving anonymous record literals real structural types that unify
-with nominal records at declared boundaries — a language-design item (the
-same shape as roadmap item 11's widening marker), not a patch. Filed for
-the roadmap; this entry is its fence.
+The fix was the design the roadmap called for, not a patch. An anonymous record
+literal now infers a **structural record type** — spelled `{field: Type, ...}`
+in canonical (sorted) order, in the checker only (`typecheck.py`
+`structural_fields` / `format_structural`). An update `{ a | f = e }` on it is
+field-checked against that shape: an undeclared field, or a replacement of the
+wrong type, is refused naming the guarantee (fixtures
+`t26_anon_record_update_wrong_type.rvl`, `t27_anon_record_update_undeclared_field.rvl`);
+reads through the binding are checked too.
+
+At every *declared* boundary the structural type **unifies field-wise with the
+nominal record it meets** — the field set must match and each field type must be
+compatible, with the `List[Never]` bottom rule falling out of the elementwise
+`compatible` recursion (`Never` is already a wildcard). This is the same shape
+as item 11's `?T` widening marker: a checker-level annotation that **never
+reaches the IR**. The `record` / `record_update` IR nodes carry no type, an
+inferred `let` type is not emitted, and the emitted `types` table stays nominal
+— so the v1/v2/v3 goldens are byte-identical and no emitter changed. See
+docs/records.md ("Structural vs nominal at declared boundaries").

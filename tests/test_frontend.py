@@ -116,6 +116,11 @@ REJECTIONS = {
     #       undeclared type and errors where it is used.
     "t24_opaque_receiver_builtin.rvl": "stdlib method `remove` on a value of unknown type",
     "t25_explicit_tparam_heuristic_off.rvl": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
+    # item 71: an update on an anonymous record literal is field-checked against
+    # the literal's own structural shape — the wrong-answer-class gap that used
+    # to escape checking (docs/contract-errata.md, now RESOLVED).
+    "t26_anon_record_update_wrong_type.rvl": "update of field `h` expects `Str`, got `Int`",
+    "t27_anon_record_update_undeclared_field.rvl": "`missing`, which is not a field of `{h: Str}`",
     "host_method_not_on_surface.rvl": "`Map` has no method `putt`",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
