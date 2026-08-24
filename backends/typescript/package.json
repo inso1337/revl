@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "cordis": "4.0.0-rc.8"
+    "cordis": "https://github.com/inso1337/cordis/archive/c8b94b2c4a921c85ae1ee292514bc8396c98d114.tar.gz"
   },
   "devDependencies": {
     "@types/node": "26.2.0",
