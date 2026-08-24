@@ -653,13 +653,83 @@ def test_v3_match_bind_inside_loop_runs_on_wasmtime(tmp_path):
     assert invoke("for_sum") == 107          # 2 + 100 + 5
 
 
-def test_v3_indexof_rejected_by_tier():
-    """DELIBERATE BOUNDARY: `indexOf` is not lowerable on this tier (it needs a
-    search loop the i32 model does not spell yet). A boundary that silently
-    started emitting would be as much a regression as a miscompile."""
+def test_v3_list_indexof_rejected_by_tier():
+    """DELIBERATE BOUNDARY: `List.indexOf` is still not lowerable on this tier —
+    the per-element comparison (str_eq per slot for List[Str], i64 compare for
+    List[Int]) is the reader shape the harness never reaches. `Str.indexOf`
+    DOES lower now (see the execution test below); List does not, and a
+    boundary that silently started emitting would be as much a regression as a
+    miscompile."""
     emit = _emitter()
-    with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
-        emit.emit(compile_source('fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }'))
+    for src in (
+        'fn f(xs: List[Int]) -> Int { return xs.indexOf(3) }',
+        'fn f(xs: List[Str]) -> Int { return xs.indexOf("a") }',
+    ):
+        with pytest.raises(emit.EmitError, match="indexOf is not lowerable"):
+            emit.emit(compile_source(src))
+
+
+def test_v3_str_reader_builtins_emit():
+    """`split`/`join`/`indexOf` on Str/List[Str] now emit (item 103). Their
+    linear-memory helpers are pulled in only on demand, like `$f64_to_str`."""
+    emit = _emitter()
+    wat = emit.emit(compile_source(
+        'fn route(s: Str) -> Int { return s.indexOf("/") }\n'
+        'fn parts(s: Str) -> List[Str] { return s.split("|") }\n'
+        'fn rejoin(xs: List[Str]) -> Str { return xs.join(",") }\n'
+    ))["functions"]
+    assert "(func $str_index_of" in wat
+    assert "(func $str_split" in wat
+    assert "(func $str_join" in wat
+    # -1 must cross to Int as -1, so the i32 result is sign-extended
+    assert "(call $str_index_of)\n      (i64.extend_i32_s)" in wat
+    # a component that never reaches for them keeps the helpers out
+    bare = emit.emit(compile_source('fn f(a: Int, b: Int) -> Int { return a + b }'))["functions"]
+    assert "$str_index_of" not in bare and "$str_split" not in bare and "$str_join" not in bare
+
+
+@_needs_wasmtime
+def test_v3_str_reader_builtins_run_on_wasmtime(tmp_path):
+    """Execution proof on wasmtime: a split->join round trip reconstructs the
+    string, and indexOf finds/misses at the same code-point index the reference
+    tiers (py/ts) return. Inputs are built from literals inside zero-arg fns
+    because `wasmtime --invoke` cannot pass a Str pointer. The harness's own
+    reader shapes — a `|`-delimited pipe record split, and a `/`-route
+    indexOf — are the last two functions."""
+    invoke = _run_module(tmp_path, """
+        fn np() -> Int { return "a|b|c".split("|").length }
+        fn np_trail() -> Int { return "a|".split("|").length }
+        fn np_empty() -> Int { return "".split("|").length }
+        fn np_emptysep() -> Int { return "abc".split("").length }
+        fn rt_len() -> Int { return "s1|user|hello".split("|").join("|").length }
+        fn rt_c0() -> Int { return "s1|user|hello".split("|").join("|").charCodeAt(0) }
+        fn rt_c2() -> Int { return "s1|user|hello".split("|").join("|").charCodeAt(2) }
+        fn rt_c6() -> Int { return "s1|user|hello".split("|").join("|").charCodeAt(6) }
+        fn join_diff() -> Int { return "a|b|c".split("|").join("-").length }
+        fn join_empty() -> Int { return "".split("").join("|").length }
+        fn part1_c0() -> Int { return "a|bb|ccc".split("|")[1].charCodeAt(0) }
+        fn idx_hit() -> Int { return "hello".indexOf("ll") }
+        fn idx_miss() -> Int { return "hello".indexOf("z") }
+        fn idx_head() -> Int { return "hello".indexOf("h") }
+        fn idx_empty() -> Int { return "hello".indexOf("") }
+        fn route() -> Int { return "GET /api/v1".indexOf("/") }
+    """)
+    assert invoke("np") == 3          # ["a","b","c"]
+    assert invoke("np_trail") == 2    # ["a",""] — trailing empty kept
+    assert invoke("np_empty") == 1    # [""]
+    assert invoke("np_emptysep") == 3 # ["a","b","c"]
+    assert invoke("rt_len") == 13     # "s1|user|hello"
+    assert invoke("rt_c0") == ord("s")
+    assert invoke("rt_c2") == ord("|")
+    assert invoke("rt_c6") == ord("r")
+    assert invoke("join_diff") == 5   # "a-b-c"
+    assert invoke("join_empty") == 0  # [] joins to ""
+    assert invoke("part1_c0") == ord("b")
+    assert invoke("idx_hit") == 2
+    assert invoke("idx_miss") == -1
+    assert invoke("idx_head") == 0
+    assert invoke("idx_empty") == 0
+    assert invoke("route") == 4       # "GET " then "/"
 
 
 def test_v3_map_value_type_rejected_by_tier():
