@@ -462,3 +462,87 @@ template is not in the manifest a hot-swap admits against. The other four tiers
 (TS, rust, java, wasm) are phase 2+; cordis-wasm additionally needs the ~10-line
 per-fiber realm-prefix runtime change recorded in
 `docs/notes/runtime-parity-local-realms.md`.
+
+## Instance accessor — frozen (frontend + cordis-py reference landed)
+
+Phase 1's spawn handle exposed only `.dispose()`, so property (d)'s *positive*
+direction — a spawner **reading a provision back** from its own instance — was
+inexpressible in revl. The accessor closes that with **no new grammar form**:
+field access on the handle.
+
+- **Surface:** `s.<key>` where `s : Instance[C]` (a name bound by a `spawn`
+  acquisition) and `<key>` is a key `C` **provides** → resolves to that
+  provided service (so `s.<key>.method(..)` calls it). Reading a key `C` does
+  not provide is a compile error (`` `<key>` is not a provision of C ``).
+- **Supervision-tree preserved:** only a name this component bound to a spawn
+  handle carries `Instance[C]`, so `s.<key>` cannot reach a sibling's or the
+  root's provision — it stays on the tree, exactly like phase-1 addressing.
+- **Frozen IR node** (what the other five tiers must lower):
+  ```json
+  { "kind": "instance-get", "target": <handle expr>,
+    "component": "<TargetComponent>", "key": "<providedKey>",
+    "service": "<ServiceType>" }
+  ```
+  `service` is frozen inline (the typing rule's result) so no tier re-derives
+  it — mirroring how `spawn.realms` carries the provided keys.
+- **Runtime contract:** every tier resolves `key` through the handle's stored
+  instance context — the private local realm the matching `spawn` node isolated
+  the key into — yielding *that instance's* provision and no other's.
+
+**Landed:** typecheck + lower (`src/revl/`) and the cordis-py reference
+(`backends/python/emit.py` + `runtime.py` `SpawnHandle`), with an executed
+test (`tests/test_instances_exec.py` — positive read returns the instance's
+provision; the compile-error negative). **Remaining (fan-out):** lower
+`instance-get` on ts / rust / java / go / wasm, each resolving through its
+spawn handle's stored context.
+
+## Hot-swap with live instances — migrate state (frozen, cordis-py reference)
+
+Resolves question 6. When a hot-swap replaces a template `T` that has live
+spawned instances, each instance's **state migrates onto the successor `T'`**
+(the `generational` policy; `respawn` cold-restarts, `reject` refuses). Built on
+`Session.swap`/`snapshot`/`rollback` and modelled on item 9's interface-compat
+gate — the state-compat gate is its analogue: it protects the instance's state
+shape the way item 9 protects consumer call sites.
+
+- **Migratable state:** the ordered vector of stateful host resources the
+  instance acquired (its `Map`, …), captured via a `__revl_state__()` protocol,
+  copied at capture so it survives the old instance's teardown.
+- **State-compat gate:** admit iff the successor acquires a **same-length,
+  same-type-per-position** resource vector. A successor that drops, retypes, or
+  changes the count of state is **rejected** (`StateIncompatible`), never
+  silently drained — a lost store is residue.
+- **Atomicity:** capture-before-teardown, check-the-whole-cohort-before-writing,
+  rollback-on-reject. No half-migrated instance.
+- **Operator visibility:** the swap report names what moved —
+  `{policy, templates: {T: {instances, migrated, resources: N}}}`.
+
+### ⚠️ Named hazard (canonical, not yet closed): same-typed positional collision
+
+The gate checks same-length / same-type — **not** that a same-typed resource
+keeps its ROLE. A successor that **reorders two same-typed resources** (a cache
+`Map` and a stats `Map`, acquired in the opposite order) **passes the gate**, and
+positional correlation migrates each one's state into the OTHER's slot — a
+**silent wrong-state migration**. This is exactly the class of silent wrongness
+this project's discipline exists to prevent; it is invisible today only because
+real components rarely hold two same-typed resources (precisely how earlier
+Int→Float / string-unit bugs hid). It is **pinned** by a passing characterization
+test (`tests/test_instance_migration.py::test_reorder_hazard_...`) that asserts
+the current wrong (crossed) result, so a future fix trips it.
+
+**Fix (roadmap item 53, narrowed):** *stable-key correlation* (correlate
+instances and resources by name/key, not position) + a *declared `handoff`
+surface* (names correlate instead of positions, and "what migrates" becomes
+visible in the plan), compiling down to this runtime substrate. This substrate
+is the canonical foundation; the declared form is the missing contract half.
+
+### Tracked riders
+- **Pool re-establishment:** a `Pool` migrates as a fresh equivalent, not a
+  carried value (in-flight checkouts are transient, §4.1). The report must say
+  `pool: re-established, not carried` — a per-resource-type visibility detail
+  folded into item 53's operator-visibility work.
+- **Per-fiber resource ledger (BLOCKING on the phase-2 fan-out):** resource
+  attribution here uses a global activation stack, correct for **sync** bodies.
+  Concurrently-activating **async** instance bodies could cross-attribute. Every
+  tier that lowers this must carry a proper per-fiber ledger — a blocking
+  prerequisite, so it is not rediscovered mid-port.

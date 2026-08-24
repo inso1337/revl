@@ -104,6 +104,46 @@ def test_wasm_now_emits_str_at_the_service_boundary():
     _emitter("wasm").emit(compile_source(STR_SERVICE))
 
 
+FOUR_COMPONENT_BODY_CONSTRUCTS = """
+type Outcome = Found(Int) | Missing
+fn double(n: Int) -> Int { return n * 2 }
+service Bus { fn maybe(n: Int) -> Opt[Int] }
+service S { fn f(x: Int) -> Int  fn g(x: Int) }
+component Env provides bus: Bus {
+  provide bus { fn maybe(n) = (n > 0) ? Some(n) : None }
+}
+component C requires bus: Bus provides s: S {
+  provide s {
+    fn f(x) {
+      let a = bus.maybe(x) ?? 0
+      let b = double(a)
+      let o = Found(b)
+      return match o { Found(v) => v, Missing => 0 }
+    }
+    fn g(x) { let kept = double(x)  return }
+  }
+}
+"""
+
+
+def test_four_component_body_constructs_reach_every_tier():
+    """docs/v2.0-roadmap.md §1d items 1-4 — the four component-body renderer
+    divergences, in one composition: `??`, a pure-fn call, and `match` in a
+    provide-method body, and a bare `return` in a void op. Each was a
+    well-formed node with no case in some tier's component-body renderer;
+    every one is now a real case, so every tier — go and wasm included — must
+    emit this without refusing. A regression on any tier reappears here."""
+    ir = compile_source(FOUR_COMPONENT_BODY_CONSTRUCTS)
+    failures: dict[str, str] = {}
+    for tier in TIERS + ("go",):
+        module = _emitter(tier)
+        try:
+            module.emit(ir)
+        except Exception as exc:  # noqa: BLE001 — any refusal is the signal
+            failures[tier] = f"{type(exc).__name__}: {exc}"
+    assert failures == {}, f"tiers that refused a component-body construct: {failures}"
+
+
 def test_the_reference_composition_emits_on_every_hosted_tier():
     ir = compile_source(
         """

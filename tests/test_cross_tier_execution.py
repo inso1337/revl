@@ -103,6 +103,45 @@ test "remove is persistent and total" {
   assert m3 == m
 }
 """,
+
+    # The four component-body renderer divergences (docs/v2.0-roadmap.md §1d,
+    # items 1-4), all in ONE composition: `??`, a pure-fn call, and `match` in
+    # a provide-method body, plus a bare `return` in a void op. Each was a
+    # well-formed IR node with no case in some tier's *component-body* renderer
+    # — invisible to a single-tier test, and to a `fn`-body test, because the
+    # component renderer is a distinct dispatch. This probe forces every tier's
+    # runner to COMPILE the emitted component (cargo/javac/go build/vitest all
+    # type-check the whole module), so a missing case is a build failure here,
+    # not a silent divergence. The `match`/pure-fn VALUE semantics execute via
+    # the two pure fns the method bodies also call; the component method's own
+    # `??`/bare-return values are executed on the reference runtime by
+    # `test_component_bodies_value_execute_the_four_constructs` below.
+    "component body: nullish, fn-call, match, bare-return": """
+type Outcome = Found(Int) | Missing
+fn double(n: Int) -> Int { return n * 2 }
+fn classify(o: Outcome) -> Int { return match o { Found(v) => v, Missing => 0 } }
+
+service Bus { fn maybe(n: Int) -> Opt[Int] }
+service S { fn f(x: Int) -> Int  fn g(x: Int) }
+
+component Env provides bus: Bus {
+  provide bus { fn maybe(n) = (n > 0) ? Some(n) : None }
+}
+component C requires bus: Bus provides s: S {
+  provide s {
+    fn f(x) {
+      let a = bus.maybe(x) ?? 0
+      let b = double(a)
+      let o = Found(b)
+      return match o { Found(v) => v, Missing => 0 }
+    }
+    fn g(x) { let kept = double(x)  return }
+  }
+}
+test "the pure fn a method body calls executes" { assert double(21) == 42 }
+test "match executes: the found arm"            { assert classify(Found(5)) == 5 }
+test "match executes: the missing arm"          { assert classify(Missing) == 0 }
+""",
 }
 
 # go joins the fast set: the v3 tier is dependency-free Go, so `go test`
@@ -134,6 +173,60 @@ def test_probe_executes_identically_slow(tier: str, name: str):
     if status == "skip":
         pytest.skip(f"{tier}: {message}")
     assert status == "pass", f"{tier} failed {name!r}: {message}"
+
+
+# The component probe above proves the four constructs COMPILE in a component
+# body on every tier's real toolchain. This proves they RUN with the right
+# VALUES — driving the component's own method bodies on the cordis-py
+# reference runtime via a `lifecycle test` (the only tier that executes a live
+# composition in the plain test suite). `f` exercises all three expression
+# constructs together: `bus.maybe(x) ?? 0` (present at x=5, defaulted at x=0),
+# the `double(..)` pure-fn call, and the `match`; `g` exercises the bare
+# `return` of a void op. `??` value-execution is fenced to this reference tier
+# — go/wasm's pure-position Opt plumbing cannot carry a bare `Some`/`None` — so
+# the other tiers get the compile gate above, not a value assertion here.
+_COMPONENT_BODY_LIFECYCLE = """
+type Outcome = Found(Int) | Missing
+fn double(n: Int) -> Int { return n * 2 }
+
+service Bus { fn maybe(n: Int) -> Opt[Int] }
+service S { fn f(x: Int) -> Int  fn g(x: Int) }
+
+component Env provides bus: Bus {
+  provide bus { fn maybe(n) = (n > 0) ? Some(n) : None }
+}
+component C requires bus: Bus provides s: S {
+  provide s {
+    fn f(x) {
+      let a = bus.maybe(x) ?? 0
+      let b = double(a)
+      let o = Found(b)
+      return match o { Found(v) => v, Missing => 0 }
+    }
+    fn g(x) { let kept = double(x)  return }
+  }
+}
+lifecycle test "component-body ?? / fn-call / match / bare-return execute" {
+  load Env
+  load C
+  let present = call s.f(5)
+  assert present == 10
+  let defaulted = call s.f(0)
+  assert defaulted == 0
+  call s.g(3)
+  unload C
+  unload Env
+  assert no_residue
+}
+"""
+
+
+def test_component_bodies_value_execute_the_four_constructs():
+    pytest.importorskip(
+        "cordis",
+        reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
+    status, message = _run("py", _COMPONENT_BODY_LIFECYCLE)
+    assert status == "pass", f"component-body constructs did not execute: {message}"
 
 
 # --------------------------------------------------- cheap static guards

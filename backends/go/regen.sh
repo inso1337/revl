@@ -19,6 +19,14 @@ python3 "$here/emit.py" "$root/backends/typescript/tests/fixtures/tenants.ir.jso
 python3 "$here/emit.py" "$here/scenarios/emitted/spawn/spawn.ir.json" spawn \
   > "$here/scenarios/emitted/spawn/gen.go"
 
+# --- instance accessor (docs/design-v2-instances.md, "Instance accessor") ---
+# accessor.ir.json is compiled from scenarios/accessor.rvl by the frozen
+# frontend (`revl compile`); the emitter lowers its `instance-get` reads to
+# realm-scoped `stc.Service[..](handle.Ctx(), _key..)` resolutions on the real
+# stc-go runtime (gen_exec_test.go proves the positive and negative by RUNNING).
+python3 "$here/emit.py" "$here/scenarios/emitted/accessor/accessor.ir.json" accessor \
+  > "$here/scenarios/emitted/accessor/gen.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -35,6 +43,7 @@ if command -v gofmt >/dev/null 2>&1; then
   gofmt -w "$here/scenarios/emitted/usercache/gen.go" \
            "$here/scenarios/emitted/tenants/gen.go" \
            "$here/scenarios/emitted/spawn/gen.go" \
+           "$here/scenarios/emitted/accessor/gen.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

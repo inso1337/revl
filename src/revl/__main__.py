@@ -773,6 +773,17 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument(
         "--accept-all", action="store_true",
         help="acknowledge every added crossing under --diff")
+    audit.add_argument(
+        "--policy", metavar="POLICY", default=None,
+        help="boundary-policy gate (item 33): evaluate a policy file over the "
+             "audit graph and REFUSE admission (nonzero) if any component "
+             "reaches a capability it may not (allow/deny per component or "
+             "realm, `tenants never reach each other`, the mcp/agent sandbox)")
+    audit.add_argument(
+        "--mcp-scope", action="append", default=[], metavar="COMPONENT",
+        help="treat COMPONENT as MCP/agent-admitted so the policy's `mcp` "
+             "sandbox allow-list applies to it (repeatable); `*` = every "
+             "component")
 
     erase = sub.add_parser(
         "erase-report",
@@ -1199,6 +1210,31 @@ def main(argv: list[str] | None = None) -> int:
         residue_bad = state.get("available") and not state.get("proven")
         breached = not report_doc["otherRealmsUntouched"]["untouched"]
         return 1 if (residue_bad or breached) else 0
+
+    if args.command == "audit" and getattr(args, "policy", None):
+        # the third leg of the gate (item 33): absolute authority. The policy
+        # is evaluated as set operations over the same audit graph `--diff`
+        # and `--json` already build; a violation refuses admission with a
+        # why-trace naming the offending chain.
+        from .audit_diff import audit_report  # noqa: PLC0415
+        from .policy import evaluate, load_policy, render_report  # noqa: PLC0415
+
+        policy = load_policy(args.policy)
+        audit = audit_report(ir)
+        scope = args.mcp_scope
+        mcp_components = (frozenset(audit.get("boundary") or {})
+                         if "*" in scope else frozenset(scope))
+        violations = evaluate(policy, audit, mcp_components=mcp_components)
+        if args.json:
+            print(json.dumps(
+                {"policy": args.policy,
+                 "violations": [{"kind": v.kind, "component": v.component,
+                                 "token": v.token, "message": v.message,
+                                 "why": v.why.to_json()} for v in violations],
+                 "refused": bool(violations)}, indent=2))
+        else:
+            print(render_report(policy, violations))
+        return 1 if violations else 0
 
     if args.command == "audit" and getattr(args, "diff", None):
         from .audit_diff import audit_report, evaluate, render  # noqa: PLC0415
