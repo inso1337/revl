@@ -176,6 +176,39 @@ def _is_host_valued(expr, scope) -> bool:
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
 IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
 
+# ── IR expression-kind schema (roadmap item 76a) ─────────────────────────────
+# The complete set of expression kinds this frontend can lower, split by the
+# positions in which each can appear. This is the *registration point* for a
+# new expression kind: adding one to the lowering MUST add it to the position
+# set(s) that match where the frontend can produce it — which automatically
+# adds it to EXPR_KINDS — and then
+# tests/test_expr_dispatcher_conformance.py fails until every backend declares
+# where it handles or deliberately refuses the kind in each dispatcher. A kind
+# that ships without a registration is exactly the "patched one of two paths"
+# failure the test exists to turn red.
+#
+#   FN        — a pure-function body (``_lower_pure_expr``).
+#   COMPONENT — a component body / provide-method body / block-effect setup
+#               (``_lower_component_pure_expr`` + component step lowering).
+#
+# The split is factual, not aspirational: `len` and `interp` are produced only
+# in fn bodies (component positions spell `.length` as a `field` and templates
+# as `format`), while `name`/`config`/`req`/`host`/`format`/`fn`/`spawn`/
+# `instance-get` are produced only in component positions. Everything else can
+# appear in both.
+EXPR_KINDS_FN: frozenset[str] = frozenset({
+    "adt", "arrow", "bin", "builtin", "call", "field", "hole", "if", "index",
+    "interp", "len", "list", "lit", "maplit", "match", "optcall", "optfield",
+    "record", "record_update", "un", "var",
+})
+EXPR_KINDS_COMPONENT: frozenset[str] = frozenset({
+    "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+    "format", "hole", "host", "if", "index", "instance-get", "list", "lit",
+    "maplit", "match", "name", "optcall", "optfield", "record",
+    "record_update", "req", "spawn", "un", "var",
+})
+EXPR_KINDS: frozenset[str] = EXPR_KINDS_FN | EXPR_KINDS_COMPONENT
+
 # the default shared realm (paper Def. 28: an unisolated key resolves to
 # its own realm); rendered as "shared" in diagnostics
 SHARED_REALM = ""
