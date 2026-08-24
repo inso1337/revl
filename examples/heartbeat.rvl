@@ -1,0 +1,25 @@
+// Time as a coeffect (roadmap item 57, docs/time-coeffect.md).
+//
+// A timer is a *revertible schedule*: `every`/`after` acquire a schedule whose
+// inverse is cancellation, derived teardown like any other effect. Unloading
+// this component provably cancels its timers — no orphaned interval outlives
+// the activation that armed them (the residue probe, item 18, would otherwise
+// catch the leak). The firing body runs at activation-time stratum with the
+// component's declared capabilities, so `emit log.write(...)` inside a timer is
+// audited (G4/G8) exactly like a top-level emission — a firing cannot smuggle a
+// boundary crossing the component did not declare. Under `revl test`/replay the
+// clock is a coeffect the harness provides, so each firing is a deterministic
+// timeline step rather than a wall-clock race.
+
+service Log { emission fn write(msg: Str) }
+
+component Heartbeat requires log: Log {
+  // a periodic timer: fires every 30 seconds for as long as the component lives
+  every 30s {
+    emit log.write("tick")
+  }
+  // a one-shot delay: fires once, 5 minutes after activation
+  after 5m {
+    emit log.write("warmup done")
+  }
+}

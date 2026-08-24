@@ -57,6 +57,7 @@ fn keywords() -> List[Str] {
     "isolate", "intercept", "realm", "in", "with",
     "handoff",
     "spawn",
+    "every", "after",
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
     "hole",

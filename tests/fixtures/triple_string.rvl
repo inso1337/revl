@@ -14,7 +14,7 @@ let empty = """"""
 
 let quotes = """has "one" and ""two"" inside"""
 
-let after = """no leading blank"""
+let later = """no leading blank"""
 
 let indented = """
   keeps its indentation

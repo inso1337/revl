@@ -166,7 +166,7 @@ def test_bindings_thread_forward_only_past_the_hole():
         "    fn get(key) {\n"
         '      let before = key\n'
         '      let mid = hole[Str] "fill"\n'
-        '      let after = key\n'
+        '      let tail = key\n'
         "      return mid\n"
         "    }\n"
         "  }\n"
@@ -174,7 +174,7 @@ def test_bindings_thread_forward_only_past_the_hole():
     spec = _specs(source)[0]["fillSpec"]
     names = {b["name"] for b in spec["bindings"]}
     assert "before" in names and "key" in names
-    assert "after" not in names
+    assert "tail" not in names
 
 
 def test_a_sample_fill_spec_is_json_serializable():

@@ -1227,22 +1227,22 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
   if (i >= ss.length() || ck.msg != "") { return ck }
   let s = ss[i]
   if (s.kind == "skip") { return check_stmts(ss, i + 1, ck) }
-  var after = ck
+  var next = ck
   if (s.kind == "let") {
     // calls in the value count even though the statement also binds
-    after = walk_expr(s.e, s.kind == "emit", ck)
-    if (after.msg != "") { return after }
-    let inf = infer(s.e, after.env)
-    if (!inf.ok) { return refuse_ck(after, inf.msg) }
+    next = walk_expr(s.e, s.kind == "emit", ck)
+    if (next.msg != "") { return next }
+    let inf = infer(s.e, next.env)
+    if (!inf.ok) { return refuse_ck(next, inf.msg) }
     if (s.bind != "") {
-      after = { ctx: after.ctx, env: after.env.push({ name: s.bind, ty: inf.ty }),
-                ev: after.ev, msg: "" }
+      next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
+                ev: next.ev, msg: "" }
     }
-    return check_stmts(ss, i + 1, after)
+    return check_stmts(ss, i + 1, next)
   }
-  after = walk_expr(s.e, s.kind == "emit", ck)
-  if (after.msg != "") { return after }
-  return check_stmts(ss, i + 1, after)
+  next = walk_expr(s.e, s.kind == "emit", ck)
+  if (next.msg != "") { return next }
+  return check_stmts(ss, i + 1, next)
 }
 
 fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {

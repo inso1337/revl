@@ -1027,6 +1027,27 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # accumulator already holds is reverted by the runtime, so a partly
         # activated component still leaves no residue (R4).
         lines.append(f"{indent}throw new Error({_expr(step['message'], ctx)})")
+    elif kind == "timer":
+        # A timer (item 57): a revertible schedule. The firing closure holds
+        # the body's emissions; `host.scheduleEvery`/`scheduleAfter` register it
+        # with the clock coeffect and return a handle, and the yielded
+        # `() => handle.cancel()` is the derived inverse — so unloading the
+        # component cancels the timer through the same accumulator LIFO that
+        # reverts every other effect (no orphaned interval; docs/time-coeffect.md).
+        ctx._counter[0] += 1
+        n = ctx._counter[0]
+        fn = f"$revl_timer_{n}"
+        handle = f"$revl_timer_{n}_h"
+        verb = "scheduleEvery" if step.get("mode") == "every" else "scheduleAfter"
+        lines.append(f"{indent}const {fn} = () => {{")
+        for emission in step.get("body") or []:
+            if emission.get("step") != "emit":  # pragma: no cover — lowerer invariant
+                raise EmitError(f"a timer body carries emissions only, "
+                                f"found {emission.get('step')!r}")
+            lines.append(f"{indent}  {_expr(emission['expr'], ctx)}")
+        lines.append(f"{indent}}}")
+        lines.append(f"{indent}const {handle} = host.{verb}({int(step['interval_ms'])}, {fn})")
+        lines.append(f"{indent}yield () => {handle}.cancel()")
     elif kind == "return":
         raise EmitError("return steps are only allowed inside method bodies")
     else:

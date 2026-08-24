@@ -279,6 +279,8 @@ def _crates_io_reachable() -> bool:
 
 def run_rust(ir: dict) -> tuple[str, str]:
     """Emit a throwaway crate and run its ``#[test]``s under ``cargo test``."""
+    if _has_timers(ir):
+        return _timer_follow_on("rust")
     if shutil.which("cargo") is None:
         return ("skip", "cargo not installed")
     if not _crates_io_reachable():
@@ -315,6 +317,8 @@ def run_go(ir: dict) -> tuple[str, str]:
     same stc-go require the go placement runner and the conformance validator
     use (resolved from the local module cache; FR-5).
     """
+    if _has_timers(ir):
+        return _timer_follow_on("go")
     go = shutil.which("go")
     if go is None:
         return ("skip", "go not installed")
@@ -364,6 +368,31 @@ def _java_tool(name: str) -> str | None:
     return exe if probe.returncode == 0 else None
 
 
+def _has_timers(ir: dict) -> bool:
+    """True when any component body carries a `timer` step (item 57).
+
+    Timers lower on the reference tiers (py + ts); go/rust/wasm/java refuse them
+    honestly as a documented follow-on (docs/time-coeffect.md). Detecting the
+    step here lets those tiers report a clean "not yet lowerable" skip instead
+    of an opaque `unsupported component step` dump from the emitter."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("step") == "timer":
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+    return any(walk(comp.get("body")) for comp in (ir.get("components") or []))
+
+
+def _timer_follow_on(tier: str) -> tuple[str, str]:
+    """The honest refusal for a tier that cannot yet lower timers (item 57)."""
+    return ("skip", f"timers (`every`/`after`, item 57) are not yet lowerable on "
+                    f"the {tier} tier — the reference tiers are py + ts; a "
+                    f"documented follow-on (docs/time-coeffect.md)")
+
+
 def _lifecycle_refusal(ir: dict, error: Exception) -> bool:
     """True when the emit refusal is the by-design lifecycle-test refusal.
 
@@ -380,6 +409,8 @@ def _lifecycle_refusal(ir: dict, error: Exception) -> bool:
 def run_java(ir: dict) -> tuple[str, str]:
     """Compile the emitted cordis4j plugin against the stubs (or the real
     classes on ``REVL_CORDIS4J_CLASSES``) and run ``REVL_TESTS`` on a JVM."""
+    if _has_timers(ir):
+        return _timer_follow_on("java")
     javac = _java_tool("javac")
     java = _java_tool("java")
     if javac is None or java is None:
@@ -446,6 +477,8 @@ def run_wasm(ir: dict) -> tuple[str, str]:
     ``wasmtime`` substrate — the same recipe backends/wasm/test_v3_emit.py
     uses. A failed `assert` traps, which wasmtime reports as a nonzero exit.
     """
+    if _has_timers(ir):
+        return _timer_follow_on("wasm")
     wasmtime = shutil.which("wasmtime")
     if wasmtime is None:
         return ("skip", "wasmtime not installed (brew install wasmtime)")
