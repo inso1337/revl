@@ -197,14 +197,14 @@ type TenantAStore_kv struct {
 	store *Map[string]
 }
 
-func (s *TenantAStore_kv) Get(k string) (string, bool) {
-	return s.store.Get(k)
+func (revlSelf *TenantAStore_kv) Get(k string) (string, bool) {
+	return revlSelf.store.Get(k)
 }
 
-func (s *TenantAStore_kv) Set(k string, v string) {
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(k, v)
-		return func() error { s.store.Remove(k); return nil }
+func (revlSelf *TenantAStore_kv) Set(k string, v string) {
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(k, v)
+		return func() error { revlSelf.store.Remove(k); return nil }
 	})
 }
 
@@ -235,14 +235,14 @@ type TenantBStore_kv struct {
 	store *Map[string]
 }
 
-func (s *TenantBStore_kv) Get(k string) (string, bool) {
-	return s.store.Get(k)
+func (revlSelf *TenantBStore_kv) Get(k string) (string, bool) {
+	return revlSelf.store.Get(k)
 }
 
-func (s *TenantBStore_kv) Set(k string, v string) {
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(k, v)
-		return func() error { s.store.Remove(k); return nil }
+func (revlSelf *TenantBStore_kv) Set(k string, v string) {
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(k, v)
+		return func() error { revlSelf.store.Remove(k); return nil }
 	})
 }
 

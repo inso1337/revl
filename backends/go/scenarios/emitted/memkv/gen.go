@@ -179,18 +179,18 @@ type MemKV_kv struct {
 	store *Map[string]
 }
 
-func (s *MemKV_kv) Count() int {
-	return s.store.Size()
+func (revlSelf *MemKV_kv) Count() int {
+	return revlSelf.store.Size()
 }
 
-func (s *MemKV_kv) AllKeys() []string {
-	return s.store.Keys()
+func (revlSelf *MemKV_kv) AllKeys() []string {
+	return revlSelf.store.Keys()
 }
 
-func (s *MemKV_kv) Put(key string, value string) {
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(key, value)
-		return func() error { s.store.Remove(key); return nil }
+func (revlSelf *MemKV_kv) Put(key string, value string) {
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(key, value)
+		return func() error { revlSelf.store.Remove(key); return nil }
 	})
 }
 

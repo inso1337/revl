@@ -178,9 +178,9 @@ type Tagger_g struct {
 	store *Map[[]string]
 }
 
-func (s *Tagger_g) GetOr(key string, fallback []string) []string {
+func (revlSelf *Tagger_g) GetOr(key string, fallback []string) []string {
 	return func() []string {
-		_v, _ok := s.store.Get(key)
+		_v, _ok := revlSelf.store.Get(key)
 		if _ok {
 			return _v
 		}
@@ -188,10 +188,10 @@ func (s *Tagger_g) GetOr(key string, fallback []string) []string {
 	}()
 }
 
-func (s *Tagger_g) Set(key string, tags []string) {
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(key, tags)
-		return func() error { s.store.Remove(key); return nil }
+func (revlSelf *Tagger_g) Set(key string, tags []string) {
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(key, tags)
+		return func() error { revlSelf.store.Remove(key); return nil }
 	})
 }
 

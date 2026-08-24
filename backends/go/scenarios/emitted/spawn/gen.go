@@ -211,8 +211,8 @@ type Worker_counter struct {
 	probe Probe
 }
 
-func (s *Worker_counter) Value() int64 {
-	return s.cfg.Id
+func (revlSelf *Worker_counter) Value() int64 {
+	return revlSelf.cfg.Id
 }
 
 func Supervisor() stc.Component {
@@ -258,8 +258,8 @@ type Supervisor_ctl struct {
 	probe Probe
 }
 
-func (s *Supervisor_ctl) RetireA() int64 {
-	r := s.w1.Dispose()
+func (revlSelf *Supervisor_ctl) RetireA() int64 {
+	r := revlSelf.w1.Dispose()
 	_ = r
 	return 1
 }

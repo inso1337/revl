@@ -179,13 +179,13 @@ type Counter_tally struct {
 	store *Map[int]
 }
 
-func (s *Counter_tally) Total() int {
-	return s.store.Size()
+func (revlSelf *Counter_tally) Total() int {
+	return revlSelf.store.Size()
 }
 
-func (s *Counter_tally) Get(key string) int {
+func (revlSelf *Counter_tally) Get(key string) int {
 	return func() int {
-		_v, _ok := s.store.Get(key)
+		_v, _ok := revlSelf.store.Get(key)
 		if _ok {
 			return _v
 		}
@@ -193,10 +193,10 @@ func (s *Counter_tally) Get(key string) int {
 	}()
 }
 
-func (s *Counter_tally) Bump(key string, amount int) {
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(key, amount)
-		return func() error { s.store.Remove(key); return nil }
+func (revlSelf *Counter_tally) Bump(key string, amount int) {
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(key, amount)
+		return func() error { revlSelf.store.Remove(key); return nil }
 	})
 }
 

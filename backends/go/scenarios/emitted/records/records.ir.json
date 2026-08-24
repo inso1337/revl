@@ -1,0 +1,563 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Directory": {
+      "methods": {
+        "make": {
+          "params": [
+            {
+              "name": "n",
+              "type": "Str"
+            },
+            {
+              "name": "a",
+              "type": "Int"
+            }
+          ],
+          "returns": "Person",
+          "emission": false
+        },
+        "birthday": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Person"
+            }
+          ],
+          "returns": "Person",
+          "emission": false
+        },
+        "second_name": {
+          "params": [
+            {
+              "name": "people",
+              "type": "List[Person]"
+            }
+          ],
+          "returns": "Str",
+          "emission": false
+        },
+        "area": {
+          "params": [
+            {
+              "name": "s",
+              "type": "Shape"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Registry",
+      "source": "backends/go/scenarios/records.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "dir": "Directory"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "dir",
+          "service": "Directory",
+          "methods": [
+            {
+              "name": "make",
+              "params": [
+                "n",
+                "a"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "record",
+                    "fields": [
+                      [
+                        "name",
+                        {
+                          "kind": "name",
+                          "id": "n"
+                        }
+                      ],
+                      [
+                        "age",
+                        {
+                          "kind": "name",
+                          "id": "a"
+                        }
+                      ]
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "birthday",
+              "params": [
+                "p"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "record",
+                    "fields": [
+                      [
+                        "name",
+                        {
+                          "kind": "field",
+                          "target": {
+                            "kind": "name",
+                            "id": "p"
+                          },
+                          "name": "name"
+                        }
+                      ],
+                      [
+                        "age",
+                        {
+                          "kind": "bin",
+                          "op": "+",
+                          "left": {
+                            "kind": "field",
+                            "target": {
+                              "kind": "name",
+                              "id": "p"
+                            },
+                            "name": "age"
+                          },
+                          "right": {
+                            "kind": "lit",
+                            "value": 1
+                          }
+                        }
+                      ]
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "second_name",
+              "params": [
+                "people"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "field",
+                    "target": {
+                      "kind": "index",
+                      "target": {
+                        "kind": "name",
+                        "id": "people"
+                      },
+                      "index": {
+                        "kind": "lit",
+                        "value": 1
+                      }
+                    },
+                    "name": "name"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "area",
+              "params": [
+                "s"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "match",
+                    "scrutinee": {
+                      "kind": "name",
+                      "id": "s"
+                    },
+                    "arms": [
+                      {
+                        "pattern": "Circle",
+                        "bind": "r",
+                        "body": {
+                          "kind": "bin",
+                          "op": "*",
+                          "left": {
+                            "kind": "bin",
+                            "op": "*",
+                            "left": {
+                              "kind": "name",
+                              "id": "r"
+                            },
+                            "right": {
+                              "kind": "name",
+                              "id": "r"
+                            }
+                          },
+                          "right": {
+                            "kind": "lit",
+                            "value": 3
+                          }
+                        },
+                        "payload_type": "Int"
+                      },
+                      {
+                        "pattern": "Square",
+                        "bind": "w",
+                        "body": {
+                          "kind": "bin",
+                          "op": "*",
+                          "left": {
+                            "kind": "name",
+                            "id": "w"
+                          },
+                          "right": {
+                            "kind": "name",
+                            "id": "w"
+                          }
+                        },
+                        "payload_type": "Int"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Front",
+      "source": "backends/go/scenarios/records.rvl",
+      "config": [],
+      "requires": {
+        "dir": "Directory"
+      },
+      "provides": {},
+      "body": []
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Registry",
+        "file": "backends/go/scenarios/records.rvl",
+        "inject": [],
+        "provides": [
+          "dir"
+        ]
+      },
+      {
+        "name": "Front",
+        "file": "backends/go/scenarios/records.rvl",
+        "inject": [
+          "dir"
+        ],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "Registry",
+      "Front"
+    ]
+  },
+  "types": {
+    "Person": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "name": "Str",
+        "age": "Int"
+      }
+    },
+    "Shape": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Circle",
+          "payload": "Int"
+        },
+        {
+          "name": "Square",
+          "payload": "Int"
+        }
+      ]
+    }
+  },
+  "tests": [
+    {
+      "name": "records/lists/variants round-trip through a live provide method",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "Registry",
+          "config": {}
+        },
+        {
+          "step": "load",
+          "component": "Front",
+          "config": {}
+        },
+        {
+          "step": "call",
+          "key": "dir",
+          "method": "make",
+          "args": [
+            {
+              "kind": "lit",
+              "value": "ada"
+            },
+            {
+              "kind": "lit",
+              "value": 36
+            }
+          ],
+          "bind": "ada"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "field",
+              "target": {
+                "kind": "var",
+                "name": "ada"
+              },
+              "name": "age"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 36
+            }
+          }
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "field",
+              "target": {
+                "kind": "var",
+                "name": "ada"
+              },
+              "name": "name"
+            },
+            "right": {
+              "kind": "lit",
+              "value": "ada"
+            }
+          }
+        },
+        {
+          "step": "call",
+          "key": "dir",
+          "method": "birthday",
+          "args": [
+            {
+              "kind": "var",
+              "name": "ada"
+            }
+          ],
+          "bind": "older"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "field",
+              "target": {
+                "kind": "var",
+                "name": "older"
+              },
+              "name": "age"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 37
+            }
+          }
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "field",
+              "target": {
+                "kind": "var",
+                "name": "older"
+              },
+              "name": "name"
+            },
+            "right": {
+              "kind": "lit",
+              "value": "ada"
+            }
+          }
+        },
+        {
+          "step": "call",
+          "key": "dir",
+          "method": "second_name",
+          "args": [
+            {
+              "kind": "list",
+              "items": [
+                {
+                  "kind": "record",
+                  "fields": [
+                    [
+                      "name",
+                      {
+                        "kind": "lit",
+                        "value": "ada"
+                      }
+                    ],
+                    [
+                      "age",
+                      {
+                        "kind": "lit",
+                        "value": 36
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "kind": "record",
+                  "fields": [
+                    [
+                      "name",
+                      {
+                        "kind": "lit",
+                        "value": "bo"
+                      }
+                    ],
+                    [
+                      "age",
+                      {
+                        "kind": "lit",
+                        "value": 41
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ],
+          "bind": "who"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "who"
+            },
+            "right": {
+              "kind": "lit",
+              "value": "bo"
+            }
+          }
+        },
+        {
+          "step": "call",
+          "key": "dir",
+          "method": "area",
+          "args": [
+            {
+              "kind": "adt",
+              "type": "Shape",
+              "case": "Circle",
+              "args": [
+                {
+                  "kind": "lit",
+                  "value": 2
+                }
+              ]
+            }
+          ],
+          "bind": "c"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "c"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 12
+            }
+          }
+        },
+        {
+          "step": "call",
+          "key": "dir",
+          "method": "area",
+          "args": [
+            {
+              "kind": "adt",
+              "type": "Shape",
+              "case": "Square",
+              "args": [
+                {
+                  "kind": "lit",
+                  "value": 5
+                }
+              ]
+            }
+          ],
+          "bind": "sq"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "sq"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 25
+            }
+          }
+        },
+        {
+          "step": "unload",
+          "component": "Front"
+        },
+        {
+          "step": "unload",
+          "component": "Registry"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}

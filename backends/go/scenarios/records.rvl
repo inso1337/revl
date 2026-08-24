@@ -1,0 +1,72 @@
+// item 139: v3 typed-core records / lists / variants across a LIVE go
+// provide method.
+//
+// The go v3 work (host Map/timers, items 84/113/99) made a v3 typed core lower
+// in top-level `fn`s and on the placement runner, but emit()'s live stc-go
+// component world stayed v1/v2-only: a record used as a `provide` method
+// param or return was refused ("record is not lowerable in the stc-go
+// component world"), even though the very same record lowers fine in a
+// top-level fn. This composition pins the fix — a `provide` method that TAKES
+// and RETURNS a record, threads a List of them, and dispatches an ADT `match`
+// — running over the real stc-go runtime under a lifecycle test.
+type Person = { name: Str, age: Int }
+type Shape = Circle(Int) | Square(Int)
+
+service Directory {
+  // record param + record return, plus a record built from scalars
+  fn make(n: Str, a: Int) -> Person
+  fn birthday(p: Person) -> Person
+  // a List of records in, a scalar field out (list param + record field access)
+  fn second_name(people: List[Person]) -> Str
+  // an ADT param dispatched by `match` in the method body. The param is named
+  // `s` on purpose: it collides with the struct receiver a provide-impl method
+  // used to hardcode as `s` (item 147) — this scenario compiling proves the
+  // receiver is now `revlSelf`, so the param no longer redeclares it.
+  fn area(s: Shape) -> Int
+}
+
+component Registry provides dir: Directory {
+  provide dir {
+    fn make(n, a) = { name: n, age: a }
+    fn birthday(p) = { name: p.name, age: p.age + 1 }
+    // the record List crosses the boundary; index + field access lower inside
+    // the live method body
+    fn second_name(people) = people[1].name
+    fn area(s) = match s {
+      Circle(r) => r * r * 3,
+      Square(w) => w * w,
+    }
+  }
+}
+
+// a second component requires the service, so the composition is a real
+// provide/require pair the runtime activates (not a lone provider).
+component Front requires dir: Directory {
+}
+
+lifecycle test "records/lists/variants round-trip through a live provide method" {
+  load Registry
+  load Front
+
+  // record return from scalars, then a record param -> record return
+  let ada = call dir.make("ada", 36)
+  assert ada.age == 36
+  assert ada.name == "ada"
+  let older = call dir.birthday(ada)
+  assert older.age == 37
+  assert older.name == "ada"
+
+  // a List[Person] argument, built inline, indexed + field-accessed in the method
+  let who = call dir.second_name([{ name: "ada", age: 36 }, { name: "bo", age: 41 }])
+  assert who == "bo"
+
+  // an ADT argument dispatched by `match` in the method body
+  let c = call dir.area(Circle(2))
+  assert c == 12
+  let sq = call dir.area(Square(5))
+  assert sq == 25
+
+  unload Front
+  unload Registry
+  assert no_residue
+}

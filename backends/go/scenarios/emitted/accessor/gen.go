@@ -186,8 +186,8 @@ type Cell_counter struct {
 	cfg CellConfig
 }
 
-func (s *Cell_counter) Value() int64 {
-	return s.cfg.Id
+func (revlSelf *Cell_counter) Value() int64 {
+	return revlSelf.cfg.Id
 }
 
 func App() stc.Component {
@@ -226,12 +226,12 @@ type App_reader struct {
 	b   *RevlSpawnHandle
 }
 
-func (s *App_reader) ReadA() int64 {
-	return func() Counter { _svc, _ := stc.Service[Counter](s.a.Ctx(), _keyCounter); return _svc }().Value()
+func (revlSelf *App_reader) ReadA() int64 {
+	return func() Counter { _svc, _ := stc.Service[Counter](revlSelf.a.Ctx(), _keyCounter); return _svc }().Value()
 }
 
-func (s *App_reader) ReadB() int64 {
-	return func() Counter { _svc, _ := stc.Service[Counter](s.b.Ctx(), _keyCounter); return _svc }().Value()
+func (revlSelf *App_reader) ReadB() int64 {
+	return func() Counter { _svc, _ := stc.Service[Counter](revlSelf.b.Ctx(), _keyCounter); return _svc }().Value()
 }
 
 // LoadCell isolates the load-target per the component's realm placement, then loads it.
