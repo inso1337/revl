@@ -147,33 +147,85 @@ def _is_fn_type(name: object) -> bool:
     return False
 
 
+# A declared function type still has no single Rust lowering — but the choice
+# is not a guess once the *position* is known (docs/function-types.md §4).
+# `_rust_type` threads that position: a `fn`/`extern` parameter or return is an
+# `impl Fn(..)` (rustc monomorphises it, exactly as a hand-written Rust
+# signature would), while an *escaping* position — a struct field, an ADT
+# payload, a `List`/`Opt`/`Map` element, a service-method signature (a trait
+# object's methods must stay object-safe) — still has no representation the
+# emitter can construct without boxing arrows at their creation site, so those
+# remain refused by name. Locals were never affected: rustc infers their
+# closure type.
 _FN_TYPE_REFUSAL = (
-    "a declared function type ({name}) is not lowerable on the Rust tier. "
-    "Rust has no single type for \"a callable\": a parameter wants `impl "
-    "Fn(..)`, a return wants `impl Fn(..)` tied to one concrete closure, and a "
-    "struct field or a `Vec` element wants `Box<dyn Fn(..)>` with an explicit "
-    "lifetime — three different lowerings whose choice depends on the position "
-    "and on whether the value escapes. revl does not carry that distinction, "
-    "so the emitter cannot pick one without guessing. Arrows bound to a local "
-    "`let` and called in the same function still lower (rustc infers the "
-    "closure type); it is only a function type *written in a declaration* that "
-    "is refused. See docs/function-types.md."
+    "a declared function type ({name}) is not lowerable in an escaping "
+    "position on the Rust tier. A `fn`/`extern` parameter or return now lowers "
+    "to `impl Fn(..)`, but a value that escapes — a struct field, an ADT "
+    "payload, a `List`/`Opt`/`Map` element, or a service-method signature — "
+    "wants `Box<dyn Fn(..)>` constructed where the arrow is created, which "
+    "revl's type does not yet carry enough position to do. Arrows bound to a "
+    "local `let` and called in the same function still lower (rustc infers the "
+    "closure type). See docs/function-types.md."
 )
 
+# Positions in which `impl Fn(..)` is a valid, monomorphisable lowering: the
+# argument and return positions of a free `fn`/`extern`. Everywhere else a
+# function type either escapes (must box) or would break trait object-safety.
+_IMPL_FN_POSITIONS = frozenset({"param", "return"})
 
-def _reject_fn_type(name: object) -> None:
-    if _is_fn_type(name):
+
+def _rust_fn_type(name: str, types: dict | None, position: str) -> str:
+    """A declared function type `(P, ...) -> R` -> its Rust lowering.
+
+    `param`/`return` positions get `impl Fn(P, ...) -> R`; any other position
+    escapes and is refused by name (see `_FN_TYPE_REFUSAL`).
+    """
+    if position not in _IMPL_FN_POSITIONS:
         raise EmitError(_FN_TYPE_REFUSAL.format(name=name))
+    params, ret = _split_fn_type(name)
+    rendered = ", ".join(_rust_type(p, types) for p in params)
+    return f"impl Fn({rendered}) -> {_rust_type(ret, types)}"
 
-def _rust_type(name: object, types: dict | None = None) -> str:
+
+def _split_fn_type(name: str) -> tuple[list[str], str]:
+    """Split `(P1, P2, ...) -> R` into its parameter types and return type.
+
+    The leading parenthesised group holds the (comma-separated) parameters; the
+    type after the matching `->` is the return, itself a full type. `() -> R`
+    yields no parameters.
+    """
+    text = name.strip()
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+            if depth == 0:
+                inner = text[1:i].strip()
+                rest = text[i + 1:].lstrip()
+                ret = rest[2:].strip() if rest.startswith("->") else ""
+                params = _split_generic(inner) if inner else []
+                return params, ret
+    raise EmitError(f"malformed function type: {name!r}")
+
+
+def _rust_type(name: object, types: dict | None = None,
+               position: str = "value") -> str:
     """Surface type -> Rust type. Unknown named types map to cordis `Value`.
 
     When `types` is supplied (IR v3), user record/variant names are mapped to
     their emitted Rust type names instead of the opaque `Value` fallback.
+
+    `position` selects the lowering for a declared function type (see
+    `_rust_fn_type`); it defaults to the escaping `"value"` position, so a
+    function type nested inside a container (`List[(Int) -> Int]`) is refused
+    even when the enclosing declaration is a parameter.
     """
     if not isinstance(name, str) or not name:
         return "Value"
-    _reject_fn_type(name)
+    if _is_fn_type(name):
+        return _rust_fn_type(name, types, position)
     if name in TYPE_MAP:
         return TYPE_MAP[name]
     types = types or {}
@@ -2590,10 +2642,11 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         name = _ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         params = ", ".join(
-            f"{_ident(p.get('name'), 'parameter name')}: {_rust_type(p.get('type'), types)}"
+            f"{_ident(p.get('name'), 'parameter name')}: "
+            f"{_rust_type(p.get('type'), types, position='param')}"
             for p in fn.get("params") or []
         )
-        returns = _rust_type(fn.get("returns"), types)
+        returns = _rust_type(fn.get("returns"), types, position="return")
         visibility = "pub " if fn.get("public") else ""
         out.append(f"{visibility}fn {name}({params}) -> {returns} {{")
         if not fn.get("body"):
@@ -2611,10 +2664,11 @@ def _emit_v3_externs(externs: list, types: dict) -> list[str]:
     for ext in externs:
         name = _ident(ext.get("name"), "extern name")
         params = ", ".join(
-            f"{_ident(p.get('name'), 'extern parameter name')}: {_rust_type(p.get('type'), types)}"
+            f"{_ident(p.get('name'), 'extern parameter name')}: "
+            f"{_rust_type(p.get('type'), types, position='param')}"
             for p in ext.get("params") or []
         )
-        returns = _rust_type(ext.get("returns"), types)
+        returns = _rust_type(ext.get("returns"), types, position="return")
         bodies = ext.get("bodies") or {}
         if "rs" not in bodies:
             raise EmitError(
