@@ -1,0 +1,59 @@
+// FR-1 (roadmap 77a) — the harness agent-loop shape: a bounded recursive
+// `run_loop` whose callback arrow (`msgs2 => ...`) carries an emission, bound
+// inside a provide-method body (docs/expressible-iteration.md exit criterion
+// 2). This is the design-doc shape: the method returns the loop's `Step`, so
+// the composition is well-typed end to end (the FR1_LOOP_SRC compile fixture
+// in tests/test_function_types.py deliberately stays a compile-only probe).
+//
+// The TS emitter's job: the arrow's `params` must bind in the arrow's body
+// scope, so `msgs2` renders as the emitted lambda's parameter — previously
+// refused as "reference to unbound name 'msgs2' in component 'Agent'".
+//
+// Regenerate with:
+//   python3 -c "import json,sys; sys.path.insert(0,'src'); from revl import compile_source; \
+//     print(json.dumps(compile_source(open('backends/typescript/tests/fixtures/fr1_loop.rvl').read()), indent=2))" \
+//     > backends/typescript/tests/fixtures/fr1_loop.ir.json
+
+type ToolReq = { name: Str, args: Str }
+type Step = Final(Str) | NeedTool(ToolReq)
+
+fn decode_response(resp: Str) -> Step {
+  if (resp.slice(0, 6) == "FINAL ") {
+    return Final(resp.slice(6, resp.length()))
+  }
+  return NeedTool({ name: resp.slice(0, 10), args: "" })
+}
+
+fn run_loop(msgs: List[Str], step: (List[Str]) -> Step, n: Int) -> Step {
+  if (n <= 0) { return Final("max_steps exhausted") }
+  return match step(msgs) {
+    Final(answer) => Final(answer),
+    NeedTool(req) => run_loop(msgs.push(req.name), step, n - 1),
+  }
+}
+
+// FR-1 Semantics (docs/expressible-iteration.md): capture of method/fn
+// variables by an arrow remains BY VALUE — a mutable `var` is snapshotted at
+// arrow-creation time (the py tier's `lambda x, n=n: ...`). The ts tier must
+// match: an arrow that captured `n` sees the value at creation, not a later
+// rebound one.
+fn captured() -> Int {
+  var n = 1
+  let f = x => x + n
+  n += 10
+  return f(5)
+}
+
+service Model { emission fn complete(h: List[Str]) -> Str }
+service Loop { emission fn run(p: Str) -> Step }
+component Agent requires model: Model provides agent: Loop {
+  config { max_steps: Int = 8 }
+  provide agent {
+    fn run(session_id) {
+      let msgs = ["prompt"]
+      return run_loop(msgs,
+                      msgs2 => decode_response(emit model.complete(msgs2)),
+                      config.max_steps)
+    }
+  }
+}
