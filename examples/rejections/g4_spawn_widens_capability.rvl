@@ -1,0 +1,44 @@
+// REJECTED — capability attenuation on spawn (item 66,
+// docs/capability-attenuation.md): a spawn may narrow a child's
+// capabilities, never widen them.
+//
+// A spawned child's capability set must be a checked SUBSET of what its
+// spawner holds — monotone shrinkage, the same direction §5 admits for
+// purity. A parent holds a boundary when it wires it (`requires`) or its own
+// body crosses it; it may pass down less, never more. Without this rule a
+// spawning component is a capability amplifier: it could hand a child a
+// boundary it cannot itself reach.
+//
+// Here `Supervisor` holds only `kv_a`, but spawns `Leaker`, whose activation
+// reaches `kv_b`. That is widening — the supervisor cannot pass down `kv_b`
+// it does not hold — so admission is refused.
+//
+// expected error:
+//   `Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`
+
+service StoreA {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+
+service StoreB {
+  emission[kv_b] fn write_b(row: Str) -> Int
+}
+
+service Task {
+  emission fn go() -> Int
+}
+
+// Leaker reaches kv_b — the boundary the supervisor does not hold.
+component Leaker requires kv_b: StoreB provides task: Task {
+  provide task {
+    fn go() {
+      emit kv_b.write_b("leak")
+      return 0
+    }
+  }
+}
+
+// Supervisor holds only kv_a, yet spawns a child that reaches kv_b.
+component Supervisor requires kv_a: StoreA {
+  let l = effect spawn Leaker with { } undo l.dispose()
+}

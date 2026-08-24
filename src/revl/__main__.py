@@ -566,6 +566,111 @@ def _run_apply(args) -> int:
     return 0 if report["applied"] else 1
 
 
+def _run_undo(args) -> int:
+    """`revl undo history.json [--to N]` — operator undo for a running system
+    (roadmap item 65, docs/generation-history.md).
+
+    A history document (`revl.generation-history`, produced by the session's
+    `history_document()`) is a list of generation snapshots. This replays them
+    into a *fresh* session — load the first, swap the rest — to reach the same
+    live generation history, then performs the undo through the gate. `--to`
+    names a recorded generation; omit it to undo to N−1. The undo is itself an
+    admitted, gated change: a target the current checker rejects is refused and
+    the composition is left untouched. Prints the dossier, tears down."""
+    from .mcp import persist  # noqa: PLC0415
+    from .mcp.session import Session, SessionError  # noqa: PLC0415
+
+    try:
+        with open(args.history, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.history}: {error}", file=sys.stderr)
+        return 1
+    if not isinstance(doc, dict) or doc.get("kind") != "revl.generation-history":
+        print(f"error: {args.history}: expected a revl.generation-history document "
+              f"(from the session's history export)", file=sys.stderr)
+        return 1
+    gens = doc.get("generations") or []
+    if len(gens) < 2:
+        print("error: the history has fewer than two generations — nothing to "
+              "undo to", file=sys.stderr)
+        return 1
+
+    # translate a recorded generation number to the position it will hold in the
+    # replayed session (which numbers its generations 1..k as it boots them).
+    to_session = None
+    if args.to is not None:
+        idx = next((i for i, g in enumerate(gens)
+                    if g.get("generation") == args.to), None)
+        if idx is None:
+            recorded = [g.get("generation") for g in gens]
+            print(f"error: generation {args.to} is not in the history document "
+                  f"(recorded: {recorded})", file=sys.stderr)
+            return 1
+        to_session = idx + 1
+
+    session = Session()
+    try:
+        for i, gen in enumerate(gens):
+            snap = gen.get("snapshot")
+            if not snap or not snap.get("sources"):
+                print(f"error: generation {gen.get('generation')} has no "
+                      f"re-admittable snapshot — the history cannot be replayed",
+                      file=sys.stderr)
+                if session.loaded:
+                    session.unload()
+                return 1
+            ir = persist._recompile(snap["sources"])
+            origin = persist._origin_from(snap["sources"])
+            config = (snap.get("meta") or {}).get("config")
+            if i == 0:
+                session.load(ir, config, origin=origin)
+            else:
+                session.swap(ir, origin=origin)
+        result = session.undo(to_session)
+    except (SessionError, RevlError) as error:
+        print(f"refused: {error}", file=sys.stderr)
+        if session.loaded:
+            session.unload()
+        return 1
+
+    _print_undo(result, args)
+    unloaded = session.unload()
+    if not getattr(args, "json", False):
+        print(f"\ntorn down — no residue: {unloaded['noResidue']}")
+    return 0 if result.get("undone") else 1
+
+
+def _print_undo(result: dict, args) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    dossier = result.get("dossier") or {}
+    crossings = dossier.get("unemittableCrossings") or {}
+    if not result.get("undone"):
+        print(f"REFUSED: {result.get('reason')}")
+        print("the running composition is untouched — an undo is a gated change.")
+    else:
+        print(f"undone: generation {dossier.get('fromGeneration')} -> "
+              f"{result.get('toGeneration')} (now running as generation "
+              f"{result.get('generation')}), re-admitted through the gate.")
+    unloads = dossier.get("unloads") or []
+    print(f"\nunloads: {', '.join(unloads) or '—'}")
+    dropped = (dossier.get("stateDropped") or {}).get("provisions") or []
+    print(f"state dropped (provisions withdrawn): "
+          f"{', '.join(p['key'] for p in dropped) or '—'}")
+    given_up = crossings.get("givenUp") or []
+    print(f"\ninterim boundary crossings that NO undo can un-emit "
+          f"(compensation is not inversion — §6.1):")
+    for token in crossings.get("crossings") or []:
+        mark = "  ! " if token in set(given_up) else "  ~ "
+        note = "  (given up going forward, already exercised)" \
+            if token in set(given_up) else "  (target still reaches this)"
+        print(f"{mark}{token}{note}")
+    if not (crossings.get("crossings") or []):
+        print("  (none — the interim generations crossed no boundary)")
+
+
 def _run_contract(args) -> int:
     """`revl contract` — federated contracts between sovereign compositions
     (docs/federation.md, roadmap item 58).
@@ -1023,6 +1128,17 @@ def main(argv: list[str] | None = None) -> int:
                                 "from the plan's basis")
     apply_cmd.add_argument("--json", action="store_true", help="machine-readable output")
 
+    undo_cmd = sub.add_parser(
+        "undo", help="operator undo: replay a generation history and return to an "
+                     "earlier generation THROUGH THE GATE (docs/generation-history.md)")
+    undo_cmd.add_argument("history", metavar="history.json",
+                          help="a revl.generation-history document (the session's "
+                               "history export): the retained generation snapshots")
+    undo_cmd.add_argument("--to", type=int, default=None, metavar="GEN",
+                          help="a recorded generation number to return to; omit to "
+                               "undo to the immediately previous generation (N−1)")
+    undo_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+
 
     query = sub.add_parser(
         "query", help="ask the composition a question (docs/queries.md)")
@@ -1408,6 +1524,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "apply":
         return _run_apply(args)
+    if args.command == "undo":
+        return _run_undo(args)
 
     if args.command == "contract":
         return _run_contract(args)
@@ -1587,6 +1705,22 @@ def main(argv: list[str] | None = None) -> int:
                 surface = (f"emissions: {', '.join(emissions)}"
                            if emissions else "no emissions")
                 print(f"  {name} × dynamic  ({surface})")
+        instances = manifest.get("instances") or []
+        if instances:
+            # Capability attenuation per instance (item 66,
+            # docs/capability-attenuation.md): the spawner → child narrowing.
+            # A child's granted set is a checked subset of what the spawner
+            # holds; `attenuated` is the authority dropped on the way down —
+            # the least-authority proof, per lineage edge.
+            print("\ncapability attenuation (per instance — lineage narrows, "
+                  "never widens):")
+            for edge in instances:
+                holds = ", ".join(edge.get("holds") or []) or "—"
+                granted = ", ".join(edge.get("granted") or []) or "—"
+                dropped = ", ".join(edge.get("attenuated") or [])
+                tail = f"  (dropped: {dropped})" if dropped else ""
+                print(f"  {edge['parent']} → {edge['child']}: "
+                      f"holds [{holds}] ⊇ grants [{granted}]{tail}")
         if declared_externs:
             print("\nexterns (verbatim host code — unchecked inside, typed at the boundary):")
             for ext in declared_externs:
