@@ -33,3 +33,11 @@ The leading `|` on the first member makes the importer capture the type as
 the leading pipe imports fine (verified). Fix: when splitting union
 members on `|`, drop an empty/leading fragment — TS allows
 `type X =\n  | 'a'\n  | 'b'` (the DSH formatter's style).
+
+## Update — multiline unions collapse to the first member
+
+Also verified: a multiline union whose FIRST member has no pipe still
+collapses — `type Phase =\n  'pending'\n  | 'loading'\n  | null` parses as
+just `'pending'` (`phase: Str`, no variant, no Opt). The type scan stops at
+the newline. Same fix area as the leading pipe: split on `|` over the whole
+declaration, treating newlines as whitespace within a type.
