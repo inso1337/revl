@@ -2762,7 +2762,8 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                 out.append("    assert!(root.registry().len() == 0"
                            " && root.reflect().services().len() == 0"
                            " && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,")
-                out.append(f'            {_string(where + ": residue \u2014 the host runtime still holds state (R4/R1)")});')
+                msg = where + ": residue \u2014 the host runtime still holds state (R4/R1)"
+                out.append("            " + _string(msg) + ");")
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         out.append("}")

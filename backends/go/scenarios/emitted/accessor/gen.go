@@ -3,6 +3,7 @@
 package accessor
 
 import (
+	stdctx "context"
 	"fmt"
 	"sync"
 
@@ -247,6 +248,16 @@ func (h *RevlSpawnHandle) Dispose() error {
 func (h *RevlSpawnHandle) Ctx() *stc.Context {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// the instance's provision lives in the FIBER's live context (set at
+	// async load, replaced on inertial reload), not the pre-load child ctx
+	// the handle was constructed with — resolve through the fiber so the
+	// accessor reads the instance's own realm, exactly like the py
+	// reference's SpawnHandle.get (docs/design-v2-instances.md).
+	if h.fiber != nil {
+		if c := h.fiber.Context(); c != nil {
+			return c
+		}
+	}
 	return h.ctx
 }
 
@@ -266,5 +277,13 @@ func revlSpawnCell(parent *stc.Context, cfg CellConfig) *RevlSpawnHandle {
 	child := parent.Child()
 	child.Isolate(_keyCounter, stc.NewRealm(stc.RootRealm(), "spawn:Cell:counter"))
 	fiber := child.Load(Cell(cfg))
+	// stc-go loads asynchronously: the instance is 'live' (its provisions
+	// resolvable) only once its fiber is Active. Wait for that here so the
+	// handle the spawner binds is a live instance — the accessor's
+	// s.<key>.method() reads through it without racing the async load
+	// (matches the reference tier's synchronous spawn semantics).
+	if err := fiber.Ready(stdctx.Background()); err != nil {
+		panic("revl: spawned instance " + "Cell" + " failed to activate: " + err.Error())
+	}
 	return newRevlSpawnHandle(fiber, child)
 }
