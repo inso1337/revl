@@ -11,3 +11,28 @@ final reported totals — a run killed and resumed reports segments, marked ~.
 | rebuild-00016 | item 68: fault splice off-by-one | ~199k+ (final segment; earlier segment lost to session limit) | ~5 min final segment | 31 | landed 37d2d80 | diagnosis segment killed by session limit mid-run; port over ~54-commit devwip drift cost a merge + re-audit of every step-index site |
 
 Wave-8 runs append below.
+
+## DSH restart wave (2026-08-24) — 14 runs, all landed
+
+| Run | Task | Outcome | Cost notes |
+|---|---|---|---|
+| acc-rust-go | instance accessor go/rust | landed c3619b6 | go tier had a real resolve bug — never caught by CI (PR #41's go job failed with the same panic and was merged anyway); fixed 0c09da7 |
+| acc-ts-java | accessor ts/java | landed 744266c | java exec test needs REVL_CORDIS4J_CLASSES (CI compiles cordis4j); java Map value type not in the IR — oracle re-derives it (friction, findings-javamap) |
+| acc-wasm | accessor wasm | landed 8a20a63 | wasmtime-gated |
+| records | item 71 fence | dbf7973 | cherry-picked from revl-work clone (branch lived in the other clone) |
+| w8-friction | 76abc | ae4e9dd | lower.py merge conflict (checker-frontier inferred-type sweep vs friction maplit pin) — both additive |
+| w8-hygiene | 72+73abc+74cd | fccde49 | pre-commit hook exceeds the 60s tool timeout (killed commits mid-hook); vitest leaves scratch files |
+| w8-runtime | 74ab | e15ce1e | npm rewrites git deps to git+ssh — codeload tarball pin for anonymous CI |
+| w8-checker | 75bc | 4e899f2 | provide-method let-sweep divergence only visible via the wasm tier |
+| w44/w60/w64 | delivery/mocks/semver | ac27f23/24cc017/db55031 | all three were interrupted agents' uncommitted work — verified, finished, landed |
+| shadow3 | selfhost checker slice | dcb5fb4 | one merge fix needed: annotated-let vs the 75b HOST-METHOD guard |
+| fr1 | expressible iteration | 84f3f6a | spec-first per roadmap precedent; the comp-path scope id bug (`id: false`) cost a probe cycle |
+| fr2..fr11 | harness feature wave | b36b495..010959d | 6 merges; run.py docstring/KNOWN_BACKENDS conflicts resolved to the merged truth (all six tiers runnable) |
+| CI #44-46 | go accessor, rust 3.11, wasm records, java JDK gate, verdict counts | 0c09da7/fdb6ca4/b6074dd | go accessor was the real find: fiber-context resolve + spawn-ready wait |
+| item-77 follow-ups | TS arrow params, Java Map, Go v3 placement | d42d629 | TS fix: params bind in the emitted arrow scope; go: v3 typed-core combined emit |
+
+Biggest single cost cuts: (1) the go accessor's resolve-through-fiber-context
+semantics should have been caught at review (the PR that merged it had a red
+go CI job); (2) the Map value type is not in the IR — both emitters re-derive
+it (carry it from the checker into the IR); (3) the pre-commit hook's 60s
+claim vs the real ~100s suite — raise the budget or gate it per-suite.
