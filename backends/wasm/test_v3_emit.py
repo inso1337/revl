@@ -460,8 +460,8 @@ def test_v3_record_linear_memory_roundtrip_runs_on_wasmtime(tmp_path):
         type Bag = { xs: List[Int], n: Int }
         fn make_row(id: Int, name: Str) -> Row { return { id: id, name: name } }
         fn row_id(id: Int) -> Int { let r = make_row(id, "x")  return r.id }
-        fn row_name_len() -> Int { let r = { id: 7, name: "abcde" }  return r.name.length() + r.id }
-        fn bag_pick(i: Int) -> Int { let b = { xs: [4, 5, 6], n: 2 }  return b.xs[i] + b.n }
+        fn row_name_len() -> Int { let r: Row = { id: 7, name: "abcde" }  return r.name.length() + r.id }
+        fn bag_pick(i: Int) -> Int { let b: Bag = { xs: [4, 5, 6], n: 2 }  return b.xs[i] + b.n }
     """)
     assert invoke("row_id", 42) == 42
     assert invoke("row_name_len") == 12          # len("abcde")=5 + id 7
