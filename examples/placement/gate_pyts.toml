@@ -1,0 +1,16 @@
+# The revl gate/compiler as a cross-tier bridge service (roadmap item 144,
+# Path A). The provider (GateProvider) runs on the py tier — its @py extern
+# calls compile_files, revl's own admission gate. The consumer (GateUser) runs
+# on the node/ts tier and reaches the gate as a bridge proxy; the probe drives a
+# real cross-tier admission over the seam.
+#
+# The verdict crosses back over the wire: `collide` is refused by G2 (a
+# provision conflict; the why-trace rides in the verdict), `clean` is admitted.
+
+[processes.gate]
+components = ["GateProvider"]          # backend defaults to "py"
+
+[processes.user]
+backend = "node"                       # `ts` is accepted as an alias
+components = ["GateUser"]
+probe = ["gate.admit_case('collide')", "gate.admit_case('clean')"]

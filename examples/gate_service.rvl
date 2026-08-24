@@ -1,0 +1,57 @@
+// The revl gate/compiler, reachable as a BRIDGE SERVICE (roadmap item 144,
+// Path A — first proving slice).
+//
+// src/revl/truc/components/gatekeeper.rvl exposes revl's admission gate
+// in-process: a `@py` extern body calls `compiler.compile_files(sources,
+// manifest=running)`, and a consumer in the *same* Python process reads the
+// verdict. This composition is the same gate made reachable ACROSS A PROCESS
+// SEAM: `GateProvider` provides it on the py tier, and a consumer on a
+// different tier (a ts `GateUser`, over the interop bridge of item 56) obtains
+// the admission verdict by calling `gate.admit(...)` through a bridge proxy.
+//
+// Why `admit` is `async fn` (not `emission`, as truc's in-process gate is):
+// only a transport-safe service — every operation `async fn`, value-typed —
+// may cross a process seam (docs/interop-bridge.md §4, src/revl/distribute.py).
+// The compile is a *pure* function of (candidate sources, running manifest):
+// with the sources handed over in memory it touches no disk, so the extern is
+// `pure` and the operation stays `async fn`. A gate marked `emission` would be
+// address-space-bound and could not be a bridge service at all.
+
+service Gate {
+  // The real contract: admit a candidate composition (its files as a
+  // {path: source} JSON object) against an optional running manifest (a prior
+  // compile's IR as {"manifest":..., "services":...} JSON, or ""), returning a
+  // verdict JSON {ok, diagnostic, admitted, manifest}. A refusal carries the
+  // compiler's why-trace verbatim in `diagnostic`.
+  async fn admit(sourcesJson: Str, manifestJson: Str) -> Str
+
+  // A fixture-driven convenience so a placement *probe* (which admits only
+  // literal arguments, not a JSON blob) can drive a real cross-tier admission:
+  // caseName is "collide" (refused by G2) or "clean" (admitted).
+  async fn admit_case(caseName: Str) -> Str
+}
+
+// The gate itself: `compile_files`, in-process on the py tier. `pure` because
+// an in-memory compile has no observable effect (no disk read/write) — which is
+// exactly what keeps `Gate.admit` transport-safe. No `@ts` body: the ts
+// consumer never runs this, it reaches the gate as a bridge proxy, and the
+// conductor drops this py-only extern from the ts module (placement.ts_safe_ir).
+extern pure fn host_gate_admit(sourcesJson: Str, manifestJson: Str) -> Str
+  = @py { from revl.gate_service import admit; return admit(sourcesJson, manifestJson) }
+
+extern pure fn host_gate_admit_case(caseName: Str) -> Str
+  = @py { from revl.gate_service import admit_case; return admit_case(caseName) }
+
+component GateProvider provides gate: Gate {
+  provide gate {
+    async fn admit(sourcesJson, manifestJson) = host_gate_admit(sourcesJson, manifestJson)
+    async fn admit_case(caseName) = host_gate_admit_case(caseName)
+  }
+}
+
+// A consumer on another tier. It requires the gate so a real seam exists
+// between its process and the provider's; a placement probe drives
+// `gate.admit_case(...)` across that seam.
+component GateUser requires gate: Gate {
+  let scratch = effect Map.new() undo scratch.drop()
+}
