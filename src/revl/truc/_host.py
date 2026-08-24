@@ -33,6 +33,25 @@ def exists(path: str) -> bool:
     return os.path.exists(path)
 
 
+def wiring(manifest_json: str) -> str:
+    """Reshape the gate's composition manifest (admit_all's `manifest`) into
+    wiring the pure Planner can name: `{provided: [key...], needs: [{name,
+    key}...]}`. The raw manifest rows carry `provides`/`inject`, but `provides`
+    (and `requires`) are revl reserved words and cannot be parsed into a record
+    field — so this mechanical rename is the only way the brain can read the
+    gate's own output. No effect, no decision: `rm` makes the call about an
+    unmet requirement in the Planner, over exactly this data."""
+    mf = json.loads(manifest_json) if manifest_json else {}
+    provided: list[str] = []
+    needs: list[dict[str, str]] = []
+    for comp in mf.get("components") or []:
+        for key in comp.get("provides") or []:
+            provided.append(key)
+        for key in comp.get("inject") or []:
+            needs.append({"name": comp.get("name", ""), "key": key})
+    return json.dumps({"provided": provided, "needs": needs})
+
+
 # -- registry read path (emission[registry]) --------------------------------
 
 def index_read(registry: str) -> str:
@@ -291,6 +310,69 @@ def _toml_add_truc(project_dir: str, name: str, registry: str) -> None:
             text += "\n"
         text += f"\n[trucs]\n{line}\n"
     p.write_text(text, encoding="utf-8")
+
+
+def commit_rm(project_dir: str, plan_json: str) -> str:
+    """Execute a `rm` commit plan: un-vendor `trucs/<name>/`, drop the lock
+    row, remove the `[trucs]` entry from `truc.toml`.
+
+    The exact inverse of `commit_add`, and guarded the same way: an empty plan
+    is a no-op, so a `rm` the planner refused (name absent, remainder would
+    not admit, or removal strands a consumer) leaves the disk untouched —
+    "disk untouched on refusal" is the pure planner's decision, not host
+    policy. The *decision* to remove arrived as the plan; the file I/O here is
+    mechanical."""
+    if not plan_json:
+        return "skipped"
+    plan = json.loads(plan_json)
+    name = plan["name"]
+
+    # un-vendor: the whole registry-entry mirror under trucs/<name>/ (§5).
+    import shutil  # noqa: PLC0415 — stdlib, only needed on the rm path
+
+    vendor = pathlib.Path(project_dir, "trucs", name)
+    if vendor.exists():
+        shutil.rmtree(vendor)
+
+    # drop the lock row (the pin goes with the bytes it pinned).
+    lock_path = pathlib.Path(project_dir, "truc.lock")
+    if lock_path.exists() and lock_path.read_text(encoding="utf-8").strip():
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["trucs"] = [r for r in (lock.get("trucs") or [])
+                         if r.get("name") != name]
+        lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+
+    _toml_rm_truc(project_dir, name)
+    return "removed"
+
+
+def _toml_rm_truc(project_dir: str, name: str) -> None:
+    """Remove `<name> = { … }` from under `[trucs]` in `truc.toml`.
+
+    The inverse of `_toml_add_truc`: a minimal, honest string edit (there is no
+    revl TOML serializer, §4.3). Scoped to the `[trucs]` section and matched on
+    the exact key so a name that is a prefix of another — or a same-named key in
+    a different table — is never touched. A name that is not present is left
+    as-is (idempotent)."""
+    p = pathlib.Path(project_dir, "truc.toml")
+    text = p.read_text(encoding="utf-8")
+    out: list[str] = []
+    section = ""
+    for ln in text.splitlines():
+        stripped = ln.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped
+            out.append(ln)
+            continue
+        if section == "[trucs]" and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key == name:
+                continue
+        out.append(ln)
+    new = "\n".join(out)
+    if text.endswith("\n") and not new.endswith("\n"):
+        new += "\n"
+    p.write_text(new, encoding="utf-8")
 
 
 # -- clock + stdout (emission) ----------------------------------------------

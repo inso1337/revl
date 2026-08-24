@@ -6,7 +6,7 @@
 
 use "assembler.rvl" { Assembler }
 
-type Cmd = Add | Assemble | Unknown
+type Cmd = Add | Rm | Assemble | AssembleCheck | Unknown
 
 fn nth(argv: List[Str], i: Int) -> Str {
   if (i < argv.length()) {
@@ -15,11 +15,30 @@ fn nth(argv: List[Str], i: Int) -> Str {
   return ""
 }
 
-fn parse_cmd(s: Str) -> Cmd {
+fn has_flag(argv: List[Str], flag: Str) -> Bool {
+  for (a of argv) {
+    if (a == flag) {
+      return true
+    }
+  }
+  return false
+}
+
+// The verb (argv[0]) plus its flags parse to one enum, so the dispatch below
+// selects exactly one emission arm (a provide method cannot itself branch).
+// `assemble --check` is a distinct verb: the dry-run that writes nothing.
+fn parse_cmd(argv: List[Str]) -> Cmd {
+  let s = nth(argv, 0)
   if (s == "add") {
     return Add
   }
+  if (s == "rm") {
+    return Rm
+  }
   if (s == "assemble") {
+    if (has_flag(argv, "--check")) {
+      return AssembleCheck
+    }
     return Assemble
   }
   return Unknown
@@ -31,10 +50,12 @@ pub service Cli {
 
 component CliDispatch requires asm: Assembler provides cli: Cli {
   provide cli {
-    fn run(argv) = match parse_cmd(nth(argv, 0)) {
-      Add      => emit asm.add(nth(argv, 1)),
-      Assemble => emit asm.assemble(),
-      Unknown  => emit asm.unknown(nth(argv, 0)),
+    fn run(argv) = match parse_cmd(argv) {
+      Add           => emit asm.add(nth(argv, 1)),
+      Rm            => emit asm.rm(nth(argv, 1)),
+      Assemble      => emit asm.assemble(),
+      AssembleCheck => emit asm.assemble_check(),
+      Unknown       => emit asm.unknown(nth(argv, 0)),
     }
   }
 }

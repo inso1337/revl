@@ -13,7 +13,9 @@ use "planner.rvl" { Plan }
 
 pub service Assembler {
   emission fn add(name: Str) -> Int
+  emission fn rm(name: Str) -> Int
   emission fn assemble() -> Int
+  emission fn assemble_check() -> Int
   emission fn unknown(cmd: Str) -> Int
 }
 
@@ -57,8 +59,44 @@ component Assembler
       return plan.report_code(r)
     }
 
+    // §8.1 (the inverse minus the gate) — drop the truc from the resolve set,
+    // admit the *remainder* through the gate, and let the Planner decide: a
+    // removal that strands a consumer (the gone truc was the sole provider of
+    // a service something still needs) is refused with the unmet requirement
+    // named, and commit_rm gets "" so nothing on disk is touched. Only a clean
+    // remainder un-vendors trucs/<name>/ and drops it from truc.toml/truc.lock.
+    fn rm(name) {
+      let m = emit ws.manifest(".")
+      let spec = plan.rm_spec(m, name)
+      let g = emit ws.read_sources(".", spec)
+      let ordered = plan.ordered_sources(g)
+      let v = emit gate.admit_all(ordered)
+      let r = plan.rm_report(m, name, v)
+      emit ws.commit_rm(".", plan.report_commit(r))
+      emit ws.print(plan.report_msg(r))
+      return plan.report_code(r)
+    }
+
+    // §8.2 dry-run — the identical resolve → hash-verify → admit chain as
+    // `assemble`, but the Planner's check_report forces empty compose-sources
+    // so write_assembly is a no-op: --check answers "is my assembly still
+    // valid?" (with the why-trace on invalid) and writes NOTHING to disk.
+    fn assemble_check() {
+      let m = emit ws.manifest(".")
+      let lock = emit ws.read("truc.lock")
+      let spec = plan.assemble_spec(m)
+      let g = emit ws.read_sources(".", spec)
+      let d = plan.drift(lock, g)
+      let ordered = plan.ordered_sources(g)
+      let v = emit gate.admit_all(ordered)
+      let r = plan.check_report(d, v, g)
+      emit ws.write_assembly(".", plan.report_sources(r))
+      emit ws.print(plan.report_msg(r))
+      return plan.report_code(r)
+    }
+
     fn unknown(cmd) {
-      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | assemble>`)
+      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | rm NAME | assemble [--check]>`)
       return 2
     }
   }
