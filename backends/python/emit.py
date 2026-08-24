@@ -85,6 +85,90 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
+# ---------------------------------------------------------------- async (item 92)
+#
+# py has no fn-level async machinery in v1/v2 — module fns are plain `def`,
+# externs erase their async flag into blocking bodies (async-extern.md §8), and
+# only provide methods go async. Item 92 adds `async def` colored fns and awaited
+# call sites, mirroring the ts slice. Two documents-wide facts drive the await
+# decisions; they are set once at the top of `emit()` and read by both the module
+# `_expr` and the `_ComponentEmitter` renderer.
+#
+# The py await-seed deliberately EXCLUDES externs: on this tier an async extern
+# erased to a blocking `def`, so awaiting its (non-awaitable) result would raise
+# `TypeError`. ts awaits {async externs, colored fns, async locals}; py awaits
+# {colored fns, async locals, async service ops}.
+_PY_COLORED_FNS: set = set()        # module fn names emitted `async def`
+_PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operations
+# per-body context, threaded through the stateless module `_expr`:
+_PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
+_PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
+_PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
+
+
+def _py_yields_coroutine(node: Any, requires: Any = None,
+                         async_locals: "frozenset[str]" = frozenset()) -> bool:
+    """True if evaluating `node` produces an awaitable on the py tier — a call
+    of an async service op through a req key, an async-colored module fn, or an
+    async value local. Externs are erased/blocking here, so they never do."""
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("kind")
+    if kind == "call":
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "req" and requires:
+            svc = requires.get(target.get("name"))
+            if (svc, node.get("method")) in _PY_ASYNC_SVC_OPS:
+                return True
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            nm = callee.get("name")
+            if nm in _PY_COLORED_FNS or nm in async_locals:
+                return True
+    if kind == "fn" and node.get("name") in _PY_COLORED_FNS:
+        return True
+    return False
+
+
+def _py_reaches_coroutine(node: Any, requires: Any = None,
+                          async_locals: "frozenset[str]" = frozenset()) -> bool:
+    """True if a coroutine is produced anywhere in `node` — a nested async arrow
+    is a value, pruned."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow" and node.get("async"):
+            return False
+        if _py_yields_coroutine(node, requires, async_locals):
+            return True
+        return any(_py_reaches_coroutine(v, requires, async_locals)
+                   for v in node.values())
+    if isinstance(node, list):
+        return any(_py_reaches_coroutine(v, requires, async_locals) for v in node)
+    return False
+
+
+def _py_async_arrow(body: Any, params: str, render, requires=None,
+                    async_locals: "frozenset[str]" = frozenset()) -> str:
+    """Emit an async-flagged arrow (item 92 §4). A lambda cannot be `async`, so
+    three statically-decided shapes:
+      1. a tail call of an async callable — the plain lambda returns the
+         coroutine; the awaiting call site settles it. No wrapper.
+      2. a statically sync body (the coerced mock arrow) — wrap in
+         `_revl_as_async` so `await`-ing it yields the value.
+      3. an internal (non-tail) await — inexpressible in a lambda; refused."""
+    global _PY_USES_AS_ASYNC
+    rendered_body = render(body)
+    if _py_yields_coroutine(body, requires, async_locals):
+        return f"lambda {params}: {rendered_body}"
+    if _py_reaches_coroutine(body, requires, async_locals):
+        raise EmitError(
+            "an async arrow body on the py tier must be a single call of an "
+            "async callable or fully sync — hoist the mixed body into a named "
+            "fn (it will be async-colored) (docs/design/async-function-values.md)"
+        )
+    _PY_USES_AS_ASYNC = True
+    return f"_revl_as_async(lambda {params}: {rendered_body})"
+
+
 def _ident(name: Any, what: str) -> str:
     if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
@@ -362,6 +446,10 @@ class _ComponentEmitter:
         self.snake = _snake(self.name)
         self.uses: set[str] = set()
         self._counter = 0
+        # item 92: is the method body currently rendered an `async def`? A call
+        # to a colored fn / async local is awaited only then (the frontend
+        # admits such a call only inside an async op).
+        self._in_async = False
         # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
         self.isolate = component.get("isolate") or {}
         self.intercept = component.get("intercept") or {}
@@ -423,6 +511,10 @@ class _ComponentEmitter:
         if kind == "fn":
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+            # item 92: a call to a colored (async def) module fn returns a
+            # coroutine — await it inside an async method body.
+            if self._in_async and name in _PY_COLORED_FNS:
+                return f"(await {name}({args}))"
             return f"{name}({args})"
         if kind == "match":
             # the ADT eliminator, now legal in component/method bodies; the
@@ -492,6 +584,13 @@ class _ComponentEmitter:
             return "[" + ", ".join(self._expr(item, where) for item in expr.get("items") or []) + "]"
         if kind == "arrow":
             params = ", ".join(expr.get("params") or [])
+            if expr.get("async"):
+                # item 92: an async-flagged callback arrow. A lambda cannot be
+                # `async`, so the shape is decided statically (tail-coroutine ->
+                # plain lambda; sync -> `_revl_as_async` wrap; mixed -> refused).
+                return _py_async_arrow(
+                    expr.get("body"), params,
+                    lambda b: self._expr(b, where), requires=self.requires)
             return f"lambda {params}: {self._expr(expr.get('body'), where)}"
         if kind == "format":
             self.uses.add("fmt")
@@ -668,8 +767,13 @@ class _ComponentEmitter:
         if not body:
             out.add(indent + 1, "pass")
             return
-        for step in body:
-            self._method_step(out, indent + 1, provide_name, name, step, mwhere, method_is_async)
+        prev_async = self._in_async
+        self._in_async = method_is_async
+        try:
+            for step in body:
+                self._method_step(out, indent + 1, provide_name, name, step, mwhere, method_is_async)
+        finally:
+            self._in_async = prev_async
 
     def _method_step(
         self,
@@ -827,6 +931,17 @@ def _split_fn_type(name: str) -> tuple[list[str], str] | None:
                 inner = name[1:i].strip()
                 return (_split_types(inner) if inner else []), rest[2:].strip()
     return None
+
+
+def _is_async_fn_type(type_name: Any) -> bool:
+    """True for a function type whose declared return is `Async[…]` — the
+    item-92 spelling that colors a first-class callback parameter."""
+    if not isinstance(type_name, str):
+        return False
+    fn = _split_fn_type(type_name.strip())
+    if fn is None:
+        return False
+    return fn[1].strip().startswith("Async[")
 
 
 def _split_types(inner: str) -> list[str]:
@@ -1111,7 +1226,17 @@ def _expr(node: dict) -> str:
             return f"(-{_expr(node['operand'])})"
         raise EmitError(f"unsupported unary operator {node['op']!r}")
     if kind == "call":
-        return f"{_expr(node['callee'])}({', '.join(_expr(a) for a in node['args'])})"
+        call = f"{_expr(node['callee'])}({', '.join(_expr(a) for a in node['args'])})"
+        # item 92: awaiting a colored fn or an async value local, in an async
+        # body. Externs are excluded (they erased to a blocking `def`, whose
+        # result is not awaitable). The frontend admits such a call only in an
+        # async context, so `_PY_IN_ASYNC` holds when this fires.
+        callee = node.get("callee")
+        if _PY_IN_ASYNC and isinstance(callee, dict) and callee.get("kind") == "var" \
+                and (callee.get("name") in _PY_COLORED_FNS
+                     or callee.get("name") in _PY_AWAIT_LOCALS):
+            return f"(await {call})"
+        return call
     if kind == "field":
         # record literals are dicts; ADT payloads are objects — the preamble
         # helper reads either shape
@@ -1138,6 +1263,10 @@ def _expr(node: dict) -> str:
         params = list(node["params"])
         captures = node.get("captures") or []
         lambda_params = ", ".join(params + [f"{name}={name}" for name in captures])
+        if node.get("async"):
+            # a pure-fn body has no req keys, so an async arrow here reaches a
+            # coroutine only through a colored fn / async local (rules 1-2).
+            return _py_async_arrow(node["body"], lambda_params, _expr)
         return f"lambda {lambda_params}: {_expr(node['body'])}"
     if kind == "match":
         return _match_expr(_expr(node["scrutinee"]), node["arms"])
@@ -1264,16 +1393,26 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
 
 
 def _emit_functions(functions: list) -> "_Lines":
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS
     out = _Lines()
     for fn in functions:
         name = _ident(fn["name"], "function name")
         params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
-        out.add(0, f"def {name}({params}):")
+        # item 92: a phase-2 async-colored fn emits `async def`; its body renders
+        # in an async context with its async-typed parameters as the await-locals
+        # (a call through one yields a coroutine to settle).
+        is_async = bool(fn.get("async"))
+        _PY_IN_ASYNC = is_async
+        _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
+                            if _is_async_fn_type(p.get("type"))} if is_async else set()
+        out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
         if not fn.get("body"):
             out.add(1, "pass")
         for stmt in fn.get("body") or []:
             _fn_stmt(stmt, out, 1)
         out.add(0)
+    _PY_IN_ASYNC = False
+    _PY_AWAIT_LOCALS = set()
     return out
 
 
@@ -1624,6 +1763,20 @@ def emit(ir: dict) -> str:
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
 
+    # item 92: the two document-wide async facts that drive the py await
+    # decisions, set before any body renders (the module `_expr` and the
+    # component emitter read them). Externs are deliberately absent from the
+    # await-seed — they erase to blocking `def`s on this tier.
+    global _PY_COLORED_FNS, _PY_ASYNC_SVC_OPS, _PY_USES_AS_ASYNC
+    _PY_COLORED_FNS = {fn.get("name") for fn in functions if fn.get("async")}
+    _PY_ASYNC_SVC_OPS = {
+        (svc_name, m_name)
+        for svc_name, svc in services.items()
+        for m_name, spec in (svc.get("methods") or {}).items()
+        if spec.get("async")
+    }
+    _PY_USES_AS_ASYNC = False
+
     emitters = [_ComponentEmitter(component, services) for component in components]
     bodies = [emitter.emit() for emitter in emitters]
 
@@ -1788,6 +1941,17 @@ def emit(ir: dict) -> str:
     out.add(0, "}")
     out.add(0)
     out.add(0)
+    # item 92: the sync->async coercion wrapper, emitted only when a colored
+    # arrow with a statically-sync body needed it (the mock's `msgs => "…"`).
+    # `await`-ing a plain value raises on py, so a sync arrow flowing into an
+    # async slot is lifted into an `async def` that returns the value.
+    if _PY_USES_AS_ASYNC:
+        out.add(0, "def _revl_as_async(_f):")
+        out.add(1, "async def _g(*_a, **_k):")
+        out.add(2, "return _f(*_a, **_k)")
+        out.add(1, "return _g")
+        out.add(0)
+        out.add(0)
     for body in bodies:
         out.extend(body)
         out.add(0)
