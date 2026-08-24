@@ -25,8 +25,9 @@ import tempfile
 import types
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-BACKENDS = ROOT / "backends"
+from ._paths import backends_root
+
+BACKENDS = backends_root()
 
 _EMITTERS: dict[str, types.ModuleType] = {}
 

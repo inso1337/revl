@@ -38,6 +38,8 @@ import threading
 import types
 from pathlib import Path
 
+from ._paths import backends_root
+
 
 def _eval_probe(expr: str, namespace: dict):
     """Evaluate one probe: `key.method(literal, ...)` — and nothing else.
@@ -91,7 +93,7 @@ async def _flush() -> None:
 
 async def run(spec: dict) -> None:
     name = spec["name"]
-    backend_dir = str(Path(__file__).resolve().parents[2] / "backends" / "python")
+    backend_dir = str(backends_root() / "python")
     if backend_dir not in sys.path:
         sys.path.insert(0, backend_dir)
 
