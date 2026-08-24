@@ -124,6 +124,49 @@ fn scan_string(source: Str, i: Int) -> Scan {
   return { j: 0 - 1, out: text3, nl: 0 }
 }
 
+// Three consecutive `"` (code point 34) at j. The `"""` delimiter cannot be
+// written as a plain literal (no escapes) nor a triple literal (it would
+// close), so it is matched by code point, like the rest of this file.
+fn is_triple_at(source: Str, j: Int) -> Bool {
+  if (code0(source.slice(j, j + 1)) != 34) { return false }
+  if (code0(source.slice(j + 1, j + 2)) != 34) { return false }
+  return code0(source.slice(j + 2, j + 3)) == 34
+}
+
+// Triple-quoted verbatim string body after the opening `"""` (i is the
+// index just past it). The body is literal characters up to the next
+// `"""` — no escapes, no `${}` interpolation; a lone `"` or `""` inside is
+// ordinary text. A single newline right after the opener is stripped so a
+// literal opening on its own line has no leading blank line, and `""""""`
+// is the empty string. out is the text, j is the index AFTER the closing
+// `"""`, nl counts newlines consumed (the stripped leading one included) so
+// the caller can advance the line counter. Unterminated -> j = -1.
+fn scan_triple(source: Str, i: Int) -> Scan {
+  var j = i
+  let n = source.length()
+  var out = ""
+  var nl = 0
+  // Strip a single leading newline right after the opening delimiter.
+  if (code0(source.slice(j, j + 1)) == 10) {
+    nl += 1
+    j += 1
+  }
+  while (j < n) {
+    if (is_triple_at(source, j)) {
+      let jj = j
+      let text = out
+      let lines = nl
+      return { j: jj + 3, out: text, nl: lines }
+    }
+    let c = source.charAt(j)
+    if (code0(c) == 10) { nl += 1 }
+    out = out.concat(c)
+    j += 1
+  }
+  let lines2 = nl
+  return { j: 0 - 1, out: "", nl: lines2 }
+}
+
 // Template parts are flattened into one Str (a token carries no richer
 // shape), joined by "|" — so a part whose own text contains "|" would be
 // unrecoverable. `${a || b}` is ordinary revl, and a differential fuzz
@@ -260,6 +303,18 @@ fn step(source: Str, i: Int, line: Int) -> Step {
              tok: { kind: kind, text: op, line: line } }
   }
   if (cc == 34) {
+    // `"""` takes precedence over a single `"` (reference lexer order): a
+    // verbatim, possibly multi-line string. The token's line is the OPENING
+    // line, while the next state advances past every newline consumed.
+    if (is_triple_at(source, i)) {
+      let ts = scan_triple(source, i + 3)
+      if (ts.j == 0 - 1) {
+        return { i: source.length(), line: line,
+                 tok: { kind: "error", text: "unterminated triple string", line: line } }
+      }
+      return { i: ts.j, line: line + ts.nl,
+               tok: { kind: "string", text: ts.out, line: line } }
+    }
     let ss = scan_string(source, i + 1)
     if (ss.j == 0 - 1) {
       return { i: source.length(), line: line,
