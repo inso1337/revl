@@ -1764,6 +1764,9 @@ class _V3Emitter:
             self._helper_str_cp_slice(),
             self._helper_str_cp_char_at(),
             self._helper_str_cp_char_code_at(),
+            self._helper_str_starts_with(),
+            self._helper_str_ends_with(),
+            self._helper_str_to_int(),
         ] + self._arith_helper_funcs() + [
             self._helper_list_push(),
             self._helper_list_concat(),
@@ -2222,6 +2225,123 @@ class _V3Emitter:
     # type — that is exactly why the slot width is uniform and why they move
     # elements as i64.
 
+    def _helper_str_starts_with(self) -> str:
+        # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+        # Both strings are canonical-ABI [u32 byte_len][bytes]; a code-point
+        # prefix of a valid UTF-8 string is exactly a byte prefix, so a byte
+        # comparison is the exact semantics. Empty prefix -> true.
+        return """  (func $str_starts_with (param $s i32) (param $p i32) (result i32)
+    (local $ls i32)
+    (local $lp i32)
+    (local $i i32)
+    (local $ok i32)
+    (local.set $ls (i32.load (local.get $s)))
+    (local.set $lp (i32.load (local.get $p)))
+    (if (i32.gt_u (local.get $lp) (local.get $ls))
+      (then (return (i32.const 0))))
+    (local.set $ok (i32.const 1))
+    (block $done
+      (loop $cmp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $lp)))
+        (if (i32.ne
+              (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i)))
+              (i32.load8_u (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $i))))
+          (then (local.set $ok (i32.const 0)) (br $done)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cmp)))
+    (local.get $ok))"""
+
+    def _helper_str_ends_with(self) -> str:
+        return """  (func $str_ends_with (param $s i32) (param $p i32) (result i32)
+    (local $ls i32)
+    (local $lp i32)
+    (local $i i32)
+    (local $j i32)
+    (local $ok i32)
+    (local.set $ls (i32.load (local.get $s)))
+    (local.set $lp (i32.load (local.get $p)))
+    (if (i32.gt_u (local.get $lp) (local.get $ls))
+      (then (return (i32.const 0))))
+    (local.set $ok (i32.const 1))
+    (local.set $i (i32.sub (local.get $ls) (local.get $lp)))
+    (block $done
+      (loop $cmp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $ls)))
+        (local.set $j (i32.sub (local.get $i) (i32.sub (local.get $ls) (local.get $lp))))
+        (if (i32.ne
+              (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i)))
+              (i32.load8_u (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $j))))
+          (then (local.set $ok (i32.const 0)) (br $done)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cmp)))
+    (local.get $ok))"""
+
+    def _helper_str_to_int(self) -> str:
+        # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII
+        # digits with an optional leading `-`, Opt None (tag 0) otherwise. The
+        # magnitude is accumulated as a wrapping i64 under unsigned guards:
+        # each step rejects `n > (lim - d) / 10` (unsigned), where lim is
+        # Int.MAX+1 for negatives (so `-9223372036854775808` — Int.MIN, whose
+        # magnitude is 2^63 — is the ONE out-of-|MAX| magnitude that parses)
+        # and Int.MAX for positives. The result is the tier's Opt[Int] tagged
+        # cell: [u32 tag][pad][i64 payload], tag 1 = Some, 0 = None.
+        return """  (func $str_to_int (param $s i32) (result i32)
+    (local $len i32)
+    (local $i i32)
+    (local $neg i32)
+    (local $b i32)
+    (local $n i64)
+    (local $d i64)
+    (local $lim i64)
+    (local $cell i32)
+    (local.set $len (i32.load (local.get $s)))
+    (local.set $i (i32.const 0))
+    (local.set $neg (i32.const 0))
+    (if (i32.and (i32.gt_u (local.get $len) (i32.const 0))
+                 (i32.eq (i32.load8_u (i32.add (local.get $s) (i32.const 4))) (i32.const 45)))
+      (then
+        (local.set $neg (i32.const 1))
+        (local.set $i (i32.const 1))))
+    (local.set $n (i64.const 0))
+    (local.set $lim (select
+      (i64.const 0x8000000000000000)
+      (i64.const 0x7fffffffffffffff)
+      (local.get $neg)))
+    (block $result
+      (block $fail
+        (if (i32.eq (local.get $i) (local.get $len))
+          (then (br $fail)))
+        (block $digits_done
+          (loop $digits
+            ;; normal exit: every byte consumed
+            (br_if $digits_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (if (i32.or (i32.lt_u (local.get $b) (i32.const 48))
+                        (i32.gt_u (local.get $b) (i32.const 57)))
+              (then (br $fail)))
+            (local.set $d (i64.extend_i32_u (i32.sub (local.get $b) (i32.const 48))))
+            (if (i64.gt_u (local.get $n)
+                          (i64.div_u (i64.sub (local.get $lim) (local.get $d)) (i64.const 10)))
+              (then (br $fail)))
+            (local.set $n (i64.add (i64.mul (local.get $n) (i64.const 10)) (local.get $d)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $digits)))
+        ;; Some: tag 1, payload = -n (n may be 2^63, i.e. Int.MIN) or n
+        (local.set $cell (call $alloc (i32.const 16)))
+        (i32.store (local.get $cell) (i32.const 1))
+        (if (local.get $neg)
+          (then
+            (if (i64.eq (local.get $n) (i64.const 0x8000000000000000))
+              (then (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.const 0x8000000000000000)))
+              (else (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.sub (i64.const 0) (local.get $n))))))
+          (else (i64.store (i32.add (local.get $cell) (i32.const 8)) (local.get $n))))
+        (br $result))
+      ;; None: tag 0, zeroed payload
+      (local.set $cell (call $alloc (i32.const 16)))
+      (i32.store (local.get $cell) (i32.const 0))
+      (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.const 0)))
+    (local.get $cell))"""
+
     def _helper_list_push(self) -> str:
         return """  (func $list_push (param $list i32) (param $elem i64) (result i32)
     (local $n i32)
@@ -2465,8 +2585,9 @@ class _V3Emitter:
         target_ty = self._infer_type(node.get("target"), scope)
         if method == "length":
             return "Int"
-        # Int/Int32 width conversions (docs/arithmetic.md).
-        if method == "to_int":
+        # Int/Int32 width conversions (docs/arithmetic.md). The Str form
+        # (parse) is handled below.
+        if method == "to_int" and target_ty == "Int32":
             return "Int"
         if method == "to_int32":
             return "Int32"
@@ -2494,6 +2615,16 @@ class _V3Emitter:
             if target_ty != "Int":
                 raise EmitError("to_str is only lowerable on Int values")
             return "Str"
+        # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+        if method == "startsWith" or method == "endsWith":
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(
+                    f"{method} is only lowerable on Str/Bytes values")
+            return "Bool"
+        # Str.to_int (FR-9): the Int32 widen above returns Int; the parse form
+        # answers the tier's Opt[Int] tagged cell.
+        if method == "to_int" and target_ty == "Str":
+            return "Opt[Int]"
         if method == "indexOf":
             raise EmitError("indexOf is not lowerable on this tier yet — use a hosted backend")
         if method in ("set", "lookup", "has", "size", "keys", "remove"):
@@ -2883,7 +3014,8 @@ class _V3Emitter:
         # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
         # is a sign-extend; narrowing Int -> Int32 traps out of the i32 range
         # through `$int32_narrow` before wrapping (the fault every tier gives).
-        if method == "to_int":
+        # The Str form (parse) is handled below.
+        if method == "to_int" and target_ty == "Int32":
             target = self._expr(target_node, scope, where, "Int32")
             return _E(f"(i64.extend_i32_s {target.wat})", "Int")
         if method == "to_int32":
@@ -2959,6 +3091,23 @@ class _V3Emitter:
                 raise EmitError(f"{where}: to_str is only lowerable on Int")
             target = self._expr(target_node, scope, where, "Int")
             return _E(f"(call $int_to_str {target.wat})", "Str")
+        if method == "to_int" and target_ty == "Str":
+            # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): the runtime
+            # helper parses ASCII digits (leading `-` allowed) and returns the
+            # Opt[Int] tagged cell — None for empty/partial/`+` spellings and
+            # for out-of-i64-range magnitudes (Int.MIN itself parses).
+            target = self._expr(target_node, scope, where, "Str")
+            return _E(f"(call $str_to_int {target.wat})", "Opt[Int]")
+        if method == "startsWith" or method == "endsWith":
+            # The prefix/suffix probes (FR-6): byte comparisons are exact for
+            # valid UTF-8 prefixes, and both helpers return the tier's Bool
+            # (an i32 0/1).
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(f"{where}: {method} is only lowerable on Str/Bytes")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Str")
+            helper = "$str_starts_with" if method == "startsWith" else "$str_ends_with"
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Bool")
         if method == "indexOf":
             raise EmitError(f"{where}: indexOf is not lowerable on this tier yet")
         # The Map value type (docs/stdlib-2.0.md §Map): refused with the

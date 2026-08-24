@@ -236,10 +236,12 @@ _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
 _DIV_ZERO_MSG = "revl: division by zero"
 
 
-def _render_builtin(method, target: str, args: list) -> str:
+def _render_builtin(method, target: str, args: list, recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
     `push`/`concat` are persistent (value semantics); `indexOf` returns -1
-    when absent on both hosts."""
+    when absent on both hosts. `recv` is the receiver's static type, carried
+    only where the lowering must dispatch on it (`to_int`: the Int32 widen is
+    the identity on python, the Str parse is not)."""
     if method == "length":
         return f"len({target})"
     if method == "push":
@@ -263,6 +265,12 @@ def _render_builtin(method, target: str, args: list) -> str:
         return f"{args[0]}.join({target})"
     if method == "repeat":
         return f"({target} * {args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # python's startswith/endswith count in code points, the exact semantics.
+    if method == "startsWith":
+        return f"{target}.startswith({args[0]})"
+    if method == "endsWith":
+        return f"{target}.endswith({args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): a python dict, copied
     # on write — `{**m, k: v}` IS the persistent set.
     if method == "set":
@@ -299,6 +307,17 @@ def _render_builtin(method, target: str, args: list) -> str:
     # type, so widening Int32 -> Int is the identity; narrowing Int -> Int32
     # re-imposes the 32-bit bound through `_revl_i32`, which traps out of range.
     if method == "to_int":
+        if recv == "Str":
+            # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the
+            # ASCII digits with an optional leading `-`, `None` otherwise —
+            # including out of the i64 range, which is None like every other
+            # non-digit (the tier's ints are unbounded, so the bound must be
+            # checked here rather than by int()).
+            return (f"(lambda _s: (None if (_s == \"\" or _s == \"-\" "
+                    f"or not _s.isascii() "
+                    f"or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
+                    f"or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
+                    f"else _n))({target})")
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
@@ -362,7 +381,7 @@ class _ComponentEmitter:
         if kind == "builtin":
             t = self._expr(expr.get("target"), where)
             a = [self._expr(x, where) for x in expr.get("args") or []]
-            return _render_builtin(expr.get("method"), t, a)
+            return _render_builtin(expr.get("method"), t, a, expr.get("recv"))
         if kind == "maplit":
             # `Map.empty()` (docs/stdlib-2.0.md §Map)
             return "{}"
@@ -1110,7 +1129,8 @@ def _expr(node: dict) -> str:
     if kind == "builtin":
         return _render_builtin(
             node.get("method"), _expr(node["target"]),
-            [_expr(a) for a in node.get("args") or []])
+            [_expr(a) for a in node.get("args") or []],
+            node.get("recv"))
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map)
         return "{}"
