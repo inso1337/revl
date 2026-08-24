@@ -18,12 +18,11 @@ interpreter that has no cordis at all.
 The frontend stays pure: the backend emitter and the cordis-py runtime are
 imported lazily, inside ``run_command``, so ``compile``/``audit``/``test``/
 ``fmt`` and ``run --plan`` all work with no runtime installed. ``py`` is the
-runnable in-process tier; ``rust``, ``java`` and ``wasm`` are runnable too, each
-as a separate process over the bridge seam (see :mod:`revl.run_rust`,
-:mod:`revl.run_java`, :mod:`revl.run_wasm` — --once boots and tears down a real
-composition with a no-residue proof, behind a per-tier runtime-availability
-gate). ``--backend ts`` is accepted but reports that it is not wired yet
-(multi-runtime is a roadmap item, not a promise here).
+runnable in-process tier; ``ts``, ``rust``, ``java`` and ``wasm`` are runnable
+too, each as a separate process over the bridge seam (see :mod:`revl.run_ts`,
+:mod:`revl.run_rust`, :mod:`revl.run_java`, :mod:`revl.run_wasm` — --once boots
+and tears down a real composition with a no-residue proof, behind a per-tier
+runtime-availability gate).
 """
 
 from __future__ import annotations
@@ -47,14 +46,14 @@ KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm")
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
 # in-flight and never recorded on their own.
 _SETTLED_DOWN = ("DISPOSED", "PENDING", "FAILED")
-# py boots cordis-py in-process (the _Driver below); rust/java/wasm each boot the
-# composition as a *separate process* over the same bridge seam (run_rust.py,
-# run_java.py, run_wasm.py): rust a cordis-rs binary, java a JVM on cordis4j,
-# wasm the cordis-wasm runtime on wasmtime. On every non-py tier --once (boot ->
-# LIFO teardown -> no-residue proof -> exit) is wired, each behind its own
-# runtime-availability gate (skip-with-reason, never a green run that booted
-# nothing).
-RUNNABLE_BACKENDS = ("py", "rust", "java", "wasm")
+# py boots cordis-py in-process (the _Driver below); ts/rust/java/wasm each boot
+# the composition as a *separate process* over the same bridge seam (run_ts.py,
+# run_rust.py, run_java.py, run_wasm.py): ts a node process on cordis v4, rust
+# a cordis-rs binary, java a JVM on cordis4j, wasm the cordis-wasm runtime on
+# wasmtime. On every non-py tier --once (boot -> LIFO teardown -> no-residue
+# proof -> exit) is wired, each behind its own runtime-availability gate
+# (skip-with-reason, never a green run that booted nothing).
+RUNNABLE_BACKENDS = ("py", "ts", "rust", "java", "wasm")
 
 
 # --------------------------------------------------------------------------
@@ -706,12 +705,12 @@ def run_command(args) -> int:
         print(f"error: {problem}", file=sys.stderr)
         return 1
 
-    if backend in ("rust", "java", "wasm"):
+    if backend in ("rust", "java", "ts", "wasm"):
         # each non-py tier boots as a separate process over the bridge seam, not
         # in-process — the same driver contract, a different address space (and a
-        # different runtime): cordis-rs, cordis4j on a JVM, or cordis-wasm on
-        # wasmtime (docs/interop-bridge.md, docs/swap.md). --once is wired on all
-        # three, each behind its own runtime-availability gate.
+        # different runtime): cordis-rs, cordis4j on a JVM, cordis v4 on node, or
+        # cordis-wasm on wasmtime (docs/interop-bridge.md, docs/swap.md). --once
+        # is wired on all four, each behind its own runtime-availability gate.
         once = bool(getattr(args, "once", False))
         interactive = sys.stdin.isatty()
         if backend == "rust":
@@ -720,6 +719,9 @@ def run_command(args) -> int:
         if backend == "java":
             from .run_java import run_java  # noqa: PLC0415 — lazy: no JDK needed to compile/plan
             return run_java(ir, config, args.files, once=once, interactive=interactive)
+        if backend == "ts":
+            from .run_ts import run_ts  # noqa: PLC0415 — lazy: no node needed to compile/plan
+            return run_ts(ir, config, args.files, once=once, interactive=interactive)
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once, interactive=interactive)
 

@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url'
 import { Context, FiberState } from 'cordis'
 
 import { makeProxy, serve } from './bridge.ts'
+import { assertNoResidue, snapshotRuntime } from './runtime.ts'
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 const name: string = spec.name
@@ -95,6 +96,14 @@ ctx.on('internal/status', (fiber: any, oldState: number) =>
   log('fiber', fiber.name, `${STATE[oldState]} -> ${STATE[fiber.state]}`),
 )
 
+// once mode: `revl run --backend ts --once` drives the boot -> LIFO teardown
+// -> no-residue proof round-trip and exits; a placement spec never sets this,
+// so the hold-until-stopped behavior below is unchanged for placements.
+const once: boolean = spec.once === true
+// the no-residue proof is a diff against the pre-load runtime: registry,
+// reflect, root effects, event hooks, and host resources (runtime.ts R4).
+const baseline = snapshotRuntime(ctx)
+
 const fibers: Array<[string, any]> = []
 
 // 1. proxies for keys provided by other processes
@@ -141,23 +150,48 @@ for (const expr of (spec.probe || []) as string[]) {
 
 console.log(`[${name}] UP`)
 
-// 5. hold until the conductor stops us
+// 5. teardown, consumers first (reverse load order — the same contract the py
+//    driver's _dispose_all and the rust runner's teardown enforce). In once
+//    mode the runner then proves no residue against the pre-load snapshot and
+//    exits; otherwise it holds until the conductor stops us.
 let stopping = false
 async function teardown(): Promise<void> {
   if (stopping) return
   stopping = true
-  for (const [, fiber] of [...fibers].reverse()) {
+  for (const [label, fiber] of [...fibers].reverse()) {
     try {
       await fiber.dispose()
     } catch {
       /* best-effort */
     }
+    log('swap', label, 'dispose')
   }
   if (server) server.close()
+  if (once) {
+    // no-residue proof (the cordis-ts mirror of the rust runner's once mode:
+    // registry().len()==0 / reflect().services().len()==0, and of the py
+    // driver's registry.size==0 / reflect.store=={} check): after a LIFO
+    // teardown the live runtime must match its pre-load snapshot — nothing
+    // left in the registry, nothing in reflect, no effects/hooks/resources.
+    const now = snapshotRuntime(ctx)
+    log('residue', 'registry', `${now.registrySize} live plugin(s)`)
+    log('residue', 'provisions', `${now.serviceImpls.length} service(s) provided`)
+    try {
+      assertNoResidue(ctx, baseline)
+      console.log(`[${name}] NO-RESIDUE — the composition left nothing behind`)
+    } catch (error) {
+      console.log(`[${name}] RESIDUE-LEFT — ${String(error).split('\n')[0]}`)
+    }
+  }
   console.log(`[${name}] DOWN`)
   process.exit(0)
 }
-process.on('SIGTERM', teardown)
-process.on('SIGINT', teardown)
-const keepAlive = setInterval(() => {}, 1 << 30) // hold the event loop
-void keepAlive
+
+if (once) {
+  await teardown()
+} else {
+  process.on('SIGTERM', teardown)
+  process.on('SIGINT', teardown)
+  const keepAlive = setInterval(() => {}, 1 << 30) // hold the event loop
+  void keepAlive
+}
