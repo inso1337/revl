@@ -134,6 +134,37 @@ def test_arrow_parameters_are_explicitly_any():
     assert "((v: any) =>" in out
 
 
+def test_slice_results_keep_their_static_kind():
+    """FR-7: a slice followed by a chained stdlib call must not typecheck to
+    a union. `revlSlice(x)` used to be `string | T[]`, so the harness's
+    `rest.split(" ")` after `resp.slice(10, len)` was rejected by tsc (4
+    errors in the emitted harness). The helper is overloaded by receiver
+    kind — `string` / `Uint8Array` / `T[]` — so TS resolves each call site
+    from the frontend's types instead of the emitter guessing. Assert the
+    emitted shapes so a regression is visible without a TS toolchain.
+    """
+    out = _ts('fn parse(rest: Str) -> List[Str] { return rest.slice(0, 10).split(" ") }\n'
+              'fn firsts(xs: List[Str]) -> Str { return xs.slice(0, 2).join(", ") }\n'
+              "fn take3(xs: List[Int]) -> List[Int] { return xs.slice(0, 3) }\n"
+              "fn head(xs: List[Int]) -> Int { let ys = xs.slice(1, 3)  return ys[0] }\n"
+              "service S { fn f(b: Bytes) -> Bytes }\n"
+              "component C provides s: S { provide s { fn f(b) = b.slice(1, 3) } }")
+    # one overload per receiver kind, the union only as the unknown fallback
+    assert "function revlSlice(x: string, a: bigint, b: bigint): string" in out
+    assert "function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array" in out
+    assert "function revlSlice<T>(x: T[], a: bigint, b: bigint): T[]" in out
+    assert "revlSlice(x: string, a: bigint, b: bigint): string | T[]" not in out, \
+        "the union signature must not be the only one — it makes chained calls fail tsc"
+    # the chains themselves keep their static kind in the emitted calls
+    assert "revlSlice(rest, 0n, 10n)).split" in out
+    assert "revlSlice(xs, 0n, 2n)).join" in out
+    assert "const ys = revlSlice(xs, 1n, 3n)" in out
+    # Bytes service params render as Uint8Array, not unknown, so the slice
+    # call resolves to the Uint8Array overload
+    assert "f(b: Uint8Array): Uint8Array" in out
+
+
+
 def test_python_validator_detects_an_uncaptured_binding():
     """A negative control: a validator that cannot fail proves nothing.
 
