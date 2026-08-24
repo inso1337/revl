@@ -1,0 +1,26 @@
+// Fixture for tests/test_canary.py — the CANDIDATE generation of tenant_a's
+// store, admitted against the baseline (canary_tenants.rvl) with
+// `replacing=(TenantAStore,)`. Same interface, same key, same realm — so it
+// admits — but its recorded world DIVERGES: it seeds an extra entry in the
+// activation body that the baseline never did. The replay comparison attributes
+// that divergence to `TenantAStore` in realm `tenant_a`, and the canary reverts
+// the slice, proving the other tenants untouched.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  // the divergence: a second acquisition the baseline generation never records
+  let seeded = effect store.insert("seed", "1") undo store.remove("seed")
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}

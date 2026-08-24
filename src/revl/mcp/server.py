@@ -427,6 +427,31 @@ def _tool_replay_forward(arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+# -- verified canary (docs/verified-canary.md, roadmap item 59) ------------
+
+
+def _tool_canary(arguments: dict) -> dict:
+    """Progressive delivery for one slice: admit a candidate against the running
+    composition, compare its recorded world to the baseline's on the designated
+    realm, and prove the revert clean (survivors + residue). Decides; the swap
+    acts. Reuses the swap admission gate, realms, replay and erase_report."""
+    from . import canary as _canary  # noqa: PLC0415 — keep the module boundary
+    baseline = _compile(arguments.get("baseline"), arguments.get("baselineFiles"))
+    realm = arguments.get("realm")
+    if not realm:
+        return {"ok": False, "error": "`realm` (the designated slice) is required"}
+    report = _canary.run_canary(
+        baseline,
+        candidate_files=arguments.get("candidateFiles"),
+        candidate_source=arguments.get("candidate"),
+        realm=realm,
+        provider=arguments.get("provider"),
+        promote_to=arguments.get("promoteTo"),
+        prove_residue=arguments.get("proveResidue", True),
+    )
+    return report
+
+
 # -- session-bound query modes (docs/queries.md §9) ------------------------
 
 
@@ -1159,6 +1184,59 @@ TOOLS.append({
     },
     "annotations": {"readOnlyHint": True, "destructiveHint": False},
     "handler": _tool_resolve,
+})
+
+# verified canary (docs/verified-canary.md, roadmap item 59) — progressive
+# delivery: decide one slice on recorded evidence, prove the revert clean.
+# Appended additively, like revl_resolve, so the core verb literal stays owned.
+TOOLS.append({
+    "name": "revl_canary",
+    "description": "Progressive delivery with a derived rollback: run a "
+                   "successor generation on ONE designated slice (a realm — a "
+                   "tenant, a sandbox) while the baseline serves the rest, and "
+                   "decide on evidence. Give the running composition (`baseline` "
+                   "source or `baselineFiles`), the `candidate` generation of the "
+                   "slice's provider (source or `candidateFiles`), and the "
+                   "`realm` to canary. Returns: the DIVERGENCE — a replay "
+                   "comparison of the two recorded worlds, attributed to the "
+                   "exact (component, realm) that produced the first differing "
+                   "step, never a metric threshold; the REVERT proof — the "
+                   "derived LIFO teardown of the slice with the EXACT `survivors` "
+                   "set proving the other N-1 tenants keep every provision (G2) "
+                   "and the R4 no-residue proof; and, with `promoteTo`, the "
+                   "PROMOTE verdict (the swap admission gate for the remainder). "
+                   "It DECIDES — `revl swap` acts. Stateless canary only; a "
+                   "stateful one needs item 53 handoff (docs/verified-canary.md).",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "baseline": {"type": "string",
+                         "description": "the running composition, as source text"},
+            "baselineFiles": {"type": "array", "items": {"type": "string"},
+                              "description": "the running composition, as .rvl paths"},
+            "candidate": {"type": "string",
+                          "description": "the successor generation of the slice's "
+                                         "provider, as source text"},
+            "candidateFiles": {"type": "array", "items": {"type": "string"},
+                               "description": "the candidate as .rvl paths (required "
+                                              "to also report the promote verdict)"},
+            "realm": {"type": "string",
+                      "description": "the designated slice — a named realm"},
+            "provider": {"type": "string",
+                         "description": "the slice's provider component to canary "
+                                        "(only needed when the realm serves several)"},
+            "promoteTo": {"type": "string",
+                          "description": "backend tier to report a promote (= swap "
+                                         "the remainder) admission verdict for"},
+            "proveResidue": {"type": "boolean",
+                             "description": "run the runtime R4 no-residue proof "
+                                            "(default true; skipped where cordis "
+                                            "is unavailable)"},
+        },
+        "required": ["realm"],
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    "handler": _tool_canary,
 })
 
 # composition queries (docs/queries.md) — defined next door so this module

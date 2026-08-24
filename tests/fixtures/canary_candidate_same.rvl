@@ -1,0 +1,21 @@
+// Fixture for tests/test_canary.py — a CANDIDATE generation of tenant_a's
+// store whose recorded world is identical to the baseline's. The replay
+// comparison finds no divergence, so the canary recommends PROMOTE (swap the
+// remainder). Byte-for-byte the same behaviour as the baseline TenantAStore.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
