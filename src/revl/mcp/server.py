@@ -34,6 +34,7 @@ from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
+from . import quarantine as _quarantine
 from . import repair as _repair
 from . import ship as _ship
 from .persist import RestoreError
@@ -290,6 +291,16 @@ def _tool_swap(arguments: dict) -> dict:
     if refusal is not None:
         return _refused_by_lease(refusal)
 
+    # quarantine tier (item 45): under a policy that declares `quarantine
+    # required`, an untrusted candidate must prove itself in the wasm sandbox
+    # before it may be swapped into a hosted tier — refused here (running comp
+    # untouched) if it did not pass and no operator holds bypass authority.
+    # No such policy => gate_swap returns None and the default path pays nothing
+    # (docs/quarantine-tier.md).
+    quarantined = _quarantine.gate_swap(SESSION, arguments)
+    if quarantined is not None:
+        return quarantined
+
     inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
     if not inline:
         return _swap_server_side(replacing)
@@ -417,6 +428,19 @@ def _tool_gauntlet(arguments: dict) -> dict:
         return _session_error("provide `source` or `files` — the gauntlet "
                               "grades a candidate component")
     return _gauntlet.run(SESSION, arguments)
+
+
+def _tool_quarantine(arguments: dict) -> dict:
+    """Quarantine a candidate: grade it with the gauntlet, then compile it to a
+    standard wasm component and run its lifecycle + fault battery in wasmtime's
+    component-model sandbox — where an escape is a trap, not an incident. Returns
+    a report whose `verdict` is passed | trapped | rejected | deferred |
+    unavailable, plus the policy admission decision. The live composition is
+    never touched (docs/quarantine-tier.md)."""
+    if arguments.get("source") is None and not arguments.get("files"):
+        return _session_error("provide `source` or `files` — quarantine proves "
+                              "a candidate component in the sandbox")
+    return _quarantine.run(SESSION, arguments)
 
 
 def _tool_repair(arguments: dict) -> dict:
@@ -1111,6 +1135,49 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_gauntlet,
+    },
+    {
+        "name": "revl_quarantine",
+        "description": "Quarantine an UNTRUSTED candidate before it may touch a "
+                       "hosted tier: grade it with the gauntlet (item 31), then "
+                       "compile it to a STANDARD wasm component (the landed "
+                       "canonical ABI) and run its lifecycle + fault battery in "
+                       "wasmtime's COMPONENT-MODEL SANDBOX — where confinement is "
+                       "physical, so a fault that would escape on a hosted tier "
+                       "is a TRAP the runtime catches, not an incident. Returns a "
+                       "report whose `verdict` is `passed` (proved itself in the "
+                       "sandbox — eligible for admission), `trapped` (a probe "
+                       "trapped in the sandbox; contained, host untouched — not "
+                       "eligible), `rejected` (admission refused; never reached "
+                       "the substrate), `deferred` (no Str-surface function — "
+                       "records/lists across the boundary are the aggregate "
+                       "follow-on) or `unavailable` (wasm-tools/wasmtime absent; "
+                       "the grade + lowering still ran). It also reports the "
+                       "policy admission decision (`admission`): where a bound "
+                       "policy declares `quarantine required` (item 33), a "
+                       "candidate is admissible only after it passes — unless the "
+                       "session's operator holds `quarantine-bypass` authority "
+                       "(item 55). Read-only: the live composition is never "
+                       "touched. Str-surface candidates this slice; see "
+                       "docs/quarantine-tier.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "service": {"type": "string",
+                            "description": "WIT interface name to group the "
+                                           "candidate's Str-surface functions "
+                                           "under (default: the sole declared "
+                                           "service, else `Candidate`)"},
+                "config": {"type": "object",
+                           "description": "per-component config for the gauntlet's "
+                                          "scratch boot"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this admission"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_quarantine,
     },
     {
         "name": "revl_repair",
