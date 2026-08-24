@@ -490,7 +490,22 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             if not (isinstance(target, dict) and target.get("kind") in _ATOMIC_KINDS):
                 target_ts = f"({target_ts})"
             args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
-            return f"{target_ts}.{method}({args})"
+            rendered = f"{target_ts}.{method}({args})"
+            # item 141 await-seed: an emission of an async service op — through a
+            # req key (`emit agent.run_in(...)`) — returns a Promise on this
+            # tier. Await it wherever it lands in an async body: not only a
+            # statement/return, but a NESTED expression position such as a
+            # ternary arm, so no Promise leaks un-awaited (e.g. `${reply}` in a
+            # template). `in_async` distinguishes the async provide method (and
+            # async arrow, which renders `async (…) => …` and so may await) from
+            # a sync body, whose in_async is False and where an async op cannot
+            # appear (the frontend colours it).
+            scope = ctx.component_scope
+            if ctx.in_async and not ctx.in_arrow and isinstance(target, dict) \
+                    and target.get("kind") == "req" and scope is not None \
+                    and (scope.requires.get(target.get("name")), method) in ctx.async_ops:
+                return f"(await {rendered})"
+            return rendered
         callee_node = node.get("callee")
         callee = _expr(callee_node, ctx)
         if not (isinstance(callee_node, dict) and callee_node.get("kind") in _V3_ATOMIC_KINDS):
@@ -729,9 +744,10 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             arrow_scope = scope.child()
             for p in names:
                 arrow_scope.locals.add(_ident(p, "arrow parameter"))
-            body_ctx = ctx.with_scope(arrow_scope, in_async=is_async)
+            body_ctx = ctx.with_scope(arrow_scope, in_async=is_async, in_arrow=True)
         else:
-            body_ctx = ctx.with_scope(ctx.component_scope, in_async=is_async)
+            body_ctx = ctx.with_scope(ctx.component_scope, in_async=is_async,
+                                      in_arrow=True)
         body = _expr(node["body"], body_ctx)
         # Mutable `var` captures are snapshotted by value at arrow-creation
         # time (docs/expressible-iteration.md Semantics), the py tier's
@@ -1268,8 +1284,22 @@ class _Ctx:
     """
 
     def __init__(self, types: dict, functions: list, externs: list,
-                 component_scope=None, counter=None, in_async=False) -> None:
+                 component_scope=None, counter=None, in_async=False,
+                 services: dict = None) -> None:
         self.types = types or {}
+        # item 141: async service operations, keyed `(service, method)`. An
+        # emission of one through a req key (`emit agent.run_in(...)`) returns a
+        # Promise on this tier; the await-seed in `_expr`'s component-`call`
+        # branch awaits it wherever it lands in an async body — including a
+        # NESTED expression position such as a ternary arm — so no Promise leaks
+        # un-awaited (e.g. into a template string). Mirrors py's
+        # `_PY_ASYNC_SVC_OPS`.
+        self.async_ops: set = {
+            (svc, method)
+            for svc, spec in (services or {}).items()
+            for method, mspec in (spec.get("methods") or {}).items()
+            if mspec.get("async")
+        }
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
         # async callables (roadmap item 80): call sites naming one are awaited
@@ -1291,6 +1321,11 @@ class _Ctx:
         # `with_scope`, not seeded here.
         self.async_locals: set = set()
         self.in_async = in_async
+        # item 141: are we rendering INSIDE an arrow body? An async arrow renders
+        # `async (…) => (<tail>)` and returning a Promise from it flattens, so the
+        # await-seed stays OUT of arrow bodies — keeping the item-92 async-arrow
+        # shape byte-identical and matching the py backend's arrow suppression.
+        self.in_arrow = False
         self.case_names: set[str] = set()
         for spec in self.types.values():
             if spec.get("kind") == "variant":
@@ -1305,14 +1340,17 @@ class _Ctx:
         self._counter[0] += 1
         return f"$revl_match_{self._counter[0]}"
 
-    def with_scope(self, scope, in_async=None, async_locals=None) -> "_Ctx":
+    def with_scope(self, scope, in_async=None, async_locals=None,
+                   in_arrow=None) -> "_Ctx":
         view = _Ctx.__new__(_Ctx)
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
         view.async_names = self.async_names
+        view.async_ops = self.async_ops
         view.async_locals = self.async_locals if async_locals is None else async_locals
         view.in_async = self.in_async if in_async is None else in_async
+        view.in_arrow = self.in_arrow if in_arrow is None else in_arrow
         view.case_names = self.case_names
         view._counter = self._counter
         view.component_scope = scope
@@ -1597,10 +1635,16 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             right = _expr(expr["right"], ctx)
             want = "false" if expr["op"] in ("!=", "!==") else "true"
             shown = json.dumps(f"{left} {expr['op']} {right}")
-            out.append(f"{pad}{{ const l = {left}, r = {right};")
-            out.append(f"{pad}  expect(revlEq(l, r), {shown} + "
-                       f'"\\n  left  = " + revlShow(l) + '
-                       f'"\\n  right = " + revlShow(r)).toBe({want}) }}')
+            # item 143: the assert temporaries carry a `$` sigil — not in revl's
+            # identifier alphabet — so `const $revl_l = <left>` can never read a
+            # user binding named `l`/`r` before its own TDZ ends (the same
+            # collision-proof convention as `$revl_match_N`). A plain `l`/`r`
+            # collided with a `let r = …` in scope: `const l = r, r = …` read the
+            # block's own not-yet-initialised `r` (ReferenceError, finding #39).
+            out.append(f"{pad}{{ const $revl_l = {left}, $revl_r = {right};")
+            out.append(f"{pad}  expect(revlEq($revl_l, $revl_r), {shown} + "
+                       f'"\\n  left  = " + revlShow($revl_l) + '
+                       f'"\\n  right = " + revlShow($revl_r)).toBe({want}) }}')
         elif test_mode:
             out.append(f"{pad}expect({_expr(expr, ctx)}).toBeTruthy()")
         elif expr.get("kind") == "bin" and expr.get("op") in (
@@ -1609,10 +1653,11 @@ def _v3_stmt(node: dict, ctx: _Ctx, out: list[str], indent: int, *, test_mode: b
             left = _expr(expr["left"], ctx)
             right = _expr(expr["right"], ctx)
             shown = json.dumps(f"{left} {op} {right}")
-            out.append(f"{pad}{{ const l = {left}, r = {right};")
-            out.append(f"{pad}  if (!(l {op} r)) throw new Error({shown} + "
-                       f'"\\n  left  = " + revlShow(l) + '
-                       f'"\\n  right = " + revlShow(r)) }}')
+            # item 143: `$`-sigil temporaries can't collide with a user binding.
+            out.append(f"{pad}{{ const $revl_l = {left}, $revl_r = {right};")
+            out.append(f"{pad}  if (!($revl_l {op} $revl_r)) throw new Error({shown} + "
+                       f'"\\n  left  = " + revlShow($revl_l) + '
+                       f'"\\n  right = " + revlShow($revl_r)) }}')
         else:
             out.append(
                 f"{pad}if (!({_expr(expr, ctx)})) "
@@ -2306,7 +2351,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
     # component that spells a top-level call as a `fn` node resolves it, and a
     # 2.0 expression mixed into the body renders against the same type context.
     doc_ctx = _Ctx(ir.get("types") or {}, ir.get("functions") or [],
-                   ir.get("externs") or [])
+                   ir.get("externs") or [], services=services)
 
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
@@ -2372,7 +2417,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
     # Document-level context for component bodies (see _emit_v1); pure fn/test
     # bodies build their own below, matching the pre-refactor per-pass split.
-    doc_ctx = _Ctx(types, functions, externs)
+    doc_ctx = _Ctx(types, functions, externs, services=services)
 
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
