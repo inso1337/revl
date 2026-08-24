@@ -394,6 +394,67 @@ def test_cargo_check_compiles_v3_types_functions_match(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Declared function types (roadmap item 91, docs/function-types.md §4).
+#
+# A function type written in a `fn`/`extern` parameter or return used to be
+# refused outright on this tier ("a declared function type is not lowerable").
+# It now lowers position-aware: a parameter or return is `impl Fn(..)` (rustc
+# monomorphises it), which is exactly what a hand-written Rust signature does.
+# The motivating shape is `agent_loop` — a top-level fn over effectful callback
+# arrows — the string-protocol harness's "runs on every runtime" proof, which
+# booted on python/ts but not rust before this. Locals were never affected;
+# escaping positions (fields, ADT payloads, container elements) stay refused.
+
+def test_emit_lowers_declared_function_type_params_to_impl_fn():
+    ir = compile_source(
+        "fn agent_loop(prompt: Str, complete: (Str) -> Str, "
+        "call_tool: (Str) -> Str, max_steps: Int) -> Str {\n"
+        "  let first: Str = complete(prompt)\n"
+        "  return call_tool(first)\n"
+        "}\n"
+    )
+    src = emit.emit(ir)
+    assert "complete: impl Fn(String) -> String" in src
+    assert "call_tool: impl Fn(String) -> String" in src
+    assert "not lowerable" not in src
+
+
+def test_emit_lowers_function_type_return_to_impl_fn():
+    src = emit.emit(compile_source(
+        "fn adder(n: Int) -> (Int) -> Int { return v => v + n }\n"))
+    assert "fn adder(n: i64) -> impl Fn(i64) -> i64" in src
+
+
+def test_emit_still_refuses_an_escaping_function_type_by_name():
+    # A record field is an escaping position (`Box<dyn Fn(..)>`, constructed at
+    # the arrow's creation site) that the emitter cannot yet lower — refused by
+    # name, never erased to the opaque `Value` fallback.
+    with pytest.raises(emit.EmitError, match="function type"):
+        emit.emit(compile_source(
+            "type Handler = { run: (Int) -> Str }\n"
+            "fn f(h: Handler) -> Str { let r: (Int) -> Str = h.run  return r(1) }"))
+
+
+@needs_cargo
+def test_cargo_check_compiles_agent_loop_declared_function_types(tmp_path):
+    """The definition-of-done pin: the `agent_loop` shape (a fn with declared
+    function-type params, plus a fn returning a function) emits rust that a real
+    `cargo check` accepts — the document no longer refuses on this tier."""
+    ir = compile_source(
+        "fn agent_loop(prompt: Str, complete: (Str) -> Str, "
+        "call_tool: (Str) -> Str, max_steps: Int) -> Str {\n"
+        "  let first: Str = complete(prompt)\n"
+        "  let tool_out: Str = call_tool(first)\n"
+        "  return tool_out\n"
+        "}\n"
+        "fn apply_twice(g: (Int) -> Int, x: Int) -> Int { return g(g(x)) }\n"
+        "fn adder(n: Int) -> (Int) -> Int { return v => v + n }\n"
+    )
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 86).
 #
 # The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
