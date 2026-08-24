@@ -15,7 +15,7 @@ before any binary compatibility.
 |---|---|---|
 | **1** | `revl export wit` — the standard WIT interface of a revl service/composition | **done** |
 | **2** | WIT `resource` support in the importer | **done** |
-| **3** | canonical-ABI emission (a standard WASI P2 **binary**) | **`Str` boundary done**; records/lists lift-lower remaining — see §5 |
+| **3** | canonical-ABI emission (a standard WASI P2 **binary**) | **scalars + records + lists + variants/`Opt`/`Result` done**; service-level lowering + variant-with-aggregate-payload *params* remaining — see §5 |
 
 The claim the slices build toward: **WIT describes shape only.** A WIT
 interface says what an operation is named, what it takes, and what it returns —
@@ -184,45 +184,63 @@ $ ./.venv/bin/pytest tests/ -q
 
 Slice 3 turns this WIT plus a revl component into a **canonical-ABI WASI
 Preview 2 binary** — a component another Component Model host (wasmtime,
-wasmCloud, Spin, jco) can load without knowing it was revl. Its **`Str`
-boundary is built**, in `backends/wasm/canonical.py`; records/lists/variants at
-the canonical boundary are the remaining follow-on.
+wasmCloud, Spin, jco) can load without knowing it was revl. It lives in
+`backends/wasm/canonical.py`. The Str-only boundary landed first; the aggregate
+follow-on extends it to the tier's full value surface.
 
-What is built. A revl program's pure functions whose whole signature is `Str`
-(one `Str`-taking, `Str`-returning function is the minimal component) emit as a
-standard component:
+### What crosses the canonical boundary
+
+The whole lowerable value surface — **non-`Str` scalars** (`Int` → `s64`,
+`Bool`), **records**, **lists**, and **variants** (user `variant`s, `Opt`,
+`Result`) — lifts and lowers canonically, as **parameters and as results**,
+over the same `cabi_realloc` bump heap:
 
 * `emit_component(ir, service=…)` produces a **core module** carrying
-  `cabi_realloc` (the standard allocator a host calls to place an incoming
-  string into the module's memory) and, per function, a canonical export named
-  `revl:exported/<iface>#<op>`. Each export **lifts** every incoming bare
-  `(ptr, len)` canonical string into the tier's internal `[u32 len][bytes]`
-  representation, calls the ordinary `_V3Emitter`-lowered function, then
-  **lowers** the internal result back out through an 8-byte return area
-  `[ptr, len]`. The emitter never touches the frontend or the internal ABI — it
-  wraps the existing lowering at the export edge.
-* `build_component(…)` wraps that core module with `wasm-tools component embed`
-  + `component new` into a real component whose exported interface is the WIT
-  `revl export wit` (Slice 1) prints for the same functions, verbatim, plus a
-  `world` that exports it — so the binary and the interface agree by
-  construction.
+  `cabi_realloc` (the host's allocator, backed by the tier's `$alloc`), a small
+  lift/lower library (`$__canon_lift_str`/`_lower_str`, and one memoized
+  `…_rec_*` / `…_list_*` / `…_var_*` pair per aggregate type reached), and one
+  canonical export `revl:exported/<iface>#<op>` per boundary function. Each
+  export takes the Component Model's **flattened** core params, lifts them into
+  the tier's internal in-memory values (`Int` = i64, `Bool` = i32, `Str` =
+  `[u32 len][bytes]`, record = 8-byte-slot vector, list = `[u32 count][slots]`,
+  variant = `[u32 tag][payload slot]`), calls the ordinary `_V3Emitter`-lowered
+  function, then returns the result **directly** (a single-core-value scalar) or
+  **indirectly** through a canonically-laid-out return area (anything that
+  flattens to more than one core value — strings, lists, records, variants). The
+  emitter never touches the frontend or the internal ABI; it bridges the two
+  ABIs only at the export edge.
+* Canonical **memory layout** is computed per type (`_Canon.size` / `.align` /
+  `.flatten`, the Component Model's rules): a `record` packs its fields at
+  aligned offsets, a `list<T>` is a `cabi_realloc`-allocated `(ptr, len)` buffer
+  of canonically-laid-out elements, a variant is `[disc u8][payload]`. Nested
+  aggregates recurse through `load_canon` / `store_canon` over that same heap.
+* `build_component(…)` wraps the core module with `wasm-tools component embed` +
+  `component new` into a real component whose exported interface is the WIT
+  `revl export wit` (Slice 1) prints for the same functions — so the binary and
+  the interface agree by construction. (One syntactic fixup: the exporter emits
+  a referenced `record`/`variant` at the package top level, which is not valid
+  WIT; `canonical.py` relocates it into the interface body for the embedded WIT.
+  The exporter itself is a frontend concern, tracked separately.)
 * The component loads and runs under **wasmtime's component model**
-  (`wasmtime run --invoke`, which accepts only a component, not a core module):
-  `echo("world") -> "world"`, `greet("revl") -> "Hello, revl!"`. Pinned by
-  `backends/wasm/test_canonical_abi.py`, which builds, `wasm-tools validate`s,
-  and executes the component (skipping only when the standard toolchain is
-  absent, the same policy as the tier's wasmtime-gated tests).
+  (`wasmtime run --invoke`): `make("revl", 7) -> {name: "revl", age: 7}`,
+  `pair(4, 5) -> [4, 5]`, `roster("z", 2) -> [{name: "z", age: 2}]`,
+  `maybe(9) -> some(9)`, `checked(-2) -> err("nonpositive")`. Pinned by
+  `backends/wasm/test_canonical_abi.py` (fixtures `canonical_echoer` for `Str`
+  and `canonical_aggregates` for the rest), which builds, `wasm-tools
+  validate`s, and executes each component — skipping only when the standard
+  toolchain is absent, the same policy as the tier's wasmtime-gated tests.
 
-This became possible once the wasm tier grew non-i32 lowering: `Str`, records
-and lists now lower over the tier's own custom linear-memory ABI (the tier reads
-them through the exported `memory`). Slice 3 maps that internal ABI to the
-**standard** canonical ABI at the component boundary.
+### What remains
 
-What remains. Only `Str` crosses the canonical boundary today. A function taking
-or returning a record, list, variant, `Opt` or `Result` stays in the core
-module (so a `Str` boundary function may still call it) but is **not** placed on
-the component interface — the gap is explicit, never a silent mis-lowering.
-Canonical lift-lower for those aggregate types (each is a defined canonical
-layout over the same `cabi_realloc` heap) is the next follow-on slice; the
-`Str` boundary already proves the machinery — `cabi_realloc`, the return area,
-and `wit-component` wrapping — that the aggregates reuse.
+* **Service-level lowering.** Only top-level pure `fn`s are presented today. A
+  `provide` method driven through the canonical boundary (the item-45 target)
+  needs the heavier component emitter and is the next follow-on.
+* **Variant/`Opt`/`Result` with an aggregate payload in *parameter* position.**
+  A variant *result* crosses fine (it goes through memory), but a variant
+  *param* is decoded from the Component Model's *flattened, joined* core values;
+  reconstructing an aggregate payload from that join is unbuilt. Such a function
+  stays in the core module (a boundary function may still call it) but is left
+  off the interface — the gap is explicit, never a silent mis-lowering. Scalar
+  and `Str` variant payloads in param position already work.
+* **`Float` / `Map` / resource handles / function values** are not lowerable on
+  this tier and never reach the boundary.
