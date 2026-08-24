@@ -20,7 +20,12 @@ set -eu
 cd "$(dirname "$0")"
 
 CORDIS_PY="${CORDIS_PY:-.cordis-py}"
-# 1c5e6f1 = the dict-plugin Config fix (74b), on top of the 1316174 A8 fix.
+# The TESTED commit, not the branch's moving HEAD. The repo's suite is
+# validated against this exact vintage — 1c5e6f1 = the dict-plugin Config fix
+# (roadmap 74b) on top of the 1316174 A8 async-body fiber-FAILED fix. A
+# fresh clone must not drift onto the branch's moving HEAD (roadmap 76c);
+# bump this pin deliberately when the runtime moves, and record why.
+# Override with CORDIS_PY_PIN.
 CORDIS_PY_PIN="${CORDIS_PY_PIN:-1c5e6f17abf538bf01012f9d72ce0cfa978d91b3}"
 if [ ! -d "$CORDIS_PY" ]; then
     git clone --branch harden-fiber-lifecycle https://github.com/inso1337/cordis-py "$CORDIS_PY"

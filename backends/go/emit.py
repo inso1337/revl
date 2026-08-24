@@ -40,6 +40,54 @@ class EmitError(ValueError):
     pass
 
 
+# Dispatcher conformance (roadmap item 76a). This file carries TWO expression
+# dispatchers — `_expr` (component/method bodies, the stc-go live world) and
+# `_go_v3_expr` (pure fn bodies) — and the sets below declare, as data, the IR
+# expression kinds each one must render, plus the kinds each one deliberately
+# refuses with a named tier-limit EmitError (never the "unsupported expr
+# kind" fall-through). tests/test_expr_dispatcher_conformance.py checks them
+# against the frontend schema (src/revl/lower.py: EXPR_KINDS /
+# EXPR_KINDS_FN / EXPR_KINDS_COMPONENT).
+#
+# Component-position refusals are real v1/v2 limits of the stc-go world: an
+# anonymous record literal has no declared record type to render (declaring
+# one routes the document to the typed-core path, which does not carry a live
+# component), match/arrow/`?.` have no lowering there yet, and bare Opt/Result
+# construction outside return position is refused by the tier's tuple-Opt
+# design. Each refusal names the limit and a workaround. `hole` is refused at
+# the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "component": frozenset({
+        "bin", "builtin", "call", "config", "field", "fn", "format",
+        "host", "if", "index", "instance-get", "list", "lit", "maplit",
+        "name", "req", "spawn", "un", "var",
+    }),
+    "fn": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "field", "if", "index",
+        "interp", "len", "list", "lit", "maplit", "match", "name", "optcall",
+        "optfield", "record", "un", "var",
+    }),
+}
+EXPR_REFUSED: dict[str, frozenset[str]] = {
+    # kinds the component dispatcher deliberately refuses (named tier limits)
+    "component": frozenset({
+        "adt",        # bare Opt/Result construction outside return position
+        "arrow",      # arrow values have no lowering in the stc-go world yet
+        "match",      # no match lowering in the stc-go world yet
+        "optcall",    # `?.` has no lowering in the stc-go world yet
+        "optfield",   # `?.` has no lowering in the stc-go world yet
+        "record",     # needs a declared record type the v1/v2 tier carries none of
+        "record_update",
+    }),
+    # kinds the fn dispatcher deliberately refuses
+    "fn": frozenset({
+        "record_update",  # docs/records.md §6 — "lift it into a helper fn instead"
+    }),
+}
+# kinds refused at the document level on every position
+EXPR_REFUSED_DOCUMENT: frozenset[str] = frozenset({"hole"})
+
+
 # --------------------------------------------------------------------------
 # identifiers / types
 # --------------------------------------------------------------------------
@@ -316,14 +364,20 @@ def _expr(node, env: _Env, expected=None) -> str:
         return "[]%s{%s}" % (go_elem, rendered)
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): same positional-inference
-        # limit as the v3 tier — refuse rather than mis-emit.
+        # limit as the v3 tier — refuse rather than mis-emit. The pin is the
+        # expected Map type: a typed fn return/parameter, or the annotated
+        # `let/var x: Map[K, V] = Map.empty()` the frontend threads onto the
+        # node as `expected` (roadmap 76b) — the author's own annotation.
+        if expected is None:
+            expected = node.get("expected")
         if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
             k, v = _v3_split_generic(expected[4:-1])
             return "map[%s]%s{}" % (_go_type(k), _go_type(v))
         raise EmitError(
             "an untyped empty Map needs an expected Map type on this tier "
             "(Go infers literals positionally, not from later use) - pin it "
-            "via a typed fn return/parameter or any annotated flow")
+            "via a typed fn return, or an annotated `let`/`var` "
+            "declaration (the positions this tier actually reads)")
     if kind == "index":
         return "%s[%s]" % (_expr(node.get("target"), env),
                            _expr(node.get("index"), env))
@@ -337,6 +391,42 @@ def _expr(node, env: _Env, expected=None) -> str:
         return _instance_get_expr(node, env)
     if kind == "spawn":
         return _spawn_expr(node, env)
+    if kind == "field":
+        # `.length` on a sized value — the one field the frontend produces on
+        # a non-record in component positions (a pure fn body spells the same
+        # access as the `len` node). Records are a v3 typed-core surface that
+        # the live stc-go world does not carry, so any other field access is a
+        # named tier limit rather than a silent fall-through.
+        if node.get("name") != "length":
+            raise EmitError(
+                "field access is only lowerable on a sized value's `.length` "
+                "in the stc-go component world (records need a declared record "
+                "type, and declaring one routes the document to the typed-core "
+                "path, which carries no live component) - lift it into a "
+                "helper fn instead")
+        global _COMP_NEEDS_STDLIB
+        _COMP_NEEDS_STDLIB = True
+        target_node = node.get("target")
+        target = _expr(target_node, env)
+        rt = _comp_infer(target_node, env)
+        return ("revlStrLen(%s)" if rt == "Str" else "revlListLen(%s)") % target
+    if kind == "fn":
+        # a call to a top-level `fn` by name (component dialect). Unreachable
+        # in practice — a document declaring a pure `fn` routes to the typed-
+        # core path — but a named tier limit beats a fall-through.
+        name = _v3_ident(node.get("name"), "function")
+        args = ", ".join(_expr(a, env) for a in node.get("args") or [])
+        return "%s(%s)" % (name, args)
+    if kind in ("record", "match", "arrow", "optfield", "optcall"):
+        raise EmitError(
+            f"{kind} is not lowerable in the stc-go component world yet "
+            f"(ir_version 1/2 documents carry no record/ADT types, and this "
+            f"tier has no match/arrow/`?.` lowering in component bodies) - "
+            f"lift it into a helper fn instead")
+    if kind == "adt":
+        raise EmitError(
+            "Opt/Result construction is only supported in return position on "
+            "the cordis-go tier (got a bare value)")
     if kind == "record_update":
         raise EmitError(
             "functional record update `{r | f = e}` is not emitted by the go "
@@ -447,6 +537,10 @@ def _comp_infer(node, env: _Env):
         return "Bool" if node.get("op") == "!" else _comp_infer(node.get("operand"), env)
     if k == "builtin":
         return _v3_builtin_ret_type(node.get("method"), _comp_infer(node.get("target"), env))
+    if k == "maplit":
+        # `Map.empty()` — the empty literal carries its pin when the author's
+        # annotation supplied one (roadmap 76b); otherwise it stays unknown.
+        return node.get("expected")
     return None
 
 
@@ -1591,10 +1685,17 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         if isinstance(tt, str) and tt.startswith("List[") and tt.endswith("]"):
             return tt[5:-1]
         return None
+    if kind == "len":
+        # `xs.length` in a pure fn body: Int, whatever the sized receiver.
+        return "Int"
     if kind == "builtin":
         return _v3_builtin_ret_type(
             node.get("method"), _go_v3_infer_type(node.get("target"), ctx)
         )
+    if kind == "maplit":
+        # `Map.empty()` — the empty literal carries its pin when the author's
+        # annotation supplied one (roadmap 76b); otherwise it stays unknown.
+        return node.get("expected")
     if kind == "call":
         callee = node.get("callee") or {}
         if callee.get("kind") == "var":
@@ -1829,6 +1930,18 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             target = f"({target})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
 
+    if kind == "len":
+        # `xs.length` in a pure fn body lowers to the `len` node (the frontend
+        # spells the same access as a `field` in component positions). Go's
+        # `len()` is bytes on a string, and revl length is code points, so the
+        # sized-value helpers from _V3_STDLIB_PREAMBLE are used — the same
+        # dispatch the `length` builtin already makes.
+        ctx.used_stdlib = True
+        target_node = node.get("target")
+        target = _go_v3_expr(target_node, ctx)
+        rt = _go_v3_infer_type(target_node, ctx)
+        return f"revlStrLen({target})" if rt == "Str" else f"revlListLen({target})"
+
     if kind == "record_update":
         raise EmitError(
             "functional record update `{r | f = e}` is not emitted by the go "
@@ -1858,14 +1971,20 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # `Map.empty()` (docs/stdlib-2.0.md §Map). Go infers composite
         # literals positionally, never from later use, so an unpinned empty
         # map is refused rather than emitted as non-compiling Go — the same
-        # honesty as an untyped empty list on tiers that cannot infer it.
+        # honesty as an untyped empty list on tiers that cannot infer it. The
+        # pin is the expected Map type: a typed fn return/parameter, or the
+        # annotated `let/var x: Map[K, V] = Map.empty()` the frontend threads
+        # onto the node as `expected` (roadmap 76b).
+        if expected is None:
+            expected = node.get("expected")
         if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
             k, v = _v3_split_generic(expected[4:-1])
             return f"map[{_go_v3_type(k, ctx.types)}]{_go_v3_type(v, ctx.types)}{{}}"
         raise EmitError(
             "an untyped empty Map needs an expected Map type on this tier "
             "(Go infers literals positionally, not from later use) - pin it "
-            "via a typed fn return/parameter or any annotated flow")
+            "via a typed fn return, or an annotated `let`/`var` "
+            "declaration (the positions this tier actually reads)")
 
     if kind == "arrow":
         names = node.get("params") or []
@@ -2818,6 +2937,44 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _refuse_holes(ir: dict) -> None:
+    """A typed hole is an unmet obligation, not code (docs/holes.md).
+
+    Emitting one would put a placeholder into Go and make the Go toolchain
+    the thing that complains — in its own vocabulary, about a line revl
+    wrote. revl already knows the draft is unfinished, so the refusal belongs
+    here, before a single character is emitted (mirrors the other five
+    backends).
+    """
+    found: list = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "hole":
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for section in ("components", "functions", "tests", "externs"):
+        walk(ir.get(section))
+    if not found:
+        return
+    where = ", ".join(
+        f"{h.get('file') or '?'}:{h.get('line') or '?'} "
+        f"(expects `{h.get('type')}`)" for h in found[:3])
+    if len(found) > 3:
+        where += f", and {len(found) - 3} more"
+    raise EmitError(
+        f"refusing to emit Go: this document still has {len(found)} typed "
+        f"hole(s) — {where}. A hole type-checks so the surrounding draft can "
+        f"be checked, but it has no implementation and there is nothing to "
+        f"lower. Fill every hole, then emit (docs/holes.md)."
+    )
+
+
 def emit(ir: dict, package: str = "emitted", package_name: str | None = None) -> str:
     # `package_name` is the conformance harness's per-case naming kwarg (the
     # same one the java tier takes); accept it as an alias for `package`.
@@ -2826,6 +2983,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
+    _refuse_holes(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old

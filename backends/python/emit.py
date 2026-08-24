@@ -55,6 +55,36 @@ class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
 
 
+# Dispatcher conformance (roadmap item 76a). This file carries TWO expression
+# dispatchers — `_ComponentEmitter._expr` (component/method bodies) and the
+# module-level `_expr` (fn bodies) — and the sets below declare, as data, the
+# IR expression kinds each one must render. tests/test_expr_dispatcher_
+# conformance.py checks them against the frontend schema (src/revl/lower.py:
+# EXPR_KINDS / EXPR_KINDS_FN / EXPR_KINDS_COMPONENT): a kind the frontend can
+# produce in a position must be handled or deliberately refused by every
+# dispatcher that serves that position, and a dispatcher's declared set must
+# match the branches in its source. "Did you patch both paths" is a red test,
+# not a 15-minute stall. `hole` is refused at the document level by the
+# pre-emit walk, so it never reaches either dispatcher.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "component": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "list", "lit",
+        "maplit", "match", "name", "optcall", "optfield", "record",
+        "record_update", "req", "spawn", "un", "var",
+    }),
+    "fn": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "field", "if", "index",
+        "interp", "len", "list", "lit", "maplit", "match", "optcall",
+        "optfield", "record", "record_update", "un", "var",
+    }),
+}
+# kinds this tier deliberately refuses everywhere (document-level or
+# position-agnostic); each must raise a named tier-limit EmitError, never the
+# "unknown expression kind" fall-through.
+EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
+
+
 def _ident(name: Any, what: str) -> str:
     if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
