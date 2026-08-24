@@ -178,6 +178,22 @@ class InterceptStmt:
 
 
 @dataclass
+class HandoffStmt:
+    """`handoff <key>: <Type>` — the verified state hand-off of a stateful
+    provider (roadmap item 53, the `code_change` gap). `key` is a provided key
+    of this component; `state_type` is the declared shape of the provider's
+    live state (its effect-created world — a cache's Map, a session store's
+    entries). When this component is *replaced*, that state is the value it
+    **exports**; when it is the *replacement*, that type is the shape it
+    **accepts**. The admission gate proves the two sides are §5-compatible
+    before a swap threads the value across — a stateful provider starts warm,
+    not cold. See docs/state-handoff.md."""
+    key: str
+    state_type: str
+    line: int
+
+
+@dataclass
 class ProvideMethod:
     name: str
     params: list[str]
@@ -1248,6 +1264,14 @@ class Parser:
             key = self._provision_key()
             self.expect("kw", "with")
             return InterceptStmt(key, self.record_literal(), tok.line)
+        if tok.kind == "kw" and tok.value == "handoff":
+            if in_method:
+                raise self.err(tok.line, "`handoff` is not allowed inside a method body")
+            self.next()
+            key = self._provision_key(what="a provided key")
+            self.expect(":")
+            state_type = self.type_()
+            return HandoffStmt(key, state_type, tok.line)
         if tok.kind == "kw" and tok.value == "provide":
             if in_method:
                 raise self.err(tok.line, "`provide` is not allowed inside a method body")
