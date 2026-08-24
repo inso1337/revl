@@ -213,3 +213,115 @@ def test_buggy_interpolation_case_compiles_end_to_end():
     compile_source(
         'service B { emission fn send(m: Str) }\n'
         'component C requires b: B { emit b.send(`v=${"}"}`) }', "s.rvl")
+
+
+# --- roadmap item 85: triple-quoted multi-line string literals ---------------
+#
+# `"""..."""` is a verbatim (no-escape, no-interpolation) string whose body may
+# contain newlines, so an agent can author a multi-line `.rvl` literal without
+# concatenation. Only `"""` closes it; a lone `"`/`""` inside is ordinary text;
+# a single newline right after the opening `"""` is stripped. The single-`"`
+# form is untouched. See lexer `_lex_triple_string` and docs/strings.md.
+
+def _one_string(source):
+    tokens = lex(source, "<test>")
+    assert tokens[0].kind == "string", tokens[0]
+    assert tokens[1].kind == "eof", tokens
+    return tokens[0].value
+
+
+def test_triple_quoted_multiline_is_one_string_token_with_newline():
+    # a real embedded newline survives verbatim; the leading newline after the
+    # opening delimiter is stripped, so the body starts at "multi".
+    assert _one_string('"""\nmulti\nline"""') == "multi\nline"
+
+
+def test_triple_quoted_without_leading_newline_keeps_everything():
+    assert _one_string('"""multi\nline"""') == "multi\nline"
+
+
+def test_triple_quoted_strips_only_one_leading_newline():
+    # a *second* blank line is intentional content and is preserved.
+    assert _one_string('"""\n\nbody"""') == "\nbody"
+
+
+def test_triple_quoted_empty_string():
+    assert _one_string('""""""') == ""
+
+
+def test_triple_quoted_body_may_contain_lone_and_double_quotes():
+    # only `"""` closes; interior `"` and `""` are literal text.
+    assert _one_string('"""a"b""c"""') == 'a"b""c'
+
+
+def test_triple_quoted_is_verbatim_no_escapes():
+    # no escape processing: backslash-n is two literal characters, matching the
+    # single-`"` no-escape rule (the whole point of the feature).
+    assert _one_string('"""a\\nb"""') == "a\\nb"
+
+
+def test_triple_quoted_does_not_interpolate_dollar():
+    # unlike the backtick template, `${...}` and `$ident` are literal here.
+    assert _one_string('"""cost ${x} and $item"""') == "cost ${x} and $item"
+
+
+def test_triple_quoted_line_tracking_continues_after_close():
+    # the token carries its opening line; a following token sees the real line.
+    tokens = lex('"""x\ny\nz"""\nlet', "<test>")
+    assert tokens[0].kind == "string" and tokens[0].line == 1
+    kw = next(t for t in tokens if t.kind == "kw")
+    assert kw.value == "let" and kw.line == 4
+
+
+def test_single_quoted_string_unchanged():
+    # full back-compat: the single-`"` form is exactly as before.
+    assert _one_string('"plain"') == "plain"
+    tokens = lex('"a" "b"', "<test>")
+    assert [t.value for t in tokens[:2]] == ["a", "b"]
+
+
+def test_unterminated_triple_quoted_string_is_an_error():
+    import pytest
+    from revl import RevlError
+
+    with pytest.raises(RevlError, match="unterminated triple-quoted string"):
+        lex('"""never closed', "<test>")
+
+
+# --- item 85 emit/round-trip: a multi-line literal lowers to a valid,
+# single-line escaped literal on every tier (lexer-only change; the emitters'
+# existing string escapers already convert the embedded newline). py + ts are
+# pinned here as the required minimum.
+
+def _emit(backend, source):
+    import importlib.util
+
+    from revl import compile_source
+    ir = compile_source(source)
+    sys.path.insert(0, str(ROOT / "backends" / backend))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"emit_multiline_{backend}", ROOT / "backends" / backend / "emit.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return str(module.emit(ir))
+    finally:
+        sys.path.remove(str(ROOT / "backends" / backend))
+
+
+_MULTILINE_SRC = 'fn greet() -> Str { return """\nmulti\nline""" }\n'
+
+
+def test_python_tier_emits_escaped_newline_literal():
+    out = _emit("python", _MULTILINE_SRC)
+    # the embedded newline becomes a `\n` escape in a valid single-line literal
+    assert "multi\\nline" in out
+    assert "multi\nline" not in out  # no raw newline splitting the literal
+    # the emitted module is valid Python
+    compile(out, "greet.py", "exec")
+
+
+def test_typescript_tier_emits_escaped_newline_literal():
+    out = _emit("typescript", _MULTILINE_SRC)
+    assert 'multi\\nline' in out
+    assert "multi\nline" not in out

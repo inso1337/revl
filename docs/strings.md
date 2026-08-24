@@ -129,6 +129,39 @@ supplies:
 Byte-oriented work keeps its own type: `Bytes` is a sequence of `u8` and its
 `length`/index are byte-based, unchanged. The unit decision is about `Str`.
 
+### Literal syntax — no escapes, plus a triple-quoted verbatim form (item 85)
+
+A plain double-quoted string `"..."` has **no escape sequences**: `"a\nb"` is
+the five literal characters `a`, `\`, `n`, `b` (a backslash and an `n`), not a
+newline. `$name`/`$$` are the one guarded exception — they were interpolation
+and dollar-escape in 1.x, so a plain string containing them is rejected with a
+migrate hint rather than silently changing meaning (see lexer `_lex_string` and
+the §9 guard-rail tests). A single-quoted `"` string may not span lines.
+
+For multi-line content there is a **triple-quoted** form, `"""..."""`:
+
+- **Verbatim.** The body is the literal characters between the delimiters,
+  newlines and all. There is still no escape processing (`\n` is a backslash
+  and an `n`) and no `${...}` interpolation (`$` is an ordinary character) — the
+  same no-escape rule as `"..."`, extended over line breaks. When you need
+  interpolation, use a backtick template; when you need a verbatim block, use
+  `"""`.
+- **Closing.** Only `"""` closes the string. A lone `"` or `""` inside the body
+  is ordinary text, so most quoted content needs no care.
+- **Leading newline.** A single newline immediately after the opening `"""` is
+  stripped, so a literal that opens on its own line does not begin with a blank
+  line (the Python/Swift/Kotlin convention). Any further blank lines are kept.
+- **Empty.** `""""""` is the empty string.
+
+Both forms produce the same IR string node — a triple-quoted literal is just a
+`Str` whose value may contain newlines — so this is a **lexer-only** feature:
+every backend's existing string escaper already renders an embedded newline as
+that host's `\n` escape (py `repr`, ts/java `json.dumps`, go/rust/wasm
+hand-written escapers), emitting a valid single-line literal on all six tiers.
+Nothing downstream of the lexer changed. The motivating use is an agent
+authoring a real multi-line `.rvl` component from inside the harness without
+string concatenation (harness milestone 6).
+
 ### The float-rendering sub-decision — **ECMAScript `Number::toString`**
 
 Here §0 *does* win, cleanly: `${x}` shares its template syntax with JS, and
