@@ -5,8 +5,9 @@
 // Python launcher does only what revl cannot: be a console script.
 
 use "assembler.rvl" { Assembler }
+use "shipper.rvl" { Shipper }
 
-type Cmd = Add | Rm | Assemble | AssembleCheck | Unknown
+type Cmd = Add | Rm | Assemble | AssembleCheck | Ship | Unknown
 
 fn nth(argv: List[Str], i: Int) -> Str {
   if (i < argv.length()) {
@@ -41,6 +42,9 @@ fn parse_cmd(argv: List[Str]) -> Cmd {
     }
     return Assemble
   }
+  if (s == "ship") {
+    return Ship
+  }
   return Unknown
 }
 
@@ -48,13 +52,14 @@ pub service Cli {
   emission fn run(argv: List[Str]) -> Int
 }
 
-component CliDispatch requires asm: Assembler provides cli: Cli {
+component CliDispatch requires asm: Assembler, ship: Shipper provides cli: Cli {
   provide cli {
     fn run(argv) = match parse_cmd(argv) {
       Add           => emit asm.add(nth(argv, 1)),
       Rm            => emit asm.rm(nth(argv, 1)),
       Assemble      => emit asm.assemble(),
       AssembleCheck => emit asm.assemble_check(),
+      Ship          => emit ship.run(".", nth(argv, 1)),
       Unknown       => emit asm.unknown(nth(argv, 0)),
     }
   }
