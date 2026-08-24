@@ -46,8 +46,8 @@ export function add(a: bigint, b: bigint): bigint {
 }
 
 it("add works", () => {
-    { const l = add(1n, 2n), r = 3n;
-      expect(revlEq(l, r), "add(1n, 2n) == 3n" + "\n  left  = " + revlShow(l) + "\n  right = " + revlShow(r)).toBe(true) }
+    { const $revl_l = add(1n, 2n), $revl_r = 3n;
+      expect(revlEq($revl_l, $revl_r), "add(1n, 2n) == 3n" + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)).toBe(true) }
 })
 
 it("bool works", () => {
