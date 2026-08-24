@@ -312,6 +312,10 @@ class Env:
         # the v1 coloring check can name/locate an async extern a method reaches
         # (docs/design/async-extern.md §3). Set alongside the emitting sets.
         self.async_externs: dict = {}
+        # the phase-2 async-colored set (async externs + transitively colored
+        # fns, docs/design/async-extern.md §3): what a provide-method admission
+        # tests membership against. Set alongside `async_externs`.
+        self.async_callables: set = set()
         # component-body type environment: safe-name -> type, plus the
         # "config.<field>" and "req.<local>" markers infer_ir resolves
         self.type_env: dict[str, str] = {}
@@ -874,26 +878,13 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
             _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types,
                              expected_return=marked_returns)
         _check_returns_on_every_path(decl, filename)
-        # v1 async coloring (docs/design/async-extern.md §3): transitive
-        # coloring through named `fn`s is slice 6. Until then a module `fn`
-        # that reaches an async extern is refused rather than silently emitted
-        # into a sync function — the emitter would drop the required `await`.
-        _async_names = {ext.name for ext in program.externs if ext.async_}
-        if _async_names:
-            _called: set = set()
-            _calls_in(body, _called)
-            _reached = sorted(_called & _async_names)
-            if _reached:
-                raise RevlError(
-                    filename, decl.line,
-                    f"function `{decl.name}` reaches async extern "
-                    f"`{_reached[0]}`, but a module `fn` cannot carry the async "
-                    f"color yet (phase 2)",
-                    hint="call the async extern directly from an `async fn` "
-                         "provide method, or wrap it in an async service "
-                         "operation (A1)",
-                    code="A1", category="async-propagation",
-                )
+        # phase-2 async coloring (docs/design/async-extern.md §3): a module
+        # `fn` that reaches an async extern — directly or transitively — is no
+        # longer refused here; it becomes async-colored by the `_async_callables`
+        # fixed point in `check_and_lower`, which then stamps `"async": True` on
+        # this entry. First-class *value* use of an async callable stays refused
+        # (an arrow type carries no color), also in that post-pass once the
+        # colored set is known. This function is now pure lowering.
         entry = {
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
@@ -2532,6 +2523,41 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
 
+    # phase-2 async coloring (docs/design/async-extern.md §3): the async twin
+    # of the emission fixed point above. Seed = async externs; a module `fn`
+    # that reaches a colored callee — directly or transitively — is itself
+    # colored. `async_witness` records the shortest derivation for diagnostics.
+    async_witness: dict[str, str] = {}
+    async_colored = _async_callables(fns, externs, async_witness)
+    # Stamp `"async": True` on every colored fn entry (the emitters read it
+    # with `.get("async")`, needing no reachability analysis of their own),
+    # mirroring the extern spelling in `_lower_externs`. And refuse first-class
+    # *value* use of an async callable: an arrow type carries no color, so
+    # passing an async extern or a colored fn as a value would smuggle a
+    # suspension past the checker — the async fixed point never widened for it,
+    # so it is a compile error, not a coloring (async-extern.md §3, "First-class
+    # values are refused, not widened").
+    _fn_decls_by_name = {d.name: d for d in program.fn_decls}
+    for entry in fns:
+        name = entry["name"]
+        called_vals: set = set()
+        _calls_in(entry.get("body") or [], set(), values=called_vals)
+        passed = sorted(called_vals & async_colored)
+        if passed:
+            decl = _fn_decls_by_name.get(name)
+            raise RevlError(
+                (decl.source if decl is not None else None) or program.filename,
+                decl.line if decl is not None else 0,
+                f"function `{name}` uses async callable `{passed[0]}` as a "
+                f"function value, but an async callable has no arrow type",
+                hint="call it directly from an async context — an arrow type "
+                     "carries no async color, so a suspension cannot be awaited "
+                     "through it (A1)",
+                code="A1", category="async-propagation",
+            )
+        if name in async_colored:
+            entry["async"] = True
+
     # instance-parametric components: one registry shared across the lowering
     # of every component, so `spawn C` can resolve C's config/provisions and
     # the linker can learn which components are runtime templates and what the
@@ -2551,23 +2577,27 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         seen.add(comp.name)
         lowered_comp = _lower_component(comp, services, program.filename,
                                         component_callables, types, emitting_fns,
-                                        emitting_caps, emission_evidence, spawn_reg)
+                                        emitting_caps, emission_evidence, spawn_reg,
+                                        async_colored)
         if comp.source:
             _retarget_holes(lowered_comp, comp.source)
-        # v1 async coloring (docs/design/async-extern.md §3, "Component
-        # bodies"): a setup/activation body (an `emit` step, an `effect`, an
-        # `await` step) may not reach an async extern — divert/inertia
-        # semantics are out of scope for v1. Provide-method bodies are checked
-        # at their own site above, so they are pruned here.
-        _async_names = {ext.name for ext in program.externs if ext.async_}
-        if _async_names:
+        # async coloring (docs/design/async-extern.md §3, "Component bodies"):
+        # a setup/activation body (an `emit` step, an `effect`, an `await`
+        # step) may not reach an async callable — an async extern *or* a
+        # phase-2 colored fn — because divert/inertia semantics are out of
+        # scope for v1. Provide-method bodies are checked at their own site
+        # above, so they are pruned here.
+        if async_colored:
             _reached: set = set()
-            _async_reached_outside_provide(lowered_comp, _async_names, _reached)
+            _async_reached_outside_provide(lowered_comp, async_colored, _reached)
             if _reached:
+                _culprit = sorted(_reached)[0]
+                _kind = "extern" if _culprit in {
+                    e.name for e in program.externs if e.async_} else "function"
                 raise RevlError(
                     comp.source or program.filename, comp.line,
-                    f"component `{comp.name}` reaches async extern "
-                    f"`{sorted(_reached)[0]}` in a setup/activation body, which "
+                    f"component `{comp.name}` reaches async {_kind} "
+                    f"`{_culprit}` in a setup/activation body, which "
                     f"cannot suspend a fiber (A1)",
                     hint="wrap the suspending call in an `async fn` service "
                          "operation and drive it from a provide method — v1 does "
@@ -3225,6 +3255,7 @@ def _config_default_type(value) -> str | None:
 # the capability tests all import these names from `revl.lower`.
 from .emission_analysis import (  # noqa: E402,F401
     _EmissionEvidence,
+    _async_callables,
     _calls_in,
     _capability_hint,
     _emission_chain,
@@ -3263,12 +3294,20 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                      emitting_fns: set | None = None,
                      emitting_caps: dict | None = None,
                      emission_evidence: "_EmissionEvidence | None" = None,
-                     spawn_reg: dict | None = None) -> dict:
+                     spawn_reg: dict | None = None,
+                     async_colored: set | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
     env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}
+    # the phase-2 async-colored set (async externs + fns that transitively
+    # reach one, docs/design/async-extern.md §3): the provide-method admission
+    # tests membership here, not just direct extern calls, so a sync method
+    # reaching a colored fn is refused too. Falls back to the extern names
+    # alone when the fixed point was not supplied (older callers/tests).
+    env.async_callables = set(async_colored) if async_colored is not None \
+        else set(env.async_externs)
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
     # instance-parametric components: the registry of spawn targets, edges,
     # templates and G4 spawn-boundary sites (docs/design-v2-instances.md)
@@ -3766,53 +3805,68 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     code="G4", category="emission-capability",
                 )
 
-        # v1 async coloring (docs/design/async-extern.md §3): an async extern
-        # call is admitted only inside a provide method whose service operation
-        # is declared `async fn`. A sync method reaching an async extern is
-        # refused with the twin of the emission-propagation diagnostic above —
-        # the service declaration is the upper bound on its providers, so
-        # asynchrony, like emission-ness, is a declared property (A1).
-        if env.async_externs:
+        # async coloring (docs/design/async-extern.md §3): an async call is
+        # admitted only inside a provide method whose service operation is
+        # declared `async fn`. The admission tests membership in the phase-2
+        # *colored* set (async externs and any fn that transitively reaches
+        # one), not just direct extern calls, so a sync method reaching a
+        # colored helper fn is refused too — the twin of the emission-
+        # propagation diagnostic above. The service declaration is the upper
+        # bound on its providers, so asynchrony, like emission-ness, is a
+        # declared property (A1).
+        if env.async_callables:
             called: set = set()
             values: set = set()
             _calls_in(mbody, called, values=values)
+
+            def _async_kind(name: str) -> str:
+                return "extern" if name in env.async_externs else "function"
+
+            def _async_locate(name: str):
+                cdecl = (env.async_externs.get(name)
+                         or (env.emission_evidence._decls.get(name)
+                             if env.emission_evidence is not None else None))
+                ev = env.emission_evidence
+                return (ev.locate(cdecl) if ev is not None and cdecl is not None
+                        else (None, getattr(cdecl, "line", None)))
+
             # a first-class reference to an async callable is refused in every
             # context, even an async method: an arrow type carries no color, so
             # the emitter cannot know to await it (async-extern.md §3, "refused,
             # not widened").
-            passed_async = sorted(values & set(env.async_externs))
+            passed_async = sorted(values & env.async_callables)
             if passed_async:
                 culprit = passed_async[0]
-                cdecl = env.async_externs[culprit]
                 raise RevlError(
                     comp.source or filename, method.line,
-                    f"`{svc.name}.{method.name}` uses async extern `{culprit}` as a "
-                    f"function value, but an async extern has no arrow type",
+                    f"`{svc.name}.{method.name}` uses async {_async_kind(culprit)} "
+                    f"`{culprit}` as a function value, but an async callable has no "
+                    f"arrow type",
                     hint="call it directly from an async context — an arrow type "
                          "carries no async color, so a suspension cannot be awaited "
                          "through it (A1)",
                     code="A1", category="async-propagation",
                 )
-            called_async = sorted(called & set(env.async_externs))
+            called_async = sorted(called & env.async_callables)
             if called_async and not decl.async_:
                 culprit = called_async[0]
-                cdecl = env.async_externs[culprit]
-                ev = env.emission_evidence
-                cfile, cline = (ev.locate(cdecl) if ev is not None
-                                else (None, getattr(cdecl, "line", None)))
+                cfile, cline = _async_locate(culprit)
                 head = TraceStep(method.name, "provide-method",
                                  comp.source or filename, method.line,
                                  f"provision `{stmt.key}`")
-                tail = TraceStep(culprit, "async-extern", cfile, cline,
-                                 "async extern")
+                tail = TraceStep(culprit, f"async-{_async_kind(culprit)}",
+                                 cfile, cline, f"async {_async_kind(culprit)}")
                 why = WhyTrace(kind="async-propagation",
                                subject=f"{svc.name}.{method.name}",
                                steps=[head, tail], shape=CHAIN)
                 evidence = ", ".join(f"`{name}`" for name in called_async)
+                reached = (f"async extern {evidence}"
+                           if culprit in env.async_externs
+                           else f"async function {evidence}")
                 raise RevlError(
                     comp.source or filename, method.line,
                     f"`{svc.name}.{method.name}` is declared sync, but this "
-                    f"implementation reaches async extern {evidence} — a sync "
+                    f"implementation reaches {reached} — a sync "
                     f"method has no in-flight window (A1)",
                     hint=f"declare the operation `async fn {method.name}(...)` in "
                          f"service `{svc.name}`, or move the suspending call out of "

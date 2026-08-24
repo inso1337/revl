@@ -1223,12 +1223,17 @@ class _Ctx:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
-        # async externs (roadmap item 80): call sites naming one are awaited
-        # (docs/design/async-extern.md §5). v1 seeds this from async externs
-        # only; slice 6 adds colored fns. `in_async` tracks whether the body
-        # currently being rendered may await (an `async fn` provide method).
+        # async callables (roadmap item 80): call sites naming one are awaited
+        # (docs/design/async-extern.md §5). Seeded from async externs *and*
+        # phase-2 async-colored module fns (both carry `"async": True` on their
+        # IR entry, stamped by the frontend fixed point) — so a call to a
+        # colored helper from another async context is awaited just like an
+        # extern call. `in_async` tracks whether the body currently being
+        # rendered may await (an `async fn` provide method, or a colored fn).
         self.async_names = {ext.get("name") for ext in externs or []
-                            if ext.get("async")}
+                            if ext.get("async")} | {
+                            fn.get("name") for fn in functions or []
+                            if fn.get("async")}
         self.in_async = in_async
         self.case_names: set[str] = set()
         for spec in self.types.values():
@@ -1398,10 +1403,23 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
     scrutinee = _expr(node.get("scrutinee"), ctx)
     arms = node.get("arms") or []
 
+    # In an async context (an `async fn` provide method or a phase-2 colored
+    # fn, docs/design/async-extern.md §3) an arm body may `await` an async
+    # callable. The IIFE-and-arm-arrows the match lowers to must then be
+    # `async`, and their invocations awaited, or the `await` lands in a sync
+    # arrow — a tsc error. When nothing inside suspends, the extra `async`
+    # wrapper is harmless (tsc does not require an `await`), so the whole
+    # match is uniformly async-shaped whenever the surrounding body may await.
+    # `(await ( <fn> )( <scrut> ))` when async — the await wraps the whole
+    # *invocation*, not the function object — else the plain `( <fn> )( <scrut> )`.
+    a = "async " if ctx.in_async else ""
+    pre = "(await (" if ctx.in_async else "("
+    post_tail = ")" if ctx.in_async else ""
+
     # Opt is `value | undefined` (not tagged): Some/None discriminate on
     # undefined, and Some binds the scrutinee itself.
     if any(arm.get("pattern") in ("Some", "None") for arm in arms):
-        lines = [f"(({tmp}) => {{"]
+        lines = [f"{pre}{a}({tmp}) => {{"]
         wildcard = None
         for arm in arms:
             pattern = arm.get("pattern")
@@ -1415,15 +1433,17 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
                 bind = arm.get("bind")
                 if bind:
                     b = _ident(bind, "match bind")
-                    lines.append(f"  if ({tmp} !== undefined) return (({b}) => ({body}))({tmp})")
+                    lines.append(f"  if ({tmp} !== undefined) return (await ({a}({b}) => ({body}))({tmp}))"
+                                 if ctx.in_async
+                                 else f"  if ({tmp} !== undefined) return (({b}) => ({body}))({tmp})")
                 else:
                     lines.append(f"  if ({tmp} !== undefined) return ({body})")
         lines.append(wildcard if wildcard is not None
                      else '  throw new TypeError("non-exhaustive match")')
-        lines.append(f"}})({scrutinee})")
+        lines.append(f"}})({scrutinee}){post_tail}")
         return "\n".join(lines)
 
-    lines = [f"(({tmp}) => {{", f"  switch ({tmp}.kind) {{"]
+    lines = [f"{pre}{a}({tmp}) => {{", f"  switch ({tmp}.kind) {{"]
     wildcard = None
     for arm in node.get("arms") or []:
         pattern = arm.get("pattern")
@@ -1436,7 +1456,9 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
         bind = arm.get("bind")
         if bind:
             bind = _ident(bind, "match bind")
-            lines.append(f"      return (({bind}) => ({body}))({tmp}.value)")
+            lines.append(f"      return (await ({a}({bind}) => ({body}))({tmp}.value))"
+                         if ctx.in_async
+                         else f"      return (({bind}) => ({body}))({tmp}.value)")
         else:
             lines.append(f"      return ({body})")
     if wildcard is None:
@@ -1446,7 +1468,7 @@ def _v3_match_expr(node: dict, ctx: "_Ctx") -> str:
         lines.append("    default:")
         lines.append(wildcard)
     lines.append("  }")
-    lines.append(f"}})({scrutinee})")
+    lines.append(f"}})({scrutinee}){post_tail}")
     return "\n".join(lines)
 
 
@@ -1946,12 +1968,24 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
             for p in fn.get("params") or []
         )
         returns = _ts_v3_type(fn.get("returns"))
-        lines.append(f"export function {name}({params}): {returns} {{")
+        # a phase-2 async-colored fn (docs/design/async-extern.md §3) emits as
+        # `async function …: Promise<T>`, and its body is rendered in an async
+        # context so every call to an async callable is awaited (see `_expr`).
+        # The color was decided by the frontend fixed point and stamped on the
+        # IR entry — the emitter only reads `.get("async")`, mirroring the
+        # extern signature form at _emit_ts_externs.
+        if fn.get("async"):
+            fn_ctx = ctx.with_scope(ctx.component_scope, in_async=True)
+            lines.append(
+                f"export async function {name}({params}): Promise<{returns}> {{")
+        else:
+            fn_ctx = ctx
+            lines.append(f"export function {name}({params}): {returns} {{")
         if not fn.get("body"):
             lines.append("  // (empty body)")
         else:
             for stmt in fn["body"]:
-                _v3_stmt(stmt, ctx, lines, 2, test_mode=False)
+                _v3_stmt(stmt, fn_ctx, lines, 2, test_mode=False)
         lines.append("}")
         lines.append("")
     return lines
