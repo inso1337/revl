@@ -29,6 +29,13 @@ class SessionError(RuntimeError):
     """The session cannot do what was asked (no runtime, nothing loaded…)."""
 
 
+# How many generations the undo history retains (roadmap item 65,
+# docs/generation-history.md). Every admitted change appends one snapshot; the
+# oldest age out past this bound, so `undo --to` below the floor is refused
+# honestly rather than silently reaching for a generation that is gone.
+HISTORY_LIMIT = 64
+
+
 def _backend():
     """Import the cordis-py runtime, with the same guidance `revl run` gives."""
     backend_dir = Path(__file__).resolve().parents[3] / "backends" / "python"
@@ -100,6 +107,16 @@ class Session:
         # snapshotted, because there is nothing to replay through the gate.
         self.origin: dict | None = None
         self.previous_origin: dict | None = None  # origin `rollback` restores
+        # the retained generation history (roadmap item 65). `previous` above is
+        # the depth-1 slot `rollback` uses and keeps its old semantics; this is
+        # the deep version: every admitted change (load, swap, undo) appends a
+        # generation snapshot here, so `undo` can return to N−1 and `undo --to`
+        # to any still-retained generation — each undo itself a gated change.
+        # Each entry is `{generation, snapshot, ir, origin, createdAt}` where
+        # `snapshot` is a persist re-admittable bundle (None when the generation
+        # was loaded without sources — an undo to it is then refused, never
+        # rehydrated past the gate). See docs/generation-history.md.
+        self._history: list[dict] = []
         # the server-side working source an agent edits with `revl_edit`
         # (deltas, not documents — docs/mcp-bridge.md, roadmap item 50). None
         # means "no uncommitted edits": the working source re-derives from
@@ -118,6 +135,13 @@ class Session:
         # enforced at load/swap as a machine-checked invariant instead of a
         # review convention. None = no sandbox (the default).
         self.sandbox = None
+        # the bound operator identity (roadmap item 55): a `revl.mcp.operator.
+        # Operator` whose grants bound which management verbs this session may
+        # call, over which components and realms. None = no profile: every verb
+        # is ungated (today's root-over-transport), so nothing breaks. Set at
+        # serve time from `--operator-profile`; the gate lives in the mcp verb
+        # dispatch (`revl.mcp.server`), not here — this is only the binding.
+        self.operator = None
 
     # -- plumbing ----------------------------------------------------------
 
@@ -161,7 +185,9 @@ class Session:
         self.draft = None
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
+        self._history = []
         self._run(self._driver._load(ir, self._prepare_module(ir)))
+        self._record_generation()
         return self.state(drain=True) | ({"recording": True} if record else {})
 
     def _enforce_sandbox(self, ir: dict) -> None:
@@ -260,6 +286,7 @@ class Session:
                     f"intact). Dropping the state would be residue, so admission "
                     f"refuses it (docs/service-compat.md, state-compat gate)."
                 ) from None
+        self._record_generation()
         state = self.state(drain=True)
         if migration is not None:
             state["migration"] = migration
@@ -352,6 +379,210 @@ class Session:
         # migration back), so it stays byte-identical to the pre-item-10 path.
         return self.swap(restored, origin=restored_origin,
                          migrate="respawn") | {"rolledBack": True}
+
+    # -- generation history and undo (roadmap item 65) ---------------------
+
+    def _record_generation(self, readmittable: bool = True) -> None:
+        """Append the now-live generation to the retained history.
+
+        The entry is a *re-admittable snapshot* (item 15's persist bundle) plus
+        the compiled IR — the snapshot is what an undo replays through the gate,
+        the IR is what the dossier reads its boundary surface off. A generation
+        without recorded sources snapshots to None: it stays in the history for
+        the count and the crossing report, but an undo *to* it is refused rather
+        than rehydrated (docs/generation-history.md).
+
+        `readmittable=False` forces the snapshot to None even when an origin is
+        present — the apply path uses it, because a plan-artifact apply leaves
+        `origin` reproducing the *pre-apply* sources, which must never stand in
+        as the post-apply generation's re-admission bundle."""
+        from .persist import build_snapshot  # noqa: PLC0415 — lazy
+
+        # best-effort: a files-based origin materializes by reading the source
+        # off disk, which can fail if the file has since moved (e.g. a session
+        # restored from a snapshot whose original file is gone). History capture
+        # must never break the change it is recording, so a snapshot that cannot
+        # be built leaves the entry present but not re-admittable (snapshot=None).
+        snap = None
+        if readmittable:
+            try:
+                snap = build_snapshot(self.ir, self.origin, self.config,
+                                      self.recorder is not None)
+            except OSError:
+                snap = None
+        self._history.append({
+            "generation": self._generation,
+            "snapshot": snap,
+            "ir": self.ir,
+            "origin": self.origin,
+        })
+        # bounded retention: the oldest generations age out. `undo --to` below
+        # the floor is refused (see `undo`) instead of reaching for one gone.
+        if len(self._history) > HISTORY_LIMIT:
+            del self._history[:-HISTORY_LIMIT]
+
+    def history_document(self) -> dict:
+        """The retained history as a portable document: the generation numbers
+        and their re-admittable snapshots. A consumer (the `revl undo` CLI)
+        replays it into a fresh session to reach the same live history, then
+        undoes. Versioned in the additive-only spirit of the interchange
+        format — gate on the MAJOR, ignore unknown members."""
+        return {
+            "kind": "revl.generation-history",
+            "schemaVersion": "1.0",
+            "current": self._generation,
+            "generations": [
+                {"generation": e["generation"], "snapshot": e["snapshot"]}
+                for e in self._history
+            ],
+        }
+
+    def _component_names(self, ir: dict | None) -> list[str]:
+        return [c.get("name") for c in (ir or {}).get("components") or []]
+
+    def _undo_dossier(self, current: dict, target: dict) -> dict:
+        """The undo plan/dossier — computed like any other change (item 65).
+
+        An undo is a swap to the target generation's shape, so its delta is
+        `plan.plan(target sources vs the running IR)`: what unloads, what
+        provisions/components drop (item 53's honesty, in reverse), the reactive
+        cascade. On top of that it enumerates the boundary crossings the interim
+        generations made that no undo can un-emit — compensation is not
+        inversion (paper §6.1; docs/erase-report.md)."""
+        from ..plan import plan as build_plan  # noqa: PLC0415 — read-only reuse
+        from ..audit_diff import audit_report, crossings  # noqa: PLC0415
+
+        sources = target["snapshot"]["sources"]
+        # components the running composition has but the target lacks are
+        # *withdrawn* by the undo — name them via `replacing` so the plan's
+        # teardown/withdrawn buckets are accurate for a whole-composition revert.
+        running_names = set(self._component_names(self.ir))
+        target_names = set(self._component_names(target["ir"]))
+        replacing = tuple(sorted(running_names - target_names))
+        p = build_plan(source=sources.get("source"), files=sources.get("files"),
+                       modules=sources.get("modules"), manifest=self.ir,
+                       replacing=replacing)
+
+        # what boundary crossings the interim generations made that no undo can
+        # un-emit. Every generation strictly after the target, up to and
+        # including the current one, was live and could reach the boundary; the
+        # union of their G8 surfaces is exposure the code-undo cannot reverse.
+        target_cross = crossings(audit_report(target["ir"]))
+        interim: list[dict] = []
+        union: set[str] = set()
+        for entry in self._history:
+            if entry["generation"] > target["generation"]:
+                cr = crossings(audit_report(entry["ir"]))
+                union |= cr
+                interim.append({"generation": entry["generation"],
+                                "crossings": sorted(cr)})
+        unemittable = {
+            "crossings": sorted(union),
+            "givenUp": sorted(union - target_cross),
+            "persisting": sorted(union & target_cross),
+            "interim": interim,
+            "note": (
+                "these boundary crossings were reachable by the interim "
+                "generations while they were live; undoing their code cannot "
+                "un-emit what already left the system (compensation is not "
+                "inversion — paper §6.1, docs/erase-report.md). `givenUp` are "
+                "reaches the target generation no longer has: authority "
+                "relinquished going forward, yet already exercised and possibly "
+                "observed downstream."),
+        }
+        return {
+            "fromGeneration": current["generation"],
+            "toGeneration": target["generation"],
+            "admissible": p["admissible"],
+            "unloads": p["cascade"]["withdrawn"],
+            "stateDropped": {
+                "provisions": p["provisions"]["withdrawn"],
+                "components": p["components"]["withdrawn"],
+                "teardownOrder": p["teardownOrder"],
+            },
+            "cascade": p["cascade"],
+            "provisions": p["provisions"],
+            "unemittableCrossings": unemittable,
+        }
+
+    def undo(self, to: int | None = None) -> dict:
+        """Return to an earlier generation — and be, itself, a gated change.
+
+        `undo()` returns to generation N−1; `undo(to=g)` to any still-retained
+        generation `g`. The target's sources are re-admitted through the *same*
+        gate a live swap runs (compile + admission): a target the current
+        checker rejects is refused, never bypassed — an undo that skipped the
+        gate would be the one unverified path into a running system. The report
+        computed alongside is the undo's dossier (`_undo_dossier`)."""
+        self._require()
+        if len(self._history) < 2:
+            raise SessionError(
+                "no earlier generation to undo to — only the current "
+                "generation is in the history")
+        current = self._history[-1]
+        if to is None:
+            target = self._history[-2]
+        else:
+            matches = [e for e in self._history if e["generation"] == to]
+            if not matches:
+                retained = [e["generation"] for e in self._history]
+                raise SessionError(
+                    f"generation {to} is not in the retained history "
+                    f"(retained: {retained}) — it never ran, or it has aged out "
+                    f"of the bounded history (the last {HISTORY_LIMIT} kept)")
+            target = matches[-1]
+            if target is current:
+                raise SessionError(
+                    f"generation {to} is already the running generation — "
+                    f"nothing to undo")
+        if target["snapshot"] is None:
+            raise SessionError(
+                f"generation {target['generation']} was loaded without recorded "
+                f"sources, so it cannot be re-admitted — undo replays the "
+                f"target's sources through the gate, and there are none to "
+                f"replay (it is not rehydrated past the gate)")
+
+        # the dossier is computed against the *pre-undo* live composition
+        dossier = self._undo_dossier(current, target)
+
+        # the gate: re-admit the target's sources exactly as a swap would. A
+        # rejected recompile is a *result* (the running system is untouched),
+        # not a crash — the undo never bypasses admission.
+        from ..errors import RevlError  # noqa: PLC0415
+        from ..diagnostics import classify  # noqa: PLC0415
+        from .persist import _origin_from, _recompile  # noqa: PLC0415
+
+        try:
+            target_ir = _recompile(target["snapshot"]["sources"])
+        except RevlError as error:
+            diag = classify(error)
+            return {
+                "undone": False,
+                "refused": True,
+                "toGeneration": target["generation"],
+                "reason": (
+                    f"generation {target['generation']} no longer admits — "
+                    f"{diag.get('message', str(error))}. The running composition "
+                    f"is untouched: an undo is a gated change, and a target the "
+                    f"current checker rejects is refused (never a bypass)."),
+                "diagnostics": [diag],
+                "dossier": dossier,
+                "state": self.state(drain=True),
+            }
+
+        # execute: the undo IS an admitted swap through the same gate. `swap`
+        # enforces the sandbox and appends the resulting generation to the
+        # history, so an undo can itself be undone (git-revert of a git-revert).
+        state = self.swap(
+            target_ir, origin=_origin_from(target["snapshot"]["sources"]),
+            migrate="respawn")
+        return {
+            "undone": True,
+            "toGeneration": target["generation"],
+            "generation": self._generation,
+            "dossier": dossier,
+            **state,
+        }
 
     # -- apply a plan artifact (docs/apply.md) -----------------------------
 
@@ -533,6 +764,14 @@ class Session:
             }
 
         self.previous = None  # a completed apply is not a swap to roll back to
+        # an apply is an admitted change, so it is a generation in the history
+        # (item 65). It was executed from a plan *artifact* (an IR, not sources),
+        # so it has no source origin to re-admit its result: the entry snapshots
+        # to None, which means an undo *to* this generation is refused honestly
+        # rather than rehydrated. Undoing *past* it (to an earlier source-backed
+        # generation) still works, and its boundary crossings are enumerated.
+        self._generation += 1
+        self._record_generation(readmittable=False)
         return {
             "applied": True,
             "steps": steps,
@@ -584,6 +823,7 @@ class Session:
         self.previous_origin = None
         self.draft = None
         self._generation = 0
+        self._history = []
         return {
             "unloaded": True,
             "noResidue": all(checks.values()),
@@ -734,6 +974,9 @@ class Session:
             "providedKeys": sorted(driver._namespace()),
             "canRollback": self.previous is not None,
             "recording": self.recorder is not None,
+            "generation": self._generation,
+            "history": [e["generation"] for e in self._history],
+            "canUndo": len(self._history) >= 2,
             **({"trace": driver.drain_events()} if drain else {}),
         }
 

@@ -72,12 +72,17 @@ FN_HEAD = "->"
 
 
 def _split_top_level(text: str) -> list[str]:
-    """Split on commas outside `[...]` and `(...)`."""
+    """Split on commas outside `[...]`, `(...)` and `{...}`.
+
+    The brace clause keeps a *structural record type* (`{x: Int, y: Int}`,
+    item 71) atomic when it appears as a field value or type argument, so a
+    nested record shape is not split at its own comma.
+    """
     parts, depth, start = [], 0, 0
     for i, ch in enumerate(text):
-        if ch in "[(":
+        if ch in "[({":
             depth += 1
-        elif ch in "])":
+        elif ch in "])}":
             depth -= 1
         elif ch == "," and depth == 0:
             parts.append(text[start:i].strip())
@@ -140,6 +145,51 @@ def parse_type(name: str | None) -> tuple[str | None, list[str]]:
         return name, []
     head, _, rest = name.partition("[")
     return head, _split_top_level(rest[:-1])
+
+
+# ------------------------------------------------- structural record types
+#
+# An anonymous record literal (`let a = { h: "x" }`) has no nominal name to look
+# up, so it used to infer as `None` — and an update `{ a | f = e }` on it escaped
+# field checking entirely (the wrong-answer-class gap fenced in
+# docs/contract-errata.md, "Record updates on receivers with no named type").
+# It now infers a STRUCTURAL record type, spelled `{field: Type, ...}` with the
+# fields in canonical (sorted) order, so the update is field-checked against the
+# literal's own shape.
+#
+# This spelling lives ONLY inside the checker. Like item 11's `?T` widening
+# marker it never reaches the IR: the `record`/`record_update` IR nodes carry no
+# type, an inferred `let` type is not emitted, and the emitted `types` table is
+# nominal (it filters reserved/synthetic keys). At any *declared* boundary the
+# structural type unifies field-wise with the nominal record it meets — the
+# `List[Never]` bottom rule falls straight out of the elementwise `compatible`
+# recursion, since `Never` is already a wildcard there. `render_type` carries the
+# shape verbatim (stripping only the `?T` marker), so a diagnostic reads it back
+# as the author wrote it.
+
+def structural_fields(name: str | None) -> dict[str, str | None] | None:
+    """`"{a: Int, h: Str}"` -> `{"a": "Int", "h": "Str"}`; None if not one."""
+    if not name:
+        return None
+    name = name.strip()
+    if not (name.startswith("{") and name.endswith("}")):
+        return None
+    inner = name[1:-1].strip()
+    if not inner:
+        return {}
+    fields: dict[str, str | None] = {}
+    for part in _split_top_level(inner):
+        key, sep, val = part.partition(":")
+        if not sep:
+            continue
+        fields[key.strip()] = val.strip() or None
+    return fields
+
+
+def format_structural(fields: dict[str, str | None]) -> str:
+    """Canonical spelling of a structural record type (fields sorted)."""
+    body = ", ".join(f"{k}: {fields[k] or 'Any'}" for k in sorted(fields))
+    return "{" + body + "}"
 
 
 # builtin parametric type heads and their exact arity
@@ -339,6 +389,22 @@ def compatible(expected: str | None, actual: str | None) -> bool:
     if _is_wildcard(expected) or _is_wildcard(actual):
         return True
     if expected == actual:
+        return True
+    e_struct = structural_fields(expected)
+    a_struct = structural_fields(actual)
+    if e_struct is not None and a_struct is not None:
+        # Two structural records unify field-wise: the same field set, each
+        # value type compatible (the `List[Never]` bottom rule is the
+        # elementwise recursion, `Never` being a wildcard).
+        if set(e_struct) != set(a_struct):
+            return False
+        return all(compatible(e_struct[k], a_struct[k]) for k in e_struct)
+    if e_struct is not None or a_struct is not None:
+        # A structural record meets a NOMINAL one only at a declared boundary,
+        # where `check_ast` has the `types` table to resolve the nominal's
+        # fields and refuses a definite mismatch by name. Here, with no table
+        # to resolve, stay permissive exactly as the pre-fix anonymous `None`
+        # did — a structural type is never a false rejection on its own.
         return True
     ehead, eargs = parse_type(expected)
     ahead, aargs = parse_type(actual)
@@ -938,6 +1004,14 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
                                    alt=f"?.{expr.name}")
         if expr.name == "length" and (thead in _SIZED_HEADS):
             return "Int"
+        struct = structural_fields(target)
+        if struct is not None:
+            # a read through an anonymous record binding is checked too (item 71)
+            if filename and expr.name not in struct:
+                raise RevlError(filename, line,
+                                f"`{render_type(target)}` has no field `{expr.name}` "
+                                f"(fields: {', '.join(sorted(struct)) or 'none'})")
+            return struct.get(expr.name)
         spec = types.get(target or "")
         if spec is not None and spec.get("kind") == "record":
             fields = spec.get("fields", {})
@@ -1032,9 +1106,16 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             item = t if item is None else join(item, t)
         return f"List[{item}]" if item else "List[Never]"
     if isinstance(expr, ExprRecord):
-        for _, value in expr.fields:
-            infer_ast(value, tenv, types, filename)
-        return None  # anonymous; named via check_ast against an expected record
+        # An anonymous literal infers a STRUCTURAL record type from its fields
+        # (item 71). At a declared boundary `check_ast` still names the literal
+        # against the expected nominal record directly; this type is what lets
+        # an update `{ a | f = e }` on a `let`-bound literal be field-checked
+        # instead of escaping. A field whose own type is unknown degrades to
+        # `Any` in the shape, keeping the record's other fields checkable.
+        shape: dict[str, str | None] = {}
+        for name, value in expr.fields:
+            shape[name] = infer_ast(value, tenv, types, filename)
+        return format_structural(shape)
     if isinstance(expr, ExprRecordUpdate):
         # docs/records.md §3: `base` must carry a record type; every updated
         # field must exist there and its replacement must match the declared
@@ -1044,12 +1125,21 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             for _, value in expr.updates:
                 infer_ast(value, tenv, types, filename)
             return None
+        # A structural base (an anonymous `let`-bound literal, item 71) is
+        # field-checked against its own shape — the same three §3 rules, named
+        # against the structural type. This is the path that used to escape.
+        struct = structural_fields(base_t)
         spec = types.get(base_t)
+        if struct is not None:
+            declared = struct
+        elif spec is not None and spec.get("kind") == "record":
+            declared = spec.get("fields", {})
+        else:
+            declared = None
         # Without a filename this is the non-raising oracle: report the type
         # when it is soundly known, otherwise bow out.
         if filename is None:
-            if spec is not None and spec.get("kind") == "record":
-                declared = spec.get("fields", {})
+            if declared is not None:
                 for name, value in expr.updates:
                     if name in declared:
                         infer_ast(value, tenv, types, filename)
@@ -1059,6 +1149,18 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             for _, value in expr.updates:
                 infer_ast(value, tenv, types, filename)
             return None
+        if declared is not None and struct is not None:
+            for name, value in expr.updates:
+                if name not in declared:
+                    raise RevlError(
+                        filename, line,
+                        f"record update names `{name}`, which is not a field of "
+                        f"`{render_type(base_t)}`",
+                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                    )
+                check_ast(value, declared.get(name), tenv, types, filename,
+                          f"update of field `{name}`")
+            return base_t
         if spec is None or spec.get("kind") != "record":
             raise RevlError(
                 filename, line,
@@ -1426,12 +1528,25 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         # docs/records.md §3: the result is `base`'s type, so the expectation
         # is checked against that; the field updates are checked per-field.
         base_t = infer_ast(expr.base, tenv, types, filename)
+        struct = structural_fields(base_t)
         spec = types.get(base_t or "")
-        if spec is not None and spec.get("kind") == "record":
+        if struct is not None:
+            declared = struct  # anonymous base: field-check against its shape (item 71)
+        elif spec is not None and spec.get("kind") == "record":
             declared = spec.get("fields", {})
+        else:
+            declared = None
+        if declared is not None:
             for name, value in expr.updates:
+                if struct is not None and name not in declared:
+                    raise RevlError(
+                        filename, line,
+                        f"record update names `{name}`, which is not a field of "
+                        f"`{render_type(base_t)}`",
+                        hint=f"fields: {', '.join(f'`{f}`' for f in sorted(declared))}",
+                    )
                 check_ast(value, declared.get(name), tenv, types, filename,
-                          f"update of field `{name}` of `{base_t}`")
+                          f"update of field `{name}` of `{render_type(base_t)}`")
         if base_t and not compatible(expected, base_t):
             raise mismatch(filename, line, where, expected,
                            render_type(base_t) or base_t)
@@ -1446,6 +1561,30 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         check_ast(expr.tail, expected, inner, types, filename, where)
         return
     actual = infer_ast(expr, tenv, types, filename)
+    struct = structural_fields(actual)
+    if struct is not None and spec is not None and spec.get("kind") == "record":
+        # An anonymous record literal flowing into a declared nominal record is
+        # the boundary where the structural type unifies with the nominal
+        # (item 71): the field set must match and each field type must be
+        # compatible (the `List[Never]` bottom rule is the per-field recursion).
+        declared = spec.get("fields", {})
+        missing = sorted(set(declared) - set(struct))
+        extra = sorted(set(struct) - set(declared))
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"missing {', '.join(f'`{m}`' for m in missing)}")
+            if extra:
+                parts.append(f"unknown {', '.join(f'`{e}`' for e in extra)}")
+            raise RevlError(filename, line,
+                            f"{where} expects `{expected}`, but the record has "
+                            f"{'; '.join(parts)}")
+        for name, ftype in struct.items():
+            if ftype and not compatible(declared.get(name), ftype):
+                raise mismatch(filename, line,
+                               f"field `{name}` of `{expected}`",
+                               declared.get(name), ftype)
+        return
     if actual and not compatible(expected, actual):
         raise mismatch(filename, line, where, expected, actual)
 

@@ -1,7 +1,11 @@
-"""Regenerate golden/user_cache.ts from the reference IR.
+"""Regenerate the TypeScript goldens from their reference IR.
 
-Uses the repo copy (../../examples/user_cache.ir.json) when this backend sits
-inside the revl repo, falling back to the vendored byte-identical fixture.
+`user_cache.ts` uses the repo copy (../../examples/user_cache.ir.json) when
+this backend sits inside the revl repo, falling back to the vendored
+byte-identical fixture. `fr3_json.ts` is the FR-3 stdlib JSON module
+(stdlib/json.rvl) emitted from a committed fixture; it is `tsc`-validated by
+`npm run typecheck` (tsconfig includes golden/**), which pins the `Any` ->
+`any` mapping (roadmap 79) against a bare-`Any` regression.
 """
 
 import json
@@ -21,3 +25,9 @@ ir = json.loads(source.read_text(encoding="utf-8"))
 out = BACKEND / "golden" / "user_cache.ts"
 out.write_text(emit(ir), encoding="utf-8")
 print(f"regenerated {out} from {source}")
+
+fr3_ir = BACKEND / "tests" / "fixtures" / "fr3_json.ir.json"
+fr3_out = BACKEND / "golden" / "fr3_json.ts"
+fr3_out.write_text(emit(json.loads(fr3_ir.read_text(encoding="utf-8"))),
+                   encoding="utf-8")
+print(f"regenerated {fr3_out} from {fr3_ir}")

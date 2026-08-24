@@ -1,0 +1,52 @@
+// REJECTED — an emission reached through a spawn handle must still be marked
+// `emit` (G4, docs/design-v2-instances.md).
+//
+// `w.task.run(...)` reads the `task` provision off the spawn handle `w` and
+// calls its `run` operation. `Task.run` is declared `emission` on the service,
+// so the call crosses the system boundary exactly as a required-service
+// emission (`net.send`) does — it cannot be reverted, and the `emit` marker is
+// what makes that visible at the call site. Reaching the emission through a
+// handle instead of a `requires` key does not exempt it: an unmarked crossing
+// is refused, the same as `let r = net.send(...)` would be.
+//
+// (A supervisor that *does* mark it — `emit w.task.run(...)` from an
+// `emission`-declared method — is accepted; the boundary is marked one level
+// up. This fixture is the missing-marker form.)
+//
+// expected error:
+//   call to emission `w.task.run` must be marked `emit` (G4)
+
+service Net {
+  emission[net] fn send(msg: Str) -> Int
+}
+
+service Task {
+  emission[net] fn run(prompt: Str) -> Int
+  fn status() -> Int
+}
+
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) {
+      emit net.send(prompt)
+      return 1
+    }
+    fn status() = 0
+  }
+}
+
+service Sup {
+  emission fn go(prompt: Str) -> Int
+}
+
+// `go` is declared `emission`, so spawning the emitting Worker is admitted —
+// but the emission call through the handle is still written without `emit`.
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = w.task.run(prompt)
+      return r
+    }
+  }
+}

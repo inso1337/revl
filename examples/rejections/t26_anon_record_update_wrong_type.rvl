@@ -1,0 +1,14 @@
+// REJECTED — item 71: an update on an anonymous record literal is field-checked
+// against the literal's own STRUCTURAL shape. `a` is `{ h: Str }`, so replacing
+// `h` with an Int is refused, naming the field-type guarantee. This used to
+// escape checking entirely (docs/contract-errata.md, "Record updates on
+// receivers with no named type" — now RESOLVED).
+//
+// expected error:
+//   update of field `h` expects `Str`, got `Int`
+
+fn main() -> Int {
+  let a = { h: "x" }
+  let b = { a | h = 5 }
+  return 0
+}

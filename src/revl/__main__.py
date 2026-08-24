@@ -159,6 +159,23 @@ def _boundary(ir: dict) -> dict:
                 if "*" in fn_caps:
                     unknown_dispatch = True
 
+        # First-class launder (G8 item 24): a host extern reached ONLY as a
+        # value handed to a dispatcher — `indirect(ship, a)` — is named in no
+        # call position, so the walk above never sees it. It is exactly the
+        # reach the G4 fixed point already tracks to keep the read-only hint
+        # sound: `_calls_in`'s value channel records the escaping callable, and
+        # `fn_caps_map` says which boundaries that value carries. Fold that same
+        # first-class reach onto the surface so a laundered `host:` crossing is
+        # enumerated identically to a direct call (audit --diff can then see it).
+        from .emission_analysis import _calls_in  # noqa: PLC0415 — lazy, like plan
+        value_refs: set = set()
+        _calls_in(comp.get("body") or [], set(), values=value_refs)
+        for ref in value_refs:
+            ref_caps = fn_caps_map.get(ref) or set()
+            host |= {c for c in ref_caps if c != "*"}
+            if "*" in ref_caps:
+                unknown_dispatch = True
+
         if unknown_dispatch:
             host.add(_UNKNOWN_DISPATCH)
 
@@ -260,6 +277,34 @@ def _run_mcp(args) -> int:
     from .mcp.server import serve
 
     if args.mcp_command == "serve":
+        # operator capabilities (docs/operator-capabilities.md, item 55): bind
+        # the served session to one operator identity, so its management verbs
+        # are scoped by that operator's grants. No profile => ungated (today's
+        # root-over-transport), so this is opt-in for networked/multi-operator
+        # use.
+        if getattr(args, "operator_profile", None):
+            from .mcp.operator import ProfileError, load_profile
+            from .mcp.server import SESSION
+
+            try:
+                registry = load_profile(args.operator_profile)
+            except (OSError, ProfileError) as error:
+                print(f"error: cannot load operator profile "
+                      f"{args.operator_profile}: {error}", file=sys.stderr)
+                return 1
+            token = getattr(args, "operator", None)
+            operator = registry.get(token) if token else registry.sole()
+            if operator is None:
+                if token:
+                    print(f"error: operator profile names no operator {token!r} "
+                          f"(known: {', '.join(sorted(registry.operators)) or 'none'})",
+                          file=sys.stderr)
+                else:
+                    print("error: the operator profile declares multiple "
+                          "operators — pass --operator to select which identity "
+                          "this session runs as", file=sys.stderr)
+                return 1
+            SESSION.operator = operator
         # composition persistence (docs/persistence.md): a snapshot passed on
         # the command line is re-admitted through the same gate a live restore
         # runs — a component the current checker rejects aborts the boot loudly
@@ -549,6 +594,173 @@ def _run_apply(args) -> int:
     return 0 if report["applied"] else 1
 
 
+def _run_undo(args) -> int:
+    """`revl undo history.json [--to N]` — operator undo for a running system
+    (roadmap item 65, docs/generation-history.md).
+
+    A history document (`revl.generation-history`, produced by the session's
+    `history_document()`) is a list of generation snapshots. This replays them
+    into a *fresh* session — load the first, swap the rest — to reach the same
+    live generation history, then performs the undo through the gate. `--to`
+    names a recorded generation; omit it to undo to N−1. The undo is itself an
+    admitted, gated change: a target the current checker rejects is refused and
+    the composition is left untouched. Prints the dossier, tears down."""
+    from .mcp import persist  # noqa: PLC0415
+    from .mcp.session import Session, SessionError  # noqa: PLC0415
+
+    try:
+        with open(args.history, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.history}: {error}", file=sys.stderr)
+        return 1
+    if not isinstance(doc, dict) or doc.get("kind") != "revl.generation-history":
+        print(f"error: {args.history}: expected a revl.generation-history document "
+              f"(from the session's history export)", file=sys.stderr)
+        return 1
+    gens = doc.get("generations") or []
+    if len(gens) < 2:
+        print("error: the history has fewer than two generations — nothing to "
+              "undo to", file=sys.stderr)
+        return 1
+
+    # translate a recorded generation number to the position it will hold in the
+    # replayed session (which numbers its generations 1..k as it boots them).
+    to_session = None
+    if args.to is not None:
+        idx = next((i for i, g in enumerate(gens)
+                    if g.get("generation") == args.to), None)
+        if idx is None:
+            recorded = [g.get("generation") for g in gens]
+            print(f"error: generation {args.to} is not in the history document "
+                  f"(recorded: {recorded})", file=sys.stderr)
+            return 1
+        to_session = idx + 1
+
+    session = Session()
+    try:
+        for i, gen in enumerate(gens):
+            snap = gen.get("snapshot")
+            if not snap or not snap.get("sources"):
+                print(f"error: generation {gen.get('generation')} has no "
+                      f"re-admittable snapshot — the history cannot be replayed",
+                      file=sys.stderr)
+                if session.loaded:
+                    session.unload()
+                return 1
+            ir = persist._recompile(snap["sources"])
+            origin = persist._origin_from(snap["sources"])
+            config = (snap.get("meta") or {}).get("config")
+            if i == 0:
+                session.load(ir, config, origin=origin)
+            else:
+                session.swap(ir, origin=origin)
+        result = session.undo(to_session)
+    except (SessionError, RevlError) as error:
+        print(f"refused: {error}", file=sys.stderr)
+        if session.loaded:
+            session.unload()
+        return 1
+
+    _print_undo(result, args)
+    unloaded = session.unload()
+    if not getattr(args, "json", False):
+        print(f"\ntorn down — no residue: {unloaded['noResidue']}")
+    return 0 if result.get("undone") else 1
+
+
+def _print_undo(result: dict, args) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return
+    dossier = result.get("dossier") or {}
+    crossings = dossier.get("unemittableCrossings") or {}
+    if not result.get("undone"):
+        print(f"REFUSED: {result.get('reason')}")
+        print("the running composition is untouched — an undo is a gated change.")
+    else:
+        print(f"undone: generation {dossier.get('fromGeneration')} -> "
+              f"{result.get('toGeneration')} (now running as generation "
+              f"{result.get('generation')}), re-admitted through the gate.")
+    unloads = dossier.get("unloads") or []
+    print(f"\nunloads: {', '.join(unloads) or '—'}")
+    dropped = (dossier.get("stateDropped") or {}).get("provisions") or []
+    print(f"state dropped (provisions withdrawn): "
+          f"{', '.join(p['key'] for p in dropped) or '—'}")
+    given_up = crossings.get("givenUp") or []
+    print(f"\ninterim boundary crossings that NO undo can un-emit "
+          f"(compensation is not inversion — §6.1):")
+    for token in crossings.get("crossings") or []:
+        mark = "  ! " if token in set(given_up) else "  ~ "
+        note = "  (given up going forward, already exercised)" \
+            if token in set(given_up) else "  (target still reaches this)"
+        print(f"{mark}{token}{note}")
+    if not (crossings.get("crossings") or []):
+        print("  (none — the interim generations crossed no boundary)")
+
+
+def _run_contract(args) -> int:
+    """`revl contract` — federated contracts between sovereign compositions
+    (docs/federation.md, roadmap item 58).
+
+    `export` projects composition A's compiled IR into its consumer surface
+    (the pinnable contract of what A requires from a provider). `check` runs a
+    provider B's current manifest against a pinned surface through the same
+    §5/drift predicate `revl version` uses (`version.diff_services`): a MAJOR
+    drift is a contract break, and the gate exits nonzero naming it.
+    """
+    from .federation import check, consumer_surface, render
+
+    if args.contract_command == "export":
+        try:
+            ir = compile_files(args.files)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        surface = consumer_surface(ir, consumer=args.consumer)
+        print(json.dumps(surface, indent=2))
+        return 0
+
+    # check: --consumer is a pinned surface artifact; --provider is either a
+    # single compiled manifest .json or one/more .rvl sources compiled here.
+    try:
+        with open(args.consumer, encoding="utf-8") as handle:
+            consumer_doc = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.consumer}: {error}", file=sys.stderr)
+        return 1
+
+    provider_paths = list(args.provider)
+    if len(provider_paths) == 1 and provider_paths[0].endswith(".json"):
+        try:
+            with open(provider_paths[0], encoding="utf-8") as handle:
+                provider_ir = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read {provider_paths[0]}: {error}",
+                  file=sys.stderr)
+            return 1
+        provider_label = provider_paths[0]
+    else:
+        try:
+            provider_ir = compile_files(provider_paths)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        provider_label = "the provider"
+
+    try:
+        result = check(consumer_doc, provider_ir)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render(result, args.consumer, provider_label))
+    return 0 if result["satisfied"] else 1
+
+
 def _print_apply(report: dict, args) -> None:
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2))
@@ -684,6 +896,73 @@ def _run_why(args) -> int:
     return 0
 
 
+def _run_dash(args) -> int:
+    """`revl dash <files...>` — the supervisor's cockpit (item 63). A READ-ONLY
+    live view: the dependency graph (realms, seams), the causal trace, and the
+    pending-decisions queue (widening acks, policy exceptions) with evidence.
+
+    It sources everything from the read surfaces — `query` for the graph,
+    `why_runtime` for the trace, `audit_diff`/`policy` for the queue — and
+    mutates nothing. Live vs recorded is a matter of which optional inputs are
+    given: a `--live-state` snapshot colors the graph as it stands now; a
+    `--trace`/`--timeline` renders a recorded run with no runtime at all."""
+    from . import dash, why_runtime  # noqa: PLC0415
+
+    def _load_json(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    trace = timeline = live_state = prev_audit = policy = None
+    try:
+        if args.trace:
+            trace = why_runtime.read_trace(args.trace)
+        if args.timeline:
+            timeline = _load_json(args.timeline)
+        if args.live_state:
+            live_state = _load_json(args.live_state)
+        if args.against:
+            prev_audit = _load_json(args.against)
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read dash input: {error}", file=sys.stderr)
+        return 1
+    if args.policy:
+        from .policy import load_policy, PolicyError  # noqa: PLC0415
+        try:
+            policy = load_policy(args.policy)
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot read policy {args.policy}: {error}",
+                  file=sys.stderr)
+            return 1
+
+    board = dash.Dashboard(
+        ir, live_state=live_state, trace=trace, timeline=timeline,
+        prev_audit=prev_audit, accepted=set(args.accept),
+        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope)
+
+    if args.json:
+        print(json.dumps(board.snapshot(), indent=2))
+        return 0
+
+    color = (not args.no_color) and sys.stdout.isatty()
+    if args.watch:
+        import time  # noqa: PLC0415
+        try:
+            while True:
+                sys.stdout.write("\033[2J\033[H" if color else "\n")
+                print(board.render(color=color), flush=True)
+                time.sleep(max(0.1, args.interval))
+        except KeyboardInterrupt:
+            return 0
+    print(board.render(color=color))
+    return 0
+
+
 def _run_recover(args) -> int:
     """`revl recover --wal FILE` — crash recovery over a write-ahead log
     (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
@@ -806,6 +1085,37 @@ def main(argv: list[str] | None = None) -> int:
     version_cmd.add_argument("--json", action="store_true",
                              help="machine-readable derivation")
 
+    contract = sub.add_parser(
+        "contract",
+        help="federated contracts between sovereign compositions: export a "
+             "consumer surface, or check a provider against a pinned one "
+             "(docs/federation.md)")
+    contract_sub = contract.add_subparsers(dest="contract_command", required=True)
+    contract_export = contract_sub.add_parser(
+        "export",
+        help="project composition A's compiled IR into its consumer surface — "
+             "the pinnable contract of everything A requires from a provider")
+    contract_export.add_argument("files", nargs="+")
+    contract_export.add_argument(
+        "--consumer", metavar="LABEL", default=None,
+        help="a name for the consumer, echoed into the artifact and its "
+             "verdicts (defaults to none)")
+    contract_check = contract_sub.add_parser(
+        "check",
+        help="does a provider's current manifest still satisfy a consumer's "
+             "pinned surface? FAILs (nonzero) on a §5 drift that breaks it")
+    contract_check.add_argument(
+        "--consumer", metavar="A-pinned.json", required=True,
+        help="the consumer surface a provider must satisfy (produce it with "
+             "`revl contract export <A-sources>`)")
+    contract_check.add_argument(
+        "--provider", metavar="B", required=True, nargs="+",
+        help="the provider's current composition: its .rvl sources (compiled "
+             "here), or a single compiled manifest .json (`revl compile -o` / "
+             "`revl version --emit-manifest`)")
+    contract_check.add_argument("--json", action="store_true",
+                                help="machine-readable verdict")
+
     erase = sub.add_parser(
         "erase-report",
         help="right-to-erasure evidence for one realm: in-process state gone "
@@ -845,6 +1155,17 @@ def main(argv: list[str] | None = None) -> int:
                                 "of the plan's own — drift is refused if it differs "
                                 "from the plan's basis")
     apply_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+
+    undo_cmd = sub.add_parser(
+        "undo", help="operator undo: replay a generation history and return to an "
+                     "earlier generation THROUGH THE GATE (docs/generation-history.md)")
+    undo_cmd.add_argument("history", metavar="history.json",
+                          help="a revl.generation-history document (the session's "
+                               "history export): the retained generation snapshots")
+    undo_cmd.add_argument("--to", type=int, default=None, metavar="GEN",
+                          help="a recorded generation number to return to; omit to "
+                               "undo to the immediately previous generation (N−1)")
+    undo_cmd.add_argument("--json", action="store_true", help="machine-readable output")
 
 
     query = sub.add_parser(
@@ -953,6 +1274,18 @@ def main(argv: list[str] | None = None) -> int:
     mcp_serve.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                            help="re-admit a revl_snapshot document into the session "
                                 "before serving (self-evolution across a restart)")
+    # operator capabilities (docs/operator-capabilities.md, item 55): scope the
+    # session's management verbs to one operator's grants. Opt-in — omit for
+    # today's ungated behaviour.
+    mcp_serve.add_argument("--operator-profile", default=None, metavar="PROFILE",
+                           help="bound the management verbs this session may call "
+                                "(swap/unload/restore/undo/edit/load/snapshot) to "
+                                "an operator's declared grants (item 55); a DSL or "
+                                "JSON file. Omit for ungated (root over transport)")
+    mcp_serve.add_argument("--operator", default=None, metavar="TOKEN",
+                           help="which operator in the profile this session runs "
+                                "as (its session token); optional when the profile "
+                                "declares exactly one operator")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1150,6 +1483,50 @@ def main(argv: list[str] | None = None) -> int:
                           "recorded cascade; a mismatch is a defect (nonzero exit)")
     why.add_argument("--json", action="store_true", help="machine-readable output")
 
+    dash = sub.add_parser(
+        "dash",
+        help="the supervisor's cockpit (item 63): a READ-ONLY live view over a "
+             "session or a recorded run — the dependency graph (realms, seams), "
+             "the causal trace streaming, and the pending-decisions queue "
+             "(boundary-widening acks, policy exceptions) with evidence "
+             "attached (docs/dash.md)")
+    dash.add_argument("files", nargs="+",
+                      help=".rvl sources — the composition whose graph to show")
+    dash.add_argument("--trace", default=None, metavar="FILE",
+                      help="an item-27 lifecycle JSONL (`revl run --trace`): "
+                           "streams the causal pane with no live runtime")
+    dash.add_argument("--timeline", default=None, metavar="FILE",
+                      help="a replay recording JSON (a `revl_timeline` dump) for "
+                           "the effect/emission detail behind the lifecycle")
+    dash.add_argument("--live-state", default=None, metavar="FILE",
+                      help="a live-state snapshot JSON "
+                           "({generation, servedKeys, componentStates}, from a "
+                           "running session): colors the graph as it stands now")
+    dash.add_argument("--against", default=None, metavar="PREV.json",
+                      help="a previous `audit --json` document; the boundary "
+                           "additions since it become the widening queue (item 21)")
+    dash.add_argument("--accept", action="append", default=[], metavar="CROSSING",
+                      help="mark one added crossing as already acknowledged in "
+                           "the queue (the token printed after `+`; repeatable)")
+    dash.add_argument("--accept-all", action="store_true",
+                      help="mark every added crossing as acknowledged")
+    dash.add_argument("--policy", default=None, metavar="POLICY",
+                      help="a boundary policy file (item 33); its violations over "
+                           "the current audit are the policy-exception queue, "
+                           "each with its why-trace as evidence")
+    dash.add_argument("--mcp-scope", action="append", default=[], metavar="COMPONENT",
+                      help="treat COMPONENT as MCP/agent-admitted for the policy's "
+                           "`mcp` sandbox (repeatable); `*` = every component")
+    dash.add_argument("--watch", action="store_true",
+                      help="periodic-refresh loop: re-read the sources and reprint "
+                           "on an interval (read-only; Ctrl-C to stop)")
+    dash.add_argument("--interval", type=float, default=2.0, metavar="SECONDS",
+                      help="refresh interval for --watch (default: 2.0)")
+    dash.add_argument("--no-color", action="store_true",
+                      help="plain output with no ANSI color")
+    dash.add_argument("--json", action="store_true",
+                      help="print the structured model instead of the text view")
+
     args = parser.parse_args(argv)
 
     if args.command == "explain":
@@ -1163,6 +1540,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "why":
         return _run_why(args)
+
+    if args.command == "dash":
+        return _run_dash(args)
 
     if args.command == "recover":
         return _run_recover(args)
@@ -1184,6 +1564,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "apply":
         return _run_apply(args)
+    if args.command == "undo":
+        return _run_undo(args)
+
+    if args.command == "contract":
+        return _run_contract(args)
 
     # historical query mode reads a recorded run (files, not source), so it is
     # routed before the compile-from-source step every other command shares
@@ -1360,6 +1745,22 @@ def main(argv: list[str] | None = None) -> int:
                 surface = (f"emissions: {', '.join(emissions)}"
                            if emissions else "no emissions")
                 print(f"  {name} × dynamic  ({surface})")
+        instances = manifest.get("instances") or []
+        if instances:
+            # Capability attenuation per instance (item 66,
+            # docs/capability-attenuation.md): the spawner → child narrowing.
+            # A child's granted set is a checked subset of what the spawner
+            # holds; `attenuated` is the authority dropped on the way down —
+            # the least-authority proof, per lineage edge.
+            print("\ncapability attenuation (per instance — lineage narrows, "
+                  "never widens):")
+            for edge in instances:
+                holds = ", ".join(edge.get("holds") or []) or "—"
+                granted = ", ".join(edge.get("granted") or []) or "—"
+                dropped = ", ".join(edge.get("attenuated") or [])
+                tail = f"  (dropped: {dropped})" if dropped else ""
+                print(f"  {edge['parent']} → {edge['child']}: "
+                      f"holds [{holds}] ⊇ grants [{granted}]{tail}")
         if declared_externs:
             print("\nexterns (verbatim host code — unchecked inside, typed at the boundary):")
             for ext in declared_externs:

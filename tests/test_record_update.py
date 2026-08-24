@@ -171,12 +171,15 @@ def test_block_arm_var_refused_at_parse():
 
 
 
-# --- the errata fence: updates on anonymously-typed receivers are unchecked.
-# Pinned so the fence in docs/contract-errata.md cannot rot silently, and so
-# whoever closes the structural-records design item flips these to refusals.
+# --- roadmap item 71 (structural record types): an update on an anonymous
+# `let`-bound literal is now field-checked against the literal's own STRUCTURAL
+# shape, so the two cases that used to escape checking are refused. Pinned so
+# the RESOLVED entry in docs/contract-errata.md cannot rot silently.
 
 
-def test_update_on_anonymous_let_receiver_is_unchecked_for_now():
+def test_update_on_anonymous_let_wrong_field_type_is_refused():
+    # `a` is an anonymous `{ h: Str }`; replacing `h` with an Int is refused,
+    # naming the field-type guarantee — the case the errata fence pinned.
     src = '''type C = { h: Str }
 fn main() -> Int {
   let a = { h: "x" }
@@ -185,7 +188,23 @@ fn main() -> Int {
   return 0
 }
 '''
-    compile_source(src)  # accepted TODAY; refusal is the design item's exit test
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    assert "update of field `h` expects `Str`, got `Int`" in str(excinfo.value)
+
+
+def test_update_on_anonymous_let_undeclared_field_is_refused():
+    # adding a field the anonymous literal does not have is refused too, naming
+    # the structural shape it was checked against.
+    src = '''fn main() -> Int {
+  let a = { h: "x" }
+  let b = { a | missing = "y" }
+  return 0
+}
+'''
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    assert "`missing`, which is not a field of `{h: Str}`" in str(excinfo.value)
 
 
 def test_update_through_a_declared_boundary_is_checked():

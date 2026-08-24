@@ -1,0 +1,50 @@
+// Capability attenuation on spawn (docs/capability-attenuation.md, item 66).
+//
+// A multi-tenant router holds two key-value boundaries — `kv_a` and `kv_b`.
+// It spawns one worker instance per tenant. Each worker template reaches only
+// its own tenant's store, so the spawn *narrows*: the `tenant_a` instance is
+// granted `kv_a` and provably cannot reach `kv_b`, even though the router that
+// spawned it holds both. Least-authority per instance, for free.
+//
+// `revl audit examples/tenant_attenuation.rvl` shows the attenuation chain:
+//   Router → TenantAWorker: holds [kv_a, kv_b] ⊇ grants [kv_a]  (dropped: kv_b)
+//   Router → TenantBWorker: holds [kv_a, kv_b] ⊇ grants [kv_b]  (dropped: kv_a)
+
+service Store {
+  emission[kv_a] fn write_a(row: Str) -> Int
+}
+
+service StoreB {
+  emission[kv_b] fn write_b(row: Str) -> Int
+}
+
+service Worker {
+  emission fn tenant() -> Str
+}
+
+// Each worker requires exactly one tenant store and reaches only that boundary.
+component TenantAWorker requires kv_a: Store provides worker: Worker {
+  config { tag: Str }
+  provide worker {
+    fn tenant() {
+      emit kv_a.write_a("hello from a")
+      return "a"
+    }
+  }
+}
+
+component TenantBWorker requires kv_b: StoreB provides worker: Worker {
+  config { tag: Str }
+  provide worker {
+    fn tenant() {
+      emit kv_b.write_b("hello from b")
+      return "b"
+    }
+  }
+}
+
+// The router holds BOTH boundaries, but passes each instance only its own.
+component Router requires kv_a: Store requires kv_b: StoreB {
+  let a = effect spawn TenantAWorker with { tag: "a" } undo a.dispose()
+  let b = effect spawn TenantBWorker with { tag: "b" } undo b.dispose()
+}
