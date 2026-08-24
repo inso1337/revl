@@ -1,8 +1,18 @@
-// Documented upstream cordis v4 lifecycle behavior (see REPORT.md).
+// Documented cordis v4 lifecycle behavior (see REPORT.md).
 //
-// These tests assert the CURRENT upstream behavior, not the desired one, so a
-// future cordis release that fixes the underlying gaps (the territory of
-// cordiverse/cordis#39) will make them fail loudly and prompt a REPORT update.
+// Finding 1 asserts the CURRENT upstream behavior: cordis disposes a fiber's
+// top-level effects concurrently, which a future release fixing the gap (the
+// territory of cordiverse/cordis#39) will make this test fail loudly and
+// prompt a REPORT update.
+//
+// Finding 2 was the same class of gap — an undo could register an effect
+// while the fiber was merely UNLOADING (assertActive checked uid, not
+// lifecycle state), leaving permanent residue. It is FIXED in the pinned
+// fork (inso1337/cordis@harden-assert-active, see package.json): the test
+// below now pins the FIXED behavior (a red-on-fix characterization test
+// flipped green), so it fails loudly if the pin ever drifts back to the
+// upstream rc.8 guard.
+//
 // The emitted code never relies on either behavior: the emitter's
 // one-generator-per-body lowering avoids finding 1, and revl's type system
 // makes finding 2 unrepresentable in source (G5).
@@ -49,8 +59,8 @@ describe('upstream finding 1 — top-level fiber effects are disposed concurrent
   })
 })
 
-describe('upstream finding 2 — effects can be registered during teardown (G5 gap)', () => {
-  it('an undo that registers a new effect is accepted while UNLOADING and the effect leaks', async () => {
+describe('upstream finding 2 — effects registered during teardown are refused (G5 gap, fixed in the pinned fork)', () => {
+  it('an undo that registers a new effect is refused while UNLOADING, so nothing leaks', async () => {
     let leaked = false
     let leakDisposed = false
 
@@ -68,9 +78,12 @@ describe('upstream finding 2 — effects can be registered during teardown (G5 g
           yield () => {
             // Teardown registering a new effect: revl has no syntactic
             // position for this (undo bodies type in teardown mode), but
-            // upstream cordis only guards against DISPOSED fibers
-            // (assertActive checks uid, not lifecycle state), so a fiber
-            // that is merely UNLOADING accepts it.
+            // upstream cordis only guarded against DISPOSED fibers
+            // (assertActive checked uid, not lifecycle state). The pinned
+            // fork now refuses it: assertActive also checks the UNLOADING
+            // state, so this ctx.effect throws INACTIVE_EFFECT (swallowed
+            // into the fiber logger by the unload pass) instead of landing
+            // a disposer after the unload snapshot.
             ctx.effect(() => {
               leaked = true
               return () => {
@@ -88,13 +101,12 @@ describe('upstream finding 2 — effects can be registered during teardown (G5 g
 
     await provider.dispose() // withdraw svc -> Rogue deactivates -> undo runs
 
-    expect(leaked).toBe(true) // no INACTIVE_EFFECT was raised
+    expect(leaked).toBe(false) // INACTIVE_EFFECT was raised; nothing executed
     expect(rogue.state).toBe(FiberState.PENDING)
-    // The leaked effect is now held by an INACTIVE fiber...
-    expect(rogue.getEffects().length).toBeGreaterThan(0)
+    // No effect was accepted by the INACTIVE fiber: no residue to leak.
+    expect(rogue.getEffects().length).toBe(0)
 
-    // ...and even disposing the fiber never runs its disposer, because the
-    // unload already happened: permanent residue.
+    // Nothing to dispose: the unload snapshot is clean.
     await rogue.dispose()
     expect(leakDisposed).toBe(false)
   })
