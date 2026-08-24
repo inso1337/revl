@@ -15,7 +15,7 @@ before any binary compatibility.
 |---|---|---|
 | **1** | `revl export wit` — the standard WIT interface of a revl service/composition | **done** |
 | **2** | WIT `resource` support in the importer | **done** |
-| **3** | canonical-ABI emission (a standard WASI P2 **binary**) | **scalars + records + lists + variants/`Opt`/`Result` done**; service-level lowering + variant-with-aggregate-payload *params* remaining — see §5 |
+| **3** | canonical-ABI emission (a standard WASI P2 **binary**) | **scalars + records + lists + variants/`Opt`/`Result` done, for top-level `fn`s *and* service `provide` methods**; method-time effects + variant-with-aggregate-payload *params* remaining — see §5 |
 
 The claim the slices build toward: **WIT describes shape only.** A WIT
 interface says what an operation is named, what it takes, and what it returns —
@@ -186,7 +186,10 @@ Slice 3 turns this WIT plus a revl component into a **canonical-ABI WASI
 Preview 2 binary** — a component another Component Model host (wasmtime,
 wasmCloud, Spin, jco) can load without knowing it was revl. It lives in
 `backends/wasm/canonical.py`. The Str-only boundary landed first; the aggregate
-follow-on extends it to the tier's full value surface.
+follow-on extended it to the tier's full value surface; the service-level piece
+now drives a component's `provide` methods through the same boundary, so a real
+revl **service** — not just a bag of top-level pure `fn`s — crosses as a
+standard component.
 
 ### What crosses the canonical boundary
 
@@ -203,8 +206,9 @@ over the same `cabi_realloc` bump heap:
   export takes the Component Model's **flattened** core params, lifts them into
   the tier's internal in-memory values (`Int` = i64, `Bool` = i32, `Str` =
   `[u32 len][bytes]`, record = 8-byte-slot vector, list = `[u32 count][slots]`,
-  variant = `[u32 tag][payload slot]`), calls the ordinary `_V3Emitter`-lowered
-  function, then returns the result **directly** (a single-core-value scalar) or
+  variant = `[u32 tag][payload slot]`), calls the ordinary lowered function
+  (a `_V3Emitter` pure `fn`, or a `_ComponentEmitter` `provide` method — see
+  service-level below), then returns the result **directly** (a single-core-value scalar) or
   **indirectly** through a canonically-laid-out return area (anything that
   flattens to more than one core value — strings, lists, records, variants). The
   emitter never touches the frontend or the internal ABI; it bridges the two
@@ -230,11 +234,49 @@ over the same `cabi_realloc` bump heap:
   validate`s, and executes each component — skipping only when the standard
   toolchain is absent, the same policy as the tier's wasmtime-gated tests.
 
+### Service-level lowering (the final slice-3 piece)
+
+`emit_component(ir, service=…)` now presents **two** IR shapes over the same
+boundary. When `service` names a service a component **provides**, its `provide`
+methods cross:
+
+* The provider component is lowered by the heavier `_ComponentEmitter`, which
+  already emits each `provide` method as a core function over the tier's
+  **internal ABI** (`_boundary_wty`: `Int` an i64 value, every compound an i32
+  pointer) — the *same* representation a pure `fn` uses. Those method exports are
+  anonymous `provide:<key>.<op>` core funcs; `canonical.py` gives each one a
+  callable `$__prov_<key>_<op>` symbol (purely in the wrapped text — the
+  component emitter and every component golden stay untouched) and emits one
+  canonical `revl:exported/<iface>#<op>` wrapper per lowerable method that
+  delegates to it. **One wrapper shape and one lift/lower library serve both the
+  pure-`fn` and the service path**, because the internal ABI on each side is
+  identical.
+* The embedded WIT is `revl export wit`'s **service** interface, built from
+  exactly the methods presented — binary and interface agree by construction.
+* Proven under wasmtime's component model by fixture `canonical_service`
+  (service `Registry`, component `Store`): `greet("revl") -> "Hello, revl!"`,
+  `make("revl", 7) -> {name: "revl", age: 7}`, `roster("z", 2) ->
+  [{name: "z", age: 2}]`, `checked(-2) -> err("nonpositive")` — the whole Str +
+  aggregate surface, now from `provide` methods.
+
+The pure-method case is complete: any `provide` method whose whole signature is
+canonically lowerable and whose body has **no method-time effects** crosses.
+
 ### What remains
 
-* **Service-level lowering.** Only top-level pure `fn`s are presented today. A
-  `provide` method driven through the canonical boundary (the item-45 target)
-  needs the heavier component emitter and is the next follow-on.
+* **Method-time effects / dynamic acquisition in a `provide` body.** A method
+  that runs an `effect` / `let-effect` step (dynamic method-time acquisition) is
+  refused by `_ComponentEmitter` itself — the wasm accumulator fixes the
+  coeffect set at activation (a state machine), so such a method never reaches
+  the canonical wrapper. Method-time `emit` of a declared emission op, and pure
+  method bodies, do lower. Dynamic method-time acquisition wants a hosted
+  backend.
+* **A service with a method the internal ABI cannot lower at all** (e.g. a
+  `Float` parameter): because `_ComponentEmitter` must lower the *whole* provide
+  block, one such method fails the component emit even if the presented methods
+  are lowerable. A method the internal ABI *can* lower but the canonical layer
+  cannot *present* (a variant-with-aggregate-payload param, below) is the softer
+  case — it stays a `provide:` export in the core, merely off the interface.
 * **Variant/`Opt`/`Result` with an aggregate payload in *parameter* position.**
   A variant *result* crosses fine (it goes through memory), but a variant
   *param* is decoded from the Component Model's *flattened, joined* core values;
