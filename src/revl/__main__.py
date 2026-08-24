@@ -1058,10 +1058,12 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
-                     help="target runtime tier (default: py; py and rust are runnable — "
-                          "rust boots as a cordis-rs process, --once for the "
+                     help="target runtime tier (default: py; py, rust, java and "
+                          "wasm are runnable — rust/java/wasm boot as a "
+                          "separate process, --once for the "
                           "boot/teardown round-trip; a missing runtime is a skip with a "
-                          "reason and a nonzero exit)")
+                          "reason and a nonzero exit; ts and go emit but have no "
+                          "run driver yet)")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--watch", action="store_true",
