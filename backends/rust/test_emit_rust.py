@@ -640,6 +640,80 @@ def test_cargo_check_harness_loop_shape_config_push_and_callbacks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Roadmap item 101 — reuse-after-move at a service-call argument (harness
+# verification of item 93, finding #24). Item 93 cloned reused non-Copy values
+# at free-function call sites; the same move recurs when a non-Copy value is
+# passed *into a service call* — directly, or nested in a record literal that is
+# the argument — and then reused (returned). The reused value must be cloned at
+# the service-call argument / record-field site, exactly as `_by_value_arg`
+# clones a free-function argument.
+
+
+def test_service_call_record_field_clones_reused_value():
+    """The harness `mtier` shape: a provide-method passes a `Str` by value into a
+    service call inside a record literal (`{ content: answer }`) and then returns
+    it. The record field moves `answer`, so the return would use a moved value
+    (E0382) — the emitter clones the field value."""
+    src = emit.emit(compile_source(
+        "type Msg = { content: Str }\n"
+        "service Sessions { fn append(id: Str, m: Msg) -> Int }\n"
+        "service Chat { emission fn reply(id: Str, answer: Str) -> Str }\n"
+        "component Server requires sessions: Sessions provides chat: Chat {\n"
+        "  provide chat {\n"
+        "    fn reply(id, answer) {\n"
+        "      let _n = sessions.append(id, { content: answer })\n"
+        "      return answer\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ))
+    assert "Msg { content: answer.clone() }" in src
+
+
+def test_service_call_direct_arg_clones_reused_value():
+    """The same move without the record wrapper: a non-Copy value passed
+    *directly* as a service-call argument and then reused is cloned at the call
+    site (the item-93 argument clone extended to service-call arguments)."""
+    src = emit.emit(compile_source(
+        "service Log { fn write(line: Str) -> Int }\n"
+        "service Echo { emission fn echo(line: Str) -> Str }\n"
+        "component E requires log: Log provides echo: Echo {\n"
+        "  provide echo {\n"
+        "    fn echo(line) {\n"
+        "      let _n = log.write(line)\n"
+        "      return line\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ))
+    assert "self.log.write(line.clone())" in src
+
+
+@needs_cargo
+def test_cargo_check_service_call_arg_reuse(tmp_path):
+    """Real cargo gate for item 101: both the record-nested and the direct
+    service-call-argument reuse shapes `cargo check` clean — no E0382."""
+    src = emit.emit(compile_source(
+        "type Msg = { content: Str }\n"
+        "service Sessions { fn append(id: Str, m: Msg) -> Int }\n"
+        "service Log { fn write(line: Str) -> Int }\n"
+        "service Chat { emission fn reply(id: Str, answer: Str) -> Str }\n"
+        "component Server requires sessions: Sessions, log: Log provides chat: Chat {\n"
+        "  provide chat {\n"
+        "    fn reply(id, answer) {\n"
+        "      let _m = sessions.append(id, { content: answer })\n"
+        "      let _w = log.write(answer)\n"
+        "      return answer\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ))
+    assert "content: answer.clone()" in src
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 86).
 #
 # The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
