@@ -577,12 +577,14 @@ def test_ts_lifecycle_test_observes_deterministic_firing():
 
 # ------------------------------------ documented follow-on: non-reference tiers
 
-@pytest.mark.parametrize("tier", ["go", "rust"])
+@pytest.mark.parametrize("tier", ["go"])
 def test_advance_refuses_honestly_on_non_reference_tiers(tier):
-    """go/rust are a documented follow-on (alongside item 99's timer work):
-    their lifecycle emitters refuse an `advance` step by name rather than
-    silently mis-lowering it. (A timer-bearing document is already refused at
-    the `timer` step; this covers a lifecycle test that advances directly.)"""
+    """go is a documented follow-on (alongside item 99's timer work): its
+    lifecycle emitter refuses an `advance` step by name rather than silently
+    mis-lowering it. (A timer-bearing document is already refused at the `timer`
+    step; this covers a lifecycle test that advances directly.) The rust half of
+    item 112 landed — rust lowers `advance` to its Clock, see
+    `test_advance_lowers_to_the_clock_on_rust`."""
     ir = compile_source(
         "service S { fn ping() -> Int }\n"
         "component C provides s: S { provide s { fn ping() = 1 } }\n"
@@ -591,3 +593,37 @@ def test_advance_refuses_honestly_on_non_reference_tiers(tier):
     with pytest.raises(Exception) as exc:
         _emitter(tier).emit(ir)
     assert "advance" in str(exc.value)
+
+
+def test_advance_lowers_to_the_clock_on_rust():
+    """Item 112 (rust half): the rust lifecycle emitter lowers an `advance` step
+    to `revl_clock_advance(ms)` (item 99's Clock) instead of refusing it — so a
+    rust lifecycle test can drive the clock and assert timer firings, like the
+    py/ts reference tiers. A timer-arming component pulls in the clock preamble;
+    the runtime behaviour is proven end-to-end by cargo in
+    backends/rust/test_emit_rust.py::test_advance_lifecycle_runs_on_real_cordis_rs."""
+    ir = compile_source(
+        "service Counter { fn count() -> Int  emission fn tick() }\n"
+        "component TickCounter provides counter: Counter {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide counter {\n"
+        "    fn count() = store.size()\n"
+        "    fn tick() {\n"
+        "      let key = `k-${store.size()}`\n"
+        "      effect store.insert(key, \"fired\")\n"
+        "      undo   store.remove(key)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "component Heartbeat requires counter: Counter {\n"
+        "  every 10s { emit counter.tick() }\n"
+        "}\n"
+        'lifecycle test "fires" { load TickCounter  load Heartbeat  '
+        "advance 25s  let n = call counter.count()  assert n == 2  "
+        "unload Heartbeat  unload TickCounter  assert no_residue }",
+        "<t>")
+    src = _emitter("rust").emit(ir)
+    assert "revl_clock_advance(25000)" in src
+    assert "pub fn revl_clock_advance(ms: i64) -> usize" in src
+    # the clock is reset at test start so an advance sees only this test's timers
+    assert "revl_clock_reset();" in src
