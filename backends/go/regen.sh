@@ -34,6 +34,15 @@ python3 "$here/emit.py" "$here/scenarios/emitted/spawn/spawn.ir.json" spawn \
 python3 "$here/emit.py" "$here/scenarios/emitted/accessor/accessor.ir.json" accessor \
   > "$here/scenarios/emitted/accessor/gen.go"
 
+# --- timers as revertible schedules (item 57, docs/time-coeffect.md) --------
+# timer.ir.json is compiled from scenarios/emitted/timer/timer.rvl by the frozen
+# frontend (`revl compile`); the emitter lowers its `every`/`after` timer steps
+# to schedule/cancel effects on the clock coeffect (gen_exec_test.go proves
+# deterministic firing under RevlClockAdvance and unload-cancels-no-residue by
+# RUNNING on stc-go).
+python3 "$here/emit.py" "$here/scenarios/emitted/timer/timer.ir.json" timer \
+  > "$here/scenarios/emitted/timer/gen.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -52,6 +61,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/memkv/gen.go" \
            "$here/scenarios/emitted/spawn/gen.go" \
            "$here/scenarios/emitted/accessor/gen.go" \
+           "$here/scenarios/emitted/timer/gen.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

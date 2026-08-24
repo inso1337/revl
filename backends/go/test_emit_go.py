@@ -37,6 +37,34 @@ USER_CACHE = ROOT / "examples" / "user_cache.ir.json"
 TENANTS = ROOT / "backends" / "typescript" / "tests" / "fixtures" / "tenants.ir.json"
 
 
+def test_timer_lowers_to_schedule_cancel_effect():
+    """A `timer` step (item 57) lowers to a revertible schedule: the arm runs
+    inside `ctx.Effect` (the effect ledger) and the derived inverse cancels it,
+    so unload drains it like any other effect. The clock preamble is pulled in
+    only when a timer is present."""
+    ir = _load(HERE / "scenarios" / "emitted" / "timer" / "timer.ir.json")
+    src = emit.emit(ir, package="timer")
+    # periodic + one-shot both lower through the schedule helpers
+    assert "revlScheduleEvery(30000, func() {" in src
+    assert "revlScheduleAfter(300000, func() {" in src
+    # armed inside the effect ledger, cancel is the yielded inverse
+    assert "ctx.Effect(func() stc.Inverse {" in src
+    assert "return func() error { _revlTimer1.Cancel(); return nil }" in src
+    # the firing body carries the emission, audited like a top-level emit
+    assert 'log.Write("tick")' in src
+    # the clock coeffect preamble is present (and deterministic-advance driver)
+    assert "func RevlClockAdvance(ms int64) int" in src
+
+
+def test_no_timer_no_clock_preamble():
+    """A component with no timer must not carry the clock preamble (byte-stable
+    output for the frozen scenarios)."""
+    ir = _load(USER_CACHE)
+    src = emit.emit(ir, package="usercache")
+    assert "RevlClockAdvance" not in src
+    assert "RevlTimer" not in src
+
+
 def test_user_cache_shapes():
     src = emit.emit(_load(USER_CACHE))
     assert "package emitted" in src
@@ -273,12 +301,14 @@ def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
 
 
 MEMKV = HERE / "scenarios" / "emitted" / "memkv" / "memkv.ir.json"
+TIMER = HERE / "scenarios" / "emitted" / "timer" / "timer.ir.json"
 
 
 @pytest.mark.parametrize("ir_path,pkg", [
     (USER_CACHE, "usercache"),
     (TENANTS, "tenants"),
     (MEMKV, "memkv"),
+    (TIMER, "timer"),
 ])
 def test_checked_in_generated_is_current(ir_path, pkg):
     """The committed gen.go must match a fresh emit (modulo gofmt)."""

@@ -807,6 +807,64 @@ def test_runtime_scenarios_on_real_cordis_rs(tmp_path):
     assert "10 passed" in result.stdout
 
 
+# ---------------------------------------------------------------------------
+# Timers as revertible schedules (item 57, docs/time-coeffect.md). `every` /
+# `after` lower to a schedule/cancel effect on the clock coeffect: arming is the
+# acquire, cancellation the derived inverse, wired into the same `ctx.effect`
+# ledger — so unloading the component cancels the timer residue-free. The clock
+# advances only on `revl_clock_advance`, so firings are deterministic.
+
+_TIMER_SCENARIO = ROOT / "backends" / "rust" / "scenarios" / "timer.rvl"
+
+
+def test_timer_lowers_to_schedule_cancel_effect():
+    """A `timer` step lowers to a revertible schedule: armed through the schedule
+    helper, cancelled through the same `ctx.effect` disposer stack any other
+    effect uses, and the clock coeffect preamble is pulled in only when a timer
+    is present."""
+    ir = compile_files([str(_TIMER_SCENARIO)])
+    src = emit.emit(ir)
+    # periodic + one-shot both lower through the schedule helpers
+    assert "revl_schedule_every(30000, move || {" in src
+    assert "revl_schedule_after(300000, move || {" in src
+    # the derived inverse is cancellation, yielded into the effect ledger
+    assert "ctx.effect(\"Heartbeat.timer.undo\", move || { revl_cancel(" in src
+    # the firing body carries the emission, audited like a top-level emit
+    assert 'write(String::from("tick"))' in src
+    # the deterministic-advance driver and the clock preamble are present
+    assert "pub fn revl_clock_advance(ms: i64) -> usize" in src
+    # arming takes a live-resource slot, so a leaked timer surfaces as residue
+    assert "REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));" in src
+
+
+def test_no_timer_no_clock_preamble():
+    """A component with no timer must not carry the clock preamble (the frozen
+    scenarios stay byte-stable)."""
+    src = emit.emit(_ir("user_cache"))
+    assert "revl_clock_advance" not in src
+    assert "RevlTimer" not in src
+
+
+@needs_cargo
+def test_timer_runtime_on_real_cordis_rs(tmp_path):
+    """The item-57 exit criterion on the rust tier: the emitted Heartbeat driven
+    by the REAL cordis-rs runtime. Fixture in scenarios/timer.rvl, assertions in
+    scenarios/timer.rs — deterministic firing under `revl_clock_advance` and
+    unload-cancels-no-residue (the periodic drops out of `revl_clock_pending`
+    on teardown, and a further advance fires nothing)."""
+    here = Path(__file__).resolve().parent
+    ir = compile_files([str(here / "scenarios" / "timer.rvl")])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_timer_scn"), encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "timer.rs").write_text(
+        (here / "scenarios" / "timer.rs").read_text(encoding="utf-8"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "1 passed" in result.stdout
+
+
 @needs_cargo
 def test_cargo_check_compiles_v3_host_await_fail_block_effect(tmp_path):
     ir = {
