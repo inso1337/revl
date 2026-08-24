@@ -30,6 +30,7 @@ from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, report
 from . import fillspec
 from . import edit as _edit
+from . import operator as _operator
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
 from .persist import RestoreError
@@ -96,6 +97,52 @@ def _session_error(message: str, **extra) -> dict:
         "severity": "error", "code": "REVL", "category": "session",
         "message": message,
     }], **extra}
+
+
+# -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
+
+def _refused_by_operator(decision) -> dict:
+    """A management verb the bound operator may not call — refused with the
+    policy-style why-trace, the running system untouched. This is the acting
+    half of the operator profile: the same all-or-nothing refusal admission
+    gives, pointed at the management plane instead of a component's reach."""
+    from ..why import render as _render_why  # noqa: PLC0415
+    return {
+        "ok": False,
+        "authorized": False,
+        "note": "the running composition is untouched — the operator profile "
+                "refused this management action",
+        "authority": {"operator": decision.operator, "verb": decision.verb,
+                      "allowed": False},
+        "why": decision.why.to_json() if decision.why is not None else None,
+        "diagnostics": [{
+            "severity": "error", "code": "REVL", "category": "operator",
+            "message": decision.message
+                       + ("\n" + _render_why(decision.why) if decision.why else ""),
+        }],
+    }
+
+
+def _stamp_authority(payload: dict, decision) -> None:
+    """Record *who* on an authorized management action (item 27 audit story):
+    stamp the operator identity into the result, and — for a verb that returns
+    a causal trace — prepend a trace event naming the operator, so "what
+    changed and on whose authority" is one query over the same trace.
+
+    Carried in the mcp layer rather than in `why_runtime`: the operator is a
+    property of the session driving the transition, not of the lifecycle
+    transition itself, so the runtime trace stays authority-agnostic and this
+    stays additive."""
+    if not isinstance(payload, dict):
+        return
+    payload["authority"] = {"operator": decision.operator, "verb": decision.verb,
+                            "subjects": list(decision.subjects), "allowed": True}
+    trace = payload.get("trace")
+    if isinstance(trace, list):
+        trace.insert(0, {"channel": "operator", "subject": decision.operator,
+                         "detail": f"authorized `{decision.verb}`"
+                                   + (f" on {', '.join(decision.subjects)}"
+                                      if decision.subjects else "")})
 
 
 def _origin(arguments: dict) -> dict:
@@ -1156,13 +1203,23 @@ def handle(message: dict) -> dict | None:
         handler = _HANDLERS.get(name)
         if handler is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
-        try:
-            payload = handler(params.get("arguments") or {})
-        except Exception as exc:  # a tool failure is a result, not a transport error
-            payload = {"ok": False, "diagnostics": [{
-                "severity": "error", "code": "REVL", "category": "internal",
-                "message": f"{type(exc).__name__}: {exc}",
-            }]}
+        arguments = params.get("arguments") or {}
+        # operator capabilities (roadmap item 55): gate a mutating management
+        # verb against the session's bound operator before it can run. No
+        # profile bound -> ungated, today's behaviour unchanged.
+        decision = _operator.decide(SESSION, name, arguments)
+        if decision.gated and not decision.allowed:
+            payload = _refused_by_operator(decision)
+        else:
+            try:
+                payload = handler(arguments)
+            except Exception as exc:  # a tool failure is a result, not a transport error
+                payload = {"ok": False, "diagnostics": [{
+                    "severity": "error", "code": "REVL", "category": "internal",
+                    "message": f"{type(exc).__name__}: {exc}",
+                }]}
+            if decision.gated and decision.allowed:
+                _stamp_authority(payload, decision)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),

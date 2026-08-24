@@ -135,6 +135,13 @@ class Session:
         # enforced at load/swap as a machine-checked invariant instead of a
         # review convention. None = no sandbox (the default).
         self.sandbox = None
+        # the bound operator identity (roadmap item 55): a `revl.mcp.operator.
+        # Operator` whose grants bound which management verbs this session may
+        # call, over which components and realms. None = no profile: every verb
+        # is ungated (today's root-over-transport), so nothing breaks. Set at
+        # serve time from `--operator-profile`; the gate lives in the mcp verb
+        # dispatch (`revl.mcp.server`), not here — this is only the binding.
+        self.operator = None
 
     # -- plumbing ----------------------------------------------------------
 
