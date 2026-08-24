@@ -80,6 +80,18 @@ This goes in the compiler spec, not the runtimes.
   torn-state freedom: after disposal, every completed effect has run its
   inverse, in LIFO order. Authors relying on "emission after boundary never
   happens once diverted" get that guarantee on py/wasm, not on rs.
+
+  **Decision (2026-08-24): A1's contracted invariant is promoted to torn-state
+  freedom.** The weaker invariant that holds on *every* tier becomes the
+  wording of the A1 contract; the per-tier difference is spec, not surprise.
+  "Emission after boundary never happens once diverted" is a py/wasm tier
+  property, not the contract: on cordis-rs a divert during a component `await`
+  defers (post-boundary steps run, then everything reverts LIFO), and that is
+  compliant. No upstream fix (fork+PR: don't hold the fiber transition lock
+  across the await boundary) at this time — cordis-rs stays pinned at 0.3.0,
+  and the race-loop assertion pins the promoted invariant so it cannot drift.
+  Revisit the stronger guarantee only if a consumer's correctness actually
+  depends on divert-at-boundary on the rs tier.
 - **cordis4j global-realm divergence** (documented, runtime-verified): revl's
   contract (docs/design-v2-realms.md) is that realms are keyed by label and
   **equal realm-label strings denote the same realm** — two components that
@@ -261,6 +273,17 @@ overflow on every tier — including wasm, whose `Int` was widened to `i64`
 with checked `$int_*` helpers. The one residual split is the *message*: a
 wasm trap carries no payload, so it faults with `unreachable` where the
 hosted tiers raise a labelled overflow error (see docs/arithmetic.md).
+
+**Decision (2026-08-24): the bare-`unreachable` trap is accepted as a
+documented tier limit.** A wasm trap carries no payload by design — the fault
+channel is the trap itself, not a value the module can hand back — so a
+designated fault-reason export before the trap would buy a labelled message
+at the cost of a second, concurrent error channel (an export the module must
+write *and* the host must read) for information the trap already conveys.
+The labelled-error difference is diagnostic depth, not semantics: every tier
+faults, and no tier continues past the fault. Revisit only if a tool wants
+to distinguish overflow from a programmatic `unreachable` on the wasm tier;
+until then the tier documents "faults with `unreachable`, no payload".
 
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins

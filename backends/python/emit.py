@@ -1491,7 +1491,9 @@ def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
     an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
     the total division forms (which *produce* a Result). Used to decide
-    whether to emit the built-in Result classes (keeps v1 goldens intact)."""
+    whether to emit the built-in Result classes: emitting them into every
+    module would add classes no program references, so the gate is dead-code
+    hygiene — the emitted module carries only the names the program uses."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -1650,8 +1652,10 @@ def emit(ir: dict) -> str:
     out.add(0)
     # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
     # unless a user type shadows the name. Opt stays host-None, so it needs
-    # no class. Emitted only when the IR actually uses Result, so v1 goldens
-    # stay byte-identical.
+    # no class. Emitted only when the IR actually uses Result — an unused
+    # Ok/Err class in every module would be dead code (docs/conformance.md,
+    # "Golden policy": output is right because it is right, not because a
+    # fixture wants the bytes).
     if _uses_builtin_result(ir):
         user_cases = {
             case["name"]
