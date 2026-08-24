@@ -63,19 +63,26 @@ def test_user_cache_golden_byte_equality():
     assert src == golden
 
 
-def test_string_literals_use_one_code_point_escape_path():
-    """`_string` collapsed to one uniform code-point escape path (item 73):
-    every string leaf — including the requirement-name lists behind
-    `Inject::new([...])` — escapes the same way. The old `json.dumps` branch
-    emitted lone-surrogate `\\uXXXX` for non-ASCII (Rust-invalid); the single
-    path emits `\\u{XXXX}` everywhere, ASCII byte-identical to before."""
+def test_string_literals_emit_printable_non_ascii_literally():
+    """`_string` escapes control chars / quotes / backslashes, but emits a
+    printable non-ASCII scalar *literally* as UTF-8 — Rust source is UTF-8, so
+    `é` needs no `\\u{...}` (item 135, finding #35). The literal form carries no
+    brace, so it is safe in a format-macro position where a `\\u{XXXX}` escape
+    would be re-read as `{XXXX}`. ASCII output is byte-identical to before, and
+    `\\u{...}` is reserved for the lone-surrogate / unprintable case."""
     assert emit._string("db") == '"db"'
     assert emit._string("a\nb") == '"a\\nb"'
-    assert emit._string("héllo") == '"h\\u{e9}llo"'
+    # printable non-ASCII -> literal UTF-8, no escape
+    assert emit._string("héllo") == '"héllo"'
+    assert emit._string("em—dash") == '"em—dash"'
     assert emit._string('say "hi"') == '"say \\"hi\\""'
     # the structural case (Inject::new): each element through the same escape
     assert emit._string(["db", "kv"]) == '["db", "kv"]'
-    assert emit._string(["kév"]) == '["k\\u{e9}v"]'
+    assert emit._string(["kév"]) == '["kév"]'
+    # lone surrogate / unprintable still escapes as \u{...} (not valid UTF-8
+    # source literally): the escape path is reserved for exactly this case.
+    assert emit._string("\udce9") == '"\\u{dce9}"'
+    assert emit._string("\x7f") == '"\\u{7f}"'
     with pytest.raises(emit.EmitError):
         emit._string(42)
 
@@ -352,11 +359,11 @@ def test_cargo_check_surfaces_a_real_compile_error(tmp_path):
     assert "E0308" in result.stderr, result.stderr
 
 
-def _cargo_check(tmp_path: Path, src: str) -> subprocess.CompletedProcess:
+def _cargo_check(tmp_path: Path, src: str, *extra: str) -> subprocess.CompletedProcess:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
     (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
-    return _cargo("check", tmp_path)
+    return _cargo("check", tmp_path, *extra)
 
 
 @needs_cargo
@@ -370,6 +377,57 @@ def test_cargo_check_compiles_v2_realms(tmp_path):
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     result = _cargo_check(tmp_path, emit.emit(ir))
     assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_cargo_check_compiles_non_ascii_in_format_position(tmp_path):
+    """Item 135 / finding #35: a non-ASCII scalar in a string that reaches a
+    format-macro position (`assert!`/`format!`) must `cargo check` clean.
+
+    The lifecycle emitter threads the test *name* into every step's message,
+    and the assert steps land it in `assert!(cond, "<name>: …")`. When the name
+    carried an em dash, `_string` produced `\\u{2014}`; because that message is
+    escaped a second time, the source ended up with a literal `\\u{2014}` whose
+    string *value* is `{2014}` — which rustc's format parser reads as a
+    reference to positional argument 2014, `error: invalid reference to
+    positional argument 2014`. `#[test]` bodies only typecheck under `--tests`,
+    so the check runs with it. Emitting the em dash literally (UTF-8) removes
+    the brace and the collision."""
+    ir = compile_source(
+        """
+        service Counter { fn count() -> Int  emission fn tick() }
+        component TickCounter provides counter: Counter {
+          let store = effect Map.new() undo store.drop()
+          provide counter {
+            fn count() = store.size()
+            fn tick() {
+              let key = `t-${store.size()}`
+              effect store.insert(key, "x")
+              undo store.remove(key)
+            }
+          }
+        }
+        component Heartbeat requires counter: Counter {
+          every 10s { emit counter.tick() }
+        }
+        lifecycle test "an every-timer fires — on each advanced tick" {
+          load TickCounter
+          load Heartbeat
+          advance 25s
+          let ticks = call counter.count()
+          assert ticks == 2
+          unload Heartbeat
+          unload TickCounter
+          assert no_residue
+        }
+        """
+    )
+    src = emit.emit(ir)
+    # the fix: the em dash rides through as literal UTF-8, never `\u{...}`.
+    assert "—" in src and "\\u{" not in src
+    result = _cargo_check(tmp_path, src, "--tests")
+    assert result.returncode == 0, result.stderr
+    assert "positional argument" not in result.stderr, result.stderr
 
 
 @needs_cargo
