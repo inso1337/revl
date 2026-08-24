@@ -111,6 +111,34 @@ func (m *Map) Get(k string) (string, bool) {
 	return v, ok
 }
 
+// Iteration surface (docs/stdlib-2.0.md §Map): the checker promises
+// `size()`/`keys()` on a host `Map.new()` receiver too, and emit lowers both
+// as method calls on this object. `Size` is the entry count as the tier's
+// revl Int (a Go `int` here, matching the service-method return type); `Keys`
+// yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
+// go string < is exactly code-point order, matching sort.Strings; the inline
+// insertion sort keeps it import-free, as revlMapKeys does). Both are
+// read-only queries, no host trace — like Get.
+func (m *Map) Size() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.m)
+}
+func (m *Map) Keys() []string {
+	m.mu.Lock()
+	ks := make([]string, 0, len(m.m))
+	for k := range m.m {
+		ks = append(ks, k)
+	}
+	m.mu.Unlock()
+	for i := 1; i < len(ks); i++ {
+		for j := i; j > 0 && ks[j] < ks[j-1]; j-- {
+			ks[j], ks[j-1] = ks[j-1], ks[j]
+		}
+	}
+	return ks
+}
+
 // service Probe
 type Probe interface {
 	Mark(m string) int64
