@@ -1057,6 +1057,17 @@ _TS_V3_TYPE = {
     "Str": "string",
     "Bytes": "Uint8Array",
     "Unit": "void",
+    # `Any` is the type algebra's wildcard for values whose static type only
+    # the runtime knows (stdlib/json.rvl `json_parse(s: Str) -> Any`). It maps
+    # to TS `any`, not `unknown`: `any` is assignable in both directions, so a
+    # parsed `Any` flows into a typed position (`let tc: ToolCall =
+    # json_parse(s)`) *and* supports field access (`tc.name`) under `strict`,
+    # which `unknown` would reject. Without this entry `_ts_v3_type("Any")`
+    # fell through to `_ident` and emitted a bare `Any` that `tsc` rejects with
+    # `Cannot find name 'Any'` in every non-signature position (roadmap 79).
+    "Any": "any",
+    # `Never` is the empty type; TS spells it `never`.
+    "Never": "never",
 }
 
 _TS_V3_BIN_OPS = {
