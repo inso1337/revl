@@ -227,6 +227,7 @@ contract in this document is the specification it will implement.
 | py/ts emitters (timer + `advance`) | `backends/python/emit.py`, `backends/typescript/emit.py` |
 | `host.clockAdvance`/`clockReset` (item 102) | `backends/typescript/runtime.ts` |
 | honest `timer`-step refusal on wasm | `src/revl/test.py` |
-| honest `advance`-step refusal on go/rust/wasm (py/ts drive it; wiring the in-language driver into those lifecycle emitters is a follow-on) | their `_lifecycle_step` dispatch in `backends/{go,rust,wasm}/emit.py` |
+| rust `advance` step → `revl_clock_advance(ms)` (item 112 rust half; drives item 99's Clock, clock reset at test start) | `backends/rust/emit.py` (`_emit_v3_lifecycle_tests`) |
+| honest `advance`-step refusal on go/wasm (py/ts/rust drive it; wiring the in-language driver into the remaining lifecycle emitters is a follow-on) | their `_lifecycle_step` dispatch in `backends/{go,wasm}/emit.py` |
 | exit tests | `tests/test_time_coeffect.py`, `backends/typescript/tests/time_coeffect.test.ts` |
 | examples | `examples/heartbeat.rvl` (timers), `examples/lifecycle_timer.rvl` (`advance`) |
