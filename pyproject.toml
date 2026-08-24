@@ -8,6 +8,10 @@ license = { text = "MIT" }
 
 [project.optional-dependencies]
 test = ["pytest>=8.0", "pytest-asyncio"]
+# OpenTelemetry export for causal lifecycle traces (revl.otel, item 120). Kept
+# out of the base install so it stays dependency-light; absent, revl.otel
+# degrades to a no-op / span-mapping dump rather than a hard import error.
+otel = ["opentelemetry-sdk>=1.20", "opentelemetry-api>=1.20"]
 
 [project.scripts]
 revl = "revl.__main__:main"
