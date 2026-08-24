@@ -44,11 +44,6 @@ from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
 
-# The emitter tiers' backend directories, for the "see backends/<dir>/" hint
-# in the not-wired refusal — `ts` lives under `typescript`, everything else
-# matches its tier name.
-_BACKEND_DIRS = {"ts": "typescript"}
-
 # fiber states that count as "settled" — a lifecycle transition has come to
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
 # in-flight and never recorded on their own.
@@ -148,8 +143,7 @@ def _key_to_service(ir: dict) -> dict[str, str]:
 def _print_plan(ir: dict, config: dict, backend: str) -> None:
     order = _load_order(ir)
     by_name = {c["name"]: c for c in _components(ir)}
-    print(f"backend: {backend}"
-          f"{'' if backend in RUNNABLE_BACKENDS else '  (not runnable yet)'}")
+    print(f"backend: {backend}")
     print(f"load order (providers first): {' -> '.join(order) or '(none)'}")
     for name in order:
         comp = by_name[name]
@@ -696,14 +690,6 @@ def run_command(args) -> int:
     if getattr(args, "plan", False):
         _print_plan(ir, config, backend)
         return 0
-
-    if backend not in RUNNABLE_BACKENDS:
-        backend_dir = _BACKEND_DIRS.get(backend, backend)
-        print(f"error: `revl run --backend {backend}` is not wired yet — "
-              f"only {'/'.join(RUNNABLE_BACKENDS)} runs today.\n"
-              f"       the {backend} tier emits (see backends/{backend_dir}/), but has no `run` driver.",
-              file=sys.stderr)
-        return 2
 
     if not _components(ir):
         print("nothing to run: no components in the composition", file=sys.stderr)
