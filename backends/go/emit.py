@@ -231,6 +231,18 @@ def _expr(node, env: _Env, expected=None) -> str:
         # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
         callee = node.get("callee")
         if callee is not None:
+            # A method call on an expression: `<recv>.<method>(args)`. The 2.0
+            # dialect spells this `callee = field(target=<recv>, name=<method>)`
+            # — the shape the instance accessor `s.<key>.method(..)` produces
+            # (the `field`'s target is the `instance-get`). The component
+            # dialect's own method call arrives via `target`/`method` below, so
+            # `field` here is unambiguously a method selector, not struct-field
+            # access (records are unsupported on this tier).
+            if callee.get("kind") == "field":
+                recv = _expr(callee.get("target"), env)
+                meth = _camel(callee.get("name"))
+                args = ", ".join(_expr(a, env) for a in node.get("args", []))
+                return "%s.%s(%s)" % (recv, meth, args)
             nm = callee.get("name") or callee.get("id")
             if nm in ("Some", "None", "Ok", "Err"):
                 raise EmitError(
@@ -321,6 +333,8 @@ def _expr(node, env: _Env, expected=None) -> str:
         args = [_expr(a, env) for a in node.get("args") or []]
         return _comp_builtin(node.get("method"),
                              _comp_infer(target_node, env), target, args)
+    if kind == "instance-get":
+        return _instance_get_expr(node, env)
     if kind == "spawn":
         return _spawn_expr(node, env)
     if kind == "record_update":
@@ -355,6 +369,40 @@ def _spawn_expr(node, env: _Env) -> str:
         return "revlSpawn%s(%s, %sConfig{%s})" % (
             _camel(target), parent, _camel(target), fields)
     return "revlSpawn%s(%s)" % (_camel(target), parent)
+
+
+def _instance_get_expr(node, env: _Env) -> str:
+    """Lower the instance accessor `s.<key>` (docs/design-v2-instances.md).
+
+    `s : Instance[C]` is a name bound to a `spawn` handle — the emitted
+    `*RevlSpawnHandle`, whose `Ctx()` exposes the child's own isolated context
+    (the same LOCAL realm the matching `spawn` isolated the provided key into,
+    a fresh `*stc.Realm` with no cross-instance sharing). Resolving `key`
+    through that context yields THIS instance's provision and no other's:
+    `stc.Service[<Svc>](s.Ctx(), _key<Key>)` — the exact realm-scoped read a
+    `requires` uses, but against the handle's stored context rather than the
+    spawner's own. `service` is the frozen inline typing result, so no
+    re-derivation. The service is wrapped in an IIFE so `s.<key>.method(..)`
+    (the enclosing `call`/`field` node) chains straight onto the resolved
+    value; the `(svc, err)` tuple `stc.Service` returns cannot be a method
+    receiver directly.
+
+    Supervision-tree addressing holds because only the handle holder reaches
+    that context: the root and any sibling (isolated into a different local
+    realm) resolve a non-nil error and the zero-value service — the negative
+    the scenario proves by reading the same key at the root. The frontend
+    already rejected a `key` the target does not provide (a compile error,
+    never lowered here)."""
+    handle = _expr(node.get("target"), env)
+    service = node.get("service")
+    if not isinstance(service, str) or not service:
+        raise EmitError("instance-get: bad frozen service type %r" % (service,))
+    key = node.get("key")
+    if not isinstance(key, str) or not key.isidentifier():
+        raise EmitError("instance-get: bad key %r" % (key,))
+    svc = _camel(service)
+    return ("func() %s { _svc, _ := stc.Service[%s](%s.Ctx(), %s); return _svc }()"
+            % (svc, svc, handle, _key_var(key)))
 
 
 def _comp_infer(node, env: _Env):

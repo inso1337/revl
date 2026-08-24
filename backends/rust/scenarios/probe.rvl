@@ -110,3 +110,38 @@ component Supervisor requires probe: Probe provides ctl: Ctl {
     fn retire_a() { let r = w1.dispose() return 1 }
   }
 }
+
+// Instance accessor: reading a provision back through a spawn handle
+// (docs/design-v2-instances.md, "Instance accessor — frozen"). Phase 1's
+// handle exposed only `.dispose()`; `s.<key>` closes property (d)'s positive
+// direction — the spawner reaching its OWN instance's provision, gated to the
+// handle it alone holds. Reader spawns two instances that each provide the
+// SAME `counter` key but distinct values (CellA -> 1, CellB -> 2), each in its
+// own fresh local realm; `read_a`/`read_b` read each back through the handle
+// it alone holds. A read that crossed handles/realms would return the wrong
+// number, so `read_a` must be 1 and `read_b` must be 2 — that pins per-handle
+// resolution. scenarios.rs also confirms the negative — the root cannot
+// resolve `counter` (each provision stayed private to its instance's realm).
+// Reuses the `Counter` service declared for the Worker scenario above.
+service Reading { fn read_a() -> Int fn read_b() -> Int }
+
+component CellA provides counter: Counter {
+  provide counter {
+    fn value() = 1
+  }
+}
+
+component CellB provides counter: Counter {
+  provide counter {
+    fn value() = 2
+  }
+}
+
+component Reader provides reading: Reading {
+  let a = effect spawn CellA undo a.dispose()
+  let b = effect spawn CellB undo b.dispose()
+  provide reading {
+    fn read_a() = a.counter.value()
+    fn read_b() = b.counter.value()
+  }
+}
