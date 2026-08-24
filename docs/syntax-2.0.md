@@ -573,22 +573,33 @@ the sketch that motivated this form fails with its own explanation.
 
 #### Portability
 
-`lifecycle test` lowers on the **reference tier only** (cordis-py). The other
-four emitters refuse it by name:
+`lifecycle test` lowers on every tier that has a live composition runtime:
+**cordis-py** (the reference, R1 + R4 against its host vocabulary),
+**cordis-rs** (`#[test]` drivers over a live `cordis::Context`, R4 registry +
+an R1 host-resource counter), **cordis (TS)** (async vitest cases over a live
+`Context`, R4 introspection + R1 live-host-resource accounting), and
+**cordis-go** (`go test` funcs over the live stc-go runtime, `len(root
+.Fibers()) == 0` + an R1 host-resource counter). Each tier states R1 over its
+own host-builtin vocabulary against the same R1/R4 clauses
+(docs/backend-ir.md §Required semantics).
+
+The **java (cordis4j)** and **wasm** emitters still refuse lifecycle tests by
+name — they have no lifecycle-test driver yet (a documented follow-up, FR-5):
 
 ```
-lifecycle test 'cache reverts cleanly' is not lowerable on the cordis-rs tier:
+lifecycle test 'cache reverts cleanly' is not lowerable on the wasm tier:
   it drives a live composition (load/call/unload) and asserts R4
   residue-freedom through the host runtime's introspection, which only the
   reference tier implements — run it with `revl test --backend py`
 ```
 
-This is a boundary, not a gap: the driver needs the host runtime's
-introspection, and each tier's is different. A refusal by name is deliberate
-— a construct silently dropped by one renderer and honored by another is this
-project's recurring bug class. In the IR a lifecycle test is an ordinary
-`ir_version: 3` entry in `tests` carrying `"lifecycle": true`, so a pure
-`test` document is byte-identical to what it was before this feature.
+`revl test --all` reports that refusal as `skip:` with the reason (a tier
+that cannot run the document's tests is never a failure of the run). A
+refusal by name is deliberate — a construct silently dropped by one renderer
+and honored by another is this project's recurring bug class. In the IR a
+lifecycle test is an ordinary `ir_version: 3` entry in `tests` carrying
+`"lifecycle": true`, so a pure `test` document is byte-identical to what it
+was before this feature.
 
 ## 8. Grammar deltas (summary)
 

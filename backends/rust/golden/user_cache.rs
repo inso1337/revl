@@ -17,6 +17,15 @@ pub trait Cache: Send + Sync {
     fn put(&self, key: String, value: String) -> ();
 }
 
+/// R1 live-resource counter (lifecycle `assert no_residue`).
+/// Thread-local because `cargo test` runs tests on parallel
+/// threads: each test must observe only its own acquisitions.
+thread_local! {
+    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// revl host object: a small thread-safe map with String keys.
 /// The value type is generic — each site's `Map.new()` pins `V`
 /// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).
@@ -25,11 +34,13 @@ pub struct Map<V> {
 }
 impl<V> Map<V> {
     pub fn new() -> Self {
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));
         Self {
             inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
     pub fn drop_(&self) {
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
         self.inner.lock().unwrap().clear();
     }
     pub fn insert(&self, key: String, value: V) {
@@ -68,6 +79,7 @@ impl Pool {
         if size < 1 {
             panic!("pool size must be an integer >= 1 (got {})", size);
         }
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));
         Self {
             url,
             size,
@@ -159,6 +171,7 @@ impl Pool {
         if already_closed {
             panic!("pool.close after close/drop — use-after-free");
         }
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
     }
     pub fn query(&self, _sql: String) -> Vec<Value> {
         let conn = self.borrow_conn("query");

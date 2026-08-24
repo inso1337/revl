@@ -227,12 +227,13 @@ def test_reference_tier_emits_a_driver():
 
 
 @pytest.mark.parametrize("backend,tier", [
-    ("rust", "cordis-rs"),
     ("java", "cordis4j"),
-    ("typescript", "cordis (TS)"),
     ("wasm", "wasm"),
 ])
 def test_other_tiers_refuse_by_name(backend, tier):
+    """FR-5: java and wasm still refuse lifecycle tests by name (documented
+    follow-ups); rust and ts now lower them (see test_lowerable_tiers below)
+    and go lowers them on its stc-go runtime."""
     ir = compile_files([str(EXAMPLES / "lifecycle_cache.rvl")])
     emitter = _emitter(backend)
     with pytest.raises(emitter.EmitError) as excinfo:
@@ -241,6 +242,22 @@ def test_other_tiers_refuse_by_name(backend, tier):
     assert "lifecycle test 'cache reverts cleanly'" in message
     assert f"not lowerable on the {tier} tier" in message
     assert "--backend py" in message
+
+
+@pytest.mark.parametrize("backend,marker", [
+    ("rust", "revl_lifecycle_"),
+    ("typescript", "assertNoResidue"),
+    ("go", "revlOptPair"),
+])
+def test_lowerable_tiers_emit_lifecycle_drivers(backend, marker):
+    """FR-5: rust, ts and go lower lifecycle tests to their native test
+    idiom — a real driver over a live composition, ending in the tier's
+    no-residue assertion — instead of refusing them."""
+    ir = compile_files([str(EXAMPLES / "lifecycle_cache.rvl")])
+    source = _emitter(backend).emit(ir)
+    assert "cache reverts cleanly" in source
+    assert "no_residue" in source or "residue" in source
+    assert marker in source
 
 
 @pytest.mark.parametrize("backend", ["python", "rust", "java", "typescript", "wasm"])
