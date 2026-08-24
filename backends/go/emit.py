@@ -3094,6 +3094,27 @@ def _emit_go_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
 
+    # no-residue proof: does `key` still resolve to a provider in ctx? The
+    # once-mode runner (revl run --backend go --once) reads this after a full
+    # LIFO teardown — a provided key whose provide-inverse ran must fail to
+    # resolve. This is the go mirror of the py driver's reflect.store check
+    # and the rust runner's reflect().services() check; stc-go has no public
+    # provision enumeration, so the generated per-key switch is the honest
+    # read (generality is codegen on this tier, exactly like the proxies).
+    out.append("// RevlStillProvided reports whether `key` currently resolves to a")
+    out.append("// service in ctx (the once-mode no-residue check).")
+    out.append("func RevlStillProvided(ctx *stc.Context, key string) bool {")
+    out.append("\tswitch key {")
+    for key, svc in provided.items():
+        cs = _camel(svc)
+        out.append("\tcase %s:" % _go_string(key))
+        out.append("\t\t_, err := stc.Service[%s](ctx, %s)" % (cs, _key_var(key)))
+        out.append("\t\treturn err == nil")
+    out.append("\t}")
+    out.append("\treturn false")
+    out.append("}")
+    out.append("")
+
     # consumer: build a plugin that provides `key` via the right proxy. The
     # runner owns the *bridge.Client (so it can also Monitor the same socket).
     out.append("func _revlProxyComponent(pname string, k stc.Key, value any) "
