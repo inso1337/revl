@@ -264,6 +264,11 @@ class ExternDecl:
     # explicit type-parameter names from an `extern pure fn id[T](...)` list.
     # externs share the fn signature table, so the same machinery covers them.
     type_params: list[str] = field(default_factory=list)
+    # `async` modifier between the classification and `fn` (roadmap item 80,
+    # docs/design/async-extern.md §1). Name matches `ServiceMethod.async_`
+    # (parser.py:42) and `ProvideMethod.async_` (parser.py:186). Validity
+    # (emission-only, no compensate) is checked in lower, not the parser.
+    async_: bool = False
 
 
 @dataclass
@@ -814,6 +819,15 @@ class Parser:
                      "`acquire` must declare `undo`, and `emission` may declare `compensate`",
             )
         classification = self.next().value
+        # Optional `async` modifier between the classification and `fn`,
+        # mirroring where service-op modifiers sit (parser.py:895-906). The
+        # classification stays first and mandatory, so the "unclassified
+        # extern" diagnostic above is untouched. Validity rules (emission-only,
+        # no compensate) are enforced in lower (docs/design/async-extern.md §1).
+        async_ = False
+        if self.at("kw", "async"):
+            self.next()
+            async_ = True
         self.expect("kw", "fn")
         name = self.expect("ident").value
         type_params = self._type_param_list()
@@ -849,7 +863,7 @@ class Parser:
         if not bodies:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
-                          type_params=type_params)
+                          type_params=type_params, async_=async_)
 
     def _capability_list(self) -> tuple[str, ...]:
         """`[a, b]` after `emission` — the boundaries this operation may cross.

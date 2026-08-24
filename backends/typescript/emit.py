@@ -315,7 +315,20 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
             f"that name is declared in this document"
         )
     args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
-    return f"{name}({args})"
+    call = f"{name}({args})"
+    # async extern call (roadmap item 80, docs/design/async-extern.md §5):
+    # await it, parenthesized so it stays atomic in a larger expression. The
+    # frontend admits such a call only inside an async provide method, so
+    # `in_async` must hold — otherwise the checker is wrong and this crashes
+    # honestly rather than emitting an un-awaited Promise into a sync function.
+    if name in ctx.async_names:
+        if not ctx.in_async:
+            raise EmitError(
+                f"async extern `{name}` called outside an async context — the "
+                f"frontend async-coloring check should have refused this (A1)"
+            )
+        return f"(await {call})"
+    return call
 
 
 def _is_float_expr(node: object) -> bool:
@@ -471,7 +484,23 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         if not (isinstance(callee_node, dict) and callee_node.get("kind") in _V3_ATOMIC_KINDS):
             callee = f"({callee})"
         args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
-        return f"{callee}({args})"
+        call = f"{callee}({args})"
+        # async extern call (roadmap item 80, docs/design/async-extern.md §5):
+        # await it, parenthesized so it stays atomic inside a larger expression
+        # (`f(x) + 1` -> `(await f(x)) + 1`). The frontend admits such a call
+        # only inside an async provide method, so `in_async` must hold — if it
+        # does not the checker is wrong, and this crashes honestly rather than
+        # emitting an un-awaited Promise into a sync function.
+        if isinstance(callee_node, dict) and callee_node.get("kind") == "var" \
+                and callee_node.get("name") in ctx.async_names:
+            if not ctx.in_async:
+                raise EmitError(
+                    f"async extern `{callee_node.get('name')}` called outside an "
+                    f"async context — the frontend async-coloring check should "
+                    f"have refused this (A1)"
+                )
+            return f"(await {call})"
+        return call
 
     # ---- component (v1) dialect kinds — each needs a component scope ----
     if kind in _COMPONENT_ONLY_KINDS:
@@ -891,7 +920,8 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[
         method_is_async = bool(declared[name].get("async"))
         prefix = "async " if method_is_async else ""
         lines.append(f"{indent}{prefix}{name}({sig}) {{")
-        lines.extend(_method_body(method.get("body") or [], ctx.with_scope(body_scope),
+        lines.extend(_method_body(method.get("body") or [],
+                                  ctx.with_scope(body_scope, in_async=method_is_async),
                                   indent + "  ", method_is_async))
         lines.append(f"{indent}}},")
     return lines
@@ -1189,10 +1219,17 @@ class _Ctx:
     """
 
     def __init__(self, types: dict, functions: list, externs: list,
-                 component_scope=None, counter=None) -> None:
+                 component_scope=None, counter=None, in_async=False) -> None:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # async externs (roadmap item 80): call sites naming one are awaited
+        # (docs/design/async-extern.md §5). v1 seeds this from async externs
+        # only; slice 6 adds colored fns. `in_async` tracks whether the body
+        # currently being rendered may await (an `async fn` provide method).
+        self.async_names = {ext.get("name") for ext in externs or []
+                            if ext.get("async")}
+        self.in_async = in_async
         self.case_names: set[str] = set()
         for spec in self.types.values():
             if spec.get("kind") == "variant":
@@ -1207,11 +1244,13 @@ class _Ctx:
         self._counter[0] += 1
         return f"$revl_match_{self._counter[0]}"
 
-    def with_scope(self, scope) -> "_Ctx":
+    def with_scope(self, scope, in_async=None) -> "_Ctx":
         view = _Ctx.__new__(_Ctx)
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
+        view.async_names = self.async_names
+        view.in_async = self.in_async if in_async is None else in_async
         view.case_names = self.case_names
         view._counter = self._counter
         view.component_scope = scope
@@ -1933,6 +1972,23 @@ def _emit_ts_externs(externs: list) -> list[str]:
                 f"extern `{name}` has no @ts body — not portable to this backend "
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
+        # async extern (roadmap item 80, docs/design/async-extern.md §5): emit
+        # an `async function` returning `Promise<T>`; the verbatim @ts body may
+        # use `await`. Every admitted call site awaits it (see `_expr`). The
+        # signature form mirrors the async service-op interface typing at
+        # emit.py:2137/2222.
+        if ext.get("async"):
+            lines.append(
+                f"export async function {name}({params}): Promise<{returns}> {{")
+            body = textwrap.dedent(bodies["ts"].strip("\n"))
+            if body:
+                for line in body.splitlines() or [""]:
+                    lines.append("  " + line)
+            else:
+                lines.append("  // (empty @ts body)")
+            lines.append("}")
+            lines.append("")
+            continue
         lines.append(f"export function {name}({params}): {returns} {{")
         body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:

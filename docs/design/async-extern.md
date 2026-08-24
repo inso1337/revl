@@ -42,7 +42,7 @@ The prior investigation's conclusions all verified:
 **Chosen spelling: `async` as an extern modifier between the classification
 and `fn`.**
 
-```revl sketch
+```revl
 extern emission async fn http_post(url: Str, body: Str) -> Str
   = @ts {
       const r = await fetch(url, { method: "POST", body })
