@@ -133,13 +133,21 @@ _V3_MODE = False
 # layout. Only meaningful under _V3_MODE; empty for v1/v2.
 _V3_TYPES: dict = {}
 
-# Placement mode (emit_placement on a v3 typed-core composition): the module
-# mixes the pure typed-core tier with live stc-go components and the interop
-# bridge, so record structs are emitted with EXPORTED, json-tagged fields (the
-# go mirror of the rust tier's serde derives) so record values survive the
-# bridge's plain-JSON wire encoding. The pure tier (emit) keeps unexported
-# fields byte-for-byte with the frozen fixtures.
-_V3_PLACEMENT = False
+# The document's v3 typed-core types (records/ADTs) are materialized as Go
+# structs/sealed interfaces in THIS package, so a component/provide-method body
+# lowers record literals, field access, ADT construction and `match` against
+# them. True on two paths:
+#   * emit_placement's typed-core composition (pure tier + live components +
+#     interop bridge, one module), and
+#   * emit()'s live stc-go path when the document declares types alongside a
+#     live component (a v3 provide method taking/returning a record — item 139).
+# Record struct fields are emitted EXPORTED + json-tagged (the go mirror of the
+# rust tier's serde derives) so record values also survive the bridge's
+# plain-JSON wire encoding in the placement case; the tags are inert but
+# harmless in the bridge-less live case. The pure typed tier (`_emit_v3_go`,
+# a separate _V3GoCtx renderer) keeps unexported fields byte-for-byte with the
+# frozen fixtures and does not read this flag. v1/v2 documents leave it False.
+_V3_TYPED_COMPONENTS = False
 
 
 def _go_type(t) -> str:
@@ -207,9 +215,22 @@ def _go_zero(surface) -> str:
 # expression rendering
 # --------------------------------------------------------------------------
 
+# The struct receiver of a provide-impl method. `revl`-prefixed so a
+# provide-method parameter can never collide with it — the same reserved-
+# namespace convention the lifecycle-test receiver (`revlT`) uses so a user
+# binding named `t` cannot shadow *testing.T. Before this the receiver was the
+# bare `s`, so a provide method with a param named `s` (e.g. `fn area(s: Shape)
+# -> Int`) emitted `func (s *C_k) Area(s Shape)` — Go rejects "s redeclared in
+# this block" (roadmap item 147). Held as one constant so both `_Env` (which
+# renders `<recv>.field` / `<recv>.cfg` / `<recv>.ctx`) and the method-signature
+# emitter agree.
+_METHOD_RECEIVER = "revlSelf"
+
+
 class _Env:
     """Renders name references. `receiver` is '' at Apply top-level (bare
-    locals) or 's' inside a provide-impl method (struct fields)."""
+    locals) or the provide-impl method receiver (`_METHOD_RECEIVER`) inside a
+    provide method, where names resolve to struct fields `<receiver>.<field>`."""
 
     def __init__(self, binds, reqs, config_fields, params=None, receiver=""):
         self.binds = set(binds)
@@ -225,25 +246,28 @@ class _Env:
         # the let-effect emitter, None everywhere else.
         self.map_new_value: str | None = None
 
+    def _prefix(self) -> str:
+        return (self.receiver + ".") if self.receiver else ""
+
     def name_ref(self, ident: str) -> str:
         if ident in self.params:
             return _safe_local(ident)
         if ident in self.binds:
-            return ("s." if self.receiver else "") + _bind_field(ident)
+            return self._prefix() + _bind_field(ident)
         if ident in self.reqs:
-            return ("s." if self.receiver else "") + _req_field(ident)
+            return self._prefix() + _req_field(ident)
         # Fall back to a bare local (e.g. a let bind not tracked).
         return _safe_local(ident)
 
     def config_ref(self, field: str) -> str:
-        base = "s.cfg" if self.receiver else "cfg"
+        base = (self.receiver + ".cfg") if self.receiver else "cfg"
         return "%s.%s" % (base, _camel(field))
 
     def req_ref(self, name: str) -> str:
-        return ("s." if self.receiver else "") + _req_field(name)
+        return self._prefix() + _req_field(name)
 
     def ctx_ref(self) -> str:
-        return "s.ctx" if self.receiver else "ctx"
+        return (self.receiver + ".ctx") if self.receiver else "ctx"
 
 
 _GO_KEYWORDS = {"type", "range", "func", "map", "chan", "select", "go",
@@ -435,7 +459,7 @@ def _expr(node, env: _Env, expected=None) -> str:
             target = _expr(target_node, env)
             rt = _comp_infer(target_node, env)
             return ("revlStrLen(%s)" if rt == "Str" else "revlListLen(%s)") % target
-        if _V3_MODE and _V3_PLACEMENT:
+        if _V3_MODE and _V3_TYPED_COMPONENTS:
             target_node = node.get("target")
             tt = _comp_infer(target_node, env)
             if isinstance(tt, str) and tt in _V3_TYPES \
@@ -463,7 +487,7 @@ def _expr(node, env: _Env, expected=None) -> str:
     if kind == "record":
         # v3 typed-core only: a record literal needs the document's declared
         # record type for its field set (the v1/v2 tier carries none).
-        if not (_V3_MODE and _V3_PLACEMENT and _V3_TYPES):
+        if not (_V3_MODE and _V3_TYPED_COMPONENTS and _V3_TYPES):
             raise EmitError(
                 f"record is not lowerable in the stc-go component world "
                 f"(ir_version 1/2 documents carry no record/ADT types, and this "
@@ -476,7 +500,7 @@ def _expr(node, env: _Env, expected=None) -> str:
         return "%s{%s}" % (tname, body)
     if kind == "adt":
         case = node.get("case")
-        if _V3_MODE and _V3_PLACEMENT and case in _v3_case_layout():
+        if _V3_MODE and _V3_TYPED_COMPONENTS and case in _v3_case_layout():
             return _v3_comp_construct(node, env)
         raise EmitError(
             "Opt/Result construction is only supported in return position on "
@@ -512,7 +536,7 @@ def _v3_field_ident(field: str) -> str:
     round-trips record values — the go mirror of the rust tier's serde
     derives; the pure tier keeps the source spelling byte-for-byte with the
     frozen fixtures."""
-    if _V3_PLACEMENT:
+    if _V3_TYPED_COMPONENTS:
         return _camel(field)
     return _v3_ident(field, "record field")
 
@@ -1168,13 +1192,14 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
             "%s %s" % (_safe_local(pn), _go_type(ptypes.get(pn, "any")))
             for pn in m.get("params", [])
         )
-        sig = "func (s *%s) %s(%s)" % (struct, _camel(mname), go_params)
+        sig = "func (%s *%s) %s(%s)" % (_METHOD_RECEIVER, struct,
+                                        _camel(mname), go_params)
         if ret:
             sig += " " + ret
         sig += " {"
         out.append(sig)
         env = _Env(binds, reqs, _config_fields_flag(has_config),
-                   params=m.get("params", []), receiver="s")
+                   params=m.get("params", []), receiver=_METHOD_RECEIVER)
         for pn in m.get("params", []):
             env.var_types[pn] = ptypes.get(pn)
         _emit_method_body(m.get("body", []), env, out, 1,
@@ -1355,7 +1380,8 @@ def _infer_map_value_go_type(comp, services, bind):
             for method in step.get("methods") or []:
                 decl = svc_methods.get(method.get("name") or "", {})
                 ptypes = {p["name"]: p["type"] for p in decl.get("params", [])}
-                env = _Env([], [], set(), params=list(ptypes), receiver="s")
+                env = _Env([], [], set(), params=list(ptypes),
+                           receiver=_METHOD_RECEIVER)
                 env.var_types.update(ptypes)
                 for body_step in method.get("body") or []:
                     _scan_step_for_inserts(body_step, bind, env, candidates)
@@ -1560,7 +1586,7 @@ def _host_type_of_acquire(acquire):
         name = _camel(recv)
         # placement mode renames the host-runtime type when a declared record
         # collides (see _host_runtime); the impl struct field must agree.
-        if _V3_PLACEMENT and name in _V3_TYPES:
+        if _V3_TYPED_COMPONENTS and name in _V3_TYPES:
             return "Revl" + name
         return name
     if acquire.get("kind") == "spawn":
@@ -2214,7 +2240,7 @@ def _host_runtime() -> str:
     ir-v3.md §v3 — a type name the host already owns)."""
     int_ty = "int64" if _V3_MODE else "int"
     src = _HOST_RUNTIME.replace("@INT@", int_ty)
-    if _V3_PLACEMENT:
+    if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
             if name in _V3_TYPES:
                 src = re.sub(r"\b%s\b" % name, "Revl" + name, src)
@@ -3346,7 +3372,7 @@ def _emit_v3_go_types(types: dict) -> list[str]:
         if spec.get("kind") == "record":
             out.append(f"type {gname} struct {{")
             for field, ftype in (spec.get("fields") or {}).items():
-                if _V3_PLACEMENT:
+                if _V3_TYPED_COMPONENTS:
                     # Exported + json-tagged: the go mirror of the rust tier's
                     # serde derives — the bridge's plain-JSON wire encoding
                     # round-trips record values (proxy/stub args and replies).
@@ -4203,7 +4229,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         # components and refuse the lifecycle steps.
         return _emit_v3_go(ir, package)
 
-    global _V3_MODE, _V3_TYPES, _V3_PLACEMENT
+    global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     _COMP_NEEDS_TIMER = False
@@ -4219,12 +4245,19 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     ):
         _COMP_NEEDS_TIMER = True
     _V3_MODE = (ver == 3)
-    # emit()'s own component path never emits the document's declared types
-    # (a v3 doc with types routes to the pure typed-core path, or — with a
-    # lifecycle test — stays here without them), so no record/ADT is in scope
-    # and the v1/v2-style refusals must hold; placement mode is never on.
-    _V3_TYPES = {}
-    _V3_PLACEMENT = False
+    # item 139: a v3 document reaching emit()'s live stc-go path may declare
+    # record/ADT types that a component's provide method takes or returns (a
+    # `provide s { fn make(n, a) -> Person { ... } }` over a live composition,
+    # kept here — not routed to the pure typed-core path — by a lifecycle test
+    # driving it). Materialize those types as Go structs/sealed interfaces in
+    # this same package and put the component/method renderer in typed-core
+    # mode, so record literals, field access, ADT construction and `match`
+    # lower against them exactly as they do in the placement path — instead of
+    # the v1/v2 "record is not lowerable in the stc-go component world" refusal.
+    # v1/v2 documents (and v3 documents with no declared types) leave the flag
+    # off, so their output stays byte-identical to the frozen scenarios.
+    _V3_TYPES = (ir.get("types") or {}) if ver == 3 else {}
+    _V3_TYPED_COMPONENTS = bool(_V3_TYPES)
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
@@ -4234,6 +4267,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     # exercised, so the flag stays False and the output is byte-identical to
     # the frozen scenarios.
     body: list[str] = []
+    if _V3_TYPES:
+        # the declared typed-core types come first, so the component impls and
+        # lifecycle tests below reference already-declared structs/interfaces.
+        body.extend(_emit_v3_go_types(_V3_TYPES))
     body.extend(_emit_services(ir.get("services", {})))
     _emit_keys(ir, body)
     _emit_realm_helper(ir, body)
@@ -4779,7 +4816,7 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     (types + components in one module), extended with the bridge the placement
     runner links against.
 
-    Record structs are emitted with EXPORTED, json-tagged fields (`_V3_PLACEMENT`)
+    Record structs are emitted with EXPORTED, json-tagged fields (`_V3_TYPED_COMPONENTS`)
     so record values survive the bridge's plain-JSON wire encoding — the go
     mirror of the rust tier's serde derives. The pure tier (`emit`) keeps
     unexported fields byte-for-byte with the frozen fixtures."""
@@ -4790,12 +4827,12 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     components = ir.get("components") or []
     ctx = _V3GoCtx(types, functions, externs)
 
-    global _V3_MODE, _V3_TYPES, _V3_PLACEMENT
+    global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     _V3_MODE = True
     _V3_TYPES = types
-    _V3_PLACEMENT = True
+    _V3_TYPED_COMPONENTS = True
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False

@@ -64,6 +64,18 @@ python3 "$here/emit.py" "$here/scenarios/emitted/timer/timer.ir.json" timer \
 python3 "$here/emit.py" "$here/scenarios/emitted/advance/advance.ir.json" advance \
   > "$here/scenarios/emitted/advance/gen_advance_test.go"
 
+# --- v3 records/lists/variants across a LIVE provide method (item 139) -------
+# records.ir.json is compiled from scenarios/records.rvl by the frozen frontend
+# (`revl compile`). A `provide` method that TAKES and RETURNS a record (and
+# threads a List of them, and dispatches an ADT `match`) lowers in emit()'s
+# live stc-go component world — before item 139 emit() carried no record/ADT
+# lowering there ("record is not lowerable in the stc-go component world"),
+# even though the same record lowers fine in a top-level fn and on the
+# placement runner. The emitted file IS the proof: it is a `*_test.go` whose
+# lifecycle `Test…` func RUNS the record round-trip on real stc-go.
+python3 "$here/emit.py" "$here/scenarios/emitted/records/records.ir.json" records \
+  > "$here/scenarios/emitted/records/gen_records_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -86,6 +98,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/accessor/gen.go" \
            "$here/scenarios/emitted/timer/gen.go" \
            "$here/scenarios/emitted/advance/gen_advance_test.go" \
+           "$here/scenarios/emitted/records/gen_records_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

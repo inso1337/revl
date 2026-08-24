@@ -335,16 +335,16 @@ type TickCounter_counter struct {
 	store *Map[string]
 }
 
-func (s *TickCounter_counter) Count() int64 {
-	return s.store.Size()
+func (revlSelf *TickCounter_counter) Count() int64 {
+	return revlSelf.store.Size()
 }
 
-func (s *TickCounter_counter) Tick() {
-	key := fmt.Sprintf("tick-%v", s.store.Size())
+func (revlSelf *TickCounter_counter) Tick() {
+	key := fmt.Sprintf("tick-%v", revlSelf.store.Size())
 	_ = key
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(key, "fired")
-		return func() error { s.store.Remove(key); return nil }
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(key, "fired")
+		return func() error { revlSelf.store.Remove(key); return nil }
 	})
 }
 

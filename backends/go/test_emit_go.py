@@ -413,8 +413,8 @@ def test_host_map_backs_keys_and_size():
     # exactly code-point order (an import-free insertion sort, like revlMapKeys)
     assert "for j := i; j > 0 && ks[j] < ks[j-1]; j--" in src
     # provide body lowers to method calls on the host object
-    assert "return s.store.Size()" in src
-    assert "return s.store.Keys()" in src
+    assert "return revlSelf.store.Size()" in src
+    assert "return revlSelf.store.Keys()" in src
     # read-only queries leave no host trace (no hostRecord in Size/Keys)
     body = src.split("func (m *Map[V]) Size()")[1].split("func (m *Map[V]) Keys()")[0]
     assert "hostRecord" not in body
@@ -502,7 +502,7 @@ def test_host_map_is_generic_over_its_value_type():
     assert "store *Map[int]" in src  # the impl struct field
     # the Int value crosses Insert unchanged — the round-trip that a String-only
     # host Map could not compile
-    assert "s.store.Insert(key, amount)" in src
+    assert "revlSelf.store.Insert(key, amount)" in src
 
 
 def test_host_map_pins_a_compound_list_value_type():
@@ -616,6 +616,89 @@ def test_v3_typed_core_placement_records_round_trip_through_the_bridge():
     # Result[Row, Str] carries the record payload through $value (json tags)
     _has(bridge, 'return map[string]any{"$kind": "Ok", "$value": _okv}, nil')
     _has(bridge, "var _ok Row")
+
+
+_V3_RECORD_PROVIDE_SRC = """
+type Person = { name: Str, age: Int }
+
+service Maker {
+  fn make(n: Str, a: Int) -> Person
+  fn older(p: Person) -> Person
+}
+
+component Factory provides maker: Maker {
+  provide maker {
+    fn make(n, a) = { name: n, age: a }
+    fn older(p) = { name: p.name, age: p.age + 1 }
+  }
+}
+
+component User requires maker: Maker {
+}
+
+lifecycle test "record round-trips through a provide method" {
+  load Factory
+  let p = call maker.make("ada", 36)
+  assert p.age == 36
+  let q = call maker.older(p)
+  assert q.age == 37
+  assert q.name == "ada"
+  unload Factory
+  assert no_residue
+}
+"""
+
+
+def test_v3_record_lowers_in_a_live_provide_method():
+    """item 139: a `provide` method that TAKES and RETURNS a record lowers in
+    emit()'s live stc-go component world (kept on that path by a lifecycle test
+    driving it). Before this the component-world renderer carried no v3
+    record/ADT lowering and refused — even though the same record lowers fine
+    in a top-level fn and on the placement runner. The declared record is
+    materialized as a Go struct in the same package (exported, json-tagged) and
+    the method signatures + literal + field access lower against it."""
+    src = emit.emit(_compile(_V3_RECORD_PROVIDE_SRC), package="factory")
+    # the record type is materialized in the live module
+    _has(src, "type Person struct {")
+    _has(src, 'Name string `json:"name"`')
+    _has(src, 'Age int64 `json:"age"`')
+    # record param + record return in the provide-impl method signatures
+    _has(src, "func (revlSelf *Factory_maker) Make(n string, a int64) Person")
+    _has(src, "func (revlSelf *Factory_maker) Older(p Person) Person")
+    # a record literal and a field access lower inside the method bodies
+    _has(src, "return Person{Name: n, Age: a}")
+    _has(src, "return Person{Name: p.Name, Age: (p.Age + 1)}")
+
+
+def test_v3_provide_method_param_named_s_does_not_collide_with_receiver():
+    """item 147: the provide-impl method receiver is `revlSelf` (a reserved,
+    revl-prefixed name), not the bare `s` it used to hardcode — so a provide
+    method with a parameter named `s` no longer emits `func (s *C_k) M(s T)`,
+    which Go rejects as "s redeclared in this block". Affects v1/v2/v3 alike."""
+    src = emit.emit(_compile("""
+        service Shaper { fn area(s: Int) -> Int }
+        component C provides shaper: Shaper {
+          provide shaper {
+            fn area(s) = s * s
+          }
+        }
+    """), package="shaper")
+    _has(src, "func (revlSelf *C_shaper) Area(s int) int")
+    _has(src, "return (s * s)")
+    # the receiver name never leaks as a bare `func (s *` anywhere
+    assert "func (s *" not in src
+
+
+def test_v3_record_in_component_without_types_still_refuses():
+    """The refusal path is intact where it must be: a component that spells a
+    record literal but declares NO record type (v1/v2 shape, or a v3 doc with
+    no `type`) has nothing to lower against, so the named tier limit still
+    fires rather than mis-emitting."""
+    ir = _load(USER_CACHE)  # a v1/v2 component document, no declared types
+    src = emit.emit(ir, package="usercache")
+    # byte-stable: no v3 record scaffolding leaks into a v1/v2 module
+    assert "json:" not in src
+    assert "_V3" not in src
 
 
 def test_v3_pure_document_still_refuses_placement():

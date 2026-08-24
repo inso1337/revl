@@ -321,7 +321,7 @@ type Sink_log struct {
 	ctx *stc.Context
 }
 
-func (s *Sink_log) Write(msg string) {
+func (revlSelf *Sink_log) Write(msg string) {
 }
 
 func Heartbeat() stc.Component {

@@ -198,12 +198,12 @@ type PgDatabase_db struct {
 	pool *Pool
 }
 
-func (s *PgDatabase_db) Query(sql string) []Row {
-	return s.pool.Query(sql)
+func (revlSelf *PgDatabase_db) Query(sql string) []Row {
+	return revlSelf.pool.Query(sql)
 }
 
-func (s *PgDatabase_db) Execute(sql string) int {
-	return s.pool.Execute(sql)
+func (revlSelf *PgDatabase_db) Execute(sql string) int {
+	return revlSelf.pool.Execute(sql)
 }
 
 func UserCache() stc.Component {
@@ -240,16 +240,16 @@ type UserCache_cache struct {
 	db    Database
 }
 
-func (s *UserCache_cache) Get(key string) (string, bool) {
-	return s.store.Get(key)
+func (revlSelf *UserCache_cache) Get(key string) (string, bool) {
+	return revlSelf.store.Get(key)
 }
 
-func (s *UserCache_cache) Put(key string, value string) {
-	s.ctx.Effect(func() stc.Inverse {
-		s.store.Insert(key, value)
-		return func() error { s.store.Remove(key); return nil }
+func (revlSelf *UserCache_cache) Put(key string, value string) {
+	revlSelf.ctx.Effect(func() stc.Inverse {
+		revlSelf.store.Insert(key, value)
+		return func() error { revlSelf.store.Remove(key); return nil }
 	})
-	s.db.Execute(fmt.Sprintf("INSERT INTO cache_log VALUES (%v)", key))
+	revlSelf.db.Execute(fmt.Sprintf("INSERT INTO cache_log VALUES (%v)", key))
 }
 
 // LoadPgDatabase isolates the load-target per the component's realm placement, then loads it.
