@@ -20,7 +20,8 @@ These tests pin all four claims on the reference tiers (py + ts):
   * the clock is a coeffect — injected advances make firings deterministic
     timeline steps ("fires on the 3rd tick");
 
-and the documented follow-on: go/rust/wasm refuse timers honestly.
+and the documented follow-on: wasm still refuses timers honestly (go and rust
+lower them as of item 99).
 """
 
 import importlib.util
@@ -375,17 +376,37 @@ def test_go_rust_lower_timers(tier):
         assert "revl_cancel(" in src
 
 
-def test_test_harness_reports_a_clean_follow_on_skip():
-    """`revl test` surfaces the tier refusal as a clean skip-with-reason, never
-    a false pass or an opaque dump."""
+def test_test_harness_reports_a_clean_follow_on_skip(monkeypatch):
+    """`revl test` surfaces a tier's timer follow-on as a clean skip-with-reason,
+    never a false pass or an opaque dump.
+
+    Only wasm remains the timer follow-on: item 99 taught go and rust to lower
+    timers, so the harness now routes them to real execution like py/ts rather
+    than reporting a stale "not yet lowerable" skip. We force the go/rust
+    toolchains absent so the suite does not shell out to `go test` / `cargo
+    test`; the point is that the resulting skip is *toolchain-absent*, never the
+    timer follow-on."""
+    from revl import test as test_module  # noqa: PLC0415
     from revl.test import run_go, run_rust, run_wasm  # noqa: PLC0415
     ir = compile_source(
         "service Log { emission fn write(m: Str) }\n"
         "component C requires log: Log { every 10s { emit log.write(\"x\") } }", "<t>")
-    for runner, tier in [(run_go, "go"), (run_rust, "rust"), (run_wasm, "wasm")]:
+
+    # wasm is still the honest timer follow-on: its emitter does not lower the
+    # step yet (docs/time-coeffect.md).
+    verdict, reason = run_wasm(ir)
+    assert verdict == "skip"
+    assert "not yet lowerable" in reason and "wasm" in reason
+
+    # go and rust lower timers now (item 99): they route to real execution and
+    # must never report the timer follow-on. With the toolchains absent the
+    # skip is a plain "not installed", not "not yet lowerable".
+    monkeypatch.setattr(test_module.shutil, "which", lambda name: None)
+    for runner, tier in [(run_go, "go"), (run_rust, "rust")]:
         verdict, reason = runner(ir)
         assert verdict == "skip"
-        assert "not yet lowerable" in reason and tier in reason
+        assert "not yet lowerable" not in reason
+        assert "not installed" in reason
 
 
 # =====================================================================

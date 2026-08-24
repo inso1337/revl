@@ -278,9 +278,13 @@ def _crates_io_reachable() -> bool:
 
 
 def run_rust(ir: dict) -> tuple[str, str]:
-    """Emit a throwaway crate and run its ``#[test]``s under ``cargo test``."""
-    if _has_timers(ir):
-        return _timer_follow_on("rust")
+    """Emit a throwaway crate and run its ``#[test]``s under ``cargo test``.
+
+    rust lowers `timer` steps as of item 99 (schedule/cancel on the clock
+    coeffect, residue-accounted), so a timer document routes to real execution
+    here like py/ts — no timer follow-on skip. Only wasm/java still refuse
+    timers as a documented follow-on (see ``_timer_follow_on``).
+    """
     if shutil.which("cargo") is None:
         return ("skip", "cargo not installed")
     if not _crates_io_reachable():
@@ -316,9 +320,12 @@ def run_go(ir: dict) -> tuple[str, str]:
     the live stc-go runtime path instead, so the throwaway module pins the
     same stc-go require the go placement runner and the conformance validator
     use (resolved from the local module cache; FR-5).
+
+    go lowers `timer` steps as of item 99 (schedule/cancel on the clock
+    coeffect, residue-accounted), so a timer document routes to real execution
+    here like py/ts — no timer follow-on skip. Only wasm/java still refuse
+    timers as a documented follow-on (see ``_timer_follow_on``).
     """
-    if _has_timers(ir):
-        return _timer_follow_on("go")
     go = shutil.which("go")
     if go is None:
         return ("skip", "go not installed")
@@ -371,10 +378,11 @@ def _java_tool(name: str) -> str | None:
 def _has_timers(ir: dict) -> bool:
     """True when any component body carries a `timer` step (item 57).
 
-    Timers lower on the reference tiers (py + ts); go/rust/wasm/java refuse them
+    Timers lower on py + ts, and on go + rust as of item 99 (schedule/cancel on
+    the clock coeffect, residue-accounted); only wasm and java still refuse them
     honestly as a documented follow-on (docs/time-coeffect.md). Detecting the
-    step here lets those tiers report a clean "not yet lowerable" skip instead
-    of an opaque `unsupported component step` dump from the emitter."""
+    step here lets those two tiers report a clean "not yet lowerable" skip
+    instead of an opaque `unsupported component step` dump from the emitter."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("step") == "timer":
@@ -387,9 +395,12 @@ def _has_timers(ir: dict) -> bool:
 
 
 def _timer_follow_on(tier: str) -> tuple[str, str]:
-    """The honest refusal for a tier that cannot yet lower timers (item 57)."""
+    """The honest refusal for a tier that cannot yet lower timers (item 57).
+
+    py + ts + go + rust lower timers (go/rust as of item 99); only wasm and java
+    still reach this refusal."""
     return ("skip", f"timers (`every`/`after`, item 57) are not yet lowerable on "
-                    f"the {tier} tier — the reference tiers are py + ts; a "
+                    f"the {tier} tier — they lower on py, ts, go, and rust; a "
                     f"documented follow-on (docs/time-coeffect.md)")
 
 
