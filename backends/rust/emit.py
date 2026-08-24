@@ -2353,17 +2353,33 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         # component form: `target.method(args)`.
         target = node.get("target") or {}
         method = _ident(_mname(node.get("method")), "method")
-        arg_exprs = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
-        if (target.get("kind") == "name"
-                and node.get("method") in ("get", "remove")
-                and str(ctx.var_types.get(target.get("id") or "") or "")
-                    .startswith("Map[")):
+        arg_nodes = node.get("args") or []
+        arg_exprs = [_render_expr(a, ctx, rename) for a in arg_nodes]
+        recv_ty = str(
+            ctx.var_types.get(target.get("id") or target.get("name") or "") or "")
+        is_host_map = recv_ty.startswith("Map[")
+        if (is_host_map and node.get("method") in ("get", "remove")):
             # FR-4: the host Map borrows its key (revl `Str` keys), so the
             # caller keeps owning it — a component that reads then writes the
             # same key (the session ledger) compiles without a clone.
             if arg_exprs:
                 arg_exprs[0] = f"&{arg_exprs[0]}"
-        args = ", ".join(arg_exprs)
+            args = ", ".join(arg_exprs)
+        elif is_host_map:
+            # Other host-Map methods (`insert`, ...) are calls on the
+            # first-party generic `Map<V>`, which already carries the right
+            # ownership at its own boundary — no service-call clone.
+            args = ", ".join(arg_exprs)
+        else:
+            # A service-method call passes its arguments by value (revl value
+            # semantics): the generated trait methods take `String`/records/ADTs
+            # by value, so a non-Copy variable reused after the call would move
+            # (E0382) — the item-93 argument clone, extended to service-call
+            # arguments (roadmap item 101). Copy scalars and fresh temporaries
+            # are untouched.
+            args = ", ".join(
+                _by_value_arg(a, r, ctx) for a, r in zip(arg_nodes, arg_exprs)
+            )
         if target.get("kind") == "req":
             recv = _ident(target.get("name"), "requirement")
             if rename and target.get("name") in rename:
@@ -2403,8 +2419,18 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
     if kind == "record":
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
+        # A record construction moves each field value into the struct. A
+        # non-Copy bare variable used as a field value would therefore be
+        # consumed here (E0382) if the caller still needs it afterward — e.g.
+        # `sessions.append(id, Msg { content: answer })` then `return answer`
+        # (roadmap item 101). `_by_value_arg` clones the reused non-Copy value
+        # (sound: revl values are immutable), leaving Copy scalars and fresh
+        # temporaries untouched. A fn-typed field is impossible here — it is an
+        # escaping position the type layer already refuses (`_FN_TYPE_REFUSAL`).
         body = ", ".join(
-            f"{_ident(k, 'record field')}: {_render_expr(v, ctx, rename)}" for k, v in fields
+            f"{_ident(k, 'record field')}: "
+            f"{_by_value_arg(v, _render_expr(v, ctx, rename), ctx)}"
+            for k, v in fields
         )
         return f"{type_name} {{ {body} }}"
 
