@@ -914,6 +914,12 @@ def main(argv: list[str] | None = None) -> int:
                       help="fault sweep: inject failure at every step of every "
                            "component and check L-Raise / no-residue / LIFO / "
                            "siblings at each (py tier; docs/fault-tests.md)")
+    test.add_argument("--mock-requires", action="store_true",
+                      help="run every `lifecycle test` in mock world: each unmet "
+                           "`requires` is filled by an auto-generated mock provider "
+                           "(item-37-typed, seeded; emissions recorded-not-crossed), "
+                           "so a consumer boots with zero real providers "
+                           "(py tier; docs/auto-mocks.md)")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1187,7 +1193,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {rendered}", file=sys.stderr)
 
     if args.command == "test":
-        return test_command(ir, args.backend, sweep=getattr(args, "sweep", False))
+        return test_command(ir, args.backend, sweep=getattr(args, "sweep", False),
+                            mock_requires=getattr(args, "mock_requires", False))
 
     if args.command == "query":
         return _run_query(args, ir)
