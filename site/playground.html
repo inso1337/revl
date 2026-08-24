@@ -16,9 +16,9 @@
 <div class="pg-overlay" id="overlay">
   <div class="spinner"></div>
   <div class="msg" id="overlay-msg">Loading Pyodide…</div>
-  <div class="sub">The real revl compiler — checker, auditor, planner — is being
-  installed into your browser. First load fetches ~10&nbsp;MB and is cached;
-  nothing you type ever leaves this page.</div>
+  <div class="sub">The real revl compiler — checker, auditor, planner — and the
+  cordis-py runtime are being installed into your browser. First load fetches
+  ~10&nbsp;MB and is cached; nothing you type ever leaves this page.</div>
 </div>
 
 <nav class="nav">
@@ -42,7 +42,9 @@
     <div class="pg-toolbar">
       <label for="examples">example</label>
       <select id="examples" aria-label="preloaded examples"></select>
-      <button class="btn btn-primary btn-sm" id="run" disabled>Run ▸</button>
+      <button class="btn btn-ghost btn-sm" id="run" disabled title="compile: check, audit, plan">Check ▸</button>
+      <button class="btn btn-primary btn-sm" id="boot" disabled
+        title="boot the composition live, in your browser, on the real cordis-py runtime">▶ Boot</button>
       <span class="hint">⌘/Ctrl + Enter</span>
     </div>
     <div class="editor">
@@ -57,6 +59,23 @@
 
   <section class="pg-result-pane">
     <div class="pg-status" id="status"><span>Loading the compiler…</span></div>
+
+    <!-- the live system: graph, operations, trace — shown while booted -->
+    <div class="sys-panel" id="sys-panel" hidden>
+      <div class="sys-head">
+        <span class="lamp" id="sys-lamp"></span>
+        <span id="sys-label">live</span>
+        <span class="spacer"></span>
+        <button class="btn btn-ghost btn-sm" id="sys-swap"
+          title="re-admit the editor's code against the RUNNING system and hot-swap it in — state crosses where a handoff is declared">⇄ Swap</button>
+        <button class="btn btn-ghost btn-sm" id="sys-unload"
+          title="tear down: replay every effect backwards, prove no residue">■ Unload</button>
+      </div>
+      <div class="sys-graph" id="sys-graph"></div>
+      <div class="sys-ops" id="sys-ops"></div>
+      <div class="sys-trace-wrap"><pre class="sys-trace" id="sys-trace"></pre></div>
+    </div>
+
     <div class="pg-tabs" role="tablist">
       <button class="pg-tab" role="tab" data-panel="diagnostics" aria-selected="true">
         <span class="dot" id="dot-diagnostics"></span>Diagnostics

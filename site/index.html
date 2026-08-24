@@ -54,7 +54,7 @@
       </div>
       <p class="hero-note">
         <span class="ok">✓</span> one checked front-end · six runtimes ·
-        emitted code validated by real compilers · compiler runs client-side, nothing leaves the page
+        emitted code validated by real compilers · compiler <b>and runtime</b> run client-side, nothing leaves the page
       </p>
     </div>
 
@@ -291,7 +291,8 @@
       <h2>Time, state, async, instances — still revertible.</h2>
       <p>The core is frozen; the language keeps growing on top of it. Every
       addition keeps the same deal: <b>declare the inverse, or admit the
-      crossing</b>. All four are live in the playground.</p>
+      crossing</b>. All four are checkable in the playground — and the playground
+      can now <a href="playground.html?example=live_counter">boot them live</a>.</p>
     </div>
     <div class="lang-grid">
       <div class="lang-card reveal">
@@ -600,10 +601,12 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
 <section class="cta-band">
   <div class="wrap">
     <h2>Break a component.<br /><span class="grad">Watch the gate refuse it.</span></h2>
-    <p>The full compiler runs in your browser — checker, auditor, planner.
-    Nothing you type leaves the page.</p>
+    <p>The full compiler runs in your browser — and so does the runtime.
+    <b>Boot</b> a composition on cordis-py, call its operations, <b>hot-swap</b> your
+    own edit into the running system (state crosses via handoff), then unload and
+    watch the no-residue proof. Nothing you type leaves the page.</p>
     <div class="hero-ctas">
-      <a class="btn btn-primary" href="playground.html">Open the playground →</a>
+      <a class="btn btn-primary" href="playground.html?example=live_counter">Boot a live system →</a>
       <a class="btn btn-ghost" href="https://github.com/inso1337/revl">Star on GitHub</a>
     </div>
     <div class="quickstart codecard reveal">

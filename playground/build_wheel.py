@@ -62,6 +62,19 @@ def main() -> None:
             whl.writestr(arcname, data)
             records.append(_record_line(arcname, data))
 
+        # The py-tier runtime glue (emit/runtime/replay/...), packaged where
+        # `_paths.backends_root()` finds it in an installed wheel
+        # (revl/backends) — the same layout as pyproject's force-include,
+        # scoped to the one tier the in-browser session can boot. With the
+        # cordis wheel installed beside it, `revl.mcp.session.Session` runs
+        # load/call/swap/unload entirely client-side.
+        py_backend = ROOT / "backends" / "python"
+        for path in sorted(py_backend.glob("*.py")):
+            arcname = "revl/backends/python/" + path.name
+            data = path.read_bytes()
+            whl.writestr(arcname, data)
+            records.append(_record_line(arcname, data))
+
         for arcname, text in (
             (f"{dist_info}/METADATA", metadata),
             (f"{dist_info}/WHEEL", wheel_meta),

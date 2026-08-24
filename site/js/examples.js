@@ -3,6 +3,13 @@
 // extra fetches. Regenerate with: python3 site/gen_examples.py
 export const EXAMPLES = [
   {
+    "id": "live_counter",
+    "label": "★ live demo — boot it, call it, evolve it",
+    "kind": "accept",
+    "file": "live_counter.rvl",
+    "source": "// LIVE DEMO — this one is meant to be *run*, not just checked.\n//\n//   1. press ▶ Boot — the composition activates in your browser, on the real\n//      cordis-py runtime; the system graph lights up\n//   2. call counter.incr() a few times, then counter.count()\n//   3. now EDIT this file — change \"+1\" to \"+2\", or make label() shout —\n//      and press ⇄ Swap: the gate re-admits your edit against the RUNNING\n//      system, and because Counter declares a `handoff`, the count SURVIVES\n//      the hot-swap (generation bumps, state stays)\n//   4. press ■ Unload — teardown replays every effect backwards, and the\n//      no-residue verdict is checked, not asserted\n//\n// Break it on purpose: rename `count` to `total` and press Swap — the gate\n// refuses the drift and the running system is untouched.\n\nservice Tally {\n  fn count() -> Int\n  fn label() -> Str\n  fn incr() -> Int\n}\n\ncomponent Counter provides counter: Tally {\n  handoff counter: Map[Str, Str]         // state crosses the swap, checked\n  let store = effect Map.new() undo store.drop()\n\n  provide counter {\n    fn count() = store.size()\n    fn label() = `counted ${store.size()}`\n    fn incr() {\n      let k = `n-${store.size()}`\n      effect store.insert(k, \"+1\")\n      undo   store.remove(k)\n      return store.size()\n    }\n  }\n}\n"
+  },
+  {
     "id": "user_cache",
     "label": "user_cache — effect/undo + a declared emission",
     "kind": "accept",
