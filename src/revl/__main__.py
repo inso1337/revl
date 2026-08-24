@@ -1097,6 +1097,76 @@ def _run_repair(args) -> int:
     return 1
 
 
+def _run_quarantine(args) -> int:
+    """`revl quarantine FILES` — the quarantine tier (item 45,
+    docs/quarantine-tier.md). Grade an untrusted candidate with the gauntlet,
+    then compile it to a standard wasm component and run its lifecycle + fault
+    battery in wasmtime's component-model sandbox — where an escape is a trap.
+
+    Prints the verdict (passed | trapped | rejected | deferred | unavailable)
+    and, with --policy, the admission decision. Exit status: 0 when the
+    candidate passed (or was deferred/unavailable — nothing to fail on), 1 when
+    it was trapped or rejected, and (with --require-runtime) 3 when the substrate
+    toolchain is absent so the candidate could not be proven."""
+    from .mcp import quarantine as _quarantine  # noqa: PLC0415
+    from .mcp.session import Session  # noqa: PLC0415
+
+    session = Session()
+    if getattr(args, "policy", None):
+        from .policy import load_policy, PolicyError  # noqa: PLC0415
+        try:
+            session.sandbox = load_policy(args.policy)
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot read policy: {error}", file=sys.stderr)
+            return 1
+
+    arguments: dict = {"files": list(args.files)}
+    if getattr(args, "service", None):
+        arguments["service"] = args.service
+    report = _quarantine.run(session, arguments)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(_render_quarantine(report))
+
+    verdict = report.get("verdict")
+    if verdict in ("trapped", "rejected"):
+        return 1
+    if verdict == "unavailable" and getattr(args, "require_runtime", False):
+        return 3
+    return 0
+
+
+def _render_quarantine(report: dict) -> str:
+    """A compact human render of the quarantine report (mirrors the dossier
+    verbs' text output; the full structure is under --json)."""
+    verdict = report.get("verdict")
+    glyph = {"passed": "PASS", "trapped": "TRAP", "rejected": "REJECT",
+             "deferred": "DEFER", "unavailable": "SKIP"}.get(verdict, "?")
+    lines = [f"quarantine: {glyph}  ({verdict})", f"  {report.get('note', '')}"]
+    sub = report.get("substrate") or {}
+    counts = sub.get("counts") or {}
+    if sub.get("ran"):
+        lines.append(f"  substrate: {sub.get('runtime')}")
+        lines.append(f"    probes={counts.get('probes')} "
+                     f"returned={counts.get('returned')} "
+                     f"trapped={counts.get('trapped')}")
+        for probe in sub.get("probes") or []:
+            if probe.get("outcome") == "trapped":
+                lines.append(f"    TRAP {probe['function']}("
+                             f"{probe['input']!r}): {probe.get('trap')}")
+    elif sub.get("reason"):
+        lines.append(f"  substrate: not run — {sub.get('reason')}")
+    admission = report.get("admission") or {}
+    if admission.get("gated"):
+        verb = "ADMIT" if admission.get("admit") else "REFUSE"
+        if admission.get("bypass"):
+            verb = "ADMIT (operator bypass)"
+        lines.append(f"  admission: {verb} — {admission.get('note') or admission.get('message', '')}")
+    return "\n".join(lines)
+
+
 def _run_recover(args) -> int:
     """`revl recover --wal FILE` — crash recovery over a write-ahead log
     (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
@@ -1404,6 +1474,28 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="write the result to this path instead of in place (single input)",
     )
+
+    quarantine = sub.add_parser(
+        "quarantine",
+        help="prove an untrusted Str-surface candidate in the wasm sandbox "
+             "(item 45): grade it with the gauntlet, then run its lifecycle + "
+             "fault battery as a standard component under wasmtime — where an "
+             "escape is a trap, not an incident")
+    quarantine.add_argument("files", nargs="+")
+    quarantine.add_argument("--json", action="store_true",
+                            help="machine-readable report")
+    quarantine.add_argument(
+        "--service", default=None, metavar="NAME",
+        help="WIT interface name to group the candidate's Str-surface functions "
+             "under (default: the sole declared service, else `Candidate`)")
+    quarantine.add_argument(
+        "--policy", default=None, metavar="POLICY",
+        help="a boundary policy (item 33): with `quarantine required`, the "
+             "admission decision reports whether the candidate is admissible")
+    quarantine.add_argument(
+        "--require-runtime", action="store_true",
+        help="fail (exit 3) instead of exiting 0 when wasm-tools/wasmtime are "
+             "absent, so the substrate battery could not actually run")
 
     test = sub.add_parser("test", help="compile and run `test` blocks")
     test.add_argument("files", nargs="+")
@@ -1775,6 +1867,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_undo(args)
     if args.command == "canary":
         return _run_canary(args)
+    if args.command == "quarantine":
+        return _run_quarantine(args)
 
     if args.command == "contract":
         return _run_contract(args)
