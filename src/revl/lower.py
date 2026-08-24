@@ -308,6 +308,10 @@ class Env:
         # why-trace support for the above (why.py); None when unavailable,
         # in which case rejections carry no derivation but are unchanged
         self.emission_evidence: "_EmissionEvidence | None" = None
+        # async externs in scope (roadmap item 80): name -> its ExternDecl, so
+        # the v1 coloring check can name/locate an async extern a method reaches
+        # (docs/design/async-extern.md §3). Set alongside the emitting sets.
+        self.async_externs: dict = {}
         # component-body type environment: safe-name -> type, plus the
         # "config.<field>" and "req.<local>" markers infer_ir resolves
         self.type_env: dict[str, str] = {}
@@ -870,6 +874,26 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
             _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types,
                              expected_return=marked_returns)
         _check_returns_on_every_path(decl, filename)
+        # v1 async coloring (docs/design/async-extern.md §3): transitive
+        # coloring through named `fn`s is slice 6. Until then a module `fn`
+        # that reaches an async extern is refused rather than silently emitted
+        # into a sync function — the emitter would drop the required `await`.
+        _async_names = {ext.name for ext in program.externs if ext.async_}
+        if _async_names:
+            _called: set = set()
+            _calls_in(body, _called)
+            _reached = sorted(_called & _async_names)
+            if _reached:
+                raise RevlError(
+                    filename, decl.line,
+                    f"function `{decl.name}` reaches async extern "
+                    f"`{_reached[0]}`, but a module `fn` cannot carry the async "
+                    f"color yet (phase 2)",
+                    hint="call the async extern directly from an `async fn` "
+                         "provide method, or wrap it in an async service "
+                         "operation (A1)",
+                    code="A1", category="async-propagation",
+                )
         entry = {
             "name": decl.name,
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
@@ -1287,6 +1311,34 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                 f"emission extern `{decl.name}` cannot declare `undo`",
                 hint="emissions are one-way boundary crossings; use `compensate` for a best-effort cleanup",
             )
+        # `async` validity (docs/design/async-extern.md §1): the modifier is
+        # legal only on `emission` externs, and an async extern may not declare
+        # `compensate` in v1 (the compensation seam is synchronous on every
+        # tier). These sit next to the classification rules above and refuse
+        # with honest messages before the flag reaches the IR.
+        if decl.async_:
+            if decl.classification == "pure":
+                raise RevlError(
+                    filename, decl.line,
+                    f"`pure` extern `{decl.name}` cannot be `async` — a suspension is "
+                    f"observable; classify it `emission`",
+                    hint="pure externs are callable from every pure position (tests, "
+                         "match guards, undo slots), which have no async story",
+                )
+            if decl.classification == "acquire":
+                raise RevlError(
+                    filename, decl.line,
+                    f"`acquire` extern `{decl.name}` cannot be `async` yet — an "
+                    f"acquire's `undo` runs on the synchronous teardown/unwind path",
+                    hint="classify it `emission`, or file the need if an awaited "
+                         "teardown ever becomes real",
+                )
+            if decl.compensate is not None:
+                raise RevlError(
+                    filename, decl.line,
+                    f"an `async` extern cannot declare `compensate` yet — the "
+                    f"compensation seam is synchronous on every tier",
+                )
         bodies: dict[str, str] = {}
         for body in decl.bodies:
             if body.backend in bodies:
@@ -1299,6 +1351,10 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             "params": [{"name": p.name, "type": p.type} for p in decl.params],
             "returns": decl.returns,
             "bodies": bodies,
+            # additive async flag (docs/design/async-extern.md §4), mirroring
+            # the service-method spelling at lower.py:2583. Absent means sync;
+            # `ir_version` stays 3 (confirmed human decision, §4).
+            **({"async": True} if decl.async_ else {}),
         }
         if decl.undo is not None:
             # only an acquire reaches here with `undo` (pure/emission are
@@ -2498,6 +2554,26 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                                         emitting_caps, emission_evidence, spawn_reg)
         if comp.source:
             _retarget_holes(lowered_comp, comp.source)
+        # v1 async coloring (docs/design/async-extern.md §3, "Component
+        # bodies"): a setup/activation body (an `emit` step, an `effect`, an
+        # `await` step) may not reach an async extern — divert/inertia
+        # semantics are out of scope for v1. Provide-method bodies are checked
+        # at their own site above, so they are pruned here.
+        _async_names = {ext.name for ext in program.externs if ext.async_}
+        if _async_names:
+            _reached: set = set()
+            _async_reached_outside_provide(lowered_comp, _async_names, _reached)
+            if _reached:
+                raise RevlError(
+                    comp.source or program.filename, comp.line,
+                    f"component `{comp.name}` reaches async extern "
+                    f"`{sorted(_reached)[0]}` in a setup/activation body, which "
+                    f"cannot suspend a fiber (A1)",
+                    hint="wrap the suspending call in an `async fn` service "
+                         "operation and drive it from a provide method — v1 does "
+                         "not lower an awaited `emit` step",
+                    code="A1", category="async-propagation",
+                )
         components.append(lowered_comp)
 
     # G4/G6 across the spawn boundary: a spawner's declared emission upper
@@ -3159,6 +3235,29 @@ from .emission_analysis import (  # noqa: E402,F401
 )
 
 
+def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
+    """Async extern names a lowered component body reaches, *excluding*
+    provide-method bodies (those are gated at their own site — async-extern.md
+    §3). Mirrors `_calls_in`'s call/value detection but prunes provide steps."""
+    if isinstance(node, dict):
+        if node.get("step") == "provide":
+            return
+        kind = node.get("kind")
+        if kind == "fn" and node.get("name") in async_names:
+            acc.add(node["name"])
+        callee = node.get("callee")
+        if kind == "call" and isinstance(callee, dict) \
+                and callee.get("kind") == "var" and callee.get("name") in async_names:
+            acc.add(callee["name"])
+        if kind == "var" and node.get("name") in async_names:
+            acc.add(node["name"])
+        for value in node.values():
+            _async_reached_outside_provide(value, async_names, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _async_reached_outside_provide(value, async_names, acc)
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
@@ -3169,6 +3268,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
+    env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}
     env.callables = callables or set()  # module fns/externs/hosts for unified expressions
     # instance-parametric components: the registry of spawn targets, edges,
     # templates and G4 spawn-boundary sites (docs/design-v2-instances.md)
@@ -3664,6 +3764,61 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     hint=_capability_hint(svc.name, method.name,
                                           decl.capabilities, extra),
                     code="G4", category="emission-capability",
+                )
+
+        # v1 async coloring (docs/design/async-extern.md §3): an async extern
+        # call is admitted only inside a provide method whose service operation
+        # is declared `async fn`. A sync method reaching an async extern is
+        # refused with the twin of the emission-propagation diagnostic above —
+        # the service declaration is the upper bound on its providers, so
+        # asynchrony, like emission-ness, is a declared property (A1).
+        if env.async_externs:
+            called: set = set()
+            values: set = set()
+            _calls_in(mbody, called, values=values)
+            # a first-class reference to an async callable is refused in every
+            # context, even an async method: an arrow type carries no color, so
+            # the emitter cannot know to await it (async-extern.md §3, "refused,
+            # not widened").
+            passed_async = sorted(values & set(env.async_externs))
+            if passed_async:
+                culprit = passed_async[0]
+                cdecl = env.async_externs[culprit]
+                raise RevlError(
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` uses async extern `{culprit}` as a "
+                    f"function value, but an async extern has no arrow type",
+                    hint="call it directly from an async context — an arrow type "
+                         "carries no async color, so a suspension cannot be awaited "
+                         "through it (A1)",
+                    code="A1", category="async-propagation",
+                )
+            called_async = sorted(called & set(env.async_externs))
+            if called_async and not decl.async_:
+                culprit = called_async[0]
+                cdecl = env.async_externs[culprit]
+                ev = env.emission_evidence
+                cfile, cline = (ev.locate(cdecl) if ev is not None
+                                else (None, getattr(cdecl, "line", None)))
+                head = TraceStep(method.name, "provide-method",
+                                 comp.source or filename, method.line,
+                                 f"provision `{stmt.key}`")
+                tail = TraceStep(culprit, "async-extern", cfile, cline,
+                                 "async extern")
+                why = WhyTrace(kind="async-propagation",
+                               subject=f"{svc.name}.{method.name}",
+                               steps=[head, tail], shape=CHAIN)
+                evidence = ", ".join(f"`{name}`" for name in called_async)
+                raise RevlError(
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` is declared sync, but this "
+                    f"implementation reaches async extern {evidence} — a sync "
+                    f"method has no in-flight window (A1)",
+                    hint=f"declare the operation `async fn {method.name}(...)` in "
+                         f"service `{svc.name}`, or move the suspending call out of "
+                         f"this method",
+                    code="A1", category="async-propagation",
+                    why=why,
                 )
 
         methods.append({"name": method.name, "params": safe_params, "body": mbody})
