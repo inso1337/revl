@@ -119,19 +119,45 @@ def test_aggregate_wit_matches_golden():
 
 
 def test_aggregate_wit_is_valid_types_inside_interface():
-    """`revl export wit` (slice-1) emits a referenced `record`/`variant` at the
-    PACKAGE top level, which is not valid WIT — a named type must live inside an
-    interface. The component embeds a relocated form: no type declaration is
-    left at the top level, and the record/variant sits in the interface body."""
+    """`revl export wit` (slice-1, item 97 `ec97d07`) emits a referenced
+    `record`/`variant`/`enum` INSIDE the interface body — valid WIT, since a
+    named type must live inside an interface. The component embeds that output
+    directly (no relocation), so the exported WIT has no type declaration at the
+    package top level and the record sits in the interface body. Assert this
+    holds for `export_wit`'s output directly, which is what the component
+    embeds."""
+    from revl.export_wit import export_wit  # noqa: PLC0415
+    canonical = _canonical()
     wit = _emit_agg()["wit"]
-    lines = wit.split("\n")
-    depth = 0
-    for line in lines:
-        s = line.strip()
-        if depth == 0 and s.startswith(("record ", "variant ", "enum ")):
-            raise AssertionError(f"top-level type declaration in embedded WIT: {s!r}")
-        depth += line.count("{") - line.count("}")
+
+    def _no_top_level_type(text: str, label: str) -> None:
+        depth = 0
+        for line in text.split("\n"):
+            s = line.strip()
+            if depth == 0 and s.startswith(("record ", "variant ", "enum ")):
+                raise AssertionError(f"top-level type declaration in {label}: {s!r}")
+            depth += line.count("{") - line.count("}")
+
+    # Build the same synthetic service IR the component embeds (the boundary
+    # functions grouped under the service name) and call `export_wit` directly:
+    # its output is already valid WIT — the named `record` sits inside the
+    # interface, nothing at the package top level — so the component embeds it
+    # verbatim with no relocation.
+    ir = compile_source(_AGG_SRC)
+    canon = canonical._Canon(ir.get("types") or {})
+    boundary = canonical._boundary_functions(ir.get("functions") or [], canon)
+    methods = {fn["name"]: {"params": fn.get("params") or [],
+                            "returns": fn.get("returns")} for fn in boundary}
+    synthetic = {"services": {_AGG_SERVICE: {"methods": methods}},
+                 "types": ir.get("types") or {}, "externs": []}
+    interface = export_wit(synthetic, service=_AGG_SERVICE, package="revl:exported")
+    _no_top_level_type(interface, "export_wit output")
+    assert "  record person { name: string, age: s64 }" in interface
+
+    # and the embedded WIT is that output verbatim, so it inherits the property
+    _no_top_level_type(wit, "embedded WIT")
     assert "  record person { name: string, age: s64 }" in wit
+    assert interface.rstrip() in wit
 
 
 def test_aggregate_interface_now_carries_records_lists_variants():
@@ -205,8 +231,8 @@ def test_service_provide_method_is_named_and_wrapped():
 def test_service_wit_interface_is_export_wit_verbatim():
     """The embedded interface is exactly `revl export wit --service Registry`
     over the same component IR — the binary and the interface documentation
-    agree. (`export_wit` emits the record at top level; the component relocates
-    it into the interface body, the only difference, covered separately.)"""
+    agree. (`export_wit` emits the record inside the interface body since item
+    97, so the component embeds its output directly — no relocation.)"""
     from revl.export_wit import export_wit  # noqa: PLC0415
     res = _emit_svc()
     ir = compile_source(_SVC_SRC)

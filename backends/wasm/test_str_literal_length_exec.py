@@ -1,23 +1,27 @@
 """`Str.length` on a multibyte STRING LITERAL, EXECUTED on cordis-wasm.
 
 Regression guard for roadmap item 104. `Str` is a code-point sequence on every
-tier (item 51, docs/strings.md): `"café".length()` is 4 (four code points), not
-5 (its UTF-8 byte count). The wasm tier stores a `Str` as a canonical-ABI cell
-(a u32 *byte-length* prefix, then the UTF-8 bytes), so a literal `.length` MUST
+tier (item 51, docs/strings.md): `"café".length` is 4 (four code points), not 5
+(its UTF-8 byte count). The wasm tier stores a `Str` as a canonical-ABI cell (a
+u32 *byte-length* prefix, then the UTF-8 bytes), so a literal `.length` MUST
 route through `$str_cp_length` — the code-point counter that walks continuation
-bytes — and never constant-fold to the `(i32.load <ptr>)` byte-length read.
+bytes — and never fold to the `(i32.load <ptr>)` byte-length read.
 
-Item 104 was filed on the suspicion that the literal path constant-folded
-`.length` to that byte load; verification showed it already lowers through
-`$str_cp_length` and answers code points correctly. This test PINS that: a
-future constant-fold / peephole that reintroduced the byte-count read would flip
-these cases (café -> 5, 日本語 -> 9, naïve -> 6) and go red BY EXECUTION on the
-real runtime, not merely by WAT-shape inspection.
+Item 104's real defect was the PROPERTY form `s.length` (no parens): it lowered
+as a distinct `len` IR node through `_len_expr`, which read the byte-length
+prefix directly (`(i64.extend_i32_u (i32.load <ptr>))`) and so answered 5 for
+`"café"`. The METHOD form `s.length()` was always correct (it routes through
+`$str_cp_length`) — testing only the method form is what masked the bug. Both
+forms are pinned here: the property row would flip (café -> 5, 日本語 -> 9,
+naïve -> 6) BY EXECUTION on the real runtime if a future fold reintroduced the
+byte-count read.
 
 The proof is execution. The runtime is the first-party cordis-wasm prototype;
 point CORDIS_WASM at a checkout (default: ~/Projects/cordis-wasm). Without it (or
 without the wasmtime Python package) these skip with a reason — never reported as
-passing.
+passing. A CLI-driven companion (`test_str_literal_length_cli_exec.py`) executes
+the same property-form cases through the `wasmtime`/`wasm-tools` binaries so the
+guard still runs where only the CLI toolchain is present.
 """
 
 from __future__ import annotations
@@ -66,14 +70,16 @@ def _cordis_runtime():
     return module
 
 
-def _run_length(literal: str) -> int:
-    """Compile+emit `provide s { fn f() = "<literal>".length() }`, plug it onto a
-    fresh cordis-wasm runtime, and return the executed result."""
+def _run_length(literal: str, expr: str = ".length()") -> int:
+    """Compile+emit `provide s { fn f() = "<literal>"<expr> }`, plug it onto a
+    fresh cordis-wasm runtime, and return the executed result. `expr` selects the
+    method form (`.length()`) or the property form (`.length`, the item-104
+    bug)."""
     mod = _cordis_runtime()
     src = (
         "service S { fn f() -> Int }\n"
         "component C provides s: S {\n"
-        f'  provide s {{ fn f() = "{literal}".length() }}\n'
+        f'  provide s {{ fn f() = "{literal}"{expr} }}\n'
         "}\n"
     )
     ir = compile_source(src)
@@ -92,6 +98,7 @@ def _run_length(literal: str) -> int:
 #   "日本語" -> 3 code points, 9 bytes  (each CJK char = 3 bytes)
 #   "naïve" -> 5 code points, 6 bytes  (ï = 2 bytes)
 #   "abc"   -> 3 code points, 3 bytes  (ASCII: byte == code point)
+@pytest.mark.parametrize("expr,form", [(".length()", "method"), (".length", "property")])
 @pytest.mark.parametrize(
     "literal,code_points,byte_len",
     [
@@ -101,18 +108,19 @@ def _run_length(literal: str) -> int:
         ("abc", 3, 3),
     ],
 )
-def test_multibyte_literal_length_counts_code_points(literal, code_points, byte_len):
-    """A multibyte string-literal `.length` executed on wasmtime answers the
-    code-point count, never the UTF-8 byte count (item 104 regression guard)."""
-    got = _run_length(literal)
+def test_multibyte_literal_length_counts_code_points(literal, code_points, byte_len, expr, form):
+    """A multibyte string-literal `.length` (method AND property form) executed
+    on wasmtime answers the code-point count, never the UTF-8 byte count. The
+    property form is the item-104 defect; both forms are guarded here."""
+    got = _run_length(literal, expr)
     assert got == code_points, (
-        f'"{literal}".length() executed to {got}; expected {code_points} code '
-        f"points (byte-count regression would give {byte_len})"
+        f'"{literal}"{expr} ({form} form) executed to {got}; expected '
+        f"{code_points} code points (byte-count regression would give {byte_len})"
     )
     if byte_len != code_points:
         # make the specific failure mode loud: it must not be the byte count
         assert got != byte_len, (
-            f'"{literal}".length() returned its UTF-8 byte count {byte_len} — '
-            "the literal `.length` fast-path folded to the byte-length load "
-            "instead of routing through $str_cp_length (item 104)"
+            f'"{literal}"{expr} ({form} form) returned its UTF-8 byte count '
+            f"{byte_len} — the literal `.length` path folded to the byte-length "
+            "load instead of routing through $str_cp_length (item 104)"
         )

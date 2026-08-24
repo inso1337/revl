@@ -49,8 +49,13 @@ number for `"😀"` (U+1F600): **1** code point, **2** UTF-16 units (D83D DE00),
 - **ts / java** measure in **UTF-16 code units**: `.length`, `charCodeAt`,
   `charAt`, `slice`/`substring` are all UTF-16. `charCodeAt(0)` returns
   `55357` — a lone high surrogate, not a character.
-- **wasm** measures in **UTF-8 bytes**: `length` reads the byte-count prefix,
-  `$str_char_code_at` does `i32.load8_u` (returns `240`, the first byte).
+- **wasm** *as originally surveyed* measured in **UTF-8 bytes** (the table row
+  above): `length` read the byte-count prefix and `$str_char_code_at` did
+  `i32.load8_u` (returning `240`, the first byte). **This wave fixed it** — the
+  WAT helpers now decode UTF-8 and measure in **code points** (`$str_cp_length`,
+  `$str_cp_char_at`, `$str_cp_char_code_at`, `$str_cp_slice`), for both the
+  `.length()` method form *and* the `.length` property form; see *Remaining
+  wasm WAT work* below, where wasm is now code-point-correct.
 
 `*` **go and rust reject the astral literal before any method runs.** The IR
 stores the string literal itself as **UTF-16** — `{"kind":"lit","value":"😀"}`
