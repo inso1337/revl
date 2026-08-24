@@ -120,7 +120,7 @@ export interface Model {
 
 export interface Loop {
   /** emission — crosses the system boundary (DESIGN.md §3.5) */
-  run(p: string): unknown
+  run(p: string): Step
 }
 
 declare module 'cordis' {
