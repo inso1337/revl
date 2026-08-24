@@ -240,7 +240,7 @@ class _Scope:
 # component dialect and the 2.0 dialect each have their own atomic set
 # (`_V3_ATOMIC_KINDS` is defined further down). The one renderer checks
 # whichever set fits the branch's shape.
-_ATOMIC_KINDS = {"name", "config", "req", "call", "host"}
+_ATOMIC_KINDS = {"name", "config", "req", "call", "host", "instance-get"}
 
 # The component (v1) dialect owns these kinds: `req`/`config`/`name` resolve
 # against the component scope, and `host`/`format` are component-only
@@ -675,6 +675,24 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         realms = "[" + ", ".join(
             _string(r) for r in node.get("realms") or []) + "]"
         return f"spawn(ctx, {target}, {cfg}, {realms})"
+
+    if kind == "instance-get":
+        # instance-parametric components (docs/design-v2-instances.md): `s.<key>`
+        # reads a provision back off a spawn handle. `target` is a
+        # `SpawnHandle`, whose `.get(key)` resolves the key through the
+        # instance's OWN private local realm — the realm the matching `spawn`
+        # isolated it into (cordis' per-key `ctx.isolate`). Only the spawner
+        # holding this handle reaches it: a sibling instance, isolated into a
+        # different local realm, and the root cannot (supervision-tree
+        # addressing). `service` is frozen inline on the node but needs no
+        # emission here — cordis exposes the provision by key on the instance's
+        # context, so the key alone resolves it (mirrors backends/python/emit.py
+        # and the runtime `SpawnHandle.get`, backends/typescript/runtime.ts).
+        target = _expr(node.get("target"), ctx)
+        key = node.get("key")
+        if not isinstance(key, str) or not key.isidentifier():
+            raise EmitError(f"bad instance-get key {key!r}")
+        return f"{target}.get({_string(key)})"
 
     raise EmitError(f"unsupported expression kind {kind!r}")
 

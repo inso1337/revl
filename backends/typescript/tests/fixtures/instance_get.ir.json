@@ -1,0 +1,124 @@
+{
+ "ir_version": 3,
+ "services": {
+  "Counter": {
+   "methods": {
+    "value": { "params": [], "returns": "Int", "emission": false }
+   }
+  },
+  "Ctl": {
+   "methods": {
+    "read_a": { "params": [], "returns": "Int", "emission": false },
+    "read_b": { "params": [], "returns": "Int", "emission": false }
+   }
+  }
+ },
+ "components": [
+  {
+   "name": "Worker",
+   "source": "instance_get.rvl",
+   "config": [ { "name": "seed", "type": "Int", "default": null } ],
+   "requires": {},
+   "provides": { "counter": "Counter" },
+   "body": [
+    {
+     "step": "let-effect",
+     "bind": "m",
+     "acquire": { "kind": "host", "fn": "Map.new", "args": [] },
+     "undo": { "kind": "call", "target": { "kind": "name", "id": "m" }, "method": "drop", "args": [] }
+    },
+    {
+     "step": "provide",
+     "name": "counter",
+     "service": "Counter",
+     "methods": [
+      {
+       "name": "value",
+       "params": [],
+       "body": [
+        { "step": "return", "expr": { "kind": "config", "field": "seed" } }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Supervisor",
+   "source": "instance_get.rvl",
+   "config": [],
+   "requires": {},
+   "provides": { "ctl": "Ctl" },
+   "body": [
+    {
+     "step": "let-effect",
+     "bind": "w1",
+     "acquire": {
+      "kind": "spawn",
+      "component": "Worker",
+      "config": { "seed": { "kind": "lit", "value": 7 } },
+      "realms": [ "counter" ],
+      "line": 19
+     },
+     "undo": { "kind": "call", "target": { "kind": "name", "id": "w1" }, "method": "dispose", "args": [] }
+    },
+    {
+     "step": "let-effect",
+     "bind": "w2",
+     "acquire": {
+      "kind": "spawn",
+      "component": "Worker",
+      "config": { "seed": { "kind": "lit", "value": 9 } },
+      "realms": [ "counter" ],
+      "line": 20
+     },
+     "undo": { "kind": "call", "target": { "kind": "name", "id": "w2" }, "method": "dispose", "args": [] }
+    },
+    {
+     "step": "provide",
+     "name": "ctl",
+     "service": "Ctl",
+     "methods": [
+      {
+       "name": "read_a",
+       "params": [],
+       "body": [
+        {
+         "step": "return",
+         "expr": {
+          "kind": "call",
+          "target": { "kind": "instance-get", "target": { "kind": "name", "id": "w1" }, "component": "Worker", "key": "counter", "service": "Counter" },
+          "method": "value",
+          "args": []
+         }
+        }
+       ]
+      },
+      {
+       "name": "read_b",
+       "params": [],
+       "body": [
+        {
+         "step": "return",
+         "expr": {
+          "kind": "call",
+          "target": { "kind": "instance-get", "target": { "kind": "name", "id": "w2" }, "component": "Worker", "key": "counter", "service": "Counter" },
+          "method": "value",
+          "args": []
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "manifest": {
+  "components": [
+   { "name": "Supervisor", "file": "instance_get.rvl", "inject": [], "provides": [ "ctl" ] }
+  ],
+  "loadOrder": [ "Supervisor" ],
+  "templates": [ "Worker" ]
+ }
+}
