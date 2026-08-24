@@ -455,6 +455,48 @@ def test_cargo_check_compiles_agent_loop_declared_function_types(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Roadmap item 94 — async function-value color erasure (follow-up to item 92).
+#
+# Item 92 added `Async[T]` (docs/design/async-function-values.md): a first-class
+# callback whose declared return is `Async[T]` colors async/await on py/ts. The
+# rust tier has no async-fn machinery, so it *erases* the color — but an
+# un-erased `Async` head fell through `_rust_type`'s generic dispatch to the
+# opaque `Value` fallback, so `(Str) -> Async[Str]` emitted the wrong
+# `impl Fn(String) -> Value` instead of `impl Fn(String) -> String`. The fix
+# maps the erased `Async[T]` return to its concrete `T`.
+
+def test_async_typed_callback_return_erases_to_concrete_type():
+    ir = compile_source(
+        "fn agent_loop(prompt: Str, complete: (Str) -> Async[Str], "
+        "max_steps: Int) -> Str {\n"
+        "  let first: Str = complete(prompt)\n"
+        "  return first\n"
+        "}\n"
+    )
+    src = emit.emit(ir)
+    assert "complete: impl Fn(String) -> String" in src
+    # the async return must not leak the opaque `Value` fallback into the sig
+    assert "impl Fn(String) -> Value" not in src
+    assert "Async" not in src
+
+
+@needs_cargo
+def test_cargo_check_compiles_async_typed_callback_erasure(tmp_path):
+    """Definition-of-done pin: an async-typed callback param emits rust a real
+    `cargo check` accepts — the color is erased to the concrete return type,
+    never the `Value` fallback that would not match the callee's `String`."""
+    ir = compile_source(
+        "fn agent_loop(prompt: Str, complete: (Str) -> Async[Str], "
+        "max_steps: Int) -> Str {\n"
+        "  let first: Str = complete(prompt)\n"
+        "  return first\n"
+        "}\n"
+    )
+    result = _cargo_check(tmp_path, emit.emit(ir))
+    assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
 # Roadmap item 93 — three rust-emitter compile bugs the string-protocol harness
 # loop shape hit once item 91's fn-type lowering exposed the bodies around it
 # (dogfood finding #22). Each is pinned by a minimal shape that a real

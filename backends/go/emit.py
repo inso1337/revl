@@ -2249,6 +2249,22 @@ def _v3_split_generic(inner: str) -> list[str]:
     return parts
 
 
+def _erase_async(ret: str) -> str:
+    """Erase the async color from a function-type return (roadmap item 92/94).
+
+    `Async[T]` colors a first-class callback on the py/ts tiers (async/await);
+    the go tier has no async-fn machinery, so an `Async[T]` return erases to its
+    concrete `T` — `(Str) -> Async[Str]` renders `func(string) string`, not the
+    invalid `func(string) Async[Str]` that leaked before. `Async` is
+    position-restricted to a fn-type return (typecheck.py), so this is the only
+    site it can reach the emitter.
+    """
+    r = ret.strip()
+    if r.startswith("Async[") and r.endswith("]"):
+        return r[len("Async["):-1].strip()
+    return ret
+
+
 def _v3_split_fn_type(name: str):
     """`(A, B) -> C` -> (["A","B"], "C") or None when not a function type."""
     if "->" not in name:
@@ -2282,7 +2298,7 @@ def _go_v3_type(t, types: dict) -> str:
     if fn is not None:
         params, returns = fn
         rendered = ", ".join(_go_v3_type(p, types) for p in params)
-        ret = _go_v3_type(returns, types)
+        ret = _go_v3_type(_erase_async(returns), types)
         return f"func({rendered}) {ret}".rstrip()
     if "[" in t and t.endswith("]"):
         head = t[: t.index("[")]
