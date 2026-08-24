@@ -15,7 +15,7 @@ before any binary compatibility.
 |---|---|---|
 | **1** | `revl export wit` — the standard WIT interface of a revl service/composition | **done** |
 | **2** | WIT `resource` support in the importer | **done** |
-| **3** | canonical-ABI emission (a standard WASI P2 **binary**) | horizon — see §5 |
+| **3** | canonical-ABI emission (a standard WASI P2 **binary**) | **`Str` boundary done**; records/lists lift-lower remaining — see §5 |
 
 The claim the slices build toward: **WIT describes shape only.** A WIT
 interface says what an operation is named, what it takes, and what it returns —
@@ -180,18 +180,49 @@ $ ./.venv/bin/pytest tests/test_export_wit.py tests/test_import_wit.py -q
 $ ./.venv/bin/pytest tests/ -q
 ```
 
-## 5. Slice 3 — canonical-ABI emission (the named, gated horizon; NOT built)
+## 5. Slice 3 — canonical-ABI emission (a standard WASI P2 binary)
 
-The next slice is turning this WIT plus a revl component into a **canonical-ABI
-WASI Preview 2 binary** — a component another Component Model host can load
-without knowing it was revl. This slice is deliberately **not** built here, and
-this bridge touches no `backends/*/emit.py`.
+Slice 3 turns this WIT plus a revl component into a **canonical-ABI WASI
+Preview 2 binary** — a component another Component Model host (wasmtime,
+wasmCloud, Spin, jco) can load without knowing it was revl. Its **`Str`
+boundary is built**, in `backends/wasm/canonical.py`; records/lists/variants at
+the canonical boundary are the remaining follow-on.
 
-It is gated. The cordis-wasm tier is i32-only today: `backends/wasm/emit.py`
-raises hard `EmitError`s for `Str`, records and lists ("type 'Str' is not
-lowerable — the cordis-wasm tier is i32-only"). The canonical ABI is defined in
-exactly those types, so canonical-ABI emission cannot land before the wasm tier
-grows non-i32 lowering. Until then, a WIT interface carrying strings, records or
-lists exports and imports as perfectly good revl (Slices 1 and 2) that the wasm
-emitter still cannot lower — which is why this bridge stops at the interface
-text and says so.
+What is built. A revl program's pure functions whose whole signature is `Str`
+(one `Str`-taking, `Str`-returning function is the minimal component) emit as a
+standard component:
+
+* `emit_component(ir, service=…)` produces a **core module** carrying
+  `cabi_realloc` (the standard allocator a host calls to place an incoming
+  string into the module's memory) and, per function, a canonical export named
+  `revl:exported/<iface>#<op>`. Each export **lifts** every incoming bare
+  `(ptr, len)` canonical string into the tier's internal `[u32 len][bytes]`
+  representation, calls the ordinary `_V3Emitter`-lowered function, then
+  **lowers** the internal result back out through an 8-byte return area
+  `[ptr, len]`. The emitter never touches the frontend or the internal ABI — it
+  wraps the existing lowering at the export edge.
+* `build_component(…)` wraps that core module with `wasm-tools component embed`
+  + `component new` into a real component whose exported interface is the WIT
+  `revl export wit` (Slice 1) prints for the same functions, verbatim, plus a
+  `world` that exports it — so the binary and the interface agree by
+  construction.
+* The component loads and runs under **wasmtime's component model**
+  (`wasmtime run --invoke`, which accepts only a component, not a core module):
+  `echo("world") -> "world"`, `greet("revl") -> "Hello, revl!"`. Pinned by
+  `backends/wasm/test_canonical_abi.py`, which builds, `wasm-tools validate`s,
+  and executes the component (skipping only when the standard toolchain is
+  absent, the same policy as the tier's wasmtime-gated tests).
+
+This became possible once the wasm tier grew non-i32 lowering: `Str`, records
+and lists now lower over the tier's own custom linear-memory ABI (the tier reads
+them through the exported `memory`). Slice 3 maps that internal ABI to the
+**standard** canonical ABI at the component boundary.
+
+What remains. Only `Str` crosses the canonical boundary today. A function taking
+or returning a record, list, variant, `Opt` or `Result` stays in the core
+module (so a `Str` boundary function may still call it) but is **not** placed on
+the component interface — the gap is explicit, never a silent mis-lowering.
+Canonical lift-lower for those aggregate types (each is a defined canonical
+layout over the same `cabi_realloc` heap) is the next follow-on slice; the
+`Str` boundary already proves the machinery — `cabi_realloc`, the return area,
+and `wit-component` wrapping — that the aggregates reuse.
