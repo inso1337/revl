@@ -277,6 +277,34 @@ def _run_mcp(args) -> int:
     from .mcp.server import serve
 
     if args.mcp_command == "serve":
+        # operator capabilities (docs/operator-capabilities.md, item 55): bind
+        # the served session to one operator identity, so its management verbs
+        # are scoped by that operator's grants. No profile => ungated (today's
+        # root-over-transport), so this is opt-in for networked/multi-operator
+        # use.
+        if getattr(args, "operator_profile", None):
+            from .mcp.operator import ProfileError, load_profile
+            from .mcp.server import SESSION
+
+            try:
+                registry = load_profile(args.operator_profile)
+            except (OSError, ProfileError) as error:
+                print(f"error: cannot load operator profile "
+                      f"{args.operator_profile}: {error}", file=sys.stderr)
+                return 1
+            token = getattr(args, "operator", None)
+            operator = registry.get(token) if token else registry.sole()
+            if operator is None:
+                if token:
+                    print(f"error: operator profile names no operator {token!r} "
+                          f"(known: {', '.join(sorted(registry.operators)) or 'none'})",
+                          file=sys.stderr)
+                else:
+                    print("error: the operator profile declares multiple "
+                          "operators — pass --operator to select which identity "
+                          "this session runs as", file=sys.stderr)
+                return 1
+            SESSION.operator = operator
         # composition persistence (docs/persistence.md): a snapshot passed on
         # the command line is re-admitted through the same gate a live restore
         # runs — a component the current checker rejects aborts the boot loudly
@@ -1246,6 +1274,18 @@ def main(argv: list[str] | None = None) -> int:
     mcp_serve.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                            help="re-admit a revl_snapshot document into the session "
                                 "before serving (self-evolution across a restart)")
+    # operator capabilities (docs/operator-capabilities.md, item 55): scope the
+    # session's management verbs to one operator's grants. Opt-in — omit for
+    # today's ungated behaviour.
+    mcp_serve.add_argument("--operator-profile", default=None, metavar="PROFILE",
+                           help="bound the management verbs this session may call "
+                                "(swap/unload/restore/undo/edit/load/snapshot) to "
+                                "an operator's declared grants (item 55); a DSL or "
+                                "JSON file. Omit for ungated (root over transport)")
+    mcp_serve.add_argument("--operator", default=None, metavar="TOKEN",
+                           help="which operator in the profile this session runs "
+                                "as (its session token); optional when the profile "
+                                "declares exactly one operator")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
