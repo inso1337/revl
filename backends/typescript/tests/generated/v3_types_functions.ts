@@ -53,7 +53,7 @@ export function Invalid(value: string): Outcome {
 
 
 export function greet(name: string): string {
-  return "hello " + name
+  return "hello " + name 
 }
 
 export function add(a: bigint, b: bigint): bigint {
