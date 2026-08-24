@@ -375,6 +375,180 @@ def _toml_rm_truc(project_dir: str, name: str) -> None:
     p.write_text(new, encoding="utf-8")
 
 
+# -- ship / publish (emission[registry]; slice S4) --------------------------
+
+def _ship_toml(project_dir: str) -> dict:
+    """`truc.toml` parsed to the [assembly] + [ship] + [registries] a ship
+    needs. Host owns TOML (there is no revl TOML parser)."""
+    import tomllib  # noqa: PLC0415 — stdlib, py3.11+
+
+    p = pathlib.Path(project_dir, "truc.toml")
+    return tomllib.loads(p.read_text(encoding="utf-8"))
+
+
+def _read_dossier_facts(path: pathlib.Path) -> tuple[bool, str, str]:
+    """The (present, verdict, lifecycle) of a supplied gauntlet dossier — the
+    author's proof they ran the proving ground (item 31). Absent or unreadable
+    reads as "no evidence supplied"; ship re-runs the gauntlet to VERIFY these
+    against the current source before trusting them."""
+    if not path.exists():
+        return (False, "", "")
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return (False, "", "")
+    verdict = str(d.get("verdict", ""))
+    lifecycle = str((((d.get("tested") or {}).get("lifecycle")) or {}).get("status", ""))
+    return (True, verdict, lifecycle)
+
+
+def _registry_policy(registry_dir: str) -> str:
+    """A registry declares its ship policy in a registry-side `policy.json`
+    (`{"ship": "gauntlet" | "audit" | "none"}`) — separate from index.json so
+    build_index / registry.verify never touch it. The official registry sets
+    "gauntlet" (audit + gauntlet evidence); additional registries set their
+    own. Absent → "audit": a component must at least compile clean to publish,
+    the safe middle (docs/design/truc-architecture.md decision §10.5)."""
+    p = pathlib.Path(registry_dir, "policy.json")
+    if not p.exists():
+        return "audit"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "audit"
+    policy = str(data.get("ship", "audit"))
+    return policy if policy in ("gauntlet", "audit", "none") else "audit"
+
+
+def ship_context(project_dir: str) -> str:
+    """Everything the pure Shipper decides from: the component source (the
+    project's own entry, verbatim), its author-supplied discoverability
+    (description + tags), the TARGET registry (name + absolute path) and its
+    declared evidence policy, the names already claimed there (first-come), and
+    the facts of any supplied gauntlet dossier."""
+    data = _ship_toml(project_dir)
+    assembly = data.get("assembly") or {}
+    ship = data.get("ship") or {}
+    registries = data.get("registries") or {}
+
+    # the component being shipped is the project's own entry, verbatim.
+    entry = assembly.get("entry") or []
+    source = ""
+    if entry:
+        src_path = pathlib.Path(project_dir, entry[0])
+        if src_path.exists():
+            source = src_path.read_text(encoding="utf-8")
+
+    # the target registry: [ship].registry, else the conventional "local", else
+    # the first declared registry.
+    reg_name = ship.get("registry") or ("local" if "local" in registries
+                                        else next(iter(registries), "local"))
+    reg = registries.get(reg_name) or {}
+    reg_path = reg.get("path")
+    reg_abs = (os.path.abspath(os.path.join(project_dir, reg_path))
+               if reg_path else reg.get("url", ""))
+
+    policy = _registry_policy(reg_abs) if reg_abs and os.path.isdir(reg_abs) else "audit"
+
+    existing: list[str] = []
+    idx_path = pathlib.Path(reg_abs, "index.json") if reg_abs else None
+    if idx_path and idx_path.exists():
+        idx = json.loads(idx_path.read_text(encoding="utf-8"))
+        existing = sorted((idx.get("components") or {}).keys())
+
+    # supplied evidence: [ship].evidence names the dossier the author produced.
+    present, verdict, lifecycle = (False, "", "")
+    ev_rel = ship.get("evidence")
+    if ev_rel:
+        present, verdict, lifecycle = _read_dossier_facts(
+            pathlib.Path(project_dir, ev_rel))
+
+    tags = ship.get("tags") or []
+    return json.dumps({
+        "source": source,
+        "description": str(ship.get("description", "")),
+        "tags": [str(t) for t in tags],
+        "registryName": reg_name,
+        "registryPath": reg_abs,
+        "policy": policy,
+        "existingNames": existing,
+        "evidencePresent": present,
+        "evidenceVerdict": verdict,
+        "evidenceLifecycle": lifecycle,
+    })
+
+
+def gauntlet_evidence(source: str) -> str:
+    """Run the proving ground (item 31, `revl.mcp.gauntlet`) cold on the shipped
+    source and return the facts the pure Shipper checks, plus the full dossier
+    text to stamp. Isolated: the gauntlet boots the candidate in a throwaway
+    Session and grades it — it never raises, so a broken source comes back as
+    verdict "rejected", not an exception. This is the re-run that VERIFIES the
+    author's supplied evidence is current for the source being shipped."""
+    import concurrent.futures  # noqa: PLC0415
+
+    from revl.mcp import gauntlet  # noqa: PLC0415 — in-process, like the gate
+    from revl.mcp.session import Session  # noqa: PLC0415
+
+    # The gauntlet boots the candidate in a scratch Session, which drives its
+    # own asyncio loop. ship runs this from *inside* truc's own running Session
+    # loop, so the scratch boot must happen on a thread with no running loop —
+    # otherwise asyncio refuses ("another loop is running"). One worker thread,
+    # joined synchronously: the extern stays a plain call from revl's view.
+    def _grade() -> dict:
+        return gauntlet.run(Session(), {"source": source})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        dossier = pool.submit(_grade).result()
+    lifecycle = ((dossier.get("tested") or {}).get("lifecycle")) or {}
+    admission = ((dossier.get("proved") or {}).get("admission")) or {}
+    return json.dumps({
+        "verdict": str(dossier.get("verdict", "")),
+        "lifecycle": str(lifecycle.get("status", "")),
+        "admission": str(admission.get("status", "")),
+        "dossierText": json.dumps(dossier, indent=2, sort_keys=True) + "\n",
+    })
+
+
+def publish(plan_json: str) -> str:
+    """Execute a publish plan: write the component into the registry, REGENERATE
+    the index (manifest.json is produced by the current compiler, never copied
+    from the author — the reproducibility invariant does the honesty work,
+    docs/registry.md §1), then carry the discoverability fields the compiler
+    cannot derive (description + tags) into the published index row so
+    revl_resolve / registry search can find it.
+
+    An empty plan is a no-op: on any refusal the Shipper returns "", so the
+    registry is untouched (all-or-nothing — the empty-guard, mirroring
+    commit_add). This is the ONLY registry-mutating body in truc."""
+    if not plan_json:
+        return "skipped"
+    from revl.registry import build_index  # noqa: PLC0415 — the index regenerator
+
+    plan = json.loads(plan_json)
+    reg = plan["registryPath"]
+    name = plan["name"]
+    entry_dir = pathlib.Path(reg, "components", name)
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    (entry_dir / "component.rvl").write_text(plan["source"], encoding="utf-8")
+    if plan.get("stampDossier") and plan.get("dossierText"):
+        (entry_dir / "dossier.json").write_text(plan["dossierText"], encoding="utf-8")
+
+    # regenerate manifest.json (all entries) + index.json from the sources.
+    build_index(reg)
+
+    # carry the discoverability fields build_index does not derive into the row.
+    idx_path = pathlib.Path(reg, "index.json")
+    idx = json.loads(idx_path.read_text(encoding="utf-8"))
+    row = (idx.get("components") or {}).get(name)
+    if row is not None:
+        row["description"] = plan.get("description", "")
+        row["tags"] = plan.get("tags") or []
+        idx_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+    return "published"
+
+
 # -- clock + stdout (emission) ----------------------------------------------
 
 def now() -> str:
