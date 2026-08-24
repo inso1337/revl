@@ -61,10 +61,15 @@ names in `_HOST_ARG_SIG`): an unknown method is refused (`HOST-METHOD`, with
 the real surface named), and arity/argument types are checked exactly like
 the call form. The stub's *result* stays opaque — no entry claims to know
 what comes back — so values flowing out of host objects remain on the audit
-surface. Receivers with no pinned family (an extern's return) type unknown;
-the lowerer refuses non-stdlib method names on them. The two method
-namespaces are collision-free by construction (checked when extending
-either: the table vs
+surface. Receivers with no pinned family (an extern's return, a host-object
+result) type unknown, and **every** method call on them is refused —
+stdlib-named or not (roadmap 75(b)): a value cannot lower *through* the
+builtin table into a misdispatch, and an annotation (`let v: Str = ...`) is
+how such a result becomes a provable receiver again. The two method
+namespaces are collision-free by construction, checked at *table-edit* time:
+a module-load assertion fails with the colliding name if either table is
+extended with a name from the other (`remove` is the one documented overlap,
+safe because dispatch is by receiver kind — the table vs
 `open/close/query/execute/new/get/insert/remove/drop/run`).
 
 ## Versioning

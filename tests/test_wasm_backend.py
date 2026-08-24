@@ -254,12 +254,18 @@ def test_boundary_refusals_say_why_not_unknown_kind():
     cannot cross the scalar service boundary is this tier's design."""
     emitter = _emitter()
     for source, expected in [
-        # a compound value returned from a service operation
-        (_component("{ let xs = [1, 2]  return xs }"), "cannot cross this tier's scalar service boundary"),
-        # a compound value passed to a coeffect
+        # a compound value returned from a service operation. A *typed*
+        # compound (`let xs = [1, 2]  return xs`) is now refused by the
+        # checker: the provide-method let sweep types the binding (roadmap
+        # 75(b)), so `return xs` against an `Int` service return is a compile
+        # error before any tier sees it. An anonymous record literal has no
+        # recoverable type, so it still reaches this tier's boundary.
+        (_component("{ return { a: 1 } }"), "cannot cross this tier's scalar service boundary"),
+        # a compound value passed to a coeffect (same story: `b.g(xs)` with
+        # `xs: List[Int]` is checker-refused; an anonymous record passes)
         ("service B { fn g(n: Int) -> Int }\n" + _SVC
          + "component C requires b: B provides s: S "
-           "{ provide s { fn f(x) { let xs = [1]  return b.g(xs) } } }",
+           "{ provide s { fn f(x) { return b.g({ a: 1 }) } } }",
          "cannot cross this tier's scalar coeffect boundary"),
         # an extern with no @wasm body is not a missing case either
         ("extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n }\n"
