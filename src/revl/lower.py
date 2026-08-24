@@ -2149,7 +2149,7 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
 
 
 def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
-    """An annotated `let`/`var` pins an empty-collection literal (roadmap 76b).
+    """An annotated `let`/`var` pins an empty-collection literal (roadmap 76b, 107).
 
     `var m: Map[Str, Int] = Map.empty()` lowers to a `maplit` node that knows
     nothing about the author's annotation — the checker accepts the empty map
@@ -2162,9 +2162,22 @@ def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
     additive and appears only where an annotation exists, so v1/v2/v3
     reference documents without one stay byte-identical.
     """
-    if declared is None or not isinstance(node, dict) or node.get("kind") != "maplit":
+    if declared is None or not isinstance(node, dict):
         return
-    node["expected"] = declared
+    kind = node.get("kind")
+    if kind == "maplit":
+        node["expected"] = declared
+    elif (
+        kind == "list"
+        and not (node.get("items") or [])
+        and declared.startswith("List[")
+    ):
+        # `var out: List[Int] = []` (roadmap 107): the checker accepts the empty
+        # list (it types `List[Never]`, bottom, and flows into any `List[T]`) but
+        # a positional emitter — the wasm tier — has no element to infer from and
+        # refuses. The author's annotation is the pin, threaded onto the literal
+        # exactly as the empty-Map case above, so the emitter can type it.
+        node["expected"] = declared
 
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,

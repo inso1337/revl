@@ -562,6 +562,39 @@ def test_v3_list_linear_memory_roundtrip_runs_on_wasmtime(tmp_path):
     assert invoke("sliced") == 22            # ys[0]==2, len==2
 
 
+def test_v3_annotated_empty_list_pins_from_declaration(tmp_path):
+    """`var`/`let x: List[T] = []` (roadmap 107): the checker accepts the empty
+    list (bottom element type) but a positional emitter has nothing to infer
+    from. The author's annotation is threaded onto the literal as `expected` at
+    lower time — same pin the empty-Map case uses — so the wasm tier can type
+    the empty initializer, allocate it, and grow it, instead of refusing with
+    "an untyped empty list literal needs an expected List type"."""
+    invoke = _run_module(tmp_path, """
+        fn empty_var_len() -> Int { var out: List[Int] = []  return out.length() }
+        fn empty_let_len() -> Int { let out: List[Str] = []  return out.length() }
+        fn empty_then_push() -> Int {
+          var out: List[Int] = []
+          let grown = out.push(7)
+          return grown[0] * 10 + grown.length()
+        }
+    """)
+    assert invoke("empty_var_len") == 0
+    assert invoke("empty_let_len") == 0
+    assert invoke("empty_then_push") == 71    # grown[0]==7, len==1
+
+
+def test_v3_annotated_empty_list_emit_string_pins_expected(tmp_path):
+    """The pin is additive and localized: it appears on the empty-list literal
+    only where an annotation exists, so the emit path types it without any
+    surface type flowing in."""
+    emit = _emitter()
+    ir = compile_source("fn f() -> Int { var out: List[Int] = []  return out.length() }")
+    let_node = next(s for s in ir["functions"][0]["body"] if s.get("step") == "let")
+    assert let_node["value"] == {"kind": "list", "items": [], "expected": "List[Int]"}
+    # emits cleanly (no EmitError) with the declared type as the only type source
+    assert '(export "f")' in emit.emit(ir)["functions"]
+
+
 def test_v3_str_builtins_run_on_wasmtime(tmp_path):
     """`length`/`concat`/`charCodeAt`/`charAt`/`slice` and Str `==` compute the
     right values on the linear-memory string model. These had NO runtime

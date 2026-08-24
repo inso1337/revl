@@ -2856,6 +2856,14 @@ class _V3Emitter:
     def _list_type(self, node: dict, scope: _Scope, expected: str | None) -> str:
         if expected is not None and _is_list_type(expected):
             return expected
+        # An annotated `let`/`var x: List[T] = []` threads the declared type onto
+        # the literal as `expected` (roadmap 107) — the author's own annotation,
+        # and the only type an empty positional literal can carry. Same pin the
+        # empty-Map case uses; read it when no surface type flowed in.
+        if expected is None:
+            pinned = node.get("expected")
+            if _is_list_type(pinned):
+                return pinned
         items = node.get("items") or []
         if not items:
             raise EmitError("an untyped empty list literal needs an expected List type")
