@@ -2945,10 +2945,29 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
                           for e in expr.items]}
     if isinstance(expr, ExprArrow):
-        node = {"kind": "arrow", "params": expr.params,
-                "body": _lower_component_pure_expr(expr.body, env, scope, callables,
-                                                   pure_only)}
+        # Arrow parameters bind in the arrow's body scope — including inside
+        # provide-method bodies (roadmap 77a / FR-1): the pure-helper +
+        # callback-arrow escape depends on `msgs2 => emit model.complete(msgs2)`
+        # resolving `msgs2` to the arrow parameter, not misreading it as a
+        # missing component requirement. Same shape as the pure-fn path below:
+        # params shadow the enclosing scope; free vars captured from it are
+        # snapshotted by value (unchanged).
+        inner = dict(scope)
         param_types = _arrow_param_types(expr)
+        for param, ptype in zip(expr.params, param_types):
+            # the component path resolves names through `id` (unlike the
+            # pure-fn path's raw `var`), so the arrow parameter maps to its
+            # own name — the emitted lambda binds params positionally, and a
+            # `name` node for the parameter must render to exactly that.
+            inner[param] = param
+            if ptype:
+                env.type_env[param] = ptype
+            else:
+                env.type_env.pop(param, None)
+        captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        node = {"kind": "arrow", "params": expr.params, "captures": captures,
+                "body": _lower_component_pure_expr(expr.body, env, inner, callables,
+                                                   pure_only)}
         if any(p is not None for p in param_types) or expr.returns:
             node["param_types"] = param_types
             node["returns"] = expr.returns
