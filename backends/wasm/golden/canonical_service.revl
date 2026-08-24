@@ -1,0 +1,23 @@
+type Person = { name: Str, age: Int }
+service Registry {
+  fn greet(nm: Str) -> Str
+  fn make(nm: Str, a: Int) -> Person
+  fn age_of(p: Person) -> Int
+  fn rename(p: Person, nm: Str) -> Person
+  fn dbl(n: Int) -> Int
+  fn roster(nm: Str, a: Int) -> List[Person]
+  fn maybe(n: Int) -> Opt[Int]
+  fn checked(n: Int) -> Result[Int, Str]
+}
+component Store provides reg: Registry {
+  provide reg {
+    fn greet(nm) = `Hello, ${nm}!`
+    fn make(nm, a) = { name: nm, age: a }
+    fn age_of(p) = p.age
+    fn rename(p, nm) = { name: nm, age: p.age }
+    fn dbl(n) = n + n
+    fn roster(nm, a) = [{ name: nm, age: a }]
+    fn maybe(n) = n > 0 ? Some(n) : None
+    fn checked(n) = n > 0 ? Ok(n) : Err("nonpositive")
+  }
+}

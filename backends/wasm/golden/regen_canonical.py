@@ -22,10 +22,13 @@ sys.path.insert(0, str(BACKEND))
 from revl import compile_source  # noqa: E402
 import canonical  # noqa: E402
 
-# (fixture stem, service name): the Str-only slice-3 fixture and the aggregate
-# follow-on (records/lists/variants/Opt/Result + non-Str scalars).
+# (fixture stem, service name): the Str-only slice-3 fixture, the aggregate
+# follow-on (records/lists/variants/Opt/Result + non-Str scalars) over top-level
+# pure fns, and the service-level fixture — the SAME value surface presented from
+# a component's `provide` methods, so real services cross as standard components.
 _FIXTURES = [("canonical_echoer", "Echoer"),
-             ("canonical_aggregates", "Registry")]
+             ("canonical_aggregates", "Registry"),
+             ("canonical_service", "Registry")]
 
 
 def main() -> None:
