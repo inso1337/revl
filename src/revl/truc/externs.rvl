@@ -30,6 +30,14 @@ pub extern pure fn json_stringify(v: Any) -> Str
 pub extern pure fn host_exists(path: Str) -> Bool
   = @py { from revl.truc._host import exists; return exists(path) }
 
+// Reshape the gate's composition manifest into wiring the pure Planner can read
+// past revl's reserved words (`provides`/`requires` cannot name record fields):
+// {provided: [key…], needs: [{name, key}…]}. A mechanical JSON transform (no
+// effect, no decision) — the *decision* an unmet requirement forces stays in
+// the Planner. `rm` uses it to prove the remainder strands no consumer.
+pub extern pure fn host_wiring(manifest_json: Str) -> Str
+  = @py { from revl.truc._host import wiring; return wiring(manifest_json) }
+
 // ---- registry read path (emission) ----
 
 pub extern emission fn host_index_read(registry: Str) -> Str
@@ -54,6 +62,9 @@ pub extern emission fn host_read_sources(project_dir: Str, spec: Str) -> Str
 
 pub extern emission fn host_commit_add(project_dir: Str, plan: Str) -> Str
   = @py { from revl.truc._host import commit_add; return commit_add(project_dir, plan) }
+
+pub extern emission fn host_commit_rm(project_dir: Str, plan: Str) -> Str
+  = @py { from revl.truc._host import commit_rm; return commit_rm(project_dir, plan) }
 
 pub extern emission fn host_write_assembly(project_dir: Str, manifest: Str) -> Str
   = @py { from revl.truc._host import write_assembly; return write_assembly(project_dir, manifest) }
