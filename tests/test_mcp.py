@@ -330,6 +330,32 @@ def test_admit_refuses_a_duplicate_provider():
     assert payload["diagnostics"][0]["code"] == "G2"
 
 
+# A provider swap ships the candidate providing a key an existing component
+# already provides, with `replacing=[that component]`. `_tool_admit` must honor
+# `replacing` on the compile it admits against — otherwise the swap reads as a
+# duplicate provider (false G2) and every model-route/mock->real swap is
+# refused. See roadmap item 100.
+def test_admit_honors_replacing_for_a_provider_swap():
+    running = compile_source(READONLY)
+    payload = _call("revl_admit", {
+        "manifest": running,
+        "source": READONLY.replace("component C ", "component D "),
+        "replacing": ["C"],
+    })
+    assert payload["ok"] is True and payload["admitted"] is True
+
+
+def test_admit_still_refuses_a_conflict_against_a_non_replaced_provider():
+    running = compile_source(READONLY)
+    payload = _call("revl_admit", {
+        "manifest": running,
+        "source": READONLY.replace("component C ", "component D "),
+        "replacing": ["Bogus"],  # names a component that provides nothing here
+    })
+    assert payload["admitted"] is False
+    assert payload["diagnostics"][0]["code"] == "G2"
+
+
 def test_audit_exposes_the_boundary_surface():
     payload = _call("revl_audit", {"files": [str(EXAMPLES / "user_cache.rvl")]})
     assert payload["ok"] is True
