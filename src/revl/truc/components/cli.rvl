@@ -1,0 +1,40 @@
+// CliDispatch (core) — argv in, exit code out. The command word is parsed to
+// an enum in a pure fn, and the match dispatches to exactly one emission arm
+// (conditional emission is expressible only this way — a provide method has
+// no `if`). All flow logic and help text live here and in the Planner; the
+// Python launcher does only what revl cannot: be a console script.
+
+use "assembler.rvl" { Assembler }
+
+type Cmd = Add | Assemble | Unknown
+
+fn nth(argv: List[Str], i: Int) -> Str {
+  if (i < argv.length()) {
+    return argv[i]
+  }
+  return ""
+}
+
+fn parse_cmd(s: Str) -> Cmd {
+  if (s == "add") {
+    return Add
+  }
+  if (s == "assemble") {
+    return Assemble
+  }
+  return Unknown
+}
+
+pub service Cli {
+  emission fn run(argv: List[Str]) -> Int
+}
+
+component CliDispatch requires asm: Assembler provides cli: Cli {
+  provide cli {
+    fn run(argv) = match parse_cmd(nth(argv, 0)) {
+      Add      => emit asm.add(nth(argv, 1)),
+      Assemble => emit asm.assemble(),
+      Unknown  => emit asm.unknown(nth(argv, 0)),
+    }
+  }
+}
