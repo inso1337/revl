@@ -102,7 +102,9 @@ def test_typescript_equality_asserts_through_revl_equality():
     what the matcher's diff was buying.
     """
     emitted = _emit("typescript")
-    assert "expect(revlEq(l, r)" in emitted, emitted
+    # item 143: the assert temporaries carry a `$` sigil so they cannot collide
+    # with a user binding named `l`/`r` (a `let r = …` then `assert r == …`).
+    assert "expect(revlEq($revl_l, $revl_r)" in emitted, emitted
     assert "function revlEq" in emitted
     # a non-equality comparison keeps the truthy form rather than guessing a
     # matcher for every operator
