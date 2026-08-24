@@ -364,6 +364,19 @@ def _java_tool(name: str) -> str | None:
     return exe if probe.returncode == 0 else None
 
 
+def _lifecycle_refusal(ir: dict, error: Exception) -> bool:
+    """True when the emit refusal is the by-design lifecycle-test refusal.
+
+    java and wasm still refuse `lifecycle test` blocks by name (documented
+    follow-ups, FR-5); that refusal is a skip-with-reason, never a tier
+    failure — exactly the signal `--all`'s verdict column exists for. Any
+    other emit error is a real bug and stays a fail.
+    """
+    return (any(t.get("lifecycle") for t in (ir.get("tests") or []))
+            and "lifecycle test" in str(error)
+            and "not lowerable" in str(error))
+
+
 def run_java(ir: dict) -> tuple[str, str]:
     """Compile the emitted cordis4j plugin against the stubs (or the real
     classes on ``REVL_CORDIS4J_CLASSES``) and run ``REVL_TESTS`` on a JVM."""
@@ -375,6 +388,9 @@ def run_java(ir: dict) -> tuple[str, str]:
     try:
         source = _emitter("java").emit(_without_fault_tests(ir))
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        if _lifecycle_refusal(ir, error):
+            return ("skip", "lifecycle tests are a documented follow-up on "
+                            f"this tier — {error}")
         return ("fail", f"emitter refused: {error}")
     with tempfile.TemporaryDirectory(prefix="revl_test_java_") as tmpd:
         tmp = Path(tmpd)
@@ -439,6 +455,9 @@ def run_wasm(ir: dict) -> tuple[str, str]:
         modules = emit.emit(_without_fault_tests(ir))
         exports = emit.test_export_names(ir.get("tests") or [])
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        if _lifecycle_refusal(ir, error):
+            return ("skip", "lifecycle tests are a documented follow-up on "
+                            f"this tier — {error}")
         return ("fail", f"emitter refused: {error}")
     if not exports:
         return ("pass", "no tests emitted by the backend" + note)

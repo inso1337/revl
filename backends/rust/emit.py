@@ -493,10 +493,17 @@ def _emit_host_stubs(ir: dict) -> list[str]:
         # every host object acquired must be released by its `undo`, or the
         # lifecycle `assert no_residue` fails. The counter is process-wide, so
         # it is per-test and cross-test safe: a clean test returns to zero.
+        # Thread-local: `cargo test` runs each #[test] on its own thread, and
+        # a process-wide counter would race across tests running in parallel.
         out.extend([
             "/// R1 live-resource counter (lifecycle `assert no_residue`).",
-            "static REVL_LIVE_HOST_RESOURCES: std::sync::atomic::AtomicI64 =",
-            "    std::sync::atomic::AtomicI64::new(0);",
+            "/// Thread-local because `cargo test` runs tests on parallel",
+            "/// threads: each test must observe only its own acquisitions.",
+            "thread_local! {",
+            "    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {",
+            "        std::cell::Cell::new(0)",
+            "    };",
+            "}",
             "",
         ])
     if "Map" in used:
@@ -508,13 +515,13 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "}",
                 "impl Map {",
                 "    pub fn new() -> Self {",
-                "        REVL_LIVE_HOST_RESOURCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
                 "        Self {",
                 "            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),",
                 "        }",
                 "    }",
                 "    pub fn drop_(&self) {",
-                "        REVL_LIVE_HOST_RESOURCES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
                 "        self.inner.lock().unwrap().clear();",
                 "    }",
                 "    pub fn insert(&self, key: String, value: String) {",
@@ -554,7 +561,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "        if size < 1 {",
                 "            panic!(\"pool size must be an integer >= 1 (got {})\", size);",
                 "        }",
-                "        REVL_LIVE_HOST_RESOURCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
                 "        Self {",
                 "            url,",
                 "            size,",
@@ -646,7 +653,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "        if already_closed {",
                 "            panic!(\"pool.close after close/drop — use-after-free\");",
                 "        }",
-                "        REVL_LIVE_HOST_RESOURCES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
                 "    }",
                 "    pub fn query(&self, _sql: String) -> Vec<Value> {",
                 "        let conn = self.borrow_conn(\"query\");",
@@ -2444,7 +2451,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                 out.append("    // registry/reflect half of `revl run --once`.")
                 out.append("    assert!(root.registry().len() == 0"
                            " && root.reflect().services().len() == 0"
-                           " && REVL_LIVE_HOST_RESOURCES.load(std::sync::atomic::Ordering::SeqCst) == 0,")
+                           " && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,")
                 out.append(f'            {_string(where + ": residue \u2014 the host runtime still holds state (R4/R1)")});')
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")

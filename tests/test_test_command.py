@@ -158,3 +158,37 @@ def test_all_mixed_verdicts_summarize_skips_separately(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[ts] skip: lifecycle tests are not lowerable on this tier yet" in out
     assert "summary: 3 pass, 3 skipped, 0 failed" in out
+
+
+
+
+def test_lifecycle_refusals_on_followup_tiers_are_skips(monkeypatch, capsys):
+    """FR-5: java and wasm still refuse `lifecycle test` by name (documented
+    follow-ups), and in `--all` that refusal is a skip-with-reason — the
+    verdict column's whole point — never a tier failure."""
+    ir = compile_source('lifecycle test "live" { }')
+
+    def _refusing_java(_ir):
+        if test_module._lifecycle_refusal(
+                _ir, Exception("lifecycle test 'live' is not lowerable on the "
+                               "cordis4j tier: it drives a live composition "
+                               "(load/call/unload) and asserts R4 "
+                               "residue-freedom through the host runtime's "
+                               "introspection, which only the reference tier "
+                               "implements — run it with `revl test "
+                               "--backend py`")):
+            return ("skip", "lifecycle tests are a documented follow-up on this tier")
+        return ("fail", "boom")
+
+    # keep the other runners deterministic and fast; only the follow-up
+    # tiers' refusal-to-skip conversion is under test
+    for name in ("ts", "rust", "go"):
+        monkeypatch.setitem(test_module.RUNNERS, name, lambda _ir: ("pass", "ok"))
+    monkeypatch.setitem(test_module.RUNNERS, "py", lambda _ir: ("skip", "no cordis-py"))
+    for name in ("java", "wasm"):
+        monkeypatch.setitem(test_module.RUNNERS, name, _refusing_java)
+    assert test_module.test_command(ir, "all") == 0
+    out = capsys.readouterr().out
+    assert "[java] skip: lifecycle tests are a documented follow-up" in out
+    assert "[wasm] skip: lifecycle tests are a documented follow-up" in out
+    assert "summary: 3 pass, 3 skipped, 0 failed" in out
