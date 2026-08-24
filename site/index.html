@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>revl — the language where unloading leaves no residue</title>
+  <meta name="description" content="revl is a research language for spatiotemporal composability: components load, hot-swap and unload in a running system, and 'no residue' is a compile-time guarantee." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/site.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%2306080e'/><text x='50' y='68' font-size='52' font-family='monospace' font-weight='700' fill='%232dd4bf' text-anchor='middle'>r</text></svg>" />
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#">revl<span class="cursor"></span></a>
+    <div class="nav-links">
+      <a href="#idea">The idea</a>
+      <a href="#gate">The gate</a>
+      <a href="#guarantees">Guarantees</a>
+      <a href="#runtimes">Runtimes</a>
+      <a href="#agents">Agents</a>
+      <a href="#toolchain">Toolchain</a>
+    </div>
+    <span class="spacer"></span>
+    <div class="nav-cta">
+      <a class="btn btn-ghost btn-sm" href="https://github.com/inso1337/revl">GitHub</a>
+      <a class="btn btn-primary btn-sm" href="playground.html">Playground</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ================= hero ================= -->
+<header class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-grid"></div>
+  <div class="wrap hero-cols">
+    <div>
+      <p class="eyebrow">A research language for spatiotemporal composability</p>
+      <h1>Software you can <span class="grad">unload.</span></h1>
+      <p class="lede">
+        revl components load, hot-swap and unload <b>inside a running system</b> —
+        and <b>“unloading leaves no residue”</b> is a compile-time guarantee, not
+        runtime discipline. Cordis made revertible effects a discipline;
+        revl makes them a <b>type system</b>.
+      </p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="playground.html">Try it in your browser →</a>
+        <a class="btn btn-ghost" href="https://github.com/inso1337/revl/blob/main/DESIGN.md">Read the design</a>
+      </div>
+      <p class="hero-note">
+        <span class="ok">✓</span> one checked front-end · six runtimes ·
+        emitted code validated by real compilers · compiler runs client-side, nothing leaves the page
+      </p>
+    </div>
+
+    <!-- live hot-swap animation -->
+    <div class="swap-panel reveal" id="swap-panel" data-phase="run">
+      <div class="swap-head">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span>revl run --watch · live composition</span>
+        <span class="swap-status"><span class="lamp"></span><span id="swap-phase-label">running</span></span>
+      </div>
+      <div class="swap-body">
+        <div class="sys">
+          <svg class="wires" viewBox="0 0 480 168" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M 158 76 C 200 70, 200 46, 236 40" />
+            <path d="M 320 44 C 372 56, 380 96, 420 116" />
+          </svg>
+          <div class="node node-db live">
+            <div class="nname">PgDatabase</div>
+            <div class="nrole">provides db: Database</div>
+            <span class="npill">running</span>
+          </div>
+          <div class="node node-v1 live" id="node-v1">
+            <div class="nname">UserCache <span style="color:var(--faint)">v1</span></div>
+            <div class="nrole">requires db · provides cache</div>
+            <span class="npill" id="v1-pill">running</span>
+          </div>
+          <div class="node node-v2" id="node-v2">
+            <div class="nname">UserCache <span style="color:var(--violet)">v2</span></div>
+            <div class="nrole">requires db · provides cache</div>
+            <span class="npill" id="v2-pill">proposed</span>
+          </div>
+          <div class="node node-api live">
+            <div class="nname">Api</div>
+            <div class="nrole">requires cache: Cache</div>
+            <span class="npill">running</span>
+          </div>
+        </div>
+        <div class="acc">
+          <h5><span>accumulator — UserCache v1</span><span id="acc-verdict"></span></h5>
+          <div class="acc-rows" id="acc-rows">
+            <div class="acc-row"><span class="eff">store = Map.new()</span><span class="arrow">⟲</span><span class="und">store.drop()</span></div>
+            <div class="acc-row"><span class="eff">store.insert("u1", …)</span><span class="arrow">⟲</span><span class="und">store.remove("u1")</span></div>
+            <div class="acc-row"><span class="eff">store.insert("u2", …)</span><span class="arrow">⟲</span><span class="und">store.remove("u2")</span></div>
+            <div class="acc-empty" id="acc-empty"><span class="ok">✓ no residue</span> — every effect reverted, LIFO (G7)</div>
+          </div>
+        </div>
+      </div>
+      <div class="swap-caption" id="swap-caption">
+        <span class="k">▸</span><span>composition running — every mutation on the stack carries its inverse</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ================= runtime strip ================= -->
+<div class="strip">
+  <div class="wrap strip-inner">
+    <div class="strip-title">One source · one checked IR · six hardened runtimes</div>
+    <div class="tier-chips">
+      <span class="tier-chip">Python <span class="v">cordis-py · reference</span></span>
+      <span class="tier-chip">TypeScript <span class="v">cordis · tsc-validated</span></span>
+      <span class="tier-chip">Rust <span class="v">cordis-rs · cargo check</span></span>
+      <span class="tier-chip">Java <span class="v">cordis4j · javac</span></span>
+      <span class="tier-chip">Go <span class="v">stc-go</span></span>
+      <span class="tier-chip">WebAssembly <span class="v">cordis-wasm · wasmtime</span></span>
+    </div>
+  </div>
+</div>
+
+<!-- ================= the idea (scrollytelling) ================= -->
+<section class="block" id="idea">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">The idea</p>
+      <h2>Every mutation carries its own way back.</h2>
+      <p>Three constructs are the whole story: <b>effect</b> pairs a mutation with
+      its inverse, <b>emit</b> admits the ones that have none, and unloading is
+      the accumulated history run backwards. The compiler refuses everything else.</p>
+    </div>
+
+    <div class="scrolly">
+      <div class="steps" id="idea-steps">
+        <div class="step" data-step="1">
+          <div class="step-n">01 · EFFECT / UNDO</div>
+          <h3>Declare the inverse, or it doesn’t compile</h3>
+          <p>Every mutation is written as an <code>effect … undo …</code> pair. The
+          runtime pushes each pair onto the component’s <b>accumulator</b> as it runs —
+          state and its rollback, recorded together, checked at compile time (G4).</p>
+        </div>
+        <div class="step" data-step="2">
+          <div class="step-n">02 · EMIT</div>
+          <h3>Irreversible? Then say so, out loud</h3>
+          <p>Writing to a real database, sending an email — some things cannot be
+          undone. revl doesn’t pretend otherwise: they must be marked
+          <code>emit</code>, the service interface must declare
+          <code>emission</code>, and every crossing lands on the audited G8
+          boundary surface. A tool can’t claim to be harmless when its body emits.</p>
+        </div>
+        <div class="step" data-step="3">
+          <div class="step-n">03 · UNLOAD = REWIND</div>
+          <h3>Teardown is derived, not written</h3>
+          <p>You never write cleanup code. Unloading replays the accumulator
+          <b>backwards</b> — LIFO-complete over everything the component did (G7) —
+          and teardown itself cannot register new effects, by construction (G5).
+          Hot-swap is just unload + re-admit, and both halves are checked.</p>
+        </div>
+      </div>
+
+      <div class="sticky-panel">
+        <div class="idea-visual" id="idea-visual" data-step="1">
+          <div class="iv-code">
+<pre><code id="iv-code-block"><span class="cl" data-l="1"><span class="tok-kw">component</span> <span class="tok-type">UserCache</span> <span class="tok-kw">requires</span> db<span class="tok-punc">:</span> <span class="tok-type">Database</span> <span class="tok-kw">provides</span> cache<span class="tok-punc">:</span> <span class="tok-type">Cache</span> <span class="tok-punc">{</span></span>
+<span class="cl cl-effect" data-l="2">  <span class="tok-kw">let</span> store <span class="tok-punc">=</span> <span class="tok-eff">effect</span> <span class="tok-type">Map</span><span class="tok-punc">.</span>new<span class="tok-punc">()</span> <span class="tok-eff">undo</span> store<span class="tok-punc">.</span>drop<span class="tok-punc">()</span></span>
+<span class="cl" data-l="3"></span>
+<span class="cl" data-l="4">  <span class="tok-kw">provide</span> cache <span class="tok-punc">{</span></span>
+<span class="cl cl-effect2" data-l="5">    <span class="tok-kw">fn</span> <span class="tok-fn">put</span><span class="tok-punc">(</span>key<span class="tok-punc">,</span> value<span class="tok-punc">)</span> <span class="tok-punc">{</span></span>
+<span class="cl cl-effect2" data-l="6">      <span class="tok-eff">effect</span> store<span class="tok-punc">.</span>insert<span class="tok-punc">(</span>key<span class="tok-punc">,</span> value<span class="tok-punc">)</span></span>
+<span class="cl cl-effect2" data-l="7">      <span class="tok-eff">undo</span>   store<span class="tok-punc">.</span>remove<span class="tok-punc">(</span>key<span class="tok-punc">)</span></span>
+<span class="cl cl-emitline" data-l="8">      <span class="tok-emit">emit</span> db<span class="tok-punc">.</span>execute<span class="tok-punc">(</span><span class="tok-str">`INSERT INTO cache_log …`</span><span class="tok-punc">)</span></span>
+<span class="cl" data-l="9">    <span class="tok-punc">}</span></span>
+<span class="cl" data-l="10">  <span class="tok-punc">}</span></span>
+<span class="cl" data-l="11"><span class="tok-punc">}</span></span></code></pre>
+          </div>
+          <div class="iv-state">
+            <div class="iv-acc">
+              <div class="iv-label">accumulator (LIFO)</div>
+              <div class="iv-stack">
+                <div class="iv-entry" data-e="1">Map.new() <span class="u">⟲ store.drop()</span></div>
+                <div class="iv-entry" data-e="2">insert("u1") <span class="u">⟲ remove("u1")</span></div>
+                <div class="iv-entry" data-e="3">insert("u2") <span class="u">⟲ remove("u2")</span></div>
+              </div>
+              <div class="iv-note" id="iv-acc-note">each effect pushes its inverse</div>
+            </div>
+            <div class="iv-boundary">
+              <div class="iv-fence"></div>
+              <div class="iv-label">system boundary (G8)</div>
+              <div class="iv-emit-row" id="iv-emit1"><span class="e">emit</span> db.execute(…) — declared, audited</div>
+              <div class="iv-note" id="iv-boundary-note">nothing crosses silently</div>
+            </div>
+          </div>
+          <div class="iv-verdict" id="iv-verdict">
+            <span class="badge badge-good">CHECKED</span>
+            <span>G4: every mutation has an inverse or an <b>emit</b> marker</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= the gate (refusal terminal) ================= -->
+<section class="block" id="gate" style="background: var(--bg1); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">The gate</p>
+      <h2>The compiler is an admission gate — and refusal is a feature.</h2>
+      <p>A rejected program doesn’t get an error code, it gets a <b>verdict</b>:
+      which guarantee it broke, and the <b>why-trace</b> — the actual derivation the
+      checker found. Dependency cycles, provision conflicts, silent mutations:
+      refused before any code exists.</p>
+    </div>
+    <div class="fanout-cols">
+      <div class="term reveal">
+        <div class="term-head"><i></i><i></i><i></i><span>zsh — revl</span></div>
+        <pre id="gate-term"><span class="t-prompt">$ </span><span class="t-caret"></span></pre>
+      </div>
+      <div class="fan-facts reveal d1">
+        <div class="fact">
+          <div>
+            <b>Rejections name the guarantee.</b>
+            <p>Not “type error”: <span style="font-family:var(--mono); color:var(--amber)">G3</span> —
+            dependency cycles are rejected at link time, and the trace shows the cycle
+            itself, file and line for every hop.</p>
+          </div>
+        </div>
+        <div class="fact">
+          <div>
+            <b>Every rejection ships its fix.</b>
+            <p>Diagnostics are structured — code, guarantee, expected/actual, hint —
+            the same document over the CLI, JSON, and MCP. <code style="font-size:12px">revl explain G4</code>
+            prints what the guarantee means and how to satisfy it.</p>
+          </div>
+        </div>
+        <div class="fact">
+          <div>
+            <b>The rejection suite is the spec.</b>
+            <p>80+ refused programs in <code style="font-size:12px">examples/rejections/</code> are the
+            checker’s executable specification — every guarantee has a program that
+            proves it’s enforced.</p>
+          </div>
+        </div>
+        <a class="btn btn-ghost" style="align-self:flex-start; margin-top: 8px" href="playground.html?example=g3_cycle">Break it yourself in the playground →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= guarantees ================= -->
+<section class="block" id="guarantees">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">G1 – G8</p>
+      <h2>Eight guarantees, enforced before code exists.</h2>
+      <p>Each one is a theorem from the
+      <a href="https://github.com/cordiverse/paper">spatiotemporal-composability paper</a>,
+      turned into something the compiler refuses to violate.</p>
+    </div>
+    <div class="g-grid">
+      <div class="g-card reveal"><div class="g-id">G1 <span class="g-when">compile</span></div>
+        <p>Every requirement is declared — <b>undeclared access cannot be written</b>. A component only sees what it <code>requires</code>.</p></div>
+      <div class="g-card reveal d1"><div class="g-id">G2 <span class="g-when">link</span></div>
+        <p><b>Provision disjointness.</b> Two providers for one key refuse to link — per realm, so multi-tenant compositions stay coherent.</p></div>
+      <div class="g-card reveal d2"><div class="g-id">G3 <span class="g-when">link</span></div>
+        <p><b>Dependency cycles rejected</b> — with the cycle itself as the why-trace, even though loading is dynamic.</p></div>
+      <div class="g-card reveal d3"><div class="g-id">G4 <span class="g-when">compile</span></div>
+        <p>Every mutation carries an <b>inverse</b> (<code>undo</code>) or admits irreversibility (<code>emit</code>). No silent third option.</p></div>
+      <div class="g-card reveal"><div class="g-id">G5 <span class="g-when">by construction</span></div>
+        <p><b>Teardown cannot register effects.</b> Cleanup can’t dig new holes while filling old ones.</p></div>
+      <div class="g-card reveal d1"><div class="g-id">G6 <span class="g-when">compile</span></div>
+        <p>Code outside effect forms is <b>pure</b> — confinement is a type-level fact, not an escape analysis.</p></div>
+      <div class="g-card reveal d2"><div class="g-id">G7 <span class="g-when">by lowering</span></div>
+        <p>Derived teardown is <b>LIFO-complete</b> over accumulated effects. Unload order is a theorem, not a convention.</p></div>
+      <div class="g-card reveal d3"><div class="g-id">G8 <span class="g-when">compile</span></div>
+        <p>The boundary surface — externs, emissions — is <b>enumerable</b>. <code>revl audit</code> prints everything that can touch the outside world.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= runtimes fan-out ================= -->
+<section class="block" id="runtimes" style="background: var(--bg1); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">Six runtimes</p>
+      <h2>Write it once. Run it as Python, TypeScript, Rust, Java, Go — or sandboxed Wasm.</h2>
+      <p>One front-end enforces G1–G8 and lowers to a single IR. Six emitters
+      target six Cordis runtimes — and conformance is <b>measured, not asserted</b>:
+      each tier’s output goes to that tier’s real compiler.</p>
+    </div>
+    <div class="fanout-cols">
+      <div class="reveal">
+        <svg class="fan-svg" id="fan-svg" viewBox="0 0 470 372" aria-label="one checked front-end fanning out to six runtimes">
+          <path class="lane lane-mid" d="M 96 186 C 112 186, 112 186, 128 186" />
+          <path class="lane lane-mid" d="M 236 186 C 250 186, 250 186, 262 186" />
+          <path class="lane" data-t="0" d="M 330 176 C 372 150, 360 46, 392 34" />
+          <path class="lane" data-t="1" d="M 330 180 C 372 168, 360 100, 392 94" />
+          <path class="lane" data-t="2" d="M 330 184 C 372 184, 360 156, 392 154" />
+          <path class="lane" data-t="3" d="M 330 190 C 372 190, 360 216, 392 214" />
+          <path class="lane" data-t="4" d="M 330 194 C 372 206, 360 272, 392 274" />
+          <path class="lane" data-t="5" d="M 330 198 C 372 226, 360 328, 392 334" />
+          <rect class="box" x="10" y="162" width="86" height="48" />
+          <text class="boxlabel" x="53" y="183" text-anchor="middle">app.rvl</text>
+          <text class="sublabel" x="53" y="198" text-anchor="middle">one source</text>
+          <rect class="box lit" x="128" y="162" width="108" height="48" />
+          <text class="boxlabel" x="182" y="183" text-anchor="middle">check G1–G8</text>
+          <text class="sublabel" x="182" y="198" text-anchor="middle">the admission gate</text>
+          <rect class="box" x="262" y="162" width="68" height="48" />
+          <text class="boxlabel" x="296" y="183" text-anchor="middle">IR</text>
+          <text class="sublabel" x="296" y="198" text-anchor="middle">frozen v1</text>
+          <g class="tier" data-t="0"><rect class="box" x="392" y="12" width="72" height="44" />
+            <text class="boxlabel" x="428" y="31" text-anchor="middle">py</text>
+            <text class="sublabel" x="428" y="46" text-anchor="middle">cordis-py</text></g>
+          <g class="tier" data-t="1"><rect class="box" x="392" y="72" width="72" height="44" />
+            <text class="boxlabel" x="428" y="91" text-anchor="middle">ts</text>
+            <text class="sublabel" x="428" y="106" text-anchor="middle">tsc ✓</text></g>
+          <g class="tier" data-t="2"><rect class="box" x="392" y="132" width="72" height="44" />
+            <text class="boxlabel" x="428" y="151" text-anchor="middle">rust</text>
+            <text class="sublabel" x="428" y="166" text-anchor="middle">cargo ✓</text></g>
+          <g class="tier" data-t="3"><rect class="box" x="392" y="192" width="72" height="44" />
+            <text class="boxlabel" x="428" y="211" text-anchor="middle">java</text>
+            <text class="sublabel" x="428" y="226" text-anchor="middle">javac ✓</text></g>
+          <g class="tier" data-t="4"><rect class="box" x="392" y="252" width="72" height="44" />
+            <text class="boxlabel" x="428" y="271" text-anchor="middle">go</text>
+            <text class="sublabel" x="428" y="286" text-anchor="middle">stc-go</text></g>
+          <g class="tier" data-t="5"><rect class="box" x="392" y="312" width="72" height="44" />
+            <text class="boxlabel" x="428" y="331" text-anchor="middle">wasm</text>
+            <text class="sublabel" x="428" y="346" text-anchor="middle">wasmtime ✓</text></g>
+        </svg>
+      </div>
+      <div class="fan-facts reveal d1">
+        <div class="fact"><div><b>Components compose across languages, live.</b>
+          <p>A Python component can require a service a Rust component provides —
+          different processes, no shared address space. <code style="font-size:12px">revl run --placement</code>
+          wires each seam with a generated proxy/stub pair, and a provider’s death
+          becomes a reactive withdrawal, not an exception.</p></div></div>
+        <div class="fact"><div><b>Migrate a live component between tiers.</b>
+          <p><code style="font-size:12px">swap UserCache --to rust</code> — the running composition
+          unwinds the component’s effects, re-admits it on another runtime, and the
+          system never stops.</p></div></div>
+        <div class="fact"><div><b>Turing-complete, demonstrated by execution.</b>
+          <p>Emitted Wasm runs <span style="font-family:var(--mono)">fib(20) = 6765</span> on real
+          wasmtime — the claim is checked by running the code, not by argument.</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= agents ================= -->
+<section class="block tint-violet" id="agents">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">Agent-native</p>
+      <h2>Built for authors that are machines.</h2>
+      <p><code style="color:var(--violet)">revl mcp serve</code> runs the whole compiler as an
+      MCP server. An agent proposing a component talks to the <b>admission gate</b>,
+      not the filesystem — and a rejection comes back as a structured document the
+      agent can act on, not a stack trace it has to parse.</p>
+    </div>
+    <div class="agent-cols">
+      <div class="reveal">
+        <div class="fact"><div><b>Structured verdicts, machine-first.</b>
+          <p>Code, guarantee, expected/actual, fix hint — every diagnostic is a
+          document. Measured on a 30-spec benchmark against real models, iterating
+          against the real checker.</p></div></div>
+        <div class="fact" style="margin-top:16px"><div><b>Safety hints derived from bodies.</b>
+          <p><code style="font-size:12px">revl mcp schema</code> projects services to MCP tools whose
+          <code style="font-size:12px">readOnlyHint</code> / <code style="font-size:12px">destructiveHint</code>
+          come <b>from the compiler</b> — a tool cannot describe itself as harmless
+          when its body emits.</p></div></div>
+        <div class="fact" style="margin-top:16px"><div><b>Admission, not access.</b>
+          <p>Agent code enters a running system through <code style="font-size:12px">revl_admit</code>
+          — checked against the live manifest — or through
+          <code style="font-size:12px">revl_gauntlet</code>, which grades a candidate in isolation
+          and returns a verdict dossier.</p></div></div>
+        <div class="mcp-verbs">
+          <span class="verb">revl_check</span><span class="verb">revl_admit</span>
+          <span class="verb">revl_plan</span><span class="verb">revl_swap</span>
+          <span class="verb">revl_rollback</span><span class="verb">revl_gauntlet</span>
+          <span class="verb">revl_query_*</span><span class="verb">revl_snapshot</span>
+          <span class="verb">revl_timeline</span><span class="verb">revl_resolve</span>
+        </div>
+      </div>
+      <div class="exchange" id="exchange">
+        <div class="msg" data-x="1">
+          <div class="msg-head"><span class="who-agent">agent</span><span>→ revl_check</span></div>
+          <pre><code data-lang="revl">component Leaky {
+  config { url: Str }
+  let pool = effect Pool.open(config.url)
+}</code></pre>
+        </div>
+        <div class="msg refuse" data-x="2">
+          <div class="msg-head"><span class="who-gate">gate</span><span>← refused, with the fix</span></div>
+          <pre><code>{ <span class="j-k">"code"</span>: <span class="j-err">"G4"</span>, <span class="j-k">"line"</span>: 3,
+  <span class="j-k">"message"</span>: <span class="j-s">"effect has no `undo` and
+     `Pool.open` is not pure"</span>,
+  <span class="j-k">"guarantee"</span>: <span class="j-s">"every mutation carries an inverse,
+     or admits irreversibility with `emit`"</span>,
+  <span class="j-k">"hint"</span>: <span class="j-s">"write `effect Pool.open(...) undo <expr>`,
+     or mark the call `emit`"</span> }</code></pre>
+        </div>
+        <div class="msg" data-x="3">
+          <div class="msg-head"><span class="who-agent">agent</span><span>→ revl_admit · patched</span></div>
+          <pre><code data-lang="revl">component Pooled {
+  config { url: Str }
+  let pool = effect Pool.open(config.url)
+             undo   pool.close()
+}</code></pre>
+        </div>
+        <div class="msg admit" data-x="4">
+          <div class="msg-head"><span class="who-gate">gate</span><span>← admitted into the live composition</span></div>
+          <pre><code>{ <span class="j-k">"admissible"</span>: <span class="j-ok">true</span>,
+  <span class="j-k">"provisions_gained"</span>: [<span class="j-s">"pool: Pool"</span>],
+  <span class="j-k">"emission_surface"</span>: <span class="j-s">"unchanged"</span>,
+  <span class="j-k">"teardown"</span>: <span class="j-s">"derived — LIFO, no residue"</span> }</code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= toolchain ================= -->
+<section class="block" id="toolchain" style="background: var(--bg1); border-top: 1px solid var(--line);">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">The toolchain is the developer surface</p>
+      <h2>The compiler answers questions, not just “yes” or “no”.</h2>
+      <p>Because effects are revertible and boundaries are enumerable, questions
+      that are undecidable elsewhere become <b>cheap</b> here.</p>
+    </div>
+    <div class="tool-grid">
+      <div class="tool-card reveal"><h4><span class="tc-cmd">revl plan</span></h4>
+        <p>A dry run for a hot-swap: which provisions appear or withdraw, who gets
+        diverted, teardown order, how the emission surface changes — before anything moves.</p></div>
+      <div class="tool-card reveal d1"><h4><span class="tc-cmd">revl query</span></h4>
+        <p>Who emits to <i>X</i>? What breaks if I withdraw <i>C</i>? Each answer says
+        whether it’s exact or a conservative over-approximation.</p></div>
+      <div class="tool-card reveal d2"><h4><span class="tc-cmd">hole[T]</span> — typed holes</h4>
+        <p>An unfinished draft still type-checks; the hole becomes a reported
+        obligation with an expected-type fill spec — and can never be admitted.</p></div>
+      <div class="tool-card reveal"><h4><span class="tc-cmd">revl run --record</span> — backwards replay</h4>
+        <p>Step an activation <i>back</i> over its own accumulator: <span style="font-family:var(--mono); font-size:12px">:back · :bisect · :inspect</span>.
+        Only revertible effects make time travel cheap.</p></div>
+      <div class="tool-card reveal d1"><h4><span class="tc-cmd">why-traces</span></h4>
+        <p>A G2/G3/G4 rejection ships the derivation, not just the verdict —
+        <span style="font-family:var(--mono); font-size:12px">put → writeThrough → audit.log</span>.</p></div>
+      <div class="tool-card reveal d2"><h4><span class="tc-cmd">fault test</span></h4>
+        <p><span style="font-family:var(--mono); font-size:12px">fail at step 2; assert no residue</span> —
+        crash-safety as a declarable, runnable assertion in the language itself.</p></div>
+      <div class="tool-card reveal"><h4><span class="tc-cmd">verified effect</span></h4>
+        <p>An <i>undo</i> that’s wrong is worse than none. <b>verified</b> round-trips
+        the inverse N randomized times on the real runtime and asserts baseline.</p></div>
+      <div class="tool-card reveal d1"><h4><span class="tc-cmd">revl erase-report</span></h4>
+        <p>Right-to-erasure evidence as a compiler artifact: proof one realm unwinds
+        to nothing while every other realm stays untouched.</p></div>
+      <div class="tool-card reveal d2"><h4><span class="tc-cmd">revl import</span> · wit / openapi / mcp</h4>
+        <p>An external contract becomes a typed service — and any revl service
+        exports back to WIT. The boundary is typed in both directions.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CTA ================= -->
+<section class="cta-band">
+  <div class="wrap">
+    <h2>Break a component.<br /><span class="grad">Watch the gate refuse it.</span></h2>
+    <p>The full compiler runs in your browser — checker, auditor, planner.
+    Nothing you type leaves the page.</p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="playground.html">Open the playground →</a>
+      <a class="btn btn-ghost" href="https://github.com/inso1337/revl">Star on GitHub</a>
+    </div>
+    <div class="quickstart codecard reveal">
+      <div class="cc-head">quickstart</div>
+      <pre><code><span class="t-prompt">$</span> git clone https://github.com/inso1337/revl && cd revl
+<span class="t-prompt">$</span> uv venv && uv pip install -e ".[test]"
+<span class="t-prompt">$</span> python -m revl compile examples/user_cache.rvl   <span class="tok-com"># source → checked IR</span>
+<span class="t-prompt">$</span> python -m revl mcp serve                         <span class="tok-com"># the compiler as an agent gate</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-inner">
+    <div>
+      <span style="font-family:var(--mono); color:var(--text)">revl</span> —
+      a research language for spatiotemporal composability · MIT license
+    </div>
+    <div class="foot-links">
+      <a href="https://github.com/inso1337/revl">GitHub</a>
+      <a href="https://github.com/inso1337/revl/blob/main/DESIGN.md">Design</a>
+      <a href="https://github.com/inso1337/revl/blob/main/docs/vision.md">Vision</a>
+      <a href="https://github.com/cordiverse/paper">The paper</a>
+      <a href="https://github.com/cordiverse/cordis">Cordis</a>
+      <a href="playground.html">Playground</a>
+    </div>
+  </div>
+</footer>
+
+<script type="module" src="js/landing.js"></script>
+</body>
+</html>

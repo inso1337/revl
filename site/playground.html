@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>revl playground — the compiler, in your browser</title>
+  <meta name="description" content="Write revl, press Run: diagnostics with why-traces, the G8 audit, an admission plan and the lowered IR — the real compiler, running client-side." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/site.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%2306080e'/><text x='50' y='68' font-size='52' font-family='monospace' font-weight='700' fill='%232dd4bf' text-anchor='middle'>r</text></svg>" />
+</head>
+<body>
+
+<div class="pg-overlay" id="overlay">
+  <div class="spinner"></div>
+  <div class="msg" id="overlay-msg">Loading Pyodide…</div>
+  <div class="sub">The real revl compiler — checker, auditor, planner — is being
+  installed into your browser. First load fetches ~10&nbsp;MB and is cached;
+  nothing you type ever leaves this page.</div>
+</div>
+
+<nav class="nav">
+  <div class="wrap nav-inner" style="max-width: none; padding: 0 20px;">
+    <a class="brand" href="index.html">revl<span class="cursor"></span></a>
+    <div class="nav-links">
+      <a href="index.html#idea">The idea</a>
+      <a href="index.html#guarantees">Guarantees</a>
+      <a href="index.html#agents">Agents</a>
+    </div>
+    <span class="spacer"></span>
+    <div class="nav-cta">
+      <span class="badge badge-good" title="the compiler runs client-side under Pyodide">runs in your browser</span>
+      <a class="btn btn-ghost btn-sm" href="https://github.com/inso1337/revl">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<main class="pg-main">
+  <section class="pg-editor-pane">
+    <div class="pg-toolbar">
+      <label for="examples">example</label>
+      <select id="examples" aria-label="preloaded examples"></select>
+      <button class="btn btn-primary btn-sm" id="run" disabled>Run ▸</button>
+      <span class="hint">⌘/Ctrl + Enter</span>
+    </div>
+    <div class="editor">
+      <div class="gutter" id="gutter"></div>
+      <div class="edwrap">
+        <pre class="hl" aria-hidden="true"><code id="hl-code"></code></pre>
+        <textarea id="editor" spellcheck="false" autocomplete="off"
+          autocapitalize="off" wrap="off" aria-label="revl source editor"></textarea>
+      </div>
+    </div>
+  </section>
+
+  <section class="pg-result-pane">
+    <div class="pg-status" id="status"><span>Loading the compiler…</span></div>
+    <div class="pg-tabs" role="tablist">
+      <button class="pg-tab" role="tab" data-panel="diagnostics" aria-selected="true">
+        <span class="dot" id="dot-diagnostics"></span>Diagnostics
+      </button>
+      <button class="pg-tab" role="tab" data-panel="audit" aria-selected="false">
+        <span class="dot" id="dot-audit"></span>G8 audit
+      </button>
+      <button class="pg-tab" role="tab" data-panel="plan" aria-selected="false">
+        <span class="dot" id="dot-plan"></span>Plan
+      </button>
+      <button class="pg-tab" role="tab" data-panel="ir" aria-selected="false">
+        <span class="dot" id="dot-ir"></span>IR
+      </button>
+    </div>
+    <div class="pg-panels">
+      <div class="pg-panel active" id="panel-diagnostics" role="tabpanel"></div>
+      <div class="pg-panel" id="panel-audit" role="tabpanel"></div>
+      <div class="pg-panel" id="panel-plan" role="tabpanel"></div>
+      <div class="pg-panel" id="panel-ir" role="tabpanel"></div>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js"></script>
+<script type="module" src="js/playground.js"></script>
+</body>
+</html>
