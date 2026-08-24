@@ -74,7 +74,8 @@ v1 documents are unaffected. The wasm tier lowers the fixed-shape builtins
 (`length`, `push`, `concat`, `slice`, `charAt`, `charCodeAt`) over its
 canonical-ABI string/list model and rejects the rest (`indexOf`, `split`,
 `join`, `repeat`) with its usual named tier error — not yet lowerable on
-that tier.
+that tier. The full wasm tier-capability matrix (values, builtins, service
+boundary shapes, and each hard refusal) is **docs/wasm-capabilities.md**.
 
 ## `Map`: the persistent value type (graduated from Planned)
 
