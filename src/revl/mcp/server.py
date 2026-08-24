@@ -240,6 +240,28 @@ def _tool_rollback(_arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _tool_undo(arguments: dict) -> dict:
+    """Return to an earlier generation through the retained history (item 65).
+
+    With no `to`, undoes to generation N−1; `to` names any still-retained
+    generation. The undo is admitted through the SAME gate a swap runs: a
+    target the current checker rejects is a refusal *result* (the running
+    composition is untouched), never a bypass. The dossier — what unloads, what
+    state drops, and the interim boundary crossings no undo can un-emit — rides
+    along either way (docs/generation-history.md)."""
+    if not SESSION.loaded:
+        return _session_error("nothing is loaded — call revl_load first")
+    try:
+        result = SESSION.undo(arguments.get("to"))
+    except SessionError as error:
+        return _session_error(str(error))
+    # a gate refusal is a result, not an error: surface it as ok:False with the
+    # diagnostic, matching how revl_restore reports a rejected re-admission.
+    if result.get("refused"):
+        return {"ok": False, **result}
+    return {"ok": True, **result}
+
+
 def _tool_unload(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.unload()}
@@ -865,6 +887,33 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_rollback,
+    },
+    {
+        "name": "revl_undo",
+        "description": "Return to an earlier generation through the retained "
+                       "generation history — the deep version of revl_rollback. "
+                       "With no `to`, undoes to generation N−1; `to` names any "
+                       "still-retained generation. The undo is itself an ADMITTED, "
+                       "gated change: the target's sources are re-admitted through "
+                       "the same compile+admission gate a swap runs, so a target the "
+                       "current checker rejects is refused (ok:false, with the "
+                       "diagnostic) and the running composition is untouched — an "
+                       "undo never bypasses the gate. The dossier rides along: what "
+                       "unloads, what state drops (item 53's honesty in reverse), and "
+                       "the interim boundary crossings that no undo can un-emit "
+                       "(compensation is not inversion — paper §6.1). "
+                       "See docs/generation-history.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "integer",
+                       "description": "a retained generation number to return to; "
+                                      "omit to undo to the immediately previous "
+                                      "generation (N−1)"},
+            },
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_undo,
     },
     {
         "name": "revl_unload",
