@@ -387,9 +387,11 @@ revl = "revl.__main__:main"
 truc = "revl.truc:main"
 ```
 
-and `revl add|rm|assemble|ship …` becomes a thin alias in
-`src/revl/__main__.py::main` that forwards `argv[1:]` to `revl.truc.main`
-— one implementation, two spellings, zero drift. truc's `.rvl` sources
+and `revl truc <verb> …` becomes a thin namespaced subcommand in
+`src/revl/__main__.py::main` that forwards its tail to `revl.truc.main`
+— one implementation, two spellings, zero drift. (The human settled this
+as a `revl truc` subcommand group, deliberately *not* flat `revl add`
+aliases, so truc's verbs never pollute revl's top-level namespace.) truc's `.rvl` sources
 live *inside the package* (`src/revl/truc/components/*.rvl`) so the wheel
 ships them for free under hatchling's package build — the exact lesson of
 item 108 (docs/v2.0-roadmap.md:3005: the wheel must carry what the runtime
@@ -490,8 +492,10 @@ any new compatibility or ranking logic (that would defeat the point).
    services (§1.2). JSON-as-Str is shippable today on py/ts; records are
    prettier but push on `Any`-typing gaps other tiers have
    (`stdlib/json.rvl` header). Recommend Str-JSON v1, records later.
-3. **`revl add` alias surface**: alias all four verbs (`add/rm/assemble/
-   ship`) under `revl`, or only `add` as the roadmap literally says. §6.
+3. **`revl truc` surface** (settled): a namespaced `revl truc <verb>`
+   subcommand group that passes its tail through to `revl.truc.main`, so
+   every verb (`add/rm/assemble/ship`) works without flat `revl add`
+   aliases crowding revl's top level. §6.
 4. **Lock as JSON** (this doc, §4.3) vs lock as TOML (symmetric with
    truc.toml but requires writing a TOML serializer in revl or moving lock
    writes host-side).
@@ -526,8 +530,9 @@ The whole §8.1/§8.2 loop, local paths only, no publish, no alias.
   assembles clean in the compatible arrangement; hand-editing a vendored
   `component.rvl` turns `assemble` red on hash drift.
 
-### Slice 2 — `revl add|rm|assemble|ship` alias
-- **Edits:** `src/revl/__main__.py` only (forwarder), + `tests/test_truc_alias.py`.
+### Slice 2 — `revl truc <verb>` namespaced subcommand
+- **Edits:** `src/revl/__main__.py` only (a REMAINDER-tail forwarder to
+  `revl.truc.main`), + `tests/test_truc_revl_subcommand.py`.
 - Independent of every other slice once slice 1's `revl.truc.main` exists.
 
 ### Slice 3 — `truc rm` + drift/`--check` hardening
