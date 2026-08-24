@@ -111,33 +111,31 @@ def test_run_preflights_with_the_required_field_supplied(tmp_path):
                    encoding="utf-8")
     result = _run_cli([USER_CACHE, "--backend", "py", "--config", str(cfg)])
     assert "missing required config" not in result.stderr
-def test_run_refuses_a_backend_that_is_not_wired_yet():
-    """Multi-runtime is by design (--backend is a real selector). py, rust, java
-    and wasm run today (each non-py tier as a separate process — see
-    test_run_rust.py / test_run_java.py / test_run_wasm.py); ts must still say so
-    rather than pretend."""
+def test_run_ts_no_longer_refuses_flatly():
+    """Multi-runtime is by design (--backend is a real selector), and ts is now
+    wired (FR-2): py, ts, rust, java and wasm all run today (each non-py tier as
+    a separate process — see test_run_ts.py / test_run_rust.py / test_run_java.py
+    / test_run_wasm.py). The flat `not wired yet` / exit-2 refusal must be gone
+    for ts; USER_CACHE needs PgDatabase.url, so the run now reaches the config
+    preflight (rc 1) instead of short-circuiting on the wiring."""
     result = _run_cli([USER_CACHE, "--backend", "ts"])
-    assert result.returncode == 2, result.stderr
-    assert "not wired yet" in result.stderr
-    # the refusal names the tiers that DO run today (RUNNABLE_BACKENDS) — ts is
-    # not among them
-    assert "runs today" in result.stderr
-    assert "ts tier emits" in result.stderr
+    assert result.returncode == 1, result.stderr
+    assert "not wired yet" not in result.stderr
+    assert 'missing required config "url"' in result.stderr
 
 
-@pytest.mark.parametrize("backend,dir_hint", [("go", "backends/go/"), ("ts", "backends/typescript/")])
-def test_run_refuses_an_emitting_tier_with_the_friendly_not_wired_message(backend, dir_hint):
+def test_run_refuses_an_emitting_tier_with_the_friendly_not_wired_message():
     """Every emitter tier that has no `run` driver takes the same path to the
     same neighboring facts (item 72): `--backend go` used to die in argparse
-    with 'invalid choice' while `--backend ts` got the friendly 'emits but has
-    no run driver' message. Both now pass the choice gate (go is a known tier)
-    and reach the one refusal, which names the real backend directory."""
-    result = _run_cli([USER_CACHE, "--backend", backend])
+    with 'invalid choice' while ts got the friendly 'emits but has no run
+    driver' message. ts is now wired (FR-2) and only go takes the refusal,
+    which names the real backend directory."""
+    result = _run_cli([USER_CACHE, "--backend", "go"])
     assert result.returncode == 2, result.stderr
     assert "not wired yet" in result.stderr
     assert "runs today" in result.stderr
-    assert f"{backend} tier emits" in result.stderr
-    assert dir_hint in result.stderr
+    assert "go tier emits" in result.stderr
+    assert "backends/go/" in result.stderr
 
 
 def test_required_config_problem_uses_the_ir_schema():
