@@ -53,3 +53,15 @@ loop_out = BACKEND / "golden" / "async_agent_loop.ts"
 loop_out.write_text(emit(json.loads(loop_ir.read_text(encoding="utf-8"))),
                     encoding="utf-8")
 print(f"regenerated {loop_out} from {loop_ir}")
+
+# async function values (roadmap item 92, finding #21): the harness callback-arrow
+# shape — `agent_loop(prompt, complete: (Str) -> Async[Str])` with a call-site
+# arrow `msgs => emit model.complete(msgs)`. The async color rides the declared
+# function type: `agent_loop` colors async, its `complete` param types as
+# `Promise<T>`, and the awaited callback + async arrow are tsc-validated by
+# `npm run typecheck` — the exit test for item 92.
+fnval_ir = BACKEND / "tests" / "fixtures" / "async_fn_values.ir.json"
+fnval_out = BACKEND / "golden" / "async_fn_values.ts"
+fnval_out.write_text(emit(json.loads(fnval_ir.read_text(encoding="utf-8"))),
+                     encoding="utf-8")
+print(f"regenerated {fnval_out} from {fnval_ir}")
