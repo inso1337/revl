@@ -114,6 +114,18 @@ def _split_fn_type(name: str) -> "tuple[list[str], str] | None":
     return None
 
 
+def _is_async_fn_type(type_name: object) -> bool:
+    """True for a function type whose declared return is `Async[…]` — the
+    item-92 spelling that colors a first-class callback parameter."""
+    if not isinstance(type_name, str):
+        return False
+    fn = _split_fn_type(type_name.strip())
+    if fn is None:
+        return False
+    _, returns = fn
+    return returns.strip().startswith("Async[")
+
+
 def _ts_type(name: object, known_types: "frozenset[str]" = frozenset()) -> str:
     """Surface type -> TS type (IR v1/A6).
 
@@ -492,10 +504,11 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # does not the checker is wrong, and this crashes honestly rather than
         # emitting an un-awaited Promise into a sync function.
         if isinstance(callee_node, dict) and callee_node.get("kind") == "var" \
-                and callee_node.get("name") in ctx.async_names:
+                and (callee_node.get("name") in ctx.async_names
+                     or callee_node.get("name") in ctx.async_locals):
             if not ctx.in_async:
                 raise EmitError(
-                    f"async extern `{callee_node.get('name')}` called outside an "
+                    f"async callable `{callee_node.get('name')}` called outside an "
                     f"async context — the frontend async-coloring check should "
                     f"have refused this (A1)"
                 )
@@ -704,13 +717,21 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # so this is not the single-assignment rebinding). A pure 2.0 fn/test
         # body has no component scope and resolves names verbatim, so nothing
         # is bound there.
+        # item 92: an arrow the checker typed against `(…) -> Async[T]` carries
+        # `"async": true`. It renders `async (…) => …` and its body renders in
+        # an async context (so an internal async-callable call is awaited).
+        # Equally load-bearing: a *sync* arrow renders its body with
+        # `in_async=False` — inheriting the enclosing `in_async` would let an
+        # `await` land inside a non-async arrow, a tsc error.
+        is_async = bool(node.get("async"))
         scope = ctx.component_scope
-        body_ctx = ctx
         if names and scope is not None:
             arrow_scope = scope.child()
             for p in names:
                 arrow_scope.locals.add(_ident(p, "arrow parameter"))
-            body_ctx = ctx.with_scope(arrow_scope)
+            body_ctx = ctx.with_scope(arrow_scope, in_async=is_async)
+        else:
+            body_ctx = ctx.with_scope(ctx.component_scope, in_async=is_async)
         body = _expr(node["body"], body_ctx)
         # Mutable `var` captures are snapshotted by value at arrow-creation
         # time (docs/expressible-iteration.md Semantics), the py tier's
@@ -723,13 +744,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # (Wrapping the arrow *body* instead would re-snapshot on every call
         # and observe the rebound `var` — a silent wrong answer.) An arrow
         # with no captures is emitted exactly as before.
+        prefix = "async " if is_async else ""
         captures = node.get("captures") or []
         if captures:
             bound = [f"{_ident(c, 'capture')}: any" for c in captures]
             args = [_ident(c, "capture") for c in captures]
-            return (f"(({', '.join(bound)}) => (({params}) => ({body})))"
+            return (f"(({', '.join(bound)}) => ({prefix}({params}) => ({body})))"
                     f"({', '.join(args)})")
-        return f"(({params}) => ({body}))"
+        return f"({prefix}({params}) => ({body}))"
 
     if kind == "match":
         return _v3_match_expr(node, ctx)
@@ -1199,6 +1221,12 @@ def _ts_v3_type(type_name: object) -> str:
             # tagged, matching the `adt`-node runtime shape `{ kind, value }`
             return (f'{{ kind: "Ok"; value: {_ts_v3_type(args[0])} }}'
                     f' | {{ kind: "Err"; value: {_ts_v3_type(args[1])} }}')
+        if base == "Async":
+            # item 92: an async function-type return `(…) -> Async[T]` renders
+            # `Promise<T>`, so a colored callback parameter types as
+            # `((a0: …) => Promise<T>)` through the FN branch above, and its
+            # awaited call sites line up with the `Promise` it returns.
+            return f"Promise<{_ts_v3_type(args[0])}>"
         return base + "<" + ", ".join("unknown" for _ in args) + ">"
     return _ident(name, "type name")
 
@@ -1234,6 +1262,13 @@ class _Ctx:
                             if ext.get("async")} | {
                             fn.get("name") for fn in functions or []
                             if fn.get("async")}
+        # async value locals (roadmap item 92): the *parameters* of the body
+        # currently rendered whose declared type is an async function type
+        # `(…) -> Async[T]`. A call through one returns a `Promise<T>` and is
+        # awaited just like a named async callable — but it is a per-body set
+        # (a local name), not a document-level one, so it is threaded through
+        # `with_scope`, not seeded here.
+        self.async_locals: set = set()
         self.in_async = in_async
         self.case_names: set[str] = set()
         for spec in self.types.values():
@@ -1249,12 +1284,13 @@ class _Ctx:
         self._counter[0] += 1
         return f"$revl_match_{self._counter[0]}"
 
-    def with_scope(self, scope, in_async=None) -> "_Ctx":
+    def with_scope(self, scope, in_async=None, async_locals=None) -> "_Ctx":
         view = _Ctx.__new__(_Ctx)
         view.types = self.types
         view.function_names = self.function_names
         view.extern_names = self.extern_names
         view.async_names = self.async_names
+        view.async_locals = self.async_locals if async_locals is None else async_locals
         view.in_async = self.in_async if in_async is None else in_async
         view.case_names = self.case_names
         view._counter = self._counter
@@ -1975,7 +2011,15 @@ def _emit_ts_functions(functions: list, types: dict, externs: list) -> list[str]
         # IR entry — the emitter only reads `.get("async")`, mirroring the
         # extern signature form at _emit_ts_externs.
         if fn.get("async"):
-            fn_ctx = ctx.with_scope(ctx.component_scope, in_async=True)
+            # item 92: a parameter declared `(…) -> Async[T]` is an async value
+            # local — a call through it returns a Promise and is awaited.
+            async_locals = {
+                _ident(p.get("name"), "parameter name")
+                for p in fn.get("params") or []
+                if _is_async_fn_type(p.get("type"))
+            }
+            fn_ctx = ctx.with_scope(ctx.component_scope, in_async=True,
+                                    async_locals=async_locals)
             lines.append(
                 f"export async function {name}({params}): Promise<{returns}> {{")
         else:

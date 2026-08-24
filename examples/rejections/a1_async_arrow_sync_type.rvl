@@ -1,0 +1,26 @@
+// Item 92 (finding #21): a callback arrow that reaches an async service
+// operation, but whose declared function type carries no async color, would
+// hand the caller an unawaited coroutine/Promise at runtime. It is a compile
+// error now — the sound replacement for the silent leak.
+//
+// The fix is one declared line: give `complete` the type
+// `(Str) -> Async[Str]` (see the accepting twin in the item-92 tests).
+
+service Model {
+  emission async fn complete(msgs: Str) -> Str
+}
+
+service Runner {
+  emission async fn run(prompt: Str) -> Str
+}
+
+fn agent_loop(current: Str, complete: (Str) -> Str) -> Str {
+  let resp = complete(current)
+  return resp
+}
+
+component Agent requires model: Model provides runner: Runner {
+  provide runner {
+    async fn run(prompt) = agent_loop(prompt, msgs => emit model.complete(msgs))
+  }
+}

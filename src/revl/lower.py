@@ -604,7 +604,10 @@ def _validate_declared_types(program: Program, filename: str) -> None:
     zero-arg generic reaches the type algebra and crashes it."""
     for fn in program.fn_decls:
         for p in fn.params:
-            check_type_wellformed(filename, p.line, p.type)
+            # A module `fn` parameter is the one v1 position that admits an
+            # async function type `(…) -> Async[T]` (item 92).
+            check_type_wellformed(filename, p.line, p.type,
+                                  allow_async_param=not fn.verified)
         check_type_wellformed(filename, fn.line, fn.returns)
     for ext in program.externs:
         for p in ext.params:
@@ -2397,6 +2400,11 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         if any(p is not None for p in param_types) or expr.returns:
             node["param_types"] = param_types
             node["returns"] = expr.returns
+        # item 92: an arrow the checker typed against `(…) -> Async[T]` carries
+        # the async color into the IR, so every emitter reads one shape
+        # (`.get("async")`) instead of parsing the `returns` string.
+        if expr.returns and parse_type(expr.returns)[0] == "Async":
+            node["async"] = True
         return node
     if isinstance(expr, ExprMatch):
         scrutinee_type = _expr_static_type(expr.scrutinee, type_env, types)
@@ -2556,6 +2564,14 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                      "through it (A1)",
                 code="A1", category="async-propagation",
             )
+        # item 92: a sync-typed arrow in a module fn that reaches an async
+        # callable (an async extern or a colored fn) is the finding-#21 leak —
+        # a compile error now. An arrow the checker typed against `(…) ->
+        # Async[T]` carries the async flag and is admitted; a plain one that
+        # reaches a suspension is refused. Pure fns have no req keys, so only
+        # the named-callable reach applies here (rule 3 is component-only).
+        _refuse_leaky_pure_arrow(entry.get("body") or [], async_colored,
+                                 _fn_decls_by_name.get(name), program.filename)
         if name in async_colored:
             entry["async"] = True
 
@@ -3005,7 +3021,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
             if name in callables:
-                return {"kind": "fn", "name": name, "args": args}
+                return {"kind": "fn", "name": name,
+                        "args": _coerce_async_args(name, args, env, line)}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
             # the same sliver guard as the var-root path above: a non-var
@@ -3267,6 +3284,7 @@ def _config_default_type(value) -> str | None:
 from .emission_analysis import (  # noqa: E402,F401
     _EmissionEvidence,
     _async_callables,
+    _is_async_fn_type,
     _calls_in,
     _capability_hint,
     _emission_chain,
@@ -3298,6 +3316,146 @@ def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
     elif isinstance(node, list):
         for value in node:
             _async_reached_outside_provide(value, async_names, acc)
+
+
+def _req_op_is_async(node, env) -> bool:
+    """A lowered call/emit node that reaches an async service operation through
+    a required key — rule 3 of the item-92 async-reach (a suspension source the
+    name-based `_calls_in` is blind to)."""
+    if not isinstance(node, dict):
+        return False
+    target = node.get("target")
+    method = node.get("method")
+    if isinstance(target, dict) and target.get("kind") == "req" and method:
+        svc = env.services.get(env.requires.get(target.get("name")) or "")
+        decl = svc.methods.get(method) if svc is not None else None
+        return bool(decl is not None and getattr(decl, "async_", False))
+    return False
+
+
+def _arrow_reaches_async(body, env) -> bool:
+    """True if a lowered arrow body reaches a suspension (item 92 §3): a
+    req-target async service op (rule 3), or a call of an async-colored callable
+    — an async extern or a phase-2 colored fn (rules 1). A nested async-flagged
+    arrow is a *value* whose suspension is its own, so it is pruned."""
+    hit = False
+
+    def walk(n):
+        nonlocal hit
+        if hit:
+            return
+        if isinstance(n, dict):
+            if n.get("kind") == "arrow" and n.get("async"):
+                return
+            if _req_op_is_async(n, env):
+                hit = True
+                return
+            for value in n.values():
+                walk(value)
+        elif isinstance(n, list):
+            for value in n:
+                walk(value)
+
+    walk(body)
+    if hit:
+        return True
+    called: set = set()
+    _calls_in(body, called, stop_async_arrows=True)
+    return bool(called & (env.async_callables or set()))
+
+
+def _refuse_leaky_arrow(node, env, source: str, line: int = 0) -> None:
+    """Walk a lowered body for a *sync-typed* arrow that reaches an async
+    operation — the item-92 leak (finding #21), now a compile error instead of
+    an unawaited coroutine at runtime. An async-flagged arrow is admitted; a
+    plain one that reaches a suspension is refused with the A1 diagnostic."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            if not node.get("async") and _arrow_reaches_async(node.get("body"), env):
+                raise RevlError(
+                    source or env.filename, node.get("line") or line or 0,
+                    "this arrow reaches an async operation, but its type carries "
+                    "no async color — the caller would receive an unawaited "
+                    "suspension (A1)",
+                    hint="declare the receiving parameter `(…) -> Async[T]` so "
+                         "every call through it is awaited, or move the "
+                         "suspending call out of the arrow "
+                         "(docs/design/async-function-values.md)",
+                    code="A1", category="async-propagation",
+                )
+            # its own body still walked below (a sync inner arrow may leak)
+        for value in node.values():
+            _refuse_leaky_arrow(value, env, source)
+    elif isinstance(node, list):
+        for value in node:
+            _refuse_leaky_arrow(value, env, source)
+
+
+def _coerce_async_args(callee_name, args, env, line):
+    """At a component-body call to a module `fn`, admit an arrow into each
+    parameter declared `(…) -> Async[T]` (item 92) by stamping the async color
+    into the IR. The component path never runs `_check_arrow`, so this is where
+    the color is placed; the pure-fn path gets it from `_resolve_arrow` instead.
+
+    v1 admits only an *arrow* in an async slot (the harness's shape — a sync
+    arrow is the accepted sync->async coercion, an async-bodied one is colored).
+    A non-arrow value (a bare callable name, a fn-typed local) is refused: it
+    would need an `as_async` wrapper the blocking backends do not yet erase —
+    a filed follow-up, refused here rather than leaked."""
+    sig = (env.types.get(FNS_KEY) or {}).get(callee_name)
+    if not sig:
+        return args
+    params = sig.get("params") or []
+    out = list(args)
+    for i, ptype in enumerate(params):
+        if i >= len(out) or not _is_async_fn_type(ptype):
+            continue
+        arg = out[i]
+        if isinstance(arg, dict) and arg.get("kind") == "arrow":
+            arg["async"] = True
+            if not arg.get("returns"):
+                arg["returns"] = render_type(parse_type(ptype)[1][-1])
+        else:
+            raise RevlError(
+                env.filename, line,
+                f"argument {i + 1} of `{callee_name}(...)` is declared "
+                f"`{render_type(ptype)}` (async), but only an arrow may be "
+                "passed into an async parameter in v1",
+                hint="wrap it in an arrow, e.g. `x => f(x)`, so the emitter can "
+                     "place the async boundary "
+                     "(docs/design/async-function-values.md)",
+                code="A1", category="async-propagation",
+            )
+    return out
+
+
+def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
+    """The module-fn twin of `_refuse_leaky_arrow`: a sync-typed arrow whose
+    body reaches an async callable (a colored name — pure fns have no req keys)
+    is the item-92 leak. Admitted (async-flagged) arrows are skipped."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow" and not node.get("async"):
+            called: set = set()
+            _calls_in(node.get("body"), called, stop_async_arrows=True)
+            hit = sorted(called & (async_colored or set()))
+            if hit:
+                raise RevlError(
+                    (decl.source if decl is not None else None) or filename,
+                    getattr(decl, "line", 0) or 0,
+                    f"this arrow reaches async callable `{hit[0]}`, but its type "
+                    "carries no async color — the caller would receive an "
+                    "unawaited suspension (A1)",
+                    hint="declare the receiving parameter `(…) -> Async[T]` so "
+                         "every call through it is awaited, or move the "
+                         "suspending call out of the arrow "
+                         "(docs/design/async-function-values.md)",
+                    code="A1", category="async-propagation",
+                )
+        for value in node.values():
+            _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
+    elif isinstance(node, list):
+        for value in node:
+            _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
 
 
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
@@ -3923,6 +4081,12 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     code="A1", category="async-propagation",
                     why=why,
                 )
+
+        # item 92: a sync-typed arrow in this method that reaches an async
+        # operation is the finding-#21 leak — a compile error now, not an
+        # unawaited coroutine at runtime. Admitted (async-flagged) arrows are
+        # skipped inside the walk.
+        _refuse_leaky_arrow(mbody, env, comp.source or filename, method.line)
 
         methods.append({"name": method.name, "params": safe_params, "body": mbody})
 

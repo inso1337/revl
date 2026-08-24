@@ -1,0 +1,32 @@
+// Item 92 exit shape (finding #21): a callback arrow whose declared function
+// type carries an `Async[Str]` return colors `agent_loop` async, so the emitted
+// loop awaits the callback instead of leaking a Promise. tsc-validated by
+// `npm run typecheck` (tsconfig includes golden/**).
+
+extern emission async fn remote(msgs: Str) -> Str
+  = @ts { return msgs + " -> reply" }
+
+service Model {
+  emission async fn complete(msgs: Str) -> Str
+}
+
+service Runner {
+  emission async fn run(prompt: Str) -> Str
+}
+
+fn agent_loop(current: Str, complete: (Str) -> Async[Str]) -> Str {
+  let resp = complete(current)
+  return resp
+}
+
+component RealModel provides model: Model {
+  provide model {
+    async fn complete(msgs) = remote(msgs)
+  }
+}
+
+component Agent requires model: Model provides runner: Runner {
+  provide runner {
+    async fn run(prompt) = agent_loop(prompt, msgs => emit model.complete(msgs))
+  }
+}
