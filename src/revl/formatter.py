@@ -67,6 +67,7 @@ _KEYWORDS = {
     "service", "component", "requires", "provides", "config", "let",
     "effect", "undo", "emit", "emission", "provide", "fn", "return",
     "true", "false", "null", "isolate", "intercept", "realm", "in", "with",
+    "handoff",
     "spawn", "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail", "hole",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
