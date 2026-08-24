@@ -706,8 +706,6 @@ class _ComponentEmitter:
         is_async = any(step.get("step") == "await" for step in self.ir.get("body") or [])
 
         out.add(0, f"def _{self.snake}_apply(ctx, config):")
-        if self.config_fields:
-            out.add(1, f"config = _{self.snake.upper()}_CONFIG.resolve(config)")
         out.add(1, f"frame = Frame(ctx, {self.name!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
@@ -728,6 +726,11 @@ class _ComponentEmitter:
         else:
             out.add(1, f"'inject': {list(self.requires.keys())!r},")
         out.add(1, f"'apply': _{self.snake}_apply,")
+        if self.config_fields:
+            # cordis-py reads Config off dict plugins via dict.get (fork
+            # commit 1c5e6f1), so the schema rides on the plugin dict and the
+            # runtime's resolve_config validates/resolves before apply runs.
+            out.add(1, f"'Config': _{self.snake.upper()}_CONFIG,")
         if self.isolate:
             # v2: realm placements, applied by runtime.plug() BEFORE
             # ctx.plugin — the fiber's context chain is fixed at plugin time

@@ -638,9 +638,12 @@ class ConfigSchema:
     """Config fields as ``(name, type, default)`` triples; ``default=None``
     means required (IR ``"default": null``).
 
-    Resolved inside the emitted ``apply`` rather than through the runtime's
-    ``resolve_config``: cordis-py reads ``Config`` off dict plugins with
-    ``getattr``, which never sees dict keys — see REPORT.md.
+    The emitted plugin dict carries the schema as ``'Config'``, and
+    cordis-py's ``resolve_config`` validates/resolves before ``apply`` runs
+    (dict plugins read ``Config`` via ``dict.get`` since fork commit
+    ``1c5e6f1`` — see REPORT.md F2). ``validate`` speaks cordis-py's Config
+    protocol (``{issues, value}`` result); ``resolve`` is kept for
+    hand-written host code that validates eagerly and wants a plain dict.
     """
 
     def __init__(self, fields: list, name: Optional[str] = None) -> None:
@@ -650,8 +653,7 @@ class ConfigSchema:
         # `<name>.config` trace event without a Frame.
         self.name = name
 
-    def resolve(self, config: Any) -> dict:
-        global _pending_config
+    def _resolve(self, config: Any) -> tuple[dict, list, list]:
         value = dict(config or {})
         defaulted: list = []
         issues = []
@@ -670,12 +672,42 @@ class ConfigSchema:
                 ok = False  # bool is an int subclass; keep Int honest
             if not ok:
                 issues.append(f'config field "{name}" expects {type_name}')
-        if issues:
-            raise ConfigError("invalid config:\n" + "\n".join(f"  - {issue}" for issue in issues))
+        return value, defaulted, issues
+
+    def _park(self, value: dict, defaulted: list) -> None:
+        global _pending_config
         _pending_config = (dict(value), defaulted)
         if self.name is not None:
             _flush_config_trace(self.name)
+
+    def resolve(self, config: Any) -> dict:
+        value, defaulted, issues = self._resolve(config)
+        if issues:
+            raise ConfigError("invalid config:\n" + "\n".join(f"  - {issue}" for issue in issues))
+        self._park(value, defaulted)
         return value
+
+    def validate(self, config: Any) -> "_ConfigResult":
+        """cordis-py ``Config.validate`` protocol: return ``{issues, value}``
+        instead of raising (fiber.resolve_config turns a truthy ``issues``
+        into a ValidationError and the fiber lands FAILED). A valid
+        resolution is parked exactly like ``resolve`` so the component's
+        Frame — built next in the emitted ``apply`` — still attributes the
+        ``<name>.config`` trace event and R4 ``resolved_config`` state."""
+        value, defaulted, issues = self._resolve(config)
+        if not issues:
+            self._park(value, defaulted)
+        return _ConfigResult(issues, value)
+
+
+class _ConfigResult:
+    """The ``{issues, value}`` object cordis-py's ``resolve_config`` expects."""
+
+    __slots__ = ("issues", "value")
+
+    def __init__(self, issues: list, value: dict) -> None:
+        self.issues = issues
+        self.value = value
 
 
 # ---------------------------------------------------------------------------
