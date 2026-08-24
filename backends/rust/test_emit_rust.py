@@ -63,6 +63,23 @@ def test_user_cache_golden_byte_equality():
     assert src == golden
 
 
+def test_string_literals_use_one_code_point_escape_path():
+    """`_string` collapsed to one uniform code-point escape path (item 73):
+    every string leaf — including the requirement-name lists behind
+    `Inject::new([...])` — escapes the same way. The old `json.dumps` branch
+    emitted lone-surrogate `\\uXXXX` for non-ASCII (Rust-invalid); the single
+    path emits `\\u{XXXX}` everywhere, ASCII byte-identical to before."""
+    assert emit._string("db") == '"db"'
+    assert emit._string("a\nb") == '"a\\nb"'
+    assert emit._string("héllo") == '"h\\u{e9}llo"'
+    assert emit._string('say "hi"') == '"say \\"hi\\""'
+    # the structural case (Inject::new): each element through the same escape
+    assert emit._string(["db", "kv"]) == '["db", "kv"]'
+    assert emit._string(["kév"]) == '["k\\u{e9}v"]'
+    with pytest.raises(emit.EmitError):
+        emit._string(42)
+
+
 def test_config_defaults_are_emitted():
     src = emit.emit(_ir("user_cache"))
     assert "impl Default for PgDatabaseConfig" in src

@@ -22,6 +22,12 @@ Slice: literal typing, + - * / % and the comparison families, over the
 five-binding environment ENV below (mirrored inside checker.rvl's
 base_env). Everything else the grammar allows is out of slice on both
 sides of the corpus.
+
+Slice three (bottom of this file) extends the differential to the module
+table: type declarations parse, aliases resolve, record/variant specs and
+the ADT case table build, and the ExprVar/ExprField/ExprCall arms of
+`infer_ast` agree on verdict AND inferred type against the reference's
+`_resolve_type_aliases` / `_lower_type_decls` / `_case_table` machinery.
 """
 
 import importlib.util
@@ -38,7 +44,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 import revl.parser as refparser  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
-from revl.typecheck import infer_ast  # noqa: E402
+from revl.typecheck import CASES_KEY, infer_ast  # noqa: E402
 
 
 # ---------------------------------------------------------------- harness
@@ -407,3 +413,269 @@ def test_generated_call_sites_agree(check_src, seed):
         want = _ref_check(src)
         got = check_src(src)
         assert got == want, f"{src!r}: selfhost {got!r} != reference {want!r}"
+
+
+# ================================================================ slice three
+#
+# The module-table expression checker (selfhost/checker.rvl's third half:
+# `infer_prog_expr`) against the reference's type-table machinery. The
+# selfhost parses the *program*'s type declarations, resolves transparent
+# aliases, builds the record/variant table and the ADT case table, then
+# infers one expression against base_env() — and the reference does the same
+# through `_resolve_type_aliases` / `_validate_declared_types` /
+# `_lower_type_decls` / `_case_table` and `infer_ast`. Both sides must agree
+# on verdict AND inferred type, exactly as in slices one and two.
+#
+# In scope: nullary case constructors as values, payload checking at a case
+# call, the Some/Ok/Err builtins (Opt/Result parametric results), ExprField
+# against a named record (opt-escape refusal, `.length` on sized heads,
+# unknown-field refusal), and table-build refusals (duplicate type/field/
+# case, alias cycles, malformed generic spellings). Out of slice on both
+# sides of the corpus: generics with parameters, match exhaustiveness,
+# host-provenance receivers, `&&`/`||`/`??` (the reference types them, the
+# selfhost binop surface does not), and fn-signature call checking.
+
+from revl.lower import (  # noqa: E402
+    _case_table,
+    _lower_type_decls,
+    _resolve_type_aliases,
+    _validate_declared_types,
+)
+
+
+@pytest.fixture(scope="module")
+def infer_prog(ns):
+    """The slice-three entry point: infer one expression against a program's
+    declarations. "(bad) ..." on a program parse error, "refuse" on a table
+    or checker refusal, "?" where the reference returns None, else the type's
+    spelling."""
+    return ns["infer_prog_expr"]
+
+
+def _ref_prog_infer(prog_src: str, expr_src: str) -> str:
+    """The reference verdict+type for infer_prog_expr's surface, rendered in
+    the selfhost vocabulary: "refuse" where the reference raises (program
+    parse, alias/table build, or expression inference), "?" where infer_ast
+    returns None, else the type's spelling."""
+    try:
+        program = refparser.Parser(prog_src, "diff.rvl").parse()
+        _resolve_type_aliases(program, "diff.rvl")
+        _validate_declared_types(program, "diff.rvl")
+        types = _lower_type_decls(program, "diff.rvl")
+        types[CASES_KEY] = _case_table(types)
+    except RevlError:
+        return "refuse"
+    try:
+        node = _ref_parse(expr_src)
+        t = infer_ast(node, dict(ENV), types, filename="diff.rvl")
+    except RevlError:
+        return "refuse"
+    return t if t else "?"
+
+
+def _agree_prog(infer_prog, prog_src, expr_src) -> None:
+    want = _ref_prog_infer(prog_src, expr_src)
+    got = infer_prog(prog_src, expr_src)
+    assert got == want, (f"{prog_src!r} / {expr_src!r}: "
+                         f"selfhost {got!r} != reference {want!r}")
+
+
+# ---------------------------------------------------------------- corpus
+
+ACCEPTED_PROG_EXPR = [
+    # nullary case constructors are values of their ADT
+    ("type S = Idle | Busy", "Idle"),
+    ("type S = Idle | Busy", "Busy"),
+    ("type S = Idle | Busy", "Some(Idle)"),
+    ("type S = Idle | Busy", "Idle.x"),
+    ("type Status = Pending", "Pending"),
+    # payload checking at a case call (widening, unknown, zero args)
+    ("type Shape = Circle(Float) | Square", "Circle(1.0)"),
+    ("type Shape = Circle(Float) | Square", "Circle(1)"),
+    ("type Shape = Circle(Float) | Square", "Circle(q)"),
+    ("type Shape = Circle(Float) | Square", "Circle()"),
+    ("type Shape = Circle(Float) | Square", "Square"),
+    ("type Box = Wrap(Any) | Empty", "Wrap(1)"),
+    ("type Box = Wrap(Any) | Empty", "Empty"),
+    ("type W = Wrap(Int)", "Wrap(x)"),
+    ("type W = Wrap(Int)", "Wrap(q)"),
+    ("type N = Wrap(Never) | X", "Wrap(1)"),
+    ("type M = M(Opt[Int]) | N", "M(1)"),
+    ("type M = M(Opt[Int]) | N", "M(Some(1))"),
+    # Some/Ok/Err keep their builtin parametric results
+    ("", "Some(1)"),
+    ("", "None"),
+    ("", "None(1)"),
+    ("", "Some(None)"),
+    ("", "Some(Some(1))"),
+    ("type Outcome = Ok(Row) | Err(Str)\ntype Row = { name: Str }",
+     "Err(\"m\")"),
+    ("type Outcome = Ok(Row) | Err(Str)\ntype Row = { name: Str }", "Ok"),
+    # records: `.length` on sized heads, unknown fields stay on the frontier
+    ("type Row = { name: Str, age: Int }", "s.length"),
+    ("type Row = { name: Str, age: Int }", "x.length"),
+    ("type Row = { name: Str, age: Int }", "q.length"),
+    ("type Row = { name: Str, age: Int }", "Ok(1).name"),
+    # equality and ordering over the new heads
+    ("type Row = { name: Str, age: Int }", "Some(1) == Some(1)"),
+    ("type Row = { name: Str, age: Int }", "Some(1) == 1"),
+    ("type Row = { name: Str, age: Int }", "1 == Some(1)"),
+    ("type Row = { name: Str, age: Int }", "None == None"),
+    ("type Row = { name: Str, age: Int }", "Ok(1) == Err(1)"),
+    ("", "Some(1) == Some(2.5)"),
+    ("", "Some(1) != Some(2.5)"),
+    ("", "Ok(Some(1)) == Ok(Some(1))"),
+    ("type S = A(Float) | B", "A(x) == A(x)"),
+    ("type Box = Wrap(Any) | Empty", "Wrap(1) == Wrap(1)"),
+    # aliases erase transparently
+    ("type Sku = Str", "Sku"),
+    ("type Rows = List[Row]\ntype Row = { name: Str }", "Rows"),
+    ("type Rows = List[Row]\ntype Row = { name: Str }", "Row"),
+    ("type MaybeRow = Row?\ntype Row = { name: Str }", "MaybeRow"),
+    ("type A = Str type B = A", "B"),
+    ("type A = B type B = Str", "A"),
+    ("type Handler = (Int) -> Str", "1"),
+    ("type R = { h: Handler }\ntype Handler = (Int) -> Str", "s"),
+    # Some/None reserved for Opt: a user case reusing them is dropped
+    ("type S = Some(Int) | Other", "Other"),
+    ("type S = Some(Int) | Other", "Some(1)"),
+    ("type S = Some(Int) | Other", "None"),
+    # multi-case variants and non-name callees stay on the frontier
+    ("type S = A | B | C", "B"),
+    ("type S = A(Int) | B(Str)", "A(x)"),
+    ("type S = A(Int) | B(Str)", "B(s)"),
+    ("", "q(1)"),
+    ("", "x(1)"),
+    ("", "s(1)"),
+    ("type S = A(Int) | B", "q(A(1))"),
+    ("type List = { x: Int }", "List"),
+]
+
+REJECTED_PROG_EXPR = [
+    # opt-escape: field access on an optional is refused
+    ("", "Some(1).foo"),
+    ("", "None.foo"),
+    ("type S = Idle | Busy", "Some(Idle).foo"),
+    # payload mismatch at a case call
+    ("type Shape = Circle(Float) | Square", "Circle(\"a\")"),
+    ("type W = Wrap(Int)", "Wrap(2.5)"),
+    ("type Outcome = Ok(Row) | Err(Str)\ntype Row = { name: Str }",
+     "Ok(x)"),
+    ("type Outcome = Ok(Row) | Err(Str)\ntype Row = { name: Str }",
+     "Err(1)"),
+    ("type E = Evt(Row) | Stop\ntype Row = { id: Int }", "Evt(1)"),
+    ("type M = M(Opt[Int]) | N", "M(\"a\")"),
+    ("type T = A(Int32) | B", "A(1)"),
+    ("type T = A(Int32) | B", "A(2.5)"),
+    ("type L = L(List[Int]) | N", "L(1)"),
+    # ordering / arithmetic on non-numeric heads
+    ("", "Some(1) < Some(2)"),
+    ("", "Some(1) + 1"),
+    ("", "Some(1) == 2.5"),
+    ("", "Some(1) < q"),
+    ("", "Ok(1) < 1"),
+    ("type S = Idle | Busy", "Idle < Busy"),
+    ("type S = Idle | Busy", "Idle + 1"),
+    ("type S = A(Int) | B", "A(1) < A(2)"),
+    ("type S = A(Int) | B", "A(1) + A(2)"),
+    # table build refusals
+    ("type A = { x: Int } type A = { y: Int }", "1"),
+    ("type S = A | A", "1"),
+    ("type R = { a: Int, a: Str }", "1"),
+    ("type A = B\ntype B = A", "1"),
+    ("type A = A", "1"),
+    ("type A = B\ntype B = C\ntype C = A", "1"),
+    ("type Bad = Opt", "1"),
+    ("type Bad = List", "1"),
+    ("type Bad = Map[Str]", "1"),
+    ("type Bad = Result", "1"),
+    ("type R = { a: Opt }", "1"),
+    ("type S = A(Opt) | B", "1"),
+]
+
+
+@pytest.mark.parametrize("prog_expr", ACCEPTED_PROG_EXPR)
+def test_accepted_prog_expr_agree(infer_prog, prog_expr):
+    prog, expr = prog_expr
+    assert _ref_prog_infer(prog, expr) not in ("refuse", "(bad)"), \
+        f"corpus bug: reference refuses {prog!r} / {expr!r}"
+    _agree_prog(infer_prog, prog, expr)
+
+
+@pytest.mark.parametrize("prog_expr", REJECTED_PROG_EXPR)
+def test_rejected_prog_expr_agree(infer_prog, prog_expr):
+    prog, expr = prog_expr
+    assert _ref_prog_infer(prog, expr) == "refuse", \
+        f"corpus bug: reference accepts {prog!r} / {expr!r}"
+    assert infer_prog(prog, expr) == "refuse", \
+        f"selfhost accepted {prog!r} / {expr!r}"
+
+
+# ---------------------------------------------------------------- fuzz
+
+# Programs whose type tables exercise every slice-three shape; the first is
+# the empty table (builtin cases only).
+FUZZ_PROGS = [
+    "",
+    "type S = Idle | Busy",
+    "type Shape = Circle(Float) | Square",
+    "type W = Wrap(Int) | Empty",
+    "type Box = Wrap(Any) | Empty",
+    "type M = M(Opt[Int]) | N",
+    "type E = Evt(Row) | Stop\ntype Row = { id: Int }",
+    "type Outcome = Ok(Row) | Err(Str)\ntype Row = { name: Str }",
+    "type S = A(Int) | B(Str)",
+    "type Rows = List[Row]\ntype Row = { name: Str }",
+]
+
+# Case-constructor names usable as nullary values or calls in each program.
+FUZZ_CTORS = [
+    [],
+    ["Idle", "Busy"],
+    ["Circle", "Square"],
+    ["Wrap", "Empty"],
+    ["Wrap", "Empty"],
+    ["M", "N"],
+    ["Evt", "Stop"],
+    ["Ok", "Err"],
+    ["A", "B"],
+    [],
+]
+
+FUZZ_ATOMS3 = ["1", "0", "7", "2.5", "x", "y", "f", "s", "flag", "q",
+               "true", "false"]
+
+
+def _gen3(rng: random.Random, ctors: list, depth: int) -> str:
+    if depth <= 0:
+        return rng.choice(FUZZ_ATOMS3 + ctors)
+    roll = rng.random()
+
+    def g():
+        return _gen3(rng, ctors, depth - 1)
+
+    if roll < 0.20:
+        return f"Some({g()})"
+    if roll < 0.30:
+        return rng.choice(["None", f"Ok({g()})", f"Err({g()})"])
+    if roll < 0.45:
+        return f"{rng.choice(ctors)}({g()})" if ctors else g()
+    if roll < 0.55:
+        return f"{g()}.length"
+    if roll < 0.80:
+        return f"{g()} {rng.choice(BINOPS)} {g()}"
+    return f"({g()})"
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_generated_prog_exprs_agree(infer_prog, seed):
+    """Random expressions over a fixed pool of type-table programs. Nothing
+    here is a fixed oracle — the two checkers are each other's oracle,
+    including on the payload-mismatch and opt-escape inputs the generator
+    makes ill-typed by accident, where agreeing to *refuse* is the property
+    under test."""
+    rng = random.Random(seed)
+    for _ in range(40):
+        prog = rng.choice(FUZZ_PROGS)
+        ctors = FUZZ_CTORS[FUZZ_PROGS.index(prog)]
+        _agree_prog(infer_prog, prog, _gen3(rng, ctors, rng.randint(1, 3)))

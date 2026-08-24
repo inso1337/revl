@@ -37,6 +37,29 @@ uv venv && uv pip install -e ".[test]"
 .venv/bin/pytest tests/            # the frontend suite — should be green
 ```
 
+**The fast frontend loop.** The full suite is 1500+ tests (~60s); frontend-only
+work (parser, checker, lowering, docs, frontend-facing tests) does not need to
+pay for it every iteration. The same two files cover most of it:
+
+```bash
+.venv/bin/pytest tests/test_frontend.py tests/test_doc_examples.py -q   # ~0.5s
+```
+
+Run the full `pytest tests/ -q` before committing (the pre-commit hook runs it
+too), not between every edit.
+
+**Where the code lives (a two-minute map).** The compiler is `src/revl/`
+(`parser.py` → `typecheck.py` → `lower.py` → `apply.py`). The **emitters are
+NOT under `src/`** — each backend is its own directory with its own `emit.py`,
+and most have two or more *expression dispatchers* inside that file (component
+vs fn-body renderers; wasm has three). When a change touches an IR expression
+kind, you must patch every relevant dispatcher in
+`backends/{python,typescript,rust,go,java,wasm}/emit.py` — each file declares
+its dispatcher coverage in `EXPR_DISPATCHERS`/`EXPR_REFUSED`, checked by
+`tests/test_expr_dispatcher_conformance.py`, so "did you patch both paths" is
+a red test rather than a 15-minute grep. Tier runtimes and scenario harnesses
+live in the same per-backend directory.
+
 Install the pre-commit hook once per clone:
 
 ```bash

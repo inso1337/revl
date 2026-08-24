@@ -63,9 +63,18 @@ exactly the reentrancy asymmetry DESIGN.md attributes to the DS mod 6 /
 PR #39 hardening.
 
 The emitted code cannot trip this: revl gives undo bodies no syntactic
-position for effect forms (G5 is by-construction). The test pins the upstream
-behavior so a fixed cordis release will fail it loudly and prompt an update
-here.
+position for effect forms (G5 is by-construction).
+
+**RESOLVED in the pinned fork.** The backend now pins revl's fork
+(`inso1337/cordis@harden-assert-active`, commit `c8b94b2`, via the
+codeload tarball URL in `package.json`) whose `assertActive` also refuses
+`FiberState.UNLOADING` — `effect()`, `ctx.on()`, `ctx.plugin()`, `restart()`
+and `update()` all inherit the guard, so registration during teardown raises
+`INACTIVE_EFFECT` exactly as full disposal does. The repro test flipped from
+a red-on-fix characterization test to a pin of the fixed behavior (finding 1
+remains current-upstream behavior and still asserts what rc.8 does). The
+upstream PR draft lives at `docs/upstream/cordis-ts-assertActive.md`; it is
+not opened without coordinator confirmation.
 
 ### 1.3 Provider swap cannot be atomic
 

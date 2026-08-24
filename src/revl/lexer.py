@@ -21,6 +21,10 @@ KEYWORDS = {
     "hole",
     # reserved for later tiers
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
+    # delivery semantics (docs/delivery-semantics.md, roadmap item 44): an
+    # `idempotent` emission may be safely re-delivered, so the runtime earns
+    # the right to auto-retry it on transient failure.
+    "idempotent",
 }
 
 SYMBOLS = {"{", "}", "(", ")", "[", "]", ",", ":", "=", "."}

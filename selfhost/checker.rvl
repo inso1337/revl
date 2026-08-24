@@ -35,7 +35,7 @@
 // extern (directly or through a named fn call chain) is refused.
 
 use "./lexer.rvl" { Token, lex_src }
-use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN,
+use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     parse_expr_str, is_bad, expr_at, params_at, type_at }
 
 // ---------------------------------------------------------------- env
@@ -78,12 +78,39 @@ fn is_numeric(t: Str) -> Bool { return t == "Int" || t == "Float" }
 fn orderable(t: Str) -> Bool { return is_numeric(t) || t == "Str" }
 
 // May a value of type `actual` flow into a position typed `expected`?
-// Slice-restricted port of typecheck.compatible: wildcards pass, equal names
-// pass, Int widens to Float. No Opt/FN/generic heads exist in this slice.
+// Port of typecheck.compatible for the slice's reachable surface: wildcards
+// (the gradual "" plus Any/Never), equal names, Int->Float and Int32 widening,
+// the Opt family (T injects into Opt[T]; Opt[T] vs Opt[U] compares inside),
+// and equal generic heads compared elementwise. FN heads are out of slice
+// (no fn-typed value exists in base_env or the corpus).
 fn compatible(expected: Str, actual: Str) -> Bool {
   if (expected == "" || actual == "") { return true }
+  if (expected == "Any" || expected == "Never"
+      || actual == "Any" || actual == "Never") { return true }
   if (expected == actual) { return true }
-  if (expected == "Float" && actual == "Int") { return true }
+  let es = split_type(expected)
+  let as_ = split_type(actual)
+  if (es.head == "Float" && as_.head == "Int") { return true }
+  if ((es.head == "Int" || es.head == "Float") && as_.head == "Int32") {
+    return true
+  }
+  if (es.head == "Opt") {
+    let einner = es.args.length() > 0 ? es.args[0] : ""
+    if (as_.head == "Opt") {
+      let ainner = as_.args.length() > 0 ? as_.args[0] : ""
+      return compatible(einner, ainner)
+    }
+    return compatible(einner, actual)  // T -> Opt[T] injection
+  }
+  if (es.head == as_.head && es.args.length() == as_.args.length()) {
+    var i = 0
+    var ok = true
+    while (i < es.args.length()) {
+      if (!compatible(es.args[i], as_.args[i])) { ok = false }
+      i += 1
+    }
+    return ok
+  }
   return false
 }
 
@@ -148,22 +175,161 @@ fn binop_type(op: Str, lt: Str, rt: Str) -> Infer {
 // ---------------------------------------------------------------- inference
 
 fn infer(e: Expr, env: List[Bind]) -> Infer {
+  return infer_t(e, env, Map.empty(), Map.empty())
+}
+
+// SLICE THREE: the tables ride along with every recursive call. The no-table
+// wrapper above keeps slices one-two's call sites byte-identical in behavior
+// (an empty case/table map makes every new arm silent).
+fn infer_t(e: Expr, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
   return match e {
     IntLit(_)   => ok_ty("Int"),
     FloatLit(_) => ok_ty("Float"),
     StrLit(_)   => ok_ty("Str"),
     BoolLit(_) => ok_ty("Bool"),
     NullLit    => refuse("`null` has no type in revl — absence is Opt[T]"),
-    Var(n)     => ok_ty(lookup_at(env, n, 0)),
-    Bin(b)     => infer_bin(b.op, b.l, b.r, env),
+    Var(n)     => infer_var_t(n, env, tt, ct),
+    Bin(b)     => infer_bin_t(b.op, b.l, b.r, env, tt, ct),
+    Field(fd)  => infer_field_t(fd, env, tt, ct),
+    Call(c)    => infer_call_t(c, env, tt, ct),
     _          => ok_ty(""),   // outside the slice: walked, not typed
   }
 }
 
-fn infer_bin(op: Str, l: Expr, r: Expr, env: List[Bind]) -> Infer {
-  let lhs = infer(l, env)
+// A bare name first resolves in the environment; failing that, a nullary ADT
+// case constructor is a value of its ADT (typecheck.infer_ast's ExprVar arm).
+// Opt/Result constructors are excluded — they are not nullary values — except
+// `None`, which the reference special-cases to "Opt[Any]" before the env.
+fn infer_var_t(n: Str, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  if (n == "None") { return ok_ty("Opt[Any]") }
+  let b = lookup_at(env, n, 0)
+  if (b != "") { return ok_ty(b) }
+  if (!ct.has(n)) { return ok_ty("") }
+  return nullary_case_ty(unwrap_case(ct, n))
+}
+
+fn starts_with(s: Str, p: Str) -> Bool {
+  return s.slice(0, p.length()) == p
+}
+
+fn nullary_case_ty(ci: CaseInfo) -> Infer {
+  if (ci.payload == "" && !starts_with(ci.adt, "Opt")
+      && !starts_with(ci.adt, "Result")) {
+    return ok_ty(ci.adt)
+  }
+  return ok_ty("")
+}
+
+fn unwrap_spec(tt: Tt, n: Str) -> TySpec {
+  return match tt.lookup(n) {
+    Some(v) => v,
+    None    => { kind: "", fields: Map.empty(), cases: [] },
+  }
+}
+
+fn unwrap_str(m: Map[Str, Str], n: Str) -> Str {
+  return match m.lookup(n) {
+    Some(v) => v,
+    None    => "",
+  }
+}
+
+fn unwrap_case(ct: Ct, n: Str) -> CaseInfo {
+  return match ct.lookup(n) {
+    Some(v) => v,
+    None    => { adt: "", payload: "" },
+  }
+}
+
+// The head of a type spelling: "List[Row]" -> "List", "Str" -> "Str".
+fn ty_head(t: Str) -> Str {
+  let b = t.indexOf("[")
+  if (b == 0 - 1) { return t }
+  return t.slice(0, b)
+}
+
+// Port of typecheck.infer_ast's ExprField arm for the named-type subset:
+// opt-escape refusal, `.length` on sized heads, then the record spec — an
+// unknown field is a refusal spelled as the reference spells it; a target
+// whose type names nothing declared stays on the gradual frontier.
+fn infer_field_t(f: FieldN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  let tgt = infer_t(f.target, env, tt, ct)
+  if (!tgt.ok) { return tgt }
+  let head = ty_head(tgt.ty)
+  if (head == "Opt") {
+    return refuse("field access on an optional — absence is unchecked here")
+  }
+  if (f.name == "length"
+      && contains(["Str", "List", "Bytes"], head)) {
+    return ok_ty("Int")
+  }
+  return field_spec_ty(tgt.ty, f.name, tt)
+}
+
+fn field_spec_ty(target: Str, fname: Str, tt: Tt) -> Infer {
+  if (!tt.has(target)) { return ok_ty("") }
+  let spec = unwrap_spec(tt, target)
+  if (spec.kind != "record") { return ok_ty("") }  // variant: silent
+  if (!spec.fields.has(fname)) {
+    return refuse("`".concat(target).concat("` has no field `")
+                    .concat(fname).concat("` (fields: ")
+                    .concat(sort_strs(spec.fields.keys()).join(", "))
+                    .concat(")"))
+  }
+  return ok_ty(unwrap_str(spec.fields, fname))
+}
+
+// Port of typecheck.infer_ast's ExprCall arm, Var-callee subset: an ADT case
+// constructor checks its payload against the argument and yields its ADT;
+// Some/Ok/Err keep their builtin parametric results. A local of fn type would
+// shadow everything (the reference checks it first) — base_env has none, so
+// that channel stays out of this slice.
+fn infer_call_t(c: CallN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
+  var args: List[Str] = []
+  var i = 0
+  while (i < c.args.length()) {
+    let a = infer_t(c.args[i], env, tt, ct)
+    if (!a.ok) { return a }
+    args = args.push(a.ty)
+    i += 1
+  }
+  return match c.target {
+    // a named ADT case constructor; anything else (plain fns — no signature
+    // table in this slice — and non-name callees) stays unchecked
+    Var(n) => case_call_ty(n, unwrap_case(ct, n), args, ct.has(n)),
+    _      => ok_ty(""),
+  }
+}
+
+fn pick_arg0(args: List[Str]) -> Str {
+  if (args.length() > 0 && args[0] != "") { return args[0] }
+  return "Any"
+}
+
+// Payload checking at a case call, ported from the ExprCall arm: a mismatch
+// is refused only where BOTH sides know their types (the reference's gradual
+// silence on unknowns, kept exactly); Some/Ok/Err keep their builtin
+// parametric results; every other case yields its ADT regardless of arity.
+fn case_call_ty(n: Str, ci: CaseInfo, args: List[Str], known: Bool) -> Infer {
+  if (!known) { return ok_ty("") }
+  if (ci.payload != "" && args.length() > 0 && args[0] != ""
+      && !compatible(ci.payload, args[0])) {
+    return refuse("`".concat(n).concat("(...)` payload expects `")
+                    .concat(ci.payload).concat("`, got `")
+                    .concat(args[0]).concat("`"))
+  }
+  let a0 = pick_arg0(args)
+  if (n == "Some") { return ok_ty("Opt[".concat(a0).concat("]")) }
+  if (n == "Ok") { return ok_ty("Result[".concat(a0).concat(", Any]")) }
+  if (n == "Err") { return ok_ty("Result[Any, ".concat(a0).concat("]")) }
+  return ok_ty(ci.adt)
+}
+
+fn infer_bin_t(op: Str, l: Expr, r: Expr, env: List[Bind],
+               tt: Tt, ct: Ct) -> Infer {
+  let lhs = infer_t(l, env, tt, ct)
   if (!lhs.ok) { return lhs }
-  let rhs = infer(r, env)
+  let rhs = infer_t(r, env, tt, ct)
   if (!rhs.ok) { return rhs }
   return binop_type(op, lhs.ty, rhs.ty)
 }
@@ -264,8 +430,14 @@ type ProvM   = { name: Str, params: List[ParamN], body: List[Stmt] }
 type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
 type CompD   = { name: Str, reqs: List[Bind], provs: List[Provide],
                  setup: List[Stmt] }
+// SLICE THREE: parse-level representation of type declarations. A record
+// keeps its fields as {name, ty} pairs (ParamN reused); a variant its cases
+// with an optional payload ("" = none). Alias detection happens at table
+// build, not here — the parser only carries what the surface spelled.
+pub type CaseD = { name: Str, payload: Str }
+pub type TypeD = { name: Str, fields: List[ParamN], cases: List[CaseD] }
 pub type Prog = { services: List[SvcD], fns: List[FnD], comps: List[CompD],
-                  bad: Str }
+                  types: List[TypeD], bad: Str }
 
 // ---------------------------------------------------------------- tokens
 
@@ -444,22 +616,28 @@ type PStep = { pg: Prog, i: Int }
 
 fn bad_prog(pg: Prog, msg: Str) -> Prog {
   if (pg.bad != "") { return pg }
-  return { services: pg.services, fns: pg.fns, comps: pg.comps, bad: msg }
+  return { services: pg.services, fns: pg.fns, comps: pg.comps,
+           types: pg.types, bad: msg }
 }
 
 fn push_fn(pg: Prog, f: FnD) -> Prog {
   return { services: pg.services, fns: pg.fns.push(f), comps: pg.comps,
-           bad: pg.bad }
+           types: pg.types, bad: pg.bad }
 }
 
 fn push_svc(pg: Prog, s: SvcD) -> Prog {
   return { services: pg.services.push(s), fns: pg.fns, comps: pg.comps,
-           bad: pg.bad }
+           types: pg.types, bad: pg.bad }
 }
 
 fn push_comp(pg: Prog, c: CompD) -> Prog {
   return { services: pg.services, fns: pg.fns, comps: pg.comps.push(c),
-           bad: pg.bad }
+           types: pg.types, bad: pg.bad }
+}
+
+fn push_type(pg: Prog, d: TypeD) -> Prog {
+  return { services: pg.services, fns: pg.fns, comps: pg.comps,
+           types: pg.types.push(d), bad: pg.bad }
 }
 
 // `-> T` after a parameter list, or nothing.
@@ -724,6 +902,117 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
                  end)
 }
 
+// ------------------------------------------------------ type declarations
+//
+// SLICE THREE. The surface grammar mirrors src/revl/parser.py's `type_decl`
+// (which requires `=` before both the record body and the case list):
+//   type P = { name: Str, age: Int }      record
+//   type S = Idle | Run(Int) | Done       variant (payload optional)
+//   type Sku = Str                        transparent alias (decided at build)
+//   type Rows = List[Row]                 alias via a type application
+//   type Handler = (Int) -> Str           alias via a function type
+// A `[T, U]` parameter list after the name is skipped (generics are slice 4+;
+// the reference rejects alias-with-params at lowering, which the corpus does
+// not exercise here). Type spellings come from parser.type_at, so they render
+// exactly as the reference renders them.
+
+fn skip_type_params(ts: List[Token], i: Int) -> Int {
+  if (!atk(ts, i, "[")) { return i }
+  var j = i + 1
+  while (j < ts.length() && !atk(ts, j, "]")) { j += 1 }
+  return j + 1
+}
+
+type CasesR = { xs: List[CaseD], i: Int, ok: Bool }
+
+// One `Case(Payload)?` at j; a leading `(`/`[`/`?` means the whole RHS is a
+// type spelling carried as a single case name (the alias shapes).
+fn p_one_case(ts: List[Token], j: Int, first: Bool) -> CasesR {
+  if (atk(ts, j, "(") || atk(ts, j, "[") || atk(ts, j, "?")) {
+    let t = type_at(ts, j)
+    if (!t.ok) { return { xs: [], i: j, ok: false } }
+    return { xs: [{ name: t.ty, payload: "" }], i: t.i, ok: true }
+  }
+  if (!atk(ts, j, "ident")) { return { xs: [], i: j, ok: false } }
+  let cn = tkc(ts, j).text
+  var k = j + 1
+  // `type Rows = List[Row]` / `type MaybeRow = Row?`: only on the FIRST case,
+  // exactly as in the reference parser.
+  if (first && (atk(ts, k, "[") || atk(ts, k, "?"))) {
+    let t2 = type_at(ts, j)
+    if (!t2.ok) { return { xs: [], i: j, ok: false } }
+    return { xs: [{ name: t2.ty, payload: "" }], i: t2.i, ok: true }
+  }
+  var payload = ""
+  if (atk(ts, k, "(")) {
+    let pt = type_at(ts, k + 1)
+    if (!pt.ok || !atk(ts, pt.i, ")")) {
+      let bad = k
+      return { xs: [], i: bad, ok: false }
+    }
+    payload = pt.ty
+    k = pt.i + 1
+  }
+  let end = k
+  let pl = payload
+  return { xs: [{ name: cn, payload: pl }], i: end, ok: true }
+}
+
+fn p_case_list(ts: List[Token], j: Int, acc: List[CaseD],
+               first: Bool) -> CasesR {
+  let one = p_one_case(ts, j, first)
+  if (!one.ok) { return one }
+  var xs = acc.push(one.xs[0])
+  if (atk(ts, one.i, "|")) { return p_case_list(ts, one.i + 1, xs, false) }
+  let rxs = xs
+  return { xs: rxs, i: one.i, ok: true }
+}
+
+fn p_type_decl(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  var j = skip_type_params(ts, i + 2)
+  if (!atk(ts, j, "=")) {
+    return mk_step(bad_prog(pg, "expected = in type ".concat(nm)),
+                   skip_line(ts, j))
+  }
+  let eq = j + 1
+  if (atk(ts, eq, "{")) {
+    // record body: `= { name: Ty, ... }`
+    let end = close_brace(ts, eq)
+    if (end == 0 - 1) {
+      return { pg: bad_prog(pg, "unbalanced braces in type ".concat(nm)),
+               i: ts.length() }
+    }
+    var fields: List[ParamN] = []
+    var k = eq + 1
+    while (k < end - 1) {
+      if (!atk(ts, k, ",")) {
+        if (!atk(ts, k, "ident") || !atk(ts, k + 1, ":")) {
+          return { pg: bad_prog(pg, "bad record field in type ".concat(nm)),
+                   i: end }
+        }
+        let ft = type_at(ts, k + 2)
+        if (!ft.ok) {
+          return { pg: bad_prog(pg, "bad record field in type ".concat(nm)),
+                   i: end }
+        }
+        fields = fields.push({ name: tkc(ts, k).text, ty: ft.ty })
+        k = ft.i
+      } else {
+        k += 1
+      }
+    }
+    let rec_fields = fields
+    return mk_step(push_type(pg, { name: nm, fields: rec_fields, cases: [] }), end)
+  }
+  let cs = p_case_list(ts, eq, [], true)
+  if (!cs.ok) {
+    return mk_step(bad_prog(pg, "bad case list in type ".concat(nm)),
+                   skip_line(ts, cs.i))
+  }
+  return mk_step(push_type(pg, { name: nm, fields: [], cases: cs.xs }), cs.i)
+}
+
 fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (i >= ts.length() || atk(ts, i, "eof")) { return pg }
   let t = tkc(ts, i)
@@ -731,8 +1020,12 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
     return p_top(ts, skip_line(ts, i),
                  bad_prog(pg, "unexpected token at top level"))
   }
-  if (t.text == "use" || t.text == "type" || t.text == "test") {
+  if (t.text == "use" || t.text == "test") {
     return p_top(ts, skip_line(ts, i), pg)
+  }
+  if (t.text == "type") {
+    let s0 = p_type_decl(ts, i, pg)
+    return p_top(ts, s0.i, s0.pg)
   }
   if (t.text == "extern") {
     let s1 = p_extern(ts, i, pg)
@@ -754,7 +1047,8 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
 }
 
 pub fn parse_prog(src: Str) -> Prog {
-  return p_top(lex_src(src), 0, { services: [], fns: [], comps: [], bad: "" })
+  return p_top(lex_src(src), 0,
+               { services: [], fns: [], comps: [], types: [], bad: "" })
 }
 
 // ---------------------------------------------------------------- calls
@@ -1202,4 +1496,383 @@ test "wrong argument type at a required-service call site is refused" {
 test "clean provider accepted" {
   let v = check_service_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")
   assert v == ""
+}
+
+// ================================================================ slice three
+//
+// The TYPE TABLE, ported from lower.py's `_resolve_type_aliases`,
+// `_lower_type_decls` and `_case_table`, plus the ExprField / named-case arms
+// of typecheck.py's `infer_ast` (above). Everything here is a Map[Str, V]:
+// the table itself, each record's field map, and the ADT case table.
+//
+// Scope, stated plainly:
+//   * IN  — decl parsing, alias erasure (transparent `type X = Y`, including
+//     the type-application and fn-type spellings), record/variant specs,
+//     the case table with the Some/None/Ok/Err builtins and ambiguity
+//     dropping, nullary case constructors as values, payload checking at a
+//     case call, ExprField against a named record.
+//   * OUT (slice 4+): generics / unify / substitute and tparam marking,
+//     match-exhaustiveness, host-provenance receivers, the plain-fn signature
+//     table (FNS_KEY), record-literal checking against an expected spec
+//     (`check_ast`), Opt[...] inner-field access (`?.`), alias-parameter
+//     rejection diagnostics.
+
+fn unwrap_alias(al: Map[Str, Str], n: Str) -> Str {
+  return match al.lookup(n) {
+    Some(v) => v,
+    None    => "",
+  }
+}
+
+// One entry of the type table. kind is "record" | "variant"; a variant's
+// fields map stays empty and a record's case list stays empty.
+type TySpec = { kind: Str, fields: Map[Str, Str], cases: List[CaseD] }
+
+type Tt = Map[Str, TySpec]
+
+// One entry of the ADT constructor table: case name -> its ADT and payload
+// ("" = nullary).
+type CaseInfo = { adt: Str, payload: Str }
+
+type Ct = Map[Str, CaseInfo]
+
+type TblR = { tbl: Tt, err: Str }
+
+type ExR = { ty: Str, ok: Bool }
+
+// "List[Row, Map[Str, Int]]" -> head "List", args ["Row", "Map[Str, Int]"]:
+// commas only split at bracket depth zero, like lower.py's _split_top_level.
+type Split = { head: Str, args: List[Str] }
+
+fn is_ws_ch(c: Str) -> Bool {
+  return c == " " || c == "\t" || c == "\n" || c == "\r"
+}
+
+fn trim_ws(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while (a < b && is_ws_ch(s.slice(a, a + 1))) { a += 1 }
+  while (b > a && is_ws_ch(s.slice(b - 1, b))) { b -= 1 }
+  let aa = a
+  let bb = b
+  return s.slice(aa, bb)
+}
+
+fn split_type(t: Str) -> Split {
+  let b = t.indexOf("[")
+  if (b == 0 - 1 || t.slice(t.length() - 1, t.length()) != "]") {
+    return { head: t, args: [] }
+  }
+  var args: List[Str] = []
+  var depth = 0
+  var start = b + 1
+  var i = b + 1
+  while (i < t.length() - 1) {
+    let c = t.slice(i, i + 1)
+    if (c == "[") { depth += 1 }
+    if (c == "]") { depth -= 1 }
+    if (c == "," && depth == 0) {
+      args = args.push(trim_ws(t.slice(start, i)))
+      start = i + 1
+    }
+    i += 1
+  }
+  args = args.push(trim_ws(t.slice(start, t.length() - 1)))
+  let r_args = args
+  return { head: t.slice(0, b), args: r_args }
+}
+
+// Alias substitution, ported from _resolve_type_aliases.expand: rebuild the
+// spelling with every argument expanded, replacing an aliased head by its
+// (recursively expanded) target. Depth-bounded where the reference detects a
+// cycle by stack.
+fn expand_ty(t: Str, al: Map[Str, Str], d: Int) -> ExR {
+  if (d > 25) { return { ty: "", ok: false } }
+  let sp = split_type(t)
+  var eargs: List[Str] = []
+  var i = 0
+  while (i < sp.args.length()) {
+    let r = expand_ty(sp.args[i], al, d + 1)
+    if (!r.ok) { return r }
+    eargs = eargs.push(r.ty)
+    i += 1
+  }
+  var base = sp.head
+  if (al.has(base)) {
+    let r2 = expand_ty(unwrap_alias(al, base), al, d + 1)
+    if (!r2.ok) { return r2 }
+    base = r2.ty
+  }
+  if (eargs.length() == 0) {
+    let rb = base
+    return { ty: rb, ok: true }
+  }
+  let rt = base.concat("[").concat(eargs.join(", ")).concat("]")
+  return { ty: rt, ok: true }
+}
+
+// Builtin heads a `type X = Y` right-hand side may name (lower.py's
+// _ALIASABLE_BUILTINS). Anything else undeclared keeps the one-case-variant
+// reading of an opaque nominal.
+fn aliasable_builtin(h: Str) -> Bool {
+  return contains(["Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
+                   "Opt", "List", "Map", "Result", "Any", "Never"], h)
+}
+
+// A nullary single-case decl is a transparent alias exactly when TypeScript's
+// own rule would compile it: the RHS names an existing type (a bare aliasable
+// builtin, another declared type, any type application, or a function type).
+fn is_alias(d: TypeD, declared: List[Str]) -> Bool {
+  if (d.fields.length() != 0 || d.cases.length() != 1) { return false }
+  let c = d.cases[0]
+  if (c.payload != "") { return false }
+  let sp = split_type(c.name)
+  if (sp.args.length() > 0) { return true }  // a type application
+  if (is_fn_type(c.name)) { return true }    // a function-type spelling
+  return aliasable_builtin(sp.head) || contains(declared, sp.head)
+}
+
+// `(Int) -> Str` — the reference's parse_type reports FN_HEAD with non-empty
+// args for a leading-parenthesised list followed by an arrow, so `_alias_target`
+// sees a type application. Port of typecheck._split_fn_type's shape check
+// (skip spaces after the closing paren, then expect `->`).
+fn is_fn_type(name: Str) -> Bool {
+  if (!starts_with(name, "(")) { return false }
+  var depth = 0
+  var i = 0
+  while (i < name.length()) {
+    let ch = name.charAt(i)
+    if (ch == "(" || ch == "[") { depth += 1 }
+    if (ch == ")" || ch == "]") {
+      depth -= 1
+      if (depth == 0) {
+        var j = i + 1
+        while (j < name.length() && is_space_ch(name.charAt(j))) { j += 1 }
+        let rest = name.slice(j, name.length())
+        return starts_with(rest, "->")
+      }
+    }
+    i += 1
+  }
+  return false
+}
+
+fn is_space_ch(c: Str) -> Bool {
+  return c == " " || c == "\t" || c == "\n" || c == "\r"
+}
+
+// Port of typecheck.check_type_wellformed: a builtin generic head used with
+// the wrong arity (bare `Opt`, `List[]`, `Map[Str]`) is not a type spelling;
+// recurses into arguments. User/nominal heads are not arity-checked.
+fn generic_arity(h: Str) -> Int {
+  if (h == "Opt" || h == "List") { return 1 }
+  if (h == "Map" || h == "Result") { return 2 }
+  return 0 - 1
+}
+
+fn ty_wellformed(t: Str) -> Bool {
+  if (t == "") { return true }
+  let sp = split_type(t)
+  let ar = generic_arity(sp.head)
+  if (ar != 0 - 1 && sp.args.length() != ar) { return false }
+  var i = 0
+  var ok = true
+  while (i < sp.args.length()) {
+    if (!ty_wellformed(sp.args[i])) { ok = false }
+    i += 1
+  }
+  return ok
+}
+
+// The table: one pass to collect declared names, one to fix the alias set,
+// one to build specs with aliases substituted away. Duplicate type / field /
+// case names are refusals here exactly where the reference raises in
+// _lower_type_decls.
+fn build_types(decls: List[TypeD]) -> TblR {
+  var declared: List[Str] = []
+  var i = 0
+  while (i < decls.length()) {
+    declared = declared.push(decls[i].name)
+    i += 1
+  }
+  var al: Map[Str, Str] = Map.empty()
+  i = 0
+  while (i < decls.length()) {
+    if (is_alias(decls[i], declared)) {
+      al = al.set(decls[i].name, decls[i].cases[0].name)
+    }
+    i += 1
+  }
+  // Alias targets are checked like the reference checks them: the target
+  // spelling must be wellformed (no bare generic), and expanding it must not
+  // run away (a cycle). The reference does both in _resolve_type_aliases.
+  var tbl: Tt = Map.empty()
+  let anames = al.keys()
+  var ai = 0
+  while (ai < anames.length()) {
+    let at = unwrap_alias(al, anames[ai])
+    if (!ty_wellformed(at)) {
+      let bad_al_tbl = tbl
+      return { tbl: bad_al_tbl,
+               err: "malformed alias target `".concat(at).concat("`") }
+    }
+    let exa = expand_ty(at, al, 0)
+    if (!exa.ok) {
+      let cyc_al_tbl = tbl
+      return { tbl: cyc_al_tbl,
+               err: "type alias cycle at `".concat(anames[ai]).concat("`") }
+    }
+    ai += 1
+  }
+  i = 0
+  while (i < decls.length()) {
+    let d = decls[i]
+    if (al.has(d.name)) {
+      // erased before checking: nothing downstream sees the alias name
+      i += 1
+    } else {
+      if (tbl.has(d.name)) {
+        let dup_ty_tbl = tbl
+        return { tbl: dup_ty_tbl, err: "duplicate type `".concat(d.name).concat("`") }
+      }
+      if (d.fields.length() > 0) {
+        var fs: Map[Str, Str] = Map.empty()
+        var k = 0
+        while (k < d.fields.length()) {
+          if (fs.has(d.fields[k].name)) {
+            let dup_fld_tbl = tbl
+            return { tbl: dup_fld_tbl,
+                     err: "duplicate field `".concat(d.fields[k].name)
+                            .concat("` in record `").concat(d.name)
+                            .concat("`") }
+          }
+          let ex = expand_ty(d.fields[k].ty, al, 0)
+          if (!ex.ok) {
+            let cyc_fld_tbl = tbl
+            return { tbl: cyc_fld_tbl, err: "type alias cycle at `".concat(d.name)
+                                      .concat("`") }
+          }
+          if (!ty_wellformed(ex.ty)) {
+            let bad_fld_tbl = tbl
+            return { tbl: bad_fld_tbl,
+                     err: "malformed field type in record `".concat(d.name)
+                            .concat("`") }
+          }
+          fs = fs.set(d.fields[k].name, ex.ty)
+          k += 1
+        }
+        let rec_fs = fs
+        tbl = tbl.set(d.name, { kind: "record", fields: rec_fs, cases: [] })
+      } else {
+        var seen: List[Str] = []
+        var cs: List[CaseD] = []
+        var k2 = 0
+        while (k2 < d.cases.length()) {
+          if (contains(seen, d.cases[k2].name)) {
+            let dup_cs_tbl = tbl
+            return { tbl: dup_cs_tbl,
+                     err: "duplicate case `".concat(d.cases[k2].name)
+                            .concat("` in type `").concat(d.name).concat("`") }
+          }
+          seen = seen.push(d.cases[k2].name)
+          var pl = ""
+          if (d.cases[k2].payload != "") {
+            let ex2 = expand_ty(d.cases[k2].payload, al, 0)
+            if (!ex2.ok) {
+              let cyc_cs_tbl = tbl
+              return { tbl: cyc_cs_tbl, err: "type alias cycle at `".concat(d.name)
+                                        .concat("`") }
+            }
+            if (!ty_wellformed(ex2.ty)) {
+              let bad_cs_tbl = tbl
+              return { tbl: bad_cs_tbl,
+                       err: "malformed payload in type `".concat(d.name).concat("`") }
+            }
+            pl = ex2.ty
+          }
+          let cs_pl = pl
+          cs = cs.push({ name: d.cases[k2].name, payload: cs_pl })
+          k2 += 1
+        }
+        let var_cs = cs
+        tbl = tbl.set(d.name, { kind: "variant", fields: Map.empty(),
+                                cases: var_cs })
+      }
+      i += 1
+    }
+  }
+  let fin_tbl = tbl
+  return { tbl: fin_tbl, err: "" }
+}
+
+// ADT constructor table, ported from _case_table: builtins first; Some/None
+// reserved for Opt (a user case reusing them is dropped); Ok/Err shadowable;
+// any other collision dropped to stay silent. Traversal over keys() ascending
+// makes the outcome deterministic — and identical to the reference's, since
+// ambiguous names are *dropped* either way.
+fn build_cases(tbl: Tt) -> Ct {
+  var ct: Ct = Map.empty()
+  ct = ct.set("Some", { adt: "Opt[Any]", payload: "" })
+  ct = ct.set("None", { adt: "Opt[Any]", payload: "" })
+  ct = ct.set("Ok", { adt: "Result[Any, Any]", payload: "" })
+  ct = ct.set("Err", { adt: "Result[Any, Any]", payload: "" })
+  var amb: List[Str] = []
+  let names = sort_strs(tbl.keys())
+  var i = 0
+  while (i < names.length()) {
+    let tn = names[i]
+    let spec: TySpec = match tbl.lookup(tn) {
+      Some(s) => s,
+      None    => { kind: "variant", fields: Map.empty(), cases: [] },
+    }
+    if (spec.kind == "variant") {
+      var k = 0
+      while (k < spec.cases.length()) {
+        let cn = spec.cases[k].name
+        if (cn == "Some" || cn == "None") {
+          amb = amb.push(cn)
+          ct = ct.remove(cn)
+        } else if ((cn == "Ok" || cn == "Err") && ct.has(cn)) {
+          let cur = match ct.lookup(cn) {
+            Some(v) => v,
+            None    => { adt: "", payload: "" },
+          }
+          if (starts_with(cur.adt, "Result")) {
+            ct = ct.set(cn, { adt: tn, payload: spec.cases[k].payload })
+          } else {
+            amb = amb.push(cn)
+            ct = ct.remove(cn)
+          }
+        } else if (ct.has(cn) || contains(amb, cn)) {
+          amb = amb.push(cn)
+          ct = ct.remove(cn)
+        } else {
+          ct = ct.set(cn, { adt: tn, payload: spec.cases[k].payload })
+        }
+        k += 1
+      }
+    }
+    i += 1
+  }
+  return ct
+}
+
+// ---------------------------------------------------------------- entry
+
+// Infer one expression in base_env() against a program's declarations — the
+// slice-three differential entry point. "(bad) ..." on a parse error,
+// "refuse" on a definite refusal (table or checker), "?" where the reference
+// returns None, else the inferred type's spelling.
+pub fn infer_prog_expr(progSrc: Str, exprSrc: Str) -> Str {
+  let pg = parse_prog(progSrc)
+  if (pg.bad != "") { return "(bad) ".concat(pg.bad) }
+  let built = build_types(pg.types)
+  if (built.err != "") { return "refuse" }
+  let ct = build_cases(built.tbl)
+  let e = parse_expr_str(exprSrc)
+  if (is_bad(e)) { return "(bad)" }
+  let r = infer_t(e, base_env(), built.tbl, ct)
+  if (!r.ok) { return "refuse" }
+  if (r.ty == "") { return "?" }
+  return r.ty
 }

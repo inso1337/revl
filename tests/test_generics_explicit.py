@@ -184,3 +184,61 @@ def test_service_method_does_not_take_a_type_parameter_list():
     # explicit list is scoped out for them; `[` after the name still fails.
     err = _err("service S { fn m[T](x: T) -> T }")
     assert "found '['" in err or "expected (" in err
+
+
+# ---- an explicit list turns the implicit heuristic OFF (roadmap 75(c)) -----
+#
+# Without `[T]`, a one-letter undeclared name in a signature is that fn's
+# implicit type parameter. WITH `[T]`, declared means declared: only the
+# listed names are type parameters, and a stray one-letter name is an
+# ordinary undeclared (opaque nominal) type — so a typo'd name errors where
+# it is used instead of silently quantifying (t25_explicit_tparam_heuristic_off.rvl).
+
+def test_typoed_one_letter_name_under_an_explicit_list_errors():
+    # `U` is a typo for `T`; it used to become a second type parameter and
+    # wildcard at the call site, so `typo([1, 2])` compiled as if the
+    # signature said `List[T]`. Now it is an opaque nominal and the mismatch
+    # is refused.
+    err = _err("fn typo[T](xs: List[U]) -> T { return xs[0] }\n"
+               "fn g() -> Int { return typo([1, 2]) }")
+    assert "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`" in err
+
+
+def test_stray_one_letter_name_does_not_unify_across_arguments():
+    err = _err("fn g[T](x: T, y: E) -> E { return y }\n"
+               'fn h() -> Int { return g(1, 2) }')
+    assert "argument 2 of `g(...)` expects `E`, got `Int`" in err
+
+
+def test_stray_one_letter_name_is_an_opaque_nominal_not_a_declaration_error():
+    # the revl reading of "undeclared": like `Row`, a stray `E` types its own
+    # positions consistently and only errors where a use conflicts with a real
+    # type — the fn itself still compiles
+    ir = compile_source("fn g[T](x: T, y: E) -> E { return y }\n"
+                        "fn h(e: E) -> E { return e }\n"
+                        "fn j[T](x: T, y: E) -> T { return x }")
+    assert len(ir["functions"]) == 3
+
+
+def test_implicit_heuristic_is_still_on_without_an_explicit_list():
+    # the change is scoped to signatures that carry `[...]`: a plain
+    # `fn ident(x: T)` still quantifies `T` exactly as before
+    ir = compile_source("fn ident(x: T) -> T { return x }\n"
+                        'fn g() -> Str { return ident("hi") }')
+    assert len(ir["functions"]) == 2
+
+
+def test_implicit_and_explicit_forms_coexist_in_one_program():
+    ir = compile_source("fn id[T](x: T) -> T { return x }\n"
+                        "fn ident(x: T) -> T { return x }\n"
+                        'fn a() -> Int { return id(5) }\n'
+                        'fn b() -> Str { return ident("s") }')
+    assert len(ir["functions"]) == 4
+
+
+def test_explicit_declared_names_still_wildcard_and_unify():
+    # only *undeclared* one-letter names stop quantifying; a declared `[T]`
+    # is still a wildcard inside the body and unifies at the call site
+    ir = compile_source("fn id[T](x: T) -> T { return x }\n"
+                        'fn g() -> Str { return id("hi") }')
+    assert len(ir["functions"]) == 2
