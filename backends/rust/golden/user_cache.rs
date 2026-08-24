@@ -17,17 +17,23 @@ pub trait Cache: Send + Sync {
     fn put(&self, key: String, value: String) -> ();
 }
 
+/// R1 live-resource counter (lifecycle `assert no_residue`).
+static REVL_LIVE_HOST_RESOURCES: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
 /// revl host object: a small thread-safe string map.
 pub struct Map {
     inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 impl Map {
     pub fn new() -> Self {
+        REVL_LIVE_HOST_RESOURCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self {
             inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
     pub fn drop_(&self) {
+        REVL_LIVE_HOST_RESOURCES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.lock().unwrap().clear();
     }
     pub fn insert(&self, key: String, value: String) {
@@ -62,6 +68,7 @@ impl Pool {
         if size < 1 {
             panic!("pool size must be an integer >= 1 (got {})", size);
         }
+        REVL_LIVE_HOST_RESOURCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Self {
             url,
             size,
@@ -153,6 +160,7 @@ impl Pool {
         if already_closed {
             panic!("pool.close after close/drop — use-after-free");
         }
+        REVL_LIVE_HOST_RESOURCES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
     pub fn query(&self, _sql: String) -> Vec<Value> {
         let conn = self.borrow_conn("query");
