@@ -15,6 +15,7 @@ reactive withdrawal.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -188,3 +189,75 @@ def test_go_consumer_crosses_a_seam_and_withdraws_when_provider_dies(tmp_path):
                 except (OSError, subprocess.TimeoutExpired):
                     proc.kill()
         shutil.rmtree(sockdir, ignore_errors=True)
+
+
+def test_go_v3_typed_core_records_and_adts_cross_the_seam(tmp_path):
+    """The v3 typed-core bridge carries rich values (FR-8 go follow-up): a Go
+    process SERVES the record/ADT service boundary of a v3 typed-core
+    composition, and a python bridge client calls through it — a record
+    return, an ADT-typed argument and return, and an ADT `match` inside the
+    method body all round-trip on the canonical wire (records as plain JSON
+    objects, ADTs as {"$kind","$value"} — docs/interop-bridge.md §3)."""
+    placement = _placement()
+    ir = compile_files([str(ROOT / "examples" / "v3_step_scheduler.rvl")])
+    go_bin = placement._build_go(ir, tmp_path)
+    assert Path(go_bin).exists()
+
+    sockdir = tempfile.mkdtemp(prefix="rvlgo3_")
+    sock = str(Path(sockdir) / "sched.sock")
+
+    spec = {
+        "name": "schedsvc",
+        "backend": "go",
+        "components": ["Sched"],
+        "config": {},
+        "provides": ["sched"],
+        "proxies": {},
+        "serve": {
+            "socket": sock,
+            "keys": ["sched"],
+            "methods": {"Scheduler": ["describe", "next", "report"]},
+        },
+        "probe": [],
+    }
+    spec_file = tmp_path / "serve.spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+    svc = subprocess.Popen(
+        [go_bin, str(spec_file)],
+        stdin=subprocess.PIPE,  # keep open: the runner stops on stdin EOF
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        up_lines = _read_until(svc, "[schedsvc] UP", timeout=20)
+        joined = "".join(up_lines)
+        assert "[schedsvc] UP" in joined, f"server never came up:\n{joined}"
+        assert os.path.exists(sock), "server never created its socket"
+
+        spec2 = importlib.util.spec_from_file_location("python_bridge", _BRIDGE)
+        bridge_mod = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(bridge_mod)
+        client = bridge_mod._Client(sock)
+        try:
+            # ADT-typed argument crosses in, the match runs, a Str comes back
+            final = {"$kind": "Final", "$value": "done"}
+            assert client.call("sched", "describe", [final]) == "done"
+            need = {"$kind": "NeedTool",
+                    "$value": {"name": "revl", "args": ["a", "b"]}}
+            assert client.call("sched", "describe", [need]) == "revl"
+            # the ADT round-trips back out through the encode helper
+            assert client.call("sched", "next", [final]) == final
+            assert client.call("sched", "next", [need]) == need
+            # record service return crosses as plain JSON
+            assert client.call("sched", "report", []) == {"id": 1, "name": "ada"}
+        finally:
+            client.close()
+    finally:
+        if svc.poll() is None:
+            try:
+                if svc.stdin:
+                    svc.stdin.close()
+                svc.terminate()
+                svc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                svc.kill()
