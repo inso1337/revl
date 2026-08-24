@@ -142,6 +142,14 @@ class Session:
         # serve time from `--operator-profile`; the gate lives in the mcp verb
         # dispatch (`revl.mcp.server`), not here — this is only the binding.
         self.operator = None
+        # component leases (roadmap item 61): operator-scoped, TTL-bound claims
+        # on component *names* that govern who may *replace* a component (never
+        # a lock on the running one, which keeps serving). The book is pure
+        # bookkeeping over the clock (`revl.mcp.leases`); the claim/advisory/
+        # enforced wiring lives in the mcp verb dispatch, surfaced below in
+        # `state`. Empty by default, so a single-agent session is unchanged.
+        from .leases import LeaseBook  # noqa: PLC0415 — no cordis, additive
+        self.leases = LeaseBook()
 
     # -- plumbing ----------------------------------------------------------
 
@@ -960,7 +968,9 @@ class Session:
 
     def state(self, drain: bool = False) -> dict:
         if self._driver is None:
-            return {"loaded": False}
+            # even with nothing loaded, the workspace's active leases (item 61)
+            # are visible — an agent can survey who holds what before it loads.
+            return {"loaded": False, "leases": self.leases.document()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         return {
@@ -977,6 +987,9 @@ class Session:
             "generation": self._generation,
             "history": [e["generation"] for e in self._history],
             "canUndo": len(self._history) >= 2,
+            # active component leases (item 61): holder, component, expiry — the
+            # multi-agent workspace, visible before anyone acts.
+            "leases": self.leases.document(),
             **({"trace": driver.drain_events()} if drain else {}),
         }
 
