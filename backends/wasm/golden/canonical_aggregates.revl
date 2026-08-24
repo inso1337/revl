@@ -1,0 +1,12 @@
+type Person = { name: Str, age: Int }
+fn make(nm: Str, a: Int) -> Person { return { name: nm, age: a } }
+fn age_of(p: Person) -> Int { return p.age }
+fn rename(p: Person, nm: Str) -> Person { return { name: nm, age: p.age } }
+fn dbl(n: Int) -> Int { return n + n }
+fn flip(b: Bool) -> Bool { return !b }
+fn pair(a: Int, b: Int) -> List[Int] { return [a, b] }
+fn head(xs: List[Int]) -> Int { return xs[0] }
+fn roster(nm: Str, a: Int) -> List[Person] { return [{ name: nm, age: a }] }
+fn maybe(n: Int) -> Opt[Int] { return n > 0 ? Some(n) : None }
+fn or_zero(o: Opt[Int]) -> Int { return o ?? 0 }
+fn checked(n: Int) -> Result[Int, Str] { return n > 0 ? Ok(n) : Err("nonpositive") }

@@ -22,15 +22,19 @@ sys.path.insert(0, str(BACKEND))
 from revl import compile_source  # noqa: E402
 import canonical  # noqa: E402
 
-SERVICE = "Echoer"
+# (fixture stem, service name): the Str-only slice-3 fixture and the aggregate
+# follow-on (records/lists/variants/Opt/Result + non-Str scalars).
+_FIXTURES = [("canonical_echoer", "Echoer"),
+             ("canonical_aggregates", "Registry")]
 
 
 def main() -> None:
-    src = (HERE / "canonical_echoer.revl").read_text(encoding="utf-8")
-    res = canonical.emit_component(compile_source(src), service=SERVICE)
-    (HERE / "canonical_echoer.core.wat").write_text(res["core_wat"], encoding="utf-8")
-    (HERE / "canonical_echoer.wit").write_text(res["wit"], encoding="utf-8")
-    print(f"regenerated canonical goldens (boundary functions: {res['functions']})")
+    for stem, service in _FIXTURES:
+        src = (HERE / f"{stem}.revl").read_text(encoding="utf-8")
+        res = canonical.emit_component(compile_source(src), service=service)
+        (HERE / f"{stem}.core.wat").write_text(res["core_wat"], encoding="utf-8")
+        (HERE / f"{stem}.wit").write_text(res["wit"], encoding="utf-8")
+        print(f"regenerated {stem} goldens (boundary functions: {res['functions']})")
 
 
 if __name__ == "__main__":

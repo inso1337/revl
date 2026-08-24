@@ -1,51 +1,62 @@
-"""revl -> standard WASI Preview 2 component (canonical ABI) — item 41 slice-3.
+"""revl -> standard WASI Preview 2 component (canonical ABI) — item 41.
 
 Slices 1-2 emitted the WIT *interface* (``revl export wit``) and WIT resources.
-This slice makes a revl program's pure ``Str``-boundary functions loadable by a
+Slice-3 made a revl program's pure ``Str``-boundary functions loadable by a
 STANDARD component-model host (wasmtime, jco, Spin, wasmCloud) over the
-CANONICAL ABI — not only by cordis-wasm's custom exported-``memory`` convention.
+CANONICAL ABI. This module is the aggregate follow-on: it extends that
+canonical boundary from ``Str`` alone to the full value surface the wasm tier
+lowers internally — non-``Str`` scalars (``Int`` -> ``s64``, ``Bool``),
+**records**, **lists**, and **variants** (user variants, ``Opt``, ``Result``) —
+so a component-model host can call a revl ``fn`` that takes or returns any of
+them, not just strings.
 
-Scope (honest, per item 41 slice-3): the pure top-level functions whose
-parameters are all ``Str`` and whose result is ``Str``. That is the smallest
-coherent canonical-ABI slice — one ``Str``-taking, ``Str``-returning function
-that a real component-model host loads and runs. Records / lists / variants
-lift-lower at the canonical boundary is a follow-on slice; functions carrying
-those types simply do not appear on the component interface here (they stay in
-the core module for intra-module calls), so the gap is explicit, not silent.
+Two ABIs, and the bridge between them
+-------------------------------------
+``_V3Emitter`` (``emit.py``) lowers each pure ``fn`` to a core function whose
+values use the tier's INTERNAL, uniform in-memory ABI:
 
-How it works
-------------
-``_V3Emitter`` already lowers a pure ``Str`` function to a core function
-``$f (export "f")`` of signature ``(param i32 …) (result i32)``, where every
-value is an INTERNAL revl string pointer: ``[u32 byte_len][utf8 bytes]``. That
-is the tier's custom in-memory ABI (a cordis-wasm host reads it through the
-exported ``memory``). The canonical ABI a component host speaks is different:
+  * ``Int``  — an ``i64`` value; ``Bool`` — an ``i32`` (0/1) value;
+  * ``Str``  — an ``i32`` pointer to ``[u32 byte_len][utf8 bytes]``;
+  * record   — an ``i32`` pointer to ``[slot0][slot1]…`` (one 8-byte slot per
+    field, in declaration order; an ``Int`` sits native, a pointer/``Bool`` is
+    zero-extended into the slot);
+  * ``List[T]`` — an ``i32`` pointer to ``[u32 count][pad][slot0]…``;
+  * variant/``Opt``/``Result`` — an ``i32`` pointer to
+    ``[u32 tag][pad][payload slot]``.
 
-  * a ``string`` crosses as a bare ``(ptr, len)`` pair — ``ptr`` points at the
-    first byte, there is NO length prefix, ``len`` is the utf-8 byte count;
-  * the host places an incoming string into guest memory by calling an exported
-    ``cabi_realloc``; and
-  * a ``string``-returning export returns a single ``i32`` pointing at an
-    8-byte *return area* holding ``[ptr: i32, len: i32]``.
+The CANONICAL ABI a component host speaks is the Component Model's: values are
+*flattened* into core params, aggregates are laid out in linear memory with
+canonical size/alignment, ``string``/``list`` cross as a bare ``(ptr, len)``
+pair, and a result that flattens to more than one core value is returned
+INDIRECTLY as a single ``i32`` pointer to a canonically-laid-out return area.
+The host places incoming buffers into guest memory through an exported
+``cabi_realloc``.
 
-So this module keeps the ``_V3Emitter`` core body verbatim and adds, at the
-export edge, the canonical boundary:
+This module keeps every ``_V3Emitter`` body verbatim and, at the export edge,
+emits a canonical wrapper per boundary function plus a small library of
+lift/lower helpers (``$__canon_*``) that translate between the two ABIs over
+the SAME bump heap (``$__hp`` / ``$alloc``) slice-3 established:
 
-  * ``cabi_realloc(old, old_size, align, new_size) -> ptr`` — the standard
-    allocator the host calls, backed by the same bump heap (``$__hp`` /
-    ``$alloc``) the module already uses;
-  * ``$__canon_lift_str(ptr, len) -> internal`` — LOWERS an incoming bare
-    ``(ptr, len)`` into an internal ``[u32 len][bytes]`` string; and
-  * one canonical export per boundary function, named
-    ``<package>/<iface>#<op>`` (the core name ``wit-component`` expects for a
-    component exporting that interface). It lifts each bare string param in,
-    calls the internal ``$f``, then lowers the internal result back out into a
-    fresh return area.
+  * ``cabi_realloc`` — the host's allocator, backed by ``$alloc``;
+  * ``$__canon_lift_str`` / ``$__canon_lower_str`` — bare ``(ptr,len)`` <->
+    internal ``[u32 len][bytes]``;
+  * ``$__canon_lift_rec_*`` / ``$__canon_lower_rec_*``, ``…_list_*``,
+    ``…_var_*`` — one memoized pair per aggregate type reached, recursing
+    through ``load_canon`` / ``store_canon``.
 
 ``build_component`` wraps the core module into a real component with
-``wasm-tools component embed`` + ``component new``. The emitted WIT world
-exports the interface ``revl export wit`` (slice-1) produces — reused verbatim
-here — so the binary and the WIT agree by construction.
+``wasm-tools component embed`` + ``component new``; the WIT world it embeds is
+``revl export wit``'s output (slice-1) verbatim, so the binary and the
+interface agree by construction, proven under ``wasmtime run --invoke``.
+
+Boundary scope (explicit, not silent): a function is presented over the
+canonical ABI iff every parameter and its result is canonically lowerable. A
+function carrying a type this module cannot lower (``Float``, ``Map``, a
+resource handle, a function value) — or a *parameter* that is a variant whose
+payload is itself an aggregate (the direct-flattened join of an aggregate
+payload is the remaining gap; such a variant is fine as a *result*, which
+crosses through memory) — is left off the interface and stays in the core
+module for intra-module calls, never mis-lowered.
 """
 
 from __future__ import annotations
@@ -68,100 +79,661 @@ from emit import EmitError, emit as _emit_core  # noqa: E402
 _SRC = _HERE.parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
-from revl.export_wit import _kebab_name, _kebab_type, export_wit  # noqa: E402
+from revl.export_wit import (  # noqa: E402
+    _kebab_name, _kebab_type, _split_generic, export_wit)
 
 _DEFAULT_PACKAGE = "revl:exported"
 
+# The Component Model's canonical-ABI flattening limits (CABI constants).
+_MAX_FLAT_PARAMS = 16
+_MAX_FLAT_RESULTS = 1
 
-def _is_str(ty: object) -> bool:
-    return ty == "Str"
+
+def _align_to(offset: int, align: int) -> int:
+    return (offset + align - 1) & ~(align - 1)
 
 
-def _boundary_functions(functions: list[dict]) -> list[dict]:
-    """The pure functions whose whole signature is ``Str`` — the ones this slice
-    can present over the canonical ABI. A function with a non-``Str`` parameter
-    or result is left off the interface (it stays in the core module so a
-    boundary function may still call it), never silently mis-lowered."""
+def _san(ty: str) -> str:
+    """A revl type string -> a wat-identifier-safe suffix (`List[Person]` ->
+    `List_Person_`). Only used to name the per-type helper functions."""
+    return "".join(c if c.isalnum() else "_" for c in ty)
+
+
+def _internal_wasm(ty: str | None) -> str:
+    """The wasm value type the INTERNAL (`_V3Emitter`) ABI carries `ty` in: an
+    `Int` is an i64 value, everything else an i32 (a `Bool` value or a
+    linear-memory pointer). Mirrors `emit._wasm_ty`."""
+    return "i64" if ty == "Int" else "i32"
+
+
+def _slot_load(address: str, ty: str | None) -> str:
+    """Read one internal 8-byte slot as `ty` (mirrors `emit._V3Emitter`)."""
+    load = f"(i64.load {address})"
+    return load if ty == "Int" else f"(i32.wrap_i64 {load})"
+
+
+def _slot_store(address: str, value: str, ty: str | None) -> str:
+    """Write `value` into one internal 8-byte slot as `ty`."""
+    if ty != "Int":
+        value = f"(i64.extend_i32_u {value})"
+    return f"(i64.store {address} {value})"
+
+
+def _join(a: str, b: str) -> str:
+    """Canonical `join` of two flattened core types (CABI `flatten_variant`)."""
+    if a == b:
+        return a
+    if {a, b} == {"i32", "f32"}:
+        return "i32"
+    return "i64"
+
+
+class _Canon:
+    """The canonical-ABI codec for one IR's type table.
+
+    Computes flatten / size / alignment for the lowerable value surface, and
+    generates (memoized) the lift/lower helper functions plus one canonical
+    export wrapper per boundary function.
+    """
+
+    def __init__(self, types: dict) -> None:
+        self.types = types or {}
+        # helper registry: key -> name, and name -> wat body (insertion order)
+        self._names: dict[tuple, str] = {}
+        self.helpers: dict[str, str] = {}
+        self._fresh = 0
+
+    # -- type table views (mirror emit._V3Emitter) -----------------------
+    def record_fields(self, ty: str | None) -> list[tuple[str, str]] | None:
+        spec = self.types.get(ty or "")
+        if spec is None or spec.get("kind") != "record":
+            return None
+        return list((spec.get("fields") or {}).items())
+
+    def tagged_layout(self, ty: str | None) -> list[tuple[str, str | None]] | None:
+        if not ty:
+            return None
+        spec = self.types.get(ty)
+        if spec is not None and spec.get("kind") == "variant":
+            return [(c["name"], c.get("payload")) for c in spec.get("cases") or []]
+        head, args = _split_generic(ty)
+        if head == "Opt" and len(args) == 1:
+            return [("None", None), ("Some", args[0])]
+        if head == "Result" and len(args) == 2:
+            return [("Ok", args[0]), ("Err", args[1])]
+        return None
+
+    def _list_elem(self, ty: str) -> str | None:
+        head, args = _split_generic(ty)
+        if head == "List" and len(args) == 1:
+            return args[0]
+        return None
+
+    # -- flatten / size / align ------------------------------------------
+    def flatten(self, ty: str | None) -> list[str]:
+        if ty == "Bool":
+            return ["i32"]
+        if ty == "Int":
+            return ["i64"]
+        if ty == "Str":
+            return ["i32", "i32"]
+        if self._list_elem(ty or "") is not None:
+            return ["i32", "i32"]
+        fields = self.record_fields(ty)
+        if fields is not None:
+            out: list[str] = []
+            for _name, fty in fields:
+                out += self.flatten(fty)
+            return out
+        layout = self.tagged_layout(ty)
+        if layout is not None:
+            joined: list[str] = []
+            for _case, payload in layout:
+                if payload is None:
+                    continue
+                for i, ct in enumerate(self.flatten(payload)):
+                    if i < len(joined):
+                        joined[i] = _join(joined[i], ct)
+                    else:
+                        joined.append(ct)
+            return ["i32"] + joined
+        raise EmitError(f"cannot flatten canonical type {ty!r}")
+
+    def align(self, ty: str | None) -> int:
+        if ty == "Bool":
+            return 1
+        if ty == "Int":
+            return 8
+        if ty == "Str":
+            return 4
+        if self._list_elem(ty or "") is not None:
+            return 4
+        fields = self.record_fields(ty)
+        if fields is not None:
+            return max([1] + [self.align(fty) for _n, fty in fields])
+        layout = self.tagged_layout(ty)
+        if layout is not None:
+            return max([1] + [self.align(p) for _c, p in layout if p is not None])
+        raise EmitError(f"cannot align canonical type {ty!r}")
+
+    def size(self, ty: str | None) -> int:
+        if ty == "Bool":
+            return 1
+        if ty == "Int":
+            return 8
+        if ty == "Str":
+            return 8
+        if self._list_elem(ty or "") is not None:
+            return 8
+        fields = self.record_fields(ty)
+        if fields is not None:
+            off = 0
+            for _n, fty in fields:
+                off = _align_to(off, self.align(fty)) + self.size(fty)
+            return _align_to(off, self.align(ty)) if fields else 0
+        layout = self.tagged_layout(ty)
+        if layout is not None:
+            payloads = [p for _c, p in layout if p is not None]
+            max_pa = max([1] + [self.align(p) for p in payloads])
+            max_ps = max([0] + [self.size(p) for p in payloads])
+            size = _align_to(1, max_pa) + max_ps
+            return _align_to(size, self.align(ty))
+        raise EmitError(f"cannot size canonical type {ty!r}")
+
+    def field_offsets(self, ty: str) -> list[tuple[str, str, int]]:
+        """`(field_name, field_type, canonical_offset)` in declaration order."""
+        out = []
+        off = 0
+        for name, fty in self.record_fields(ty) or []:
+            off = _align_to(off, self.align(fty))
+            out.append((name, fty, off))
+            off += self.size(fty)
+        return out
+
+    def payload_offset(self, ty: str) -> int:
+        layout = self.tagged_layout(ty) or []
+        payloads = [p for _c, p in layout if p is not None]
+        max_pa = max([1] + [self.align(p) for p in payloads])
+        return _align_to(1, max_pa)
+
+    # -- lowerability gates ----------------------------------------------
+    def can_lower_result(self, ty: str | None) -> bool:
+        if ty in ("Bool", "Int", "Str"):
+            return True
+        elem = self._list_elem(ty or "")
+        if elem is not None:
+            return self.can_lower_result(elem)
+        fields = self.record_fields(ty)
+        if fields is not None:
+            return all(self.can_lower_result(f) for _n, f in fields)
+        layout = self.tagged_layout(ty)
+        if layout is not None:
+            return all(p is None or self.can_lower_result(p) for _c, p in layout)
+        return False
+
+    def can_lower_param(self, ty: str | None) -> bool:
+        if ty in ("Bool", "Int", "Str"):
+            return True
+        elem = self._list_elem(ty or "")
+        if elem is not None:
+            return self.can_lower_param(elem)
+        fields = self.record_fields(ty)
+        if fields is not None:
+            return all(self.can_lower_param(f) for _n, f in fields)
+        layout = self.tagged_layout(ty)
+        if layout is not None:
+            # a variant PARAM is decoded from flattened+joined core values; only
+            # scalar / Str / empty payloads are reconstructed here. An aggregate
+            # payload in param position is the remaining gap (fine as a result).
+            return all(p is None or p in ("Bool", "Int", "Str")
+                       for _c, p in layout)
+        return False
+
+    # -- helper registry --------------------------------------------------
+    def _reg(self, key: tuple, name: str, body) -> str:
+        if key in self._names:
+            return self._names[key]
+        self._names[key] = name
+        self.helpers[name] = ""      # reserve (recursive types)
+        self.helpers[name] = body()
+        return name
+
+    # -- load_canon / store_canon: canonical memory <-> internal value ----
+    def load_canon(self, ty: str, addr: str) -> str:
+        """WAT expr producing an internal value from a canonical value at `addr`."""
+        if ty == "Bool":
+            return f"(i32.load8_u {addr})"
+        if ty == "Int":
+            return f"(i64.load {addr})"
+        if ty == "Str":
+            return (f"(call $__canon_lift_str (i32.load {addr}) "
+                    f"(i32.load offset=4 {addr}))")
+        elem = self._list_elem(ty)
+        if elem is not None:
+            return (f"(call ${self._lift_list(elem)} (i32.load {addr}) "
+                    f"(i32.load offset=4 {addr}))")
+        if self.record_fields(ty) is not None:
+            return f"(call ${self._lift_rec(ty)} {addr})"
+        if self.tagged_layout(ty) is not None:
+            return f"(call ${self._lift_var(ty)} {addr})"
+        raise EmitError(f"cannot load canonical type {ty!r}")
+
+    def store_canon(self, ty: str, val: str, addr: str) -> str:
+        """WAT stmt writing an internal value `val` canonically at `addr`."""
+        if ty == "Bool":
+            return f"(i32.store8 {addr} {val})"
+        if ty == "Int":
+            return f"(i64.store {addr} {val})"
+        if ty == "Str":
+            return f"(call $__canon_lower_str {val} {addr})"
+        elem = self._list_elem(ty)
+        if elem is not None:
+            return f"(call ${self._lower_list(elem)} {val} {addr})"
+        if self.record_fields(ty) is not None:
+            return f"(call ${self._lower_rec(ty)} {val} {addr})"
+        if self.tagged_layout(ty) is not None:
+            return f"(call ${self._lower_var(ty)} {val} {addr})"
+        raise EmitError(f"cannot store canonical type {ty!r}")
+
+    # -- per-type helpers -------------------------------------------------
+    def _lift_rec(self, ty: str) -> str:
+        name = f"__canon_lift_rec_{_san(ty)}"
+
+        def body() -> str:
+            fields = self.field_offsets(ty)
+            lines = [f"  (func ${name} (param $c i32) (result i32)",
+                     "    (local $r i32)",
+                     f"    (local.set $r (call $alloc (i32.const {8 * len(fields)})))"]
+            for i, (_fn, fty, coff) in enumerate(fields):
+                caddr = (f"(i32.add (local.get $c) (i32.const {coff}))"
+                         if coff else "(local.get $c)")
+                iaddr = (f"(i32.add (local.get $r) (i32.const {8 * i}))"
+                         if i else "(local.get $r)")
+                lines.append("    " + _slot_store(iaddr, self.load_canon(fty, caddr), fty))
+            lines.append("    (local.get $r))")
+            return "\n".join(lines)
+
+        return self._reg(("lift_rec", ty), name, body)
+
+    def _lower_rec(self, ty: str) -> str:
+        name = f"__canon_lower_rec_{_san(ty)}"
+
+        def body() -> str:
+            lines = [f"  (func ${name} (param $r i32) (param $c i32)"]
+            for i, (_fn, fty, coff) in enumerate(self.field_offsets(ty)):
+                caddr = (f"(i32.add (local.get $c) (i32.const {coff}))"
+                         if coff else "(local.get $c)")
+                iaddr = (f"(i32.add (local.get $r) (i32.const {8 * i}))"
+                         if i else "(local.get $r)")
+                lines.append("    " + self.store_canon(fty, _slot_load(iaddr, fty), caddr))
+            lines[-1] += ")"
+            return "\n".join(lines)
+
+        return self._reg(("lower_rec", ty), name, body)
+
+    def _lift_list(self, elem: str) -> str:
+        name = f"__canon_lift_list_{_san(elem)}"
+
+        def body() -> str:
+            esz = self.size(elem)
+            caddr = (f"(i32.add (local.get $p) (i32.mul (local.get $i) "
+                     f"(i32.const {esz})))")
+            iaddr = ("(i32.add (local.get $r) (i32.add (i32.const 8) "
+                     "(i32.mul (local.get $i) (i32.const 8))))")
+            return "\n".join([
+                f"  (func ${name} (param $p i32) (param $len i32) (result i32)",
+                "    (local $r i32) (local $i i32)",
+                "    (local.set $r (call $alloc (i32.add (i32.const 8) "
+                "(i32.mul (local.get $len) (i32.const 8)))))",
+                "    (i32.store (local.get $r) (local.get $len))",
+                "    (block (loop",
+                "      (br_if 1 (i32.ge_u (local.get $i) (local.get $len)))",
+                "      " + _slot_store(iaddr, self.load_canon(elem, caddr), elem),
+                "      (local.set $i (i32.add (local.get $i) (i32.const 1)))",
+                "      (br 0)))",
+                "    (local.get $r))",
+            ])
+
+        return self._reg(("lift_list", elem), name, body)
+
+    def _lower_list(self, elem: str) -> str:
+        name = f"__canon_lower_list_{_san(elem)}"
+
+        def body() -> str:
+            esz = self.size(elem)
+            caddr = (f"(i32.add (local.get $buf) (i32.mul (local.get $i) "
+                     f"(i32.const {esz})))")
+            iaddr = ("(i32.add (local.get $r) (i32.add (i32.const 8) "
+                     "(i32.mul (local.get $i) (i32.const 8))))")
+            return "\n".join([
+                f"  (func ${name} (param $r i32) (param $dst i32)",
+                "    (local $count i32) (local $i i32) (local $buf i32)",
+                "    (local.set $count (i32.load (local.get $r)))",
+                "    (local.set $buf (call $alloc (i32.mul (local.get $count) "
+                f"(i32.const {esz}))))",
+                "    (block (loop",
+                "      (br_if 1 (i32.ge_u (local.get $i) (local.get $count)))",
+                "      " + self.store_canon(elem, _slot_load(iaddr, elem), caddr),
+                "      (local.set $i (i32.add (local.get $i) (i32.const 1)))",
+                "      (br 0)))",
+                "    (i32.store (local.get $dst) (local.get $buf))",
+                "    (i32.store offset=4 (local.get $dst) (local.get $count)))",
+            ])
+
+        return self._reg(("lower_list", elem), name, body)
+
+    def _lift_var(self, ty: str) -> str:
+        name = f"__canon_lift_var_{_san(ty)}"
+
+        def body() -> str:
+            layout = self.tagged_layout(ty) or []
+            poff = self.payload_offset(ty)
+            lines = [f"  (func ${name} (param $c i32) (result i32)",
+                     "    (local $r i32)",
+                     "    (local.set $r (call $alloc (i32.const 16)))",
+                     "    (i32.store (local.get $r) (i32.load8_u (local.get $c)))",
+                     "    (i64.store offset=8 (local.get $r) (i64.const 0))"]
+            caddr = (f"(i32.add (local.get $c) (i32.const {poff}))"
+                     if poff else "(local.get $c)")
+            iaddr = "(i32.add (local.get $r) (i32.const 8))"
+            for k, (_case, payload) in enumerate(layout):
+                if payload is None:
+                    continue
+                store = _slot_store(iaddr, self.load_canon(payload, caddr), payload)
+                lines.append(
+                    f"    (if (i32.eq (i32.load (local.get $r)) (i32.const {k})) "
+                    f"(then {store}))")
+            lines.append("    (local.get $r))")
+            return "\n".join(lines)
+
+        return self._reg(("lift_var", ty), name, body)
+
+    def _lower_var(self, ty: str) -> str:
+        name = f"__canon_lower_var_{_san(ty)}"
+
+        def body() -> str:
+            layout = self.tagged_layout(ty) or []
+            poff = self.payload_offset(ty)
+            lines = [f"  (func ${name} (param $r i32) (param $c i32)",
+                     "    (i32.store8 (local.get $c) (i32.load (local.get $r)))"]
+            caddr = (f"(i32.add (local.get $c) (i32.const {poff}))"
+                     if poff else "(local.get $c)")
+            iaddr = "(i32.add (local.get $r) (i32.const 8))"
+            for k, (_case, payload) in enumerate(layout):
+                if payload is None:
+                    continue
+                store = self.store_canon(payload, _slot_load(iaddr, payload), caddr)
+                lines.append(
+                    f"    (if (i32.eq (i32.load (local.get $r)) (i32.const {k})) "
+                    f"(then {store}))")
+            lines[-1] += ")"
+            return "\n".join(lines)
+
+        return self._reg(("lower_var", ty), name, body)
+
+    # -- flattened-param lift (top-level + record/variant params) ---------
+    def _new_local(self) -> str:
+        self._fresh += 1
+        return f"$t{self._fresh}"
+
+    def lift_flat(self, ty: str, cursor: "_Cursor", stmts: list[str],
+                  locals_: list[tuple[str, str]]) -> str:
+        """Consume the flattened core params for `ty` from `cursor`, appending
+        any construction statements, and return a WAT expr for the internal
+        value. `locals_` collects `(name, wasm_type)` scratch declarations."""
+        if ty in ("Bool", "Int"):
+            nm, _ct = cursor.take()
+            return f"(local.get {nm})"
+        if ty == "Str":
+            p, _ = cursor.take()
+            ln, _ = cursor.take()
+            return f"(call $__canon_lift_str (local.get {p}) (local.get {ln}))"
+        elem = self._list_elem(ty)
+        if elem is not None:
+            p, _ = cursor.take()
+            ln, _ = cursor.take()
+            return (f"(call ${self._lift_list(elem)} (local.get {p}) "
+                    f"(local.get {ln}))")
+        fields = self.record_fields(ty)
+        if fields is not None:
+            t = self._new_local()
+            locals_.append((t, "i32"))
+            stmts.append(f"(local.set {t} (call $alloc (i32.const {8 * len(fields)})))")
+            for i, (_fn, fty) in enumerate(fields):
+                val = self.lift_flat(fty, cursor, stmts, locals_)
+                iaddr = (f"(i32.add (local.get {t}) (i32.const {8 * i}))"
+                         if i else f"(local.get {t})")
+                stmts.append(_slot_store(iaddr, val, fty))
+            return f"(local.get {t})"
+        layout = self.tagged_layout(ty)
+        if layout is not None:
+            disc, _ = cursor.take()
+            joined = [cursor.take() for _ in self.flatten(ty)[1:]]
+            t = self._new_local()
+            locals_.append((t, "i32"))
+            stmts.append(f"(local.set {t} (call $alloc (i32.const 16)))")
+            stmts.append(f"(i32.store (local.get {t}) (local.get {disc}))")
+            stmts.append(f"(i64.store offset=8 (local.get {t}) (i64.const 0))")
+            iaddr = f"(i32.add (local.get {t}) (i32.const 8))"
+            for k, (_case, payload) in enumerate(layout):
+                if payload is None:
+                    continue
+                val = self._reinterpret(payload, joined)
+                store = _slot_store(iaddr, val, payload)
+                stmts.append(
+                    f"(if (i32.eq (local.get {disc}) (i32.const {k})) (then {store}))")
+            return f"(local.get {t})"
+        raise EmitError(f"cannot lift canonical param type {ty!r}")
+
+    def _reinterpret(self, payload: str, joined: list[tuple[str, str]]) -> str:
+        """Rebuild a scalar/Str payload from the variant's joined core slots,
+        narrowing a slot the join widened to i64 back to i32 where the payload
+        wants it."""
+        flat = self.flatten(payload)
+
+        def slot(i: int) -> str:
+            nm, ct = joined[i]
+            if flat[i] == ct:
+                return f"(local.get {nm})"
+            if flat[i] == "i32" and ct == "i64":
+                return f"(i32.wrap_i64 (local.get {nm}))"
+            return f"(local.get {nm})"
+
+        if payload in ("Int", "Bool"):
+            return slot(0)
+        if payload == "Str":
+            return f"(call $__canon_lift_str {slot(0)} {slot(1)})"
+        raise EmitError(f"cannot reinterpret variant payload {payload!r}")
+
+    # -- the canonical export wrapper ------------------------------------
+    def canon_export(self, fn: dict, package: str, iface: str) -> str:
+        name = fn["name"]
+        params = fn.get("params") or []
+        ret = fn.get("returns")
+        export_name = f"{package}/{iface}#{_kebab_name(name)}"
+
+        # flatten each param into named core params
+        idx = 0
+        grouped: list[tuple[str, list[tuple[str, str]]]] = []
+        for p in params:
+            names = []
+            for ct in self.flatten(p.get("type")):
+                names.append((f"$c{idx}", ct))
+                idx += 1
+            grouped.append((p.get("type"), names))
+        if idx > _MAX_FLAT_PARAMS:
+            raise EmitError(
+                f"{name}: {idx} flattened params exceed the canonical "
+                f"MAX_FLAT_PARAMS ({_MAX_FLAT_PARAMS}); indirect params are a "
+                "remaining gap")
+        param_decl = " ".join(
+            f"(param {nm} {ct})" for _t, names in grouped for nm, ct in names)
+
+        stmts: list[str] = []
+        locals_: list[tuple[str, str]] = []
+        arg_gets: list[str] = []
+        for i, (pty, names) in enumerate(grouped):
+            cur = _Cursor(names)
+            val = self.lift_flat(pty, cur, stmts, locals_)
+            a = f"$a{i}"
+            locals_.append((a, _internal_wasm(pty)))
+            stmts.append(f"(local.set {a} {val})")
+            arg_gets.append(f"(local.get {a})")
+
+        call = f"(call ${name} {' '.join(arg_gets)})".replace("  ", " ")
+
+        # result: 0 -> void, 1 -> direct core value, >1 -> indirect return area
+        flat = self.flatten(ret) if ret and ret != "Unit" else []
+        if not flat:
+            result_decl = ""
+            stmts.append(f"(drop {call})")
+            ret_expr = ""
+        elif len(flat) <= _MAX_FLAT_RESULTS:
+            result_decl = f" (result {flat[0]})"
+            rv = "$rv"
+            locals_.append((rv, _internal_wasm(ret)))
+            stmts.append(f"(local.set {rv} {call})")
+            ret_expr = self._direct_result(ret, f"(local.get {rv})")
+        else:
+            result_decl = " (result i32)"
+            rv = "$rv"
+            locals_.append((rv, _internal_wasm(ret)))
+            locals_.append(("$area", "i32"))
+            stmts.append(f"(local.set {rv} {call})")
+            stmts.append(f"(local.set $area (call $alloc (i32.const {self.size(ret)})))")
+            stmts.append(self.store_canon(ret, f"(local.get {rv})", "(local.get $area)"))
+            ret_expr = "(local.get $area)"
+
+        local_decl = " ".join(f"(local {nm} {wt})" for nm, wt in locals_)
+        body = "\n    ".join(stmts)
+        tail = ("\n    " + ret_expr) if ret_expr else ""
+        return (
+            f'  ;; canonical export of `{name}` -> WIT `{iface}#{_kebab_name(name)}`\n'
+            f'  (func (export "{export_name}") {param_decl}{result_decl}\n'
+            f'    {local_decl}\n'
+            f'    {body}{tail})'
+        )
+
+    def _direct_result(self, ret: str, rv: str) -> str:
+        """The single core value a `MAX_FLAT_RESULTS`-fitting result returns,
+        read out of the internal value `rv`."""
+        if ret in ("Int", "Bool"):
+            return rv                                   # already the value
+        fields = self.record_fields(ret)
+        if fields is not None:                          # single-scalar record
+            (_name, fty), = fields
+            return _slot_load(rv, fty)
+        if self.tagged_layout(ret) is not None:         # enum (all-empty cases)
+            return f"(i32.load {rv})"
+        raise EmitError(f"cannot direct-return canonical type {ret!r}")
+
+    # -- the shared canonical library (always emitted) -------------------
+    def base_helpers(self) -> str:
+        return (
+            '  ;; --- canonical ABI boundary (item 41) ---\n'
+            '  ;; cabi_realloc: the standard allocator a component host calls to\n'
+            '  ;; place an incoming string/list into this module\'s memory. Backed\n'
+            '  ;; by the same bump heap ($__hp / $alloc); old/align are unused (a\n'
+            '  ;; bump allocator never frees, and $alloc already 8-aligns).\n'
+            '  (func (export "cabi_realloc")\n'
+            '      (param $old i32) (param $old_size i32) (param $align i32) (param $new_size i32)\n'
+            '      (result i32)\n'
+            '    (call $alloc (local.get $new_size)))\n'
+            '  ;; bare (ptr,len) canonical string <-> internal [u32 len][bytes].\n'
+            '  (func $__canon_lift_str (param $ptr i32) (param $len i32) (result i32)\n'
+            '    (local $s i32) (local $i i32)\n'
+            '    (local.set $s (call $alloc_str (local.get $len)))\n'
+            '    (block (loop\n'
+            '      (br_if 1 (i32.ge_u (local.get $i) (local.get $len)))\n'
+            '      (i32.store8\n'
+            '        (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))\n'
+            '        (i32.load8_u (i32.add (local.get $ptr) (local.get $i))))\n'
+            '      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n'
+            '      (br 0)))\n'
+            '    (local.get $s))\n'
+            '  (func $__canon_lower_str (param $s i32) (param $dst i32)\n'
+            '    (i32.store (local.get $dst) (i32.add (local.get $s) (i32.const 4)))\n'
+            '    (i32.store offset=4 (local.get $dst) (i32.load (local.get $s))))'
+        )
+
+
+import re as _re
+
+# Top-level WIT type-declaration keywords. `revl export wit` (slice-1) emits a
+# referenced `record`/`variant`/`enum` at the PACKAGE top level, which is not
+# valid WIT — a named type must live inside an `interface` (or `world`). That
+# was latent while slice-3 only crossed `Str` (no named type is ever emitted for
+# a Str-only signature); it surfaces here the moment a record/variant crosses.
+# We cannot touch the frontend exporter (src/revl/*), so we relocate those
+# declarations into the interface body for the WIT the component embeds — a
+# pure syntactic fix that keeps the interface's shape byte-for-byte and makes
+# the document parseable. (The frontend bug is flagged separately.)
+_WIT_TYPE_KW = _re.compile(r"^(record|variant|enum|flags|type)\b")
+
+
+def _relocate_types_into_interface(wit: str, iface: str) -> str:
+    """Move any top-level `record`/`variant`/`enum` lines into `interface iface`
+    so the emitted WIT is valid. No-op when the exporter emitted none (the
+    Str-only path)."""
+    lines = wit.split("\n")
+    decls: list[str] = []
+    kept: list[str] = []
+    depth = 0
+    for line in lines:
+        stripped = line.strip()
+        # only relocate declarations that sit OUTSIDE any brace block
+        if depth == 0 and _WIT_TYPE_KW.match(stripped):
+            decls.append("  " + stripped)
+            continue
+        kept.append(line)
+        depth += line.count("{") - line.count("}")
+    if not decls:
+        return wit
+    out: list[str] = []
+    for line in kept:
+        out.append(line)
+        if _re.match(rf"^interface {_re.escape(iface)} \{{\s*$", line.strip()):
+            out.extend(decls)
+    # collapse the blank line the relocation may have left where the decls were
+    text = "\n".join(out)
+    return _re.sub(r"\n\n\n+", "\n\n", text)
+
+
+class _Cursor:
+    def __init__(self, items: list[tuple[str, str]]) -> None:
+        self.items = items
+        self.i = 0
+
+    def take(self) -> tuple[str, str]:
+        item = self.items[self.i]
+        self.i += 1
+        return item
+
+
+def _boundary_functions(functions: list[dict], canon: _Canon) -> list[dict]:
+    """The pure functions this module can present over the canonical ABI: every
+    parameter is canonically lowerable as a param and the result as a result. A
+    function carrying anything else is left off the interface (it stays in the
+    core module so a boundary function may still call it), never mis-lowered."""
     out = []
     for fn in functions:
-        params = fn.get("params") or []
-        if not _is_str(fn.get("returns")):
+        ret = fn.get("returns")
+        if ret and ret != "Unit" and not canon.can_lower_result(ret):
             continue
-        if any(not _is_str(p.get("type")) for p in params):
+        params = fn.get("params") or []
+        if any(not canon.can_lower_param(p.get("type")) for p in params):
             continue
         out.append(fn)
     return out
 
 
-def _canon_helpers() -> str:
-    """`cabi_realloc` (the host's allocator) + the bare->internal string lift,
-    both backed by the module's existing `$alloc` / `$alloc_str` bump heap."""
-    return (
-        '  ;; --- canonical ABI boundary (item 41 slice-3) ---\n'
-        '  ;; cabi_realloc: the standard allocator a component host calls to place\n'
-        '  ;; an incoming string/list into this module\'s memory. Backed by the same\n'
-        '  ;; bump heap ($__hp) the internal code uses; old/align are unused (a bump\n'
-        '  ;; allocator never frees or re-aligns — every block is already 8-aligned).\n'
-        '  (func (export "cabi_realloc")\n'
-        '      (param $old i32) (param $old_size i32) (param $align i32) (param $new_size i32)\n'
-        '      (result i32)\n'
-        '    (call $alloc (local.get $new_size)))\n'
-        '  ;; $__canon_lift_str: bare (ptr,len) canonical string -> internal\n'
-        '  ;; [u32 len][bytes] revl string. Allocates via $alloc_str (len+4, len at\n'
-        '  ;; offset 0) and copies the len utf-8 bytes in after the prefix.\n'
-        '  (func $__canon_lift_str (param $ptr i32) (param $len i32) (result i32)\n'
-        '    (local $s i32) (local $i i32)\n'
-        '    (local.set $s (call $alloc_str (local.get $len)))\n'
-        '    (block (loop\n'
-        '      (br_if 1 (i32.ge_u (local.get $i) (local.get $len)))\n'
-        '      (i32.store8\n'
-        '        (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))\n'
-        '        (i32.load8_u (i32.add (local.get $ptr) (local.get $i))))\n'
-        '      (local.set $i (i32.add (local.get $i) (i32.const 1)))\n'
-        '      (br 0)))\n'
-        '    (local.get $s))'
-    )
-
-
-def _canon_export(fn: dict, package: str, iface: str) -> str:
-    """One canonical-ABI export wrapping the internal `$<name>`.
-
-    Lifts every bare-string parameter into an internal string, calls the
-    internal function, then lowers the internal result string back out: the
-    return value is a pointer to a fresh 8-byte return area holding
-    ``[ptr -> first byte, len]`` (an internal string is ``[u32 len][bytes]`` so
-    the byte pointer is ``q + 4`` and the length is the u32 at ``q``)."""
-    name = fn.get("name")
-    export_name = f"{package}/{iface}#{_kebab_name(name)}"
-    params = fn.get("params") or []
-    n = len(params)
-    param_decls = " ".join(
-        f"(param $c_p{i} i32) (param $c_p{i}_len i32)" for i in range(n))
-    lift_locals = " ".join(f"(local $c_s{i} i32)" for i in range(n))
-    lifts = "\n".join(
-        f"    (local.set $c_s{i} "
-        f"(call $__canon_lift_str (local.get $c_p{i}) (local.get $c_p{i}_len)))"
-        for i in range(n))
-    call_args = " ".join(f"(local.get $c_s{i})" for i in range(n))
-    lift_block = (lifts + "\n") if lifts else ""
-    return (
-        f'  ;; canonical export of pure fn `{name}` -> WIT `{iface}#{_kebab_name(name)}`\n'
-        f'  (func (export "{export_name}") {param_decls} (result i32)\n'
-        f'    {lift_locals} (local $c_q i32) (local $c_ret i32)\n'
-        f'{lift_block}'
-        f'    (local.set $c_q (call ${name} {call_args}))\n'
-        f'    (local.set $c_ret (call $alloc (i32.const 8)))\n'
-        f'    (i32.store (local.get $c_ret) (i32.add (local.get $c_q) (i32.const 4)))\n'
-        f'    (i32.store offset=4 (local.get $c_ret) (i32.load (local.get $c_q)))\n'
-        f'    (local.get $c_ret))'
-    )
-
-
-def _core_with_canonical(ir: dict, boundary: list[dict], package: str,
-                         iface: str) -> str:
+def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
+                         package: str, iface: str) -> str:
     """The `_V3Emitter` core module for this IR, with the canonical boundary
-    (cabi_realloc + lift helper + one export per boundary function) spliced in
-    just before the module's closing paren."""
+    (cabi_realloc + lift/lower library + one export per boundary function)
+    spliced in just before the module's closing paren."""
+    # generate the exports first so `canon.helpers` is fully populated
+    exports = [canon.canon_export(fn, package, iface) for fn in boundary]
     modules = _emit_core({
         "ir_version": 3,
         "types": ir.get("types") or {},
@@ -176,8 +748,9 @@ def _core_with_canonical(ir: dict, boundary: list[dict], package: str,
     if not body.endswith(")"):
         raise EmitError("unexpected core module shape (no closing paren to splice into)")
     trunk = body[:-1].rstrip("\n")
-    additions = [_canon_helpers()] + [
-        _canon_export(fn, package, iface) for fn in boundary]
+    additions = [canon.base_helpers()]
+    additions += list(canon.helpers.values())
+    additions += exports
     return trunk + "\n" + "\n".join(additions) + "\n)\n"
 
 
@@ -186,23 +759,25 @@ def emit_component(ir: dict, *, service: str,
     """Lower a revl IR to a standard canonical-ABI component's inputs.
 
     Returns ``{"core_wat", "wit", "package", "interface", "world", "functions"}``:
-    the core WAT (canonical exports + cabi_realloc), the WIT document (the
-    slice-1 interface plus a world that exports it), and the names needed to
-    wrap the two into a component with ``build_component``.
+    the core WAT (canonical exports + the lift/lower library + cabi_realloc), the
+    WIT document (the slice-1 interface plus a world that exports it), and the
+    names needed to wrap the two into a component with ``build_component``.
 
     ``service`` names the WIT interface the boundary functions are grouped under
     (the component's exported interface). Raises ``EmitError`` if the IR has no
-    ``Str``-only pure function to present.
+    canonically-lowerable pure function to present.
     """
     functions = ir.get("functions") or []
-    boundary = _boundary_functions(functions)
+    canon = _Canon(ir.get("types") or {})
+    boundary = _boundary_functions(functions, canon)
     if not boundary:
         raise EmitError(
-            "no canonical-ABI-emittable function: item 41 slice-3 exports the "
-            "pure functions whose whole signature is `Str` (one Str-taking, "
-            "Str-returning function is the minimal component). This IR has none "
-            "— records/lists/variants at the canonical boundary are a follow-on "
-            "slice."
+            "no canonical-ABI-emittable function: this component presents the "
+            "pure functions whose whole signature (params + result) is "
+            "canonically lowerable — scalars (Int/Bool/Str), records, lists and "
+            "variants/Opt/Result. This IR has none (a Float/Map/resource/"
+            "function-typed signature, or a variant PARAM with an aggregate "
+            "payload, stays off the interface)."
         )
     iface = _kebab_type(service)
 
@@ -218,17 +793,18 @@ def emit_component(ir: dict, *, service: str,
         "types": ir.get("types") or {},
         "externs": [],
     }
-    interface_wit = export_wit(synthetic, service=service, package=package)
+    interface_wit = _relocate_types_into_interface(
+        export_wit(synthetic, service=service, package=package), iface)
     world_name = f"{iface}-component"
     wit = (
         interface_wit.rstrip()
         + "\n\n"
         + "/// The world wit-component wraps the core module against: it exports\n"
-        + f"/// the `{iface}` interface above over the canonical ABI (item 41 slice-3).\n"
+        + f"/// the `{iface}` interface above over the canonical ABI (item 41).\n"
         + f"world {world_name} {{\n  export {iface};\n}}\n"
     )
 
-    core_wat = _core_with_canonical(ir, boundary, package, iface)
+    core_wat = _core_with_canonical(ir, canon, boundary, package, iface)
     return {
         "core_wat": core_wat,
         "wit": wit,
@@ -306,21 +882,25 @@ def wasmtime_binary() -> str | None:
     return str(fallback) if fallback.is_file() else None
 
 
-def run_component_str(component_path: pathlib.Path, func: str, arg: str) -> str:
-    """Invoke ``func(arg)`` on the component under wasmtime's COMPONENT MODEL
-    (``wasmtime run --invoke``, which only accepts a component here) and return
-    the string the canonical ABI lifted back. Proves the round trip end to end.
-    """
+def run_component(component_path: pathlib.Path, invoke: str) -> str:
+    """Invoke `invoke` (a WAVE call expr, e.g. ``make("x", 5)``) on the
+    component under wasmtime's COMPONENT MODEL (``wasmtime run --invoke``, which
+    only accepts a component here) and return wasmtime's WAVE-formatted result
+    line. Proves the canonical round trip end to end."""
     binary = wasmtime_binary()
     if binary is None:
         raise EmitError("wasmtime not found")
     result = subprocess.run(
-        [binary, "run", "--invoke", f'{func}("{arg}")', str(component_path)],
+        [binary, "run", "--invoke", invoke, str(component_path)],
         capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise EmitError(f"component invocation failed: {result.stderr.strip()}")
-    out = result.stdout.strip()
-    # wasmtime prints the returned string as a quoted literal, e.g. "hi world".
+    return result.stdout.strip()
+
+
+def run_component_str(component_path: pathlib.Path, func: str, arg: str) -> str:
+    """`func(arg)` for a ``string``-returning export — unquotes the WAVE result."""
+    out = run_component(component_path, f'{func}("{arg}")')
     if len(out) >= 2 and out[0] == '"' and out[-1] == '"':
         return out[1:-1]
     return out
