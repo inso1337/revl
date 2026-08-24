@@ -81,29 +81,34 @@ func (p *Pool) Execute(sql string) int {
 	return 0
 }
 
-// Map is a thread-safe string map.
-type Map struct {
+// Map is a thread-safe map with Str keys. The value type is generic — each
+// site's `Map.new()` pins `V` from how the map is used (FR-4: a revl
+// `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),
+// mirroring backends/rust/emit.py's `struct Map<V>`. Emit instantiates it at
+// the acquisition (`MapNew[int64]()`), so the boundary carries the declared
+// value type and Insert/Get type-check against the component's real values.
+type Map[V any] struct {
 	mu sync.Mutex
-	m  map[string]string
+	m  map[string]V
 }
 
-func MapNew() *Map {
+func MapNew[V any]() *Map[V] {
 	hostRecord("map.new")
 	revlHostAcquire()
-	return &Map{m: map[string]string{}}
+	return &Map[V]{m: map[string]V{}}
 }
-func (m *Map) Drop() { hostRecord("map.drop"); revlHostRelease() }
-func (m *Map) Insert(k, v string) {
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
+func (m *Map[V]) Insert(k string, v V) {
 	m.mu.Lock()
 	m.m[k] = v
 	m.mu.Unlock()
 }
-func (m *Map) Remove(k string) {
+func (m *Map[V]) Remove(k string) {
 	m.mu.Lock()
 	delete(m.m, k)
 	m.mu.Unlock()
 }
-func (m *Map) Get(k string) (string, bool) {
+func (m *Map[V]) Get(k string) (V, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	v, ok := m.m[k]
@@ -113,17 +118,17 @@ func (m *Map) Get(k string) (string, bool) {
 // Iteration surface (docs/stdlib-2.0.md §Map): the checker promises
 // `size()`/`keys()` on a host `Map.new()` receiver too, and emit lowers both
 // as method calls on this object. `Size` is the entry count as the tier's
-// revl Int (a Go `int` here, matching the service-method return type); `Keys`
+// revl Int (int, matching the service-method return type); `Keys`
 // yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
 // go string < is exactly code-point order, matching sort.Strings; the inline
 // insertion sort keeps it import-free, as revlMapKeys does). Both are
 // read-only queries, no host trace — like Get.
-func (m *Map) Size() int {
+func (m *Map[V]) Size() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.m)
+	return int(len(m.m))
 }
-func (m *Map) Keys() []string {
+func (m *Map[V]) Keys() []string {
 	m.mu.Lock()
 	ks := make([]string, 0, len(m.m))
 	for k := range m.m {
@@ -152,9 +157,9 @@ func MemKV() stc.Component {
 		Name:    "MemKV",
 		Provide: []stc.Key{_keyKv},
 		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
-			var store *Map
+			var store *Map[string]
 			if err := ctx.Effect(func() stc.Inverse {
-				store = MapNew()
+				store = MapNew[string]()
 				return func() error { store.Drop(); return nil }
 			}); err != nil {
 				return nil, err
@@ -171,7 +176,7 @@ func MemKV() stc.Component {
 
 type MemKV_kv struct {
 	ctx   *stc.Context
-	store *Map
+	store *Map[string]
 }
 
 func (s *MemKV_kv) Count() int {

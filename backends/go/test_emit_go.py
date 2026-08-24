@@ -65,6 +65,40 @@ def test_no_timer_no_clock_preamble():
     assert "RevlTimer" not in src
 
 
+ADVANCE = HERE / "scenarios" / "emitted" / "advance" / "advance.ir.json"
+
+
+def test_advance_lifecycle_step_drives_the_clock():
+    """item 102 (go half): a `lifecycle test`'s `advance <n><unit>` step lowers
+    to RevlClockAdvance(N), with RevlClockReset() at test start so each test's
+    clock is independent. Before this, the go emitter refused `advance` outright
+    (`unknown lifecycle step 'advance'`)."""
+    src = emit.emit(_load(ADVANCE), package="advance")
+    # the advance steps drive the deterministic clock forward (35s / 100s / …)
+    assert "RevlClockAdvance(35000)" in src
+    assert "RevlClockAdvance(100000)" in src
+    # a test that advances resets the package-global clock first
+    assert "RevlClockReset()" in src
+    # the clock preamble (advance/reset driver) is pulled in
+    assert "func RevlClockAdvance(ms int64) int" in src
+    assert "func RevlClockReset() {" in src
+
+
+def test_advance_generated_test_file_is_current():
+    """The committed self-running advance test is byte-current with a fresh
+    emit (modulo gofmt) — the reproducibility gate regen.sh guarantees."""
+    fresh = emit.emit(_load(ADVANCE), package="advance")
+    committed = (ADVANCE.parent / "gen_advance_test.go").read_text(encoding="utf-8")
+    formatted = _gofmt(fresh)
+    if formatted is not None:
+        assert formatted == committed, (
+            "advance/gen_advance_test.go is stale — run backends/go/regen.sh")
+        return
+    norm = lambda s: " ".join(s.split())
+    assert norm(fresh) == norm(committed), (
+        "advance/gen_advance_test.go is stale — run backends/go/regen.sh")
+
+
 def test_user_cache_shapes():
     src = emit.emit(_load(USER_CACHE))
     assert "package emitted" in src
@@ -302,6 +336,9 @@ def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
 
 MEMKV = HERE / "scenarios" / "emitted" / "memkv" / "memkv.ir.json"
 TIMER = HERE / "scenarios" / "emitted" / "timer" / "timer.ir.json"
+# item 113: the host Map value type — Map[Str, Int] and Map[Str, List[Str]].
+COUNTER = HERE / "scenarios" / "emitted" / "counter" / "counter.ir.json"
+TAGGER = HERE / "scenarios" / "emitted" / "tagger" / "tagger.ir.json"
 
 
 @pytest.mark.parametrize("ir_path,pkg", [
@@ -309,13 +346,22 @@ TIMER = HERE / "scenarios" / "emitted" / "timer" / "timer.ir.json"
     (TENANTS, "tenants"),
     (MEMKV, "memkv"),
     (TIMER, "timer"),
+    (COUNTER, "counter"),
+    (TAGGER, "tagger"),
 ])
 def test_checked_in_generated_is_current(ir_path, pkg):
     """The committed gen.go must match a fresh emit (modulo gofmt)."""
     fresh = emit.emit(_load(ir_path), package=pkg)
     committed = (HERE / "scenarios" / "emitted" / pkg / "gen.go").read_text(encoding="utf-8")
-    # Compare ignoring whitespace runs so gofmt's alignment doesn't cause
-    # false diffs; a real structural drift still shows.
+    # gofmt the fresh emit first: gofmt splits the inline `;`-joined statements
+    # the `??` closure emits onto their own lines (a token change a bare
+    # whitespace-normalize would miss), so compare gofmt-to-gofmt when gofmt is
+    # present, and fall back to a whitespace-insensitive check when it is not.
+    formatted = _gofmt(fresh)
+    if formatted is not None:
+        assert formatted == committed, (
+            f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+        return
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
         f"{pkg}/gen.go is stale — run backends/go/regen.sh")
@@ -358,9 +404,11 @@ def test_host_map_backs_keys_and_size():
     `Size` is the entry count as the tier's revl Int (a Go `int`, matching the
     emitted `Count() int` service signature), `Keys` sorts into canonical order."""
     src = emit.emit(_compile(_HOST_MAP_ITER_SRC), package="memkv")
-    # runtime methods exist on the host Map object
-    assert "func (m *Map) Size() int {" in src
-    assert "func (m *Map) Keys() []string {" in src
+    # runtime methods exist on the host Map object (item 113: the host Map is
+    # generic over its value type, `Map[V]`, so the methods carry the receiver
+    # type parameter; Size is the tier's revl Int — a Go `int` in v1/v2 mode)
+    assert "func (m *Map[V]) Size() int {" in src
+    assert "func (m *Map[V]) Keys() []string {" in src
     # canonical (code-point) order: go's `string <` is UTF-8 byte lexicographic,
     # exactly code-point order (an import-free insertion sort, like revlMapKeys)
     assert "for j := i; j > 0 && ks[j] < ks[j-1]; j--" in src
@@ -368,7 +416,7 @@ def test_host_map_backs_keys_and_size():
     assert "return s.store.Size()" in src
     assert "return s.store.Keys()" in src
     # read-only queries leave no host trace (no hostRecord in Size/Keys)
-    body = src.split("func (m *Map) Size()")[1].split("func (m *Map) Keys()")[0]
+    body = src.split("func (m *Map[V]) Size()")[1].split("func (m *Map[V]) Keys()")[0]
     assert "hostRecord" not in body
 
 
@@ -404,6 +452,90 @@ def test_map_empty_renders_positionally_or_refuses_honestly():
     assert "return map[string]int64{}" in src
     with pytest.raises(emit.EmitError, match="untyped empty Map"):
         emit.emit(_compile('pub fn f() -> Int { var m = Map.empty() return 0 }'))
+
+
+# ---- host Map value type (item 113, FR-4) ----------------------------------
+# The host `Map.new()` object is generic over its value type, so a `Map[Str, Int]`
+# counter or `Map[Str, List[Str]]` ledger lowers Insert/Get against the DECLARED
+# value type — not a hardcoded String. Go cannot infer `V` from the argument-less
+# `MapNew()`, so emit pins it at the acquisition (`MapNew[int]()`). Before this,
+# a component that inserted a non-String value failed `go build`
+# (`cannot use n (int) as string value`). Mirrors backends/rust/emit.py's
+# `struct Map<V>` (FR-4). The executable proofs live in
+# scenarios/emitted/{counter,tagger}/gen_exec_test.go.
+
+_HOST_MAP_INT_SRC = """
+service Tally {
+  fn total() -> Int
+  fn get(key: Str) -> Int
+  emission fn bump(key: Str, amount: Int)
+}
+
+component Counter provides tally: Tally {
+  let store = effect Map.new() undo store.drop()
+
+  provide tally {
+    fn total()   = store.size()
+    fn get(key)  = store.get(key) ?? 0
+    fn bump(key, amount) {
+      effect store.insert(key, amount)
+      undo   store.remove(key)
+    }
+  }
+}
+"""
+
+
+def test_host_map_is_generic_over_its_value_type():
+    """The host Map runtime is `Map[V any]`, and a `Map[Str, Int]` binding pins
+    V from its `insert` sites so Insert/Get carry Int values (not String)."""
+    src = emit.emit(_compile(_HOST_MAP_INT_SRC), package="counter")
+    # generic runtime type + value-typed methods
+    assert "type Map[V any] struct {" in src
+    assert "func MapNew[V any]() *Map[V] {" in src
+    assert "func (m *Map[V]) Insert(k string, v V) {" in src
+    assert "func (m *Map[V]) Get(k string) (V, bool) {" in src
+    # the store binding pins V = int (a v1/v2 component: Int is Go `int`), so
+    # every reference site instantiates Map[int] consistently
+    assert "var store *Map[int]" in src
+    assert "store = MapNew[int]()" in src
+    assert "store *Map[int]" in src  # the impl struct field
+    # the Int value crosses Insert unchanged — the round-trip that a String-only
+    # host Map could not compile
+    assert "s.store.Insert(key, amount)" in src
+
+
+def test_host_map_pins_a_compound_list_value_type():
+    """A `Map[Str, List[Str]]` binding pins V = []string from an `insert` whose
+    value is a List[Str] param (learned across the provide methods)."""
+    src = emit.emit(_compile("""
+service Groups {
+  fn get_or(key: Str, fallback: List[Str]) -> List[Str]
+  emission fn set(key: Str, tags: List[Str])
+}
+
+component Tagger provides g: Groups {
+  let store = effect Map.new() undo store.drop()
+
+  provide g {
+    fn get_or(key, fallback) = store.get(key) ?? fallback
+    fn set(key, tags) {
+      effect store.insert(key, tags)
+      undo   store.remove(key)
+    }
+  }
+}
+"""), package="tagger")
+    assert "var store *Map[[]string]" in src
+    assert "store = MapNew[[]string]()" in src
+
+
+def test_host_map_defaults_to_string_when_no_insert_pins_a_type():
+    """A read-only / write-free host Map keeps the historical String surface —
+    memkv's `Map[Str, Str]` still emits Map[string] (byte-identical intent)."""
+    src = emit.emit(_compile(_HOST_MAP_ITER_SRC), package="memkv")
+    assert "var store *Map[string]" in src
+    assert "store = MapNew[string]()" in src
 
 
 # --------------------------------------------------------------------------

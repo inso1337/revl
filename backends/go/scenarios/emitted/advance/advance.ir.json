@@ -1,0 +1,437 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Counter": {
+      "methods": {
+        "count": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        },
+        "tick": {
+          "params": [],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "TickCounter",
+      "source": "backends/go/scenarios/advance.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "counter": "Counter"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "counter",
+          "service": "Counter",
+          "methods": [
+            {
+              "name": "count",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "size",
+                    "args": []
+                  }
+                }
+              ]
+            },
+            {
+              "name": "tick",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "key",
+                  "value": {
+                    "kind": "format",
+                    "template": "tick-$0",
+                    "args": [
+                      {
+                        "kind": "call",
+                        "target": {
+                          "kind": "name",
+                          "id": "store"
+                        },
+                        "method": "size",
+                        "args": []
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      },
+                      {
+                        "kind": "lit",
+                        "value": "fired"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Heartbeat",
+      "source": "backends/go/scenarios/advance.rvl",
+      "config": [],
+      "requires": {
+        "counter": "Counter"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "timer",
+          "mode": "every",
+          "interval_ms": 10000,
+          "body": [
+            {
+              "step": "emit",
+              "expr": {
+                "kind": "call",
+                "target": {
+                  "kind": "req",
+                  "name": "counter"
+                },
+                "method": "tick",
+                "args": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Warmup",
+      "source": "backends/go/scenarios/advance.rvl",
+      "config": [],
+      "requires": {
+        "counter": "Counter"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "timer",
+          "mode": "after",
+          "interval_ms": 50000,
+          "body": [
+            {
+              "step": "emit",
+              "expr": {
+                "kind": "call",
+                "target": {
+                  "kind": "req",
+                  "name": "counter"
+                },
+                "method": "tick",
+                "args": []
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "TickCounter",
+        "file": "backends/go/scenarios/advance.rvl",
+        "inject": [],
+        "provides": [
+          "counter"
+        ]
+      },
+      {
+        "name": "Heartbeat",
+        "file": "backends/go/scenarios/advance.rvl",
+        "inject": [
+          "counter"
+        ],
+        "provides": []
+      },
+      {
+        "name": "Warmup",
+        "file": "backends/go/scenarios/advance.rvl",
+        "inject": [
+          "counter"
+        ],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "TickCounter",
+      "Heartbeat",
+      "Warmup"
+    ]
+  },
+  "tests": [
+    {
+      "name": "an every-timer fires on each advanced tick",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "TickCounter",
+          "config": {}
+        },
+        {
+          "step": "load",
+          "component": "Heartbeat",
+          "config": {}
+        },
+        {
+          "step": "call",
+          "key": "counter",
+          "method": "count",
+          "args": [],
+          "bind": "before"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "before"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          }
+        },
+        {
+          "step": "advance",
+          "ms": 35000
+        },
+        {
+          "step": "call",
+          "key": "counter",
+          "method": "count",
+          "args": [],
+          "bind": "ticks"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "ticks"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 3
+            }
+          }
+        },
+        {
+          "step": "unload",
+          "component": "Heartbeat"
+        },
+        {
+          "step": "advance",
+          "ms": 100000
+        },
+        {
+          "step": "call",
+          "key": "counter",
+          "method": "count",
+          "args": [],
+          "bind": "settled"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "settled"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 3
+            }
+          }
+        },
+        {
+          "step": "unload",
+          "component": "TickCounter"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    },
+    {
+      "name": "an after-timer fires once when its delay elapses",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "TickCounter",
+          "config": {}
+        },
+        {
+          "step": "load",
+          "component": "Warmup",
+          "config": {}
+        },
+        {
+          "step": "advance",
+          "ms": 30000
+        },
+        {
+          "step": "call",
+          "key": "counter",
+          "method": "count",
+          "args": [],
+          "bind": "early"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "early"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          }
+        },
+        {
+          "step": "advance",
+          "ms": 30000
+        },
+        {
+          "step": "call",
+          "key": "counter",
+          "method": "count",
+          "args": [],
+          "bind": "fired"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "fired"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            }
+          }
+        },
+        {
+          "step": "advance",
+          "ms": 100000
+        },
+        {
+          "step": "call",
+          "key": "counter",
+          "method": "count",
+          "args": [],
+          "bind": "spent"
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "var",
+              "name": "spent"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 1
+            }
+          }
+        },
+        {
+          "step": "unload",
+          "component": "Warmup"
+        },
+        {
+          "step": "unload",
+          "component": "TickCounter"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}
