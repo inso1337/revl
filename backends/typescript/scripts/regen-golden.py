@@ -31,3 +31,13 @@ fr3_out = BACKEND / "golden" / "fr3_json.ts"
 fr3_out.write_text(emit(json.loads(fr3_ir.read_text(encoding="utf-8"))),
                    encoding="utf-8")
 print(f"regenerated {fr3_out} from {fr3_ir}")
+
+# async extern (roadmap item 80): the harness `http_post` shape — an
+# `emission async fn` awaited inside an async provide method. tsc-validated by
+# `npm run typecheck`, which pins `Promise<T>` + awaited call sites against the
+# original `Promise<string>` not assignable to `string` regression.
+async_ir = BACKEND / "tests" / "fixtures" / "async_http.ir.json"
+async_out = BACKEND / "golden" / "async_http.ts"
+async_out.write_text(emit(json.loads(async_ir.read_text(encoding="utf-8"))),
+                     encoding="utf-8")
+print(f"regenerated {async_out} from {async_ir}")

@@ -1,0 +1,13 @@
+extern emission async fn http_post(url: Str, body: Str) -> Str
+  = @ts {
+      const r = await Promise.resolve({ text: () => Promise.resolve(url + body) })
+      return await r.text()
+    }
+
+service Http { emission async fn post(url: Str, body: Str) -> Str }
+
+component Poster provides http: Http {
+  provide http {
+    async fn post(url, body) = http_post(url, body)
+  }
+}
