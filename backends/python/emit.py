@@ -1289,7 +1289,7 @@ def _emit_externs(externs: list) -> "_Lines":
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         out.add(0, f"def {name}({params}):")
-        body = bodies["py"].strip()
+        body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
                 out.add(1, line)
