@@ -127,16 +127,19 @@ $ truc assemble
 $ truc ship
 ```
 
-…and there is a `revl` alias, so the language keeps one front door for
-newcomers who never left `revl`:
+…and there is a namespaced `revl truc <verb>` subcommand, so the language keeps
+one front door for newcomers who never left `revl`:
 
 ```console
-$ revl add audited_database
-$ revl assemble
+$ revl truc add audited_database
+$ revl truc assemble
 ```
 
-Both drive the same engine. `truc` for people who think in trucs; `revl add`
-for people who just want to add a thing.
+Both drive the same engine — `revl truc <verb>` forwards its tail verbatim to
+the very same launcher the standalone `truc` runs. `truc` for people who think
+in trucs; `revl truc` for people who just want to add a thing without leaving
+the `revl` command. (It is a subcommand group under `revl`, deliberately not a
+flat `revl add` alias, so truc's verbs never crowd revl's top-level namespace.)
 
 ---
 

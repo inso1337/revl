@@ -1823,7 +1823,26 @@ def main(argv: list[str] | None = None) -> int:
     repair.add_argument("--json", action="store_true",
                         help="print the incident dossier as JSON")
 
+    # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
+    # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
+    # after `truc` is handed verbatim to truc's own launcher (`revl.truc:main`,
+    # the same entry point the `truc` console script calls), so every verb truc
+    # grows — `add`/`rm`/`assemble`/`ship` — works through `revl truc <verb>`
+    # without this dispatch knowing any of them. REMAINDER captures the tail
+    # untouched (flags included), so `revl truc add X` == `truc add X`.
+    truc_cmd = sub.add_parser(
+        "truc",
+        help="the revl component manager — `revl truc <verb>` is the namespaced "
+             "form of the standalone `truc <verb>` (add/rm/assemble/ship); the "
+             "tail is passed through unchanged (docs/truc.md)")
+    truc_cmd.add_argument("truc_args", nargs=argparse.REMAINDER, metavar="...",
+                          help="the truc verb and its arguments, forwarded as-is")
+
     args = parser.parse_args(argv)
+
+    if args.command == "truc":
+        from .truc import main as _truc_main  # noqa: PLC0415 — lazy, pulls cordis
+        return _truc_main(args.truc_args)
 
     if args.command == "explain":
         return _run_explain(args)
