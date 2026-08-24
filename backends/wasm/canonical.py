@@ -546,10 +546,21 @@ class _Canon:
         raise EmitError(f"cannot reinterpret variant payload {payload!r}")
 
     # -- the canonical export wrapper ------------------------------------
-    def canon_export(self, fn: dict, package: str, iface: str) -> str:
+    def canon_export(self, fn: dict, package: str, iface: str,
+                     call_symbol: str | None = None) -> str:
+        """A canonical-ABI wrapper for one boundary function/method.
+
+        `fn` carries `name`/`params`/`returns` in the SAME shape whether it is a
+        top-level pure `fn` or a service method. `call_symbol` names the core
+        function the wrapper delegates to: for a pure `fn` it is `$<name>` (the
+        default); for a service method it is the named provide-method function
+        (`$__prov_<key>_<method>`), which carries the very same internal ABI a
+        pure `fn` does, so exactly one wrapper shape serves both.
+        """
         name = fn["name"]
         params = fn.get("params") or []
         ret = fn.get("returns")
+        callee = call_symbol or f"${name}"
         export_name = f"{package}/{iface}#{_kebab_name(name)}"
 
         # flatten each param into named core params
@@ -580,7 +591,7 @@ class _Canon:
             stmts.append(f"(local.set {a} {val})")
             arg_gets.append(f"(local.get {a})")
 
-        call = f"(call ${name} {' '.join(arg_gets)})".replace("  ", " ")
+        call = f"(call {callee} {' '.join(arg_gets)})".replace("  ", " ")
 
         # result: 0 -> void, 1 -> direct core value, >1 -> indirect return area
         flat = self.flatten(ret) if ret and ret != "Unit" else []
@@ -727,6 +738,71 @@ def _boundary_functions(functions: list[dict], canon: _Canon) -> list[dict]:
     return out
 
 
+def _boundary_methods(methods: dict, canon: _Canon) -> list[tuple[str, dict]]:
+    """The service methods presentable over the canonical ABI, in declaration
+    order: every parameter is canonically lowerable as a param and the result as
+    a result — the SAME gate the pure-`fn` path uses. A method carrying anything
+    else is left off the interface; it stays a `provide:` export in the core
+    module so an intra-module caller may still reach it, never mis-lowered."""
+    out: list[tuple[str, dict]] = []
+    for mname, spec in (methods or {}).items():
+        ret = spec.get("returns")
+        if ret and ret != "Unit" and not canon.can_lower_result(ret):
+            continue
+        params = spec.get("params") or []
+        if any(not canon.can_lower_param(p.get("type")) for p in params):
+            continue
+        out.append((mname, spec))
+    return out
+
+
+def _provider_of(components: list[dict], service: str) -> tuple[dict, str] | None:
+    """The `(component, provide-key)` that provides `service`, or None. A single
+    service is the shippable target, so the FIRST provider wins if several do."""
+    for component in components or []:
+        for key, provided in (component.get("provides") or {}).items():
+            if provided == service:
+                return component, key
+    return None
+
+
+# The provide-method exports `_ComponentEmitter` emits are anonymous core funcs
+# (`(func (export "provide:<key>.<method>") …)`); a canonical wrapper in the same
+# module can only `call` a *named* function. We name them here — purely in the
+# component text this module wraps, so `_ComponentEmitter` and every existing
+# component golden stay untouched — and hand the wrapper the symbol to call.
+_PROVIDE_EXPORT = _re.compile(r'\(func \(export "(provide:[^"]+)"\)')
+
+
+def _provide_symbol(export_name: str) -> str:
+    # `provide:realm/kv.get` -> `$__prov_realm_kv_get`
+    return "$__prov_" + _san(export_name[len("provide:"):])
+
+
+def _name_provide_funcs(module: str) -> tuple[str, dict[str, str]]:
+    """Give every `provide:` export in `module` a callable `$__prov_*` symbol.
+    Returns the rewritten module and a `{export_name: symbol}` map."""
+    symbols: dict[str, str] = {}
+
+    def repl(m: "_re.Match") -> str:
+        export_name = m.group(1)
+        sym = _provide_symbol(export_name)
+        symbols[export_name] = sym
+        return f'(func {sym} (export "{export_name}")'
+
+    return _PROVIDE_EXPORT.sub(repl, module), symbols
+
+
+def _splice_canonical(core: str, additions: list[str]) -> str:
+    """Splice `additions` (WAT funcs) in just before a core module's closing
+    paren. Shared by the pure-`fn` and service-method paths."""
+    body = core.rstrip()
+    if not body.endswith(")"):
+        raise EmitError("unexpected core module shape (no closing paren to splice into)")
+    trunk = body[:-1].rstrip("\n")
+    return trunk + "\n" + "\n".join(additions) + "\n)\n"
+
+
 def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
                          package: str, iface: str) -> str:
     """The `_V3Emitter` core module for this IR, with the canonical boundary
@@ -744,14 +820,81 @@ def _core_with_canonical(ir: dict, canon: _Canon, boundary: list[dict],
     core = modules.get("functions")
     if core is None:
         raise EmitError("no `functions` module was emitted for the canonical component")
-    body = core.rstrip()
-    if not body.endswith(")"):
-        raise EmitError("unexpected core module shape (no closing paren to splice into)")
-    trunk = body[:-1].rstrip("\n")
-    additions = [canon.base_helpers()]
-    additions += list(canon.helpers.values())
-    additions += exports
-    return trunk + "\n" + "\n".join(additions) + "\n)\n"
+    additions = [canon.base_helpers()] + list(canon.helpers.values()) + exports
+    return _splice_canonical(core, additions)
+
+
+def _service_core_with_canonical(ir: dict, canon: _Canon, component: dict,
+                                 boundary: list[tuple[str, dict]],
+                                 package: str, iface: str) -> str:
+    """The `_ComponentEmitter` module for `component`, with the canonical
+    boundary spliced in: each service method's `provide:` export is named, and a
+    canonical wrapper delegates to it. The provide method already lowers to the
+    tier's INTERNAL ABI (`_ComponentEmitter._boundary_wty` — `Int` an i64 value,
+    every compound an i32 pointer), which is exactly what the pure-`fn` wrapper
+    consumes, so the SAME lift/lower library and wrapper serve both."""
+    modules = _emit_core(ir)
+    name = component.get("name")
+    core = modules.get(name)
+    if core is None:
+        raise EmitError(
+            f"no module emitted for component {name!r} (the canonical service "
+            "boundary lowers a single provider component)")
+    named_core, symbols = _name_provide_funcs(core)
+    exports = []
+    for mname, spec in boundary:
+        # resolve the provide export by its `.<method>` suffix so a realm-scoped
+        # key (`isolate`) resolves without re-deriving the scope here.
+        sym = _resolve_provide_symbol(symbols, mname)
+        fn = {"name": mname, "params": spec.get("params") or [],
+              "returns": spec.get("returns")}
+        exports.append(canon.canon_export(fn, package, iface, call_symbol=sym))
+    additions = [canon.base_helpers()] + list(canon.helpers.values()) + exports
+    return _splice_canonical(named_core, additions)
+
+
+def _resolve_provide_symbol(symbols: dict[str, str], method: str) -> str:
+    matches = [sym for exp, sym in symbols.items() if exp.endswith(f".{method}")]
+    if not matches:
+        raise EmitError(
+            f"no `provide:` export found for method {method!r} in the component "
+            "module (the provider must actually provide the presented method)")
+    if len(matches) > 1:
+        raise EmitError(
+            f"method {method!r} is provided under more than one key; name the "
+            "single provided service to present it unambiguously")
+    return matches[0]
+
+
+def _assemble(*, service: str, methods: dict, types: dict, core_wat: str,
+              presented: list[str], package: str) -> dict:
+    """The WIT document + result dict shared by the pure-`fn` and service paths.
+
+    `methods` is the `{name: {params, returns}}` view of exactly what the core
+    module presents, so the embedded WIT (built from it via slice-1's exporter)
+    and the binary agree by construction, and a `world` exporting the interface
+    gives wit-component an export target."""
+    iface = _kebab_type(service)
+    synthetic = {"services": {service: {"methods": methods}},
+                 "types": types, "externs": []}
+    interface_wit = _relocate_types_into_interface(
+        export_wit(synthetic, service=service, package=package), iface)
+    world_name = f"{iface}-component"
+    wit = (
+        interface_wit.rstrip()
+        + "\n\n"
+        + "/// The world wit-component wraps the core module against: it exports\n"
+        + f"/// the `{iface}` interface above over the canonical ABI (item 41).\n"
+        + f"world {world_name} {{\n  export {iface};\n}}\n"
+    )
+    return {
+        "core_wat": core_wat,
+        "wit": wit,
+        "package": package,
+        "interface": iface,
+        "world": world_name,
+        "functions": presented,
+    }
 
 
 def emit_component(ir: dict, *, service: str,
@@ -763,12 +906,23 @@ def emit_component(ir: dict, *, service: str,
     WIT document (the slice-1 interface plus a world that exports it), and the
     names needed to wrap the two into a component with ``build_component``.
 
-    ``service`` names the WIT interface the boundary functions are grouped under
-    (the component's exported interface). Raises ``EmitError`` if the IR has no
-    canonically-lowerable pure function to present.
+    ``service`` names the WIT interface. Two IR shapes cross:
+
+      * a component that **provides** a service named ``service`` — the service's
+        ``provide`` methods are lowered by ``_ComponentEmitter`` and presented
+        over the canonical ABI (the service-level boundary, item 41 slice-3);
+      * otherwise, the top-level pure ``fn``s, grouped under ``service`` as the
+        interface name (the original pure-`fn` boundary).
+
+    Raises ``EmitError`` if the selected shape has nothing canonically lowerable.
     """
-    functions = ir.get("functions") or []
     canon = _Canon(ir.get("types") or {})
+    provider = _provider_of(ir.get("components") or [], service) \
+        if service in (ir.get("services") or {}) else None
+    if provider is not None:
+        return _emit_service_component(ir, canon, service, provider, package)
+
+    functions = ir.get("functions") or []
     boundary = _boundary_functions(functions, canon)
     if not boundary:
         raise EmitError(
@@ -780,39 +934,38 @@ def emit_component(ir: dict, *, service: str,
             "payload, stays off the interface)."
         )
     iface = _kebab_type(service)
-
-    # The WIT interface, produced by slice-1's exporter over a service view of
-    # the boundary functions, so the component's interface is byte-identical to
-    # `revl export wit`. A `world` that exports it is appended so wit-component
-    # has an export target.
-    synthetic = {
-        "services": {service: {"methods": {
-            fn["name"]: {"params": fn.get("params") or [],
-                         "returns": fn.get("returns")}
-            for fn in boundary}}},
-        "types": ir.get("types") or {},
-        "externs": [],
-    }
-    interface_wit = _relocate_types_into_interface(
-        export_wit(synthetic, service=service, package=package), iface)
-    world_name = f"{iface}-component"
-    wit = (
-        interface_wit.rstrip()
-        + "\n\n"
-        + "/// The world wit-component wraps the core module against: it exports\n"
-        + f"/// the `{iface}` interface above over the canonical ABI (item 41).\n"
-        + f"world {world_name} {{\n  export {iface};\n}}\n"
-    )
-
     core_wat = _core_with_canonical(ir, canon, boundary, package, iface)
-    return {
-        "core_wat": core_wat,
-        "wit": wit,
-        "package": package,
-        "interface": iface,
-        "world": world_name,
-        "functions": [fn["name"] for fn in boundary],
-    }
+    methods = {fn["name"]: {"params": fn.get("params") or [],
+                            "returns": fn.get("returns")} for fn in boundary}
+    return _assemble(service=service, methods=methods, types=ir.get("types") or {},
+                     core_wat=core_wat, presented=[fn["name"] for fn in boundary],
+                     package=package)
+
+
+def _emit_service_component(ir: dict, canon: _Canon, service: str,
+                            provider: tuple[dict, str], package: str) -> dict:
+    """Present a component-provided service's ``provide`` methods over the
+    canonical ABI (item 41 slice-3, the service-level boundary)."""
+    component, _key = provider
+    iface = _kebab_type(service)
+    declared = ((ir.get("services") or {}).get(service) or {}).get("methods") or {}
+    boundary = _boundary_methods(declared, canon)
+    if not boundary:
+        raise EmitError(
+            f"service {service!r} presents no canonical-ABI-emittable method: a "
+            "method crosses when its whole signature (params + result) is "
+            "canonically lowerable — scalars (Int/Bool/Str), records, lists and "
+            "variants/Opt/Result. This service has none (a Float/Map/resource/"
+            "function-typed signature, or a variant PARAM with an aggregate "
+            "payload, stays off the interface)."
+        )
+    core_wat = _service_core_with_canonical(
+        ir, canon, component, boundary, package, iface)
+    methods = {mname: {"params": spec.get("params") or [],
+                       "returns": spec.get("returns")} for mname, spec in boundary}
+    return _assemble(service=service, methods=methods, types=ir.get("types") or {},
+                     core_wat=core_wat, presented=[m for m, _ in boundary],
+                     package=package)
 
 
 # --------------------------------------------------------------------------- #

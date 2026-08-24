@@ -44,6 +44,10 @@ _SRC = (GOLDEN / "canonical_echoer.revl").read_text(encoding="utf-8")
 _SERVICE = "Echoer"
 _AGG_SRC = (GOLDEN / "canonical_aggregates.revl").read_text(encoding="utf-8")
 _AGG_SERVICE = "Registry"
+# The service-level fixture: the SAME value surface, but presented from a
+# component's `provide` methods (slice-3's final piece) rather than top-level fns.
+_SVC_SRC = (GOLDEN / "canonical_service.revl").read_text(encoding="utf-8")
+_SVC_SERVICE = "Registry"
 
 
 def _emit():
@@ -53,6 +57,11 @@ def _emit():
 def _emit_agg():
     return _canonical().emit_component(
         compile_source(_AGG_SRC), service=_AGG_SERVICE)
+
+
+def _emit_svc():
+    return _canonical().emit_component(
+        compile_source(_SVC_SRC), service=_SVC_SERVICE)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +173,99 @@ def test_unlowerable_functions_stay_off_the_interface_but_in_the_core():
 
 
 # --------------------------------------------------------------------------- #
+# Service-level canonical lowering — the final piece of slice-3. A component's
+# `provide` methods (not just top-level pure fns) cross the canonical boundary.
+# --------------------------------------------------------------------------- #
+
+def test_service_core_wat_matches_golden():
+    res = _emit_svc()
+    golden = (GOLDEN / "canonical_service.core.wat").read_text(encoding="utf-8")
+    assert res["core_wat"] == golden
+
+
+def test_service_wit_matches_golden():
+    res = _emit_svc()
+    golden = (GOLDEN / "canonical_service.wit").read_text(encoding="utf-8")
+    assert res["wit"] == golden
+
+
+def test_service_provide_method_is_named_and_wrapped():
+    """The provide-method export the component tier emits (an anonymous
+    `provide:<key>.<method>` core func) is given a callable `$__prov_*` symbol,
+    and a canonical wrapper with the interface-qualified export name delegates to
+    it over cabi_realloc + the lift/lower library."""
+    core = _emit_svc()["core_wat"]
+    assert '(func (export "cabi_realloc")' in core
+    assert '(func $__prov_reg_greet (export "provide:reg.greet")' in core
+    assert '(func (export "revl:exported/registry#greet")' in core
+    assert "(call $__prov_reg_greet" in core
+    assert "$__canon_lift_str" in core
+
+
+def test_service_wit_interface_is_export_wit_verbatim():
+    """The embedded interface is exactly `revl export wit --service Registry`
+    over the same component IR — the binary and the interface documentation
+    agree. (`export_wit` emits the record at top level; the component relocates
+    it into the interface body, the only difference, covered separately.)"""
+    from revl.export_wit import export_wit  # noqa: PLC0415
+    res = _emit_svc()
+    ir = compile_source(_SVC_SRC)
+    interface = export_wit(ir, service=_SVC_SERVICE, package="revl:exported")
+    for line in interface.splitlines():
+        s = line.strip()
+        if s.endswith(";") and "func(" in s:      # a method declaration line
+            assert s in res["wit"], s
+
+
+def test_service_presents_the_whole_lowerable_surface():
+    """Str, records (Int+Str fields), lists of records, non-Str scalars, and
+    Opt/Result all cross as *service methods*, not just top-level fns."""
+    res = _emit_svc()
+    assert res["functions"] == [
+        "greet", "make", "age_of", "rename", "dbl", "roster", "maybe", "checked"]
+    wit = res["wit"]
+    assert "greet: func(nm: string) -> string;" in wit
+    assert "make: func(nm: string, a: s64) -> person;" in wit
+    assert "roster: func(nm: string, a: s64) -> list<person>;" in wit
+    assert "checked: func(n: s64) -> result<s64, string>;" in wit
+
+
+def test_service_unlowerable_method_stays_off_interface_but_in_core():
+    """A method whose signature the canonical layer cannot present (a variant
+    PARAM with an aggregate payload — the same remaining gap as the fn path) is
+    left off the exported interface, yet its `provide:` export stays in the core
+    module. The SAME variant as a RESULT crosses (it goes through memory)."""
+    canonical = _canonical()
+    ir = compile_source(
+        "type Person = { name: Str, age: Int }\n"
+        "service Mixed {\n"
+        "  fn tag(s: Str) -> Str\n"
+        "  fn unbox(o: Opt[Person]) -> Int\n"
+        "  fn box(nm: Str, a: Int) -> Opt[Person]\n"
+        "}\n"
+        "component C provides mx: Mixed {\n"
+        "  provide mx {\n"
+        "    fn tag(s) = `[${s}]`\n"
+        "    fn unbox(o) = 0\n"
+        "    fn box(nm, a) = Some({ name: nm, age: a })\n"
+        "  }\n"
+        "}\n")
+    res = canonical.emit_component(ir, service="Mixed")
+    assert res["functions"] == ["tag", "box"]
+    assert '(export "provide:mx.unbox")' in res["core_wat"]     # in the core
+    assert 'export "revl:exported/mixed#unbox"' not in res["core_wat"]  # off iface
+
+
+def test_service_refuses_when_no_lowerable_method():
+    canonical = _canonical()
+    ir = compile_source(
+        "service Floaty { fn f(x: Float) -> Float }\n"
+        "component C provides fl: Floaty { provide fl { fn f(x) = x } }\n")
+    with pytest.raises(canonical.EmitError, match="no canonical-ABI-emittable method"):
+        canonical.emit_component(ir, service="Floaty")
+
+
+# --------------------------------------------------------------------------- #
 # Build + execute under wasmtime's COMPONENT MODEL — the real proof.
 # --------------------------------------------------------------------------- #
 
@@ -225,5 +327,37 @@ def test_aggregate_component_builds_validates_and_round_trips(tmp_path):
     assert call("maybe(-1)") == "none"
     assert call("or-zero(some(42))") == "42"
     assert call("or-zero(none)") == "0"
+    assert call("checked(7)") == "ok(7)"
+    assert call('checked(-2)') == 'err("nonpositive")'
+
+
+def test_service_component_builds_validates_and_round_trips(tmp_path):
+    """The final slice-3 proof: a component's `provide` methods — lowered by the
+    heavier `_ComponentEmitter`, not the pure-fn path — cross the canonical
+    boundary and run under wasmtime's component model. A real service crosses as
+    a standard component, Str and the full aggregate surface alike."""
+    canonical = _canonical()
+    _toolchain_or_skip(canonical)
+    res = _emit_svc()
+    component = canonical.build_component(
+        res["core_wat"], res["wit"], tmp_path, res["world"], name="store")
+    canonical.validate_component(component)
+
+    def call(invoke):
+        return canonical.run_component(component, invoke)
+
+    # a Str-surface method (the shippable target)
+    assert canonical.run_component_str(component, "greet", "revl") == "Hello, revl!"
+    assert canonical.run_component_str(component, "greet", "") == "Hello, !"
+    # a non-Str scalar method
+    assert call("dbl(21)") == "42"
+    # record-surface methods — Str+Int -> record, record -> Int, record -> record
+    assert call('make("revl", 7)') == '{name: "revl", age: 7}'
+    assert call('age-of({name: "x", age: 9})') == "9"
+    assert call('rename({name: "old", age: 3}, "new")') == '{name: "new", age: 3}'
+    # list of records, and Opt/Result results — all through provide methods
+    assert call('roster("z", 2)') == '[{name: "z", age: 2}]'
+    assert call("maybe(9)") == "some(9)"
+    assert call("maybe(-1)") == "none"
     assert call("checked(7)") == "ok(7)"
     assert call('checked(-2)') == 'err("nonpositive")'
