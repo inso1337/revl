@@ -51,8 +51,9 @@ Int/Bool/Str/Bytes/List/record/variant/Opt/Result values
 
 The fixed-shape stdlib surface (docs/stdlib-2.0.md) lowers over the canonical
 ABI model. The substrate's rule: **`length`, `push`, `concat`, `slice`,
-`charAt`, `charCodeAt` (and the arithmetic/rendering builtins) lower; the
-string-splitting/joining/searching builtins do not.**
+`charAt`, `charCodeAt`, plus the reader builtins `split`, `join` and `Str`'s
+`indexOf` (and the arithmetic/rendering builtins) lower; only `repeat`, the
+`Map` operations, and `List.indexOf` do not.**
 
 | builtin | on | wasm? | notes / exact refusal |
 |---|---|---|---|
@@ -66,18 +67,23 @@ string-splitting/joining/searching builtins do not.**
 | `to_int()` / `to_int32()` | Int32 / Int | ✅ | checked width conversions |
 | `div_trunc` / `div_floor` / `div_euclid` / `mod` | Int | ✅ | named integer ops, same result every tier |
 | `checked_div_trunc` / `_floor` / `_euclid` / `checked_mod` | Int | ✅ | total forms: zero divisor → `Err(...)`, no trap |
-| `indexOf(v)` | Str, List | ❌ | `indexOf is not lowerable on this tier yet` |
-| `split(sep)` | Str | ❌ | `unsupported builtin method 'split'` |
-| `join(sep)` | List[Str] | ❌ | `unsupported builtin method 'join'` |
+| `indexOf(v)` | Str | ✅ | `$str_index_of`: byte substring scan, returns the **code-point index** of the match (or `-1`), matching py/ts |
+| `indexOf(v)` | List | ❌ | `indexOf is not lowerable on this tier yet for List — the element comparison has no representation here; use a hosted backend` |
+| `split(sep)` | Str | ✅ | `$str_split` → `List[Str]`: JS-shape (trailing empties kept, `""` → per-code-point pieces) |
+| `join(sep)` | List[Str] | ✅ | `$str_join`: elements joined by `sep` over the bump heap; `[]` → `""` |
 | `repeat(n)` | Str | ❌ | `unsupported builtin method 'repeat'` |
 | `set` / `lookup` / `has` / `size` / `keys` / `remove` | Map | ❌ | `` `set` is not lowerable on this tier yet — the Map value type has no representation here; use a hosted backend`` |
 
-The harness's string-protocol tools (`split`/`join` in top-level fns,
-docs/guide-ai-agents.md) therefore do **not** run on the substrate: the protocol
-must be re-expressed with `slice`/`charAt`/`charCodeAt`/`length` (or the
-toolbox's wire format re-shaped) for a wasm placement. The refusals are emitted
-at compile time, so a wasm target never silently mis-splits — it fails loudly at
-emit.
+The harness's *reader* artifacts now cross to the substrate: the durable pipe
+**reader** and the agent's toolbox (`Str.split`), and the web router's
+`route_request` (`Str.indexOf`), lower to `$str_split`/`$str_index_of` over the
+linear-memory `Str`/`List` ABI, closing the gap the concat-built **writer**
+(`log_line`) already crossed. The three reader helpers are pulled into a module
+only on demand (like `$f64_to_str`), so a component that never splits/joins/
+searches keeps a byte-identical helper preamble. What still does **not** run on
+the substrate is `repeat`, the `Map` operations, and `List.indexOf` (the
+per-element comparison the harness's wire protocol never reaches); those are
+emitted as compile-time refusals, so a wasm target never silently degrades.
 
 ## The service boundary
 
@@ -146,9 +152,10 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 
 A harness-shaped component that must also run on the substrate:
 
-1. **Keep string work to the six builtins** — `length`/`push`/`concat`/`slice`/
-   `charAt`/`charCodeAt` — and express `split`/`join`/`indexOf`/`repeat` with
-   them, or move that logic into a `fn` that stays on hosted tiers.
+1. **Most string work lowers** — `length`/`push`/`concat`/`slice`/`charAt`/
+   `charCodeAt`, plus the reader trio `split`/`join`/`Str.indexOf`. Only
+   `repeat` and `List.indexOf` still need expressing with the others (or moving
+   into a `fn` that stays on hosted tiers).
 2. **Return Str/List/record/Opt/Result from services is fine** (linear-memory
    boundary); avoid `Float` and `Map` values anywhere, and avoid function-typed
    service params/returns.
