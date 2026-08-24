@@ -78,6 +78,10 @@ def test_end_to_end_java_golden():
 
 REJECTIONS = {
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
+    # roadmap item 80: a sync provide method that reaches an `async` extern is
+    # refused with the twin of the emission-propagation diagnostic (async-
+    # extern.md §3); declare the service operation `async fn` to admit it.
+    "a1_async_extern_sync_method.rvl": "is declared sync, but this implementation reaches async extern `http_post`",
     "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",

@@ -1,0 +1,106 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Http": {
+      "methods": {
+        "post": {
+          "params": [
+            {
+              "name": "url",
+              "type": "Str"
+            },
+            {
+              "name": "body",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": true,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Poster",
+      "source": "async_http.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "http": "Http"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "http",
+          "service": "Http",
+          "methods": [
+            {
+              "name": "post",
+              "params": [
+                "url",
+                "body"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "http_post",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "url"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "body"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Poster",
+        "file": "async_http.rvl",
+        "inject": [],
+        "provides": [
+          "http"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Poster"
+    ]
+  },
+  "externs": [
+    {
+      "name": "http_post",
+      "class": "emission",
+      "params": [
+        {
+          "name": "url",
+          "type": "Str"
+        },
+        {
+          "name": "body",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": "\n      const r = await Promise.resolve({ text: () => Promise.resolve(url + body) })\n      return await r.text()\n    "
+      },
+      "async": true
+    }
+  ]
+}
