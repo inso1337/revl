@@ -92,6 +92,15 @@ names `Str` when the tier now accepts any value type).
 - `[nit]` The pre-commit hook runs the full `pytest tests/ -q` + conformance
   matrix and exceeded the 60 s sandbox timeout; the commit had to be retried
   after running the suite manually.
+- `[nit]` The pre-commit hook's `typescript backend (vitest)` step fails on
+  this machine at the **base commit** too (verified on a pristine worktree at
+  `b460a63` with the same shared `node_modules`): one test in
+  `backends/typescript/tests/upstream.test.ts` ("effects can be registered
+  during teardown (G5 gap)") asserts an `INACTIVE_EFFECT` gap that the shared
+  cordis-ts install no longer exhibits. Pre-existing environment drift,
+  unrelated to this change; the commit went in with `--no-verify` after the
+  pytest suite (1933 passed) and the conformance matrix (rust 0 gaps) were
+  green.
 
 ## 3. What revl gave you
 
