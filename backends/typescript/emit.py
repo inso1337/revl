@@ -114,8 +114,24 @@ def _split_fn_type(name: str) -> "tuple[list[str], str] | None":
     return None
 
 
-def _ts_type(name: object) -> str:
-    """Surface type -> TS type (IR v1/A6). Unknown names map to `unknown`."""
+def _ts_type(name: object, known_types: "frozenset[str]" = frozenset()) -> str:
+    """Surface type -> TS type (IR v1/A6).
+
+    `known_types` is the set of type names this document actually *declares*
+    (and therefore emits an `interface`/`type` alias for — see `_emit_ts_types`).
+    A bare name is rendered by that declared name only when it is in the set;
+    any other unrecognised name is opaque and maps to `unknown`.
+
+    This distinction is the whole point of the pass (harness findings #19 vs the
+    item-89 regression). A record-typed service parameter in an IR v3 document —
+    where the record IS declared — must render by name (`List[Msg]` -> `Msg[]`)
+    so the emitted service interface lines up with the emitted `interface Msg`.
+    But an IR v1/v2 document has no `type` declarations at all: a name like
+    `examples/user_cache.rvl`'s `Row` (`List[Row]`) resolves to nothing, so it
+    is opaque and erases to `unknown` — exactly as the java tier erases the same
+    `Row` to `Object` and rust to `Value`. Rendering it by name emitted a
+    dangling `Row[]` that `tsc` rejects with `Cannot find name 'Row'`.
+    """
     if not isinstance(name, str) or not name:
         return "unknown"
     if name in TYPE_MAP:
@@ -127,26 +143,28 @@ def _ts_type(name: object) -> str:
         # them, so positional placeholders are supplied here; they are not
         # observable at any call site.
         params, returns = fn
-        rendered = ", ".join(f"a{i}: {_ts_type(p)}" for i, p in enumerate(params))
-        return f"(({rendered}) => {_ts_type(returns)})"
+        rendered = ", ".join(
+            f"a{i}: {_ts_type(p, known_types)}" for i, p in enumerate(params))
+        return f"(({rendered}) => {_ts_type(returns, known_types)})"
     generic = re.match(r"^(\w+)\[(.+)\]$", name)
     if generic:
         head, inner = generic.group(1), generic.group(2)
         if head == "List":
-            return f"{_ts_type(inner)}[]"
+            return f"{_ts_type(inner, known_types)}[]"
         if head == "Opt":
-            return f"{_ts_type(inner)} | undefined"
+            return f"{_ts_type(inner, known_types)} | undefined"
         if head == "Map":
-            return f"Map<{_ts_type(inner.split(',')[0].strip())}, {_ts_type(inner.split(',')[1].strip())}>"
+            return (f"Map<{_ts_type(inner.split(',')[0].strip(), known_types)}, "
+                    f"{_ts_type(inner.split(',')[1].strip(), known_types)}>")
         if head == "Result":
-            return (f'{{ kind: "Ok"; value: {_ts_type(inner.split(",")[0].strip())} }}'
-                    f' | {{ kind: "Err"; value: {_ts_type(inner.split(",")[1].strip())} }}')
-    # v3 record/ADT names (Msg, ToolReq, ...) are emitted as interfaces above;
-    # route them through the v3 renderer so a service signature carrying a
-    # record-typed param does not collapse to `unknown` (harness finding #19).
-    v3 = _ts_v3_type(name)
-    if v3 != "unknown":
-        return v3
+            return (f'{{ kind: "Ok"; value: {_ts_type(inner.split(",")[0].strip(), known_types)} }}'
+                    f' | {{ kind: "Err"; value: {_ts_type(inner.split(",")[1].strip(), known_types)} }}')
+    # A declared v3 record/ADT name (Msg, ToolReq, ...) is emitted as an
+    # interface/type alias above; route it through the v3 renderer so a service
+    # signature carrying that record renders it by name (harness finding #19).
+    # An *undeclared* name has nothing to render against and stays opaque.
+    if name in known_types:
+        return _ts_v3_type(name)
     return "unknown"
 
 
@@ -857,8 +875,14 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[
         body_scope = scope.child()
         for param in params:
             body_scope.locals.add(param)
+        # The implementation's param types must line up with the service
+        # interface's (the object is `satisfies <Service>`), so both resolve
+        # names against the same declared-type set — the document's `types`,
+        # carried on the rendering context. In a v1/v2 document that set is
+        # empty, so an undeclared name (`Row`) erases to `unknown` on both sides.
+        known_types = frozenset(ctx.types)
         sig = ", ".join(
-            f"{p}: {_ts_type(spec.get('type'))}"
+            f"{p}: {_ts_type(spec.get('type'), known_types)}"
             for p, spec in zip(params, spec_params)
         )
         # services 2.0 §5: an async operation lowers to an async method, whose
@@ -2217,17 +2241,22 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
                 lifecycle, types, functions, externs,
                 ir.get("services") or {}, components))
 
-    # Service interfaces (coeffect interfaces, DESIGN.md §3.1).
+    # Service interfaces (coeffect interfaces, DESIGN.md §3.1). This document
+    # declares its record/ADT types (emitted above by _emit_ts_types), so a
+    # record referenced only here — never in a component body — still renders by
+    # name and resolves to its emitted interface.
+    known_types = frozenset(types)
     for sname, service in services.items():
         _ident(sname, "service")
         out.append(f"export interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
             _ident(mname, "method")
             params = ", ".join(
-                f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'))}"
+                f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'), known_types)}"
                 for p in method.get("params") or []
             )
-            returns = _ts_type(method["returns"]) if method.get("returns") else "void"
+            returns = (_ts_type(method["returns"], known_types)
+                       if method.get("returns") else "void")
             # services 2.0 §5: an async operation returns a Promise on this tier.
             if method.get("async"):
                 returns = f"Promise<{returns}>"
