@@ -195,6 +195,52 @@ def test_v3_stdlib_emit_shapes():
     _has(src, "RevlOk[int64, string]{Value: n}")
 
 
+# ---------------------------------------------------------------------------
+# Roadmap item 94 — async function-value color erasure (follow-up to item 92).
+#
+# Item 92 added `Async[T]` (docs/design/async-function-values.md): a first-class
+# callback whose declared return is `Async[T]` colors async/await on py/ts. The
+# go tier has no async-fn machinery, so it *erases* the color — but the fn-type
+# renderer passed the `Async[T]` return through untouched, so
+# `(Str) -> Async[Str]` emitted the invalid Go `func(string) Async[Str]` that
+# `go build` rejects. The fix erases the async return to its concrete `T`.
+
+def _async_callback_ir():
+    from revl import compile_source  # noqa: PLC0415
+    return compile_source(
+        "fn agent_loop(prompt: Str, complete: (Str) -> Async[Str], "
+        "max_steps: Int) -> Str {\n"
+        "  let first: Str = complete(prompt)\n"
+        "  return first\n"
+        "}\n"
+    )
+
+
+def test_async_typed_callback_return_erases_to_concrete_type():
+    src = emit.emit(_async_callback_ir(), package="asyncfn")
+    # the erased color renders the concrete Go return type, never `Async[T]`
+    _has(src, "complete func(string) string")
+    assert "Async" not in src
+
+
+def test_go_build_accepts_async_typed_callback_erasure():
+    """Definition-of-done pin: an async-typed callback param emits Go that a
+    real `go build` accepts — `func(...) T`, never the invalid `Async[T]`."""
+    import sys  # noqa: PLC0415
+
+    sys.path.insert(0, str(ROOT / "tools"))
+    from validate import GoValidator  # noqa: PLC0415
+
+    validator = GoValidator()
+    reason = validator.unavailable()
+    if reason:
+        pytest.skip(reason)
+    src = emit.emit(_async_callback_ir(), package="asyncfn")
+    results = validator.check([("async-fn-value-erasure", src)])
+    status, detail = results["async-fn-value-erasure"]
+    assert status == "ok", detail
+
+
 def _gofmt(src: str) -> str | None:
     """gofmt `src`, or None when gofmt is unavailable. gofmt also strips the
     redundant parens the expression renderer emits around `if`/`for`
