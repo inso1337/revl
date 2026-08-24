@@ -378,6 +378,20 @@ def _string(value) -> str:
             out.append("\\t")
         elif 0x20 <= cp <= 0x7E:
             out.append(ch)
+        elif cp >= 0x80 and ch.isprintable():
+            # Rust source is UTF-8, so a printable non-ASCII scalar can appear
+            # literally inside a `"..."` string. Emitting it literally (rather
+            # than `\u{XXXX}`) keeps the literal free of braces, which is what
+            # makes it safe in a format-macro position: an `assert!`/`format!`
+            # argument re-scans the string's *value* for `{...}`, and a
+            # `\u{2014}` that reaches such a position (directly, or after a
+            # second escaping pass has turned it into a literal `\u{2014}` in
+            # the source) is read as `{2014}` -> "invalid reference to
+            # positional argument 2014". The literal form has no brace to
+            # collide, and the fix is position-independent. `\u{...}` is
+            # reserved below for the lone-surrogate / unprintable case, which
+            # cannot appear literally in UTF-8 source. (item 135, finding #35)
+            out.append(ch)
         else:
             out.append("\\u{%x}" % cp)
     out.append('"')
