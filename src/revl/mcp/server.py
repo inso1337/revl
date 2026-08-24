@@ -680,22 +680,21 @@ def _tool_admit(arguments: dict) -> dict:
                        "against what is already loaded",
         }]}
     replacing = tuple(arguments.get("replacing") or ())
+    # Honor `replacing` on the FIRST (and only) compile — mirrors _tool_swap
+    # (line 308-311). A provider swap ships the candidate providing a key the
+    # named components already provide; excluding those from the ambient lets
+    # the candidate legitimately take the key over. Compiling without
+    # `replacing` first raised a false G2 ("provided by both") and the second,
+    # files-only re-compile never ran (and never fired for `source`
+    # candidates at all). A genuine G2 — the candidate colliding with a
+    # NON-replaced provider — still surfaces here.
     try:
         ir = _compile(arguments.get("source"), arguments.get("files"),
-                      manifest=running)
+                      manifest=running, replacing=replacing)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = False
         return rejected
-    if replacing:
-        try:
-            ir = compile_files(list(arguments.get("files") or []),
-                               manifest=running, replacing=replacing) \
-                if arguments.get("files") else ir
-        except RevlError as error:
-            rejected = report(error)
-            rejected["admitted"] = False
-            return rejected
     return {
         "ok": True,
         "admitted": True,
