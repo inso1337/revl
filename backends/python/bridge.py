@@ -25,6 +25,19 @@ provider process goes away; the proxy disposes its own fiber, the provision is
 withdrawn, and every dependent deactivates with ordered teardown (R2/R3): the
 same reactive path demo/live.py shows for a local swap, now spanning processes.
 
+Peer *hang* is a deadline breach, not a death (docs/seam-deadlines.md). A
+provider that is alive but wedged — slow, deadlocked, GC-stalled — answers
+neither with a value nor with EOF; a naive blocking round-trip would wait on it
+forever, so the consumer that called it wedges too. Every seam call therefore
+carries a **deadline** (`_Client(deadline=...)` sets the per-operation default,
+optionally per-method via ``deadlines={method: seconds}``; ``call(...,
+deadline=...)`` overrides one call). When the round-trip outlives its deadline,
+`call` raises `SeamDeadline` — its **own** fault kind, deliberately neither the
+`ConnectionError` a peer death raises (so it does **not** withdraw the
+provision) nor the `RuntimeError` a provider-side error marshals back. The
+consumer's L-Raise then unwinds exactly as for any other seam failure (A8):
+effects accumulated so far revert LIFO, the component lands FAILED, no residue.
+
 Peer *replacement* is re-point, not withdrawal: `_Client.repoint(new_path)` is
 a **planned cutover** (`revl swap <component> --to <backend>`, docs/swap.md). A
 successor provider is booted on another socket; the client reconnects its RPC
@@ -52,6 +65,31 @@ from collections.abc import Mapping
 # ---------------------------------------------------------------------------
 # canonical value codec (docs/interop-bridge.md "Canonical value encoding")
 # ---------------------------------------------------------------------------
+
+
+class SeamDeadline(TimeoutError):
+    """A seam call outlived its deadline: the provider is neither answering nor
+    gone — it hung.
+
+    A distinguishable fault, on purpose. It is **not** a `ConnectionError` (a
+    peer death, which the monitor turns into a reactive withdrawal) and it is
+    **not** a `RuntimeError` (a provider-side error marshalled back across the
+    seam). A consumer — or a test — can therefore tell a hang apart from a death
+    and from a remote failure by fault kind alone. It subclasses `TimeoutError`
+    so generic timeout handling still recognises it, while staying disjoint from
+    the two seam faults that already exist.
+
+    Carries the seam it broke on: `key`, `method`, and the `deadline` (seconds)
+    that was breached.
+    """
+
+    def __init__(self, key: str, method: str, deadline: float) -> None:
+        self.key = key
+        self.method = method
+        self.deadline = deadline
+        super().__init__(
+            f"seam call {key}.{method} exceeded its {deadline:g}s deadline "
+            f"(the provider is alive but did not answer in time)")
 
 
 def _encode_value(value):
@@ -226,7 +264,7 @@ class _Client:
     provider is torn down) is recognised as an expected cutover, not a death.
     """
 
-    def __init__(self, path: str, module=None) -> None:
+    def __init__(self, path: str, module=None, deadline=None, deadlines=None) -> None:
         self._lock = threading.RLock()
         self._path = path
         self.rpc = _connect(path)
@@ -235,13 +273,51 @@ class _Client:
         self._module = module  # emitted module: its case classes rebuild ADTs
         self._generation = 0
         self._on_lost = None    # set by watch(); re-armed on each repoint
+        # the per-operation deadline default (seconds), and an optional
+        # per-method map that overrides it for named operations. `None` means
+        # "no deadline" — an unbounded blocking round-trip, the legacy shape a
+        # swap/repoint client keeps unless a caller opts in.
+        self._deadline = deadline
+        self._deadlines = dict(deadlines or {})
 
-    def call(self, key: str, method: str, args):
+    def deadline_for(self, method: str, override=None):
+        """Resolve the effective deadline (seconds) for one call: an explicit
+        per-call `override` wins; else the per-method default; else the
+        client-wide default; else `None` (unbounded)."""
+        if override is not None:
+            return override
+        if method in self._deadlines:
+            return self._deadlines[method]
+        return self._deadline
+
+    def call(self, key: str, method: str, args, deadline=None):
+        seconds = self.deadline_for(method, deadline)
         with self._lock:
             io = self._io
+            rpc = self.rpc
             io.write((json.dumps({"key": key, "method": method, "args": list(args)}) + "\n").encode())
             io.flush()
-            line = io.readline()
+            # Bound the blocking read on the reply. A wedged provider sends
+            # nothing, so the recv times out at `seconds`; we surface that as
+            # the distinguishable SeamDeadline fault rather than blocking on it
+            # forever. The socket's prior timeout is restored either way; the
+            # whole round-trip is under the lock (as it already was for
+            # drain-v1), so `rpc` is exactly the socket we time and read.
+            prev = rpc.gettimeout()
+            try:
+                if seconds is not None:
+                    rpc.settimeout(seconds)
+                line = io.readline()
+            except (TimeoutError, socket.timeout):
+                # the seam hung: alive, not answering, not gone. Distinguishable
+                # from a ConnectionError (death -> withdrawal) and a RuntimeError
+                # (provider error) — its own fault kind.
+                raise SeamDeadline(key, method, seconds) from None
+            finally:
+                try:
+                    rpc.settimeout(prev)
+                except OSError:
+                    pass
             module = self._module
         if not line:
             raise ConnectionError("bridge peer closed the connection")
@@ -347,12 +423,19 @@ class _Proxy:
         raise AttributeError(name)
 
 
-def proxy_component(key: str, methods, path: str, module=None) -> dict:
+def proxy_component(key: str, methods, path: str, module=None,
+                    deadline=None, deadlines=None) -> dict:
     """A cordis component that provides `key` via a proxy forwarding to the
     stub at `path`. `module` (the emitted module) lets the proxy rebuild ADT /
     Result returns into native case instances. Its `_client` is exposed so the
-    driver can `watch()` for peer death and dispose the fiber."""
-    client = _Client(path, module)
+    driver can `watch()` for peer death and dispose the fiber.
+
+    `deadline` sets the per-operation deadline default (seconds) every forwarded
+    call carries; `deadlines` (``{method: seconds}``) overrides it per named
+    operation. A breach raises `SeamDeadline` in the calling fiber, which the
+    runtime unwinds like any other seam failure (A8: revert LIFO, no residue).
+    Placement (`src/revl/placement.py`) reads these off the seam spec."""
+    client = _Client(path, module, deadline=deadline, deadlines=deadlines)
 
     def apply(ctx, config=None):
         proxy = _Proxy(client, key, methods)
