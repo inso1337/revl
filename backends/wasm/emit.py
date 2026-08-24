@@ -1199,6 +1199,15 @@ class _ComponentEmitter:
             # byte-identical helper preamble (the v1 goldens are unchanged).
             if "$f64_to_str" in rendered:
                 lines.append(self.v3._helper_f64_to_str())
+            # The reader builtins are pulled in the same way — only when a
+            # component actually reaches for one — so a component that never
+            # splits/joins/searches keeps a byte-identical helper preamble.
+            if "$str_index_of" in rendered:
+                lines.append(self.v3._helper_str_index_of())
+            if "$str_split" in rendered:
+                lines.append(self.v3._helper_str_split())
+            if "$str_join" in rendered:
+                lines.append(self.v3._helper_str_join())
         elif needs_arith:
             lines.extend(self.v3._arith_helper_funcs())
         lines.extend(fn_defs)
@@ -2409,6 +2418,183 @@ class _V3Emitter:
       (i32.mul (local.get $len) (i32.const 8)))
     (local.get $p))"""
 
+    # -- the reader builtins: split / join / indexOf (docs/stdlib-2.0.md) -----
+    #
+    # These three close the gap between "the Str boundary works" (concat-built
+    # writers cross to wasm) and "the reader/parser artifacts cross too". Each
+    # is expressed over the same linear-memory Str/List ABI as the helpers
+    # above — a `Str` is `[u32 byte_len][utf8 bytes]`, a `List` is
+    # `[u32 count][pad][i64 slot]…` with a `List[Str]` slot holding a str
+    # address widened to i64. Their semantics mirror the reference tiers
+    # (py/ts): index/count in *code points*, JS-shape split (trailing empties
+    # kept, `""` → per-code-point pieces), and `List[Str].join(sep)`.
+
+    def _helper_str_index_of(self) -> str:
+        # Str.indexOf(needle): a byte substring scan; on a hit, the byte offset
+        # is converted to the *code-point* index (the reference tiers return a
+        # code-point index — py `str.find`, ts `Array.from(x.slice(0,at)).length`).
+        # Empty needle → 0 (matches "".find("")/indexOf("")); absent → -1. The
+        # result is an i32 that the call site sign-extends to the tier's Int.
+        return """  (func $str_index_of (param $s i32) (param $needle i32) (result i32)
+    (local $ls i32) (local $ln i32) (local $i i32) (local $j i32) (local $ok i32)
+    (local $cp i32) (local $b i32)
+    (local.set $ls (i32.load (local.get $s)))
+    (local.set $ln (i32.load (local.get $needle)))
+    (if (i32.eqz (local.get $ln)) (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (block $notfound
+      (loop $scan
+        (br_if $notfound
+          (i32.gt_u (i32.add (local.get $i) (local.get $ln)) (local.get $ls)))
+        (local.set $ok (i32.const 1))
+        (local.set $j (i32.const 0))
+        (block $cmpdone
+          (loop $cmp
+            (br_if $cmpdone (i32.ge_u (local.get $j) (local.get $ln)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4))
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (i32.add (local.get $needle) (i32.const 4)) (local.get $j))))
+              (then (local.set $ok (i32.const 0)) (br $cmpdone)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $cmp)))
+        (if (local.get $ok)
+          (then
+            (local.set $cp (i32.const 0))
+            (local.set $j (i32.const 0))
+            (block $cpdone
+              (loop $cploop
+                (br_if $cpdone (i32.ge_u (local.get $j) (local.get $i)))
+                (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $j))))
+                (if (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80))
+                  (then (local.set $cp (i32.add (local.get $cp) (i32.const 1)))))
+                (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                (br $cploop)))
+            (return (local.get $cp))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan)))
+    (i32.const -1))"""
+
+    def _helper_str_split(self) -> str:
+        # Str.split(sep) → List[Str]. JS-shape (docs/stdlib-2.0.md §split):
+        # trailing empties are kept ("a,".split(",") → ["a",""]) and the
+        # empty-string result is one empty piece (""→[""]). An empty separator
+        # splits into per-code-point pieces (py `list(v)`), so ""→[] there.
+        # Each piece is a freshly allocated Str; pieces are appended through
+        # `$list_push`, so the result is a standard `[count][pad][slot]…` list
+        # of str addresses.
+        return """  (func $str_split (param $s i32) (param $sep i32) (result i32)
+    (local $ls i32) (local $lsep i32) (local $list i32) (local $start i32)
+    (local $i i32) (local $j i32) (local $ok i32) (local $seg i32) (local $seglen i32) (local $b i32)
+    (local.set $ls (i32.load (local.get $s)))
+    (local.set $lsep (i32.load (local.get $sep)))
+    (local.set $list (call $alloc (i32.const 8)))
+    (i32.store (local.get $list) (i32.const 0))
+    (if (i32.eqz (local.get $lsep))
+      (then
+        (local.set $i (i32.const 0))
+        (block $cpdone
+          (loop $cploop
+            (br_if $cpdone (i32.ge_u (local.get $i) (local.get $ls)))
+            (local.set $j (i32.add (local.get $i) (i32.const 1)))
+            (block $skipdone
+              (loop $skip
+                (br_if $skipdone (i32.ge_u (local.get $j) (local.get $ls)))
+                (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $j))))
+                (br_if $skipdone (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+                (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                (br $skip)))
+            (local.set $seglen (i32.sub (local.get $j) (local.get $i)))
+            (local.set $seg (call $alloc_str (local.get $seglen)))
+            (memory.copy (i32.add (local.get $seg) (i32.const 4))
+                         (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))
+                         (local.get $seglen))
+            (local.set $list (call $list_push (local.get $list) (i64.extend_i32_u (local.get $seg))))
+            (local.set $i (local.get $j))
+            (br $cploop)))
+        (return (local.get $list))))
+    (local.set $start (i32.const 0))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $scan
+        (br_if $done (i32.gt_u (i32.add (local.get $i) (local.get $lsep)) (local.get $ls)))
+        (local.set $ok (i32.const 1))
+        (local.set $j (i32.const 0))
+        (block $cmpdone
+          (loop $cmp
+            (br_if $cmpdone (i32.ge_u (local.get $j) (local.get $lsep)))
+            (if (i32.ne
+                  (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4))
+                                        (i32.add (local.get $i) (local.get $j))))
+                  (i32.load8_u (i32.add (i32.add (local.get $sep) (i32.const 4)) (local.get $j))))
+              (then (local.set $ok (i32.const 0)) (br $cmpdone)))
+            (local.set $j (i32.add (local.get $j) (i32.const 1)))
+            (br $cmp)))
+        (if (local.get $ok)
+          (then
+            (local.set $seglen (i32.sub (local.get $i) (local.get $start)))
+            (local.set $seg (call $alloc_str (local.get $seglen)))
+            (memory.copy (i32.add (local.get $seg) (i32.const 4))
+                         (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $start))
+                         (local.get $seglen))
+            (local.set $list (call $list_push (local.get $list) (i64.extend_i32_u (local.get $seg))))
+            (local.set $i (i32.add (local.get $i) (local.get $lsep)))
+            (local.set $start (local.get $i))
+            (br $scan)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $scan)))
+    (local.set $seglen (i32.sub (local.get $ls) (local.get $start)))
+    (local.set $seg (call $alloc_str (local.get $seglen)))
+    (memory.copy (i32.add (local.get $seg) (i32.const 4))
+                 (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $start))
+                 (local.get $seglen))
+    (local.set $list (call $list_push (local.get $list) (i64.extend_i32_u (local.get $seg))))
+    (local.get $list))"""
+
+    def _helper_str_join(self) -> str:
+        # List[Str].join(sep) → Str (receiver is the list, argument the
+        # separator — the TS orientation the tier follows). Two passes: sum the
+        # element byte lengths plus (n-1) separators, allocate the result once,
+        # then copy each element with a separator before all but the first.
+        # An empty list joins to "" (docs/stdlib-2.0.md §join).
+        return """  (func $str_join (param $list i32) (param $sep i32) (result i32)
+    (local $n i32) (local $lsep i32) (local $i i32) (local $total i32)
+    (local $elem i32) (local $elen i32) (local $out i32) (local $cur i32)
+    (local.set $n (i32.load (local.get $list)))
+    (local.set $lsep (i32.load (local.get $sep)))
+    (if (i32.eqz (local.get $n))
+      (then (return (call $alloc_str (i32.const 0)))))
+    (local.set $total (i32.mul (i32.sub (local.get $n) (i32.const 1)) (local.get $lsep)))
+    (local.set $i (i32.const 0))
+    (block $sumdone
+      (loop $sum
+        (br_if $sumdone (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $elem (i32.wrap_i64
+          (i64.load (i32.add (i32.add (local.get $list) (i32.const 8))
+                             (i32.mul (local.get $i) (i32.const 8))))))
+        (local.set $total (i32.add (local.get $total) (i32.load (local.get $elem))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $sum)))
+    (local.set $out (call $alloc_str (local.get $total)))
+    (local.set $cur (i32.add (local.get $out) (i32.const 4)))
+    (local.set $i (i32.const 0))
+    (block $wdone
+      (loop $write
+        (br_if $wdone (i32.ge_u (local.get $i) (local.get $n)))
+        (if (i32.gt_u (local.get $i) (i32.const 0))
+          (then
+            (memory.copy (local.get $cur) (i32.add (local.get $sep) (i32.const 4)) (local.get $lsep))
+            (local.set $cur (i32.add (local.get $cur) (local.get $lsep)))))
+        (local.set $elem (i32.wrap_i64
+          (i64.load (i32.add (i32.add (local.get $list) (i32.const 8))
+                             (i32.mul (local.get $i) (i32.const 8))))))
+        (local.set $elen (i32.load (local.get $elem)))
+        (memory.copy (local.get $cur) (i32.add (local.get $elem) (i32.const 4)) (local.get $elen))
+        (local.set $cur (i32.add (local.get $cur) (local.get $elen)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $write)))
+    (local.get $out))"""
+
 
 
     # -- type inference -------------------------------------------------------
@@ -2626,7 +2812,25 @@ class _V3Emitter:
         if method == "to_int" and target_ty == "Str":
             return "Opt[Int]"
         if method == "indexOf":
-            raise EmitError("indexOf is not lowerable on this tier yet — use a hosted backend")
+            # The reader's search probe. Lowered over the linear-memory Str ABI
+            # (a byte scan, code-point index out); List.indexOf needs a
+            # per-element comparison the harness never reaches, so it stays a
+            # named refusal.
+            if target_ty in ("Str", "Bytes"):
+                return "Int"
+            raise EmitError(
+                "indexOf is not lowerable on this tier yet for List — the "
+                "element comparison has no representation here; use a hosted backend")
+        if method == "split":
+            # Str.split(sep) → List[Str] (docs/stdlib-2.0.md §split).
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError("split is only lowerable on Str values")
+            return "List[Str]"
+        if method == "join":
+            # List[Str].join(sep) → Str; the receiver must be a List[Str].
+            if not _is_list_type(target_ty) or _list_elem(target_ty) != "Str":
+                raise EmitError("join is only lowerable on List[Str] values")
+            return "Str"
         if method in ("set", "lookup", "has", "size", "keys", "remove"):
             raise EmitError(
                 f"`{method}` is not lowerable on this tier yet — the Map value "
@@ -3109,7 +3313,32 @@ class _V3Emitter:
             helper = "$str_starts_with" if method == "startsWith" else "$str_ends_with"
             return _E(f"{target.wat}\n      {arg.wat}\n      (call {helper})", "Bool")
         if method == "indexOf":
-            raise EmitError(f"{where}: indexOf is not lowerable on this tier yet")
+            # Byte-scan the haystack for the needle; `$str_index_of` returns a
+            # code-point index (or -1), matching py/ts. The i32 result is
+            # sign-extended so -1 crosses to the tier's Int as -1.
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(
+                    f"{where}: indexOf is not lowerable on this tier yet for List — "
+                    f"the element comparison has no representation here; use a hosted backend")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Str")
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_index_of)\n      (i64.extend_i32_s)", "Int")
+        if method == "split":
+            # Str.split(sep) → List[Str]: a fresh list of freshly allocated
+            # pieces over the bump heap (docs/stdlib-2.0.md §split).
+            if target_ty not in ("Str", "Bytes"):
+                raise EmitError(f"{where}: split is only lowerable on Str")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Str")
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_split)", "List[Str]")
+        if method == "join":
+            # List[Str].join(sep) → Str: receiver is the list, argument the
+            # separator (docs/stdlib-2.0.md §join).
+            if not _is_list_type(target_ty) or _list_elem(target_ty) != "Str":
+                raise EmitError(f"{where}: join is only lowerable on List[Str]")
+            target = self._expr(target_node, scope, where, target_ty)
+            arg = self._expr(args[0], scope, where, "Str")
+            return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_join)", "Str")
         # The Map value type (docs/stdlib-2.0.md §Map): refused with the
         # named tier error, like indexOf — the canonical-ABI model carries
         # only Int/Bool/String/List, and a persistent map needs a richer
@@ -3764,8 +3993,15 @@ class _V3Emitter:
                 {"name": export, "params": [], "returns": "Bool",
                  "body": test.get("body") or []},
                 test_mode=True))
-        uses_f64 = any("$f64_to_str" in block
-                       for block in fn_blocks + extern_blocks + test_blocks)
+        all_blocks = fn_blocks + extern_blocks + test_blocks
+        uses_f64 = any("$f64_to_str" in block for block in all_blocks)
+        # The reader builtins ($str_split/$str_join/$str_index_of) follow the
+        # same demand-driven rule as $f64_to_str: pulled in only when a body
+        # actually calls one, so every split/join/indexOf-free module stays
+        # byte-identical to before.
+        uses_index_of = any("$str_index_of" in block for block in all_blocks)
+        uses_split = any("$str_split" in block for block in all_blocks)
+        uses_join = any("$str_join" in block for block in all_blocks)
 
         # tests call the same helpers their functions do ($str_eq, $alloc_str,
         # …), so a document whose bodies are all `test` blocks still needs them
@@ -3773,6 +4009,12 @@ class _V3Emitter:
             lines.extend(self._helper_funcs())
             if uses_f64:
                 lines.append(self._helper_f64_to_str())
+            if uses_index_of:
+                lines.append(self._helper_str_index_of())
+            if uses_split:
+                lines.append(self._helper_str_split())
+            if uses_join:
+                lines.append(self._helper_str_join())
         lines.extend(self._type_comments())
         unsupported = self._unsupported_comments()
         if unsupported:

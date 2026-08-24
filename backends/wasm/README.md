@@ -42,7 +42,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
 | host builtins (`Pool`, `Map`; `Job` outside `await`) | different host namespace | express state through coeffects |
 | method-time effects / compensation | the accumulator is fixed at activation | hosted backends |
 | `Float` / `Map` / function-typed values (any position) | no value representation in the canonical-ABI model (Float has only the interpolation subset) | hosted backends / WIT tier |
-| `split` / `join` / `repeat` / `indexOf` builtins | string-splitting/joining/searching not lowered yet | hosted backends |
+| `repeat` builtin, `List.indexOf` | `repeat` and the List per-element search not lowered yet (`Str.split`/`join`/`indexOf` now DO lower — the reader trio, `$str_split`/`$str_join`/`$str_index_of`) | hosted backends |
 | non-scalar instance-accessor payloads (`spawn`) | a pointer would cross into memory the spawner does not own | hosted backends |
 
 ## Now supported (v2 + typed v3)
@@ -56,8 +56,10 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   8-byte slot per field/element); the module exports `memory` so a host can
   read results. Supported builtins: `length`, `push`, `concat`, `slice`,
   `charAt`, `charCodeAt`, `to_str`, `startsWith`, `endsWith`, `to_int`
-  (the Str parse; the Int32 widen is the sign-extend — the full list is
-  the matrix doc, docs/wasm-capabilities.md).
+  (the Str parse; the Int32 widen is the sign-extend), and the reader trio
+  `split` / `join` / `Str.indexOf` (`$str_split` / `$str_join` /
+  `$str_index_of`, pulled in on demand) — the full list is the matrix doc,
+  docs/wasm-capabilities.md).
 - **`match` / variants in component and method bodies**: tagged-union cells
   (`[u32 tag][pad][payload]`), including `match` over `Opt`/`Result`.
 - **rich service boundaries**: a Str/List/record/variant/`Opt`/`Result`
