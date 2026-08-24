@@ -772,6 +772,68 @@ class _Records:
             i += 1
         return n
 
+    def _scan_type_expr(self, s: str, i: int) -> int:
+        """Index just past a (possibly multiline) *type-alias body* starting at
+        `s[i]`.
+
+        Unlike `_scan_to_sep`, which ends a member at the first newline, this
+        reads a whole type expression across lines. DSH formats its unions one
+        member per line — with or without a leading `|`:
+
+            type PluginFiberPhase =
+              | 'pending'
+              | 'loading'
+              | null
+
+        so the body must not be cut at the newline after the first member (which
+        left `| 'pending'` — a refusal — or, for the leading-`|`-less shape,
+        silently collapsed the alias to just its first member). At bracket depth
+        zero a newline ends the expression *only* when nothing continues it: the
+        line did not end on a binary/opening operator (`|`, `&`, `=`, `<`, `,`,
+        `.`, `:`, `?`, `(`, `[`, `{`), and the next non-blank line does not begin
+        with `|` or `&`. A `;` at depth zero always ends it. Balanced
+        `()[]{}<>` and string literals are stepped over, so an inline object or
+        a multiline branded intersection is spanned, not cut."""
+        depth, n = 0, len(s)
+        last_op = True                 # a leading `|`/`&` is permitted
+        while i < n:
+            c = s[i]
+            if c in "\"'`":            # step over a string-literal type whole
+                i += 1
+                while i < n and s[i] != c:
+                    i += 2 if s[i] == "\\" else 1
+                i += 1
+                last_op = False
+                continue
+            if c in "([{<":
+                depth += 1
+                i += 1
+                last_op = True
+                continue
+            if c in ")]}>":
+                if depth > 0:          # ignore a stray `>` (e.g. from `=>`)
+                    depth -= 1
+                i += 1
+                last_op = False
+                continue
+            if depth == 0 and c == ";":
+                return i
+            if depth == 0 and c == "\n":
+                if last_op:            # this line ended mid-expression
+                    i += 1
+                    continue
+                j = i + 1
+                while j < n and s[j] in " \t\r\n":
+                    j += 1
+                if j < n and s[j] in "|&":   # the next line continues the union
+                    i = j
+                    continue
+                return i
+            if not c.isspace():
+                last_op = c in "|&=<,.:?([{"
+            i += 1
+        return n
+
     def _member_fields(self, body: str) -> list[tuple[str, str, bool]]:
         """`(name, ts_type, optional)` for each `name: T` field of a `{ … }`
         body — methods, index signatures and private/protected members skipped."""
@@ -861,7 +923,7 @@ class _Records:
                 base = tm.end() + (len(text[tm.end():]) - len(tail))
                 body = text[base:_match_bracket(text, base)]
                 return {"module": ctx, "fields": self._member_fields(body)}
-            end = self._scan_to_sep(text, tm.end())
+            end = self._scan_type_expr(text, tm.end())
             return {"module": ctx, "alias": text[tm.end():end].strip()}
 
         cm = re.search(r"(?:export\s+)?(?:abstract\s+)?class\s+" + esc + r"\b", text)

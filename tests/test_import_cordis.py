@@ -309,6 +309,103 @@ def test_the_full_idiomatic_gateway_shape_imports_end_to_end():
     assert ir["components"][0]["provides"] == {"plugin_inventory": "PluginInventory"}
 
 
+# --------- DSH's REAL union FORMATTING: leading `|`, one member per line
+#                                                          (roadmap item 138)
+
+def test_a_leading_pipe_multiline_union_synthesizes_the_same_variant():
+    """DSH writes its literal unions one member per line, each with a leading `|`
+    (item 137 recovered the *inline* form only). The importer must read the union
+    across all its lines — not cut it at the newline after the first member, which
+    left `| 'pending'` and refused it — and drop the empty fragment a leading `|`
+    produces, so the multiline form synthesizes the SAME variant as the inline
+    form. `PluginLoadKind` here uses the `=`-line-then-bare-first-member shape
+    that silently collapsed the alias to `Str`; all members must be recovered."""
+    source = import_cordis_file(str(FIXTURES / "leading_pipe_union.ts"))
+    assert ("type PluginFiberPhase = "
+            "Pending | Loading | Active | Failed | Unloading") in source
+    assert "type PluginLoadKind = Eager | Lazy" in source
+    ir = compile_source(source, "leading_pipe_union.rvl")
+    phase = ir["types"]["PluginFiberPhase"]
+    assert phase["kind"] == "variant"
+    assert [c["name"] for c in phase["cases"]] == \
+        ["Pending", "Loading", "Active", "Failed", "Unloading"]
+    methods = _methods(ir, "Fibers")
+    # `| null` -> Opt around the whole variant; no member is silently lost
+    assert methods["phase"]["returns"] == "Opt[PluginFiberPhase]"
+    assert methods["schedule"]["params"] == [{"name": "kind", "type": "PluginLoadKind"}]
+
+
+def test_leading_pipe_and_inline_unions_produce_identical_output():
+    """The two spellings of the same union — inline, and one-member-per-line with
+    a leading `|` — must import to byte-identical revl (modulo the source filename
+    the header records)."""
+    inline = """
+    import { Context, Service } from 'cordis'
+    export type Phase = 'pending' | 'active' | null
+    export class Fibers extends Service {
+      constructor(ctx) { super(ctx, 'fibers') }
+      phase(): Phase { return null }
+    }
+    """
+    multiline = """
+    import { Context, Service } from 'cordis'
+    export type Phase =
+      | 'pending'
+      | 'active'
+      | null
+    export class Fibers extends Service {
+      constructor(ctx) { super(ctx, 'fibers') }
+      phase(): Phase { return null }
+    }
+    """
+    a = import_cordis(inline, filename="p.ts")
+    b = import_cordis(multiline, filename="p.ts")
+    assert a == b
+    assert "type Phase = Pending | Active" in a
+    assert "fn phase() -> Opt[Phase]" in a
+
+
+def test_a_multiline_union_is_not_silently_collapsed_to_its_first_member():
+    """The worse of the two bugs: a union whose first member sits on its own line
+    without a leading `|` used to have the type scan stop at the newline, silently
+    dropping every continuation member — a literal union collapsed to `Str` (no
+    variant, no `Opt`). Every member must now be recovered."""
+    plugin = """
+    import { Context, Service } from 'cordis'
+    export type Phase =
+      'pending'
+      | 'loading'
+      | null
+    export class Fibers extends Service {
+      constructor(ctx) { super(ctx, 'fibers') }
+      phase(): Phase { return null }
+    }
+    """
+    source = import_cordis(plugin, filename="collapse.ts")
+    assert "type Phase = Pending | Loading" in source
+    assert "fn phase() -> Opt[Phase]" in source
+    assert "-> Str" not in source          # the collapse-to-Str bug is gone
+
+
+def test_a_multiline_mixed_union_still_refuses_honestly():
+    """The multiline scan recovers all members, but a union that mixes a literal
+    with a non-literal type is still a sum with no tag on the non-literal arm, so
+    it stays refused — the scan must not paper over an honest refusal."""
+    plugin = """
+    import { Context, Service } from 'cordis'
+    type Thing =
+      | 'a'
+      | number
+    export class Mix extends Service {
+      constructor(ctx) { super(ctx, 'mix') }
+      it(): Thing { return 'a' }
+    }
+    """
+    with pytest.raises(RevlError) as excinfo:
+        import_cordis(plugin, filename="mix.ts")
+    assert "sum type with no tag" in str(excinfo.value)
+
+
 # --------------------------------------------------------- the emission rule
 
 def test_untyped_ts_defaults_every_operation_to_emission():
