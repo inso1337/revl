@@ -486,6 +486,44 @@ def test_runtime_scenarios_on_real_cordis4j(tmp_path):
     JAVAC is None or JAVA is None or not CORDIS4J_CLASSES,
     reason="needs a JDK and REVL_CORDIS4J_CLASSES (compiled cordis4j-core classes)",
 )
+def test_instance_accessor_on_real_cordis4j(tmp_path):
+    """The instance accessor (`s.<key>`) exit criterion for the Java tier
+    (docs/design-v2-instances.md "Instance accessor — frozen"): reading a
+    provision back through a spawn handle, driven on the REAL cordis4j runtime.
+
+    Proves, by RUNNING, the three DoD properties: (1) positive —
+    `s.<key>.method(..)` through a spawn handle returns THAT instance's
+    provision (w1 -> 7, w2 -> 9); (2) per-instance — the two handles resolve
+    distinct realms (neither reaches the other's); (3) negative — the root
+    (a stand-in for any sibling) cannot resolve the instance's provision, which
+    lives in the worker's private local realm. Fixture:
+    backends/java/scenarios/instance_accessor.rvl (java-owned)."""
+    fixture = HERE / "scenarios" / "instance_accessor.rvl"
+    ir = compile_files([str(fixture)])
+    pkg = tmp_path / "revl"
+    pkg.mkdir()
+    (pkg / "Components.java").write_text(emit.emit(ir), encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    harness = HERE / "scenarios" / "RunInstanceAccessor.java"
+    compile_all = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", CORDIS4J_CLASSES, "-d", str(out),
+         str(pkg / "Components.java"), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_all.returncode == 0, compile_all.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", f"{CORDIS4J_CLASSES}{os.pathsep}{out}", "RunInstanceAccessor"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "INSTANCE_ACCESSOR_OK a=7 b=9" in run.stdout
+
+
+@pytest.mark.skipif(
+    JAVAC is None or JAVA is None or not CORDIS4J_CLASSES,
+    reason="needs a JDK and REVL_CORDIS4J_CLASSES (compiled cordis4j-core classes)",
+)
 def test_global_realm_divergence_characterized(tmp_path):
     """CHARACTERIZES a KNOWN divergence, it does not assert conformance.
 
