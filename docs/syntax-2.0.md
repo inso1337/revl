@@ -397,6 +397,67 @@ extern emission fn send(sock: Socket, data: Bytes)
   place full fluency is wanted is exactly the place checking was never
   promised.
 
+### 6.1 `acquire` and the two undos — the durable-resource discipline
+
+An `acquire` extern that opens a durable host resource — a socket, a pool, a
+file handle — carries an `undo` because G4 demands it. But that extern-level
+`undo` is **documentation, not the working release**, and knowing why is the
+whole discipline. An acquire's teardown runs with almost nothing in scope: it
+sees the implicit `result` binding and nothing else (§6 above), and no tier
+defines teardown parameter capture. So an extern whose release needs the
+*specific handle it just produced* cannot spell that release at the extern
+level — the handle is not nameable there. The slot still has to parse (G4),
+so it names the inverse operation against a placeholder:
+
+```revl fragment
+// the extern undo NAMES the inverse; the literal `1` can never be the real
+// descriptor the acquisition returned — this slot is documentation
+extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+  = @py { ... }
+```
+
+The real, revertible release is one level up, in the component that performs
+the acquisition. There the acquired handle *is* in scope — it is the effect's
+own binding — so the component's `undo` closes exactly the descriptor that was
+opened. Thread the handle through:
+
+```revl
+extern pure fn log_close(fd: Int) = @py { return None }
+
+extern pure fn log_write(fd: Int, line: Str) -> Int = @py { return 0 }
+
+extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+  = @py { return 1 }
+
+service AuditLog { emission fn record(line: Str) -> Int }
+
+component FileAuditLog provides audit: AuditLog {
+  config { path: Str }
+
+  // `fd` is the descriptor `log_open` returned, in scope here — so this undo
+  // closes the handle that was really opened, unlike the extern's `log_close(1)`
+  let fd = effect log_open(config.path) undo log_close(fd)
+
+  provide audit {
+    fn record(line) = log_write(fd, line)
+  }
+}
+```
+
+`log_close(fd)` on the component effect is what the lifecycle machinery runs on
+teardown and what `no_residue` checks reverted; `log_close(1)` on the extern
+never runs against the live handle. The rule: **an `acquire` extern's `undo`
+documents the inverse; the component's `effect … undo …` performs it, with the
+acquired handle threaded through.** The worked, compiling, runtime-tested
+version — with real `os.open`/`os.write`/`os.close` bodies and a `lifecycle
+test` that opens the log, records a line, unloads, and asserts `no_residue` —
+is `examples/durable_log.rvl` (pinned by `tests/test_durable_log_example.py`).
+
+One ergonomic that *used* to complicate this is gone: a multi-line `@py`/`@ts`
+extern body no longer has to start in column 0 — the py and ts emitters
+`textwrap.dedent` the body (roadmap item 78), so `os.open(...)` can sit at a
+natural indent inside the `= @py { … }` block.
+
 ## 7. `verified` and `test` — the self-checking loop
 
 ```revl sketch

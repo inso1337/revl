@@ -1,0 +1,71 @@
+// The acquire/undo discipline for a durable host resource with state
+// (roadmap item 83; docs/syntax-2.0.md §6, "acquire and the two undos").
+//
+// The resource is a real file handle. `log_open` opens an append-only audit
+// log and returns its OS file descriptor; `log_write` appends a line through
+// that fd; `log_close` releases it. The fd is state that outlives the call
+// that produced it, so releasing it correctly is the whole point.
+//
+// Two undos are in play, and only one of them is real:
+//
+//   * the extern's `undo log_close(1)` — G4 requires an `acquire` extern to
+//     carry an undo, but an acquire's teardown sees only the implicit
+//     `result` binding, and the literal `1` written here can never be the
+//     descriptor the runtime actually handed back. This slot is DOCUMENTATION:
+//     it names the inverse operation, not a working release.
+//
+//   * the component's `let fd = effect log_open(...) undo log_close(fd)` — the
+//     REAL revertible acquisition. `fd` is the descriptor the acquire returned,
+//     in scope, so this undo closes the handle that was actually opened. This
+//     is what the lifecycle machinery runs on teardown, and what `no_residue`
+//     checks reverted.
+//
+// The discipline: thread the acquired handle through the component effect and
+// close it there. The extern undo documents intent; the component effect does
+// the work.
+
+extern pure fn log_close(fd: Int)
+= @py {
+      import os
+      try:
+          os.close(fd)
+      except OSError:
+          pass
+      return None
+    }
+
+extern pure fn log_write(fd: Int, line: Str) -> Int
+= @py {
+      import os
+      return os.write(fd, (line + "\n").encode("utf-8"))
+    }
+
+extern acquire fn log_open(path: Str) -> Int undo log_close(1)
+= @py {
+      import os
+      return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    }
+
+service AuditLog {
+  emission fn record(line: Str) -> Int
+}
+
+component FileAuditLog provides audit: AuditLog {
+  config { path: Str }
+
+  // The acquired fd is threaded into the undo — this closes the handle that
+  // was really opened, unlike the extern's documentary `log_close(1)`.
+  let fd = effect log_open(config.path) undo log_close(fd)
+
+  provide audit {
+    fn record(line) = log_write(fd, line)
+  }
+}
+
+lifecycle test "the audit log opens, records, and closes cleanly" {
+  load FileAuditLog with { path: "/tmp/revl-durable-log.audit" }
+  let n = call audit.record("boot")
+  assert n > 0
+  unload FileAuditLog
+  assert no_residue
+}
