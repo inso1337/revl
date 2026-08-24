@@ -1128,6 +1128,22 @@ class Map(_Closable):
         self._check_open("get")
         return self.data.get(key)
 
+    # -- iteration surface (docs/stdlib-2.0.md §Map) -----------------------
+    # `size()`/`keys()` are the value-Map iteration builtins, and the checker
+    # promises them on a host `Map.new()` receiver too (the emitter lowers
+    # both as plain method calls on this object). They mirror the value-Map
+    # semantics exactly: `keys()` yields the keys in ascending canonical Str
+    # order (python str comparison IS code-point order, so sorted() is exact),
+    # `size()` is the entry count. Read-only, like `get` — no trace record.
+
+    def keys(self) -> list:
+        self._check_open("keys")
+        return sorted(self.data)
+
+    def size(self) -> int:
+        self._check_open("size")
+        return len(self.data)
+
     def insert(self, key: Any, value: Any) -> None:
         self._check_open("insert")
         self.data[key] = value
