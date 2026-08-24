@@ -448,13 +448,77 @@ def _preflight(backends_used: set[str], files, placement_path: str, once: bool) 
 # --------------------------------------------------------------------------
 
 
+def _names_in(node, acc: set) -> set:
+    """Every `name`/`id` string reachable in an IR subtree — enough to tell
+    whether a component's body reaches a given extern (an extern call is a
+    `{"kind": "fn", "name": "<extern>"}` node; a bare reference an
+    `{"kind": "name", "id": ...}`). Over-inclusive by design: it never drops an
+    extern a kept component still reaches."""
+    if isinstance(node, dict):
+        for field in ("name", "id"):
+            value = node.get(field)
+            if isinstance(value, str):
+                acc.add(value)
+        for value in node.values():
+            _names_in(value, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _names_in(value, acc)
+    return acc
+
+
+def ts_safe_ir(ir: dict) -> dict:
+    """The slice of a composition the TypeScript tier can emit (roadmap item
+    144, Path A).
+
+    A cross-tier placement compiles ONE composition and hands the *same* IR to
+    every process's emitter; but a provider that lives on the py tier — the
+    `Gate` compiler service is the motivating case — reaches host code through a
+    `@py`-only extern (`compile_files`, which has no TypeScript spelling), and
+    the ts emitter rightly refuses an extern with no `@ts` body
+    (backends/typescript/emit.py::_emit_ts_externs). The consumer never needs
+    that body: it reaches the provider through a **bridge proxy** (spec
+    `proxies`, installed by backends/typescript/placement_runner.ts), which
+    speaks the service interface over the seam. So the node module needs the
+    *interface*, not the remote `@py` implementation.
+
+    This drops exactly the un-emittable part: every extern with no `@ts` body,
+    and every component (or top-level fn) whose body reaches one. Services,
+    types and ts-safe components are kept verbatim — a composition with no
+    py-only extern is returned byte-identical, so existing node placements are
+    unaffected. The dropped provider still runs, on its own (py) process; the
+    node process consumes it as a proxy.
+    """
+    externs = ir.get("externs") or []
+    py_only = {e.get("name") for e in externs
+               if "ts" not in (e.get("bodies") or {}) and e.get("name")}
+    if not py_only:
+        return ir
+
+    def reaches_py_only(carrier) -> bool:
+        return bool(_names_in(carrier, set()) & py_only)
+
+    out = dict(ir)
+    out["externs"] = [e for e in externs if e.get("name") not in py_only]
+    out["components"] = [c for c in ir.get("components") or []
+                         if not reaches_py_only(c)]
+    out["functions"] = [f for f in ir.get("functions") or []
+                        if not reaches_py_only(f)]
+    return out
+
+
 def _emit_ts_module(ir: dict, tmp: Path) -> str:
     """Emit the cordis-ts module for node processes into backends/typescript/
-    _gen/ so its `../runtime.ts` / `cordis` imports resolve."""
+    _gen/ so its `../runtime.ts` / `cordis` imports resolve.
+
+    The IR is first narrowed to the tier-emittable slice (`ts_safe_ir`): a
+    py-only provider (e.g. the `Gate` compiler service) is dropped here and
+    reached as a bridge proxy instead, so the ts emitter never sees a `@py`
+    extern it cannot spell (roadmap item 144)."""
     gen = _TS_DIR / "_gen"
     gen.mkdir(exist_ok=True)
     ir_json = tmp / "ir.json"
-    ir_json.write_text(json.dumps(ir), encoding="utf-8")
+    ir_json.write_text(json.dumps(ts_safe_ir(ir)), encoding="utf-8")
     result = subprocess.run([sys.executable, str(_TS_DIR / "emit.py"), str(ir_json)],
                             capture_output=True, text=True)
     if result.returncode != 0:
