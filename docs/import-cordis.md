@@ -117,7 +117,26 @@ trusted.
 | the provided **service key** | `export const provide`, a plugin object's `provide:` field, a `Service` subclass's `super(ctx, 'key')` or `static provide`, or `ctx.provide('key')` |
 | the **method surface** | the public methods of a `class … extends Service`, or of a `ctx.<key> = { … }` object literal |
 | parameter / return **types** | TypeScript annotations, or JSDoc `@param {T}` / `@returns {T}` |
+| **named record types** | an `interface`, a `type X = { … }` alias, or a plain data `class` — defined in the plugin file *or* followed through a **local** import — transcribed as a revl record `type` (see below) |
 | method **descriptions** | the prose lines of a method's JSDoc (copied as `//` comments) |
+
+The method surface is recovered through the **real base chain**, so a `Service`
+subclass reached via a project-local base — `class Sessions extends BaseStore`
+where `BaseStore extends Service`, or a base imported under an alias — is
+recovered, not just a literal `extends Service`; public methods inherited from a
+local base class are merged in (the derived class wins on a name collision). A
+method carrying **decorators** (`@cache`, `@throttle(100)`, `@audit.log`, …) is
+recovered too: the decorators are skipped to reach the underlying signature, and
+a `@revl:pure` JSDoc above them still applies.
+
+A **nominal parameter/return type** that names a record is no longer refused
+outright: the importer follows the plugin's own **local** imports (relative
+`./…` paths) to the definition, transcribes it — and any record it nests, in
+whatever further local module — as a revl `type` emitted ahead of the service
+(dependency-first, so the file compiles as-is), and references it by name. A
+bare `type X = string` alias resolves inline (revl has no type alias). A nominal
+type that is *not* reachable through a local import — a bare undefined name, or
+one imported from a *package* — is still refused (§4).
 
 ### Type mapping (TypeScript → revl)
 
@@ -134,6 +153,7 @@ trusted.
 | `Promise<T>` | `T` | not a revl `async fn`: that keyword governs `await` boundaries in the *provider*, and this provider only forwards to an extern. The asynchrony lives inside the host body, which resolves the Promise before returning `T` (recorded as a `// note:`) |
 | `void` / `undefined` / `never` return | *(no result)* | |
 | a string / numeric literal type | `Str` / `Int` | |
+| a named `interface` / `type … = { … }` / data `class` | a revl record `type` | followed in the plugin file or a *local* import, and emitted ahead of the service; fields cross camelCase → snake_case, an optional field becomes `Opt[T]` (§3) |
 
 Names cross conventions: a plugin's camelCase methods, parameters and the
 provide key become snake_case (`readOnlyLooking` → `read_only_looking`); the
@@ -155,7 +175,7 @@ refusal names the construct, its line, and the way forward.
 | a parameter with **no** TS type and no JSDoc type | there is nothing to recover; a guessed `Str` would be a fabricated contract | annotate the parameter, or `--mark-unrecovered` (§4.1) |
 | `any` / `unknown` / `object` / `Function` / `symbol` | TypeScript's untyped escape hatches — no honest revl spelling | give the method a real type |
 | an inline object / tuple type `{ a: string }` | revl records are *nominal* | declare a named type and annotate with it |
-| a **nominal** type not defined in this file (`UserRecord`) | one plugin file gives the importer no definition to stand behind the name | declare its revl `type` by hand and reference it |
+| a **nominal** type with no record definition in this file or a local import (`UserRecord`) | there is no definition to stand behind the name (a *local* record is followed and transcribed instead — see §3) | declare its revl `type` by hand and reference it, or make it an `interface` / `type` in a local module |
 | a union of several concrete types (`A \| B`) | a sum type with no tag has no revl spelling | declare a named `variant` |
 | a generic other than `Array` / `Promise` / `Record` | not mapped | reshape it, or wrap by hand |
 | a plugin with **no** recoverable provided service | nothing to wrap | expose one of the `provide` forms in §3, or pass `--service` |
@@ -241,9 +261,17 @@ i32-only, so it cannot host a TypeScript plugin.
   type at all.
 - `tests/fixtures/cordis/mixed.ts` — one recoverable method beside one
   unrecoverable one, for `--mark-unrecovered`.
+- `tests/fixtures/cordis/subclassed.ts` — a `Service` subclass reached through a
+  local base class (`Sessions extends BaseStore extends Service`), with an
+  inherited base method.
+- `tests/fixtures/cordis/decorated.ts` — methods behind decorators (`@cache`,
+  `@throttle(100)`, `@audit.log`), one also `@revl:pure`.
+- `tests/fixtures/cordis/records.ts` (+ `models/user.ts`, `models/geo.ts`) — a
+  record type followed across a local import, nesting a second record from a
+  further module.
 
 ```console
-$ ./.venv/bin/pytest tests/test_import_cordis.py -q     # 23 passed
+$ ./.venv/bin/pytest tests/test_import_cordis.py -q     # 27 passed
 ```
 
 ## 8. The family, complete
