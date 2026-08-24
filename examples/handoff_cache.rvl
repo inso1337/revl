@@ -1,0 +1,32 @@
+// Verified state hand-off on hot-swap (roadmap item 53, docs/state-handoff.md).
+//
+// `handoff cache: Map[Str, Str]` declares the SHAPE of this provider's live
+// state, and it reads both ways: when this component is *replaced*, that type
+// is the value it exports; when it is the *replacement*, that is the shape it
+// accepts. At swap admission the §5 compatibility relation is pointed at state
+// instead of interface — a successor whose declared shape cannot hold the
+// predecessor's is refused with a why-trace (`why.kind ==
+// "state-handoff-drift"`), because silently dropping live state on a swap
+// would be residue (G7).
+//
+// A component declares at most one `handoff`, as a prelude declaration, on a
+// key it provides. A component with no `handoff` lowers byte-identically to
+// before; in the IR the declaration is `component["handoff"]`.
+
+service Store {
+  fn get(k: Str) -> Opt[Str]
+  fn put(k: Str, v: Str)
+}
+
+component Cache provides cache: Store {
+  handoff cache: Map[Str, Str]           // the state contract
+  let m = effect Map.new() undo m.drop() // the state itself
+
+  provide cache {
+    fn get(k) = m.get(k)
+    fn put(k, v) {
+      effect m.insert(k, v)
+      undo   m.remove(k)
+    }
+  }
+}

@@ -469,6 +469,37 @@ section.block { padding: 110px 0; position: relative; }
   font-size: 12px; color: var(--text);
 }
 
+/* ---------- new-on-the-core cards ---------------------------------------- */
+
+.lang-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.lang-card {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); overflow: hidden;
+  display: flex; flex-direction: column;
+  transition: border-color 0.25s, transform 0.25s;
+}
+.lang-card:hover { border-color: rgba(45, 212, 191, 0.4); transform: translateY(-3px); }
+.lc-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 16px; border-bottom: 1px solid var(--line);
+  font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+}
+.lc-head b { color: var(--teal); font-weight: 600; }
+.lc-head a { font-size: 12px; white-space: nowrap; }
+.lang-card pre {
+  margin: 0; padding: 14px 16px; font-size: 12.5px; line-height: 1.65;
+  overflow-x: auto; background: #070a12;
+  border-bottom: 1px solid var(--line);
+}
+.lang-card p {
+  margin: 0; padding: 13px 16px 15px; font-size: 13.5px; color: var(--muted);
+}
+.lang-card p b { color: var(--text); }
+.lang-card p code {
+  background: rgba(148, 163, 184, 0.12); padding: 0 5px; border-radius: 4px;
+  font-size: 12px; color: var(--text);
+}
+
 /* ---------- fan-out (runtimes) ------------------------------------------- */
 
 .fanout-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; }
@@ -792,6 +823,7 @@ table.audit .comp { font-family: var(--mono); color: var(--text); }
   .step { margin-bottom: 20px; opacity: 1; }
   .g-grid { grid-template-columns: repeat(2, 1fr); }
   .tool-grid { grid-template-columns: repeat(2, 1fr); }
+  .lang-grid { grid-template-columns: 1fr; }
   .nav-links { display: none; }
   .pg-main { grid-template-columns: 1fr; height: auto; }
   .pg-editor-pane { height: 60vh; border-right: 0; border-bottom: 1px solid var(--line); }

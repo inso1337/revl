@@ -20,7 +20,9 @@
       <a href="#idea">The idea</a>
       <a href="#gate">The gate</a>
       <a href="#guarantees">Guarantees</a>
+      <a href="#language">New</a>
       <a href="#runtimes">Runtimes</a>
+      <a href="#truc">truc</a>
       <a href="#agents">Agents</a>
       <a href="#toolchain">Toolchain</a>
     </div>
@@ -281,6 +283,71 @@
   </div>
 </section>
 
+<!-- ================= new on the core ================= -->
+<section class="block" id="language">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">New on the frozen core</p>
+      <h2>Time, state, async, instances — still revertible.</h2>
+      <p>The core is frozen; the language keeps growing on top of it. Every
+      addition keeps the same deal: <b>declare the inverse, or admit the
+      crossing</b>. All four are live in the playground.</p>
+    </div>
+    <div class="lang-grid">
+      <div class="lang-card reveal">
+        <div class="lc-head"><span>timers — <b>every / after</b></span>
+          <a href="playground.html?example=heartbeat">try it →</a></div>
+        <pre data-lang="revl"><code>component Heartbeat requires log: Log {
+  every 30s { emit log.write("tick") }
+  after 5m  { emit log.write("warmup done") }
+}</code></pre>
+        <p>A timer is a <b>revertible schedule</b> — its inverse is cancellation,
+        derived like any teardown. Unload provably cancels; no orphaned interval
+        outlives its component. Under test the clock is a coeffect:
+        <code>advance 35s</code> makes the third tick an
+        <a href="playground.html?example=lifecycle_timer">assertable step</a>,
+        never a wall-clock race.</p>
+      </div>
+      <div class="lang-card reveal d1">
+        <div class="lc-head"><span>state handoff — <b>handoff</b></span>
+          <a href="playground.html?example=handoff_cache">try it →</a></div>
+        <pre data-lang="revl"><code>component Cache provides cache: Store {
+  handoff cache: Map[Str, Str]   // the state contract
+  let m = effect Map.new() undo m.drop()
+}</code></pre>
+        <p>A hot-swap of a stateful provider used to mean a cold successor. Now
+        the predecessor <b>exports</b> its declared shape and the successor
+        <b>accepts</b> it — checked at admission, with shape drift refused as a
+        why-trace. The cache stays warm across the swap.</p>
+      </div>
+      <div class="lang-card reveal">
+        <div class="lc-head"><span>async — <b>Async[T]</b>, colored &amp; checked</span>
+          <a href="playground.html?example=a1_async">see it refused →</a></div>
+        <pre data-lang="revl"><code>extern emission async fn http_post(url: Str, body: Str) -> Str
+  = @ts { return await fetch(url, body) }
+
+service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
+        <p>Asynchrony is a <b>declared property</b>, like emission-ness: async
+        function values, async host externs, awaited on py/ts and erased on
+        go/rust. A sync method reaching an async extern has no in-flight window
+        — so the gate refuses it (A1).</p>
+      </div>
+      <div class="lang-card reveal d1">
+        <div class="lc-head"><span>instances — <b>spawn</b>, attenuated</span>
+          <a href="playground.html?example=tenant_attenuation">try it →</a></div>
+        <pre data-lang="revl"><code>component Router requires kv_a: Store requires kv_b: StoreB {
+  let a = effect spawn TenantAWorker with { tag: "a" } undo a.dispose()
+  let b = effect spawn TenantBWorker with { tag: "b" } undo b.dispose()
+}</code></pre>
+        <p>A spawn may <b>narrow</b> a child's capabilities — never widen them.
+        Each tenant worker provably reaches only its own store, even though the
+        router holds both: least authority per instance,
+        <a href="playground.html?example=g4_spawn">enforced by G4</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ================= runtimes fan-out ================= -->
 <section class="block" id="runtimes" style="background: var(--bg1); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);">
   <div class="wrap">
@@ -349,6 +416,56 @@
   </div>
 </section>
 
+<!-- ================= truc ================= -->
+<section class="block" id="truc">
+  <div class="wrap">
+    <div class="block-head reveal">
+      <p class="eyebrow">The component manager</p>
+      <h2>truc — assemble, don’t install.</h2>
+      <p>Components are <b>petits bouts</b> — little pieces — and a composition
+      is what you get when you assemble them. Every other package manager
+      fetches first and finds out later. truc <b>admits every component through
+      revl’s own gate</b> before it joins the assembly: a piece that would break
+      your composition is refused at assemble time, with a why-trace — not
+      discovered at runtime, in production, by you.</p>
+    </div>
+    <div class="fanout-cols">
+      <div class="term reveal">
+        <div class="term-head"><i></i><i></i><i></i><span>zsh — truc</span></div>
+        <pre><span class="t-prompt">$ </span><span class="t-cmd">truc add audited_database</span>
+<span class="t-dim">  fetched · pinned in truc.lock · vendored under trucs/</span>
+
+<span class="t-prompt">$ </span><span class="t-cmd">truc assemble --check</span>
+<span class="t-dim">  dry run — resolve + admit, nothing touched</span>
+
+<span class="t-prompt">$ </span><span class="t-cmd">truc assemble</span>
+<span class="t-dim">  resolve → admit (</span><span class="t-g">G2</span><span class="t-dim">: no provider races, </span><span class="t-g">G4</span><span class="t-dim">: no</span>
+<span class="t-dim">  capability overreach) → compose</span>
+<span class="t-ok">  ✓ every petit bout admitted</span>
+
+<span class="t-prompt">$ </span><span class="t-cmd">truc ship</span>
+<span class="t-dim">  publish, policy-gated: official = gauntlet-graded,</span>
+<span class="t-dim">  re-verified dossier · discoverability metadata enforced</span></pre>
+      </div>
+      <div class="fan-facts reveal d1">
+        <div class="fact"><div><b>Fetched is not admitted.</b>
+          <p><code style="font-size:12px">truc add</code> only fetches and pins. Whether the
+          composition still <i>holds</i> is <code style="font-size:12px">assemble</code>’s job — a
+          separate, honest step, with <code style="font-size:12px">--check</code> as its dry run
+          and <code style="font-size:12px">truc rm</code> refusing to strand a dependent.</p></div></div>
+        <div class="fact"><div><b>Written in revl.</b>
+          <p>truc is itself a revl composition — its components pass through the
+          same admission gate they run for you, in-process. The manager dogfoods
+          the paradigm it manages.</p></div></div>
+        <div class="fact"><div><b>One namespace with the compiler.</b>
+          <p>Every verb is also <code style="font-size:12px">revl truc &lt;verb&gt;</code>, so agents
+          and CI reach the manager through the toolchain they already hold.</p></div></div>
+        <a class="btn btn-ghost" style="align-self:flex-start; margin-top: 8px" href="https://github.com/inso1337/revl/blob/main/docs/truc.md">Read the truc doc →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ================= agents ================= -->
 <section class="block tint-violet" id="agents">
   <div class="wrap">
@@ -376,12 +493,17 @@
           — checked against the live manifest — or through
           <code style="font-size:12px">revl_gauntlet</code>, which grades a candidate in isolation
           and returns a verdict dossier.</p></div></div>
+        <div class="fact" style="margin-top:16px"><div><b>G4 for the management plane.</b>
+          <p>The verbs themselves are capabilities: an <b>operator profile</b>
+          gates which MCP verbs a session may reach, so a read-only agent
+          provably cannot <code style="font-size:12px">revl_swap</code> a running system.</p></div></div>
         <div class="mcp-verbs">
           <span class="verb">revl_check</span><span class="verb">revl_admit</span>
           <span class="verb">revl_plan</span><span class="verb">revl_swap</span>
           <span class="verb">revl_rollback</span><span class="verb">revl_gauntlet</span>
+          <span class="verb">revl_quarantine</span><span class="verb">revl_repair</span>
+          <span class="verb">revl_canary</span><span class="verb">revl_ship</span>
           <span class="verb">revl_query_*</span><span class="verb">revl_snapshot</span>
-          <span class="verb">revl_timeline</span><span class="verb">revl_resolve</span>
         </div>
       </div>
       <div class="exchange" id="exchange">
@@ -459,6 +581,17 @@
       <div class="tool-card reveal d2"><h4><span class="tc-cmd">revl import</span> · wit / openapi / mcp</h4>
         <p>An external contract becomes a typed service — and any revl service
         exports back to WIT. The boundary is typed in both directions.</p></div>
+      <div class="tool-card reveal"><h4><span class="tc-cmd">revl quarantine</span></h4>
+        <p>The gauntlet proves a candidate <i>runs correctly</i>; quarantine proves
+        it <b>cannot escape while doing so</b> — physically, in the wasm sandbox,
+        trap-on-escape, before it touches a hosted tier.</p></div>
+      <div class="tool-card reveal d1"><h4><span class="tc-cmd">revl canary</span></h4>
+        <p>Progressive delivery: run both generations at once, give the successor
+        one realm slice, promote or revert on evidence — the rollback is derived,
+        not written.</p></div>
+      <div class="tool-card reveal d2"><h4><span class="tc-cmd">revl repair</span></h4>
+        <p>A component faults and the system repairs itself — inside declared
+        bounds, stopping for a human exactly when it would step outside them.</p></div>
     </div>
   </div>
 </section>
