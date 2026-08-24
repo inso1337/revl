@@ -1,0 +1,24 @@
+// Host-Map iteration scenario for the cordis-go tier (roadmap item 88).
+// The value-Map iteration builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map)
+// also type-check on a host `Map.new()` receiver, and emit lowers both as plain
+// method calls on the runtime object — so the host `type Map struct` must back
+// `Size()`/`Keys()`, or the emitted component fails to compile. gen_exec_test.go
+// proves it by RUNNING on stc-go: keys come back in canonical order, size counts.
+service KV {
+  fn count() -> Int
+  fn all_keys() -> List[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component MemKV provides kv: KV {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn count()    = store.size()
+    fn all_keys() = store.keys()
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}

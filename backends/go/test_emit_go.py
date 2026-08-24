@@ -226,9 +226,13 @@ def test_v3_checked_in_generated_is_current(ir_path, pkg, rel):
     assert formatted == committed, f"{rel} is stale — run backends/go/regen.sh"
 
 
+MEMKV = HERE / "scenarios" / "emitted" / "memkv" / "memkv.ir.json"
+
+
 @pytest.mark.parametrize("ir_path,pkg", [
     (USER_CACHE, "usercache"),
     (TENANTS, "tenants"),
+    (MEMKV, "memkv"),
 ])
 def test_checked_in_generated_is_current(ir_path, pkg):
     """The committed gen.go must match a fresh emit (modulo gofmt)."""
@@ -239,6 +243,57 @@ def test_checked_in_generated_is_current(ir_path, pkg):
     norm = lambda s: " ".join(s.split())
     assert norm(fresh) == norm(committed), (
         f"{pkg}/gen.go is stale — run backends/go/regen.sh")
+
+
+# host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 88).
+# The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
+# on a host `Map.new()` receiver too (host-receiver provenance isn't tracked in
+# provide bodies), and emit lowers both as plain method calls on the runtime
+# object. The host `type Map struct` therefore has to carry those methods, or
+# the emitted component fails `go build` (`s.store.Size undefined`). The
+# executable proof — running keys()/size() on real stc-go — lives in
+# scenarios/emitted/memkv/gen_exec_test.go; this pins the emitted shapes.
+# Mirrors the ts/rust/java gates (item 86) and the python fix (item 84).
+_HOST_MAP_ITER_SRC = """
+service KV {
+  fn count() -> Int
+  fn all_keys() -> List[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component MemKV provides kv: KV {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn count()    = store.size()
+    fn all_keys() = store.keys()
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+"""
+
+
+def test_host_map_backs_keys_and_size():
+    """The host `type Map struct` runtime carries `Size`/`Keys`, and the provide
+    body lowers them as method calls on the store — with value-Map semantics:
+    `Size` is the entry count as the tier's revl Int (a Go `int`, matching the
+    emitted `Count() int` service signature), `Keys` sorts into canonical order."""
+    src = emit.emit(_compile(_HOST_MAP_ITER_SRC), package="memkv")
+    # runtime methods exist on the host Map object
+    assert "func (m *Map) Size() int {" in src
+    assert "func (m *Map) Keys() []string {" in src
+    # canonical (code-point) order: go's `string <` is UTF-8 byte lexicographic,
+    # exactly code-point order (an import-free insertion sort, like revlMapKeys)
+    assert "for j := i; j > 0 && ks[j] < ks[j-1]; j--" in src
+    # provide body lowers to method calls on the host object
+    assert "return s.store.Size()" in src
+    assert "return s.store.Keys()" in src
+    # read-only queries leave no host trace (no hostRecord in Size/Keys)
+    body = src.split("func (m *Map) Size()")[1].split("func (m *Map) Keys()")[0]
+    assert "hostRecord" not in body
 
 
 # ---- Map value type (docs/stdlib-2.0.md §Map) ------------------------------
