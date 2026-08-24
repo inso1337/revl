@@ -5,7 +5,7 @@ Grammar (v0 subset — see DESIGN.md §3):
     program    := (service | component)*
     service    := 'service' IDENT '{' methoddecl* '}'
     methoddecl := modifier* 'fn' IDENT '(' [tparam (',' tparam)*] ')' ['->' type]
-    modifier   := 'emission' ['[' IDENT (',' IDENT)* ']'] | 'async' | 'commutative'
+    modifier   := 'emission' ['[' IDENT (',' IDENT)* ']'] | 'async' | 'commutative' | 'idempotent'
     tparam     := IDENT ':' type
     type       := IDENT ['[' type (',' type)* ']']
     component  := 'component' IDENT ['requires' binds] ['provides' binds] '{' body '}'
@@ -41,6 +41,12 @@ class MethodDecl:
     line: int
     async_: bool = False       # `async fn` service operation (§5)
     commutative: bool = False  # Def. 39 order-independence opt-in
+    # delivery semantics (docs/delivery-semantics.md, roadmap item 44): the
+    # emission may be safely re-delivered — `f(f(x)) == f(x)` on the server.
+    # Only an `emission` may claim it; it is the sibling of `commutative` (an
+    # algebraic property of the operation) and the precondition for the
+    # runtime's auto-retry right.
+    idempotent: bool = False
     # capability-scoped emission (docs/capabilities.md): `emission[db, log]`
     # bounds *where* a provider may emit. `None` is bare `emission` — "any
     # capability" — which is what every pre-capability source means, so
@@ -884,8 +890,9 @@ class Parser:
             capabilities: tuple[str, ...] | None = None
             async_ = False
             method_commutative = False
+            method_idempotent = False
             mline = self.peek().line
-            while self.at("kw") and self.peek().value in ("emission", "async", "commutative"):
+            while self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent"):
                 modifier = self.next().value
                 if modifier == "emission":
                     emission = True
@@ -897,8 +904,22 @@ class Parser:
                         capabilities = self._capability_list()
                 elif modifier == "async":
                     async_ = True
-                else:
+                elif modifier == "commutative":
                     method_commutative = True
+                else:
+                    method_idempotent = True
+            # `idempotent` is a delivery property, and only an emission is
+            # delivered: a plain `fn` never crosses the boundary, so it has
+            # nothing to re-deliver. Reject the claim rather than silently
+            # dropping it (docs/delivery-semantics.md).
+            if method_idempotent and not emission:
+                raise self.err(
+                    mline,
+                    "`idempotent` describes how an emission is delivered, so it "
+                    "is only meaningful on an `emission` operation",
+                    hint="write `emission idempotent fn ...`; a plain `fn` is not "
+                         "delivered, so there is nothing to re-deliver",
+                )
             self.expect("kw", "fn")
             mname = self.expect("ident").value
             self.expect("(")
@@ -918,7 +939,8 @@ class Parser:
                 raise self.err(mline, f"duplicate method `{mname}` in service {name}")
             methods[mname] = MethodDecl(
                 mname, params, returns, emission, mline, async_=async_,
-                commutative=method_commutative, capabilities=capabilities,
+                commutative=method_commutative, idempotent=method_idempotent,
+                capabilities=capabilities,
             )
         self.expect("}")
         return ServiceDecl(name, methods, line, commutative=commutative)

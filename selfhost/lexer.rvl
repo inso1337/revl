@@ -59,7 +59,8 @@ fn keywords() -> List[Str] {
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
     "hole",
-    "extern", "acquire", "pure", "compensate", "await", "verified", "commutative"]
+    "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
+    "idempotent"]
 }
 
 fn ops3() -> List[Str] { return ["===", "!=="] }

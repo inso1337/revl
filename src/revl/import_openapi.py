@@ -77,6 +77,15 @@ _SCALARS = {
 #: evidence in an OpenAPI document that an operation does not change anything.
 _SAFE_METHODS = ("get", "head", "options", "trace")
 
+#: HTTP methods that RFC 9110 §9.2.2 defines as *idempotent* among those that
+#: are also emissions (i.e. not safe): PUT and DELETE. Repeating one has the
+#: same server-visible effect as issuing it once — `f(f(x)) == f(x)` — which is
+#: exactly the delivery property `emission idempotent` promotes to a checked IR
+#: flag (docs/delivery-semantics.md, roadmap item 44). POST and PATCH are not
+#: idempotent by specification. Safe methods are idempotent too, but they import
+#: as plain `fn`, not `emission`, so delivery does not arise for them.
+_IDEMPOTENT_EMISSION_METHODS = ("put", "delete")
+
 #: every method an OpenAPI 3.x path item may carry.
 _METHODS = (*_SAFE_METHODS, "put", "post", "delete", "patch")
 
@@ -544,6 +553,7 @@ class _Operation:
     returns: str | None
     emission: bool
     reason: str                     # why it is (or is not) an emission
+    idempotent: bool = False        # RFC 9110 §9.2.2, spec's claim (item 44)
 
 
 class _Generator:
@@ -689,9 +699,14 @@ class _Generator:
         summary = operation.get("summary") or operation.get("description") or ""
         summary = str(summary).strip().splitlines()[0][:88] if summary else ""
 
+        # Delivery evidence (item 44): PUT/DELETE are idempotent by RFC 9110
+        # §9.2.2. Only claim it on an operation that actually imports as an
+        # emission — a verb the author weakened to plain `fn` has no delivery.
+        idempotent = emission and method in _IDEMPOTENT_EMISSION_METHODS
+
         return _Operation(method=method, path=path, name=name, pointer=pointer,
                           summary=summary, params=params, returns=returns,
-                          emission=emission, reason=reason)
+                          emission=emission, reason=reason, idempotent=idempotent)
 
     def op_name(self, method: str, path: str, operation_id: object,
                 pointer: str) -> str:
@@ -988,8 +1003,17 @@ class _Generator:
 
             ops.append(f"  // {head}" + (f" — {operation.summary}" if operation.summary else ""))
             ops.append(f"  // {operation.reason}")
-            ops.append(f"  {'' if not operation.emission else 'emission '}"
-                       f"fn {operation.name}({signature}){returns}")
+            if operation.idempotent:
+                # the delivery claim, stated as a claim — same footing as the
+                # `emission`/`safe` evidence above it (item 44)
+                ops.append(
+                    f"  // `idempotent` by RFC 9110 §9.2.2: `{operation.method.upper()}` is "
+                    "idempotent by specification — the author's claim about their "
+                    "server, letting the runtime auto-retry a transient failure")
+            modifiers = ""
+            if operation.emission:
+                modifiers = "emission idempotent " if operation.idempotent else "emission "
+            ops.append(f"  {modifiers}fn {operation.name}({signature}){returns}")
 
             extern = f"http_{self.key}_{operation.name}"
             target = f"{server}{operation.path}" if server else operation.path
@@ -1041,9 +1065,16 @@ class _Generator:
             "// trust a plain `fn` below, and re-import with `--emission <op>` (or set",
             "// `x-revl-emission: true`) for any that writes.",
             "//",
-            "// Note also what is *not* claimed: PUT and DELETE are idempotent by",
-            "// specification and are still `emission` — repeating an operation safely",
-            "// says nothing about undoing it.",
+            "// A second claim rides alongside `safe`: RFC 9110 §9.2.2 defines PUT",
+            "// and DELETE as *idempotent* — repeating one has the same effect as",
+            "// issuing it once. They are still `emission` (idempotent is not",
+            "// reversible: repeating safely says nothing about undoing), so this",
+            "// importer emits `emission idempotent fn` for them. Like `safe`, the",
+            "// claim is the spec's, not a proof — but it is a checked IR property",
+            "// once written, and it earns the runtime the right to auto-retry a",
+            "// transient failure. POST and PATCH are not idempotent and stay a bare",
+            "// `emission fn`. Delete the `idempotent` word from any operation whose",
+            "// real server does not honour the guarantee.",
             "//",
             "// The extern bodies are stubs: the typed boundary is generated, the HTTP",
             "// call is not. Fill each one in — including URL construction, headers,",

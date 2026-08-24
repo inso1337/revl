@@ -98,6 +98,14 @@ first call, which is what G4 is about. Reading "idempotent" as "revertible" is
 the most tempting wrong inference available at this boundary, so the header
 names it.
 
+**Idempotency rides along as a delivery claim, not a proof.** Since RFC 9110
+§9.2.2 defines `PUT` and `DELETE` as idempotent, the importer writes
+`emission idempotent fn` for them — the checked IR property that earns the
+runtime its auto-retry right (docs/delivery-semantics.md, roadmap item 44).
+It is the same claim-shaped evidence as `safe`: the spec's word about the
+author's server, not a proof this compiler checked. `POST` and `PATCH` are
+not idempotent by specification and stay a bare `emission fn`.
+
 **revl's `pure` and HTTP's `safe` line up on the axis revl cares about.**
 `pure` in revl means "no observable effect" (docs/syntax-2.0.md §6). It does
 *not* mean deterministic — and a `GET` is certainly not deterministic, since
