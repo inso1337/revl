@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import textwrap
 
 __all__ = ["emit", "EmitError"]
 
@@ -1887,7 +1888,7 @@ def _emit_ts_externs(externs: list) -> list[str]:
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
         lines.append(f"export function {name}({params}): {returns} {{")
-        body = bodies["ts"].strip()
+        body = textwrap.dedent(bodies["ts"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
                 lines.append("  " + line)
