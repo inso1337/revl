@@ -21,24 +21,26 @@ public final class Components {
         void put(String key, String value);
     }
 
-    // host object runtime (Map) — minimal working Java implementation
-    public static final class Map {
-        private final java.util.HashMap<String, String> values = new java.util.HashMap<>();
+    // host object runtime (Map) — minimal working Java implementation.
+    // The value type is generic — each site's `Map.create()` pins `V`
+    // (FR-4: `Map[Str, List[Msg]]` and friends, not just String).
+    public static final class Map<V> {
+        private final java.util.HashMap<String, V> values = new java.util.HashMap<>();
         private Map() {}
         // revl `Map.new()` — renamed: `new` is a Java reserved word.
-        public static Map create() {
-            return new Map();
+        public static <V> Map<V> create() {
+            return new Map<>();
         }
         public void drop() {
             values.clear();
         }
-        public void insert(String key, String value) {
+        public void insert(String key, V value) {
             values.put(key, value);
         }
         public void remove(String key) {
             values.remove(key);
         }
-        public java.util.Optional<String> get(String key) {
+        public java.util.Optional<V> get(String key) {
             return java.util.Optional.ofNullable(values.get(key));
         }
     }
@@ -180,8 +182,8 @@ public final class Components {
         private final Context ctx;
         private final Context.EffectScope fx;
         private final Database db;
-        private final Map store;
-        UserCacheCache(Context ctx, Context.EffectScope fx, Database db, Map store) {
+        private final Map<String> store;
+        UserCacheCache(Context ctx, Context.EffectScope fx, Database db, Map<String> store) {
             this.ctx = ctx;
             this.fx = fx;
             this.db = db;
@@ -205,7 +207,7 @@ public final class Components {
             Context.EffectScope fx = ctx.effect();
             Database db = ctx.get(Database.class);
             try {
-                var store = Map.create();
+                Map<String> store = Map.create();
                 fx.track(Disposables.of(() -> store.drop()));
                 fx.track(ctx.provide(ServiceKey.of(Cache.class), new UserCacheCache(ctx, fx, db, store)));
                 return fx;
