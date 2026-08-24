@@ -90,6 +90,36 @@ def _read_text(path: str) -> str:
         return handle.read()
 
 
+def build_snapshot(ir: dict | None, origin: dict | None,
+                   config: dict | None, record: bool = False) -> dict | None:
+    """`{sources, manifest, meta}` from *explicit* admission inputs, not a live
+    session — the shared core of :func:`snapshot` and of the generation-history
+    entries (roadmap item 65, docs/generation-history.md).
+
+    Returns None when there are no recorded sources to reproduce the
+    composition from: a snapshot is the *inputs* to re-admit, so a generation
+    admitted without its sources (a hand-built IR) has nothing to snapshot, and
+    an undo to it will be refused rather than rehydrated past the gate.
+    """
+    if not origin:
+        return None
+    manifest = (ir or {}).get("manifest") or {}
+    return {
+        "sources": _materialize(origin),
+        "manifest": manifest,
+        "meta": {
+            "snapshotVersion": SNAPSHOT_VERSION,
+            "irVersion": (ir or {}).get("ir_version"),
+            "components": [entry.get("name")
+                          for entry in manifest.get("components") or []],
+            "loadOrder": manifest.get("loadOrder") or [],
+            "record": bool(record),
+            "config": dict(config or {}),
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
 def snapshot(session) -> dict:
     """`{sources, manifest, meta}` — enough to re-admit the live composition.
 
@@ -107,21 +137,8 @@ def snapshot(session) -> dict:
             "inputs (snapshot captures the sources a live admission was given, "
             "not a dump of runtime objects)")
 
-    manifest = (session.ir or {}).get("manifest") or {}
-    return {
-        "sources": _materialize(session.origin),
-        "manifest": manifest,
-        "meta": {
-            "snapshotVersion": SNAPSHOT_VERSION,
-            "irVersion": (session.ir or {}).get("ir_version"),
-            "components": [entry.get("name")
-                          for entry in manifest.get("components") or []],
-            "loadOrder": manifest.get("loadOrder") or [],
-            "record": session.recorder is not None,
-            "config": dict(session.config or {}),
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-        },
-    }
+    return build_snapshot(session.ir, session.origin, session.config,
+                          session.recorder is not None)
 
 
 # ---------------------------------------------------------------- restore
