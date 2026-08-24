@@ -193,6 +193,12 @@ class _EmissionEvidence:
             decl.name for decl in program.externs
             if decl.classification == "emission"
         }
+        # async externs (roadmap item 80): name -> decl, for the v1 coloring
+        # check to locate an async extern a body reaches (async-extern.md §3)
+        self.async_externs = {
+            decl.name: decl for decl in program.externs
+            if getattr(decl, "async_", False)
+        }
 
     def locate(self, decl) -> tuple[str | None, int | None]:
         if decl is None:

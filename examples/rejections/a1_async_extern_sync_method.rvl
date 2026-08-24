@@ -1,0 +1,22 @@
+// REJECTED — A1: a sync provide method reaches an async extern.
+// An `async` extern is an emission whose host operation may suspend the
+// calling task (docs/design/async-extern.md §2). A sync service operation
+// has no in-flight window to await it in, so a provider that reaches one is
+// refused — the service declaration is the upper bound on its providers, so
+// asynchrony, like emission-ness, is a declared property (§3). Declare the
+// operation `async fn` and the same body is admitted.
+//
+// expected error:
+//   `Http.post` is declared sync, but this implementation reaches async
+//   extern `http_post` — a sync method has no in-flight window (A1)
+
+extern emission async fn http_post(url: Str, body: Str) -> Str
+  = @ts { return await Promise.resolve(url + body) }
+
+service Http { emission fn post(url: Str, body: Str) -> Str }
+
+component Poster provides http: Http {
+  provide http {
+    fn post(url, body) = http_post(url, body)
+  }
+}
