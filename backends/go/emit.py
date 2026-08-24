@@ -547,6 +547,10 @@ def _emit_services(services: dict) -> list[str]:
                 for p in m.get("params", [])
             )
             ret = _go_return(m.get("returns"))
+            if m.get("idempotent"):
+                # delivery semantics (item 44): safe to re-deliver, so the
+                # runtime may auto-retry a transient failure of this emission
+                out.append("\t// idempotent: the runtime may auto-retry a transient failure")
             sig = "\t%s(%s)" % (_camel(mname), params)
             if ret:
                 sig += " " + ret

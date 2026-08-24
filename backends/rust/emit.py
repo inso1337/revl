@@ -448,6 +448,9 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             if method.get("emission"):
                 out.append("    /// emission: crosses the system boundary (DESIGN.md §3.5)")
+            if method.get("idempotent"):
+                out.append("    /// idempotent: safe to re-deliver — the runtime "
+                           "may auto-retry a transient failure (item 44)")
             out.append(f"    fn {mname}(&self, {params}) -> {ret};")
         out.append("}")
         out.append("")
