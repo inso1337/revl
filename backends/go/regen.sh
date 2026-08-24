@@ -11,6 +11,13 @@ python3 "$here/emit.py" "$root/examples/user_cache.ir.json" usercache \
 python3 "$here/emit.py" "$root/backends/typescript/tests/fixtures/tenants.ir.json" tenants \
   > "$here/scenarios/emitted/tenants/gen.go"
 
+# host `Map.new()` iteration surface — keys()/size() (roadmap item 88). Compiled
+# from scenarios/memkv.rvl by the frozen frontend (`revl compile`); the host
+# `type Map struct` backs Size()/Keys(), and gen_exec_test.go proves both RUN on
+# stc-go (keys canonically sorted, size counting).
+python3 "$here/emit.py" "$here/scenarios/emitted/memkv/memkv.ir.json" memkv \
+  > "$here/scenarios/emitted/memkv/gen.go"
+
 # --- instance-parametric spawn (docs/design-v2-instances.md, phase 1) ------
 # spawn.ir.json is compiled from scenarios/spawn.rvl by the frozen frontend
 # (`revl compile`); the emitter lowers its `spawn` acquisitions to child-fiber
@@ -42,6 +49,7 @@ python3 "$here/emit.py" "$fx/v3_stdlib.ir.json"           stdlib \
 if command -v gofmt >/dev/null 2>&1; then
   gofmt -w "$here/scenarios/emitted/usercache/gen.go" \
            "$here/scenarios/emitted/tenants/gen.go" \
+           "$here/scenarios/emitted/memkv/gen.go" \
            "$here/scenarios/emitted/spawn/gen.go" \
            "$here/scenarios/emitted/accessor/gen.go" \
            "$here/v3/tests/gen_test.go" \
