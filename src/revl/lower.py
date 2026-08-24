@@ -3363,6 +3363,37 @@ def _req_op_is_async(node, env) -> bool:
     return False
 
 
+def _reached_async_req_ops(node, env, acc: list) -> None:
+    """Collect req-target async service ops (`req.method` whose op is `async
+    fn`) a lowered method body reaches DIRECTLY — in statement OR expression
+    position (a ternary arm, a nested expression), the blind spot item 117
+    closes. The name-based `_calls_in` the A1 provide-method check runs sees
+    async *callables* (externs, colored fns) but never an async *service
+    operation* reached through a required key (rule 3 of the item-92 async-
+    reach), so a sync method whose ternary returns `emit m.op(x)` slipped
+    through as admitted (finding #40).
+
+    Any nested arrow is pruned: an arrow value's async-reach is the concern of
+    `_refuse_leaky_arrow`/`_refuse_leaky_pure_arrow` (finding #21), which raise
+    the arrow-color diagnostic instead — this walk owns only the ops the method
+    body reaches without an intervening arrow. Each hit is
+    `(req_name, method, op_decl)`."""
+    if isinstance(node, dict):
+        if node.get("kind") == "arrow":
+            return
+        if _req_op_is_async(node, env):
+            target = node.get("target")
+            method = node.get("method")
+            svc = env.services.get(env.requires.get(target.get("name")) or "")
+            op_decl = svc.methods.get(method) if svc is not None else None
+            acc.append((target.get("name"), method, op_decl))
+        for value in node.values():
+            _reached_async_req_ops(value, env, acc)
+    elif isinstance(node, list):
+        for value in node:
+            _reached_async_req_ops(value, env, acc)
+
+
 def _arrow_reaches_async(body, env) -> bool:
     """True if a lowered arrow body reaches a suspension (item 92 §3): a
     req-target async service op (rule 3), or a call of an async-colored callable
@@ -4114,6 +4145,44 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     hint=f"declare the operation `async fn {method.name}(...)` in "
                          f"service `{svc.name}`, or move the suspending call out of "
                          f"this method",
+                    code="A1", category="async-propagation",
+                    why=why,
+                )
+
+        # item 117 (finding #40): the name-based reach above is blind to an
+        # async *service operation* reached through a required key — the
+        # complement of the async-callable case. A sync provide method that
+        # reaches such an op in ANY position (a `let x = emit m.op(...)`
+        # statement, or nested in a ternary arm / expression) has no in-flight
+        # window to await it in, so it is refused — the expression-position
+        # complement of item 141, which awaits the same emission inside an
+        # *async* method (that path, `decl.async_`, is deliberately left
+        # admitted here). Not guarded by `env.async_callables`: an async svc op
+        # can be reached with no async externs/colored fns present at all.
+        if not decl.async_:
+            reached_ops: list = []
+            _reached_async_req_ops(mbody, env, reached_ops)
+            if reached_ops:
+                req_name, op_method, op_decl = reached_ops[0]
+                culprit = f"{req_name}.{op_method}"
+                head = TraceStep(method.name, "provide-method",
+                                 comp.source or filename, method.line,
+                                 f"provision `{stmt.key}`")
+                tail = TraceStep(culprit, "async-operation",
+                                 getattr(op_decl, "source", None),
+                                 getattr(op_decl, "line", None),
+                                 "async service operation")
+                why = WhyTrace(kind="async-propagation",
+                               subject=f"{svc.name}.{method.name}",
+                               steps=[head, tail], shape=CHAIN)
+                raise RevlError(
+                    comp.source or filename, method.line,
+                    f"`{svc.name}.{method.name}` is declared sync, but this "
+                    f"implementation reaches async operation `{culprit}` — a "
+                    f"sync method has no in-flight window (A1)",
+                    hint=f"declare the operation `async fn {method.name}(...)` "
+                         f"in service `{svc.name}`, or move the suspending call "
+                         f"out of this method",
                     code="A1", category="async-propagation",
                     why=why,
                 )
