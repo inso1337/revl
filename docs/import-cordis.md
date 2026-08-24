@@ -180,6 +180,26 @@ now seen through — following the same resolve-don't-guess rule:
   (`'a' | number`) has no tag on the non-literal arm and stays refused honestly —
   only pure literal-only unions synthesize.
 
+  The union is read across however many lines it spans, in DSH's real
+  formatting — one member per line, each with a leading `|`, and often a leading
+  `|` on the whole alias:
+
+  ```ts
+  export type PluginFiberPhase =
+    | 'pending'
+    | 'loading'
+    | 'active'
+    | 'failed'
+    | 'unloading'
+    | null
+  ```
+
+  imports to exactly the same variant as the inline `'pending' | … | null`
+  spelling. The leading `|` TypeScript permits is dropped, and a member sitting
+  on its own line (with or without a leading `|`) is never lost — an earlier
+  version cut the alias body at the first newline, which refused the leading-`|`
+  shape and silently collapsed the bare-first-member shape to a single `Str`.
+
 ### Type mapping (TypeScript → revl)
 
 | TypeScript | revl | note |
