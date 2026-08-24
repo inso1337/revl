@@ -87,11 +87,13 @@ class Policy:
     tenants_isolated: bool = False           # `tenants never reach each other`
     mcp_allow: tuple[str, ...] | None = None  # the agent-sandbox allow-list
     leases_enforced: bool = False            # `leases enforced` (item 61)
+    quarantine_required: bool = False        # `quarantine required` (item 45)
     source: str | None = None                # file path, for messages
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
-            and self.mcp_allow is None and not self.leases_enforced
+            and self.mcp_allow is None and not self.leases_enforced \
+            and not self.quarantine_required
 
 
 # ------------------------------------------------------------------- parsing
@@ -120,6 +122,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     tenants = False
     mcp_allow: tuple[str, ...] | None = None
     leases_enforced = False
+    quarantine_required = False
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -127,6 +130,13 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         low = line.lower()
         if low == "tenants never reach each other":
             tenants = True
+            continue
+        # the quarantine tier (item 45): require an untrusted candidate to prove
+        # itself in the wasm sandbox before it may be admitted to a hosted tier
+        # (docs/quarantine-tier.md). Enforced at swap; an operator with
+        # `quarantine-bypass` authority (item 55) may override.
+        if low in ("quarantine required", "quarantine is required"):
+            quarantine_required = True
             continue
         # component leases (item 61): promote the advisory workspace warning to
         # an admission refusal — a swap that replaces a component another
@@ -163,7 +173,8 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         else:
             raise PolicyError(source, lineno,
                               f"unrecognised policy line: {raw.strip()!r}")
-    return Policy(tuple(rules), tenants, mcp_allow, leases_enforced, source)
+    return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
+                  quarantine_required, source)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -199,7 +210,9 @@ def _parse_json(text: str, source: str | None) -> Policy:
     mcp = doc.get("mcp") or {}
     mcp_allow = tuple(mcp["allow"]) if mcp.get("allow") is not None else None
     leases_enforced = bool((doc.get("leases") or {}).get("enforced"))
-    return Policy(tuple(rules), tenants, mcp_allow, leases_enforced, source)
+    quarantine_required = bool((doc.get("quarantine") or {}).get("required"))
+    return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
+                  quarantine_required, source)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:

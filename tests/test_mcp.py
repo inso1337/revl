@@ -233,6 +233,8 @@ def test_initialize_and_tools_list():
                           "revl_ship",
                           # the proving ground (docs/gauntlet.md)
                           "revl_gauntlet",
+                          # the quarantine tier (docs/quarantine-tier.md)
+                          "revl_quarantine",
                           # composition persistence (docs/persistence.md)
                           "revl_snapshot", "revl_restore",
                           # composition queries (docs/queries.md)
