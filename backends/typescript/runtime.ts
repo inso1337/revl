@@ -680,6 +680,11 @@ export const host = {
   // / `host.scheduleAfter`, whose handle's `cancel()` is the schedule's inverse.
   scheduleEvery,
   scheduleAfter,
+  // item 102: an `advance` lifecycle statement compiles to `host.clockAdvance`,
+  // the only in-language way to move the clock coeffect and so exercise a
+  // timer's firing; `host.clockReset` isolates one lifecycle test's timeline.
+  clockAdvance: (ms: number): number => Clock.advance(ms),
+  clockReset: (): void => Clock.reset(),
   applyConfigDefaults,
 }
 

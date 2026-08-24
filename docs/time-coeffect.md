@@ -1,6 +1,7 @@
 # Time as a coeffect
 
-*Roadmap item 57. Reference tiers: Python + TypeScript.*
+*Roadmap item 57 (timers as revertible coeffects); item 102 (the `advance`
+lifecycle statement). Reference tiers: Python + TypeScript.*
 
 Periodic and delayed work — a heartbeat, a warm-up, a retry sweep — has always
 lived in host `setInterval`/`time.Timer` loops, *outside* every guarantee revl
@@ -106,12 +107,73 @@ assert fired == 3 and seen == [10, 20, 30]
 assert Clock.firings()[2] == (1, 30)      # the 3rd firing, at 30ms
 ```
 
-`advance` fires every due timer earliest-first, ties broken by arm order,
+`Clock.advance` fires every due timer earliest-first, ties broken by arm order,
 re-arming `every` timers across the whole span — a total, reproducible ordering
 across any number of interleaved timers. A production driver would pump `advance`
 from a real monotonic source; the reference tier keeps it explicit so tests are
 deterministic. The Python (`backends/python/runtime.py`) and TypeScript
 (`backends/typescript/runtime.ts`) clocks agree tick-for-tick.
+
+### The `advance` lifecycle statement (item 102)
+
+Property 3 above is driven by a *host* call to `Clock.advance`. Item 57 left a
+gap: that call was not expressible **in the language**, so a `lifecycle test`
+(syntax-2.0 §7.1) could prove a timer's *cancellation* (property 1) but never
+its *firing* — `asyncio.sleep` cannot help, because the clock never moves on its
+own. A revl author could not write "fires on the 3rd tick" as a test.
+
+Item 102 adds the `advance <n><unit>` lifecycle statement. It is the only
+statement that moves the clock coeffect, and it reuses item 57's duration units
+(`ms`/`s`/`m`/`h`/`d`). After an `advance`, every due timer fires as a
+deterministic timeline step, so the firing is observable through a plain `call`:
+
+```revl
+service Counter { fn count() -> Int  emission fn tick() }
+
+component TickCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+  provide counter {
+    fn count() = store.size()
+    fn tick() {                       // one distinct entry per firing
+      let key = `tick-${store.size()}`
+      effect store.insert(key, "fired")
+      undo   store.remove(key)
+    }
+  }
+}
+component Heartbeat requires counter: Counter { every 10s { emit counter.tick() } }
+
+lifecycle test "an every-timer fires on each advanced tick" {
+  load TickCounter
+  load Heartbeat
+  advance 35s
+  let ticks = call counter.count()
+  assert ticks == 3                   // fired at 10s, 20s, 30s — the 3rd tick
+  unload Heartbeat                    // cancellation is the schedule's inverse
+  advance 100s
+  let settled = call counter.count()
+  assert settled == 3                 // no orphaned firing after teardown
+  unload TickCounter
+  assert no_residue
+}
+```
+
+It lowers to an additive lifecycle step, `{"step": "advance", "ms": 35000}`,
+which the reference emitters render against the same clock coeffect the timer
+armed:
+
+* **Python** — `Clock.advance(35000)`;
+* **TypeScript** — `host.clockAdvance(35000)`.
+
+A lifecycle test that advances the clock is reset to `t=0` on entry
+(`Clock.reset()` / `host.clockReset()`) so its timeline is independent of any
+earlier test in the file; a lifecycle test with no `advance` is byte-identical
+to its pre-item-102 output (the `Clock` import and reset appear only when
+needed). The pinned exit test is `examples/lifecycle_timer.rvl`, run on both
+reference tiers by `tests/test_time_coeffect.py`.
+
+`advance` is a *lifecycle* statement only — legal inside a `lifecycle test`
+body, an ordinary identifier everywhere else, exactly like `load`/`unload`/`call`.
 
 ## Scope (first slice)
 
@@ -158,9 +220,13 @@ contract in this document is the specification it will implement.
 | --- | --- |
 | `every`/`after` keywords | `src/revl/lexer.py`, `selfhost/lexer.rvl`, `src/revl/formatter.py` |
 | syntax → `TimerStmt` | `src/revl/parser.py` |
+| syntax → `AdvanceStmt` (item 102) | `src/revl/parser.py` (`lifecycle_stmt`, `_advance_duration_ms`) |
 | lowering → `timer` step, v3 gate, G4 reach | `src/revl/lower.py` |
+| lowering → `advance` step (item 102) | `src/revl/lower.py` (`_lower_lifecycle_body`) |
 | clock coeffect + timer scheduler | `backends/python/runtime.py`, `backends/typescript/runtime.ts` |
-| py/ts emitters | `backends/python/emit.py`, `backends/typescript/emit.py` |
-| honest refusal on go/rust/wasm | `src/revl/test.py` |
+| py/ts emitters (timer + `advance`) | `backends/python/emit.py`, `backends/typescript/emit.py` |
+| `host.clockAdvance`/`clockReset` (item 102) | `backends/typescript/runtime.ts` |
+| honest `timer`-step refusal on wasm | `src/revl/test.py` |
+| honest `advance`-step refusal on go/rust/wasm (py/ts drive it; wiring the in-language driver into those lifecycle emitters is a follow-on) | their `_lifecycle_step` dispatch in `backends/{go,rust,wasm}/emit.py` |
 | exit tests | `tests/test_time_coeffect.py`, `backends/typescript/tests/time_coeffect.test.ts` |
-| example | `examples/heartbeat.rvl` |
+| examples | `examples/heartbeat.rvl` (timers), `examples/lifecycle_timer.rvl` (`advance`) |
