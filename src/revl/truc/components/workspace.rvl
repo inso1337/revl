@@ -5,7 +5,7 @@
 
 use "../externs.rvl" {
   host_manifest_read, host_read, host_exists, host_read_sources,
-  host_commit_add, host_write_assembly, host_print
+  host_commit_add, host_commit_rm, host_write_assembly, host_print
 }
 
 pub service Workspace {
@@ -14,6 +14,7 @@ pub service Workspace {
   fn exists(path: Str) -> Bool
   emission fn read_sources(projectDir: Str, spec: Str) -> Str
   emission fn commit_add(projectDir: Str, plan: Str) -> Str
+  emission fn commit_rm(projectDir: Str, plan: Str) -> Str
   emission fn write_assembly(projectDir: Str, manifest: Str) -> Str
   emission fn print(text: Str)
 }
@@ -25,6 +26,7 @@ component Workspace provides ws: Workspace {
     fn exists(path) = host_exists(path)
     fn read_sources(projectDir, spec) = emit host_read_sources(projectDir, spec)
     fn commit_add(projectDir, plan) = emit host_commit_add(projectDir, plan)
+    fn commit_rm(projectDir, plan) = emit host_commit_rm(projectDir, plan)
     fn write_assembly(projectDir, manifest) = emit host_write_assembly(projectDir, manifest)
     fn print(text) = emit host_print(text)
   }
