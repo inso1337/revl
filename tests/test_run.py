@@ -125,6 +125,21 @@ def test_run_refuses_a_backend_that_is_not_wired_yet():
     assert "ts tier emits" in result.stderr
 
 
+@pytest.mark.parametrize("backend,dir_hint", [("go", "backends/go/"), ("ts", "backends/typescript/")])
+def test_run_refuses_an_emitting_tier_with_the_friendly_not_wired_message(backend, dir_hint):
+    """Every emitter tier that has no `run` driver takes the same path to the
+    same neighboring facts (item 72): `--backend go` used to die in argparse
+    with 'invalid choice' while `--backend ts` got the friendly 'emits but has
+    no run driver' message. Both now pass the choice gate (go is a known tier)
+    and reach the one refusal, which names the real backend directory."""
+    result = _run_cli([USER_CACHE, "--backend", backend])
+    assert result.returncode == 2, result.stderr
+    assert "not wired yet" in result.stderr
+    assert "runs today" in result.stderr
+    assert f"{backend} tier emits" in result.stderr
+    assert dir_hint in result.stderr
+
+
 def test_required_config_problem_uses_the_ir_schema():
     """The helper mirrors the runtime's ConfigSchema rule — `default: null`
     is required — straight off the IR's own config list."""

@@ -199,22 +199,25 @@ def _camel(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
 
-def _string(value: str) -> str:
+def _string(value) -> str:
     """A Rust double-quoted string literal, escaped *from code points*.
 
     The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
     Rust source is UTF-8 and spells a non-ASCII scalar as `\\u{XXXX}` — it
     rejects the lone-surrogate `\\uXXXX` escapes `json.dumps` emits, which is
-    why every non-ASCII literal used to fail to compile on this tier. ASCII is
-    byte-identical to the old `json.dumps` output (printable ASCII verbatim;
-    `\\n`/`\\r`/`\\t`/`\\"`/`\\\\` the same), so v1 goldens stay frozen.
+    why every non-ASCII literal used to fail to compile on this tier.
 
-    A non-`str` input (e.g. a list of requirement names) keeps the old
-    `json.dumps` serialization unchanged — only real `Str` values take the
-    code-point path.
+    One escape dialect for the whole function: a non-`str` input (the list of
+    requirement names behind `Inject::new([...])`) is serialized structurally,
+    with every string element escaped through the same code-point path. The
+    old `json.dumps` fallback is gone — byte-stability is never grounds for a
+    dual code path (docs/conformance.md, "Golden policy").
     """
+    if isinstance(value, list):
+        return "[" + ", ".join(_string(item) for item in value) + "]"
     if not isinstance(value, str):
-        return json.dumps(value)
+        raise EmitError(f"cannot serialize {type(value).__name__} as a Rust "
+                        f"string literal: {value!r}")
     out = ['"']
     for ch in value:
         cp = ord(ch)

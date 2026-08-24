@@ -22,8 +22,10 @@ runnable in-process tier; ``rust``, ``java`` and ``wasm`` are runnable too, each
 as a separate process over the bridge seam (see :mod:`revl.run_rust`,
 :mod:`revl.run_java`, :mod:`revl.run_wasm` — --once boots and tears down a real
 composition with a no-residue proof, behind a per-tier runtime-availability
-gate). ``--backend ts`` is accepted but reports that it is not wired yet
-(multi-runtime is a roadmap item, not a promise here).
+gate). ``--backend ts`` and ``--backend go`` are accepted but report that they
+are not wired yet (multi-runtime is a roadmap item, not a promise here) — the
+same friendly refusal, so every emitting tier takes one path to the same
+neighboring facts.
 """
 
 from __future__ import annotations
@@ -41,7 +43,12 @@ from .holes import refuse_admission
 from .errors import RevlError
 from . import why_runtime
 
-KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm")
+KNOWN_BACKENDS = ("py", "ts", "go", "rust", "java", "wasm")
+
+# The emitter tiers' backend directories, for the "see backends/<dir>/" hint
+# in the not-wired refusal — `ts` lives under `typescript`, everything else
+# matches its tier name.
+_BACKEND_DIRS = {"ts": "typescript"}
 
 # fiber states that count as "settled" — a lifecycle transition has come to
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
@@ -691,9 +698,10 @@ def run_command(args) -> int:
         return 0
 
     if backend not in RUNNABLE_BACKENDS:
+        backend_dir = _BACKEND_DIRS.get(backend, backend)
         print(f"error: `revl run --backend {backend}` is not wired yet — "
               f"only {'/'.join(RUNNABLE_BACKENDS)} runs today.\n"
-              f"       the {backend} tier emits (see backends/{backend}/), but has no `run` driver.",
+              f"       the {backend} tier emits (see backends/{backend_dir}/), but has no `run` driver.",
               file=sys.stderr)
         return 2
 
