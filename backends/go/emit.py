@@ -885,6 +885,12 @@ _COMP_NEEDS_MAP = False
 # Str.to_int (revlParseInt) referenced by a component body: flags the Opt
 # preamble (the helper's return type) plus the helper itself.
 _COMP_NEEDS_PARSE_INT = False
+# A `timer` step (item 57) in a component body: flags the clock coeffect +
+# timer scheduler preamble (_TIMER_PREAMBLE). Timers lower to a revertible
+# schedule whose inverse is cancellation, wired into the same effect ledger.
+_COMP_NEEDS_TIMER = False
+# Per-emit counter for unique timer local names (`_revlTimer1`, `_revlTimer2`).
+_TIMER_COUNTER = 0
 
 
 def _comp_builtin(method, recv_surface, target, args):
@@ -1507,6 +1513,40 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             out.append("%s}" % pad)
         else:
             out.append("%s%s" % (pad, emit_call))
+    elif s == "timer":
+        # A `timer` step (item 57): a revertible schedule. Arming the timer is
+        # the acquire, cancellation its derived inverse — wired into the SAME
+        # `ctx.Effect` ledger (LIFO) that reverts a Pool or a provision, so
+        # unloading the component provably cancels the timer with no orphaned
+        # interval (residue-free, the leak the residue probe hunts cannot
+        # occur). The clock does not advance on its own: RevlClockAdvance drives
+        # it, so a firing is a deterministic timeline step, not a wall-clock
+        # race (docs/time-coeffect.md). The firing closure holds the timer
+        # body's emissions and runs at activation-time stratum with the
+        # component's declared capabilities (each `emit` lowers through the same
+        # path a top-level emission does, so G4/G8 reach is audited).
+        global _COMP_NEEDS_TIMER, _TIMER_COUNTER
+        _COMP_NEEDS_TIMER = True
+        mode = step.get("mode")
+        schedule = "revlScheduleEvery" if mode == "every" else "revlScheduleAfter"
+        interval = int(step.get("interval_ms"))
+        _TIMER_COUNTER += 1
+        handle = "_revlTimer%d" % _TIMER_COUNTER
+        emissions = step.get("body") or []
+        out.append("%svar %s *RevlTimer" % (pad, handle))
+        out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+        out.append("%s%s = %s(%d, func() {" % (inner, handle, schedule, interval))
+        for em in emissions:
+            if em.get("step") != "emit":  # lowerer invariant (scope: emissions)
+                raise EmitError("timer body carries emissions only, found %r"
+                                % (em.get("step"),))
+            out.append("%s\t%s" % (inner, _expr(em.get("expr"), env)))
+        out.append("%s})" % inner)
+        # the derived inverse: cancellation, yielded into the disposer stack.
+        out.append("%sreturn func() error { %s.Cancel(); return nil }" % (inner, handle))
+        out.append("%s}); err != nil {" % pad)
+        out.append("%sreturn nil, err" % inner)
+        out.append("%s}" % pad)
     elif s == "if":
         out.append("%sif %s {" % (pad, _expr(step.get("cond"), env)))
         for sub in step.get("then") or []:
@@ -3269,6 +3309,169 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
     return out
 
 
+# The clock coeffect + timer scheduler (item 57), the go mirror of
+# backends/python/runtime.py's Clock/TimerHandle — deterministic tick-for-tick.
+# Time advances only when RevlClockAdvance is called; a firing is a step in the
+# timeline, never a wall-clock race, so replay is reproducible. Arming records
+# `timer#N.schedule` and takes a live-resource slot (revlHostAcquire); cancel /
+# a spent `after` records `timer#N.cancel` and returns the slot — so a leaked
+# `every` timer surfaces through the same R1 residue accounting a leaked Pool
+# does. Emitted only when a component body carries a `timer` step.
+_TIMER_PREAMBLE = '''// ---- clock coeffect + timer scheduler (item 57, docs/time-coeffect.md) --
+// The go mirror of backends/python/runtime.py's Clock/TimerHandle: time moves
+// only on RevlClockAdvance, firing due timers earliest-first (ties by arm
+// order) and re-arming `every` across the span — deterministic for replay.
+
+type RevlTimer struct {
+	serial     int
+	mode       string // "every" | "after"
+	intervalMs int64
+	body       func()
+	state      string // "live" | "cancelled" | "done"
+	nextAt     int64
+	fired      int
+}
+
+func (t *RevlTimer) tag() string { return fmt.Sprintf("timer#%d", t.serial) }
+
+// Cancel is the schedule's inverse — idempotent, and a no-op once the timer is
+// spent (a fired `after`). Running it on teardown proves the schedule leaves no
+// residue: it returns the live-resource slot arming took.
+func (t *RevlTimer) Cancel() bool {
+	_revlClockMu.Lock()
+	defer _revlClockMu.Unlock()
+	if t.state != "live" {
+		return false
+	}
+	t.state = "cancelled"
+	hostRecord(t.tag() + ".cancel")
+	revlHostRelease()
+	return true
+}
+
+var (
+	_revlClockMu      sync.Mutex
+	_revlClockNow     int64
+	_revlClockSerial  int
+	_revlClockTimers  []*RevlTimer
+	_revlClockFirings [][2]int64 // (timer serial, fired-at ms) in fire order
+)
+
+func revlSchedule(mode string, intervalMs int64, body func()) *RevlTimer {
+	_revlClockMu.Lock()
+	defer _revlClockMu.Unlock()
+	_revlClockSerial++
+	t := &RevlTimer{
+		serial: _revlClockSerial, mode: mode, intervalMs: intervalMs,
+		body: body, state: "live", nextAt: _revlClockNow + intervalMs,
+	}
+	_revlClockTimers = append(_revlClockTimers, t)
+	hostRecord(fmt.Sprintf("%s.schedule %s %dms", t.tag(), mode, intervalMs))
+	revlHostAcquire()
+	return t
+}
+
+// revlScheduleEvery arms a periodic timer against the clock coeffect (`every`).
+func revlScheduleEvery(intervalMs int64, body func()) *RevlTimer {
+	return revlSchedule("every", intervalMs, body)
+}
+
+// revlScheduleAfter arms a one-shot delayed timer against the clock (`after`).
+func revlScheduleAfter(intervalMs int64, body func()) *RevlTimer {
+	return revlSchedule("after", intervalMs, body)
+}
+
+// RevlClockAdvance advances logical time by ms, firing every timer that comes
+// due — earliest first, ties broken by arm order — and re-arming `every` timers
+// across the whole span. Returns the number of firings.
+func RevlClockAdvance(ms int64) int {
+	_revlClockMu.Lock()
+	target := _revlClockNow + ms
+	count := 0
+	for {
+		var due *RevlTimer
+		for _, t := range _revlClockTimers {
+			if t.state != "live" || t.nextAt > target {
+				continue
+			}
+			if due == nil || t.nextAt < due.nextAt ||
+				(t.nextAt == due.nextAt && t.serial < due.serial) {
+				due = t
+			}
+		}
+		if due == nil {
+			break
+		}
+		_revlClockNow = due.nextAt
+		if due.mode == "every" {
+			due.nextAt += due.intervalMs
+		}
+		due.fired++
+		_revlClockFirings = append(_revlClockFirings,
+			[2]int64{int64(due.serial), _revlClockNow})
+		hostRecord(fmt.Sprintf("%s.fire #%d at %dms", due.tag(), due.fired, _revlClockNow))
+		body := due.body
+		_revlClockMu.Unlock()
+		body() // run the firing body without the clock lock (scope: emissions)
+		_revlClockMu.Lock()
+		if due.mode == "after" {
+			// a one-shot is spent once it fires; release through the same
+			// `cancel` verb so the residue trace stays balanced and teardown's
+			// own Cancel() is a clean no-op.
+			due.state = "done"
+			hostRecord(due.tag() + ".cancel")
+			revlHostRelease()
+		}
+		count++
+	}
+	_revlClockNow = target
+	_revlClockMu.Unlock()
+	return count
+}
+
+// RevlClockNow is the current logical time in ms.
+func RevlClockNow() int64 {
+	_revlClockMu.Lock()
+	defer _revlClockMu.Unlock()
+	return _revlClockNow
+}
+
+// RevlClockPending counts live timers — a teardown that abandons one leaves
+// this > 0 (the countable no-orphaned-interval proof).
+func RevlClockPending() int {
+	_revlClockMu.Lock()
+	defer _revlClockMu.Unlock()
+	n := 0
+	for _, t := range _revlClockTimers {
+		if t.state == "live" {
+			n++
+		}
+	}
+	return n
+}
+
+// RevlClockFirings is the recorded firing log: (timer serial, fired-at ms).
+func RevlClockFirings() [][2]int64 {
+	_revlClockMu.Lock()
+	defer _revlClockMu.Unlock()
+	out := make([][2]int64, len(_revlClockFirings))
+	copy(out, _revlClockFirings)
+	return out
+}
+
+// RevlClockReset returns the clock to time zero with no timers (call between
+// scenarios, like HostReset).
+func RevlClockReset() {
+	_revlClockMu.Lock()
+	defer _revlClockMu.Unlock()
+	_revlClockNow = 0
+	_revlClockSerial = 0
+	_revlClockTimers = nil
+	_revlClockFirings = nil
+}
+'''
+
+
 # The pure-tier runtime preamble. Groups are emitted only when used, but every
 # helper here is an ordinary package-level declaration — Go never errors on an
 # unused func/type, only on unused imports (which is why the group flags gate
@@ -3868,6 +4071,9 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
 
     global _V3_MODE, _V3_TYPES, _V3_PLACEMENT
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
+    global _COMP_NEEDS_TIMER, _TIMER_COUNTER
+    _COMP_NEEDS_TIMER = False
+    _TIMER_COUNTER = 0
     _V3_MODE = (ver == 3)
     # emit()'s own component path never emits the document's declared types
     # (a v3 doc with types routes to the pure typed-core path, or — with a
@@ -3927,6 +4133,8 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         out.append(_V3_MAP_PREAMBLE)
     if _COMP_NEEDS_PARSE_INT:
         out.append(_V3_PARSE_INT_HELPER)
+    if _COMP_NEEDS_TIMER:
+        out.append(_TIMER_PREAMBLE)
 
     out.extend(body)
 
@@ -4440,12 +4648,15 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
 
     global _V3_MODE, _V3_TYPES, _V3_PLACEMENT
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
+    global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     _V3_MODE = True
     _V3_TYPES = types
     _V3_PLACEMENT = True
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
+    _COMP_NEEDS_TIMER = False
+    _TIMER_COUNTER = 0
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
     has_spawn = _spawn_targets(ir) and any(
@@ -4636,6 +4847,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append(_V3_MAP_PREAMBLE)
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
+    if _COMP_NEEDS_TIMER:
+        out.append(_TIMER_PREAMBLE)
     out.extend(body)
     out.extend(host_stubs)
 
