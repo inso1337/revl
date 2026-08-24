@@ -164,6 +164,62 @@ def test_a_nominal_type_with_no_local_definition_is_still_refused():
     assert "nominal type `Widget` is not defined in this file" in str(excinfo.value)
 
 
+# --------------------------- DSH's REAL gateway shapes (roadmap item 134)
+
+def test_external_service_named_base_and_ts_extension_import():
+    """The real `PluginInventoryGateway`: a class extending a `*Service`-named
+    base imported from ANOTHER package (`TypertRemoteService` from
+    `@deepseek-ai/dsh-typert-protocol`), whose decorated operations traffic in a
+    record imported WITH a `.ts` extension (`import type { … } from './types.ts'`).
+
+    Item 116 recovered in-file base chains and extensionless imports but refused
+    this ("exposes no method surface this importer can read"). Both gaps close:
+    (a) a non-local `*Service` base is a service root, so the subclass's own
+    decorated methods are recovered; (b) the `.ts`-extension local import
+    resolves and its record type is transcribed."""
+    source = import_cordis_file(str(FIXTURES / "gateway.ts"))
+    assert ("class PluginInventoryGateway extends TypertRemoteService "
+            "(an external `*Service` base, treated as a Service root)") in source
+    # (b) the `.ts`-extension local import was followed and its record transcribed
+    assert ("type PluginInventorySnapshot = "
+            "{ total: Int, plugins: List[Str], generated_at: Str }") in source
+    ir = compile_source(source, "gateway.rvl")
+    methods = _methods(ir, "PluginInventory")
+    # (a) the subclass's own decorated operations are the service surface
+    assert set(methods) == {"list_plugins", "forget"}
+    assert methods["list_plugins"]["returns"] == "PluginInventorySnapshot"
+    assert methods["forget"]["params"] == [{"name": "id", "type": "Str"}]
+    # the `@revl:pure` JSDoc above the decorated op still reaches it
+    assert methods["list_plugins"]["emission"] is False
+    assert _extern_classes(ir)["cordis_plugin_inventory_list_plugins"] == "pure"
+    assert ir["components"][0]["provides"] == {"plugin_inventory": "PluginInventory"}
+
+
+def test_a_non_service_named_external_base_still_terminates_honestly():
+    """The `*Service` convention is the whole license: a class extending a
+    non-local base that does NOT end in `Service` has nothing to stand behind it,
+    so the chain terminates and no service is minted (no over-recovery)."""
+    plugin = """
+    import { EventEmitter } from 'node:events'
+    export class Widget extends EventEmitter {
+      poke(id: string): void {}
+    }
+    """
+    with pytest.raises(RevlError) as excinfo:
+        import_cordis(plugin, filename="w.ts")
+    assert "provides no service this importer can find" in str(excinfo.value)
+
+
+def test_a_js_extension_local_import_also_resolves():
+    """NodeNext spells a relative import to a `.ts` source with a `.js` extension
+    (`from './types.js'`); the record it names must resolve to the `.ts` source
+    just as the `.ts` spelling does."""
+    source = import_cordis_file(str(FIXTURES / "inv.ts"))
+    assert "type PluginInventorySnapshot = " in source
+    ir = compile_source(source, "inv.rvl")
+    assert _methods(ir, "Inv")["snapshot"]["returns"] == "PluginInventorySnapshot"
+
+
 # --------------------------------------------------------- the emission rule
 
 def test_untyped_ts_defaults_every_operation_to_emission():

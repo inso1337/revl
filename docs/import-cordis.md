@@ -125,15 +125,31 @@ subclass reached via a project-local base — `class Sessions extends BaseStore`
 where `BaseStore extends Service`, or a base imported under an alias — is
 recovered, not just a literal `extends Service`; public methods inherited from a
 local base class are merged in (the derived class wins on a name collision). A
-method carrying **decorators** (`@cache`, `@throttle(100)`, `@audit.log`, …) is
-recovered too: the decorators are skipped to reach the underlying signature, and
-a `@revl:pure` JSDoc above them still applies.
+method carrying **decorators** (`@cache`, `@throttle(100)`, `@audit.log`,
+`@Remote('list')`, …) is recovered too: the decorators are skipped to reach the
+underlying signature, and a `@revl:pure` JSDoc above them still applies.
+
+The base chain also reaches through a base defined in **another package**. A
+plugin whose real service base is imported from a dependency — `class Gateway
+extends TypertRemoteService` where `TypertRemoteService` comes from
+`@deepseek-ai/dsh-typert-protocol` — terminates the local chain at a non-local
+name the importer cannot open. Cordis names every service base `*Service` by
+convention (`RemoteService`, `TypertRemoteService`, …), so a **non-local base
+whose name ends in `Service`** is treated as a service root: the subclass's own
+(decorated) methods are recovered as the service surface. This is a naming
+convention, not proof — so a non-local base that does *not* end in `Service`
+(`extends EventEmitter`) has nothing to stand behind it and terminates the chain
+honestly: no service is minted from it (§4), rather than over-recovering.
 
 A **nominal parameter/return type** that names a record is no longer refused
 outright: the importer follows the plugin's own **local** imports (relative
 `./…` paths) to the definition, transcribes it — and any record it nests, in
 whatever further local module — as a revl `type` emitted ahead of the service
 (dependency-first, so the file compiles as-is), and references it by name. A
+relative import is resolved whether it is **extensionless** (`from './types'`)
+or carries an explicit extension — `from './types.ts'`, or the NodeNext `.js`
+spelling (`from './types.js'`, and `.mts`/`.mjs`/`.d.ts`) that resolves back to
+the `.ts` source. A
 bare `type X = string` alias resolves inline (revl has no type alias). A nominal
 type that is *not* reachable through a local import — a bare undefined name, or
 one imported from a *package* — is still refused (§4).
@@ -269,9 +285,15 @@ i32-only, so it cannot host a TypeScript plugin.
 - `tests/fixtures/cordis/records.ts` (+ `models/user.ts`, `models/geo.ts`) — a
   record type followed across a local import, nesting a second record from a
   further module.
+- `tests/fixtures/cordis/gateway.ts` (+ `types.ts`) — DSH's real gateway shape: a
+  class extending a `*Service`-named base imported from *another package*
+  (`extends TypertRemoteService`), with `@Remote(…)`-decorated operations that
+  traffic in a record imported *with* a `.ts` extension (`from './types.ts'`).
+- `tests/fixtures/cordis/inv.ts` (+ `types.ts`) — the NodeNext `.js`-extension
+  spelling of a local record import (`from './types.js'`).
 
 ```console
-$ ./.venv/bin/pytest tests/test_import_cordis.py -q     # 27 passed
+$ ./.venv/bin/pytest tests/test_import_cordis.py -q     # 30 passed
 ```
 
 ## 8. The family, complete
