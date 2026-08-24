@@ -57,9 +57,127 @@ import dataclasses
 import inspect
 import json
 import socket
+import ssl
+import sys as _sys
 import threading
 import time
+import types as _types
 from collections.abc import Mapping
+
+# Under ``from __future__ import annotations`` every annotation is a string, and
+# defining a `@dataclass` makes `dataclasses` resolve those strings through
+# ``sys.modules[cls.__module__]`` (the KW_ONLY sentinel scan, py3.14). A by-path
+# loader (``spec_from_file_location`` + ``exec_module`` without registering the
+# module) leaves that entry absent, so the scan hits ``None.__dict__``. The
+# bridge is loaded exactly that way by several suites (it needs no cordis), so
+# self-register a placeholder when nothing is registered yet — a no-op under a
+# normal ``import`` (Python has already put the real module there).
+if _sys.modules.get(__name__) is None:
+    _sys.modules[__name__] = _types.ModuleType(__name__)
+
+
+# ---------------------------------------------------------------------------
+# transport endpoints: a local UDS (default) or a network TCP + mTLS seam
+# (docs/network-placement.md)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class TlsConfig:
+    """The mutual-TLS material one process presents on a **network** seam.
+
+    Both ends of a network seam present a certificate (mutual TLS): the
+    provider's `serve` demands a client certificate (``CERT_REQUIRED``) and the
+    consumer's client verifies the provider's certificate against the same CA —
+    so a network seam is not "whoever can reach the port" but "the two processes
+    that hold CA-signed certs". `identity` is *this* process's identity, reused
+    from the operator model (item 55): the token the certificate is minted for,
+    so a seam call is attributable to a named process, not just an address. A
+    local UDS seam carries **no** `TlsConfig` — a 0700-dir Unix socket is bound
+    to one host by construction and needs no cert (full back-compat).
+    """
+
+    certfile: str
+    keyfile: str
+    cafile: str
+    identity: str
+    server_hostname: str | None = None
+
+    def server_context(self) -> ssl.SSLContext:
+        """The provider side: present our cert, and **demand** the peer's (mTLS)."""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(self.certfile, self.keyfile)
+        ctx.load_verify_locations(self.cafile)
+        ctx.verify_mode = ssl.CERT_REQUIRED  # mutual: a client with no cert is refused
+        return ctx
+
+    def client_context(self) -> ssl.SSLContext:
+        """The consumer side: present our cert, and verify the provider's against
+        the CA (hostname-checked)."""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_cert_chain(self.certfile, self.keyfile)
+        ctx.load_verify_locations(self.cafile)
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.check_hostname = True
+        return ctx
+
+    @classmethod
+    def from_spec(cls, spec) -> "TlsConfig":
+        """Build from the seam spec's ``tls`` mapping (what placement writes)."""
+        return cls(
+            certfile=spec["cert"], keyfile=spec["key"], cafile=spec["ca"],
+            identity=spec["identity"], server_hostname=spec.get("server_hostname"))
+
+
+@dataclasses.dataclass(frozen=True)
+class Endpoint:
+    """Where a seam is reachable, and how. Two shapes, one code path:
+
+    * **local UDS** (default, fully back-compatible): `path` set, `host`/`port`
+      unset, `tls` None. A bare socket-path string is exactly this.
+    * **network TCP + mTLS**: `host` and `port` set, `tls` a `TlsConfig`. The
+      deadline, reactive-withdrawal and canonical-encoding machinery all apply
+      unchanged over TCP — the only differences are the address family and the
+      TLS wrap around the stream.
+    """
+
+    path: str | None = None
+    host: str | None = None
+    port: int | None = None
+    tls: TlsConfig | None = None
+
+    @property
+    def is_network(self) -> bool:
+        return self.host is not None
+
+    def describe(self) -> str:
+        if self.is_network:
+            who = f" as {self.tls.identity}" if self.tls else ""
+            return f"tcp://{self.host}:{self.port}{who}"
+        return self.path or "?"
+
+    @classmethod
+    def from_spec(cls, spec) -> "Endpoint":
+        """Normalize any accepted seam-target form to an `Endpoint`:
+
+        * an `Endpoint` -> itself;
+        * a `str` -> a local UDS at that path (the legacy form);
+        * a mapping with ``host`` -> a network TCP+mTLS endpoint;
+        * a mapping with ``socket``/``path`` -> a local UDS.
+        """
+        if isinstance(spec, Endpoint):
+            return spec
+        if isinstance(spec, str):
+            return cls(path=spec)
+        if spec.get("host") is not None:
+            tls = spec.get("tls")
+            return cls(host=spec["host"], port=int(spec["port"]),
+                       tls=TlsConfig.from_spec(tls) if tls is not None else None)
+        return cls(path=spec.get("socket") or spec.get("path"))
+
+
+def _as_endpoint(target) -> Endpoint:
+    return Endpoint.from_spec(target)
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +263,45 @@ def _connect(path: str, attempts: int = 100, delay: float = 0.05) -> socket.sock
     raise last if last is not None else ConnectionError(path)
 
 
+def _connect_tcp(endpoint: Endpoint, attempts: int = 100, delay: float = 0.05) -> socket.socket:
+    """Connect to a network seam over TCP and wrap it in mutual TLS. The retry
+    loop mirrors `_connect`: a *TCP* refusal (the provider process is still
+    coming up) is retried, so start order stays irrelevant. A completed TCP
+    connect whose **TLS handshake** then fails is a real fault — a bad cert, the
+    wrong CA, a hostname mismatch — and is raised, never retried away."""
+    if endpoint.tls is None:
+        raise ValueError(
+            f"network seam tcp://{endpoint.host}:{endpoint.port} has no TLS "
+            "identity — a seam that crosses machines must present a per-process "
+            "certificate (mTLS); refusing to dial it in the clear "
+            "(docs/network-placement.md)")
+    context = endpoint.tls.client_context()
+    server_hostname = endpoint.tls.server_hostname or endpoint.host
+    last: OSError | None = None
+    for _ in range(attempts):
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            raw.connect((endpoint.host, endpoint.port))
+        except (ConnectionRefusedError, ConnectionResetError, OSError) as exc:
+            last = exc
+            raw.close()
+            time.sleep(delay)
+            continue
+        try:  # TCP is up: the handshake runs now — its failures are terminal.
+            return context.wrap_socket(raw, server_hostname=server_hostname)
+        except (ssl.SSLError, OSError):
+            raw.close()
+            raise
+    raise last if last is not None else ConnectionError(f"{endpoint.host}:{endpoint.port}")
+
+
+def _connect_endpoint(endpoint: Endpoint, attempts: int = 100, delay: float = 0.05) -> socket.socket:
+    """Dial an endpoint by its shape: TCP+mTLS for a network seam, UDS otherwise."""
+    if endpoint.is_network:
+        return _connect_tcp(endpoint, attempts, delay)
+    return _connect(endpoint.path, attempts, delay)
+
+
 # ---------------------------------------------------------------------------
 # provider side: export provided keys over a socket
 # ---------------------------------------------------------------------------
@@ -208,14 +365,21 @@ async def _invoke(ctx, exports: dict, req: dict) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-async def serve(ctx, exports, path: str):
-    """Listen on `path` and answer calls against `ctx` for the exported surface.
+async def serve(ctx, exports, endpoint):
+    """Listen on `endpoint` and answer calls against `ctx` for the exported
+    surface.
+
+    `endpoint` is a UDS path string (the legacy form) or an `Endpoint` — a
+    local UDS, or a network TCP+mTLS seam. Over TCP the provider **demands** the
+    consumer's certificate (mutual TLS), so an anonymous caller that reaches the
+    port is refused at the handshake, before any request is read.
 
     `exports` is either ``{key: [method, ...]}`` (the declared allowlist, what
     placement passes) or a bare iterable of keys (legacy; see `_export_table`).
     A request naming a key or a method outside that surface is refused with an
     error reply — never dispatched. Returns the asyncio server; the caller
     keeps it (and the process) alive."""
+    ep = _as_endpoint(endpoint)
     table = _export_table(exports)
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -239,7 +403,16 @@ async def serve(ctx, exports, path: str):
             except OSError:
                 pass
 
-    return await asyncio.start_unix_server(handle, path=path)
+    if ep.is_network:
+        if ep.tls is None or not ep.tls.identity:
+            raise ValueError(
+                f"cannot serve network seam tcp://{ep.host}:{ep.port} without a "
+                "TLS identity — a network provider must present a per-process "
+                "certificate (mTLS); refusing to listen in the clear "
+                "(docs/network-placement.md)")
+        return await asyncio.start_server(handle, host=ep.host, port=ep.port,
+                                          ssl=ep.tls.server_context())
+    return await asyncio.start_unix_server(handle, path=ep.path)
 
 
 # ---------------------------------------------------------------------------
@@ -264,12 +437,12 @@ class _Client:
     provider is torn down) is recognised as an expected cutover, not a death.
     """
 
-    def __init__(self, path: str, module=None, deadline=None, deadlines=None) -> None:
+    def __init__(self, endpoint, module=None, deadline=None, deadlines=None) -> None:
         self._lock = threading.RLock()
-        self._path = path
-        self.rpc = _connect(path)
+        self._endpoint = _as_endpoint(endpoint)
+        self.rpc = _connect_endpoint(self._endpoint)
         self._io = self.rpc.makefile("rwb")
-        self.monitor = _connect(path)
+        self.monitor = _connect_endpoint(self._endpoint)
         self._module = module  # emitted module: its case classes rebuild ADTs
         self._generation = 0
         self._on_lost = None    # set by watch(); re-armed on each repoint
@@ -357,9 +530,11 @@ class _Client:
         thread.start()
         return thread
 
-    def repoint(self, new_path: str) -> None:
+    def repoint(self, new_target) -> None:
         """Planned cutover: reconnect this client's RPC and monitor to a
-        successor provider serving at `new_path`, without firing `on_lost`.
+        successor provider serving at `new_target` (a UDS path string or an
+        `Endpoint` — so a cutover may cross onto a network seam too), without
+        firing `on_lost`.
 
         The successor is dialled *before* the lock is taken, so a failed
         connect raises here and leaves the live client entirely untouched (the
@@ -369,13 +544,14 @@ class _Client:
         subsequent calls go to the successor. The old sockets are then shut so
         the superseded monitor thread wakes promptly and, seeing the bumped
         generation, exits without withdrawing."""
-        new_rpc = _connect(new_path)
+        new_endpoint = _as_endpoint(new_target)
+        new_rpc = _connect_endpoint(new_endpoint)
         new_io = new_rpc.makefile("rwb")
-        new_monitor = _connect(new_path)
+        new_monitor = _connect_endpoint(new_endpoint)
         with self._lock:
             old_io, old_rpc, old_monitor = self._io, self.rpc, self.monitor
             self.rpc, self._io, self.monitor = new_rpc, new_io, new_monitor
-            self._path = new_path
+            self._endpoint = new_endpoint
             self._generation += 1
             generation = self._generation
             rearm = self._on_lost is not None
@@ -423,19 +599,44 @@ class _Proxy:
         raise AttributeError(name)
 
 
-def proxy_component(key: str, methods, path: str, module=None,
+def _require_network_contract(key: str, endpoint: Endpoint, deadline) -> None:
+    """A network seam is malpractice without identity **and** a deadline: an
+    anonymous cross-machine caller, or an unbounded round-trip against a wedged
+    remote provider. Refuse to build either, with a diagnostic that names the
+    missing half — before anything connects."""
+    if endpoint.tls is None or not endpoint.tls.identity:
+        raise ValueError(
+            f"network seam {key!r} at tcp://{endpoint.host}:{endpoint.port} has "
+            "no TLS identity — a seam that crosses machines must present a "
+            "per-process identity (mTLS, item 55). Refusing to proxy it "
+            "(docs/network-placement.md)")
+    if deadline is None:
+        raise ValueError(
+            f"network seam {key!r} at tcp://{endpoint.host}:{endpoint.port} has "
+            "no deadline — a network round-trip against a wedged provider would "
+            "block the consumer forever. Refusing to proxy it without a seam "
+            "deadline (item 54, docs/seam-deadlines.md)")
+
+
+def proxy_component(key: str, methods, endpoint, module=None,
                     deadline=None, deadlines=None) -> dict:
     """A cordis component that provides `key` via a proxy forwarding to the
-    stub at `path`. `module` (the emitted module) lets the proxy rebuild ADT /
-    Result returns into native case instances. Its `_client` is exposed so the
-    driver can `watch()` for peer death and dispose the fiber.
+    stub at `endpoint` (a UDS path string, or an `Endpoint` — a local UDS or a
+    network TCP+mTLS seam). `module` (the emitted module) lets the proxy rebuild
+    ADT / Result returns into native case instances. Its `_client` is exposed so
+    the driver can `watch()` for peer death and dispose the fiber.
 
     `deadline` sets the per-operation deadline default (seconds) every forwarded
     call carries; `deadlines` (``{method: seconds}``) overrides it per named
     operation. A breach raises `SeamDeadline` in the calling fiber, which the
     runtime unwinds like any other seam failure (A8: revert LIFO, no residue).
-    Placement (`src/revl/placement.py`) reads these off the seam spec."""
-    client = _Client(path, module, deadline=deadline, deadlines=deadlines)
+    Placement (`src/revl/placement.py`) reads these off the seam spec. A
+    **network** seam is refused here unless it carries both an identity and a
+    deadline — a seam without either is malpractice across a machine boundary."""
+    ep = _as_endpoint(endpoint)
+    if ep.is_network:
+        _require_network_contract(key, ep, deadline)
+    client = _Client(ep, module, deadline=deadline, deadlines=deadlines)
 
     def apply(ctx, config=None):
         proxy = _Proxy(client, key, methods)

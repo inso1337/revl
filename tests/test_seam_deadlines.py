@@ -49,10 +49,17 @@ def sockdir():
 
 
 def _bridge():
-    """backends/python/bridge.py, imported directly (it needs no cordis)."""
+    """backends/python/bridge.py, imported directly (it needs no cordis).
+
+    Registered in ``sys.modules`` before exec: the module defines dataclasses
+    under ``from __future__ import annotations``, and dataclasses resolves those
+    string annotations through ``sys.modules[cls.__module__]`` — a by-path load
+    that skips registration would fail that lookup (py3.14)."""
+    name = "revl_deadline_test_bridge"
     spec = importlib.util.spec_from_file_location(
-        "revl_deadline_test_bridge", ROOT / "backends" / "python" / "bridge.py")
+        name, ROOT / "backends" / "python" / "bridge.py")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
