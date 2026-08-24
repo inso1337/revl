@@ -30,7 +30,9 @@ Mapping (DESIGN.md §7, docs/design-v2-realms.md, docs/syntax-2.0.md):
 The emitted file also contains the host-object runtime (`Pool`/`Map`/`Job`) —
 `Pool` is a real bounded connection pool and `Job` a real cancellable
 asynchronous unit of work, both defined once for every tier in
-backends/python/runtime.py under ".. _pool-job-semantics:" —
+backends/python/runtime.py under ".. _pool-job-semantics:" — and `Map` is a
+`HashMap<String, V>` with `V` inferred per site from the IR (FR-4 — the
+session ledger `Map[Str, List[Msg]]` compiles) —
 and applies IR config `default` values through a no-arg plugin constructor.
 
 CLI: `python3 emit.py <ir.json> [> out.java]`.
@@ -66,9 +68,11 @@ _HOST_STUBS = {
     "Map": {
         "new": ("Self", []),
         "drop": ("void", []),
-        "insert": ("void", ["String", "String"]),
+        # FR-4: the value parameter is generic — the host Map is
+        # `HashMap<String, V>` with V learned per site from the IR.
+        "insert": ("void", ["String", "V"]),
         "remove": ("void", ["String"]),
-        "get": ("java.util.Optional<String>", ["String"]),
+        "get": ("java.util.Optional<V>", ["String"]),
     },
     "Job": {
         "run": ("Job", ["String"]),
@@ -1950,25 +1954,33 @@ def _emit_host_stubs(ir: dict) -> list[str]:
 
 
 def _emit_map_runtime() -> list[str]:
+    # FR-4 (FEATURE-REQUESTS.md FR-4 / docs/v2.0-roadmap.md item 77(c)): the
+    # host Map is generic over its value type, `V` learned per site from the
+    # IR's `insert` calls (the session ledger is `Map[Str, List[Msg]]`). Every
+    # site that binds a host Map pins the type at its declaration
+    # (`Map<...> store = Map.create();`), so javac never has to infer `V`
+    # from a raw `Map.create()`.
     return [
-        "// host object runtime (Map) — minimal working Java implementation",
-        "public static final class Map {",
-        "    private final java.util.HashMap<String, String> values = new java.util.HashMap<>();",
+        "// host object runtime (Map) — minimal working Java implementation.",
+        "// The value type is generic — each site's `Map.create()` pins `V`",
+        "// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).",
+        "public static final class Map<V> {",
+        "    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();",
         "    private Map() {}",
         "    // revl `Map.new()` — renamed: `new` is a Java reserved word.",
-        "    public static Map create() {",
-        "        return new Map();",
+        "    public static <V> Map<V> create() {",
+        "        return new Map<>();",
         "    }",
         "    public void drop() {",
         "        values.clear();",
         "    }",
-        "    public void insert(String key, String value) {",
+        "    public void insert(String key, V value) {",
         "        values.put(key, value);",
         "    }",
         "    public void remove(String key) {",
         "        values.remove(key);",
         "    }",
-        "    public java.util.Optional<String> get(String key) {",
+        "    public java.util.Optional<V> get(String key) {",
         "        return java.util.Optional.ofNullable(values.get(key));",
         "    }",
         "}",
@@ -2194,6 +2206,274 @@ def _host_of(component: dict, bind: str) -> str:
     return "Object"
 
 
+# ---------------------------------------------------------------------------
+# FR-4 (FEATURE-REQUESTS.md FR-4 / docs/v2.0-roadmap.md item 77(c)): the host
+# Map's value type, learned from the IR.  The frontend types a Map by its
+# value parameter — every `store.insert(k, v)` names the map's value type — so
+# the emitter carries it into the generic `Map<V>` it emits: provider-struct
+# fields become `Map<java.util.List<Msg>>` and the constructor is pinned
+# `Map<java.util.List<Msg>> store = Map.create();`.  This is a *tiny* oracle
+# for the shapes an `insert` value takes in practice (a parameter, a literal,
+# a list, a stdlib result like `push`, a free-fn or required-service call, a
+# record literal, an ADT case, a record-field access, a config field).
+# Anything it cannot prove stays `None` and the emitter falls back to `Str` —
+# the historical surface — so String-valued maps keep emitting byte-identically.
+# ---------------------------------------------------------------------------
+
+
+def _map_value_expr_type(node: object, var_types: dict, env: _Env,
+                         functions: list, v3_ctx: _V3Ctx | None) -> str | None:
+    """Best-effort *surface* type of an expression for Map value inference."""
+    if not isinstance(node, dict):
+        return None
+    kind = node.get("kind")
+    if kind in ("name", "var"):
+        return var_types.get(node.get("id") or node.get("name"))
+    if kind == "lit":
+        value = node.get("value")
+        if isinstance(value, bool):
+            return "Bool"
+        if isinstance(value, int):
+            return "Int"
+        if isinstance(value, float):
+            return "Float"
+        if isinstance(value, str):
+            return "Str"
+        return None
+    if kind in ("format", "interp"):
+        return "Str"
+    if kind == "list":
+        items = node.get("items") or []
+        if not items:
+            return None  # an untyped `[]` pins nothing
+        first = _map_value_expr_type(items[0], var_types, env, functions, v3_ctx)
+        if first is None:
+            return None
+        return f"List[{first}]"
+    if kind == "builtin":
+        method = node.get("method")
+        args = node.get("args") or []
+        # `push` returns the receiver list extended by its argument, so the
+        # result's element type is the argument's type even when the receiver
+        # (e.g. a `store.get(k) ?? []` binding) has no known surface type.
+        if method == "push" and args:
+            elem = _map_value_expr_type(args[0], var_types, env, functions, v3_ctx)
+            if elem is not None:
+                return f"List[{elem}]"
+        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+            return "Int"
+        if method in ("charAt", "join", "repeat", "to_str", "slice"):
+            return "Str"
+        if method == "split":
+            return "List[Str]"
+        if method == "concat":
+            return _map_value_expr_type(node.get("target"), var_types, env, functions, v3_ctx)
+        return None
+    if kind == "fn":
+        # free-function call: the declared return type
+        name = node.get("name")
+        for fn in functions or []:
+            if fn.get("name") == name:
+                return fn.get("returns")
+        return None
+    if kind == "call":
+        # v1-style call: `{target: ..., method: ...}`. A required-service call
+        # resolves through the component's requires + the service declaration.
+        target = node.get("target") or {}
+        if target.get("kind") == "req":
+            service_name = (env.component.get("requires") or {}).get(target.get("name"))
+            if service_name is not None:
+                service = env.services.get(service_name)
+                if service is not None:
+                    decl = ((service.get("methods") or {})
+                            .get(node.get("method") or "") or {})
+                    return decl.get("returns")
+        # v3-style call: `{callee: {kind: "field", target: ..., name: ...}}`.
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            ct = callee.get("target") or {}
+            if ct.get("kind") == "req":
+                service_name = (env.component.get("requires") or {}).get(ct.get("name"))
+                if service_name is not None:
+                    service = env.services.get(service_name)
+                    if service is not None:
+                        decl = ((service.get("methods") or {})
+                                .get(callee.get("name") or "") or {})
+                        return decl.get("returns")
+        return None
+    if kind == "record":
+        if v3_ctx is None:
+            return None
+        try:
+            return v3_ctx.record_type_for_fields(
+                [k for k, _ in node.get("fields") or []])
+        except EmitError:
+            return None
+    if kind == "adt":
+        # lowered ADT construction carries its type on the node
+        return node.get("type")
+    if kind == "field":
+        # a record-field access (`msg.content`): resolve through the declared
+        # record type of the receiver
+        if v3_ctx is None:
+            return None
+        receiver = _map_value_expr_type(node.get("target"), var_types, env, functions, v3_ctx)
+        spec = v3_ctx.types.get(receiver) if receiver is not None else None
+        if not (isinstance(spec, dict) and spec.get("kind") == "record"):
+            return None
+        return (spec.get("fields") or {}).get(node.get("name"))
+    if kind == "config":
+        fname = node.get("field")
+        for f in env.component.get("config") or []:
+            if f.get("name") == fname:
+                return f.get("type")
+        return None
+    if kind == "bin" and node.get("op") == "??":
+        # `a ?? b` with an unknown left (a host `get`) is circular — the map
+        # value type is exactly what we are learning; use the right side only
+        # when it types concretely (a literal fallback).
+        right = _map_value_expr_type(node.get("right"), var_types, env, functions, v3_ctx)
+        if right is not None and "Never" not in right:
+            return right
+        return None
+    return None
+
+
+def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
+                      functions: list, v3_ctx: _V3Ctx | None,
+                      candidates: list[str]) -> None:
+    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
+    expression; recurses into sub-expressions. Handles both the v1 call shape
+    (`target`/`method`) and the 2.0 shape (`callee` as a field access)."""
+    if not isinstance(node, dict):
+        return
+    if node.get("kind") == "call":
+        target = node.get("target") or {}
+        if (target.get("kind") in ("name", "var")
+                and (target.get("id") or target.get("name")) == bind
+                and node.get("method") == "insert"):
+            args = node.get("args") or []
+            if len(args) >= 2:
+                t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
+                if t is not None and "Never" not in t:
+                    candidates.append(t)
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            ct = callee.get("target") or {}
+            if (ct.get("kind") in ("name", "var")
+                    and (ct.get("id") or ct.get("name")) == bind
+                    and callee.get("name") == "insert"):
+                args = node.get("args") or []
+                if len(args) >= 2:
+                    t = _map_value_expr_type(args[1], var_types, env, functions, v3_ctx)
+                    if t is not None and "Never" not in t:
+                        candidates.append(t)
+        for arg in node.get("args") or []:
+            _map_expr_inserts(arg, bind, var_types, env, functions, v3_ctx, candidates)
+        _map_expr_inserts(target, bind, var_types, env, functions, v3_ctx, candidates)
+        _map_expr_inserts(callee, bind, var_types, env, functions, v3_ctx, candidates)
+        return
+    for value in node.values():
+        if isinstance(value, list):
+            for item in value:
+                _map_expr_inserts(item, bind, var_types, env, functions, v3_ctx, candidates)
+        elif isinstance(value, dict):
+            _map_expr_inserts(value, bind, var_types, env, functions, v3_ctx, candidates)
+
+
+def _map_insert_candidates(step: dict, bind: str, var_types: dict, env: _Env,
+                           functions: list, v3_ctx: _V3Ctx | None,
+                           candidates: list[str]) -> None:
+    """Walk one component-body step (or provide-method body step) for `insert`
+    calls on `bind`."""
+    kind = step.get("step")
+    if kind in ("effect", "let-effect"):
+        _map_expr_inserts(step.get("acquire"), bind, var_types, env, functions, v3_ctx, candidates)
+        _map_expr_inserts(step.get("undo"), bind, var_types, env, functions, v3_ctx, candidates)
+        for nested in step.get("setup") or []:
+            _map_insert_candidates(nested, bind, var_types, env, functions, v3_ctx, candidates)
+    elif kind == "provide":
+        # provide methods type their parameters from the service declaration
+        service = env.services.get(step.get("service") or "")
+        if service is None:
+            return
+        for method in step.get("methods") or []:
+            mvar = {
+                p.get("name"): p.get("type")
+                for p in ((service.get("methods") or {})
+                          .get(method.get("name") or "", {})).get("params") or []
+            }
+            for body_step in method.get("body") or []:
+                _map_insert_candidates(body_step, bind, mvar, env, functions, v3_ctx, candidates)
+    elif kind in ("let", "assign"):
+        _map_expr_inserts(step.get("value"), bind, var_types, env, functions, v3_ctx, candidates)
+    elif kind == "return":
+        _map_expr_inserts(step.get("expr"), bind, var_types, env, functions, v3_ctx, candidates)
+    elif kind == "emit":
+        _map_expr_inserts(step.get("expr"), bind, var_types, env, functions, v3_ctx, candidates)
+        _map_expr_inserts(step.get("compensate"), bind, var_types, env, functions, v3_ctx, candidates)
+    elif kind == "if":
+        for nested in step.get("then") or []:
+            _map_insert_candidates(nested, bind, var_types, env, functions, v3_ctx, candidates)
+        for nested in step.get("else") or []:
+            _map_insert_candidates(nested, bind, var_types, env, functions, v3_ctx, candidates)
+    elif kind == "fail":
+        _map_expr_inserts(step.get("message"), bind, var_types, env, functions, v3_ctx, candidates)
+
+
+def _map_value_surface_type(env: _Env, bind: str, functions: list,
+                            v3_ctx: _V3Ctx | None) -> str | None:
+    """The revl *surface* value type of a host Map binding, learned from its
+    `insert` call sites across the whole component (activation body + every
+    provide method). `None` when no site pins a concrete type — the emitter
+    then falls back to `Str` (the historical surface)."""
+    candidates: list[str] = []
+    for step in env.component.get("body") or []:
+        _map_insert_candidates(step, bind, {}, env, functions, v3_ctx, candidates)
+    if not candidates:
+        return None
+    distinct: list[str] = []
+    for t in candidates:
+        if t not in distinct:
+            distinct.append(t)
+    # A genuinely mixed map cannot be one revl `Map[Str, V]`; the first
+    # concrete candidate (document order) is deterministic, and a real
+    # conflict surfaces loudly in javac at the mismatched `insert`.
+    return distinct[0]
+
+
+def _component_map_values(env: _Env, functions: list,
+                          v3_ctx: _V3Ctx | None) -> dict[str, str]:
+    """bind -> revl surface value type for every host Map binding in the
+    component, defaulted to `Str` when nothing pins a concrete type."""
+    out: dict[str, str] = {}
+    for s in env.component.get("body") or []:
+        if s.get("step") != "let-effect":
+            continue
+        acquire = s.get("acquire") or {}
+        if acquire.get("kind") != "host" or not (acquire.get("fn") or "").startswith("Map."):
+            continue
+        surface = _map_value_surface_type(env, s["bind"], functions, v3_ctx)
+        out[s["bind"]] = surface or "Str"
+    return out
+
+
+def _bind_decl_type(component: dict, bind: str, render_type,
+                    map_values: dict[str, str]) -> str:
+    """The Java type of a binding's declaration in the legacy (v1/v2) path:
+    the host object's class, or a generic `Map<...>` whose value type comes
+    from the IR (FR-4). `render_type` is the signature renderer in use
+    (`_java_type` for v1/v2, `_java_v3_type` for v3), which decides how the
+    surface value type renders as a Java type argument."""
+    host = _host_of(component, bind)
+    if host == "Map":
+        surface = map_values.get(bind, "Str")
+        if render_type is _java_v3_type:
+            return f"Map<{_java_v3_type(surface, boxed=True)}>"
+        return f"Map<{_java_type_arg(surface)}>"
+    return host
+
+
 def _param_type(env: _Env, key: str, mname: str, p: str) -> str:
     service = env.provides[key]
     for mp in env.services[service]["methods"].get(mname, {}).get("params", []):
@@ -2300,8 +2580,14 @@ def _core_imports(ir: dict) -> list[str]:
     return [f"import io.cordis4j.core.{name};" for name in sorted(names)]
 
 
-def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx) -> str:
+def _bind_type(component: dict, bind: str, v3_ctx: _V3Ctx,
+               map_values: dict[str, str] | None = None) -> str:
     host = _host_of(component, bind)
+    if host == "Map":
+        # FR-4: the host Map is generic; the value type is learned from the
+        # IR's `insert` sites (defaults to the historical `Str`).
+        surface = (map_values or {}).get(bind, "Str")
+        return f"Map<{_java_v3_type(surface, boxed=True)}>"
     if host != "Object":
         return host
     for step in component.get("body") or []:
@@ -2445,6 +2731,7 @@ def _emit_component_stmts(
     out: list[str],
     steps: list[dict],
     pad: str,
+    map_values: dict[str, str] | None = None,
 ) -> None:
     for step in steps:
         kind = step.get("step")
@@ -2453,7 +2740,13 @@ def _emit_component_stmts(
                 _emit_setup_stmt(env, v3_ctx, setup, out, pad)
             if kind == "let-effect":
                 bind = _ident(step["bind"], "binding")
-                out.append(f"{pad}var {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
+                # FR-4: a host Map binding pins its value type at the
+                # declaration (`Map<...> store = Map.create();`) — `var` would
+                # infer `Map<Object>` from the generic static factory and the
+                # emitted insert/get calls would lose their static types.
+                surface = (map_values or {}).get(bind)
+                decl = f"Map<{_java_v3_type(surface, boxed=True)}>" if surface else "var"
+                out.append(f"{pad}{decl} {bind} = {_expr(step['acquire'], v3_ctx, None, env)};")
             else:
                 out.append(f"{pad}{_expr(step['acquire'], v3_ctx, None, env)};")
             out.append(
@@ -2481,12 +2774,14 @@ def _emit_component_stmts(
         elif kind == "if":
             out.append(f"{pad}if ({_expr(step['cond'], v3_ctx, None, env)}) {{")
             _emit_component_stmts(
-                component, env, v3_ctx, cname, out, step.get("then") or [], pad + "    "
+                component, env, v3_ctx, cname, out, step.get("then") or [], pad + "    ",
+                map_values,
             )
             if step.get("else"):
                 out.append(f"{pad}}} else {{")
                 _emit_component_stmts(
-                    component, env, v3_ctx, cname, out, step["else"], pad + "    "
+                    component, env, v3_ctx, cname, out, step["else"], pad + "    ",
+                    map_values,
                 )
             out.append(f"{pad}}}")
         elif kind == "fail":
@@ -2531,6 +2826,11 @@ def _emit_component_modern(
 ) -> list[str]:
     env = _Env(component, services)
     v3_ctx = _V3Ctx(types or {}, functions or [], externs or [], components or [])
+    # FR-4: bind -> revl surface value type for each host Map binding, so
+    # provider fields, constructor parameters and the apply() local all pin
+    # `Map<V>` instead of leaving `Map` raw (the session ledger is
+    # `Map[Str, List[Msg]]`).
+    map_values = _component_map_values(env, functions or [], v3_ctx)
     name = component["name"]
     cname = _ident(name, "component")
     isolate = component.get("isolate") or {}
@@ -2558,12 +2858,12 @@ def _emit_component_modern(
         for local, service in env.reqs.items():
             out.append(f"    private final {service} {local};")
         for b in _binds(component):
-            btype = _bind_type(component, b, v3_ctx)
+            btype = _bind_type(component, b, v3_ctx, map_values)
             out.append(f"    private final {btype} {b};")
         ctor_params = ", ".join(
             ["Context ctx", "Context.EffectScope fx"]
             + [f"{service} {local}" for local, service in env.reqs.items()]
-            + [f"{_bind_type(component, b, v3_ctx)} {b}" for b in _binds(component)]
+            + [f"{_bind_type(component, b, v3_ctx, map_values)} {b}" for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_params}) {{")
         out.append("        this.ctx = ctx;")
@@ -2623,7 +2923,8 @@ def _emit_component_modern(
     out.append("        try {")
     body_lines: list[str] = []
     _emit_component_stmts(
-        component, env, v3_ctx, cname, body_lines, component.get("body") or [], "            "
+        component, env, v3_ctx, cname, body_lines, component.get("body") or [],
+        "            ", map_values,
     )
     out.extend(body_lines)
     body_steps = component.get("body") or []
@@ -2663,6 +2964,14 @@ def _emit_component(
         return _emit_component_modern(
             component, services, types, functions, externs, components)
     env = _Env(component, services)
+    # FR-4: bind -> revl surface value type for each host Map binding (the
+    # legacy path builds its own lightweight v3 context when the document
+    # declares types, so record-valued maps resolve their names).
+    v3_ctx = (
+        _V3Ctx(types or {}, functions or [], externs or [], components or [])
+        if types else None
+    )
+    map_values = _component_map_values(env, functions or [], v3_ctx)
     name = component["name"]
     cname = _ident(name, "component")
     out: list[str] = []
@@ -2679,11 +2988,13 @@ def _emit_component(
         for local, req_service in env.reqs.items():
             out.append(f"    private final {req_service} {_ident(local, 'requirement')};")
         for b in _binds(component):
-            out.append(f"    private final {_host_of(component, b)} {b};")
+            out.append(
+                f"    private final {_bind_decl_type(component, b, render_type, map_values)} {b};")
         ctor_args = ", ".join(
             [f"{req_service} {_ident(local, 'requirement')}"
              for local, req_service in env.reqs.items()]
-            + [f"{_host_of(component, b)} {b}" for b in _binds(component)]
+            + [f"{_bind_decl_type(component, b, render_type, map_values)} {b}"
+               for b in _binds(component)]
         )
         out.append(f"    {struct}({ctor_args}) {{")
         for local in env.reqs:
@@ -2728,7 +3039,9 @@ def _emit_component(
         kind = step.get("step")
         if kind == "let-effect":
             bind = _ident(step["bind"], "binding")
-            out.append(f"            {_host_of(component, step['bind'])} {bind} = {_expr(step['acquire'], None, None, env)};")
+            out.append(
+                f"            {_bind_decl_type(component, step['bind'], render_type, map_values)} "
+                f"{bind} = {_expr(step['acquire'], None, None, env)};")
             undo = _expr(step['undo'], None, None, env)
             out.append(f"            undos.add(Disposables.of(() -> {undo}));")
             disposers.append(bind)
