@@ -244,18 +244,19 @@ def test_other_tiers_refuse_by_name(backend, tier):
     assert "--backend py" in message
 
 
-@pytest.mark.parametrize("backend", ["rust", "typescript"])
-def test_lowerable_tiers_emit_lifecycle_drivers(backend):
-    """FR-5: rust and ts lower lifecycle tests to their native test idiom —
-    a real driver over a live composition, ending in the tier's no-residue
-    assertion — instead of refusing them."""
+@pytest.mark.parametrize("backend,marker", [
+    ("rust", "revl_lifecycle_"),
+    ("typescript", "assertNoResidue"),
+    ("go", "revlOptPair"),
+])
+def test_lowerable_tiers_emit_lifecycle_drivers(backend, marker):
+    """FR-5: rust, ts and go lower lifecycle tests to their native test
+    idiom — a real driver over a live composition, ending in the tier's
+    no-residue assertion — instead of refusing them."""
     ir = compile_files([str(EXAMPLES / "lifecycle_cache.rvl")])
     source = _emitter(backend).emit(ir)
     assert "cache reverts cleanly" in source
     assert "no_residue" in source or "residue" in source
-    # the tier's native driver shape: a #[test] fn on rust, an async vitest
-    # case calling the runtime's no-residue introspection on ts
-    marker = "revl_lifecycle_" if backend == "rust" else "assertNoResidue"
     assert marker in source
 
 
