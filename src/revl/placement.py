@@ -297,6 +297,90 @@ def swap_admission(files, running_ir: dict, component: str, backend: str):
 
 
 # --------------------------------------------------------------------------
+# per-slice provider selection (roadmap §59, verified canary)
+# --------------------------------------------------------------------------
+#
+# A canary is the gradual form of a swap: run predecessor and successor at once
+# and split traffic by a *designated slice*. The mechanism is realms/instances
+# (item 10), because G2 forbids two providers of one key in *one* realm — so a
+# second (canary) provider of a key can only live in a *different* realm. That
+# is exactly what makes a slice a clean unit: the canary provider serves one
+# realm's keys and, by G2, cannot reach into any sibling realm. These functions
+# pick the provider that serves a designated slice, and the remainder a promote
+# would then swap — pure reads off the linked IR, no runtime.
+
+
+def _realm_of(entry: dict, key: str) -> str:
+    from .lower import SHARED_REALM  # noqa: PLC0415 — avoid a top-level cycle
+    return (entry.get("isolate") or {}).get(key, SHARED_REALM)
+
+
+def slice_realms(ir: dict) -> list[str]:
+    """Every named (non-shared) realm the composition declares, sorted. Each is
+    a candidate canary slice — a tenant, a sandbox, a test realm (Def. 28)."""
+    from .lower import SHARED_REALM  # noqa: PLC0415
+    entries = (ir.get("manifest") or {}).get("components") or []
+    found: set[str] = set()
+    for entry in entries:
+        found |= {r for r in (entry.get("isolate") or {}).values()
+                  if r != SHARED_REALM}
+    return sorted(found)
+
+
+def slice_providers(ir: dict, realm: str) -> dict[str, str]:
+    """`{key: provider}` for every provision served *into* `realm` — the
+    provider set that a canary designates for this slice. G2 makes each
+    `(key, realm)` unique, so this map is single-valued by construction."""
+    out: dict[str, str] = {}
+    for entry in (ir.get("manifest") or {}).get("components") or []:
+        for key in entry.get("provides") or []:
+            if _realm_of(entry, key) == realm:
+                out[key] = entry["name"]
+    return dict(sorted(out.items()))
+
+
+def slice_partition(ir: dict, realm: str) -> dict:
+    """Split the composition into the designated canary slice and the remainder
+    a *promote* (item 23's swap) would then have to move.
+
+    Returns ``{"realm", "providers", "members", "remainderRealms",
+    "remainderProviders"}``. ``members`` are the components isolating any key
+    into the slice (in load order); ``providers`` are the ones that *provide*
+    into it — the processes a canary boots. ``remainderProviders`` are the same
+    keys' providers in every sibling realm: promote = swap each of those to the
+    canary's generation once the evidence says go.
+    """
+    from .lower import SHARED_REALM  # noqa: PLC0415
+    entries = {e["name"]: e for e in (ir.get("manifest") or {}).get("components") or []}
+    load_order = (ir.get("manifest") or {}).get("loadOrder") or list(entries)
+
+    def in_realm(name: str, r: str) -> bool:
+        return r in {v for v in (entries[name].get("isolate") or {}).values()
+                     if v != SHARED_REALM}
+
+    members = [n for n in load_order if n in entries and in_realm(n, realm)]
+    providers = slice_providers(ir, realm)
+
+    # the same keys, served in every OTHER realm — what a promote must swap
+    slice_keys = set(providers)
+    remainder_realms = [r for r in slice_realms(ir) if r != realm]
+    remainder_providers: dict[str, dict[str, str]] = {}
+    for other in remainder_realms:
+        served = {k: p for k, p in slice_providers(ir, other).items()
+                  if k in slice_keys}
+        if served:
+            remainder_providers[other] = served
+
+    return {
+        "realm": realm,
+        "providers": providers,
+        "members": members,
+        "remainderRealms": remainder_realms,
+        "remainderProviders": remainder_providers,
+    }
+
+
+# --------------------------------------------------------------------------
 # preflight: fail with a diagnostic instead of spawning children that die
 # --------------------------------------------------------------------------
 

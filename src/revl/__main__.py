@@ -546,6 +546,43 @@ def _run_plan(args) -> int:
     return 0 if result["admissible"] else 1
 
 
+def _run_canary(args) -> int:
+    """`revl canary <baseline> --candidate <file> --slice <realm>` — progressive
+    delivery for one slice (docs/verified-canary.md, roadmap item 59).
+
+    Runs a successor generation on ONE designated realm while the baseline
+    serves the rest, compares the two recorded worlds (a replay comparison,
+    attributed to a code site), and proves the revert clean (survivors +
+    residue). It decides; `revl swap` acts. Exit status: 0 when the candidate
+    is admitted and the revert is clean (the other tenants provably untouched),
+    1 when the candidate is refused or the revert would breach a sibling."""
+    from .compiler import compile_files  # noqa: PLC0415
+    from .mcp.canary import run_canary, render  # noqa: PLC0415
+
+    try:
+        running = compile_files(list(args.files))
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    report = run_canary(
+        running,
+        candidate_files=list(args.candidate),
+        realm=args.slice,
+        provider=args.provider,
+        promote_to=args.promote_to,
+        prove_residue=not getattr(args, "no_residue_proof", False),
+    )
+    print(json.dumps(report, indent=2) if args.json else render(report))
+    if not report.get("ok"):
+        return 1
+    # a clean canary is an admitted candidate whose revert leaves every sibling
+    # tenant untouched; a breached revert or a refused candidate is a failure.
+    revert = report.get("revert") or {}
+    breached = not revert.get("untouched", False)
+    return 1 if breached else 0
+
+
 def _run_apply(args) -> int:
     """`revl apply change.plan` — boot the plan's pre-state, then execute the
     plan against it: drift-refuse if the composition moved, verify each step
@@ -1180,6 +1217,31 @@ def main(argv: list[str] | None = None) -> int:
                                "undo to the immediately previous generation (N−1)")
     undo_cmd.add_argument("--json", action="store_true", help="machine-readable output")
 
+    canary_cmd = sub.add_parser(
+        "canary",
+        help="progressive delivery for one slice: run a candidate on a "
+             "designated realm, compare recorded worlds (replay), prove the "
+             "revert clean — the other tenants untouched (docs/verified-canary.md)")
+    canary_cmd.add_argument("files", nargs="+",
+                            help="the running (baseline) composition's .rvl files")
+    canary_cmd.add_argument("--candidate", action="append", required=True, metavar="FILE",
+                            help="the successor generation of the slice's provider; "
+                                 "repeatable")
+    canary_cmd.add_argument("--slice", required=True, metavar="REALM",
+                            help="the designated slice — a named realm (a tenant, "
+                                 "a sandbox)")
+    canary_cmd.add_argument("--provider", default=None, metavar="COMPONENT",
+                            help="the slice's provider to canary (only needed when "
+                                 "the realm serves several)")
+    canary_cmd.add_argument("--promote-to", default=None, metavar="BACKEND",
+                            help="report a promote (= swap the remainder) admission "
+                                 "verdict for this tier")
+    canary_cmd.add_argument("--json", action="store_true",
+                            help="machine-readable, versioned report document")
+    canary_cmd.add_argument("--no-residue-proof", action="store_true",
+                            help="skip the runtime teardown proof (static survivors "
+                                 "proof only; use where cordis is unavailable)")
+
 
     query = sub.add_parser(
         "query", help="ask the composition a question (docs/queries.md)")
@@ -1588,6 +1650,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_apply(args)
     if args.command == "undo":
         return _run_undo(args)
+    if args.command == "canary":
+        return _run_canary(args)
 
     if args.command == "contract":
         return _run_contract(args)
