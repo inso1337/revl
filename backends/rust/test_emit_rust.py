@@ -783,3 +783,173 @@ def test_cargo_test_runs_the_map_value_semantics(tmp_path):
     result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
     assert "1 passed" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# FR-4 (docs/v2.0-roadmap.md item 77(c)) — non-String values in the HOST Map.
+# The session ledger (`Map[Str, List[Msg]]`) used to emit a hardcoded
+# `HashMap<String, String>` and fail E0308/E0599; the host Map is now generic
+# over its value type, learned per site from the IR's `insert` calls.
+# --------------------------------------------------------------------------
+
+LEDGER_SRC = """
+type Msg = { role: Str, content: Str }
+service SessionStore {
+  fn load(id: Str) -> List[Msg]
+  emission fn append(id: Str, msg: Msg)
+}
+component SessionLedger provides sessions: SessionStore {
+  let store = effect Map.new() undo store.drop()
+  provide sessions {
+    fn load(id) = store.get(id) ?? []
+    fn append(id, msg) {
+      let prev = store.get(id) ?? []
+      effect store.insert(id, prev.push(msg))
+      undo   store.insert(id, prev)
+    }
+  }
+}
+"""
+
+HOST_MAP_TYPES_SRC = """
+service Counters {
+  fn get(k: Str) -> Int
+  fn put(k: Str, v: Int)
+}
+component Counters provides counters: Counters {
+  let store = effect Map.new() undo store.drop()
+  provide counters {
+    fn get(k) = store.get(k) ?? 0
+    fn put(k, v) { effect store.insert(k, v) undo store.remove(k) }
+  }
+}
+service Tags {
+  fn get(k: Str) -> List[Str]
+  fn put(k: Str, v: List[Str])
+}
+component Tags provides tags: Tags {
+  let store = effect Map.new() undo store.drop()
+  provide tags {
+    fn get(k) = store.get(k) ?? []
+    fn put(k, v) { effect store.insert(k, v) undo store.remove(k) }
+  }
+}
+service Flags {
+  fn get(k: Str) -> Bool
+  fn put(k: Str, v: Bool)
+}
+component Flags provides flags: Flags {
+  let store = effect Map.new() undo store.drop()
+  provide flags {
+    fn get(k) = store.get(k) ?? false
+    fn put(k, v) { effect store.insert(k, v) undo store.remove(k) }
+  }
+}
+"""
+
+RECORD_VALUE_SRC = """
+type Profile = { name: Str, age: Int }
+service ProfileStore {
+  fn get(k: Str) -> Opt[Profile]
+  fn put(k: Str, p: Profile)
+}
+component Profiles provides profiles: ProfileStore {
+  let store = effect Map.new() undo store.drop()
+  provide profiles {
+    fn get(k) = store.get(k)
+    fn put(k, p) { effect store.insert(k, p) undo store.remove(k) }
+  }
+}
+"""
+
+
+def test_ledger_shape_carries_the_map_value_type():
+    """The session-ledger shape: the emitted provider struct and constructor
+    pin `Map<Vec<Msg>>` (FR-4), the host Map struct is generic, and the key is
+    borrowed so a read-then-write on one key compiles without a clone."""
+    src = emit.emit(compile_source(LEDGER_SRC))
+    assert "pub struct Map<V>" in src
+    assert "impl<V> Map<V>" in src
+    assert "impl<V: Clone> Map<V>" in src
+    assert "pub fn get(&self, key: &String) -> Option<V>" in src
+    assert "pub fn remove(&self, key: &String)" in src
+    assert "store: Arc<Map<Vec<Msg>>>" in src
+    assert "let store = Arc::new(Map::<Vec<Msg>>::new());" in src
+    assert "self.store.get(&id).unwrap_or_else(|| vec![])" in src
+    assert "store_undo.insert(id_undo, prev);" in src
+    # the historical hardcoding is gone
+    assert "HashMap<String, String>" not in src
+
+
+@needs_cargo
+def test_cargo_check_compiles_ledger_shaped_map_component(tmp_path):
+    """The FR-4 exit criterion: the harness's core state shape (session ledger
+    `Map[Str, List[Msg]]`, Msg a record) COMPILES on the rust tier."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(LEDGER_SRC)))
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_cargo_check_compiles_int_bool_and_list_map_values(tmp_path):
+    """Map[Str, Int], Map[Str, Bool] and Map[Str, List[Str]] host maps."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(HOST_MAP_TYPES_SRC)))
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_cargo_check_compiles_record_map_value(tmp_path):
+    """A record value type (`Map[Str, Profile]`) — the ledger's Msg minus the
+    List wrapper."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(RECORD_VALUE_SRC)))
+    assert result.returncode == 0, result.stderr
+
+
+def test_int_and_list_map_values_reach_the_emitted_types():
+    src = emit.emit(compile_source(HOST_MAP_TYPES_SRC))
+    assert "store: Arc<Map<i64>>" in src
+    assert "store: Arc<Map<Vec<String>>>" in src
+    assert "store: Arc<Map<bool>>" in src
+    assert "Map::<i64>::new()" in src
+    assert "Map::<Vec<String>>::new()" in src
+    assert "Map::<bool>::new()" in src
+    src = emit.emit(compile_source(RECORD_VALUE_SRC))
+    assert "store: Arc<Map<Profile>>" in src
+    assert "Map::<Profile>::new()" in src
+
+
+@needs_cargo
+def test_cargo_test_runs_non_string_map_values_on_the_real_runtime(tmp_path):
+    """Runtime proof, not just a compile: a Map[Str, Int] and a Map[Str,
+    List[Str]] host map are driven through the real cordis-rs runtime —
+    insert/get round-trip non-String values, absent keys fall back, and
+    teardown leaves nothing behind (the no-residue shape)."""
+    ir = compile_source(HOST_MAP_TYPES_SRC)
+    src = emit.emit(ir) + """
+
+#[test]
+fn host_map_roundtrips_int_and_list_values() {
+    let root = cordis::Context::new();
+    let fiber = root.plugin(counters(), ());
+    fiber.wait().unwrap();
+    let counters = root.require::<Box<dyn Counters>>("counters").unwrap();
+    counters.put("a".to_string(), 7i64);
+    assert_eq!(counters.get("a".to_string()), 7i64);
+    assert_eq!(counters.get("missing".to_string()), 0i64);
+    fiber.dispose().unwrap();
+
+    let root2 = cordis::Context::new();
+    let fiber2 = root2.plugin(tags(), ());
+    fiber2.wait().unwrap();
+    let tags = root2.require::<Box<dyn Tags>>("tags").unwrap();
+    tags.put("t".to_string(), vec!["x".to_string(), "y".to_string()]);
+    assert_eq!(tags.get("t".to_string()), vec!["x".to_string(), "y".to_string()]);
+    assert_eq!(tags.get("none".to_string()), Vec::<String>::new());
+    fiber2.dispose().unwrap();
+}
+"""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "1 passed" in result.stdout
