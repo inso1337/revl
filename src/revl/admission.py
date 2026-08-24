@@ -347,6 +347,100 @@ def _drift_error(program: Program, new: ServiceDecl, drift: _Drift,
     return RevlError(program.filename, new.line, message, hint=hint, why=why)
 
 
+# --------------------------------------------------- state hand-off (§5, item 53)
+#
+# The fourth admission concern: a *stateful* provider's live world (its
+# effect-created Map, a session store's entries) is torn down LIFO on a swap
+# and the successor starts cold (item 23 drains in-flight calls but carries no
+# state). For a stateless provider that is correct; for a stateful one it is
+# "restart with extra steps" — the data is silently dropped.
+#
+# Item 53 closes the gap the Erlang way (`code_change`): a component may name a
+# `handoff` — the declared *shape* of the state it exports when replaced, and
+# the shape it accepts when it is the replacement. The gate proves the two
+# sides *fit* before any swap threads the value across, reusing the very §5
+# compatibility relation the interface-drift check rests on
+# (`typecheck.compatible`), pointed at STATE instead of interface. The
+# threading itself lives in `mcp.session` (the swap path); this is the checked
+# admission that makes it sound — a swap whose successor cannot hold the
+# predecessor's state is *refused*, not allowed to drop it at runtime.
+#
+# Orientation. The predecessor *exports* a value of its declared type `E`; the
+# successor *accepts* it at its declared type `A`. The value flows old -> new,
+# so — exactly the covariant value-flow `_service_compatible` uses for a
+# consumer's returns — `A` must accept everything an `E` produces:
+# `compatible(expected=A, actual=E)`. When they disagree the swap is refused
+# with a §5-shaped why-trace naming the offending key and the two shapes.
+
+
+def _handoff_compatible(accepted: str | None, exported: str | None) -> bool:
+    """May the predecessor's *exported* state (`exported`) be accepted at the
+    successor's *accepted* shape? Value-flow is old -> new, so this is the same
+    covariant `compatible(expected, actual)` §5 uses at a return position —
+    the accepted type must admit everything the exported type produces."""
+    return compatible(accepted, exported)
+
+
+def _admit_handoff_replacement(program: Program, components: list[dict],
+                               ambient: dict) -> None:
+    """Gate every state hand-off a candidate provider *accepts* against the
+    predecessor it replaces (§5/item 53).
+
+    For each candidate component that declares a `handoff` on a key some
+    running provider also handed off, the candidate's *accepted* shape must be
+    §5-compatible with the predecessor's *exported* shape. Refuses the swap
+    (an admission rejection, same shape as interface drift) when they disagree,
+    rather than letting the runtime drop the state. A key the successor accepts
+    but nothing running exported — or a running export the successor does not
+    accept — is not a conflict: the first starts cold, the second opts out of
+    inheriting (a stateless successor of a stateful provider is a valid, if
+    lossy, choice the author made explicit)."""
+    running = ambient.get("handoffs") or {}
+    if not running:
+        return
+    for comp in components:
+        h = comp.get("handoff")
+        if not isinstance(h, dict):
+            continue
+        key = h.get("key")
+        old = running.get(key)
+        if old is None:
+            continue  # nothing running exported this key's state — a cold key
+        accepted = h.get("type")
+        exported = old.get("type")
+        if _handoff_compatible(accepted, exported):
+            continue
+        line = next((c.line for c in program.components
+                     if c.name == comp.get("name")), 0)
+        raise _handoff_error(program, comp, key, accepted, exported, old, line)
+
+
+def _handoff_error(program: Program, comp: dict, key: str,
+                   accepted: str | None, exported: str | None,
+                   old: dict, line: int = 0) -> RevlError:
+    old_name = old.get("component") or "the running provider"
+    new_name = comp.get("name") or "the replacement"
+    # the phrase "differs from the running manifest" routes this through
+    # diagnostics.classify to the same (G2, "admission") bucket every other
+    # admission refusal carries — a swap refused, nothing changed.
+    message = (f"state hand-off on `{key}` differs from the running manifest: "
+               f"`{new_name}` accepts `{accepted}`, but `{old_name}` exports "
+               f"`{exported}` — the successor cannot hold the predecessor's "
+               f"state, and dropping it on the swap would be residue")
+    hint = ("a successor's `handoff` type must accept everything the running "
+            "provider's `handoff` exports (state compatibility, the §5 relation "
+            "pointed at state — docs/state-handoff.md); widen the accepted type "
+            "or migrate the shape explicitly")
+    steps = [
+        TraceStep(f"{new_name}.{key}", "accept", program.filename, line,
+                  f"accepts state `{accepted}`"),
+        TraceStep(f"{old_name}.{key}", "export", None, None,
+                  f"running provider exports state `{exported}`"),
+    ]
+    why = WhyTrace(kind="state-handoff-drift", subject=key, shape=SET, steps=steps)
+    return RevlError(program.filename, line, message, hint=hint, why=why)
+
+
 # ------------------------------------------------------- boundary policy (§5)
 #
 # The third leg of the gate (roadmap item 33). Where `_admit_service_replacement`

@@ -269,6 +269,13 @@ class Session:
         # non-instance swap is byte-identical to before.
         pre = (self._capture_instances(old_ir, ir)
                if migrate == "generational" else {})
+        # item 53: capture each stateful *provider's* live state (its
+        # effect-created world) before teardown too, so a component that
+        # declared a `handoff` starts its successor warm. Admission has already
+        # proved the exported/accepted shapes are §5-compatible; this threads
+        # the value. Empty unless a running provider declared a hand-off, so a
+        # stateless swap is byte-identical to before.
+        handoff_pre = self._capture_provider_state(old_ir)
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
         self.previous = self.ir
         self.previous_origin = self.origin
@@ -279,6 +286,7 @@ class Session:
         self._generation += 1
         self._run(driver._load(ir, self._prepare_module(ir)))
         migration = None
+        handoff = None
         if pre:
             try:
                 migration = self._reconcile_instances(pre)
@@ -286,7 +294,8 @@ class Session:
                 # atomicity (Q4): unwind the whole swap and re-seat the original
                 # instance state, so a rejected migration leaves nothing changed
                 # and nothing half-migrated.
-                self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin)
+                self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
+                                 handoff_pre)
                 raise SessionError(
                     f"swap rejected: a live instance's state cannot migrate onto "
                     f"the successor — {exc}. The running composition is untouched "
@@ -294,10 +303,27 @@ class Session:
                     f"intact). Dropping the state would be residue, so admission "
                     f"refuses it (docs/service-compat.md, state-compat gate)."
                 ) from None
+        if handoff_pre:
+            try:
+                handoff = self._restore_provider_state(ir, handoff_pre)
+            except driver.runtime.StateIncompatible as exc:
+                # defence in depth: admission gates the *declared* shapes, but a
+                # provider whose resource vector diverges from its declaration
+                # still rolls the whole swap back rather than dropping state.
+                self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
+                                 handoff_pre)
+                raise SessionError(
+                    f"swap rejected: a provider's hand-off state cannot cross onto "
+                    f"the successor — {exc}. The running composition is untouched "
+                    f"(rolled back to the previous generation, state intact). "
+                    f"Dropping it would be residue (docs/state-handoff.md)."
+                ) from None
         self._record_generation()
         state = self.state(drain=True)
         if migration is not None:
             state["migration"] = migration
+        if handoff is not None:
+            state["handoff"] = handoff
         return state
 
     # -- live-instance state migration (roadmap item 10) -------------------
@@ -357,11 +383,13 @@ class Session:
 
     def _abort_swap(self, old_ir: dict, pre: dict,
                     saved_previous: dict | None,
-                    saved_previous_origin: dict | None) -> None:
-        """Undo a swap whose instance migration was rejected: tear down the
-        rejected successor, reload the predecessor, and re-seat the captured
-        instance state onto its re-spawned instances — the composition is left
-        exactly as if the swap had never been attempted."""
+                    saved_previous_origin: dict | None,
+                    handoff_pre: dict | None = None) -> None:
+        """Undo a swap whose migration was rejected: tear down the rejected
+        successor, reload the predecessor, and re-seat the captured state —
+        both spawned-instance state and provider hand-off state — onto the
+        re-loaded predecessor, so the composition is left exactly as if the
+        swap had never been attempted."""
         driver = self._driver
         self._run(driver._dispose_all(self.ir))
         driver.ir = self.ir = old_ir
@@ -376,6 +404,107 @@ class Session:
                     handle.restore_state(cap)  # same template — always compatible
                 except driver.runtime.StateIncompatible:  # pragma: no cover
                     pass
+        # re-seat provider hand-off state onto the reloaded predecessor (same
+        # component code — its resource vector matches, so this cannot reject).
+        for key, info in (handoff_pre or {}).items():
+            fiber = driver.fibers.get(info["component"])
+            resources = self._frame_resources(fiber)
+            for res, (_old_type, snap) in zip(resources, info["captured"]):
+                if snap is not None:
+                    try:
+                        res.__revl_restore__(snap)
+                    except Exception:  # pragma: no cover — defensive
+                        pass
+
+    # -- provider state hand-off (roadmap item 53) -------------------------
+
+    def _frame_resources(self, fiber) -> list:
+        """The ordered vector of stateful host resources a live component's
+        activation acquired (its `Map`s, …) — the same `frame._resources` the
+        instance-migration path reads, but for a *composition-level* provider
+        fiber rather than a spawned instance. `[]` when the component never
+        activated (its provisions never came up) or the runtime tracks no
+        frame for it."""
+        if fiber is None:
+            return []
+        frame = self._driver.runtime._frame_for_ctx(fiber.ctx)
+        return list(frame._resources) if frame is not None else []
+
+    def _capture_provider_state(self, old_ir: dict | None) -> dict:
+        """Snapshot the live state of every running provider that declared a
+        `handoff` (item 53), keyed by the provided key it hangs off.
+
+        The value is the ordered `(resource_type, state)` vector of the
+        provider's activation frame — captured while the old provider is still
+        live and its world still exists, before teardown drops it. Keyed by
+        provided key (not component name) so the successor's provider, which may
+        be a differently-named component, is correlated by *what it provides*."""
+        pre: dict = {}
+        for comp in (old_ir or {}).get("components") or []:
+            handoff = comp.get("handoff")
+            if not isinstance(handoff, dict) or not handoff.get("key"):
+                continue
+            fiber = self._driver.fibers.get(comp["name"])
+            resources = self._frame_resources(fiber)
+            captured = [
+                (type(res),
+                 res.__revl_state__() if hasattr(res, "__revl_state__") else None)
+                for res in resources
+            ]
+            pre[handoff["key"]] = {
+                "component": comp["name"],
+                "type": handoff.get("type"),
+                "captured": captured,
+            }
+        return pre
+
+    def _restore_provider_state(self, new_ir: dict, pre: dict) -> dict:
+        """Thread each captured provider state onto the successor that
+        re-provides its key (item 53). Two passes — check the whole cohort,
+        then apply — so a single incompatible provider rejects with nothing
+        half-written (the same atomicity the instance path guarantees).
+
+        A captured key whose successor declares no `handoff` is *not* migrated:
+        the successor opted out of inheriting the state (a deliberate, if lossy,
+        author choice), so it starts cold rather than being force-fed a shape it
+        never declared."""
+        runtime = self._driver.runtime
+        new_by_key: dict = {}
+        for comp in new_ir.get("components") or []:
+            handoff = comp.get("handoff")
+            if isinstance(handoff, dict) and handoff.get("key"):
+                new_by_key[handoff["key"]] = comp
+        plan: list = []
+        report: dict = {}
+        for key, info in pre.items():
+            comp = new_by_key.get(key)
+            if comp is None:
+                continue  # successor does not accept this key's state — cold
+            captured = info["captured"]
+            fiber = self._driver.fibers.get(comp["name"])
+            resources = self._frame_resources(fiber)
+            if len(resources) != len(captured):
+                raise runtime.StateIncompatible(
+                    f"provider of {key!r} held {len(captured)} stateful "
+                    f"resource(s); the successor acquires {len(resources)} — "
+                    f"state cannot migrate without dropping or inventing one")
+            for pos, (res, (old_type, _snap)) in enumerate(zip(resources, captured)):
+                if type(res) is not old_type:
+                    raise runtime.StateIncompatible(
+                        f"provider of {key!r}: resource #{pos} was "
+                        f"{old_type.__name__}, the successor acquires "
+                        f"{type(res).__name__} — retyped state cannot migrate")
+            plan.append((key, comp["name"], resources, captured))
+        for key, cname, resources, captured in plan:
+            for res, (_old_type, snap) in zip(resources, captured):
+                if snap is not None:
+                    res.__revl_restore__(snap)
+            report[key] = {
+                "component": cname, "migrated": True,
+                # honest count of what actually crossed (item 53 operator rule)
+                "resources": sum(1 for _t, s in captured if s is not None),
+            }
+        return report or None
 
     def rollback(self) -> dict:
         if self.previous is None:
