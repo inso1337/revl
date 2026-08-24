@@ -107,6 +107,15 @@ REJECTIONS = {
     "t21_int32_narrow_implicit.rvl": "this function's return expects `Int32`, got `Int`",
     "t22_int32_width_mix.rvl": "`+` does not mix `Int32` and `Int`",
     "t23_int32_remainder.rvl": "`%` is Int-only; widen the Int32 operands with `.to_int()` first",
+    # errata harvest, checker side (docs/v2.0-roadmap.md 75(b)(c)):
+    # 75(b) a stdlib-named method on a receiver whose provenance no
+    #       constructor pins used to lower as that builtin and misdispatch at
+    #       runtime — refused like any other host-boundary method (HOST-METHOD);
+    # 75(c) an explicit `[T]` list turns the implicit one-letter heuristic
+    #       OFF for that signature, so a stray one-letter name is an ordinary
+    #       undeclared type and errors where it is used.
+    "t24_opaque_receiver_builtin.rvl": "stdlib method `remove` on a value of unknown type",
+    "t25_explicit_tparam_heuristic_off.rvl": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
     "host_method_not_on_surface.rvl": "`Map` has no method `putt`",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",

@@ -42,6 +42,33 @@ become that function's type parameters, are wildcards inside its body, and are
 unified against the actual arguments at each call site by the same
 `collect_tparams` / `unify` / `substitute` machinery in `typecheck.py`.
 
+## An explicit list turns the implicit heuristic OFF (roadmap 75(c))
+
+A signature that carries an explicit `[T]` list does **not** also collect
+implicit type parameters. Declared means declared:
+
+```revl reject
+fn typo[T](xs: List[U]) -> T { return xs[0] }   // `U` is undeclared
+fn call_it() -> Int { return typo([1, 2]) }     // refused: expects List[U], got List[Int]
+```
+
+`U` is an ordinary undeclared (opaque nominal) type, exactly like the
+multi-character `Row` in `-> List[Row]`: it types its own positions
+consistently but never unifies, so a use that conflicts with a real type
+errors (`argument 1 of `typo(...)` expects `List[U]`, got `List[Int]``)
+instead of silently becoming a second type parameter and wildcarding at every
+call site. With no explicit list the heuristic is unchanged: a one-letter
+undeclared name in a `fn`/`extern` signature is still that function's implicit
+type parameter (the two forms can coexist in one program; each signature is
+decided on its own list). This is what closes the hygiene hole the implicit
+rule could not turn off: `[T]` is how an author says "these and only these
+are the parameters".
+
+**Bounds stay deferred.** `[T: Ord]` is not accepted — the list remains a
+plain name list, and there is no constraint machinery anywhere. No consumer
+demands bounds yet; when one does, the parameter list is where they will
+attach, but the checker does not build the machinery ahead of demand.
+
 ## Where the list is allowed
 
 | Declaration form            | Takes `[T]`? |
