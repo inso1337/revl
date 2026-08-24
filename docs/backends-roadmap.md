@@ -1,6 +1,6 @@
 # Backends roadmap
 
-The organizing fact: **the five tiers are disjoint by directory** (`backends/{python,typescript,rust,java,wasm}`), so one agent per tier is the natural wave shape — parallel, no shared-file contention. The only cross-tier files are the conformance gate (`tests/test_realm_conformance.py`, `tools/conformance.py`) and the IR schema; work touching those is sequenced, not parallelized.
+The organizing fact: **the six tiers are disjoint by directory** (`backends/{python,typescript,rust,java,wasm,go}`), so one agent per tier is the natural wave shape — parallel, no shared-file contention. The only cross-tier files are the conformance gate (`tests/test_realm_conformance.py`, `tools/conformance.py`) and the IR schema; work touching those is sequenced, not parallelized.
 
 ## Current state
 

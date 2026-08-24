@@ -111,18 +111,30 @@ def test_run_preflights_with_the_required_field_supplied(tmp_path):
                    encoding="utf-8")
     result = _run_cli([USER_CACHE, "--backend", "py", "--config", str(cfg)])
     assert "missing required config" not in result.stderr
-def test_run_refuses_a_backend_that_is_not_wired_yet():
-    """Multi-runtime is by design (--backend is a real selector). py, rust, java
-    and wasm run today (each non-py tier as a separate process — see
-    test_run_rust.py / test_run_java.py / test_run_wasm.py); ts must still say so
-    rather than pretend."""
+def test_run_ts_no_longer_refuses_flatly():
+    """Multi-runtime is by design (--backend is a real selector), and ts is now
+    wired (FR-2): py, ts, rust, java and wasm all run today (each non-py tier as
+    a separate process — see test_run_ts.py / test_run_rust.py / test_run_java.py
+    / test_run_wasm.py). The flat `not wired yet` / exit-2 refusal must be gone
+    for ts; USER_CACHE needs PgDatabase.url, so the run now reaches the config
+    preflight (rc 1) instead of short-circuiting on the wiring."""
     result = _run_cli([USER_CACHE, "--backend", "ts"])
-    assert result.returncode == 2, result.stderr
-    assert "not wired yet" in result.stderr
-    # the refusal names the tiers that DO run today (RUNNABLE_BACKENDS) — ts is
-    # not among them
-    assert "runs today" in result.stderr
-    assert "ts tier emits" in result.stderr
+    assert result.returncode == 1, result.stderr
+    assert "not wired yet" not in result.stderr
+    assert 'missing required config "url"' in result.stderr
+
+
+def test_every_emitting_tier_is_now_runnable():
+    """FR-2 + FR-8 closed the last two not-wired gaps: py, ts, rust, java,
+    wasm and go are all runnable (each non-py tier as a separate process over
+    the bridge seam). USER_CACHE needs PgDatabase.url, so every backend now
+    reaches the config preflight (rc 1) instead of a flat not-wired refusal —
+    the friendly refusal path no longer exists for any emitting tier."""
+    for backend in ("py", "ts", "rust", "java", "wasm", "go"):
+        result = _run_cli([USER_CACHE, "--backend", backend])
+        assert result.returncode == 1, (backend, result.stderr)
+        assert "not wired yet" not in result.stderr
+        assert 'missing required config "url"' in result.stderr
 
 
 def test_required_config_problem_uses_the_ir_schema():
@@ -166,7 +178,9 @@ def test_py_tier_preflights_the_missing_cordis_runtime(monkeypatch):
     monkeypatch.setattr(revl_test, "_cordis_available", lambda: False)
     ir = compile_files([str(ROOT / "examples" / "lifecycle_cache.rvl")])
     outcome, message = revl_test.run_py(ir)
-    assert outcome == "fail"
+    # FR-5: an absent runtime is a skip-with-reason, exactly like every other
+    # tier's missing-toolchain gate — never a fail that reads as a regression.
+    assert outcome == "skip"
     assert message.startswith("preflight:")
     assert "sh backends/python/setup.sh" in message
     assert "backends/python/.venv/bin/python -m revl test" in message

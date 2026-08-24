@@ -40,6 +40,8 @@ from .typecheck import (
     parse_type,
     substitute,
     unify,
+    _is_wildcard,
+    _check_method_namespace_disjoint,
 )
 from .parser import (
     AssertStmt,
@@ -108,6 +110,9 @@ _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
     "charCodeAt": 1, "indexOf": 1, "concat": 1,
     "split": 1, "join": 1, "repeat": 1,
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # Str-only, one Str argument.
+    "startsWith": 1, "endsWith": 1,
     # Integer division and modulo. `/` and `%` keep the meaning TypeScript
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).
@@ -132,6 +137,15 @@ _BUILTIN_METHODS = {
     "to_str": 0,
 }
 
+# The disjointness this comment block promises is a *checked* claim, enforced
+# at module load (table-edit time), not at golden-diff time: editing this
+# table with a name from the host stub surface reclassifies every host call
+# site of that name and surfaces only as broken tests across the suite
+# (roadmap 75(b) tooling half; dogfood/findings-mapiter.md §2). `remove` is
+# the ONE sanctioned overlap (docs/stdlib-2.0.md §Map) — dispatch by receiver
+# kind is what makes it safe.
+_check_method_namespace_disjoint(_BUILTIN_METHODS, "_BUILTIN_METHODS")
+
 
 # Integer division and modulo are undefined at zero, and every tier says so
 # differently — python raises, rust and wasm trap, java throws, and TypeScript
@@ -152,6 +166,29 @@ def _refuse_zero_divisor(method: str, args, filename: str, line: int) -> None:
             f"`{method}` by a literal zero is undefined",
             hint="integer division and modulo have no value at zero; guard the "
                  "divisor (`if (b == 0) { ... }`) or use a non-zero constant")
+
+
+def _refuse_unpinned_stdlib_method(method: str, recv_t: str | None,
+                                   filename: str, line: int) -> None:
+    """The stdlib-named-method sliver (roadmap 75(b), docs/contract-errata.md
+    "Typing gaps"): a method call on a receiver whose type no constructor pins
+    must not lower as the builtin. At runtime the value is whatever the host
+    returned (or whatever the type parameter was instantiated with), not a
+    Str/List/Int/Int32/Bytes/Map value, so the builtin dispatch misbehaves on
+    every tier. Only a receiver the checker can *prove* is a stdlib value may
+    take the builtin table; everything else stays on the G8 audit surface,
+    refused here with the same HOST-METHOD diagnostic the family surface uses."""
+    shown = render_type(recv_t) or "unknown"
+    raise RevlError(
+        filename, line,
+        f"stdlib method `{method}` on a value of {shown} type — no constructor "
+        "pins this receiver as a Str/List/Int/Int32/Bytes/Map value, so the "
+        "checker refuses to lower the call as the builtin",
+        hint="host-object results carry no type (G8): annotate the binding "
+             "(`let v: Str = ...`) or route the value through a declared type "
+             "before calling methods on it",
+        code="HOST-METHOD", category="host-boundary",
+    )
 
 
 def _is_host_valued(expr, scope) -> bool:
@@ -175,6 +212,39 @@ def _is_host_valued(expr, scope) -> bool:
     return False
 IR_VERSION_V2 = 2  # emitted only when a compiled component uses realms/interception
 IR_VERSION_V3 = 3  # emitted when a program uses full-language features (fn/type)
+
+# ── IR expression-kind schema (roadmap item 76a) ─────────────────────────────
+# The complete set of expression kinds this frontend can lower, split by the
+# positions in which each can appear. This is the *registration point* for a
+# new expression kind: adding one to the lowering MUST add it to the position
+# set(s) that match where the frontend can produce it — which automatically
+# adds it to EXPR_KINDS — and then
+# tests/test_expr_dispatcher_conformance.py fails until every backend declares
+# where it handles or deliberately refuses the kind in each dispatcher. A kind
+# that ships without a registration is exactly the "patched one of two paths"
+# failure the test exists to turn red.
+#
+#   FN        — a pure-function body (``_lower_pure_expr``).
+#   COMPONENT — a component body / provide-method body / block-effect setup
+#               (``_lower_component_pure_expr`` + component step lowering).
+#
+# The split is factual, not aspirational: `len` and `interp` are produced only
+# in fn bodies (component positions spell `.length` as a `field` and templates
+# as `format`), while `name`/`config`/`req`/`host`/`format`/`fn`/`spawn`/
+# `instance-get` are produced only in component positions. Everything else can
+# appear in both.
+EXPR_KINDS_FN: frozenset[str] = frozenset({
+    "adt", "arrow", "bin", "builtin", "call", "field", "hole", "if", "index",
+    "interp", "len", "list", "lit", "maplit", "match", "optcall", "optfield",
+    "record", "record_update", "un", "var",
+})
+EXPR_KINDS_COMPONENT: frozenset[str] = frozenset({
+    "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+    "format", "hole", "host", "if", "index", "instance-get", "list", "lit",
+    "maplit", "match", "name", "optcall", "optfield", "record",
+    "record_update", "req", "spawn", "un", "var",
+})
+EXPR_KINDS: frozenset[str] = EXPR_KINDS_FN | EXPR_KINDS_COMPONENT
 
 # the default shared realm (paper Def. 28: an unisolated key resolves to
 # its own realm); rendered as "shared" in diagnostics
@@ -821,9 +891,11 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
 
     Each signature's type parameters are marked here, once, so the rest of the
     checker can tell a universally quantified `T` from a nominal type that
-    merely has a one-letter name. Both forms feed the same set: implicit
-    single-uppercase names, and any explicit `fn id[T](...)` names the decl
-    carries (validated for shadowing here — see `validate_explicit_tparams`).
+    merely has a one-letter name. The set is the explicit `fn id[T](...)`
+    names the decl carries (validated for shadowing here — see
+    `validate_explicit_tparams`), plus — only when the decl carries NO list —
+    the implicit single-uppercase names (roadmap 75(c): an explicit list
+    turns the heuristic off; declared means declared).
     Marked types never reach the IR — this table is the checker's view, and
     `_lower_fns`/`_lower_externs` emit the author's spelling, byte-identical
     whether a parameter was implicit or explicit."""
@@ -1690,6 +1762,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         lowered_value = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
         _mark_widen(declared, actual_declared, lowered_value)
+        _pin_empty_literal(declared, lowered_value)
         body.append({"step": "let", "name": stmt.name,
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -2017,6 +2090,25 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
     return node
 
 
+def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
+    """An annotated `let`/`var` pins an empty-collection literal (roadmap 76b).
+
+    `var m: Map[Str, Int] = Map.empty()` lowers to a `maplit` node that knows
+    nothing about the author's annotation — the checker accepts the empty map
+    (it types `Map[Str, Never]`, bottom, and flows into any `Map[K, V]`) but
+    the go tier refuses an unpinned empty Map because Go infers composite
+    literals positionally, not from later use. The annotation the author
+    already wrote is the pin, so the frontend — the single IR producer, and
+    the only stage that knows the declared type — attaches it to the literal:
+    ``"expected": "Map[Str, Int]"`` on the `maplit` node. The marker is
+    additive and appears only where an annotation exists, so v1/v2/v3
+    reference documents without one stay byte-identical.
+    """
+    if declared is None or not isinstance(node, dict) or node.get("kind") != "maplit":
+        return
+    node["expected"] = declared
+
+
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
                      type_env: dict | None = None, types: dict | None = None) -> dict:
     type_env = type_env if type_env is not None else {}
@@ -2145,14 +2237,35 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                     hint="records carry data, not methods; call functions as `f(x)`, "
                          "and call arrows through a `let` binding",
                 )
+            # The stdlib-named-method sliver (roadmap 75(b)): only a receiver
+            # the checker can *prove* is a stdlib value (Str/List/Int/Int32/
+            # Bytes/Map) may take the builtin table. A receiver whose
+            # provenance no constructor pins — an extern's return, a
+            # host-object result, a type parameter — used to lower a
+            # stdlib-named method as that builtin and misdispatch at runtime.
+            # Refuse it like any other host-boundary method (HOST-METHOD); the
+            # fence then closes to exactly "host-object results are on the
+            # audit surface" (G8).
+            recv_t = _expr_static_type(expr.callee.target, type_env, types)
+            if _is_wildcard(recv_t):
+                _refuse_unpinned_stdlib_method(method, recv_t, filename,
+                                               expr.line)
             if len(expr.args) != arity:
                 raise RevlError(filename, expr.line,
                                 f"builtin `{method}` takes {arity} argument(s), "
                                 f"{len(expr.args)} given")
             _refuse_zero_divisor(method, expr.args, filename, expr.line)
-            return {"kind": "builtin", "method": method,
-                    "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
-                    "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
+            node: dict = {"kind": "builtin", "method": method,
+                          "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
+                          "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
+            if method == "to_int":
+                # `to_int` is spelled for two receiver families (Int32 widen,
+                # Str parse) — the backends must dispatch on the receiver's
+                # static type, which the IR node would otherwise not carry
+                # (the same reason `un` annotates Int negation). Annotate it,
+                # exactly as the checker selected the row.
+                node["recv"] = infer_ast(expr.callee.target, type_env, types, None)
+            return node
         # A call argument that widens Int -> Float is marked on the argument
         # node (`_mark_widen`) so every backend emits the conversion — the
         # `ident(3)` gap in docs/arithmetic.md. Generic signatures are
@@ -2411,7 +2524,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
     uses_v3 = any(not name.startswith("__") for name in types) or bool(fns) or bool(externs) or bool(tests)
     uses_v3 = uses_v3 or any(
-        svc.commutative or any(m.async_ or m.commutative for m in svc.methods.values())
+        svc.commutative or any(m.async_ or m.commutative or m.idempotent
+                               for m in svc.methods.values())
         for svc in services.values()
     )
     uses_v3 = uses_v3 or uses_components_2
@@ -2456,6 +2570,9 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                            if m.capabilities is not None else {}),
                         **({"async": True} if m.async_ else {}),
                         **({"commutative": True} if m.commutative else {}),
+                        # delivery semantics (roadmap item 44): the checked
+                        # right for the runtime to auto-retry this emission
+                        **({"idempotent": True} if m.idempotent else {}),
                     }
                     for m in svc.methods.values()
                 },
@@ -2587,18 +2704,27 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # a component consuming a Result should not have to call out to a fn
         scrutinee = _lower_component_pure_expr(expr.scrutinee, env, scope,
                                                callables, pure_only)
+        scrutinee_type = _expr_static_type(expr.scrutinee, env.type_env, env.types)
         _check_match_exhaustiveness(expr, env.type_env, env.types, filename)
         arms = []
         for pattern, bind, body in expr.arms:
             inner = dict(scope)
+            payload_type = _arm_payload_type(scrutinee_type, pattern, env.types)
             if bind is not None:
                 safe = _safe_name(bind, set(scope.values()))
                 inner[bind] = safe
-            arms.append({
+            arm = {
                 "pattern": pattern,
                 "bind": inner.get(bind) if bind is not None else None,
                 "body": _lower_component_pure_expr(body, env, inner, callables, pure_only),
-            })
+            }
+            # the payload type a match arm binds, when the scrutinee's static
+            # type is recoverable — the same key the pure-fn lowering
+            # (`_lower_pure_expr`) writes, so a backend that must cast (java's
+            # tagged Result) can do so in component/method bodies too
+            if payload_type is not None:
+                arm["payload_type"] = payload_type
+            arms.append(arm)
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, ExprLit):
         if expr.value is None:
@@ -2693,14 +2819,32 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     )
                 return _component_req_call(env, root, method, args, line)
             if method in _BUILTIN_METHODS:
+                # The stdlib-named-method sliver (roadmap 75(b)), same rule as
+                # a `fn` body: only a receiver the checker can *prove* is a
+                # stdlib value may take the builtin table. A local of unknown
+                # type (a host-object result such as `let v = store.get(k)`)
+                # used to lower a stdlib-named method as that builtin and
+                # misdispatch at runtime; refuse it (HOST-METHOD). Undeclared
+                # roots fall through and are caught by G1 name resolution.
+                if root in scope:
+                    recv_t = infer_ir({"kind": "name", "id": scope[root]},
+                                      env.type_env, env.types, env.services)
+                    if _is_wildcard(recv_t):
+                        _refuse_unpinned_stdlib_method(method, recv_t,
+                                                       filename, line)
                 if len(args) != _BUILTIN_METHODS[method]:
                     raise RevlError(filename, line,
                                     f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
                                     f"argument(s), {len(args)} given")
-                return {"kind": "builtin", "method": method,
-                        "target": _lower_component_pure_expr(expr.callee.target, env, scope,
-                                                             callables, pure_only),
-                        "args": args}
+                node: dict = {"kind": "builtin", "method": method,
+                              "target": _lower_component_pure_expr(expr.callee.target, env, scope,
+                                                                   callables, pure_only),
+                              "args": args}
+                if method == "to_int":
+                    # receiver-family dispatch (`recv`), as in a fn body
+                    node["recv"] = infer_ir({"kind": "name", "id": scope[root]},
+                                            env.type_env, env.types, env.services)
+                return node
             if root in scope:
                 # A method on a local that is a *known* stdlib-bearing value
                 # (Str/List/Bytes) must be a builtin — builtins were already
@@ -2735,14 +2879,25 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "fn", "name": name, "args": args}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
+            # the same sliver guard as the var-root path above: a non-var
+            # receiver of unknown type (e.g. `open_pool("pg://").remove(k)`)
+            # must not lower as the builtin either
+            target = _lower_component_pure_expr(expr.callee.target, env, scope,
+                                                callables, pure_only)
+            recv_t = infer_ir(target, env.type_env, env.types, env.services)
+            if _is_wildcard(recv_t):
+                _refuse_unpinned_stdlib_method(method, recv_t, filename, line)
             if len(args) != _BUILTIN_METHODS[method]:
                 raise RevlError(filename, line,
                                 f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
                                 f"argument(s), {len(args)} given")
-            return {"kind": "builtin", "method": method,
-                    "target": _lower_component_pure_expr(expr.callee.target, env, scope,
-                                                         callables, pure_only),
-                    "args": args}
+            node: dict = {"kind": "builtin", "method": method, "target": target,
+                          "args": args}
+            if method == "to_int":
+                # receiver-family dispatch (`recv`), as in a fn body
+                node["recv"] = infer_ast(expr.callee.target, env.type_env,
+                                         env.types, None)
+            return node
         return {"kind": "call",
                 "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
                                                      pure_only),
@@ -2790,10 +2945,29 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 "items": [_lower_component_pure_expr(e, env, scope, callables, pure_only)
                           for e in expr.items]}
     if isinstance(expr, ExprArrow):
-        node = {"kind": "arrow", "params": expr.params,
-                "body": _lower_component_pure_expr(expr.body, env, scope, callables,
-                                                   pure_only)}
+        # Arrow parameters bind in the arrow's body scope — including inside
+        # provide-method bodies (roadmap 77a / FR-1): the pure-helper +
+        # callback-arrow escape depends on `msgs2 => emit model.complete(msgs2)`
+        # resolving `msgs2` to the arrow parameter, not misreading it as a
+        # missing component requirement. Same shape as the pure-fn path below:
+        # params shadow the enclosing scope; free vars captured from it are
+        # snapshotted by value (unchanged).
+        inner = dict(scope)
         param_types = _arrow_param_types(expr)
+        for param, ptype in zip(expr.params, param_types):
+            # the component path resolves names through `id` (unlike the
+            # pure-fn path's raw `var`), so the arrow parameter maps to its
+            # own name — the emitted lambda binds params positionally, and a
+            # `name` node for the parameter must render to exactly that.
+            inner[param] = param
+            if ptype:
+                env.type_env[param] = ptype
+            else:
+                env.type_env.pop(param, None)
+        captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
+        node = {"kind": "arrow", "params": expr.params, "captures": captures,
+                "body": _lower_component_pure_expr(expr.body, env, inner, callables,
+                                                   pure_only)}
         if any(p is not None for p in param_types) or expr.returns:
             node["param_types"] = param_types
             node["returns"] = expr.returns
@@ -3311,6 +3485,21 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     # (docs/function-types.md §limits).
                     check_type_wellformed(filename, mstmt.line, mstmt.type)
                     env.type_env[safe] = mstmt.type
+                    # ... and it pins an empty-collection literal on the right:
+                    # `var m: Map[Str, Int] = Map.empty()` is the author's own
+                    # expected type (roadmap 76b), carried on the `maplit` node
+                    _pin_empty_literal(mstmt.type, value)
+                else:
+                    # record the inferred type exactly as the activation-body
+                    # setup sweep does, so a later method on the binding is
+                    # checked against the *real* type (`let xs = [1, 2]` then
+                    # `xs.length()` is a List length, not an unpinned call) —
+                    # the stdlib-named-method guard (roadmap 75(b)) depends on
+                    # provable receiver types.
+                    inferred = infer_ir(value, env.type_env, env.types,
+                                        env.services)
+                    if inferred is not None:
+                        env.type_env[safe] = inferred
                 mbody.append({"step": "let", "name": safe, "value": value,
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):

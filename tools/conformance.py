@@ -72,6 +72,12 @@ CASES: list[tuple[str, str, str]] = [
     ("service", "commutative op",
      _component("  provide s { fn f(x) = x }",
                 services="service S { commutative fn f(x: Int) -> Int }\n")),
+    # delivery semantics (roadmap item 44): `idempotent` is the sibling of
+    # `commutative` — an algebraic property declared on an emission; tiers
+    # render it as metadata/comment (the py tier consumes it for retries)
+    ("service", "idempotent emission op",
+     _component("  provide s { fn f(x) = 1 }",
+                services="service S { emission idempotent fn f(x: Int) -> Int }\n")),
     ("service", "void return",
      _component("  provide s { fn f(x) { return } }",
                 services="service S { fn f(x: Int) }\n")),
@@ -216,6 +222,31 @@ CASES: list[tuple[str, str, str]] = [
      "fn inc(n: Int) -> Int { return n + 1 }\n"
      'test "inc" { assert inc(1) == 2 }\n'
      + _component("  provide s { fn f(x) = inc(x) }")),
+
+    # ---- slice-then-method chaining (FR-7)
+    # A slice's result is used immediately by another stdlib call; its static
+    # kind must survive, or the emitted TS reads a `string | T[]` union and
+    # `.split`/`.join`/`.push`/return-assignability all fail tsc. The corpus
+    # missed this class because no case chained a method onto a slice — the
+    # harness hit `rest.split(" ")` after `resp.slice(10, len)` with 4 errors.
+    ("slice", "Str then split",
+     'fn parse(rest: Str) -> List[Str] { return rest.slice(0, 10).split(" ") }\n'
+     + _component('  provide s { fn f(x) { let p = parse("ab cd")  return p.length() } }')),
+    ("slice", "Str then length",
+     "fn words(s: Str) -> Int { return s.slice(1, 5).length() }\n"
+     + _component('  provide s { fn f(x) = words("hello") }')),
+    ("slice", "List then join",
+     'fn firsts(xs: List[Str]) -> Str { return xs.slice(0, 2).join(", ") }\n'
+     + _component('  provide s { fn f(x) = firsts(["a", "b"]).length() }')),
+    ("slice", "List then push",
+     "fn keep(xs: List[Int]) -> List[Int] { return xs.slice(0, 2).push(9) }\n"
+     + _component("  provide s { fn f(x) = keep([1, 2, 3])[0] }")),
+    ("slice", "List returned",
+     "fn take3(xs: List[Int]) -> List[Int] { return xs.slice(0, 3) }\n"
+     + _component("  provide s { fn f(x) = take3([1, 2, 3, 4])[0] }")),
+    ("slice", "List then index",
+     "fn head(xs: List[Int]) -> Int { let ys = xs.slice(1, 3)  return ys[0] }\n"
+     + _component("  provide s { fn f(x) = head([1, 2, 3]) }")),
 ]
 
 

@@ -10,7 +10,7 @@ each process declares its `backend`:
     components = ["PgDatabase"]          # backend defaults to "py"
 
     [processes.consumer]
-    backend = "rust"                     # or "py" | "node" | "java" | "go"
+    backend = "rust"                     # or "py" | "node" | "ts" | "java" | "go"
     components = ["UserCache"]
     probe = ["cache.put('alice', '42')", "cache.get('alice')"]
 
@@ -33,6 +33,9 @@ does not buy).
 Backends and their runners:
 - py   -> src/revl/_process_runner.py            (cordis-py; reactive)
 - node -> backends/typescript/placement_runner.ts (cordis-ts; reactive)
+          `ts` is accepted as an alias for `node` (the manifest names the
+          runtime the process boots on; every other surface calls the tier
+          `ts`), so a placement file reads the same everywhere
 - rust -> backends/rust/placement_runner          (cordis-rs; reactive; the
           proxy/stub/dispatch table is emitted per composition by
           backends/rust/emit.py, so it both consumes and serves)
@@ -62,7 +65,18 @@ from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
 
-KNOWN_BACKENDS = ("py", "node", "rust", "java", "go")
+KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
+
+# The TypeScript tier is `node` in the placement manifest (the process runs
+# on the Node runtime) but `ts` on every other surface (run.py, `revl test`,
+# the README, the conformance matrix). Both spellings are accepted; `ts` is
+# canonicalized to `node` at the manifest edge so the rest of the conductor
+# keys on one name.
+_BACKEND_ALIASES = {"ts": "node"}
+
+
+def _canonical_backend(name: str) -> str:
+    return _BACKEND_ALIASES.get(name, name)
 
 _BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
 _TS_DIR = _BACKENDS_DIR / "typescript"
@@ -439,7 +453,8 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     # runtimes before processes: an unrunnable backend is a diagnostic here,
     # not a traceback per child a second later (an unknown backend name is
     # reported by the spec loop below, so it is not preflighted).
-    backends_used = {pconf.get("backend", "py") for pconf in processes.values()} & set(KNOWN_BACKENDS)
+    backends_used = {_canonical_backend(pconf.get("backend", "py"))
+                     for pconf in processes.values()} & set(KNOWN_BACKENDS)
     problem = _preflight(backends_used, files, placement_path, once)
     if problem:
         print(f"error: {problem}", file=sys.stderr)
@@ -476,9 +491,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     specs: dict[str, dict] = {}
     backends: dict[str, str] = {}
     for pname, pconf in processes.items():
-        backend = pconf.get("backend", "py")
+        backend = _canonical_backend(pconf.get("backend", "py"))
         if backend not in KNOWN_BACKENDS:
-            return abort(f"process {pname!r} has unsupported backend {backend!r} "
+            return abort(f"process {pname!r} has unsupported backend {pconf.get('backend')!r} "
                          f"({', '.join(KNOWN_BACKENDS)})")
         backends[pname] = backend
         proxies: dict[str, dict] = {}
@@ -658,6 +673,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             print(f"swap refused: no component {component!r} in this placement "
                   f"(have: {', '.join(sorted(placed))})", flush=True)
             return
+        to_backend = _canonical_backend(to_backend)
         if to_backend not in KNOWN_BACKENDS:
             print(f"swap refused: unknown backend {to_backend!r} "
                   f"({', '.join(KNOWN_BACKENDS)})", flush=True)

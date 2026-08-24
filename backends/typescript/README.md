@@ -2,12 +2,16 @@
 
 The v0 TypeScript backend for revl, targeting [cordis](https://github.com/cordiverse/cordis)
 4.0.0-rc.8 (the reference implementation of the spatiotemporal-composability
-paradigm). Implements the frozen contract in `docs/backend-ir.md`.
+paradigm), pinned to revl's fork [`inso1337/cordis`](https://github.com/inso1337/cordis)
+at `harden-assert-active` — the rc.8 source plus the `assertActive` lifecycle
+fix (see `docs/upstream/cordis-ts-assertActive.md` and
+`docs/contract-errata.md`). Implements the frozen contract in
+`docs/backend-ir.md`.
 
 ## Setup + test (one command each)
 
 ```sh
-npm install     # pinned deps (cordis 4.0.0-rc.8, vitest)
+npm install     # pinned deps (cordis fork c8b94b2, vitest)
 npm test        # emits test fixtures, runs R1–R5 + emitter + upstream suites
 ```
 
@@ -33,7 +37,7 @@ npm run typecheck  # tsc --noEmit over runtime.ts, demo.ts, golden/
 | `demo.ts` | acceptance demo with event log (R1–R4 checks, exit code reflects them) |
 | `tests/semantics.test.ts` | R1–R5, each test named for the requirement it covers |
 | `tests/emitter.test.ts` | golden diff, determinism, contract rejections |
-| `tests/upstream.test.ts` | pinned reproductions of two upstream cordis lifecycle gaps (see `REPORT.md`) |
+| `tests/upstream.test.ts` | pinned reproductions of two upstream cordis lifecycle gaps — finding 1 (top-level effects disposed concurrently) is current upstream behavior; finding 2 (effects registered during teardown) is FIXED in the pinned fork and pins the fixed behavior (see `REPORT.md`) |
 | `REPORT.md` | impedance mismatches, upstream bugs, IR contract notes, LOC, ship-first recommendation |
 
 The reference IR is read from `../../examples/user_cache.ir.json` when this

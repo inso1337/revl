@@ -40,6 +40,54 @@ class EmitError(ValueError):
     pass
 
 
+# Dispatcher conformance (roadmap item 76a). This file carries TWO expression
+# dispatchers — `_expr` (component/method bodies, the stc-go live world) and
+# `_go_v3_expr` (pure fn bodies) — and the sets below declare, as data, the IR
+# expression kinds each one must render, plus the kinds each one deliberately
+# refuses with a named tier-limit EmitError (never the "unsupported expr
+# kind" fall-through). tests/test_expr_dispatcher_conformance.py checks them
+# against the frontend schema (src/revl/lower.py: EXPR_KINDS /
+# EXPR_KINDS_FN / EXPR_KINDS_COMPONENT).
+#
+# Component-position refusals are real v1/v2 limits of the stc-go world: an
+# anonymous record literal has no declared record type to render (declaring
+# one routes the document to the typed-core path, which does not carry a live
+# component), match/arrow/`?.` have no lowering there yet, and bare Opt/Result
+# construction outside return position is refused by the tier's tuple-Opt
+# design. Each refusal names the limit and a workaround. `hole` is refused at
+# the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "component": frozenset({
+        "bin", "builtin", "call", "config", "field", "fn", "format",
+        "host", "if", "index", "instance-get", "list", "lit", "maplit",
+        "name", "req", "spawn", "un", "var",
+    }),
+    "fn": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "field", "if", "index",
+        "interp", "len", "list", "lit", "maplit", "match", "name", "optcall",
+        "optfield", "record", "un", "var",
+    }),
+}
+EXPR_REFUSED: dict[str, frozenset[str]] = {
+    # kinds the component dispatcher deliberately refuses (named tier limits)
+    "component": frozenset({
+        "adt",        # bare Opt/Result construction outside return position
+        "arrow",      # arrow values have no lowering in the stc-go world yet
+        "match",      # no match lowering in the stc-go world yet
+        "optcall",    # `?.` has no lowering in the stc-go world yet
+        "optfield",   # `?.` has no lowering in the stc-go world yet
+        "record",     # needs a declared record type the v1/v2 tier carries none of
+        "record_update",
+    }),
+    # kinds the fn dispatcher deliberately refuses
+    "fn": frozenset({
+        "record_update",  # docs/records.md §6 — "lift it into a helper fn instead"
+    }),
+}
+# kinds refused at the document level on every position
+EXPR_REFUSED_DOCUMENT: frozenset[str] = frozenset({"hole"})
+
+
 # --------------------------------------------------------------------------
 # identifiers / types
 # --------------------------------------------------------------------------
@@ -316,14 +364,20 @@ def _expr(node, env: _Env, expected=None) -> str:
         return "[]%s{%s}" % (go_elem, rendered)
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): same positional-inference
-        # limit as the v3 tier — refuse rather than mis-emit.
+        # limit as the v3 tier — refuse rather than mis-emit. The pin is the
+        # expected Map type: a typed fn return/parameter, or the annotated
+        # `let/var x: Map[K, V] = Map.empty()` the frontend threads onto the
+        # node as `expected` (roadmap 76b) — the author's own annotation.
+        if expected is None:
+            expected = node.get("expected")
         if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
             k, v = _v3_split_generic(expected[4:-1])
             return "map[%s]%s{}" % (_go_type(k), _go_type(v))
         raise EmitError(
             "an untyped empty Map needs an expected Map type on this tier "
             "(Go infers literals positionally, not from later use) - pin it "
-            "via a typed fn return/parameter or any annotated flow")
+            "via a typed fn return, or an annotated `let`/`var` "
+            "declaration (the positions this tier actually reads)")
     if kind == "index":
         return "%s[%s]" % (_expr(node.get("target"), env),
                            _expr(node.get("index"), env))
@@ -337,6 +391,42 @@ def _expr(node, env: _Env, expected=None) -> str:
         return _instance_get_expr(node, env)
     if kind == "spawn":
         return _spawn_expr(node, env)
+    if kind == "field":
+        # `.length` on a sized value — the one field the frontend produces on
+        # a non-record in component positions (a pure fn body spells the same
+        # access as the `len` node). Records are a v3 typed-core surface that
+        # the live stc-go world does not carry, so any other field access is a
+        # named tier limit rather than a silent fall-through.
+        if node.get("name") != "length":
+            raise EmitError(
+                "field access is only lowerable on a sized value's `.length` "
+                "in the stc-go component world (records need a declared record "
+                "type, and declaring one routes the document to the typed-core "
+                "path, which carries no live component) - lift it into a "
+                "helper fn instead")
+        global _COMP_NEEDS_STDLIB
+        _COMP_NEEDS_STDLIB = True
+        target_node = node.get("target")
+        target = _expr(target_node, env)
+        rt = _comp_infer(target_node, env)
+        return ("revlStrLen(%s)" if rt == "Str" else "revlListLen(%s)") % target
+    if kind == "fn":
+        # a call to a top-level `fn` by name (component dialect). Unreachable
+        # in practice — a document declaring a pure `fn` routes to the typed-
+        # core path — but a named tier limit beats a fall-through.
+        name = _v3_ident(node.get("name"), "function")
+        args = ", ".join(_expr(a, env) for a in node.get("args") or [])
+        return "%s(%s)" % (name, args)
+    if kind in ("record", "match", "arrow", "optfield", "optcall"):
+        raise EmitError(
+            f"{kind} is not lowerable in the stc-go component world yet "
+            f"(ir_version 1/2 documents carry no record/ADT types, and this "
+            f"tier has no match/arrow/`?.` lowering in component bodies) - "
+            f"lift it into a helper fn instead")
+    if kind == "adt":
+        raise EmitError(
+            "Opt/Result construction is only supported in return position on "
+            "the cordis-go tier (got a bare value)")
     if kind == "record_update":
         raise EmitError(
             "functional record update `{r | f = e}` is not emitted by the go "
@@ -447,6 +537,10 @@ def _comp_infer(node, env: _Env):
         return "Bool" if node.get("op") == "!" else _comp_infer(node.get("operand"), env)
     if k == "builtin":
         return _v3_builtin_ret_type(node.get("method"), _comp_infer(node.get("target"), env))
+    if k == "maplit":
+        # `Map.empty()` — the empty literal carries its pin when the author's
+        # annotation supplied one (roadmap 76b); otherwise it stays unknown.
+        return node.get("expected")
     return None
 
 
@@ -456,6 +550,9 @@ _COMP_NEEDS_STDLIB = False
 # Map value helpers (revlMapSet/Get/Has) referenced by component bodies:
 # flags _V3_MAP_PREAMBLE (+ the Opt preamble its Get answers into).
 _COMP_NEEDS_MAP = False
+# Str.to_int (revlParseInt) referenced by a component body: flags the Opt
+# preamble (the helper's return type) plus the helper itself.
+_COMP_NEEDS_PARSE_INT = False
 
 
 def _comp_builtin(method, recv_surface, target, args):
@@ -486,10 +583,23 @@ def _comp_builtin(method, recv_surface, target, args):
         return "revlStrCharAt(%s, %s)" % (target, args[0])
     if method == "charCodeAt":
         return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    if method == "startsWith":
+        return "strings.HasPrefix(%s, %s)" % (target, args[0])
+    if method == "endsWith":
+        return "strings.HasSuffix(%s, %s)" % (target, args[0])
+    # Int/Int32 width conversions (docs/arithmetic.md): Int32 widen is the
+    # identity int64; Str.to_int (FR-9) parses to the sealed RevlOpt.
+    if method == "to_int":
+        if is_str:
+            global _COMP_NEEDS_PARSE_INT
+            _COMP_NEEDS_PARSE_INT = True
+            return "revlParseInt(%s)" % (target,)
+        return "int64(%s)" % (target,)
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
     # imported on this tier, and %d on an int64 is exact decimal.
     if method == "to_str":
-        return 'fmt.Sprintf("%d", %s)' % target
+        return 'fmt.Sprintf("%%d", %s)' % target
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
     # _COMP_NEEDS_MAP at module assembly.
@@ -595,6 +705,10 @@ def _emit_services(services: dict) -> list[str]:
                 for p in m.get("params", [])
             )
             ret = _go_return(m.get("returns"))
+            if m.get("idempotent"):
+                # delivery semantics (item 44): safe to re-deliver, so the
+                # runtime may auto-retry a transient failure of this emission
+                out.append("\t// idempotent: the runtime may auto-retry a transient failure")
             sig = "\t%s(%s)" % (_camel(mname), params)
             if ret:
                 sig += " " + ret
@@ -1120,6 +1234,254 @@ def _emit_load_helpers(ir, out):
         out.append("")
 
 
+
+
+def _go_lifecycle_arg(node, payload_surface, env):
+    """An Opt payload argument rendered in the payload's Go type.
+
+    `revlEq` compares through `any`, and Go's untyped-constant rule would turn
+    a bare `4` into `int` while the Opt payload is `int64` (v3) / `int32`
+    (Int32) — DeepEqual would then say the values differ. Pin the literal to
+    the payload's Go type instead of letting the `any` context infer it."""
+    if isinstance(node, dict) and node.get("kind") == "lit":
+        value = node.get("value")
+        if isinstance(value, int) and payload_surface in ("Int", "Int32"):
+            return "%s(%s)" % (_go_type(payload_surface), value)
+        if isinstance(value, float) and payload_surface == "Float":
+            return "float64(%s)" % repr(value)
+    return _expr(node, env, payload_surface)
+
+
+def _go_lifecycle_assert(expr, bind_types, env, where):
+    """A Go bool expression for a lifecycle `assert` step.
+
+    The cordis-go tier carries Opt only in return position (`(T, bool)`), so a
+    `bind == Some(..)` / `bind == None` comparison over an Opt-typed lifecycle
+    binding is lowered against the tuple explicitly — `revlEq` on the value
+    plus the presence bit. Plain scalar/structural asserts lower through the
+    ordinary component expression renderer. Anything else (an Opt-typed
+    binding used outside this shape) refuses loudly: the tier cannot express
+    it, and a silently-wrong assertion is worse than none."""
+    if expr.get("kind") == "var" and bind_types.get(expr.get("name"), "").startswith("Opt["):
+        raise EmitError(
+            f"{where}: an Opt-typed lifecycle binding can only be asserted "
+            f"against `Some(..)` or `None` on the cordis-go tier (Opt is "
+            f"return-position only); got {expr!r}")
+    if expr.get("kind") != "bin" or expr.get("op") not in ("==", "!=", "===", "!=="):
+        return _expr(expr, env)
+    op = expr.get("op")
+    left, right = expr.get("left"), expr.get("right")
+    negate = op in ("!=", "!==")
+    if left.get("kind") == "var":
+        name = left.get("name")
+        surface = bind_types.get(name, "")
+        if surface.startswith("Opt["):
+            go_bind = _safe_local(name)
+            payload = surface[4:-1]
+            # `Some(..)` is a call; `None` lowers to a bare var
+            if right.get("kind") == "call":
+                callee = right.get("callee") or {}
+                cname = callee.get("name")
+                if cname == "Some":
+                    args = right.get("args") or []
+                    if len(args) != 1:
+                        raise EmitError(f"{where}: `Some(..)` takes exactly one argument")
+                    arg = _go_lifecycle_arg(args[0], payload, env)
+                    inner = "(%s.ok && revlEq(%s.value, %s))" % (go_bind, go_bind, arg)
+                    return "(!(%s))" % inner if negate else inner
+            elif right.get("kind") == "var" and right.get("name") == "None":
+                inner = "(!%s.ok)" % go_bind
+                return "(!(%s))" % inner if negate else inner
+            raise EmitError(
+                f"{where}: an Opt-typed lifecycle binding can only be asserted "
+                f"against `Some(..)` or `None` on the cordis-go tier (Opt is "
+                f"return-position only); got {expr!r}")
+    return _expr(expr, env)
+
+
+def _component_config_fields(name, components):
+    for comp in components:
+        if comp["name"] == name:
+            return [(f.get("name"), f.get("type")) for f in (comp.get("config") or [])]
+    return []
+
+
+def _component_has_config(name, components):
+    for comp in components:
+        if comp["name"] == name:
+            return bool(comp.get("config"))
+    return False
+
+
+def _emit_stc_lifecycle_tests(ir, out) -> None:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as `func TestXxx(t *testing.T)`
+    driving the live stc-go runtime (FR-5).
+
+    A lifecycle test is a script over a *live* composition: load components
+    into a fresh ``stc.Context`` via the generated ``LoadX`` helpers, call
+    through provision keys with typed ``stc.Service`` resolutions (the exact
+    read the placement runner's probes use), unload them LIFO, and assert the
+    runtime holds nothing. ``assert no_residue`` proves R4 with the registry
+    mirror of the ``registry().len() == 0`` shape
+    (``len(root.Fibers()) == 0``) and R1 with the host runtime's live-resource
+    counter, matching the py reference tier's pairing.
+    """
+    tests = [t for t in (ir.get("tests") or []) if t.get("lifecycle")]
+    if not tests:
+        return
+    components = ir.get("components") or []
+    services = ir.get("services") or {}
+    if not services:
+        raise EmitError(
+            "a lifecycle test loads components and calls through provision "
+            "keys, so it needs at least one service in the document to drive; "
+            "this document declares none"
+        )
+    provided: dict[str, str] = {}
+    for comp in components:
+        for key, svc in (comp.get("provides") or {}).items():
+            provided[key] = svc
+    method_tables = {sname: (svc.get("methods") or {})
+                     for sname, svc in services.items()}
+    out.append("// ---- lifecycle tests (docs/syntax-2.0.md §7.1) ----------------")
+    out.append("// A `lifecycle test` drives the composition on a live stc-go")
+    out.append("// context: load components, call through provision keys, unload")
+    out.append("// LIFO, and assert no residue (R4 registry + R1 host resources).")
+    out.append("type revlOptPair[T any] struct {")
+    out.append("\tvalue T")
+    out.append("\tok    bool")
+    out.append("}")
+    out.append("")
+    out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
+    out.append("")
+    used: set = set()
+    for test in tests:
+        tname = _go_v3_test_name(test.get("name") or "lifecycle", used)
+        where = "lifecycle test %s" % _go_string(test["name"])
+        env = _Env([], [], [])
+        bind_types: dict[str, str] = {}
+        out.append("func %s(revlT *testing.T) {" % tname)
+        out.append("\troot := stc.New()")
+        out.append("\t_fibers := map[string]*stc.Fiber{}")
+        for step in test.get("body") or []:
+            kind = step.get("step")
+            if kind == "load":
+                component = step["component"]
+                cname = _camel(component)
+                cfg = step.get("config") or {}
+                fields = ", ".join(
+                    "%s: %s" % (_camel(fname), _expr(cfg[fname], env, ftype))
+                    for fname, ftype in _component_config_fields(component, components)
+                    if fname in cfg)
+                if _component_has_config(component, components):
+                    sig = "Load%s(root, %sConfig{%s})" % (cname, cname, fields)
+                else:
+                    sig = "Load%s(root)" % cname
+                out.append("\t{")
+                out.append("\t\t_f := %s" % sig)
+                out.append("\t\tif err := _f.Ready(stdctx.Background()); err != nil {")
+                out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, err)'
+                           % _go_string(where + ": load " + component))
+                out.append("\t\t}")
+                out.append("\t\t_fibers[%s] = _f" % _go_string(component))
+                out.append("\t}")
+            elif kind == "unload":
+                component = step["component"]
+                out.append("\tif _f, _ok := _fibers[%s]; _ok {" % _go_string(component))
+                out.append("\t\t_f.Dispose()")
+                out.append("\t\t// disposal is orchestrated asynchronously; a")
+                out.append("\t\t// reload must not collide with the old fiber's")
+                out.append("\t\t// provisions, so wait for it to be Gone")
+                out.append("\t\tfor i := 0; i < 200 && _f.State() != stc.StateGone; i++ {")
+                out.append("\t\t\ttime.Sleep(5 * time.Millisecond)")
+                out.append("\t\t}")
+                out.append("\t\tdelete(_fibers, %s)" % _go_string(component))
+                out.append("\t}")
+            elif kind == "call":
+                key = step["key"]
+                service = provided.get(key)
+                if service is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: no provider for key {key!r}")
+                method = (method_tables.get(service) or {}).get(step["method"])
+                if method is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: unknown method {step['method']!r}")
+                bind = step.get("bind")
+                ret_surface = method.get("returns")
+                params = method.get("params") or []
+                args = ", ".join(
+                    _expr(a, env, params[i].get("type") if i < len(params) else None)
+                    for i, a in enumerate(step.get("args") or []))
+                mcall = "(_svc).%s(%s)" % (_camel(step["method"]), args)
+                if bind is not None and str(ret_surface or "").startswith("Opt["):
+                    payload = ret_surface[4:-1]
+                    go_payload = _go_type(payload)
+                    bind_types[bind] = ret_surface
+                    env.var_types[bind] = ret_surface
+                    # the binding outlives the resolution block, so it is
+                    # declared before it (a revl binding is test-scoped)
+                    out.append("\tvar %s revlOptPair[%s]" % (_safe_local(bind), go_payload))
+                    out.append("\t{")
+                    out.append("\t\t_svc, _err := stc.Service[%s](root, %s)" %
+                               (_camel(service), _key_var(key)))
+                    out.append("\t\tif _err != nil {")
+                    out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, _err)'
+                               % _go_string(where + ": " + key + " is ACTIVE (R2)"))
+                    out.append("\t\t}")
+                    out.append("\t\t_r, _ok := %s" % mcall)
+                    out.append("\t\t%s = revlOptPair[%s]{value: _r, ok: _ok}"
+                               % (_safe_local(bind), go_payload))
+                    out.append("\t}")
+                elif bind is not None:
+                    bind_types[bind] = ret_surface or ""
+                    env.var_types[bind] = ret_surface
+                    go_bind = _go_type(ret_surface) if ret_surface else ""
+                    out.append("\tvar %s %s" % (_safe_local(bind), go_bind))
+                    out.append("\t{")
+                    out.append("\t\t_svc, _err := stc.Service[%s](root, %s)" %
+                               (_camel(service), _key_var(key)))
+                    out.append("\t\tif _err != nil {")
+                    out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, _err)'
+                               % _go_string(where + ": " + key + " is ACTIVE (R2)"))
+                    out.append("\t\t}")
+                    out.append("\t\t%s = %s" % (_safe_local(bind), mcall))
+                    out.append("\t}")
+                else:
+                    out.append("\t{")
+                    out.append("\t\t_svc, _err := stc.Service[%s](root, %s)" %
+                               (_camel(service), _key_var(key)))
+                    out.append("\t\tif _err != nil {")
+                    out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, _err)'
+                               % _go_string(where + ": " + key + " is ACTIVE (R2)"))
+                    out.append("\t\t}")
+                    if ret_surface:
+                        out.append("\t\t_ = %s" % mcall)
+                    else:
+                        out.append("\t\t%s" % mcall)
+                    out.append("\t}")
+            elif kind == "assert":
+                out.append("\tif !(%s) {" % _go_lifecycle_assert(
+                    step["expr"], bind_types, env, where))
+                out.append("\t\trevlT.Fatalf(%s)" % _go_string(where + ": assertion failed"))
+                out.append("\t}")
+            elif kind == "assert_no_residue":
+                out.append("\t// R4 + R1: the composition must leave the live")
+                out.append("\t// runtime holding nothing — the orchestrator reaps")
+                out.append("\t// disposed fibers asynchronously, so poll briefly.")
+                out.append("\tfor i := 0; i < 200; i++ {")
+                out.append("\t\tif len(root.Fibers()) == 0 && revlHostLive() == 0 {")
+                out.append("\t\t\tbreak")
+                out.append("\t\t}")
+                out.append("\t\ttime.Sleep(5 * time.Millisecond)")
+                out.append("\t}")
+                out.append("\tif !(len(root.Fibers()) == 0 && revlHostLive() == 0) {")
+                out.append("\t\trevlT.Fatalf(%s, len(root.Fibers()), revlHostLive())"
+                           % _go_string(where + ": residue — %d fiber(s), %d host resource(s) (R4/R1)"))
+                out.append("\t}")
+            else:  # pragma: no cover — the lowerer emits nothing else
+                raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
+        out.append("}")
+        out.append("")
+
 # --------------------------------------------------------------------------
 # instance-parametric spawn (docs/design-v2-instances.md, phase 1)
 # --------------------------------------------------------------------------
@@ -1259,11 +1621,42 @@ def _go_literal(v) -> str:
 # module header + host runtime
 # --------------------------------------------------------------------------
 
+def _host_runtime() -> str:
+    """The emitted host runtime, with the Int width matched to the mode.
+
+    ir_version 1/2 components keep `int` (the frozen scenarios, byte-for-byte);
+    a v3-mode document converges on `int64` so the host Pool's Int positions
+    type-check against v3 component bodies (whose Int is int64). Before this,
+    a v3 document whose component opens a Pool or executes a statement failed
+    to compile: `PoolOpen(config.url, config.pool_size)` passed an int64 into
+    an `int` parameter (docs/conformance.md; surfaced by FR-5's lifecycle
+    tests on the go tier).
+    """
+    int_ty = "int64" if _V3_MODE else "int"
+    return _HOST_RUNTIME.replace("@INT@", int_ty)
+
+
 def _needs_sync(ir) -> bool:
     return any(c.get("isolate") for c in ir.get("components", [])) or True
 
 
 _HOST_RUNTIME = r'''// ---- host runtime (minimal, recording) --------------------------------
+
+// R1 live-resource accounting (docs/backend-ir.md §Required semantics, the
+// same pairing the py reference tier's `assert no_residue` checks): every host
+// object acquired must be released by its `undo`, or the lifecycle
+// `assert no_residue` fails. The counter is package-wide, so it is per-test
+// and cross-test safe: a clean test returns to zero.
+var _revlLiveMu sync.Mutex
+var _revlLiveHostResources int
+
+func revlHostAcquire() { _revlLiveMu.Lock(); _revlLiveHostResources++; _revlLiveMu.Unlock() }
+func revlHostRelease() { _revlLiveMu.Lock(); _revlLiveHostResources--; _revlLiveMu.Unlock() }
+func revlHostLive() int {
+	_revlLiveMu.Lock()
+	defer _revlLiveMu.Unlock()
+	return _revlLiveHostResources
+}
 // A deterministic in-memory stand-in for revl host objects, instrumented so
 // scenarios can assert the exact effect/undo order of emitted code.
 
@@ -1298,19 +1691,20 @@ type Row = map[string]string
 // Pool is a deterministic in-memory connection pool.
 type Pool struct {
 	url  string
-	size int
+	size @INT@
 }
 
-func PoolOpen(url string, size int) *Pool {
+func PoolOpen(url string, size @INT@) *Pool {
 	hostRecord("pool.open")
+	revlHostAcquire()
 	return &Pool{url: url, size: size}
 }
-func (p *Pool) Close()               { hostRecord("pool.close") }
+func (p *Pool) Close()               { hostRecord("pool.close"); revlHostRelease() }
 func (p *Pool) Query(sql string) []Row {
 	hostRecord("pool.query:" + sql)
 	return nil
 }
-func (p *Pool) Execute(sql string) int {
+func (p *Pool) Execute(sql string) @INT@ {
 	hostRecord("pool.execute:" + sql)
 	return 0
 }
@@ -1323,9 +1717,10 @@ type Map struct {
 
 func MapNew() *Map {
 	hostRecord("map.new")
+	revlHostAcquire()
 	return &Map{m: map[string]string{}}
 }
-func (m *Map) Drop() { hostRecord("map.drop") }
+func (m *Map) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map) Insert(k, v string) {
 	m.mu.Lock()
 	m.m[k] = v
@@ -1483,6 +1878,7 @@ class _V3GoCtx:
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
+        self.needs_parse_int = False    # Str.to_int (revlParseInt helper)
         for name, spec in self.types.items():
             if spec.get("kind") == "record":
                 key = tuple(sorted((spec.get("fields") or {}).keys()))
@@ -1517,10 +1913,20 @@ _GO_DIV_ZERO_MSG = "revl: division by zero"
 
 def _v3_builtin_ret_type(method, recv_type):
     if method in ("length", "indexOf", "charCodeAt",
-                  "div_trunc", "div_floor", "div_euclid", "mod", "to_int"):
+                  "div_trunc", "div_floor", "div_euclid", "mod"):
         return "Int"
+    # `to_int` is BOTH the Int32 widen and the Str parse (FR-9): the result
+    # type follows the receiver, exactly as the checker dispatches it.
+    if method == "to_int":
+        return "Opt[Int]" if recv_type == "Str" else "Int"
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
+    if method == "to_str":
+        return "Str"
     if method == "to_int32":
         return "Int32"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    if method in ("startsWith", "endsWith"):
+        return "Bool"
     # The total forms (docs/arithmetic.md) produce a Result value.
     if method in ("checked_div_trunc", "checked_div_floor",
                   "checked_div_euclid", "checked_mod"):
@@ -1587,10 +1993,17 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         if isinstance(tt, str) and tt.startswith("List[") and tt.endswith("]"):
             return tt[5:-1]
         return None
+    if kind == "len":
+        # `xs.length` in a pure fn body: Int, whatever the sized receiver.
+        return "Int"
     if kind == "builtin":
         return _v3_builtin_ret_type(
             node.get("method"), _go_v3_infer_type(node.get("target"), ctx)
         )
+    if kind == "maplit":
+        # `Map.empty()` — the empty literal carries its pin when the author's
+        # annotation supplied one (roadmap 76b); otherwise it stays unknown.
+        return node.get("expected")
     if kind == "call":
         callee = node.get("callee") or {}
         if callee.get("kind") == "var":
@@ -1825,6 +2238,18 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             target = f"({target})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
 
+    if kind == "len":
+        # `xs.length` in a pure fn body lowers to the `len` node (the frontend
+        # spells the same access as a `field` in component positions). Go's
+        # `len()` is bytes on a string, and revl length is code points, so the
+        # sized-value helpers from _V3_STDLIB_PREAMBLE are used — the same
+        # dispatch the `length` builtin already makes.
+        ctx.used_stdlib = True
+        target_node = node.get("target")
+        target = _go_v3_expr(target_node, ctx)
+        rt = _go_v3_infer_type(target_node, ctx)
+        return f"revlStrLen({target})" if rt == "Str" else f"revlListLen({target})"
+
     if kind == "record_update":
         raise EmitError(
             "functional record update `{r | f = e}` is not emitted by the go "
@@ -1854,14 +2279,20 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # `Map.empty()` (docs/stdlib-2.0.md §Map). Go infers composite
         # literals positionally, never from later use, so an unpinned empty
         # map is refused rather than emitted as non-compiling Go — the same
-        # honesty as an untyped empty list on tiers that cannot infer it.
+        # honesty as an untyped empty list on tiers that cannot infer it. The
+        # pin is the expected Map type: a typed fn return/parameter, or the
+        # annotated `let/var x: Map[K, V] = Map.empty()` the frontend threads
+        # onto the node as `expected` (roadmap 76b).
+        if expected is None:
+            expected = node.get("expected")
         if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
             k, v = _v3_split_generic(expected[4:-1])
             return f"map[{_go_v3_type(k, ctx.types)}]{_go_v3_type(v, ctx.types)}{{}}"
         raise EmitError(
             "an untyped empty Map needs an expected Map type on this tier "
             "(Go infers literals positionally, not from later use) - pin it "
-            "via a typed fn return/parameter or any annotated flow")
+            "via a typed fn return, or an annotated `let`/`var` "
+            "declaration (the positions this tier actually reads)")
 
     if kind == "arrow":
         names = node.get("params") or []
@@ -1982,6 +2413,13 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # HasPrefix/HasSuffix compare bytes, and a code-point prefix of a UTF-8
+    # string is exactly a byte prefix.
+    if method == "startsWith":
+        return f"strings.HasPrefix({target}, {args[0]})"
+    if method == "endsWith":
+        return f"strings.HasSuffix({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): %d on an int64 is
     # exact decimal. Unlike the component tier, the pure v3 module imports fmt
     # only on demand, so flag it — otherwise a module whose sole fmt use is
@@ -2011,8 +2449,15 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # the same thing.
     # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
     # is a plain int64 conversion; narrowing Int -> Int32 re-imposes the 32-bit
-    # bound through revlToI32, which panics out of range.
+    # bound through revlToI32, which panics out of range. `to_int` is ALSO the
+    # Str parse (FR-9, docs/stdlib-2.0.md §Str.to_int): revlParseInt answers
+    # the tier's sealed RevlOpt — None for empty/partial/`+` spellings and for
+    # out-of-i64-range values, which strconv-style overflow would otherwise
+    # have to throw for.
     if method == "to_int":
+        if rt == "Str":
+            ctx.needs_parse_int = True
+            return f"revlParseInt({target})"
         return f"int64({target})"
     if method == "to_int32":
         ctx.needs_overflow32 = True
@@ -2380,6 +2825,50 @@ func revlOptOr[T any](o RevlOpt[T], d T) T {
 }
 '''
 
+# Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII digits
+# with an optional leading `-`, RevlNone otherwise. Parsed by hand (no
+# strconv) so the helper needs no import; the uint64 accumulator allows the
+# one out-of-i64-magnitude digit string that is still IN range — `-9223372036854775808`
+# (Int.MIN) — while every larger magnitude is None, matching the Int bound.
+_V3_PARSE_INT_HELPER = '''// ---- Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int) ----------------
+func revlParseInt(s string) RevlOpt[int64] {
+\tif s == "" {
+\t\treturn RevlNone[int64]{}
+\t}
+\tneg := false
+\ti := 0
+\tif s[0] == '-' {
+\t\tneg = true
+\t\ti = 1
+\t\tif len(s) == 1 {
+\t\t\treturn RevlNone[int64]{}
+\t\t}
+\t}
+\tconst lim = uint64(9223372036854775808) // Int.MAX + 1
+\tvar n uint64
+\tfor ; i < len(s); i++ {
+\t\tc := s[i]
+\t\tif c < '0' || c > '9' {
+\t\t\treturn RevlNone[int64]{}
+\t\t}
+\t\tn = n*10 + uint64(c-'0')
+\t\tif n > lim {
+\t\t\treturn RevlNone[int64]{}
+\t\t}
+\t}
+\tif neg {
+\t\tif n == lim {
+\t\t\treturn RevlSome[int64]{Value: -9223372036854775807 - 1}
+\t\t}
+\t\treturn RevlSome[int64]{Value: -int64(n)}
+\t}
+\tif n == lim {
+\t\treturn RevlNone[int64]{}
+\t}
+\treturn RevlSome[int64]{Value: int64(n)}
+}
+'''
+
 _V3_RESULT_PREAMBLE = '''// ---- built-in Result as a generic sealed interface --------------------
 type RevlResult[T any, E any] interface{ isRevlResult() }
 type RevlOk[T any, E any] struct{ Value T }
@@ -2667,6 +3156,11 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         "externs": externs, "tests": tests,
     })
     used_opt = ("Opt[" in blob) or ('"optfield"' in blob) or ('"optcall"' in blob)
+    # Str.to_int answers a RevlOpt too: the helper's return type needs the
+    # Opt preamble in the module even though no `Opt[` ever appears in the
+    # source (the builtin's result type is carried by the checker, not the IR).
+    if ctx.needs_parse_int:
+        used_opt = True
     # The Map value type (docs/stdlib-2.0.md §Map): its helpers answer Opt
     # (`lookup`), so using any of them pulls the Opt preamble in too.
     used_map = ('"maplit"' in blob) or any(
@@ -2804,6 +3298,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("")
     if used_opt:
         out.append(_V3_OPT_PREAMBLE)
+    if ctx.needs_parse_int:
+        # after the Opt preamble: revlParseInt's return type is RevlOpt
+        out.append(_V3_PARSE_INT_HELPER)
     if used_result:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map:
@@ -2814,6 +3311,44 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _refuse_holes(ir: dict) -> None:
+    """A typed hole is an unmet obligation, not code (docs/holes.md).
+
+    Emitting one would put a placeholder into Go and make the Go toolchain
+    the thing that complains — in its own vocabulary, about a line revl
+    wrote. revl already knows the draft is unfinished, so the refusal belongs
+    here, before a single character is emitted (mirrors the other five
+    backends).
+    """
+    found: list = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "hole":
+                found.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for section in ("components", "functions", "tests", "externs"):
+        walk(ir.get(section))
+    if not found:
+        return
+    where = ", ".join(
+        f"{h.get('file') or '?'}:{h.get('line') or '?'} "
+        f"(expects `{h.get('type')}`)" for h in found[:3])
+    if len(found) > 3:
+        where += f", and {len(found) - 3} more"
+    raise EmitError(
+        f"refusing to emit Go: this document still has {len(found)} typed "
+        f"hole(s) — {where}. A hole type-checks so the surrounding draft can "
+        f"be checked, but it has no implementation and there is nothing to "
+        f"lower. Fill every hole, then emit (docs/holes.md)."
+    )
+
+
 def emit(ir: dict, package: str = "emitted", package_name: str | None = None) -> str:
     # `package_name` is the conformance harness's per-case naming kwarg (the
     # same one the java tier takes); accept it as an alias for `package`.
@@ -2822,6 +3357,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
+    _refuse_holes(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old
@@ -2839,13 +3375,25 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     #     them with the converged expression renderer.
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
-    if ver == 3 and (not ir.get("components") or has_top_level):
+    has_lifecycle = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    if has_lifecycle and not ir.get("components"):
+        raise EmitError(
+            "a lifecycle test drives components over a live stc-go runtime, "
+            "but this document declares no components — there is nothing to "
+            "load or assert no residue over"
+        )
+    if ver == 3 and (not ir.get("components") or (has_top_level and not has_lifecycle)):
+        # A `lifecycle test` is a script over a live composition, so the
+        # document must stay on the stc-go runtime path even though it also
+        # carries top-level `test` blocks (FR-5); the pure path would drop the
+        # components and refuse the lifecycle steps.
         return _emit_v3_go(ir, package)
 
-    global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP
+    global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     _V3_MODE = (ver == 3)
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
+    _COMP_NEEDS_PARSE_INT = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -2859,6 +3407,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         _emit_component(comp, ir.get("services", {}), body)
     _emit_load_helpers(ir, body)
     _emit_spawn_support(ir, body)
+    _emit_stc_lifecycle_tests(ir, body)
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -2868,6 +3417,11 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("import (")
     out.append('\t"fmt"')
     out.append('\t"sync"')
+    if has_lifecycle:
+        out.append('\tstdctx "context"')
+        out.append('\t"reflect"')
+        out.append('\t"testing"')
+        out.append('\t"time"')
     if _COMP_NEEDS_STDLIB:
         out.append('\t"strings"')
         out.append('\t"unicode/utf8"')
@@ -2877,13 +3431,17 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("")
     out.append("var _ = fmt.Sprintf")
     out.append("")
-    out.append(_HOST_RUNTIME)
+    out.append(_host_runtime())
     if _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
-    if _COMP_NEEDS_MAP:
-        # revlMapGet answers a RevlOpt, so the Opt preamble comes first.
+    if _COMP_NEEDS_MAP or _COMP_NEEDS_PARSE_INT:
+        # revlMapGet / revlParseInt answer a RevlOpt, so the Opt preamble
+        # comes first.
         out.append(_V3_OPT_PREAMBLE)
+    if _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)
+    if _COMP_NEEDS_PARSE_INT:
+        out.append(_V3_PARSE_INT_HELPER)
 
     out.extend(body)
 
@@ -3091,6 +3649,27 @@ def _emit_go_bridge(ir: dict) -> list[str]:
         out.append("\t\treturn %s, true" % _go_string(svc))
     out.append("\t}")
     out.append('\treturn "", false')
+    out.append("}")
+    out.append("")
+
+    # no-residue proof: does `key` still resolve to a provider in ctx? The
+    # once-mode runner (revl run --backend go --once) reads this after a full
+    # LIFO teardown — a provided key whose provide-inverse ran must fail to
+    # resolve. This is the go mirror of the py driver's reflect.store check
+    # and the rust runner's reflect().services() check; stc-go has no public
+    # provision enumeration, so the generated per-key switch is the honest
+    # read (generality is codegen on this tier, exactly like the proxies).
+    out.append("// RevlStillProvided reports whether `key` currently resolves to a")
+    out.append("// service in ctx (the once-mode no-residue check).")
+    out.append("func RevlStillProvided(ctx *stc.Context, key string) bool {")
+    out.append("\tswitch key {")
+    for key, svc in provided.items():
+        cs = _camel(svc)
+        out.append("\tcase %s:" % _go_string(key))
+        out.append("\t\t_, err := stc.Service[%s](ctx, %s)" % (cs, _key_var(key)))
+        out.append("\t\treturn err == nil")
+    out.append("\t}")
+    out.append("\treturn false")
     out.append("}")
     out.append("")
 

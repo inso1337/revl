@@ -62,7 +62,7 @@ JS_RESERVED = {
 # do not mix in JS, which is exactly the width-mixing the checker also forbids
 # (docs/arithmetic.md).
 TYPE_MAP = {"Str": "string", "Int": "bigint", "Int32": "number",
-            "Bool": "boolean", "Float": "number"}
+            "Bool": "boolean", "Float": "number", "Bytes": "Uint8Array"}
 
 # Members cordis's Context already owns; a provision key colliding with one
 # would shadow framework API (or be refused by the runtime). The host knows
@@ -140,6 +140,25 @@ def _ts_type(name: object) -> str:
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+# Dispatcher conformance (roadmap item 76a). This tier converged to ONE
+# expression renderer (`_expr`) covering both IR dialects, so the table below
+# has a single entry: every kind the frontend can produce in either position
+# must render through it, or be deliberately refused with a named
+# tier-limit EmitError — never the "unsupported expression kind"
+# fall-through. tests/test_expr_dispatcher_conformance.py checks this table
+# against src/revl/lower.py's EXPR_KINDS and against the renderer's source.
+# `hole` is refused at the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "renderer": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "interp", "len",
+        "list", "lit", "maplit", "match", "name", "optcall", "optfield",
+        "record", "record_update", "req", "spawn", "un", "var",
+    }),
+}
+EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
 def _ident(name: object, role: str) -> str:
@@ -589,7 +608,8 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             target = f"({target})"
         arg_nodes = list(node.get("args") or [])
         args = [_expr(a, ctx) for a in arg_nodes]
-        return _ts_builtin(node.get("method"), target, args, arg_nodes, ctx)
+        return _ts_builtin(node.get("method"), target, args, arg_nodes, ctx,
+                           node.get("recv"))
 
     if kind == "if":
         return (
@@ -1129,7 +1149,8 @@ def _v3_var(node: dict, ctx: "_Ctx") -> str:
     return name
 
 
-def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -> str:
+def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
+                recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md) as idiomatic TS; `push` and
     `concat` are persistent (value semantics), matching the py backend.
 
@@ -1166,7 +1187,13 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     # Int/Int32 width conversions (docs/arithmetic.md). Int is a bigint and
     # Int32 a number: widening is `BigInt(...)`, narrowing goes through
     # `revlI32(Number(...))`, which re-imposes the 32-bit bound and traps.
+    # `to_int` is ALSO the Str parse (FR-9, docs/stdlib-2.0.md §Str.to_int):
+    # `revlParseInt` answers `bigint | undefined` — the tier's Opt[Int] —
+    # rejecting empty/partial/`+`-prefixed spellings and anything out of the
+    # i64 range, so `BigInt` never sees a string it would throw on.
     if method == "to_int":
+        if recv == "Str":
+            return f"revlParseInt({target})"
         return f"BigInt({target})"
     if method == "to_int32":
         return f"revlI32(Number({target}))"
@@ -1180,6 +1207,13 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
         return f"{target}.join({args[0]})"
     if method == "repeat":
         return f"{target}.repeat({_int_as_number(arg_nodes[0], ctx)})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    # A code-point prefix of a string is a UTF-16 prefix (code-point
+    # boundaries never split), so the native startsWith/endsWith are exact.
+    if method == "startsWith":
+        return f"{target}.startsWith({args[0]})"
+    if method == "endsWith":
+        return f"{target}.endsWith({args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
@@ -1561,6 +1595,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_INT_ARITH_HELPER, ""])
     if _uses_str_methods(ir):
         out.extend([_REVL_STR_HELPER, ""])
+    if _uses_parse_int(ir):
+        out.extend([_REVL_PARSE_INT_HELPER, ""])
     return out
 
 
@@ -1637,14 +1673,33 @@ _REVL_EQ_HELPER = """function revlEq(a: unknown, b: unknown): boolean {
 # string through its code points (`Array.from` iterates by code point) while
 # leaving List/Bytes receivers on their native element operations, so
 # `"😀".length()` is 1 and `charCodeAt(0)` is the scalar 128512, not a
-# surrogate. Receiver type is not known statically on this tier, so the branch
-# is at runtime on `typeof x === "string"`.
+# surrogate. The runtime dispatch is on `typeof x === "string"`.
+#
+# `revlSlice` is *overloaded* rather than one union signature: the frontend
+# statically knows the receiver kind (Str/List/Bytes) and spells it into the
+# emitted signatures (fn params, config fields, service interfaces), so TS
+# resolves each call site to `string` / `T[]` / `Uint8Array` and a method
+# chained on the result — `rest.slice(10, len).split(" ")`,
+# `parts.slice(1, n).join(" ")`, `xs.slice(0, 2).push(v)` — typechecks. One
+# union return `string | T[]` made every such chain a `tsc` error (FR-7: the
+# TS tier emitted code its own compiler rejected). The `unknown` overload
+# keeps a receiver whose kind genuinely cannot be pinned (an untyped/`any`
+# position — previously the union signature still accepted it) compiling to
+# the union rather than failing overload resolution, and the last signature
+# is the implementation: it keeps the runtime dispatch for that same case,
+# where lying with a cast would be worse than admitting the union.
 _REVL_STR_HELPER = """function revlLen(x: string | ArrayLike<unknown>): bigint {
   return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
 }
-function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+function revlSlice(x: string, a: bigint, b: bigint): string
+function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array
+function revlSlice<T>(x: T[], a: bigint, b: bigint): T[]
+function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[]
+function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {
   const i = Number(a), j = Number(b)
-  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+  return typeof x === "string"
+    ? Array.from(x).slice(i, j).join("")
+    : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = Array.from(s)[Number(i)]
@@ -1663,6 +1718,31 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
 }"""
 
 _STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "indexOf"}
+
+
+# Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII digits
+# with an optional leading `-`, `undefined` (the tier's Opt None) otherwise.
+# The regex gates before BigInt so a bad spelling never throws; the range
+# check then enforces the i64 bound, because `BigInt` is unbounded.
+_REVL_PARSE_INT_HELPER = """function revlParseInt(s: string): bigint | undefined {
+  if (!/^-?\\d+$/.test(s)) return undefined
+  const n = BigInt(s)
+  if (n < -9223372036854775808n || n > 9223372036854775807n) return undefined
+  return n
+}"""
+
+
+def _uses_parse_int(node) -> bool:
+    """Does this IR call `Str.to_int` (the parse form, not the Int32 widen)?
+    Only that form needs `revlParseInt`; the widen lowers to bare `BigInt`."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "builtin" and node.get("method") == "to_int"
+                and node.get("recv") == "Str"):
+            return True
+        return any(_uses_parse_int(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_parse_int(v) for v in node)
+    return False
 
 
 def _uses_str_methods(node) -> bool:
@@ -1786,12 +1866,103 @@ def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> 
     ctx = _Ctx(types, functions, externs)
     lines: list[str] = []
     for test in tests:
+        if test.get("lifecycle"):
+            # lifecycle tests are emitted by _emit_ts_lifecycle_tests — their
+            # body is a script over a live composition, not pure statements
+            continue
         lines.append(f"it({_string(test.get('name'))}, () => {{")
         if not test.get("body"):
             lines.append("  // (empty test body)")
         else:
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, lines, 2, test_mode=True)
+        lines.append("})")
+        lines.append("")
+    return lines
+
+
+def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
+                             externs: list, services: dict,
+                             components: list) -> list[str]:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as async vitest cases driving
+    a live cordis-ts context (FR-5).
+
+    A lifecycle test is a script over a *live* composition: load components
+    into a ``new Context()`` via the runtime's ``plug`` helper, call through
+    provision keys (``ctx.<key>`` — the same committed-view access the emitted
+    components use), unload them LIFO, and assert the runtime holds nothing.
+    ``assert no_residue`` reuses the runtime's R4 introspection
+    (``snapshotRuntime``/``assertNoResidue``, backends/typescript/runtime.ts),
+    which mirrors the py reference tier's residue check including its R1
+    live-host-resource accounting.
+    """
+    provided: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            provided[key] = service
+    method_tables = {
+        sname: (svc.get("methods") or {})
+        for sname, svc in services.items()
+    }
+    ctx = _Ctx(types, functions, externs)
+    lines: list[str] = []
+    for test in tests:
+        if not test.get("lifecycle"):
+            continue
+        where = f"lifecycle test {test['name']!r}"
+        lines.append(f"it({_string(test.get('name'))}, async () => {{")
+        lines.append("  // drives the composition on a real cordis context and")
+        lines.append("  // proves no residue after LIFO teardown (FR-5 / §7.1).")
+        lines.append("  const root = new Context()")
+        lines.append("  const _revl_baseline = snapshotRuntime(root)")
+        lines.append("  const _revl_fibers = new Map<string, any>()")
+        for step in test.get("body") or []:
+            kind = step.get("step")
+            if kind == "load":
+                component = step["component"]
+                cfg = step.get("config") or {}
+                cfg_items = ", ".join(
+                    f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
+                    for field, value in cfg.items())
+                lines.append("  {")
+                lines.append(f"    const _f = plug(root, {component}, {{{cfg_items}}})")
+                lines.append("    await _f")
+                lines.append(f"    _revl_fibers.set({_string(component)}, await _f)")
+                lines.append("    await _revl_settle()")
+                lines.append("  }")
+            elif kind == "unload":
+                component = step["component"]
+                lines.append(f"  await (await _revl_fibers.get({_string(component)})).dispose()")
+                lines.append("  _revl_fibers.delete(" + _string(component) + ")")
+                lines.append("  await _revl_settle()")
+            elif kind == "call":
+                key = step["key"]
+                service = provided.get(key)
+                if service is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: no provider for key {key!r}")
+                method = (method_tables.get(service) or {}).get(step["method"])
+                if method is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: unknown method {step['method']!r}")
+                args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
+                await_ = "await " if method.get("async") else ""
+                call = f"root.{_ident(key, 'provision key')}.{_ident(step['method'], 'method')}({args})"
+                bind = step.get("bind")
+                if bind is not None:
+                    lines.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
+                else:
+                    lines.append(f"  {await_}{call}")
+                lines.append("  await _revl_settle()")
+            elif kind == "assert":
+                # reuse the pure-test assert rendering (equality goes through
+                # revlEq + vitest's matcher, with both sides in the message)
+                _v3_stmt({"step": "assert", "expr": step["expr"]}, ctx, lines,
+                         2, test_mode=True)
+            elif kind == "assert_no_residue":
+                lines.append("  // R4 + R1: same introspection the py reference")
+                lines.append("  // tier's `assert no_residue` performs.")
+                lines.append("  assertNoResidue(root, _revl_baseline)")
+            else:  # pragma: no cover — the lowerer emits nothing else
+                raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         lines.append("})")
         lines.append("")
     return lines
@@ -1853,12 +2024,22 @@ def _uses_spawn(ir: dict) -> bool:
     return found
 
 
+def _uses_lifecycle_tests(ir: dict) -> bool:
+    """True iff the document carries any `lifecycle test` block (§7.1), so the
+    module imports the runtime's plug + residue-introspection helpers and the
+    value `Context` import those drivers need."""
+    return any(t.get("lifecycle") for t in (ir.get("tests") or []))
+
+
 def _runtime_imports(ir: dict, runtime_import: str) -> str:
     """The `import { ... } from '<runtime>'` line. `spawn` is added only when a
-    spawn node is present (docs/design-v2-instances.md phase 2)."""
+    spawn node is present (docs/design-v2-instances.md phase 2); the lifecycle
+    drivers add `plug` + the no-residue introspection (FR-5, §7.1)."""
     names = ["host"]
     if _uses_spawn(ir):
         names.append("spawn")
+    if _uses_lifecycle_tests(ir):
+        names += ["plug", "snapshotRuntime", "assertNoResidue"]
     return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
 
 
@@ -1908,6 +2089,9 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
                 returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
+            if method.get("idempotent"):
+                out.append("  /** idempotent — safe to re-deliver; the runtime may "
+                           "auto-retry a transient failure (item 44) */")
             out.append(f"  {mname}({params}): {returns}")
         out.append("}")
         out.append("")
@@ -1943,7 +2127,10 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
-        "import type { Context } from 'cordis'",
+        # lifecycle drivers construct a live Context, so they need the value,
+        # not just the type; pure documents keep the type-only import.
+        ("import { Context } from 'cordis'"
+         if _uses_lifecycle_tests(ir) else "import type { Context } from 'cordis'"),
         _runtime_imports(ir, runtime_import),
     ]
     if tests:
@@ -1951,6 +2138,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     out.append("")
 
     out.extend(_revl_helpers(ir))
+    if _uses_lifecycle_tests(ir):
+        out.append("const _revl_settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))")
+        out.append("")
 
     if types:
         out.extend(_emit_ts_types(types))
@@ -1959,7 +2149,14 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     if functions:
         out.extend(_emit_ts_functions(functions, types, externs))
     if tests:
-        out.extend(_emit_ts_tests(tests, types, functions, externs))
+        pure = [t for t in tests if not t.get("lifecycle")]
+        lifecycle = [t for t in tests if t.get("lifecycle")]
+        if pure:
+            out.extend(_emit_ts_tests(pure, types, functions, externs))
+        if lifecycle:
+            out.extend(_emit_ts_lifecycle_tests(
+                lifecycle, types, functions, externs,
+                ir.get("services") or {}, components))
 
     # Service interfaces (coeffect interfaces, DESIGN.md §3.1).
     for sname, service in services.items():
@@ -1977,6 +2174,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
                 returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
+            if method.get("idempotent"):
+                out.append("  /** idempotent — safe to re-deliver; the runtime may "
+                           "auto-retry a transient failure (item 44) */")
             out.append(f"  {mname}({params}): {returns}")
         out.append("}")
         out.append("")
@@ -2048,26 +2248,6 @@ def _refuse_fault_tests(ir) -> None:
         f"module that is not emitted for this tier."
     )
 
-def _refuse_lifecycle_tests(tests: list) -> None:
-    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
-
-    A lifecycle test is not a pure test unit: it loads components into a live
-    context, calls through provision keys, unloads them, and asserts
-    residue-freedom by reading the *host runtime's* introspection (R1/R4,
-    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
-    Refuse by name — a construct that is silently dropped by one renderer and
-    present in another is this project's recurring bug class.
-    """
-    for test in tests or []:
-        if test.get("lifecycle"):
-            raise EmitError(
-                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis (TS)'} tier: "
-                "it drives a live composition (load/call/unload) and asserts R4 "
-                "residue-freedom through the host runtime's introspection, which only the "
-                "reference tier implements — run it with `revl test --backend py` "
-                "(docs/syntax-2.0.md §7.1)"
-            )
-
 
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
@@ -2077,7 +2257,6 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
 
     _refuse_fault_tests(ir)
 
-    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     # The unified `_Ctx` carrying the document type context is built inside
     # each _emit_* pass and threaded into every body (component and 2.0),

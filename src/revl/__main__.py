@@ -785,6 +785,27 @@ def main(argv: list[str] | None = None) -> int:
              "sandbox allow-list applies to it (repeatable); `*` = every "
              "component")
 
+    version_cmd = sub.add_parser(
+        "version",
+        help="derive the required semver bump from the interface diff against "
+             "a previous composition (docs/derived-versioning.md)")
+    version_cmd.add_argument("files", nargs="+")
+    version_cmd.add_argument(
+        "--against", metavar="PREV.json", default=None,
+        help="a previous compiled composition document to diff against; the "
+             "bump is a measurement of the change (produce one with `revl "
+             "compile <sources> -o prev.json` or `--emit-manifest`)")
+    version_cmd.add_argument(
+        "--current-version", metavar="X.Y.Z", default=None,
+        help="the previous composition's declared version; when given, the "
+             "computed next version is printed too")
+    version_cmd.add_argument(
+        "--emit-manifest", action="store_true",
+        help="print the compiled composition document (the diff input a later "
+             "`--against` reads) and exit, instead of deriving a bump")
+    version_cmd.add_argument("--json", action="store_true",
+                             help="machine-readable derivation")
+
     erase = sub.add_parser(
         "erase-report",
         help="right-to-erasure evidence for one realm: in-process state gone "
@@ -914,6 +935,12 @@ def main(argv: list[str] | None = None) -> int:
                       help="fault sweep: inject failure at every step of every "
                            "component and check L-Raise / no-residue / LIFO / "
                            "siblings at each (py tier; docs/fault-tests.md)")
+    test.add_argument("--mock-requires", action="store_true",
+                      help="run every `lifecycle test` in mock world: each unmet "
+                           "`requires` is filled by an auto-generated mock provider "
+                           "(item-37-typed, seeded; emissions recorded-not-crossed), "
+                           "so a consumer boots with zero real providers "
+                           "(py tier; docs/auto-mocks.md)")
 
     mcp = sub.add_parser("mcp", help="MCP bridge: serve the compiler, or project services <-> tools")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1058,10 +1085,12 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
-                     help="target runtime tier (default: py; py and rust are runnable — "
-                          "rust boots as a cordis-rs process, --once for the "
+                     help="target runtime tier (default: py; py, rust, java and "
+                          "wasm are runnable — rust/java/wasm boot as a "
+                          "separate process, --once for the "
                           "boot/teardown round-trip; a missing runtime is a skip with a "
-                          "reason and a nonzero exit)")
+                          "reason and a nonzero exit; ts and go emit but have no "
+                          "run driver yet)")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--watch", action="store_true",
@@ -1187,7 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {rendered}", file=sys.stderr)
 
     if args.command == "test":
-        return test_command(ir, args.backend, sweep=getattr(args, "sweep", False))
+        return test_command(ir, args.backend, sweep=getattr(args, "sweep", False),
+                            mock_requires=getattr(args, "mock_requires", False))
 
     if args.command == "query":
         return _run_query(args, ir)
@@ -1342,6 +1372,34 @@ def main(argv: list[str] | None = None) -> int:
                 verdict = distribution[name]
                 print(f"  {name:<{width}}  {verdict['verdict']:<20} "
                       f"{'; '.join(verdict['reasons'])}")
+        return 0
+
+    if args.command == "version":
+        from .version import derive, render  # noqa: PLC0415
+        if args.emit_manifest:
+            # the diff input for a later `--against`: the compiled composition,
+            # which (unlike an audit report) carries the `services` table.
+            print(json.dumps(ir, indent=2))
+            return 0
+        if not args.against:
+            print("error: `revl version` needs --against PREV.json (a previous "
+                  "compiled composition) or --emit-manifest", file=sys.stderr)
+            return 2
+        try:
+            with open(args.against, encoding="utf-8") as handle:
+                previous = json.load(handle)
+        except OSError as error:
+            print(f"error: cannot read {args.against}: {error}", file=sys.stderr)
+            return 1
+        try:
+            result = derive(previous, ir, previous_version=args.current_version)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(render(result, args.against))
         return 0
 
     rendered = json.dumps(ir, indent=2)

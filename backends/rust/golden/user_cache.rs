@@ -17,27 +17,44 @@ pub trait Cache: Send + Sync {
     fn put(&self, key: String, value: String) -> ();
 }
 
-/// revl host object: a small thread-safe string map.
-pub struct Map {
-    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+/// R1 live-resource counter (lifecycle `assert no_residue`).
+/// Thread-local because `cargo test` runs tests on parallel
+/// threads: each test must observe only its own acquisitions.
+thread_local! {
+    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {
+        std::cell::Cell::new(0)
+    };
 }
-impl Map {
+
+/// revl host object: a small thread-safe map with String keys.
+/// The value type is generic — each site's `Map.new()` pins `V`
+/// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).
+pub struct Map<V> {
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,
+}
+impl<V> Map<V> {
     pub fn new() -> Self {
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));
         Self {
             inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
     pub fn drop_(&self) {
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
         self.inner.lock().unwrap().clear();
     }
-    pub fn insert(&self, key: String, value: String) {
+    pub fn insert(&self, key: String, value: V) {
         self.inner.lock().unwrap().insert(key, value);
     }
-    pub fn remove(&self, key: String) {
-        self.inner.lock().unwrap().remove(&key);
+    pub fn remove(&self, key: &String) {
+        self.inner.lock().unwrap().remove(key);
     }
-    pub fn get(&self, key: String) -> Option<String> {
-        self.inner.lock().unwrap().get(&key).cloned()
+}
+impl<V: Clone> Map<V> {
+    // The key is borrowed, not moved: a component that reads then
+    // writes the same key (the session ledger) keeps owning it.
+    pub fn get(&self, key: &String) -> Option<V> {
+        self.inner.lock().unwrap().get(key).cloned()
     }
 }
 
@@ -62,6 +79,7 @@ impl Pool {
         if size < 1 {
             panic!("pool size must be an integer >= 1 (got {})", size);
         }
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));
         Self {
             url,
             size,
@@ -153,6 +171,7 @@ impl Pool {
         if already_closed {
             panic!("pool.close after close/drop — use-after-free");
         }
+        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));
     }
     pub fn query(&self, _sql: String) -> Vec<Value> {
         let conn = self.borrow_conn("query");
@@ -210,19 +229,19 @@ pub fn pg_database() -> cordis::PluginHandle {
 }
 
 struct UserCacheCache {
-    store: Arc<Map>,
+    store: Arc<Map<String>>,
     db: Arc<Box<dyn Database>>,
     ctx: Arc<cordis::Context>,
 }
 impl Cache for UserCacheCache {
-    fn get(&self, key: String) -> Option<String> { self.store.get(key) }
+    fn get(&self, key: String) -> Option<String> { self.store.get(&key) }
     fn put(&self, key: String, value: String) -> () {
         let store_undo = self.store.clone();
         let db_undo = self.db.clone();
         let key_undo = key.clone();
         let value_undo = value.clone();
         let _ = self.store.insert(key.clone(), value.clone());
-        let _ = self.ctx.effect("UserCache.put.effect.0", move || { store_undo.remove(key_undo); Ok(()) });
+        let _ = self.ctx.effect("UserCache.put.effect.0", move || { store_undo.remove(&key_undo); Ok(()) });
         let _ = self.db.execute(format!("INSERT INTO cache_log VALUES ({0})", key.clone()));
     }
 }
@@ -233,7 +252,7 @@ pub fn user_cache() -> cordis::PluginHandle {
         cordis::Inject::new(["db"]),
         |ctx, config| {
             let db = ctx.require::<Box<dyn Database>>("db")?;
-            let store = Arc::new(Map::new());
+            let store = Arc::new(Map::<String>::new());
             let store_undo = store.clone();
             let db_undo = db.clone();
             ctx.effect("UserCache.store.undo", move || { store_undo.drop_(); Ok(()) })?;

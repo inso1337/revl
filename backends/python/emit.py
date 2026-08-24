@@ -55,6 +55,36 @@ class EmitError(ValueError):
     """The IR document cannot be lowered by this backend."""
 
 
+# Dispatcher conformance (roadmap item 76a). This file carries TWO expression
+# dispatchers — `_ComponentEmitter._expr` (component/method bodies) and the
+# module-level `_expr` (fn bodies) — and the sets below declare, as data, the
+# IR expression kinds each one must render. tests/test_expr_dispatcher_
+# conformance.py checks them against the frontend schema (src/revl/lower.py:
+# EXPR_KINDS / EXPR_KINDS_FN / EXPR_KINDS_COMPONENT): a kind the frontend can
+# produce in a position must be handled or deliberately refused by every
+# dispatcher that serves that position, and a dispatcher's declared set must
+# match the branches in its source. "Did you patch both paths" is a red test,
+# not a 15-minute stall. `hole` is refused at the document level by the
+# pre-emit walk, so it never reaches either dispatcher.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "component": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "list", "lit",
+        "maplit", "match", "name", "optcall", "optfield", "record",
+        "record_update", "req", "spawn", "un", "var",
+    }),
+    "fn": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "field", "if", "index",
+        "interp", "len", "list", "lit", "maplit", "match", "optcall",
+        "optfield", "record", "record_update", "un", "var",
+    }),
+}
+# kinds this tier deliberately refuses everywhere (document-level or
+# position-agnostic); each must raise a named tier-limit EmitError, never the
+# "unknown expression kind" fall-through.
+EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
+
+
 def _ident(name: Any, what: str) -> str:
     if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
@@ -206,10 +236,12 @@ _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
 _DIV_ZERO_MSG = "revl: division by zero"
 
 
-def _render_builtin(method, target: str, args: list) -> str:
+def _render_builtin(method, target: str, args: list, recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), rendered as portable Python.
     `push`/`concat` are persistent (value semantics); `indexOf` returns -1
-    when absent on both hosts."""
+    when absent on both hosts. `recv` is the receiver's static type, carried
+    only where the lowering must dispatch on it (`to_int`: the Int32 widen is
+    the identity on python, the Str parse is not)."""
     if method == "length":
         return f"len({target})"
     if method == "push":
@@ -233,6 +265,12 @@ def _render_builtin(method, target: str, args: list) -> str:
         return f"{args[0]}.join({target})"
     if method == "repeat":
         return f"({target} * {args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # python's startswith/endswith count in code points, the exact semantics.
+    if method == "startsWith":
+        return f"{target}.startswith({args[0]})"
+    if method == "endsWith":
+        return f"{target}.endswith({args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): a python dict, copied
     # on write — `{**m, k: v}` IS the persistent set.
     if method == "set":
@@ -269,6 +307,17 @@ def _render_builtin(method, target: str, args: list) -> str:
     # type, so widening Int32 -> Int is the identity; narrowing Int -> Int32
     # re-imposes the 32-bit bound through `_revl_i32`, which traps out of range.
     if method == "to_int":
+        if recv == "Str":
+            # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the
+            # ASCII digits with an optional leading `-`, `None` otherwise —
+            # including out of the i64 range, which is None like every other
+            # non-digit (the tier's ints are unbounded, so the bound must be
+            # checked here rather than by int()).
+            return (f"(lambda _s: (None if (_s == \"\" or _s == \"-\" "
+                    f"or not _s.isascii() "
+                    f"or not (_s.isdigit() or (_s[0] == \"-\" and _s[1:].isdigit())) "
+                    f"or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) "
+                    f"else _n))({target})")
         return f"({target})"
     if method == "to_int32":
         return f"_revl_i32({target})"
@@ -332,7 +381,7 @@ class _ComponentEmitter:
         if kind == "builtin":
             t = self._expr(expr.get("target"), where)
             a = [self._expr(x, where) for x in expr.get("args") or []]
-            return _render_builtin(expr.get("method"), t, a)
+            return _render_builtin(expr.get("method"), t, a, expr.get("recv"))
         if kind == "maplit":
             # `Map.empty()` (docs/stdlib-2.0.md §Map)
             return "{}"
@@ -706,8 +755,6 @@ class _ComponentEmitter:
         is_async = any(step.get("step") == "await" for step in self.ir.get("body") or [])
 
         out.add(0, f"def _{self.snake}_apply(ctx, config):")
-        if self.config_fields:
-            out.add(1, f"config = _{self.snake.upper()}_CONFIG.resolve(config)")
         out.add(1, f"frame = Frame(ctx, {self.name!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
@@ -728,6 +775,11 @@ class _ComponentEmitter:
         else:
             out.add(1, f"'inject': {list(self.requires.keys())!r},")
         out.add(1, f"'apply': _{self.snake}_apply,")
+        if self.config_fields:
+            # cordis-py reads Config off dict plugins via dict.get (fork
+            # commit 1c5e6f1), so the schema rides on the plugin dict and the
+            # runtime's resolve_config validates/resolves before apply runs.
+            out.add(1, f"'Config': _{self.snake.upper()}_CONFIG,")
         if self.isolate:
             # v2: realm placements, applied by runtime.plug() BEFORE
             # ctx.plugin — the fiber's context chain is fixed at plugin time
@@ -1077,7 +1129,8 @@ def _expr(node: dict) -> str:
     if kind == "builtin":
         return _render_builtin(
             node.get("method"), _expr(node["target"]),
-            [_expr(a) for a in node.get("args") or []])
+            [_expr(a) for a in node.get("args") or []],
+            node.get("recv"))
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map)
         return "{}"
@@ -1381,10 +1434,13 @@ async def _revl_call(root, key, method, args, where):
         raise AssertionError(
             "{}: no provider for key {!r} \u2014 its component is loaded but not ACTIVE; "
             "a component with an unmet `requires` stays PENDING (R2)".format(where, key))
-    result = getattr(impl, method)(*args)
-    if _revl_inspect.isawaitable(result):
-        result = await result
-    return result
+    # delivery semantics (item 44): the driver may auto-retry a transient
+    # failure iff the checked property says this emission is idempotent. A
+    # non-idempotent emission gets exactly one delivery attempt.
+    idempotent = method in _REVL_IDEMPOTENT.get(key, ())
+    return await retry_idempotent(
+        lambda: getattr(impl, method)(*args),
+        idempotent=idempotent, where=where)
 '''
 
 
@@ -1491,7 +1547,9 @@ def _uses_builtin_result(ir: dict) -> bool:
     """True if the IR constructs or matches the built-in Result (Ok/Err) —
     an `adt` node typed Result, a `match` arm on Ok/Err, or a call to one of
     the total division forms (which *produce* a Result). Used to decide
-    whether to emit the built-in Result classes (keeps v1 goldens intact)."""
+    whether to emit the built-in Result classes: emitting them into every
+    module would add classes no program references, so the gate is dead-code
+    hygiene — the emitted module carries only the names the program uses."""
     def walk(node) -> bool:
         if isinstance(node, dict):
             if node.get("kind") == "adt" and str(node.get("type", "")).startswith("Result"):
@@ -1579,9 +1637,23 @@ def emit(ir: dict) -> str:
         | _find_host_roots(functions)
         | _find_host_roots(tests)
         # §7.1: the lifecycle driver loads components through the realm-aware
-        # `plug` and reads the host-builtin trace to detect unreleased resources
-        | ({"plug", "set_trace"} if lifecycle else set())
+        # `plug` and reads the host-builtin trace to detect unreleased resources.
+        # `retry_idempotent` (item 44) gives the driver its auto-retry right for
+        # idempotent emissions — see `_REVL_IDEMPOTENT` and `_revl_call` below.
+        | ({"plug", "set_trace", "retry_idempotent"} if lifecycle else set())
     )
+
+    # Delivery semantics (item 44): the reference runtime driver may auto-retry
+    # a transient failure of an emission *iff* it is declared `idempotent`. Map
+    # each provision key to the set of its idempotent method names so the
+    # `_revl_call` dispatch can consult the checked property at the call site.
+    idempotent_map: dict[str, set[str]] = {}
+    for component in components:
+        for key, svc_name in (component.get("provides") or {}).items():
+            methods = (services.get(svc_name) or {}).get("methods") or {}
+            idem = {m for m, spec in methods.items() if spec.get("idempotent")}
+            if idem:
+                idempotent_map[key] = idem
 
     out = _Lines()
     out.add(0, f'"""Generated by the revl cordis-py backend (ir_version {ir.get("ir_version", IR_VERSION)}) — do not edit.')
@@ -1594,7 +1666,13 @@ def emit(ir: dict) -> str:
         out.add(0)
     if lifecycle:
         out.add(0, "import asyncio as _revl_asyncio")
-        out.add(0, "import inspect as _revl_inspect")
+        # delivery semantics (item 44): {key: {idempotent method names}} — the
+        # checked retry-eligibility the `_revl_call` dispatch consults
+        rendered_idem = "{" + ", ".join(
+            f"{key!r}: {{{', '.join(map(repr, sorted(idem)))}}}"
+            for key, idem in sorted(idempotent_map.items())
+        ) + "}"
+        out.add(0, f"_REVL_IDEMPOTENT = {rendered_idem}")
         out.add(0)
     if _uses_bounded_int(ir):
         out.add(0, "_REVL_I64_MIN = -(2 ** 63)")
@@ -1650,8 +1728,10 @@ def emit(ir: dict) -> str:
     out.add(0)
     # built-in Result is a tagged ADT (so `match` can discriminate Ok/Err),
     # unless a user type shadows the name. Opt stays host-None, so it needs
-    # no class. Emitted only when the IR actually uses Result, so v1 goldens
-    # stay byte-identical.
+    # no class. Emitted only when the IR actually uses Result — an unused
+    # Ok/Err class in every module would be dead code (docs/conformance.md,
+    # "Golden policy": output is right because it is right, not because a
+    # fixture wants the bytes).
     if _uses_builtin_result(ir):
         user_cases = {
             case["name"]
@@ -1699,6 +1779,10 @@ def emit(ir: dict) -> str:
                 metadata.append("'async': True")
             if spec.get("commutative"):
                 metadata.append("'commutative': True")
+            # delivery semantics (item 44): the runtime consults this flag to
+            # decide whether a transient failure of this emission may be retried
+            if spec.get("idempotent"):
+                metadata.append("'idempotent': True")
             out.add(2, f"{method_name!r}: {{{', '.join(metadata)}}},")
         out.add(1, "},")
     out.add(0, "}")

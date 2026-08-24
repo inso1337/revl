@@ -745,11 +745,10 @@ fn probe(k: Str) -> Int {
 
 def test_opaque_receivers_refuse_unknown_methods_at_lowering():
     # an extern's return has no constructor to pin a family, so the checker
-    # types it unknown — but the lowerer still refuses any method name that
-    # is not on the stdlib surface, so a typo on an opaque receiver cannot
-    # reach a runtime either. What stays genuinely opaque is the *type*: a
-    # stdlib-named method on such a receiver lowers as that builtin (the
-    # narrowed fence, docs/contract-errata.md).
+    # types it unknown — and every method call on it is refused, stdlib-named
+    # or not, so neither a typo nor a mis-lowered builtin can reach a runtime.
+    # What stays genuinely opaque is the *type*: the value itself flows
+    # unchecked (the G8 audit surface, docs/contract-errata.md).
     err = _err("""
 extern pure fn open_pool(name: Str) -> Any = @py { return object() }
 fn f() {
@@ -757,3 +756,94 @@ fn f() {
   pool.anything_at_all(1, 2, 3)
 }""")
     assert "no builtin method `anything_at_all`" in err
+
+
+# ---- the stdlib-named-method sliver is closed (roadmap 75(b)) --------------
+#
+# A method call on a receiver whose provenance no constructor pins — an
+# extern's return, a host-object result, a type parameter — used to lower as
+# the builtin (`pool.remove("k")` dispatched as the Map `remove` builtin on
+# whatever the host returned) and misbehave at runtime on every tier. It is
+# now refused with the HOST-METHOD diagnostic (t24_opaque_receiver_builtin.rvl).
+# The false positives below are the legal spellings the closure must not
+# touch: typed stdlib values, host-provenance receivers, and annotated
+# host-object results.
+
+def test_stdlib_method_on_unpinned_extern_return_is_refused():
+    err = _err("""
+extern pure fn open_pool(name: Str) = @py { return object() }
+fn f() {
+  let pool = open_pool("pg://")
+  pool.remove("k")
+}""")
+    assert "stdlib method `remove` on a value of unknown type" in err
+
+
+def test_stdlib_method_on_a_host_object_result_is_refused():
+    # `m.get(k)` returns a host value of unknown type; calling a stdlib
+    # method on it used to lower as the builtin
+    err = _err("""
+fn f(k: Str) {
+  let m = Map.new()
+  let v = m.get(k)
+  v.length()
+}""")
+    assert "stdlib method `length` on a value of unknown type" in err
+
+
+def test_stdlib_method_on_unpinned_receiver_in_a_component_is_refused():
+    # the same sliver through the component effect-block path: `v` is the
+    # host result of `cache.get(k)`, not a provable Map value
+    err = _err("""
+component Cache {
+  let cache = effect Map.new() undo cache.drop()
+  let warm = effect { let v = cache.get("k")  v.remove("k")  Pool.open("u", 1) } undo warm.close()
+}""")
+    assert "stdlib method `remove` on a value of unknown type" in err
+
+
+def test_pinned_stdlib_receivers_still_compile():
+    # the false positives that must keep working: every receiver with a
+    # *provable* stdlib type takes the builtin table exactly as before
+    ir = compile_source("""
+fn str_len(s: Str) -> Int { return s.length() }
+fn list_len(xs: List[Int]) -> Int { return xs.length() }
+fn map_value(m: Map[Str, Int]) -> Map[Str, Int] { return m.set("k", 1) }
+fn int_str(n: Int) -> Str { return n.to_str() }
+fn int32_wide(n: Int32) -> Int { return n.to_int() }
+fn lit() -> Int { return "abc".length() }
+fn chain() -> Str { let m = Map.empty().set("k", "v")  return match m.lookup("k") { Some(x) => x, None => "" } }
+""")
+    assert len(ir["functions"]) == 7
+
+
+def test_host_provenance_receiver_keeps_its_stub_verbs():
+    # a constructor-tracked host receiver (in a fn body and in a component)
+    # stays on the checked host surface — `remove` dispatches by receiver
+    # kind, never by name alone
+    ir = compile_source("""
+fn host_prov(k: Str) {
+  let m = Map.new()
+  m.insert(k, "v")
+  m.remove(k)
+}
+component Cache {
+  let m = effect Map.new() undo m.drop()
+  let warm = effect { m.remove("k")  Pool.open("u", 1) } undo warm.close()
+}
+""")
+    assert len(ir["functions"]) == 1
+    assert ir["components"][0]["name"] == "Cache"
+
+
+def test_annotated_host_result_is_pinned_and_checked():
+    # the hint on the refusal: an annotation is how a host result becomes a
+    # provable receiver — `let v: Str = m.get(k)` then `v.length()` is a Str
+    # length, checked like any other
+    ir = compile_source("""
+fn f(k: Str) -> Int {
+  let m = Map.new()
+  let v: Str = m.get(k)
+  return v.length()
+}""")
+    assert len(ir["functions"]) == 1

@@ -393,7 +393,12 @@ export class MapHandle {
   get(key: any): any {
     this.assertLive('get')
     record(`${this.label}.get(${key})`)
-    return this.data.get(key) ?? null
+    // Opt is bare `value | undefined` on this tier (emit.py: the stdlib Map
+    // `lookup` answers undefined when absent — "exactly the Opt None case"),
+    // so a missing key must read as `undefined`, never `null`: `None == None`
+    // is false for `null == undefined` through revlEq. The interop bridge
+    // canonicalizes both to JSON null on the wire.
+    return this.data.get(key)
   }
 
   insert(key: any, value: any): void {

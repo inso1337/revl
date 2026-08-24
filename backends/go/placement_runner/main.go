@@ -61,6 +61,10 @@ type spec struct {
 	Proxies    map[string]proxyInfo       `json:"proxies"`
 	Probe      []probe                    `json:"probe"`
 	Serve      *serveInfo                 `json:"serve"`
+	// Once (revl run --backend go --once) replaces the hold-until-stopped
+	// loop with the boot -> LIFO teardown -> no-residue-proof -> exit
+	// round-trip, the same driver contract the rust/java/wasm tiers run.
+	Once bool `json:"once"`
 }
 
 type labeledFiber struct {
@@ -170,47 +174,84 @@ func main() {
 
 	fmt.Printf("[%s] UP\n", name)
 
-	// 5. hold until the conductor stops us (SIGTERM, or stdin EOF) OR a peer
-	//    dies. A dead provider withdraws its proxy so consumers deactivate.
-	stop := make(chan struct{}, 1)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	go func() { <-sig; stop <- struct{}{} }()
-	go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
+	// 5. once mode: the round-trip ends here — boot, then straight to LIFO
+	//    teardown + the no-residue proof. Otherwise hold until the conductor
+	//    stops us (SIGTERM, or stdin EOF) OR a peer dies. A dead provider
+	//    withdraws its proxy so consumers deactivate.
+	if !s.Once {
+		stop := make(chan struct{}, 1)
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+		go func() { <-sig; stop <- struct{}{} }()
+		go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
 
-	select {
-	case key := <-peer:
-		log("peer", key, "provider died: withdrawing the proxy")
-		for _, lf := range fibers {
-			if lf.label == key+"-proxy" {
-				lf.fiber.Dispose()
+		select {
+		case key := <-peer:
+			log("peer", key, "provider died: withdrawing the proxy")
+			for _, lf := range fibers {
+				if lf.label == key+"-proxy" {
+					lf.fiber.Dispose()
+				}
 			}
+			// Observe dependents leave Active: the provision is withdrawn, so the
+			// orchestrator deactivates every consumer of the lost key (R2/R3).
+			deadline := time.Now().Add(3 * time.Second)
+			for _, lf := range fibers {
+				if strings.HasSuffix(lf.label, "-proxy") {
+					continue
+				}
+				for time.Now().Before(deadline) && lf.fiber.State() == stc.StateActive {
+					time.Sleep(20 * time.Millisecond)
+				}
+				log("withdraw", lf.label, "state="+lf.fiber.State().String())
+			}
+		case <-stop:
 		}
-		// Observe dependents leave Active: the provision is withdrawn, so the
-		// orchestrator deactivates every consumer of the lost key (R2/R3).
-		deadline := time.Now().Add(3 * time.Second)
-		for _, lf := range fibers {
-			if strings.HasSuffix(lf.label, "-proxy") {
-				continue
-			}
-			for time.Now().Before(deadline) && lf.fiber.State() == stc.StateActive {
-				time.Sleep(20 * time.Millisecond)
-			}
-			log("withdraw", lf.label, "state="+lf.fiber.State().String())
-		}
-	case <-stop:
 	}
 
-	// 6. teardown, consumers first (reverse load order)
+	// 6. teardown, consumers first (reverse load order). In once mode each
+	//    dispose is awaited out of the fiber registry, so the residue proof
+	//    below reads a settled runtime, not an in-flight one.
+	goneCtx, cancel := stdctx.WithTimeout(stdctx.Background(), 5*time.Second)
+	defer cancel()
 	for i := len(fibers) - 1; i >= 0; i-- {
 		fibers[i].fiber.Dispose()
-		log("swap", fibers[i].label, "dispose")
+		if s.Once {
+			log("swap", fibers[i].label, "dispose -> inverses replay (LIFO)")
+			_ = fibers[i].fiber.Gone(goneCtx)
+		} else {
+			log("swap", fibers[i].label, "dispose")
+		}
 	}
 	if listener != nil {
 		listener.Close()
 	}
 	for _, c := range clients {
 		c.Close()
+	}
+
+	// 7. no-residue proof (once mode): after a full LIFO teardown the live
+	//    runtime must hold nothing — no fiber left in the registry, and no
+	//    provided key still resolving. The go mirror of the py driver's
+	//    registry.size/reflect.store check and the rust runner's
+	//    registry().len()/reflect().services() check; NO-RESIDUE is printed
+	//    only when both hold.
+	if s.Once {
+		live := len(root.Fibers())
+		log("residue", "plugins", fmt.Sprintf("%d live plugin(s)", live))
+		still := 0
+		for _, key := range s.Provides {
+			if emitted.RevlStillProvided(root, key) {
+				still++
+				log("residue", key, "STILL LIVE")
+			}
+		}
+		log("residue", "provisions", fmt.Sprintf("%d service(s) still provided", still))
+		if live == 0 && still == 0 {
+			fmt.Printf("[%s] NO-RESIDUE — the composition left nothing behind\n", name)
+		} else {
+			fmt.Printf("[%s] RESIDUE-LEFT — see the residue lines above\n", name)
+		}
 	}
 	fmt.Printf("[%s] DOWN\n", name)
 }
