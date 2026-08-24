@@ -643,24 +643,41 @@ the sketch that motivated this form fails with its own explanation.
 an R1 host-resource counter), **cordis (TS)** (async vitest cases over a live
 `Context`, R4 introspection + R1 live-host-resource accounting), and
 **cordis-go** (`go test` funcs over the live stc-go runtime, `len(root
-.Fibers()) == 0` + an R1 host-resource counter). Each tier states R1 over its
-own host-builtin vocabulary against the same R1/R4 clauses
+.Fibers()) == 0` + an R1 host-resource counter), and — as of item 142 — the
+**wasm** substrate (the emitted components booted on the live cordis-wasm
+runtime: load = `rt.plug`, call = resolve the provision key in the coeffect
+table Σ and invoke its op, unload = `rt.unplug`, and `assert no_residue` =
+`len(rt.fibers) == 0` (R4) + the coeffect table `rt.table` empty (R1), the
+substrate mirror of the once-mode boot's no-residue proof). Each tier states
+R1 over its own host-builtin vocabulary against the same R1/R4 clauses
 (docs/backend-ir.md §Required semantics).
 
-The **java (cordis4j)** and **wasm** emitters still refuse lifecycle tests by
-name — they have no lifecycle-test driver yet (a documented follow-up, FR-5):
+The wasm substrate carries lifecycle tests over its **scalar** instruction set
+(Int is i64, Bool is i32; backends/wasm/README.md "Widths"). A lifecycle test
+whose steps stay scalar — Int/Bool service boundaries, no `config`, no timers —
+*runs* there; one the substrate genuinely cannot express skips **per test, with
+a reason** (never a false pass): a `load … with { … }` (no instantiation-config
+channel), a `call`/`assert` that crosses a non-scalar boundary (Str/List/record/
+variant/Opt/Float cross as linear-memory pointers the host cannot marshal at the
+coeffect seam), or an `advance` (timers are the item-57 follow-on). See
+`examples/lifecycle_wasm.rvl` (a scalar mesh that runs) versus
+`examples/lifecycle_cache.rvl` (`config`/`Pool`/`Map`, so it skips on wasm), and
+docs/wasm-capabilities.md.
+
+The **java (cordis4j)** emitter still refuses lifecycle tests by name — it has
+no lifecycle-test driver yet (a documented follow-up, FR-5):
 
 ```
-lifecycle test 'cache reverts cleanly' is not lowerable on the wasm tier:
+lifecycle test 'cache reverts cleanly' is not lowerable on the java tier:
   it drives a live composition (load/call/unload) and asserts R4
   residue-freedom through the host runtime's introspection, which only the
   reference tier implements — run it with `revl test --backend py`
 ```
 
-`revl test --all` reports that refusal as `skip:` with the reason (a tier
-that cannot run the document's tests is never a failure of the run). A
-refusal by name is deliberate — a construct silently dropped by one renderer
-and honored by another is this project's recurring bug class. In the IR a
+`revl test --all` reports that refusal, and any per-test wasm skip, as `skip:`
+with the reason (a tier that cannot run the document's tests is never a failure
+of the run). A refusal by name is deliberate — a construct silently dropped by
+one renderer and honored by another is this project's recurring bug class. In the IR a
 lifecycle test is an ordinary `ir_version: 3` entry in `tests` carrying
 `"lifecycle": true`, so a pure `test` document is byte-identical to what it
 was before this feature.

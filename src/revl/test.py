@@ -16,6 +16,7 @@ toolchain) reads as a skip, never as a regression (FR-5).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -64,6 +65,25 @@ def _without_fault_tests(ir: dict) -> dict:
         return ir
     stripped = dict(ir)
     stripped.pop("fault_tests", None)
+    return stripped
+
+
+def _without_lifecycle_tests(ir: dict) -> dict:
+    """*ir* with its `lifecycle test` blocks removed, keeping the plain `test`
+    blocks.
+
+    A `lifecycle test` is not a pure test unit — the wasm emitter refuses one
+    by name (it drives a live composition, not a standalone Bool export). To
+    lower the *component* modules a lifecycle test drives (and to still emit a
+    document's ordinary `test` blocks), the wasm lifecycle driver strips the
+    lifecycle section before `emit()`, then runs those tests against the live
+    cordis-wasm runtime itself (see ``run_wasm`` / backends/wasm/lifecycle.py).
+    """
+    tests = ir.get("tests") or []
+    if not any(t.get("lifecycle") for t in tests):
+        return ir
+    stripped = dict(ir)
+    stripped["tests"] = [t for t in tests if not t.get("lifecycle")]
     return stripped
 
 
@@ -483,26 +503,35 @@ def run_java(ir: dict) -> tuple[str, str]:
     return ("pass", "JVM: all REVL_TESTS ran" + note)
 
 
-def run_wasm(ir: dict) -> tuple[str, str]:
-    """Emit the module with each `test` block as an exported zero-arg Bool
-    function (`revl_test_*`, true = pass) and invoke every export on the real
-    ``wasmtime`` substrate — the same recipe backends/wasm/test_v3_emit.py
-    uses. A failed `assert` traps, which wasmtime reports as a nonzero exit.
-    """
-    if _has_timers(ir):
-        return _timer_follow_on("wasm")
-    wasmtime = shutil.which("wasmtime")
-    if wasmtime is None:
-        return ("skip", "wasmtime not installed (brew install wasmtime)")
-    note = _fault_note(ir, "wasm")
+def _wasm_lifecycle_module() -> types.ModuleType:
+    """Load backends/wasm/lifecycle.py (the revl-side classifier/spec builder)
+    under a unique module name, the same recipe ``_emitter`` uses for emit.py."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_wasm_lifecycle", BACKENDS / "wasm" / "lifecycle.py")
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_wasm_pure(ir: dict, wasmtime: str, note: str) -> tuple[str, str] | None:
+    """Run the document's plain `test` blocks on the wasmtime substrate.
+
+    Each `test` block is an exported zero-arg Bool function (`revl_test_*`,
+    true = pass); a failed `assert` traps, which wasmtime reports as a nonzero
+    exit — the same recipe backends/wasm/test_v3_emit.py uses. Any `lifecycle
+    test` is stripped first (it is driven separately, on the live runtime); its
+    presence must not take the pure tests down with an emit refusal. Returns a
+    verdict, or ``None`` when the document has no pure tests to emit."""
+    pure_ir = _without_lifecycle_tests(_without_fault_tests(ir))
+    pure_tests = [t for t in (ir.get("tests") or []) if not t.get("lifecycle")]
+    if not pure_tests:
+        return None
     try:
         emit = _emitter("wasm")
-        modules = emit.emit(_without_fault_tests(ir))
-        exports = emit.test_export_names(ir.get("tests") or [])
+        modules = emit.emit(pure_ir)
+        exports = emit.test_export_names(pure_tests)
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
-        if _lifecycle_refusal(ir, error):
-            return ("skip", "lifecycle tests are a documented follow-up on "
-                            f"this tier — {error}")
         return ("fail", f"emitter refused: {error}")
     if not exports:
         return ("pass", "no tests emitted by the backend" + note)
@@ -528,6 +557,152 @@ def run_wasm(ir: dict) -> tuple[str, str]:
     if failures:
         return ("fail", f"{failures} of {len(exports)} test(s) failed" + note)
     return ("pass", f"wasmtime: {len(exports)} test(s) passed" + note)
+
+
+def _run_wasm_lifecycle(ir: dict, lifecycle: list) -> tuple[str, str]:
+    """Drive the document's `lifecycle test` blocks on a live cordis-wasm
+    composition (roadmap item 142).
+
+    Mirrors the once-mode driver split (:mod:`revl.run_wasm` on the revl side,
+    ``run_harness.py`` on the cordis-wasm side): here we compile + emit the
+    component modules (with the lifecycle section stripped, so the emitter does
+    not refuse them), decide which tests the substrate can express
+    (backends/wasm/lifecycle.py), and hand a wasmtime-bearing cordis-wasm
+    interpreter a spec of modules + reduced step scripts to execute
+    (``lifecycle_harness.py``). A test the substrate cannot express is skipped
+    *with a reason*, per test — never a false pass. A missing cordis-wasm
+    runtime is a skip-with-reason for the whole lifecycle portion, exactly as
+    the py tier skips a missing cordis-py."""
+    from .run_wasm import (  # noqa: PLC0415 — sibling driver; reused, not edited
+        _cordis_wasm_dir,
+        _cordis_wasm_python,
+        wasm_runtime_reason,
+    )
+
+    lifecycle_mod = _wasm_lifecycle_module()
+
+    # Classify first — a document may carry only tests the substrate cannot
+    # express (config, non-scalar boundaries, timers), in which case we skip
+    # honestly without ever needing the runtime.
+    runnable: list[dict] = []
+    skips: list[str] = []
+    for test in lifecycle:
+        ok, reason = lifecycle_mod.classify(ir, test)
+        if ok:
+            runnable.append(test)
+        else:
+            skips.append(f"{test.get('name')!r}: {reason}")
+
+    # Emit the component modules the runnable tests drive. If the components do
+    # not lower (config blocks, host builtins, …) every lifecycle test skips
+    # honestly with that emit reason rather than reporting a false pass.
+    modules: dict[str, str] = {}
+    if runnable:
+        try:
+            modules = _emitter("wasm").emit(
+                _without_lifecycle_tests(_without_fault_tests(ir)))
+        except Exception as error:  # noqa: BLE001 — components do not lower
+            for test in runnable:
+                skips.append(f"{test.get('name')!r}: its components do not lower on "
+                             f"the wasm tier — {error}")
+            runnable = []
+
+    if not runnable:
+        detail = "; ".join(skips) if skips else "no lifecycle tests"
+        return ("skip", "lifecycle tests skipped on the wasm substrate — " + detail)
+
+    reason = wasm_runtime_reason()
+    if reason is not None:
+        note = ""
+        if skips:
+            note = "; also skipped — " + "; ".join(skips)
+        return ("skip", "the cordis-wasm runtime is not available to run "
+                        f"{len(runnable)} lifecycle test(s): {reason}" + note)
+
+    component_modules = {c["name"]: modules[c["name"]]
+                         for c in (ir.get("components") or [])
+                         if c["name"] in modules}
+    spec = {
+        "name": "lifecycle",
+        "modules": component_modules,
+        "tests": [lifecycle_mod.build_spec_test(t) for t in runnable],
+    }
+    harness = BACKENDS / "wasm" / "lifecycle_harness.py"
+    env = dict(os.environ)
+    env["CORDIS_WASM"] = str(_cordis_wasm_dir())
+
+    passed = 0
+    with tempfile.TemporaryDirectory(prefix="revl_test_wasm_lifecycle_") as tmpd:
+        spec_file = Path(tmpd) / "lifecycle.spec.json"
+        spec_file.write_text(json.dumps(spec), encoding="utf-8")
+        result = subprocess.run(
+            [_cordis_wasm_python(), str(harness), str(spec_file)],
+            capture_output=True, text=True, timeout=600, env=env)
+    output = (result.stdout + result.stderr).strip()
+    for line in output.splitlines():
+        if line.startswith("SUMMARY "):
+            try:
+                passed = int(line.split()[1])
+            except (IndexError, ValueError):  # pragma: no cover — malformed line
+                pass
+        elif line.startswith(("PASS ", "FAIL ")):
+            print(line)
+
+    ran = len(runnable)
+    for skip_line in skips:
+        print(f"SKIP {skip_line}")
+    tail = (f"; {len(skips)} lifecycle test(s) skipped (not wasm-expressible) — "
+            + "; ".join(skips)) if skips else ""
+    if result.returncode != 0 or passed != ran:
+        return ("fail", f"{ran - passed} of {ran} lifecycle test(s) failed on the "
+                        f"live cordis-wasm runtime" + tail)
+    return ("pass", f"cordis-wasm: {ran} lifecycle test(s) ran (boot -> call -> "
+                    f"unload -> no-residue)" + tail)
+
+
+def _combine_wasm_verdicts(*verdicts: tuple[str, str] | None) -> tuple[str, str]:
+    """Fold the pure- and lifecycle-portion verdicts into one tier verdict:
+    any failure fails the tier; otherwise a pass if anything ran; else a skip
+    (the `--all` verdict semantics — a skip inside a pass is not a regression)."""
+    present = [v for v in verdicts if v is not None]
+    if not present:  # pragma: no cover — run_wasm only calls with at least one
+        return ("pass", "no tests to run")
+    messages = "; ".join(m for _, m in present if m)
+    if any(o == "fail" for o, _ in present):
+        return ("fail", messages)
+    if any(o == "pass" for o, _ in present):
+        return ("pass", messages)
+    return ("skip", messages)
+
+
+def run_wasm(ir: dict) -> tuple[str, str]:
+    """Run the document's `test` and `lifecycle test` blocks on the wasm tier.
+
+    Plain `test` blocks run as exported Bool functions on wasmtime
+    (``_run_wasm_pure``); `lifecycle test` blocks — new in item 142 — boot the
+    emitted components on the live cordis-wasm runtime, call through provision
+    keys, unload LIFO, and check R4/R1 residue (``_run_wasm_lifecycle``),
+    instead of the former blanket skip. A test the substrate cannot express
+    (a `config` load, a non-scalar service boundary, a timer step) skips *with
+    a reason*, never a false pass.
+    """
+    if _has_timers(ir):
+        return _timer_follow_on("wasm")
+    wasmtime = shutil.which("wasmtime")
+    if wasmtime is None:
+        return ("skip", "wasmtime not installed (brew install wasmtime)")
+    note = _fault_note(ir, "wasm")
+    lifecycle = [t for t in (ir.get("tests") or []) if t.get("lifecycle")]
+
+    pure_verdict = _run_wasm_pure(ir, wasmtime, note)
+    if not lifecycle:
+        # No lifecycle tests: preserve the original single-verdict behaviour
+        # (including the "no tests emitted" pass for a tests-free document).
+        return pure_verdict if pure_verdict is not None else (
+            "pass", "no tests emitted by the backend" + note)
+
+    lifecycle_verdict = _run_wasm_lifecycle(ir, lifecycle)
+    return _combine_wasm_verdicts(pure_verdict, lifecycle_verdict)
 
 
 RUNNERS: dict[str, callable] = {
