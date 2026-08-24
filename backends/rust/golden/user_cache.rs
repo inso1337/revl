@@ -49,6 +49,22 @@ impl<V> Map<V> {
     pub fn remove(&self, key: &String) {
         self.inner.lock().unwrap().remove(key);
     }
+    // Iteration surface (docs/stdlib-2.0.md §Map): the checker
+    // promises `size()`/`keys()` on a host `Map.new()` receiver, and
+    // emit lowers both as method calls on this object. `size` is the
+    // entry count; `keys` yields the keys in ascending canonical Str
+    // order — Rust's `String: Ord` is byte-wise over UTF-8, which is
+    // exactly code-point order, so a plain sort is canonical. Both are
+    // read-only queries, no host trace.
+    pub fn size(&self) -> i64 {
+        self.inner.lock().unwrap().len() as i64
+    }
+    pub fn keys(&self) -> Vec<String> {
+        let mut ks: Vec<String> =
+            self.inner.lock().unwrap().keys().cloned().collect();
+        ks.sort();
+        ks
+    }
 }
 impl<V: Clone> Map<V> {
     // The key is borrowed, not moved: a component that reads then

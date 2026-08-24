@@ -393,6 +393,60 @@ def test_cargo_check_compiles_v3_types_functions_match(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# ---------------------------------------------------------------------------
+# host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 86).
+#
+# The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
+# on a host `Map.new()` receiver too (host-receiver provenance isn't tracked in
+# provide bodies), and emit lowers both as plain method calls on the runtime
+# object. The `struct Map<V>` therefore has to carry those methods, or the
+# emitted component fails to compile (`no method named size`). This mirrors the
+# python fix (backends/python/tests/test_host_map_iter.py).
+
+_HOST_MAP_ITER_SRC = """
+service KV {
+  fn count() -> Int
+  fn all_keys() -> List[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component MemKV provides kv: KV {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn count()    = store.size()
+    fn all_keys() = store.keys()
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+"""
+
+
+def test_host_map_backs_keys_and_size():
+    """The `struct Map<V>` runtime carries `size`/`keys`, and the provide body
+    lowers them as method calls on the store — not `.len()` / `.iter()` over a
+    bare map (which would need `store` to be a HashMap, not a host object)."""
+    src = emit.emit(compile_source(_HOST_MAP_ITER_SRC, "memkv.rvl"))
+    # runtime methods exist, with value-Map semantics (count + sorted keys)
+    assert "pub fn size(&self) -> i64 {" in src
+    assert "pub fn keys(&self) -> Vec<String> {" in src
+    assert "ks.sort();" in src  # canonical (code-point) order via String: Ord
+    # provide body lowers to method calls on the host object
+    assert "self.store.size()" in src
+    assert "self.store.keys()" in src
+
+
+@needs_cargo
+def test_cargo_check_compiles_host_map_iteration(tmp_path):
+    """The reproduction gate: before `size`/`keys` were added to the runtime,
+    this emitted component failed to compile (`no method named size`)."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_HOST_MAP_ITER_SRC, "memkv.rvl")))
+    assert result.returncode == 0, result.stderr
+
+
 STDLIB_SRC = """
 pub fn seq(n: Int) -> List[Int] { var out = [] var i = 0 while (i < n) { out = out.push(i) i += 1 } return out }
 pub fn head(s: Str) -> Str { return s.slice(0, 1) }
