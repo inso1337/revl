@@ -12,10 +12,21 @@ attributes (never the lowering spine), so this module does not import from
 from __future__ import annotations
 
 from .parser import Program
+from .typecheck import parse_type, FN_HEAD
 from .why import TraceStep
 
 
-def _calls_in(node, found: set, values: set | None = None) -> None:
+def _is_async_fn_type(type_name: str | None) -> bool:
+    """True for a function type whose declared return is `Async[…]` — the one
+    spelling that colors a first-class callback (roadmap item 92)."""
+    head, args = parse_type(type_name)
+    if head != FN_HEAD or not args:
+        return False
+    return parse_type(args[-1])[0] == "Async"
+
+
+def _calls_in(node, found: set, values: set | None = None,
+              stop_async_arrows: bool = False) -> None:
     """Function/extern names a lowered node calls. Component bodies lower a
     call to `{kind: fn, name}`; pure fn bodies to `{kind: call, callee:
     {kind: var, name}}`.
@@ -29,6 +40,13 @@ def _calls_in(node, found: set, values: set | None = None) -> None:
     """
     if isinstance(node, dict):
         kind = node.get("kind")
+        if stop_async_arrows and kind == "arrow" and node.get("async"):
+            # An async-colored arrow is a *value* whose suspension belongs to
+            # whoever awaits it, not to the body constructing it (item 92 §3,
+            # "the arrow owns its color"). Its internal calls are not the
+            # constructor's, so async coloring/admission stop here. Emission
+            # analysis passes `stop_async_arrows=False` and keeps bubbling.
+            return
         if kind == "fn" and isinstance(node.get("name"), str):
             found.add(node["name"])
         callee = node.get("callee")
@@ -41,10 +59,10 @@ def _calls_in(node, found: set, values: set | None = None) -> None:
         for key, value in node.items():
             if key == "callee" and kind == "call":
                 continue  # the callee is a call target, not a flowing value
-            _calls_in(value, found, values)
+            _calls_in(value, found, values, stop_async_arrows)
     elif isinstance(node, list):
         for value in node:
-            _calls_in(value, found, values)
+            _calls_in(value, found, values, stop_async_arrows)
 
 
 def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
@@ -155,10 +173,20 @@ def _async_callables(fns: list, externs: list, witness: dict | None = None) -> s
     not yet colored, pointing at one that already was."""
     colored: set = {ext["name"] for ext in externs if ext.get("async")}
     calls: dict[str, set] = {}
+    async_params: dict[str, set] = {}
     for fn in fns:
         called: set = set()
-        _calls_in(fn.get("body") or [], called)
+        # A body constructing an async arrow is not colored by the arrow's
+        # internals — the arrow is a value awaited elsewhere (item 92 §3).
+        _calls_in(fn.get("body") or [], called, stop_async_arrows=True)
         calls[fn["name"]] = called
+        # rule 2 (item 92 §3): a parameter whose declared type is an async
+        # function type. A fn that *calls* such a parameter is colored — a
+        # declaration-shaped seed, computed once, no new iteration dynamics.
+        async_params[fn["name"]] = {
+            p["name"] for p in (fn.get("params") or [])
+            if _is_async_fn_type(p.get("type"))
+        }
 
     changed = True
     while changed:  # least fixed point over the call graph
@@ -167,11 +195,17 @@ def _async_callables(fns: list, externs: list, witness: dict | None = None) -> s
             if name in colored:
                 continue
             reached = sorted(c for c in called if c in colored)
-            if reached:
+            calls_async_param = sorted(called & async_params.get(name, set()))
+            if reached or calls_async_param:
                 colored.add(name)
                 if witness is not None:
-                    witness[name] = min(
-                        reached, key=lambda callee: _witness_depth(callee, witness))
+                    if reached:
+                        witness[name] = min(
+                            reached, key=lambda c: _witness_depth(c, witness))
+                    else:
+                        # a one-hop, self-evident witness: no named callee is
+                        # colored, the seed is the fn's own async-typed param.
+                        witness[name] = calls_async_param[0]
                 changed = True
     return colored
 

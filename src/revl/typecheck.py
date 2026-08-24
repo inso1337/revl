@@ -196,13 +196,59 @@ def format_structural(fields: dict[str, str | None]) -> str:
 _GENERIC_ARITY = {"Opt": 1, "List": 1, "Map": 2, "Result": 2}
 
 
-def check_type_wellformed(filename: str, line: int, type_name: str | None) -> None:
+def check_type_wellformed(filename: str, line: int, type_name: str | None,
+                          *, allow_async_param: bool = False) -> None:
     """Reject a malformed declared type annotation (a builtin generic head
     used with the wrong number of arguments, e.g. bare `Opt` or `List`).
-    Recurses into type arguments. User/nominal heads are not arity-checked."""
+    Recurses into type arguments. User/nominal heads are not arity-checked.
+
+    `Async[T]` (roadmap item 92) is a *position-restricted* annotation, never
+    a value type: it is legal only as the return of a function type, and — in
+    v1 — only when that function type is a module `fn` parameter
+    (`allow_async_param=True`). Every other declaration site leaves the flag
+    False, so an async function type there is refused with a "not yet" hint."""
+    _check_type_wf(filename, line, type_name, type_name,
+                   allow_async=allow_async_param, in_fn_return=False)
+
+
+def _check_type_wf(filename: str, line: int, type_name: str | None,
+                   root: str | None, *, allow_async: bool,
+                   in_fn_return: bool) -> None:
     if not type_name:
         return
     head, args = parse_type(type_name)
+    if head == "Async":
+        if not in_fn_return:
+            raise RevlError(
+                filename, line,
+                f"`Async[T]` is not a value type (`{type_name}`) — it may only "
+                "be the return type of a function type, e.g. "
+                "`(List[Msg]) -> Async[Str]`",
+                hint="drop the `Async` wrapper here; a first-class async result "
+                     "is carried by a function type's return, not by a value "
+                     "(docs/design/async-function-values.md)",
+                code="A1", category="async-propagation",
+            )
+        if not allow_async:
+            raise RevlError(
+                filename, line,
+                f"an async function type (`{root}`) is only supported as a "
+                "module `fn` parameter in v1, not in this position",
+                hint="declare the async callback as a parameter of a top-level "
+                     "`fn`, e.g. `fn agent_loop(…, complete: (List[Msg]) -> "
+                     "Async[Str]) -> Str` (docs/design/async-function-values.md)",
+                code="A1", category="async-propagation",
+            )
+        if len(args) != 1:
+            raise RevlError(
+                filename, line,
+                f"`Async` takes 1 type argument, got {len(args)} (`{type_name}`)",
+                hint="write e.g. `Async[Str]`",
+            )
+        # inside the wrapped T, `Async` may not appear again.
+        _check_type_wf(filename, line, args[0], root,
+                       allow_async=False, in_fn_return=False)
+        return
     arity = _GENERIC_ARITY.get(head or "")
     if arity is not None and len(args) != arity:
         example = {"Opt": "Opt[Int]", "List": "List[Int]",
@@ -213,8 +259,19 @@ def check_type_wellformed(filename: str, line: int, type_name: str | None) -> No
             f"(`{type_name}`)",
             hint=f"write e.g. `{example}` — a bare `{head}` is not a type",
         )
-    for arg in args:
-        check_type_wellformed(filename, line, arg)
+    for i, arg in enumerate(args):
+        # Only the *immediate* function type's return position may carry an
+        # async color: a parameter that is itself a function type drops the
+        # permission (higher-order async is a filed follow-up), while a
+        # curried return keeps it.
+        if head == FN_HEAD:
+            is_return = i == len(args) - 1
+            _check_type_wf(filename, line, arg, root,
+                           allow_async=allow_async and is_return,
+                           in_fn_return=is_return)
+        else:
+            _check_type_wf(filename, line, arg, root,
+                           allow_async=False, in_fn_return=False)
 
 
 # ------------------------------------------------- type parameters
@@ -348,6 +405,11 @@ def unify(param: str | None, actual: str | None, subst: dict) -> bool:
     if head and head.startswith(_TPARAM) and not args:
         if _is_wildcard(actual):
             return True  # nothing to learn from an unknown argument
+        if parse_type(actual)[0] == "Async":
+            # A generic combinator must not smuggle an async color into an
+            # expression type through a bound `?T` (item 92 §2); refuse rather
+            # than widen. `substitute` therefore can never produce `Async`.
+            return False
         prior = subst.get(head)
         if prior is None:
             subst[head] = actual
@@ -416,6 +478,17 @@ def compatible(expected: str | None, actual: str | None) -> bool:
     # (docs/arithmetic.md, "Sized integers").
     if ehead in ("Int", "Float") and ahead == "Int32":
         return True
+    if ehead == "Async":
+        # `Async[T]` appears only as an *expected* return type (wellformedness
+        # confines it to a function-type return). A sync value coerces in — a
+        # non-suspending function is a degenerate async one — so
+        # `compatible("Async[T]", actual)` reduces to `compatible(T, actual)`.
+        # The reverse (`compatible("T", "Async[U]")`) is a head mismatch and
+        # falls through to `False` below: async never silently flows into sync.
+        # Two async returns (`Async[T]` vs `Async[U]`) meet elementwise via the
+        # generic same-head rule at the tail of this function.
+        if ahead != "Async":
+            return compatible(eargs[0] if eargs else None, actual)
     if ehead == FN_HEAD:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
@@ -1374,9 +1447,25 @@ def _check_arrow_args(args, params, tenv: dict, types: dict,
     if not filename:
         return
     for i, (arg, param) in enumerate(zip(args, params)):
-        if isinstance(arg, ExprArrow) and parse_type(param)[0] == FN_HEAD:
+        phead, pargs = parse_type(param)
+        if isinstance(arg, ExprArrow) and phead == FN_HEAD:
             check_ast(arg, param, tenv, types, filename,
                       f"argument {i + 1} of {what}")
+        elif not isinstance(arg, ExprArrow) and phead == FN_HEAD and pargs \
+                and parse_type(pargs[-1])[0] == "Async":
+            # item 92 v1: only an arrow may flow into an async parameter — a
+            # bare value would need an `as_async` coercion wrapper the blocking
+            # backends do not yet erase (a filed follow-up).
+            raise RevlError(
+                filename, getattr(arg, "line", 0) or 0,
+                f"argument {i + 1} of {what} is declared "
+                f"`{render_type(param)}` (async), but only an arrow may be "
+                "passed into an async parameter in v1",
+                hint="wrap it in an arrow, e.g. `x => f(x)`, so the emitter can "
+                     "place the async boundary "
+                     "(docs/design/async-function-values.md)",
+                code="A1", category="async-propagation",
+            )
 
 
 def call_function_value(expr, fn_type: str, what: str, arg_types: list,
@@ -1402,6 +1491,13 @@ def call_function_value(expr, fn_type: str, what: str, arg_types: list,
         for i, (p, a) in enumerate(zip(params, arg_types)):
             if p and a and not compatible(p, a):
                 raise mismatch(filename, line, f"argument {i + 1} of {what}", p, a)
+    # Elimination: calling an async-typed value yields the *unwrapped* `T` — the
+    # tier-level await is implicit (item 92 §2). No expression ever has type
+    # `Async[T]`; admission that this call sits in an async context is lower's
+    # job, not the checker's.
+    rhead, rargs = parse_type(returns)
+    if rhead == "Async":
+        return rargs[0] if rargs else None
     return returns
 
 
@@ -1450,7 +1546,15 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
             inner[name] = resolved[-1]
         else:
             inner.pop(name, None)
-    check_ast(expr.body, want_return, inner, types, filename,
+    # The body is checked against the *unwrapped* return: the async color is a
+    # tier property, not part of the value's shape (item 92 §2). `_resolve_arrow`
+    # still writes the async-headed `want_return` back onto the node, so the
+    # color reaches the IR through the existing pipe.
+    body_return = want_return
+    rhead, rargs = parse_type(want_return)
+    if rhead == "Async":
+        body_return = rargs[0] if rargs else None
+    check_ast(expr.body, body_return, inner, types, filename,
               f"the body of this arrow (from {where})")
     _resolve_arrow(expr, resolved, want_return)
 
