@@ -1,0 +1,16 @@
+service Groups {
+  fn get_or(key: Str, fallback: List[Str]) -> List[Str]
+  emission fn set(key: Str, tags: List[Str])
+}
+
+component Tagger provides g: Groups {
+  let store = effect Map.new() undo store.drop()
+
+  provide g {
+    fn get_or(key, fallback) = store.get(key) ?? fallback
+    fn set(key, tags) {
+      effect store.insert(key, tags)
+      undo   store.remove(key)
+    }
+  }
+}

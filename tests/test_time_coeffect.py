@@ -26,6 +26,7 @@ lower them as of item 99).
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -577,14 +578,14 @@ def test_ts_lifecycle_test_observes_deterministic_firing():
 
 # ------------------------------------ documented follow-on: non-reference tiers
 
-@pytest.mark.parametrize("tier", ["go"])
+@pytest.mark.parametrize("tier", ["wasm"])
 def test_advance_refuses_honestly_on_non_reference_tiers(tier):
-    """go is a documented follow-on (alongside item 99's timer work): its
-    lifecycle emitter refuses an `advance` step by name rather than silently
-    mis-lowering it. (A timer-bearing document is already refused at the `timer`
-    step; this covers a lifecycle test that advances directly.) The rust half of
-    item 112 landed — rust lowers `advance` to its Clock, see
-    `test_advance_lowers_to_the_clock_on_rust`."""
+    """wasm is the remaining follow-on: it has no live-composition lifecycle
+    machinery, so an `advance`-bearing lifecycle test is refused wholesale
+    rather than silently mis-lowered. Both halves of item 112 have landed — go
+    lowers `advance` to its Clock (`test_advance_lowers_to_the_go_clock`) and
+    rust lowers it too (item 114, `test_advance_lowers_to_the_clock_on_rust`) —
+    so neither tier appears here any more."""
     ir = compile_source(
         "service S { fn ping() -> Int }\n"
         "component C provides s: S { provide s { fn ping() = 1 } }\n"
@@ -592,15 +593,17 @@ def test_advance_refuses_honestly_on_non_reference_tiers(tier):
         "<t>")
     with pytest.raises(Exception) as exc:
         _emitter(tier).emit(ir)
-    assert "advance" in str(exc.value)
+    # wasm refuses the whole lifecycle test (it cannot drive a live composition),
+    # which subsumes the advance step — an honest refusal, not a mis-lowering.
+    assert "wasm tier" in str(exc.value)
 
 
 def test_advance_lowers_to_the_clock_on_rust():
-    """Item 112 (rust half): the rust lifecycle emitter lowers an `advance` step
-    to `revl_clock_advance(ms)` (item 99's Clock) instead of refusing it — so a
-    rust lifecycle test can drive the clock and assert timer firings, like the
-    py/ts reference tiers. A timer-arming component pulls in the clock preamble;
-    the runtime behaviour is proven end-to-end by cargo in
+    """Item 112 (rust half, item 114): the rust lifecycle emitter lowers an
+    `advance` step to `revl_clock_advance(ms)` (item 99's Clock) instead of
+    refusing it — so a rust lifecycle test can drive the clock and assert timer
+    firings, like the py/ts reference tiers. A timer-arming component pulls in
+    the clock preamble; the runtime behaviour is proven end-to-end by cargo in
     backends/rust/test_emit_rust.py::test_advance_lifecycle_runs_on_real_cordis_rs."""
     ir = compile_source(
         "service Counter { fn count() -> Int  emission fn tick() }\n"
@@ -627,3 +630,46 @@ def test_advance_lowers_to_the_clock_on_rust():
     assert "pub fn revl_clock_advance(ms: i64) -> usize" in src
     # the clock is reset at test start so an advance sees only this test's timers
     assert "revl_clock_reset();" in src
+
+
+def test_advance_lowers_to_the_go_clock():
+    """item 102 (go half): the go lifecycle emitter lowers `advance <n><unit>`
+    to RevlClockAdvance(N) (resetting the clock at test start), driving the same
+    deterministic Clock item 99 gave go — no more `unknown lifecycle step`."""
+    ir = compile_source(
+        "service Counter { fn count() -> Int  emission fn tick() }\n"
+        "component TickCounter provides counter: Counter {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide counter {\n"
+        "    fn count() = store.size()\n"
+        "    fn tick() { let k = `t-${store.size()}`  effect store.insert(k, \"x\")  undo store.remove(k) }\n"
+        "  }\n"
+        "}\n"
+        "component Heartbeat requires counter: Counter { every 10s { emit counter.tick() } }\n"
+        'lifecycle test "t" {\n'
+        "  load TickCounter  load Heartbeat\n"
+        "  advance 35s\n"
+        "  let n = call counter.count()\n"
+        "  assert n == 3\n"
+        "  unload Heartbeat  unload TickCounter  assert no_residue\n"
+        "}",
+        "<t>")
+    src = _emitter("go").emit(ir)
+    assert "RevlClockAdvance(35000)" in src
+    assert "RevlClockReset()" in src
+    assert "func RevlClockAdvance(ms int64) int" in src
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go toolchain not installed")
+def test_go_lifecycle_test_observes_deterministic_firing(tmp_path):
+    """The exit test on the go tier: `revl test --backend go` on the timer
+    lifecycle doc advances the go Clock and asserts the firing counts — the go
+    analog of the py/ts reference-tier exit tests above."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "revl", "test", "--backend", "go",
+         str(EXAMPLES / "lifecycle_timer.rvl")],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[go] pass:" in result.stdout
