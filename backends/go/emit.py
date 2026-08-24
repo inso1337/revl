@@ -550,6 +550,9 @@ _COMP_NEEDS_STDLIB = False
 # Map value helpers (revlMapSet/Get/Has) referenced by component bodies:
 # flags _V3_MAP_PREAMBLE (+ the Opt preamble its Get answers into).
 _COMP_NEEDS_MAP = False
+# Str.to_int (revlParseInt) referenced by a component body: flags the Opt
+# preamble (the helper's return type) plus the helper itself.
+_COMP_NEEDS_PARSE_INT = False
 
 
 def _comp_builtin(method, recv_surface, target, args):
@@ -580,10 +583,23 @@ def _comp_builtin(method, recv_surface, target, args):
         return "revlStrCharAt(%s, %s)" % (target, args[0])
     if method == "charCodeAt":
         return "revlStrCharCodeAt(%s, %s)" % (target, args[0])
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    if method == "startsWith":
+        return "strings.HasPrefix(%s, %s)" % (target, args[0])
+    if method == "endsWith":
+        return "strings.HasSuffix(%s, %s)" % (target, args[0])
+    # Int/Int32 width conversions (docs/arithmetic.md): Int32 widen is the
+    # identity int64; Str.to_int (FR-9) parses to the sealed RevlOpt.
+    if method == "to_int":
+        if is_str:
+            global _COMP_NEEDS_PARSE_INT
+            _COMP_NEEDS_PARSE_INT = True
+            return "revlParseInt(%s)" % (target,)
+        return "int64(%s)" % (target,)
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): fmt is always
     # imported on this tier, and %d on an int64 is exact decimal.
     if method == "to_str":
-        return 'fmt.Sprintf("%d", %s)' % target
+        return 'fmt.Sprintf("%%d", %s)' % target
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
     # _COMP_NEEDS_MAP at module assembly.
@@ -1581,6 +1597,7 @@ class _V3GoCtx:
         self.needs_int_arith = False    # div_floor / div_euclid / mod
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
+        self.needs_parse_int = False    # Str.to_int (revlParseInt helper)
         for name, spec in self.types.items():
             if spec.get("kind") == "record":
                 key = tuple(sorted((spec.get("fields") or {}).keys()))
@@ -1615,10 +1632,20 @@ _GO_DIV_ZERO_MSG = "revl: division by zero"
 
 def _v3_builtin_ret_type(method, recv_type):
     if method in ("length", "indexOf", "charCodeAt",
-                  "div_trunc", "div_floor", "div_euclid", "mod", "to_int"):
+                  "div_trunc", "div_floor", "div_euclid", "mod"):
         return "Int"
+    # `to_int` is BOTH the Int32 widen and the Str parse (FR-9): the result
+    # type follows the receiver, exactly as the checker dispatches it.
+    if method == "to_int":
+        return "Opt[Int]" if recv_type == "Str" else "Int"
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
+    if method == "to_str":
+        return "Str"
     if method == "to_int32":
         return "Int32"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    if method in ("startsWith", "endsWith"):
+        return "Bool"
     # The total forms (docs/arithmetic.md) produce a Result value.
     if method in ("checked_div_trunc", "checked_div_floor",
                   "checked_div_euclid", "checked_mod"):
@@ -2105,6 +2132,13 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
         return f"revlStrCharAt({target}, {args[0]})"
     if method == "charCodeAt":
         return f"revlStrCharCodeAt({target}, {args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # HasPrefix/HasSuffix compare bytes, and a code-point prefix of a UTF-8
+    # string is exactly a byte prefix.
+    if method == "startsWith":
+        return f"strings.HasPrefix({target}, {args[0]})"
+    if method == "endsWith":
+        return f"strings.HasSuffix({target}, {args[0]})"
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): %d on an int64 is
     # exact decimal. Unlike the component tier, the pure v3 module imports fmt
     # only on demand, so flag it — otherwise a module whose sole fmt use is
@@ -2134,8 +2168,15 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # the same thing.
     # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int
     # is a plain int64 conversion; narrowing Int -> Int32 re-imposes the 32-bit
-    # bound through revlToI32, which panics out of range.
+    # bound through revlToI32, which panics out of range. `to_int` is ALSO the
+    # Str parse (FR-9, docs/stdlib-2.0.md §Str.to_int): revlParseInt answers
+    # the tier's sealed RevlOpt — None for empty/partial/`+` spellings and for
+    # out-of-i64-range values, which strconv-style overflow would otherwise
+    # have to throw for.
     if method == "to_int":
+        if rt == "Str":
+            ctx.needs_parse_int = True
+            return f"revlParseInt({target})"
         return f"int64({target})"
     if method == "to_int32":
         ctx.needs_overflow32 = True
@@ -2503,6 +2544,50 @@ func revlOptOr[T any](o RevlOpt[T], d T) T {
 }
 '''
 
+# Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII digits
+# with an optional leading `-`, RevlNone otherwise. Parsed by hand (no
+# strconv) so the helper needs no import; the uint64 accumulator allows the
+# one out-of-i64-magnitude digit string that is still IN range — `-9223372036854775808`
+# (Int.MIN) — while every larger magnitude is None, matching the Int bound.
+_V3_PARSE_INT_HELPER = '''// ---- Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int) ----------------
+func revlParseInt(s string) RevlOpt[int64] {
+\tif s == "" {
+\t\treturn RevlNone[int64]{}
+\t}
+\tneg := false
+\ti := 0
+\tif s[0] == '-' {
+\t\tneg = true
+\t\ti = 1
+\t\tif len(s) == 1 {
+\t\t\treturn RevlNone[int64]{}
+\t\t}
+\t}
+\tconst lim = uint64(9223372036854775808) // Int.MAX + 1
+\tvar n uint64
+\tfor ; i < len(s); i++ {
+\t\tc := s[i]
+\t\tif c < '0' || c > '9' {
+\t\t\treturn RevlNone[int64]{}
+\t\t}
+\t\tn = n*10 + uint64(c-'0')
+\t\tif n > lim {
+\t\t\treturn RevlNone[int64]{}
+\t\t}
+\t}
+\tif neg {
+\t\tif n == lim {
+\t\t\treturn RevlSome[int64]{Value: -9223372036854775807 - 1}
+\t\t}
+\t\treturn RevlSome[int64]{Value: -int64(n)}
+\t}
+\tif n == lim {
+\t\treturn RevlNone[int64]{}
+\t}
+\treturn RevlSome[int64]{Value: int64(n)}
+}
+'''
+
 _V3_RESULT_PREAMBLE = '''// ---- built-in Result as a generic sealed interface --------------------
 type RevlResult[T any, E any] interface{ isRevlResult() }
 type RevlOk[T any, E any] struct{ Value T }
@@ -2790,6 +2875,11 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         "externs": externs, "tests": tests,
     })
     used_opt = ("Opt[" in blob) or ('"optfield"' in blob) or ('"optcall"' in blob)
+    # Str.to_int answers a RevlOpt too: the helper's return type needs the
+    # Opt preamble in the module even though no `Opt[` ever appears in the
+    # source (the builtin's result type is carried by the checker, not the IR).
+    if ctx.needs_parse_int:
+        used_opt = True
     # The Map value type (docs/stdlib-2.0.md §Map): its helpers answer Opt
     # (`lookup`), so using any of them pulls the Opt preamble in too.
     used_map = ('"maplit"' in blob) or any(
@@ -2927,6 +3017,9 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("")
     if used_opt:
         out.append(_V3_OPT_PREAMBLE)
+    if ctx.needs_parse_int:
+        # after the Opt preamble: revlParseInt's return type is RevlOpt
+        out.append(_V3_PARSE_INT_HELPER)
     if used_result:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map:
@@ -3004,10 +3097,11 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     if ver == 3 and (not ir.get("components") or has_top_level):
         return _emit_v3_go(ir, package)
 
-    global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP
+    global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     _V3_MODE = (ver == 3)
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
+    _COMP_NEEDS_PARSE_INT = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -3042,10 +3136,14 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append(_HOST_RUNTIME)
     if _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
-    if _COMP_NEEDS_MAP:
-        # revlMapGet answers a RevlOpt, so the Opt preamble comes first.
+    if _COMP_NEEDS_MAP or _COMP_NEEDS_PARSE_INT:
+        # revlMapGet / revlParseInt answer a RevlOpt, so the Opt preamble
+        # comes first.
         out.append(_V3_OPT_PREAMBLE)
+    if _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)
+    if _COMP_NEEDS_PARSE_INT:
+        out.append(_V3_PARSE_INT_HELPER)
 
     out.extend(body)
 

@@ -608,7 +608,8 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             target = f"({target})"
         arg_nodes = list(node.get("args") or [])
         args = [_expr(a, ctx) for a in arg_nodes]
-        return _ts_builtin(node.get("method"), target, args, arg_nodes, ctx)
+        return _ts_builtin(node.get("method"), target, args, arg_nodes, ctx,
+                           node.get("recv"))
 
     if kind == "if":
         return (
@@ -1148,7 +1149,8 @@ def _v3_var(node: dict, ctx: "_Ctx") -> str:
     return name
 
 
-def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -> str:
+def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
+                recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md) as idiomatic TS; `push` and
     `concat` are persistent (value semantics), matching the py backend.
 
@@ -1185,7 +1187,13 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
     # Int/Int32 width conversions (docs/arithmetic.md). Int is a bigint and
     # Int32 a number: widening is `BigInt(...)`, narrowing goes through
     # `revlI32(Number(...))`, which re-imposes the 32-bit bound and traps.
+    # `to_int` is ALSO the Str parse (FR-9, docs/stdlib-2.0.md §Str.to_int):
+    # `revlParseInt` answers `bigint | undefined` — the tier's Opt[Int] —
+    # rejecting empty/partial/`+`-prefixed spellings and anything out of the
+    # i64 range, so `BigInt` never sees a string it would throw on.
     if method == "to_int":
+        if recv == "Str":
+            return f"revlParseInt({target})"
         return f"BigInt({target})"
     if method == "to_int32":
         return f"revlI32(Number({target}))"
@@ -1199,6 +1207,13 @@ def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx") -
         return f"{target}.join({args[0]})"
     if method == "repeat":
         return f"{target}.repeat({_int_as_number(arg_nodes[0], ctx)})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    # A code-point prefix of a string is a UTF-16 prefix (code-point
+    # boundaries never split), so the native startsWith/endsWith are exact.
+    if method == "startsWith":
+        return f"{target}.startsWith({args[0]})"
+    if method == "endsWith":
+        return f"{target}.endsWith({args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): the built-in JS Map,
     # copied on write. There is no expression-form copy, so `set` goes
     # through an immediately-applied closure: operands evaluate exactly
@@ -1580,6 +1595,8 @@ def _revl_helpers(ir: dict) -> list[str]:
         out.extend([_REVL_INT_ARITH_HELPER, ""])
     if _uses_str_methods(ir):
         out.extend([_REVL_STR_HELPER, ""])
+    if _uses_parse_int(ir):
+        out.extend([_REVL_PARSE_INT_HELPER, ""])
     return out
 
 
@@ -1682,6 +1699,31 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
 }"""
 
 _STR_METHOD_NAMES = {"length", "slice", "charAt", "charCodeAt", "indexOf"}
+
+
+# Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): total on the ASCII digits
+# with an optional leading `-`, `undefined` (the tier's Opt None) otherwise.
+# The regex gates before BigInt so a bad spelling never throws; the range
+# check then enforces the i64 bound, because `BigInt` is unbounded.
+_REVL_PARSE_INT_HELPER = """function revlParseInt(s: string): bigint | undefined {
+  if (!/^-?\\d+$/.test(s)) return undefined
+  const n = BigInt(s)
+  if (n < -9223372036854775808n || n > 9223372036854775807n) return undefined
+  return n
+}"""
+
+
+def _uses_parse_int(node) -> bool:
+    """Does this IR call `Str.to_int` (the parse form, not the Int32 widen)?
+    Only that form needs `revlParseInt`; the widen lowers to bare `BigInt`."""
+    if isinstance(node, dict):
+        if (node.get("kind") == "builtin" and node.get("method") == "to_int"
+                and node.get("recv") == "Str"):
+            return True
+        return any(_uses_parse_int(v) for v in node.values())
+    if isinstance(node, (list, tuple)):
+        return any(_uses_parse_int(v) for v in node)
+    return False
 
 
 def _uses_str_methods(node) -> bool:
