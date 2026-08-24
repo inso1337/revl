@@ -82,6 +82,10 @@ REJECTIONS = {
     # refused with the twin of the emission-propagation diagnostic (async-
     # extern.md §3); declare the service operation `async fn` to admit it.
     "a1_async_extern_sync_method.rvl": "is declared sync, but this implementation reaches async extern `http_post`",
+    # roadmap item 92 (finding #21): a callback arrow that reaches an async
+    # service op, but whose declared function type carries no async color, is a
+    # compile error — the sound replacement for the silent coroutine leak.
+    "a1_async_arrow_sync_type.rvl": "carries no async color — the caller would receive an unawaited suspension (A1)",
     "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",
