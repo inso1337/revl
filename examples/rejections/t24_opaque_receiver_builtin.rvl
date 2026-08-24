@@ -1,0 +1,21 @@
+// REJECTED — the stdlib-named-method sliver (roadmap 75(b)): a method call on
+// a receiver whose provenance no constructor pins must not lower as that
+// builtin. `open_pool` is an extern whose return carries no type, so
+// `pool.remove("k")` used to lower as the Map `remove` builtin and dispatch
+// against whatever the host actually returned — wrong at runtime on every
+// tier, and invisible to every tier's compiler (the same hole `m.putt(k)`
+// used to be, on the other side of the table). Only a receiver the checker
+// can *prove* is a Str/List/Int/Int32/Bytes/Map value may call a stdlib
+// method; an unpinned receiver is refused with the HOST-METHOD diagnostic,
+// so the fence closes to exactly "host-object results are on the audit
+// surface" (G8, docs/contract-errata.md "Typing gaps").
+//
+// expected error:
+//   stdlib method `remove` on a value of unknown type
+
+extern pure fn open_pool(name: Str) = @py { return object() }
+
+fn f() {
+  let pool = open_pool("pg://")
+  pool.remove("k")
+}

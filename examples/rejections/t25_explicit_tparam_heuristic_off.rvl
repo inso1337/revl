@@ -1,0 +1,20 @@
+// REJECTED — type-parameter hygiene (roadmap 75(c)): an explicit `[T]` list
+// turns the implicit single-uppercase heuristic OFF for that signature.
+// `U` here is undeclared — a typo for `T` — and used to silently become a
+// second type parameter (a wildcard at every call site), so `typo([1, 2])`
+// compiled and returned `Int` exactly as if the author had written
+// `List[T]`, and the typo stayed invisible. Now `U` is an ordinary
+// undeclared (opaque nominal) type, so the argument mismatch errors the way
+// an undeclared type always should have — the strict tiers refuse the same
+// program (rust E0412 "cannot find type U", javac "cannot find symbol").
+//
+// expected error:
+//   argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`
+
+fn typo[T](xs: List[U]) -> T {
+  return xs[0]
+}
+
+fn call_it() -> Int {
+  return typo([1, 2])
+}
