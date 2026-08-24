@@ -65,6 +65,7 @@ wrapped by hand as `extern acquire fn ... undo ...` (G4).
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -390,6 +391,7 @@ class _Scanner:
         methods: list[_Method] = []
         i = body_open + 1
         mods: list[str] = []
+        deco_at: int | None = None    # offset of the first decorator on this member
         while i < body_end:
             c = self.code[i]
             if c.isspace():
@@ -397,11 +399,29 @@ class _Scanner:
                 continue
             if c in ";,":
                 mods = []
+                deco_at = None
                 i += 1
+                continue
+            if c == "@":
+                # A decorator (`@name`, `@ns.name`, `@name(args)`) sits between a
+                # method's JSDoc and its `def`; skip it so the underlying method
+                # is still recognised, but remember the first one's offset so the
+                # JSDoc (attached to the decorator's `@`) still reaches the method.
+                if deco_at is None:
+                    deco_at = i
+                dm = re.match(r"@\s*[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*",
+                              self.code[i:])
+                j = i + (dm.end() if dm else 1)
+                while j < body_end and self.code[j].isspace():
+                    j += 1
+                if j < body_end and self.code[j] == "(":
+                    j = _match_bracket(self.code, j)
+                i = j
                 continue
             if c == "{":                       # a stray block: skip it
                 i = _match_bracket(self.code, i)
                 mods = []
+                deco_at = None
                 continue
             if c == "#":                        # a private field/method
                 i += 1
@@ -419,13 +439,15 @@ class _Scanner:
             # modifier (`get`/`static`/`async`/…) is always followed by a
             # further token, so `get(` is a method literally called `get`.
             if nxt == "(":
-                method = self._one_method(word, m.start(), j, mods)
+                jsdoc_at = deco_at if deco_at is not None else m.start()
+                method = self._one_method(word, m.start(), j, mods, jsdoc_at)
                 if method is not None:
                     methods.append(method)
                 # skip the parameter list, an optional return type, and body
                 after = _match_bracket(self.code, j)
                 i = self._skip_return_and_body(after)
                 mods = []
+                deco_at = None
                 continue
             if word in _METHOD_MODIFIERS:
                 mods.append(word)
@@ -433,6 +455,7 @@ class _Scanner:
                 continue
             # a field: `name = ...` / `name: T` — skip to the next `;`
             mods = []
+            deco_at = None
             semi = self.code.find(";", m.end())
             i = semi + 1 if semi != -1 and semi < body_end else j
         return methods
@@ -448,7 +471,7 @@ class _Scanner:
         return i + 1
 
     def _one_method(self, name: str, start: int, paren_at: int,
-                    mods: list[str]) -> _Method | None:
+                    mods: list[str], jsdoc_at: int | None = None) -> _Method | None:
         if name in ("constructor", *_LIFECYCLE) or "private" in mods \
                 or "protected" in mods or "get" in mods or "set" in mods:
             return None
@@ -470,7 +493,7 @@ class _Scanner:
                 end += 1
             ret = self.code[k:end].strip()
         params = self._params(params_src[1:-1])
-        jsdoc = self.jsdocs.get(start, "")
+        jsdoc = self.jsdocs.get(start if jsdoc_at is None else jsdoc_at, "")
         is_async = "async" in mods or ret.startswith("Promise")
         return _Method(name=name, params=params, ret=ret, is_async=is_async,
                        jsdoc=jsdoc, line=_line_at(self.raw, start))
@@ -492,6 +515,79 @@ class _Scanner:
                                  optional=optional, line=0))
         return params
 
+    # -- class chain ------------------------------------------------------
+    def _all_classes(self) -> list[dict]:
+        """Every `class Name [extends Base]` in the file, with the offset of its
+        body `{` and the *bare* base identifier (generics and any `Ns.` prefix
+        stripped)."""
+        classes: list[dict] = []
+        for m in re.finditer(r"\bclass\s+([A-Za-z_$][\w$]*)", self.code):
+            try:
+                brace = self.code.index("{", m.end())
+            except ValueError:
+                continue
+            header = self.code[m.end():brace]
+            # drop generic groups so an `extends` inside `<T extends U>` (a type
+            # constraint) is never mistaken for the class's own base clause.
+            while True:
+                stripped = re.sub(r"<[^<>]*>", "", header)
+                if stripped == header:
+                    break
+                header = stripped
+            bm = re.search(r"\bextends\s+([A-Za-z_$][\w$.]*)", header)
+            base = bm.group(1).split(".")[-1] if bm else None
+            classes.append({"name": m.group(1), "base": base,
+                            "start": m.start(), "brace": brace})
+        return classes
+
+    def _service_roots(self) -> set[str]:
+        """The local names that mean cordis's `Service` base — `Service` itself,
+        plus any alias it was imported under (`import { Service as Svc }`)."""
+        roots = {"Service"}
+        for im in re.finditer(r"import\s*\{([^}]*)\}\s*from\s*['\"][^'\"]*['\"]",
+                              self.code):
+            for spec in im.group(1).split(","):
+                bits = re.split(r"\bas\b", spec)
+                if bits[0].strip() == "Service":
+                    roots.add(bits[-1].strip())
+        return roots
+
+    def _service_class(self) -> tuple[dict | None, list[dict]]:
+        """The class to treat as the provided service, found through the *real*
+        base chain — so a `Service` subclass reached via a non-`Service`-named
+        base (`class Foo extends BaseThing` where `BaseThing extends Service`, or
+        an aliased base) is recovered, not just a literal `extends Service`.
+
+        Returns `(target, chain)` where `chain` is the local base classes from
+        the target up to (not including) `Service`, nearest first — so inherited
+        methods can be merged. `(None, [])` if no Service subclass is present.
+        """
+        classes = self._all_classes()
+        by_name = {c["name"]: c for c in classes}
+        roots = self._service_roots()
+
+        def chain_of(cls: dict, seen: frozenset[str]) -> list[dict] | None:
+            base = cls["base"]
+            if base is None or cls["name"] in seen:
+                return None
+            if base in roots:
+                return []
+            parent = by_name.get(base)
+            if parent is None:
+                return None
+            rest = chain_of(parent, seen | {cls["name"]})
+            return None if rest is None else [parent, *rest]
+
+        services = [(c, chain_of(c, frozenset())) for c in classes]
+        services = [(c, ch) for c, ch in services if ch is not None]
+        if not services:
+            return None, []
+        # Prefer the most-derived class: one no other Service subclass extends.
+        bases = {c["base"] for c, _ in services}
+        leaves = [(c, ch) for c, ch in services if c["name"] not in bases]
+        target, chain = (leaves or services)[0]
+        return target, chain
+
     # -- top-level driver -------------------------------------------------
     def scan(self) -> _Plugin:
         plugin = _Plugin()
@@ -502,23 +598,36 @@ class _Scanner:
         self._provide_key(plugin)
         self._teardown(plugin)
 
-        # method surface: a `class ... extends Service`, else a
+        # method surface: a `class ... extends Service` (found through the real
+        # base chain, so a non-`Service`-named base is still recovered), else a
         # `ctx.<key> = { ... }` object literal.
-        cls = re.search(r"class\s+([A-Za-z_$][\w$]*)\s+extends\s+"
-                        r"(?:[A-Za-z_$][\w$]*\.)*Service\b", self.code)
+        cls, chain = self._service_class()
         if cls:
-            brace = self.code.index("{", cls.end())
-            plugin.methods = self._members(brace)
-            plugin.surface_origin = f"class {cls.group(1)} extends Service"
+            # the target's own methods, plus any public methods inherited from a
+            # local Service base class up the chain (the derived class wins on a
+            # name collision — an override, not a duplicate operation).
+            merged: dict[str, _Method] = {}
+            for ancestor in reversed(chain):        # base-most first
+                for meth in self._members(ancestor["brace"]):
+                    merged[meth.name] = meth
+            for meth in self._members(cls["brace"]):
+                merged[meth.name] = meth
+            plugin.methods = list(merged.values())
+            if cls["base"] in self._service_roots():
+                plugin.surface_origin = f"class {cls['name']} extends {cls['base']}"
+            else:
+                plugin.surface_origin = (
+                    f"class {cls['name']} extends {cls['base']} "
+                    f"(a Service subclass via {' -> '.join(a['name'] for a in chain)})")
             static_provide = re.search(r"\bstatic\s+provide\s*=\s*['\"`]([^'\"`]+)",
-                                       self.code[cls.start():])
+                                       self.code[cls["start"]:])
             if static_provide:
                 plugin.provide_key = static_provide.group(1)
             if plugin.provide_key is None:
                 # a Service subclass whose key we could not read: name it after
                 # the class, and say so.
-                plugin.provide_key = _snake(cls.group(1))
-                plugin.provide_line = _line_at(self.raw, cls.start())
+                plugin.provide_key = _snake(cls["name"])
+                plugin.provide_line = _line_at(self.raw, cls["start"])
         elif plugin.provide_key:
             obj = re.search(rf"\bctx\s*\.\s*{re.escape(plugin.provide_key)}\s*=\s*\{{",
                             self.code)
@@ -551,12 +660,233 @@ class _Names:
         return f"{name}Ty"
 
 
-def _resolve_type(ts: str, names: _Names) -> str:
+_FIELD_MODIFIERS = {"readonly", "public", "private", "protected", "static",
+                    "declare", "abstract", "override"}
+
+
+class _Records:
+    """Follows a *named* type — an `interface`, a `type X = { … }` alias, or a
+    plain data `class` — to its definition, in the plugin file or a **local**
+    import, and transcribes it as a revl record `type`.
+
+    This is the one place the importer reads beyond the single plugin file: a
+    nominal parameter/return type is otherwise refused (nothing to stand behind
+    the bare name), but a record reachable by following the plugin's own local
+    imports *does* have a definition, so it is transcribed rather than refused.
+    A non-relative import (a package) is never followed; a name with no findable
+    record definition still refuses, exactly as before.
+    """
+
+    def __init__(self, source: str, filename: str) -> None:
+        self.filename = filename
+        self._modules: dict[str, str] = {filename: _decomment(source)[0]}
+        self._module_imports: dict[str, dict[str, str]] = {}
+        self._ctx: list[str] = []                # module scope stack for lookups
+        self._pending: set[str] = set()          # revl names being built (cycles)
+        self.decls: dict[str, str] = {}          # revl type name -> declaration
+        self.origin: dict[str, str] = {}         # revl type name -> where found
+
+    # -- module loading / import resolution -------------------------------
+    def _load(self, path: str) -> str:
+        if path not in self._modules:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    self._modules[path] = _decomment(handle.read())[0]
+            except OSError:
+                self._modules[path] = ""
+        return self._modules[path]
+
+    def _resolve_module(self, from_module: str, spec: str) -> str | None:
+        """A relative import `spec` from `from_module` -> an existing file, or
+        None (a package import, or an unresolvable path — never followed)."""
+        if not spec.startswith(".") or not os.path.isfile(from_module):
+            return None
+        root = os.path.normpath(os.path.join(os.path.dirname(from_module), spec))
+        for cand in (root + ".ts", root + ".tsx", root + ".d.ts", root + ".mts",
+                     os.path.join(root, "index.ts")):
+            if os.path.isfile(cand):
+                return cand
+        return None
+
+    def _imports_of(self, module: str) -> dict[str, str]:
+        if module not in self._module_imports:
+            text = self._modules.get(module, "")
+            found: dict[str, str] = {}
+            for im in re.finditer(
+                    r"import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*['\"]([^'\"]+)['\"]",
+                    text):
+                target = self._resolve_module(module, im.group(2))
+                if target is None:
+                    continue
+                for spec in im.group(1).split(","):
+                    local = re.split(r"\bas\b", spec)[-1].strip()
+                    if local:
+                        found[local] = target
+            self._module_imports[module] = found
+        return self._module_imports[module]
+
+    # -- field parsing ----------------------------------------------------
+    def _scan_to_sep(self, s: str, i: int) -> int:
+        """Index of the next `;`, `,` or newline at bracket depth zero (a member
+        boundary); skips balanced `()[]{}<>` and so steps over a method body."""
+        depth, n = 0, len(s)
+        while i < n:
+            c = s[i]
+            if c in "([{<":
+                depth += 1
+            elif c in ")]}>":
+                depth -= 1
+            elif depth == 0 and (c in ";," or c == "\n"):
+                return i
+            i += 1
+        return n
+
+    def _member_fields(self, body: str) -> list[tuple[str, str, bool]]:
+        """`(name, ts_type, optional)` for each `name: T` field of a `{ … }`
+        body — methods, index signatures and private/protected members skipped."""
+        inner = body[1:-1]
+        out: list[tuple[str, str, bool]] = []
+        i, n = 0, len(inner)
+        mods: list[str] = []
+        while i < n:
+            c = inner[i]
+            if c.isspace():
+                i += 1
+                continue
+            if c in ";,":
+                mods = []
+                i += 1
+                continue
+            m = _IDENT.match(inner, i)
+            if not m:
+                i = self._scan_to_sep(inner, i) + 1
+                mods = []
+                continue
+            word, j = m.group(0), m.end()
+            k = j
+            while k < n and inner[k].isspace():
+                k += 1
+            optional = False
+            if k < n and inner[k] == "?":
+                optional = True
+                k += 1
+                while k < n and inner[k].isspace():
+                    k += 1
+            nxt = inner[k] if k < n else ""
+            if word in _FIELD_MODIFIERS and not optional and nxt not in ":(?<=":
+                mods.append(word)
+                i = j
+                continue
+            if nxt == ":":
+                end = self._scan_to_sep(inner, k + 1)
+                ts = inner[k + 1:end].strip()
+                if ts and "private" not in mods and "protected" not in mods:
+                    out.append((word, ts, optional))
+                i, mods = end + 1, []
+                continue
+            # a method, an initializer-only field, or something else: skip it.
+            i, mods = self._scan_to_sep(inner, k) + 1, []
+        return out
+
+    def _find_def(self, name: str, ctx: str,
+                  seen: frozenset[tuple[str, str]] = frozenset()) -> dict | None:
+        """Locate `name`'s definition, following local imports. Returns
+        `{"module", "fields"}` for a record, `{"module", "alias"}` for a bare
+        type alias, or None. `seen` is the set of `(name, module)` already
+        visited, so an interface- or import-cycle terminates."""
+        if (name, ctx) in seen:
+            return None
+        seen = seen | {(name, ctx)}
+        text = self._modules.get(ctx, "")
+        esc = re.escape(name)
+
+        im = re.search(r"(?:export\s+)?(?:declare\s+)?interface\s+" + esc + r"\b",
+                       text)
+        if im and "{" in text[im.end():]:
+            brace = text.index("{", im.end())
+            header = text[im.end():brace]
+            fields = self._member_fields(text[brace:_match_bracket(text, brace)])
+            hm = re.search(r"\bextends\s+([^{]+)", header)
+            if hm:                              # flatten inherited interface fields
+                inherited: list[tuple[str, str, bool]] = []
+                for raw in _split_top(hm.group(1)):
+                    base = re.sub(r"<[^>]*>", "", raw).split(".")[-1].strip()
+                    parent = base and self._find_def(base, ctx, seen)
+                    if parent and "fields" in parent:
+                        inherited += parent["fields"]
+                fields = inherited + fields
+            return {"module": ctx, "fields": fields}
+
+        tm = re.search(r"(?:export\s+)?type\s+" + esc + r"\s*=\s*", text)
+        if tm:
+            tail = text[tm.end():].lstrip()
+            if tail.startswith("{"):
+                base = tm.end() + (len(text[tm.end():]) - len(tail))
+                body = text[base:_match_bracket(text, base)]
+                return {"module": ctx, "fields": self._member_fields(body)}
+            end = self._scan_to_sep(text, tm.end())
+            return {"module": ctx, "alias": text[tm.end():end].strip()}
+
+        cm = re.search(r"(?:export\s+)?(?:abstract\s+)?class\s+" + esc + r"\b", text)
+        if cm and "{" in text[cm.end():]:
+            brace = text.index("{", cm.end())
+            if "extends" not in text[cm.end():brace]:   # not a Service subclass
+                body = text[brace:_match_bracket(text, brace)]
+                return {"module": ctx, "fields": self._member_fields(body)}
+
+        target = self._imports_of(ctx).get(name)
+        if target is not None:
+            self._load(target)
+            return self._find_def(name, target, seen)
+        return None
+
+    # -- public: resolve one nominal type ---------------------------------
+    def resolve(self, ts_name: str, names: _Names) -> str | None:
+        """`ts_name` -> a revl type name (registering its `type` declaration and
+        any it depends on), or None if no record definition can be found. An
+        *unrecoverable field* raises `Unrecoverable`, so a record with a field
+        the importer cannot map refuses the operation rather than half-emitting."""
+        ctx = self._ctx[-1] if self._ctx else self.filename
+        found = self._find_def(ts_name, ctx)
+        if found is None:
+            return None
+        if "alias" in found:
+            self._ctx.append(found["module"])
+            try:
+                return _resolve_type(found["alias"], names, self)
+            finally:
+                self._ctx.pop()
+
+        revl = names.type_name(ts_name)
+        if revl in self.decls or revl in self._pending:
+            return revl
+        self._pending.add(revl)
+        self._ctx.append(found["module"])
+        try:
+            fields: list[str] = []
+            for fname, fts, optional in found["fields"]:
+                ftype = _resolve_type(fts, names, self)
+                if optional and not ftype.startswith("Opt["):
+                    ftype = f"Opt[{ftype}]"
+                fields.append(f"{_snake(fname)}: {ftype}")
+            if not fields:
+                return None
+            self.decls[revl] = f"type {revl} = {{ {', '.join(fields)} }}"
+            self.origin[revl] = f"`{ts_name}` in {found['module']}"
+        finally:
+            self._ctx.pop()
+            self._pending.discard(revl)
+        return revl
+
+
+def _resolve_type(ts: str, names: _Names,
+                  records: "_Records | None" = None) -> str:
     """TypeScript type string -> revl surface type, or `Unrecoverable`.
 
     Every branch either produces a concrete revl type or refuses; nothing is
-    guessed. An unknown *nominal* type is refused too — this importer reads one
-    plugin file and has no definition to stand behind a bare `Foo`.
+    guessed. An unknown *nominal* type is refused too — unless `records` can
+    follow it to a record/interface definition (in this file or a local import)
+    and transcribe it as a revl `type`.
     """
     ts = ts.strip()
     # strip one layer of redundant parens
@@ -578,23 +908,24 @@ def _resolve_type(ts: str, names: _Names) -> str:
             raise Unrecoverable(ts, "a union of several concrete types is a sum "
                                     "type with no tag; revl needs a named "
                                     "`variant`, which this file does not define")
-        inner = _resolve_type(concrete[0], names)
+        inner = _resolve_type(concrete[0], names, records)
         return inner if inner.startswith("Opt[") else f"Opt[{inner}]"
 
     if ts.startswith("Promise<") and ts.endswith(">"):
-        return _resolve_type(ts[len("Promise<"):-1], names)
+        return _resolve_type(ts[len("Promise<"):-1], names, records)
     if ts.startswith("Array<") and ts.endswith(">"):
-        return f"List[{_resolve_type(ts[len('Array<'):-1], names)}]"
+        return f"List[{_resolve_type(ts[len('Array<'):-1], names, records)}]"
     if ts.startswith("ReadonlyArray<") and ts.endswith(">"):
-        return f"List[{_resolve_type(ts[len('ReadonlyArray<'):-1], names)}]"
+        return f"List[{_resolve_type(ts[len('ReadonlyArray<'):-1], names, records)}]"
     if ts.startswith("readonly "):
         ts = ts[len("readonly "):].strip()
     if ts.endswith("[]"):
-        return f"List[{_resolve_type(ts[:-2], names)}]"
+        return f"List[{_resolve_type(ts[:-2], names, records)}]"
     if ts.startswith("Record<") and ts.endswith(">"):
         args = _split_top(ts[len("Record<"):-1])
         if len(args) == 2:
-            return f"Map[{_resolve_type(args[0], names)}, {_resolve_type(args[1], names)}]"
+            return (f"Map[{_resolve_type(args[0], names, records)}, "
+                    f"{_resolve_type(args[1], names, records)}]")
 
     if ts in _PRIMITIVES:
         return _PRIMITIVES[ts]
@@ -610,9 +941,14 @@ def _resolve_type(ts: str, names: _Names) -> str:
         raise Unrecoverable(ts, "a generic type this importer does not map "
                                 "(known: `Array`, `Promise`, `Record`)")
     if re.fullmatch(r"[A-Za-z_$][\w$]*", ts):
+        if records is not None:
+            recovered = records.resolve(ts, names)
+            if recovered is not None:
+                return recovered
         raise Unrecoverable(ts, f"the nominal type `{ts}` is not defined in this "
-                                "file and has no built-in revl mapping; declare "
-                                "its revl `type` by hand and reference it")
+                                "file or a local import, and has no built-in revl "
+                                "mapping; declare its revl `type` by hand and "
+                                "reference it")
     raise Unrecoverable(ts, "no revl spelling for this type")
 
 
@@ -650,7 +986,7 @@ def _jsdoc_summary(jsdoc: str) -> list[str]:
 class _Generator:
     def __init__(self, plugin: _Plugin, filename: str, backend: str,
                  service: str | None, pure: set[str],
-                 mark_unrecovered: bool) -> None:
+                 mark_unrecovered: bool, source: str = "") -> None:
         self.plugin = plugin
         self.filename = filename
         self.backend = backend
@@ -658,6 +994,7 @@ class _Generator:
         self.pure_used: set[str] = set()
         self.mark_unrecovered = mark_unrecovered
         self.names = _Names()
+        self.records = _Records(source, filename)
         self.notes: list[str] = []
         self.unrecovered: list[str] = []
         self.service = _pascal(service) if service else self._default_service_name()
@@ -680,7 +1017,7 @@ class _Generator:
         if not ts:
             raise Unrecoverable("", f"parameter `{param.name}` has no TypeScript "
                                     "type and no JSDoc `@param` type")
-        revl = _resolve_type(ts, self.names)
+        revl = _resolve_type(ts, self.names, self.records)
         if param.optional and not revl.startswith("Opt["):
             revl = f"Opt[{revl}]"
         return revl
@@ -699,7 +1036,7 @@ class _Generator:
             return None
         if ts in _VOIDISH:
             return None
-        revl = _resolve_type(ts, self.names)
+        revl = _resolve_type(ts, self.names, self.records)
         return None if revl == "Unit" else revl
 
     def _is_pure(self, method: _Method) -> str | None:
@@ -834,7 +1171,14 @@ class _Generator:
                      "plugin's own camelCase; a typo would silently leave the "
                      "operation `emission`")
 
+        for name in self.records.decls:
+            self.note(f"record type `{name}` transcribed from "
+                      f"{self.records.origin[name]}")
+
         parts = [self._header()]
+        # named record types followed from local imports, in dependency order
+        # (a field's type is registered before the record that uses it).
+        parts.extend(self.records.decls.values())
         parts.append(f"service {self.service} {{\n" + "\n".join(op_lines) + "\n}")
         parts.extend(externs)
         provider = (
@@ -916,7 +1260,7 @@ def import_cordis(source: str, *, filename: str = "<cordis>", backend: str = "ts
                              "tier is i32-only, so it cannot host a TS plugin")
     plugin = _Scanner(source, filename).scan()
     return _Generator(plugin, filename, backend, service, set(pure or ()),
-                      mark_unrecovered).emit()
+                      mark_unrecovered, source=source).emit()
 
 
 def import_cordis_file(path: str, *, backend: str = "ts", service: str | None = None,
