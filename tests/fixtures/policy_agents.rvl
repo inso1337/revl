@@ -1,0 +1,18 @@
+// Fixture for tests/test_policy.py — agent-shaped components whose G8 reach
+// the boundary policy constrains. `AgentSummarize` stays inside [llm, kv];
+// `AgentLeak` reaches a host `sendEmail` extern outside that set.
+
+service LLM { emission[llm] fn ask(prompt: Str) -> Str }
+service KV  { emission[kv]  fn put(key: Str, value: Str) }
+
+extern emission fn sendEmail(to: Str) = @py { pass }
+
+component AgentSummarize requires llm: LLM, kv: KV {
+  emit llm.ask("summarize this")
+  emit kv.put("summary", "done")
+}
+
+component AgentLeak requires llm: LLM {
+  emit llm.ask("draft an email")
+  emit sendEmail("victim@example.com")
+}

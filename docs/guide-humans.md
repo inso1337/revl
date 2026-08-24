@@ -245,6 +245,45 @@ the fix ([DESIGN.md](../DESIGN.md) §4):
 
 ## Tooling
 
+The complete subcommand index — every command wired in `src/revl/__main__.py`,
+one line each with the doc that details it. The flags and worked examples follow
+below.
+
+| command | what it does | docs |
+|---|---|---|
+| `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [backend-ir-v1.md](backend-ir-v1.md) |
+| `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [why-traces.md](why-traces.md) |
+| `revl audit FILES` | manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate, `--accept`/`--accept-all` acknowledge added crossings | [interchange-format.md](interchange-format.md) · [audit-diff.md](audit-diff.md) |
+| `revl erase-report FILES --realm R` | right-to-erasure evidence for one realm (`--json`, `--no-residue-proof`) | [erase-report.md](erase-report.md) |
+| `revl plan FILES` | dry run for admission (`--manifest RUNNING.json`, `--replacing`); `-o change.plan` serializes an executable plan | [plan.md](plan.md) |
+| `revl apply change.plan` | execute a plan: drift-refuse, verify each step, roll back on failure (`--against RUNNING.json`) | [apply.md](apply.md) |
+| `revl query emits-to\|withdraw\|depends-on\|reaches\|drift TARGET FILES` | ask the composition a static question (`drift` takes `--gains`/`--loses`) | [queries.md](queries.md) |
+| `revl query emitted-between --timeline F --from X --to Y` | which emissions crossed between two steps of a recorded run | [queries.md](queries.md) |
+| `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
+| `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |
+| `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
+| `revl run FILES` | boot on a Cordis runtime — see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
+| `revl recover --wal FILE` | crash recovery: roll a WAL forward/back to a checked verdict + residue proof (`--restore`, `--json`) | [crash-recovery.md](crash-recovery.md) |
+| `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check FILES` runs the withdraw oracle | [why-runtime.md](why-runtime.md) |
+| `revl serve --mcp FILES` | serve a booted composition's own provided operations as MCP tools (`--config`, `--composition`) | [mcp-bridge.md](mcp-bridge.md) |
+| `revl mcp serve` | the compiler itself as an MCP server (`--files` default composition, `--restore SNAPSHOT.json`) | [mcp-bridge.md](mcp-bridge.md) |
+| `revl mcp schema FILES` | project provided services to MCP tool definitions | [mcp-bridge.md](mcp-bridge.md) |
+| `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
+| `revl import wit\|openapi\|cordis FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) |
+| `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
+
+`revl run` flags: `--backend {py,rust,java,wasm}` (ts accepted but **not
+runnable**), `--once` (boot → LIFO teardown → no-residue proof → exit),
+`--watch` (recompile on edit; a rejected edit keeps the run alive), `--record`
+(record the accumulator for the replay REPL — `:timeline`, `:back`, `:forward`,
+`:inspect`, `:bisect`, see [replay.md](replay.md)), `--wal FILE` (durable
+write-ahead log; recover with `revl recover`, see
+[crash-recovery.md](crash-recovery.md)), `--trace FILE` (causal lifecycle
+JSONL for `revl why`), `--withdraw COMPONENT` (one-shot withdraw + oracle diff),
+`--placement MAP` (split across processes/tiers; opens the `swap>` prompt for
+live cross-tier migration, see [swap.md](swap.md)), `--plan` (print the load
+plan, no runtime), `--config FILE`.
+
 ```bash
 python -m revl compile app.rvl -o out.json   # parse → check → link → IR
 python -m revl audit app.rvl                 # manifest + G8 boundary surface

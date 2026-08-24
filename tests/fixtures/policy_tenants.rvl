@@ -1,0 +1,16 @@
+// Fixture for tests/test_policy.py — two components isolated into different
+// realms (`tenantA`, `tenantB`) that both reach the same named boundary
+// (`bus`). Under `tenants never reach each other` their isolation is not
+// real: one tenant's world touches a boundary the other's does too.
+
+service Bus { emission[bus] fn publish(message: Str) }
+
+component TenantAJob requires bus: Bus {
+  isolate bus in realm("tenantA")
+  emit bus.publish("a-event")
+}
+
+component TenantBJob requires bus: Bus {
+  isolate bus in realm("tenantB")
+  emit bus.publish("b-event")
+}
