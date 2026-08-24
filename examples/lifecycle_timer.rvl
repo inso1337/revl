@@ -1,0 +1,78 @@
+// Timers under `revl test` (docs/time-coeffect.md, roadmap items 57 + 102).
+//
+// Item 57 made a timer a *revertible schedule* whose inverse is cancellation,
+// and the clock a *coeffect the harness provides* — a firing is a deterministic
+// timeline step, never a wall-clock race. Item 57 proved the first half inside
+// a `lifecycle test` (unload cancels, residue-free), but the second half — a
+// firing — was not expressible in the language, because nothing in a lifecycle
+// test could move the clock.
+//
+// Item 102 closes that: the `advance <n><unit>` lifecycle statement drives the
+// same clock coeffect forward, so a timer's firing becomes an assertable step.
+// A `TickCounter` records one entry per firing, so `count()` reads back exactly
+// how many times a timer's body ran — "fires on the 3rd tick", in-language.
+
+service Counter {
+  fn count() -> Int
+  emission fn tick()
+}
+
+component TickCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+
+  provide counter {
+    fn count() = store.size()
+    fn tick() {
+      // one distinct entry per firing; `count()` is `store.size()`, so an
+      // advance that fires the body N times leaves count == N.
+      let key = `tick-${store.size()}`
+      effect store.insert(key, "fired")
+      undo   store.remove(key)
+    }
+  }
+}
+
+component Heartbeat requires counter: Counter {
+  every 10s { emit counter.tick() }
+}
+
+component Warmup requires counter: Counter {
+  after 50s { emit counter.tick() }
+}
+
+// `every`: the body runs on each tick the advance crosses, and cancellation on
+// unload is residue-free — a later advance produces no orphaned firing.
+lifecycle test "an every-timer fires on each advanced tick" {
+  load TickCounter
+  load Heartbeat
+  let before = call counter.count()
+  assert before == 0                 // the clock never moves on its own
+  advance 35s
+  let ticks = call counter.count()
+  assert ticks == 3                  // fired at 10s, 20s, 30s — the 3rd tick
+  unload Heartbeat                    // cancellation is the schedule's inverse
+  advance 100s
+  let settled = call counter.count()
+  assert settled == 3                // no orphaned firing after teardown
+  unload TickCounter
+  assert no_residue
+}
+
+// `after`: a one-shot fires exactly once, only after its delay elapses, and is
+// then spent — advancing further never fires it again.
+lifecycle test "an after-timer fires once when its delay elapses" {
+  load TickCounter
+  load Warmup
+  advance 30s
+  let early = call counter.count()
+  assert early == 0                  // 30s < 50s — not yet
+  advance 30s
+  let fired = call counter.count()
+  assert fired == 1                  // crossed 50s — fired once
+  advance 100s
+  let spent = call counter.count()
+  assert spent == 1                  // one-shot is spent — never fires again
+  unload Warmup
+  unload TickCounter
+  assert no_residue
+}

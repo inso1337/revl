@@ -596,6 +596,18 @@ class ResidueStmt:
 
 
 @dataclass
+class AdvanceStmt:
+    """`advance <n><unit>` — drive the clock coeffect (item 57) forward inside a
+    `lifecycle test`. The clock never moves on its own, so this is the only way
+    a test can exercise a timer's *firing* — a firing is a deterministic
+    timeline step (`fires on the 3rd tick`), not a wall-clock race
+    (item 102, docs/time-coeffect.md)."""
+
+    ms: int
+    line: int
+
+
+@dataclass
 class TestDecl:
     name: str
     body: list
@@ -1677,7 +1689,7 @@ class Parser:
     # `load` / `unload` / `call` are *contextual* statement keywords: they are
     # ordinary identifiers everywhere else in the language, and only a
     # `lifecycle test` body reads them as statements.
-    _LIFECYCLE_STMT_WORDS = ("load", "unload", "call")
+    _LIFECYCLE_STMT_WORDS = ("load", "unload", "call", "advance")
 
     def _reject_lifecycle_stmt_here(self) -> None:
         """A lifecycle statement inside a plain `test` (or any pure body) is
@@ -1685,7 +1697,10 @@ class Parser:
         tok = self.peek()
         nxt = self.toks[self.pos + 1]
         word = None
-        if tok.kind == "ident" and tok.value in self._LIFECYCLE_STMT_WORDS and nxt.kind == "ident":
+        # `advance` is followed by a duration (`advance 30s`), so its lookahead
+        # is an int; the others name a component/key and are followed by an ident.
+        nxt_ok = nxt.kind == "ident" or (tok.value == "advance" and nxt.kind == "int")
+        if tok.kind == "ident" and tok.value in self._LIFECYCLE_STMT_WORDS and nxt_ok:
             word = tok.value
         elif tok.kind == "kw" and tok.value == "assert" and nxt.kind == "ident" and nxt.value == "no_residue":
             word = "assert no_residue"
@@ -1729,6 +1744,10 @@ class Parser:
             return self._call_stmt(bind)
         if tok.kind == "ident" and tok.value == "call":
             return self._call_stmt(None)
+        if tok.kind == "ident" and tok.value == "advance":
+            self.next()
+            ms = self._advance_duration_ms()
+            return AdvanceStmt(ms, tok.line)
         if tok.kind == "kw" and tok.value == "assert":
             self.next()
             nxt = self.peek()
@@ -1754,8 +1773,33 @@ class Parser:
             tok.line,
             f"expected a lifecycle statement, found {tok.value!r}",
             hint="a lifecycle test body is `load` / `unload` / `call` / `let … = call …` / "
-                 "`assert` (syntax-2.0 §7.1)",
+                 "`advance` / `assert` (syntax-2.0 §7.1)",
         )
+
+    def _advance_duration_ms(self) -> int:
+        """Parse the `<n><unit>` after `advance` (item 102) into milliseconds,
+        reusing item 57's duration units. `advance` is the only lifecycle
+        statement that moves the clock coeffect, so a timer's firing becomes an
+        assertable timeline step (docs/time-coeffect.md §advance)."""
+        num = self.peek()
+        if num.kind != "int":
+            raise self.err(num.line,
+                           f"expected a whole-number duration after `advance`, found {num.value!r}",
+                           hint="an advance is `<n><unit>`, e.g. `advance 30s` (units: ms, s, m, h, d)")
+        if num.value <= 0:
+            raise self.err(num.line,
+                           f"an `advance` duration must be positive (found {num.value})",
+                           hint="advancing the clock by zero fires nothing; give it a real span")
+        self.next()
+        unit_tok = self.peek()
+        if unit_tok.kind != "ident" or unit_tok.value not in self._DURATION_UNITS:
+            found = unit_tok.value if unit_tok.kind in ("ident", "kw") else repr(unit_tok.value)
+            raise self.err(unit_tok.line,
+                           f"expected a duration unit after `advance {num.value}`, found {found}",
+                           hint="units are `ms`, `s`, `m`, `h`, `d` — write the advance with no "
+                                f"space, e.g. `advance {num.value}s`")
+        self.next()
+        return num.value * self._DURATION_UNITS[unit_tok.value]
 
     def _call_stmt(self, bind: str | None) -> CallStmt:
         tok = self.peek()
