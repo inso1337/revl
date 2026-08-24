@@ -67,6 +67,13 @@ from .errors import RevlError
 
 KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
 
+# Every seam call carries a deadline (docs/seam-deadlines.md): a cross-process
+# round-trip against a wedged provider must not block its consumer forever, so
+# each proxied seam gets a per-operation deadline default. This is the
+# composition-wide fallback (seconds); the placement file overrides it per
+# process (`seam_deadline`) or per operation (`[processes.<p>.seam_deadlines]`).
+DEFAULT_SEAM_DEADLINE = 30.0
+
 # The TypeScript tier is `node` in the placement manifest (the process runs
 # on the Node runtime) but `ts` on every other surface (run.py, `revl test`,
 # the README, the conformance matrix). Both spellings are accepted; `ts` is
@@ -428,6 +435,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     placement = _load_placement(placement_path)
     processes = placement.get("processes") or {}
     config = placement.get("config") or {}
+    # composition-wide seam-deadline default; a process may override it, and a
+    # process may set per-operation deadlines (docs/seam-deadlines.md).
+    default_deadline = placement.get("seam_deadline", DEFAULT_SEAM_DEADLINE)
     if not processes:
         print("error: placement has no [processes]", file=sys.stderr)
         return 1
@@ -496,6 +506,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             return abort(f"process {pname!r} has unsupported backend {pconf.get('backend')!r} "
                          f"({', '.join(KNOWN_BACKENDS)})")
         backends[pname] = backend
+        # this process's seam-deadline default + optional per-operation map. Each
+        # proxy carries them so a wedged provider breaches the deadline as a
+        # distinguishable SeamDeadline rather than blocking the consumer forever.
+        p_deadline = pconf.get("seam_deadline", default_deadline)
+        p_deadlines = {m: float(s) for m, s in (pconf.get("seam_deadlines") or {}).items()}
         proxies: dict[str, dict] = {}
         for key, service in requires[pname].items():
             if key in provides[pname]:
@@ -503,7 +518,10 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             host = owner.get(key)
             if host is None:
                 return abort(f"key {key!r} required by {pname!r} is provided by no process")
-            proxies[key] = {"socket": sockets[host], "methods": methods.get(service, []), "service": service}
+            proxies[key] = {"socket": sockets[host], "methods": methods.get(service, []),
+                            "service": service, "deadline": p_deadline}
+            if p_deadlines:
+                proxies[key]["deadlines"] = dict(p_deadlines)
         serve_keys = [k for k in provides[pname] if any(k in requires[q] and q != pname for q in processes)]
         spec = {
             "name": pname,
