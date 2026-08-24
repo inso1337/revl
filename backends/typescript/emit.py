@@ -136,6 +136,17 @@ def _ts_type(name: object) -> str:
             return f"{_ts_type(inner)}[]"
         if head == "Opt":
             return f"{_ts_type(inner)} | undefined"
+        if head == "Map":
+            return f"Map<{_ts_type(inner.split(',')[0].strip())}, {_ts_type(inner.split(',')[1].strip())}>"
+        if head == "Result":
+            return (f'{{ kind: "Ok"; value: {_ts_type(inner.split(",")[0].strip())} }}'
+                    f' | {{ kind: "Err"; value: {_ts_type(inner.split(",")[1].strip())} }}')
+    # v3 record/ADT names (Msg, ToolReq, ...) are emitted as interfaces above;
+    # route them through the v3 renderer so a service signature carrying a
+    # record-typed param does not collapse to `unknown` (harness finding #19).
+    v3 = _ts_v3_type(name)
+    if v3 != "unknown":
+        return v3
     return "unknown"
 
 
