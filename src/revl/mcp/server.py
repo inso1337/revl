@@ -35,6 +35,7 @@ from . import operator as _operator
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
 from . import repair as _repair
+from . import ship as _ship
 from .persist import RestoreError
 from .. import query as Q
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
@@ -718,6 +719,21 @@ def _tool_plan(arguments: dict) -> dict:
     return payload
 
 
+def _tool_ship(arguments: dict) -> dict:
+    """Fuse check -> admit -> plan (-> swap, when `apply`) into one early-exit
+    call — the token-saving ship path (docs/token-economy.md, roadmap item 50).
+
+    Instead of the four round-trips the audit's finding #3 measures, an agent
+    calls this once: the stages run in order, stop at the first failure (no
+    wasted work), and the manifest defaults to the running composition this
+    server already holds — so the running IR is not re-sent to admit against
+    it. The orchestration lives in `ship.py`; this is the thin wiring that
+    hands it the existing per-stage handlers and the live session."""
+    return _ship.ship(arguments,
+                      check=_tool_check, admit=_tool_admit, plan=_tool_plan,
+                      swap=_tool_swap, session=SESSION)
+
+
 def _tool_audit(arguments: dict) -> dict:
     try:
         ir = _compile(arguments.get("source"), arguments.get("files"))
@@ -894,6 +910,40 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_plan,
+    },
+    {
+        "name": "revl_ship",
+        "description": "One intent, one call: fuse check -> admit -> plan into a "
+                       "single early-exit request instead of three round-trips "
+                       "(the token-saving ship path, docs/token-economy.md). Runs "
+                       "the stages in order and STOPS at the first that fails — a "
+                       "candidate that does not compile is never admitted, one that "
+                       "is not admissible is never planned — and returns one "
+                       "consolidated result with a per-stage verdict and `stoppedAt`. "
+                       "The running manifest defaults to the composition this server "
+                       "holds, so the running IR is not re-sent to admit against it. "
+                       "Pass `apply: true` to also hot-swap the candidate in once all "
+                       "stages pass, collapsing the whole check->admit->plan->swap "
+                       "chain into this one call; without it nothing is mutated.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_SOURCE_INPUT,
+                "manifest": {"type": "object",
+                             "description": "compiled IR of the running composition; "
+                                            "omit to ship against the loaded session"},
+                "replacing": {"type": "array", "items": {"type": "string"},
+                              "description": "components withdrawn in this ship"},
+                "apply": {"type": "boolean",
+                          "description": "when true, hot-swap the candidate in after "
+                                         "all stages pass (destructive); default false "
+                                         "is the read-only rehearsal"},
+            },
+        },
+        # capable of mutation (apply); annotate like revl_swap so an agent knows
+        # it is not purely read-only, even though it defaults to a dry run.
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_ship,
     },
     {
         "name": "revl_audit",

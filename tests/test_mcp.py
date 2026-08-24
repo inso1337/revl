@@ -229,6 +229,8 @@ def test_initialize_and_tools_list():
                           "revl_repair",
                           # deltas, not documents (docs/mcp-bridge.md, item 50)
                           "revl_edit",
+                          # one intent, one call: fused ship (docs/token-economy.md, item 50)
+                          "revl_ship",
                           # the proving ground (docs/gauntlet.md)
                           "revl_gauntlet",
                           # composition persistence (docs/persistence.md)
