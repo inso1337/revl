@@ -1,0 +1,39 @@
+// REJECTED — A1 (roadmap item 117, harness finding #40): a SYNC provide
+// method whose ternary returns an async emission.
+//
+// `model.complete` is a required async service operation — a suspension
+// source reached through a required key (rule 3 of the item-92 async-reach).
+// The name-based reach the A1 provide-method check runs sees async *callables*
+// (externs, colored fns) in any position, but was blind to an async *service
+// operation* reached this way. Because that op sat in EXPRESSION position (a
+// ternary arm) rather than a statement, a sync method returning it was wrongly
+// ADMITTED — then py leaked a coroutine and ts emitted `{}` at runtime.
+//
+// A sync service operation has no in-flight window to await a suspension in,
+// so a provider that reaches one is refused — the same A1 verdict the async-
+// extern case already produced, now firing for the expression-position case.
+// This is the frontend complement of item 141, which correctly *awaits* the
+// same emission when the method is declared `async fn` (see the accepting twin
+// in tests/test_frontend.py::test_a1_async_op_via_ternary_in_async_method_ok).
+//
+// The fix is one declared word: `async fn route(...)` in service `Runner`.
+//
+// expected error:
+//   `Runner.route` is declared sync, but this implementation reaches async
+//   operation `model.complete` — a sync method has no in-flight window (A1)
+
+service Model {
+  emission async fn complete(msgs: Str) -> Str
+}
+
+service Runner {
+  emission fn route(prompt: Str) -> Str
+}
+
+component Agent requires model: Model provides runner: Runner {
+  provide runner {
+    fn route(prompt) {
+      return prompt == "go" ? emit model.complete(prompt) : "idle"
+    }
+  }
+}

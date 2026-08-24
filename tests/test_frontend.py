@@ -86,6 +86,11 @@ REJECTIONS = {
     # service op, but whose declared function type carries no async color, is a
     # compile error — the sound replacement for the silent coroutine leak.
     "a1_async_arrow_sync_type.rvl": "carries no async color — the caller would receive an unawaited suspension (A1)",
+    # roadmap item 117 (harness finding #40): a SYNC provide method reaching an
+    # async *service operation* through a required key in EXPRESSION position (a
+    # ternary arm) — the blind spot the name-based reach left open — is refused
+    # with the A1 diagnostic, the expression-position complement of item 141.
+    "a1_async_op_sync_ternary.rvl": "`Runner.route` is declared sync, but this implementation reaches async operation `model.complete` — a sync method has no in-flight window (A1)",
     "v2_async_signature_mismatch.rvl": "method `stats` of provision `db` is not async but service Database declares it async",
     "v2_same_realm_conflict.rvl": "provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)",
     "v2_dynamic_realm.rvl": "dynamic realm labels are not supported",
@@ -251,6 +256,30 @@ def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
     assert expected in str(excinfo.value)
+
+
+def test_a1_async_op_via_ternary_in_async_method_ok():
+    """The accepting twin of `a1_async_op_sync_ternary.rvl` (item 117): the
+    SAME async op reached through a ternary arm is admitted when the provide
+    method is declared `async fn` — item 141 awaits the emission. Only a SYNC
+    context reaching an async op in expression position is refused, so the
+    item-117 reach extension must not over-refuse the async path."""
+    from revl import compile_source
+
+    ir = compile_source(
+        """
+        service Model { emission async fn complete(msgs: Str) -> Str }
+        service Runner { emission async fn route(prompt: Str) -> Str }
+        component Agent requires model: Model provides runner: Runner {
+          provide runner {
+            async fn route(prompt) {
+              return prompt == "go" ? emit model.complete(prompt) : "idle"
+            }
+          }
+        }
+        """
+    )
+    assert ir is not None
 
 
 # ---------------------------------------------------------------- v1 features
