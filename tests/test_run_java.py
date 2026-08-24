@@ -31,12 +31,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl.run import RUNNABLE_BACKENDS  # noqa: E402
-from revl.run_java import java_runtime_reason  # noqa: E402
+from revl.run_java import JAVAC_RELEASE, java_runtime_reason  # noqa: E402
 
 # A minimal Int-only provider/consumer pair (no config, no strings, no ADTs) —
 # so the test does not lean on any richer emitter feature, and the two
 # components make the LIFO teardown order observable.
 PAIR = str(ROOT / "examples" / "counter_pair.rvl")
+
+# A match-bearing composition (FR-10 / roadmap item 77(e)): the java emitter
+# lowers `match` over a Result to a Java 21 pattern `switch`, so the run driver
+# must compile the emitted module at `--release 21` — at 17 javac refuses it.
+MATCH = str(ROOT / "examples" / "java_match.rvl")
 
 _JAVA_REASON = java_runtime_reason()
 needs_jdk = pytest.mark.skipif(
@@ -83,6 +88,34 @@ def test_java_plan_reports_the_tier_as_runnable():
     assert "not runnable yet" not in result.stdout
 
 
+def test_java_run_driver_compiles_at_release_21():
+    """FR-10 / roadmap item 77(e): the emitted module is Java 21 (the emitter
+    lowers `match` to pattern `switch` expressions), so the run driver's javac
+    gate must be `--release 21` — the same release `revl test --backend java`
+    compiles at and the real cordis4j runtime wants. A 17 gate fails every
+    match-bearing composition ("patterns in switch statements are not supported
+    in -source 17"). Assertable without a JDK: this is the constant both javac
+    invocations read."""
+    assert JAVAC_RELEASE == "21"
+
+
+def test_java_match_composition_emits_a_pattern_switch():
+    """The regression's premise, pinned without a JDK: `examples/java_match.rvl`
+    really emits a Java 21 pattern `switch` — so a run through a 17 gate would
+    fail javac, and only a 21 gate can boot it."""
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location(
+        "revl_java_emit", ROOT / "backends" / "java" / "emit.py")
+    emit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit)
+    from revl.compiler import compile_files  # noqa: PLC0415
+
+    source = emit.emit(compile_files([MATCH]))
+    assert "switch (" in source, "the match must lower to a Java pattern switch"
+    assert "case RevlResult.Ok" in source
+
+
 # --------------------------------------------------------- with the runtime
 #
 # The golden path: emit java -> javac -> boot the composition as a JVM process
@@ -112,6 +145,34 @@ def test_run_java_once_boots_tears_down_lifo_and_proves_no_residue():
     # the no-residue proof, read off the live runtime after teardown (the java
     # mirror of the py driver's registry/reflect check): no provided service
     # still resolves
+    assert "0 service(s) still provided" in out
+    assert "NO-RESIDUE" in out
+    assert "[run] DOWN" in out
+
+
+@needs_jdk
+def test_run_java_once_boots_a_match_composition():
+    """FR-10 / roadmap item 77(e): the javac gate is `--release 21`, so a
+    match-bearing composition (whose `match` lowers to a Java 21 pattern
+    `switch`) must boot through the java run driver's full once round-trip —
+    emit -> javac 21 -> boot -> LIFO teardown -> no-residue proof -> exit 0.
+    Under the old 17 gate this composition failed javac outright."""
+    result = _run_cli([MATCH, "--backend", "java", "--once"], input_text="")
+    assert result.returncode == 0, result.stderr + result.stdout
+    out = result.stdout
+
+    assert "== load composition (java tier) ==" in out
+    assert "Halver" in out and "HalverUser" in out
+    assert "state=Active" in out
+    assert "[run] UP" in out
+
+    # LIFO teardown: the consumer (HalverUser) before the provider (Halver).
+    # (The runner pads the subject to 16 chars, so match the padded form —
+    # "swap  | Halver " — or the shorter name prefix-matches its user.)
+    down_user = out.index("swap  | HalverUser")
+    down_svc = out.index("swap  | Halver ")
+    assert down_user < down_svc, "consumer must tear down before its provider"
+
     assert "0 service(s) still provided" in out
     assert "NO-RESIDUE" in out
     assert "[run] DOWN" in out

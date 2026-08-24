@@ -1,0 +1,23 @@
+// A match-bearing composition for the java run driver regression
+// (docs/v2.0-roadmap.md item 77(e), FR-10): the java emitter lowers `match`
+// over a Result to a Java 21 pattern `switch` expression, so this composition
+// compiles only under `--release 21` — the release `revl run --backend java`
+// must use (a 17 gate fails javac with "patterns in switch statements are not
+// supported in -source 17"). Config-free and dependency-light, so the run
+// driver round-trip (emit -> javac 21 -> boot -> LIFO teardown -> no-residue)
+// is exercised without leaning on any richer emitter feature.
+service Halve {
+  fn halve(v: Int) -> Int
+}
+
+component Halver provides halve: Halve {
+  provide halve {
+    fn halve(v) = match v.checked_div_trunc(2) {
+      Ok(q) => q,
+      Err(_) => 0 - 1,
+    }
+  }
+}
+
+component HalverUser requires halve: Halve {
+}

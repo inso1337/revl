@@ -407,6 +407,7 @@ or **[docs/vision.md](docs/vision.md)** for what this is *for*.
 - [function-types.md](docs/function-types.md) · [holes.md](docs/holes.md) · [capabilities.md](docs/capabilities.md) — newer type-system surface
 - [generics.md](docs/generics.md) — implicit and explicit `[T]` type parameters
 - [strings.md](docs/strings.md) — a `Str`'s code-point unit and `Float` rendering · [arithmetic.md](docs/arithmetic.md) — `/`, `%`, named integer ops and `Int32`
+- [wasm-capabilities.md](docs/wasm-capabilities.md) — the substrate tier's capability matrix: which values, string builtins and service returns wasm carries, and each hard refusal
 - [collections.md](docs/collections.md) — deterministic (sorted) `Map` iteration · [records.md](docs/records.md) — functional record update and block-bodied match arms
 - [namespacing.md](docs/namespacing.md) — namespaced provision keys
 - [design-v2-realms.md](docs/design-v2-realms.md) · [design-v2-instances.md](docs/design-v2-instances.md) — realms, interception, instances
