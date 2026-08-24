@@ -6,6 +6,11 @@ that backend's existing execution recipe (the same subprocess shapes the
 per-tier suites use). A tier whose toolchain is absent is *skipped with a
 reason* — a skipped tier is never reported as passing, and ``--all`` is the
 portability assertion: it fails the run if any *available* tier fails.
+
+``--all`` reports one verdict line per tier — ``pass`` / ``skip: reason`` /
+``fail`` — and a ``summary: N pass, M skipped, K failed`` line, so a by-design
+refusal (a lifecycle test on a tier that does not lower it yet, a missing
+toolchain) reads as a skip, never as a regression (FR-5).
 """
 
 from __future__ import annotations
@@ -129,7 +134,11 @@ def run_py(ir: dict) -> tuple[str, str]:
         # verdict for an environment problem whose remedy is one command
         # (findings-uxprobe.md, longest stall).
         if "from cordis import" in source and not _cordis_available():
-            return ("fail", _PY_RUNTIME_REMEDY)
+            # An absent runtime is an environment skip, never a fail: the other
+            # tiers treat a missing toolchain the same way, and `--all` must
+            # not read as a regression because this interpreter lacks cordis-py
+            # (FR-5; the module docstring's "toolchain absent -> skip" contract).
+            return ("skip", _PY_RUNTIME_REMEDY)
         module = types.ModuleType("revl_test_module")
         # Register before exec: the emitter renders record types as @dataclass,
         # and dataclasses._process_class resolves each field via
@@ -301,7 +310,10 @@ def run_go(ir: dict) -> tuple[str, str]:
 
     The v3 tier is ordinary Go with no dependencies, so unlike rust this needs
     no network — a bare `go.mod` is enough, and the tier is as cheap to execute
-    as python and TypeScript.
+    as python and TypeScript. A document carrying a `lifecycle test` lowers to
+    the live stc-go runtime path instead, so the throwaway module pins the
+    same stc-go require the go placement runner and the conformance validator
+    use (resolved from the local module cache; FR-5).
     """
     go = shutil.which("go")
     if go is None:
@@ -314,13 +326,22 @@ def run_go(ir: dict) -> tuple[str, str]:
             source = next(iter(source.values()))
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
         return ("fail", f"emitter refused: {error}")
+    go_mod = "module revltest\n\ngo 1.25\n"
+    if any(t.get("lifecycle") for t in (ir.get("tests") or [])):
+        go_mod += ("\nrequire github.com/0xdenny218/stc-go "
+                   "v0.6.1-0.20260818143352-b3d6788a428e\n")
     with tempfile.TemporaryDirectory(prefix="revl_test_go_") as tmpd:
         tmp = Path(tmpd)
         (tmp / "gen_test.go").write_text(source, encoding="utf-8")
-        (tmp / "go.mod").write_text("module revltest\n\ngo 1.25\n", encoding="utf-8")
+        (tmp / "go.mod").write_text(go_mod, encoding="utf-8")
+        env = {**os.environ, "GOFLAGS": "-mod=mod"}
+        if "stc-go" in go_mod:
+            # the module is pinned and cached by the placement runner / the
+            # conformance validator; an offline resolve is the honest gate
+            env["GOPROXY"] = "off"
         result = subprocess.run([go, "test", "./..."], cwd=tmp,
                                 capture_output=True, text=True, timeout=600,
-                                env={**os.environ, "GOFLAGS": "-mod=mod"})
+                                env=env)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -343,6 +364,19 @@ def _java_tool(name: str) -> str | None:
     return exe if probe.returncode == 0 else None
 
 
+def _lifecycle_refusal(ir: dict, error: Exception) -> bool:
+    """True when the emit refusal is the by-design lifecycle-test refusal.
+
+    java and wasm still refuse `lifecycle test` blocks by name (documented
+    follow-ups, FR-5); that refusal is a skip-with-reason, never a tier
+    failure — exactly the signal `--all`'s verdict column exists for. Any
+    other emit error is a real bug and stays a fail.
+    """
+    return (any(t.get("lifecycle") for t in (ir.get("tests") or []))
+            and "lifecycle test" in str(error)
+            and "not lowerable" in str(error))
+
+
 def run_java(ir: dict) -> tuple[str, str]:
     """Compile the emitted cordis4j plugin against the stubs (or the real
     classes on ``REVL_CORDIS4J_CLASSES``) and run ``REVL_TESTS`` on a JVM."""
@@ -354,6 +388,9 @@ def run_java(ir: dict) -> tuple[str, str]:
     try:
         source = _emitter("java").emit(_without_fault_tests(ir))
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        if _lifecycle_refusal(ir, error):
+            return ("skip", "lifecycle tests are a documented follow-up on "
+                            f"this tier — {error}")
         return ("fail", f"emitter refused: {error}")
     with tempfile.TemporaryDirectory(prefix="revl_test_java_") as tmpd:
         tmp = Path(tmpd)
@@ -418,6 +455,9 @@ def run_wasm(ir: dict) -> tuple[str, str]:
         modules = emit.emit(_without_fault_tests(ir))
         exports = emit.test_export_names(ir.get("tests") or [])
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
+        if _lifecycle_refusal(ir, error):
+            return ("skip", "lifecycle tests are a documented follow-up on "
+                            f"this tier — {error}")
         return ("fail", f"emitter refused: {error}")
     if not exports:
         return ("pass", "no tests emitted by the backend" + note)
@@ -454,7 +494,7 @@ RUNNERS: dict[str, callable] = {
     "go": run_go,
 }
 
-_TAG = {"pass": "ok", "skip": "skipped", "fail": "FAIL"}
+_TAG = {"pass": "pass", "skip": "skip", "fail": "fail"}
 
 
 def sweep_command(ir: dict) -> int:
@@ -554,21 +594,24 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         return 0
 
     if backend == "all":
-        failures = 0
+        verdicts = {"pass": 0, "skip": 0, "fail": 0}
         for name, runner in RUNNERS.items():
             outcome, message = runner(ir)
+            verdicts[outcome] += 1
             print(f"[{name}] {_TAG[outcome]}: {message}")
-            if outcome == "fail":
-                failures += 1
-        if failures:
-            print(f"{failures} tier(s) failed", file=sys.stderr)
+        summary = (f"summary: {verdicts['pass']} pass, "
+                   f"{verdicts['skip']} skipped, {verdicts['fail']} failed")
+        if verdicts["fail"]:
+            print(summary, file=sys.stderr)
+            print(f"{verdicts['fail']} tier(s) failed", file=sys.stderr)
             return 1
+        print(summary)
         print("all tiers passed")
         return 0
 
     outcome, message = RUNNERS[backend](ir)
     if outcome == "pass":
-        print(f"[{backend}] ok: {message}")
+        print(f"[{backend}] pass: {message}")
         return 0
-    print(f"[{backend}] {message}", file=sys.stderr)
+    print(f"[{backend}] {_TAG[outcome]}: {message}", file=sys.stderr)
     return 1

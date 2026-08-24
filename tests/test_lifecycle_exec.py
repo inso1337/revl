@@ -38,7 +38,7 @@ def test_a_composition_that_reverts_cleanly_passes():
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS cache reverts cleanly" in result.stdout
     assert "PASS a reloaded cache starts empty" in result.stdout
-    assert "[py] ok: 2 test(s) passed" in result.stdout
+    assert "[py] pass: 2 test(s) passed" in result.stdout
 
 
 def test_a_leaky_undo_is_caught():
@@ -92,4 +92,4 @@ def test_pure_and_lifecycle_tests_coexist_in_one_document(tmp_path):
 
     result = _revl_test(str(path))
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "[py] ok: 3 test(s) passed" in result.stdout
+    assert "[py] pass: 3 test(s) passed" in result.stdout

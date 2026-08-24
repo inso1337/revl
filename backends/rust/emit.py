@@ -523,6 +523,26 @@ def _emit_host_stubs(ir: dict) -> list[str]:
     walk(ir.get("types"))
 
     out: list[str] = []
+    lifecycle_present = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    if "Map" in used or "Pool" in used or lifecycle_present:
+        # R1 live-resource accounting (docs/backend-ir.md §Required semantics,
+        # the same pairing the py reference tier's `assert no_residue` checks):
+        # every host object acquired must be released by its `undo`, or the
+        # lifecycle `assert no_residue` fails. The counter is process-wide, so
+        # it is per-test and cross-test safe: a clean test returns to zero.
+        # Thread-local: `cargo test` runs each #[test] on its own thread, and
+        # a process-wide counter would race across tests running in parallel.
+        out.extend([
+            "/// R1 live-resource counter (lifecycle `assert no_residue`).",
+            "/// Thread-local because `cargo test` runs tests on parallel",
+            "/// threads: each test must observe only its own acquisitions.",
+            "thread_local! {",
+            "    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {",
+            "        std::cell::Cell::new(0)",
+            "    };",
+            "}",
+            "",
+        ])
     if "Map" in used:
         out.extend(
             [
@@ -539,11 +559,13 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "}",
                 "impl<V> Map<V> {",
                 "    pub fn new() -> Self {",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
                 "        Self {",
                 "            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),",
                 "        }",
                 "    }",
                 "    pub fn drop_(&self) {",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
                 "        self.inner.lock().unwrap().clear();",
                 "    }",
                 "    pub fn insert(&self, key: String, value: V) {",
@@ -587,6 +609,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "        if size < 1 {",
                 "            panic!(\"pool size must be an integer >= 1 (got {})\", size);",
                 "        }",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
                 "        Self {",
                 "            url,",
                 "            size,",
@@ -678,6 +701,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "        if already_closed {",
                 "            panic!(\"pool.close after close/drop — use-after-free\");",
                 "        }",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
                 "    }",
                 "    pub fn query(&self, _sql: String) -> Vec<Value> {",
                 "        let conn = self.borrow_conn(\"query\");",
@@ -2598,6 +2622,10 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
     out: list[str] = []
     used: set[str] = set()
     for test in tests:
+        if test.get("lifecycle"):
+            # lifecycle tests are emitted by _emit_v3_lifecycle_tests — their
+            # body is a script over a live composition, not pure statements
+            continue
         base = _snake(test.get("name") or "test")
         base = re.sub(r"[^A-Za-z0-9_]", "_", base)
         if not base or base[0].isdigit():
@@ -2615,6 +2643,128 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
         else:
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
+        out.append("}")
+        out.append("")
+    return out
+
+
+def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
+                             externs: list, services: dict,
+                             components: list) -> list[str]:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as ``#[test]`` fns driving a
+    live cordis-rs context.
+
+    A lifecycle test is a script over a *live* composition: load components
+    into a ``cordis::Context``, call through provision keys, unload them LIFO,
+    and assert the runtime holds nothing afterwards. It lowers to the tier's
+    native test idiom exactly the way a plain ``test`` block does (FR-5):
+    ``#[test]`` fns that reuse the generated bridge plumbing — ``_revl_load``
+    for loads, typed ``ctx.require`` calls through the service traits for
+    calls — and prove ``assert no_residue`` with the same introspection the
+    ``run --once`` driver uses (``registry().len() == 0`` and
+    ``reflect().services().len() == 0``, docs/backend-ir.md R4).
+
+    The lowerer checks the script statically (every key's provider must be
+    loaded, G2 provision disjointness), so a refused call is a compile error
+    before any of this runs; here the script becomes Rust.
+    """
+    if not services:
+        raise EmitError(
+            "a lifecycle test loads components and calls through provision "
+            "keys, so it needs at least one service in the document to drive; "
+            "this document declares none"
+        )
+    provided: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            provided[key] = service
+    method_tables = {
+        sname: (svc.get("methods") or {})
+        for sname, svc in services.items()
+    }
+    ctx = _V3Ctx(types, functions, externs, components)
+    out: list[str] = []
+    used: set[str] = set()
+    for test in tests:
+        if not test.get("lifecycle"):
+            continue
+        where = f"lifecycle test {_string(test['name'])}"
+        base = _snake(test.get("name") or "lifecycle")
+        base = re.sub(r"[^A-Za-z0-9_]", "_", base)
+        if not base or base[0].isdigit():
+            base = "lifecycle_" + base
+        name = f"revl_lifecycle_{base}"
+        counter = 0
+        while name in used:
+            counter += 1
+            name = f"revl_lifecycle_{base}_{counter}"
+        used.add(name)
+        out.append("#[test]")
+        out.append(f"fn {name}() {{")
+        out.append("    // drives the composition on a real cordis-rs context and")
+        out.append("    // proves no residue after LIFO teardown (FR-5 / §7.1).")
+        out.append("    let root = cordis::Context::new();")
+        out.append("    let mut _revl_fibers: Vec<(&str, cordis::Fiber)> = Vec::new();")
+        for step in test.get("body") or []:
+            kind = step.get("step")
+            if kind == "load":
+                component = step["component"]
+                snake = _snake(component)
+                cfg = step.get("config") or {}
+                cfg_items = ", ".join(
+                    f"{_string(field)}: {_render_expr(value, ctx, {})}"
+                    for field, value in cfg.items())
+                out.append("    {")
+                out.append("        let _cfg = serde_json::json!("
+                           f'{{{_string(component)}: {{{cfg_items}}}}});')
+                out.append(f'        let _f = _revl_load(&root, {_string(snake)}, &_cfg)'
+                           f".expect({_string(where + ': load ' + component)});")
+                out.append(f'        _f.wait().expect({_string(where + ": " + component + " did not reach ACTIVE (R2)")});')
+                out.append(f"        _revl_fibers.push(({_string(snake)}, _f));")
+                out.append("    }")
+            elif kind == "unload":
+                component = step["component"]
+                snake = _snake(component)
+                out.append(f'    if let Some(pos) = _revl_fibers.iter().position(|(n, _)| *n == {_string(snake)}) {{')
+                out.append("        let (_, _f) = _revl_fibers.remove(pos);")
+                out.append(f"        _f.dispose().expect({_string(where + ': unload ' + component)});")
+                out.append("    }")
+            elif kind == "call":
+                key = step["key"]
+                service = provided.get(key)
+                if service is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: no provider for key {key!r}")
+                method_name = _mname(step["method"])
+                method = (method_tables.get(service) or {}).get(step["method"])
+                if method is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: unknown method {step['method']!r}")
+                args = ", ".join(_render_expr(arg, ctx, {})
+                                 for arg in step.get("args") or [])
+                call = (f'root.require::<Box<dyn {service}>>({_string(key)})'
+                        f".expect({_string(where + ': ' + key + ' is ACTIVE (R2)')})"
+                        f".{method_name}({args})")
+                bind = step.get("bind")
+                if bind is not None:
+                    out.append(f"    let {_ident(bind, 'lifecycle binding')} = {call};")
+                    if method.get("returns"):
+                        ctx.var_types[bind] = method.get("returns")
+                else:
+                    out.append(f"    let _ = {call};")
+            elif kind == "assert":
+                out.append(f"    assert!({_render_expr(step['expr'], ctx, {})}, "
+                           f"{_string(where + ': assertion failed')});")
+            elif kind == "assert_no_residue":
+                out.append("    // R4 + R1: the composition must leave the live runtime")
+                out.append("    // holding nothing — no plugin, no provided service, no")
+                out.append("    // unreleased host resource — the same checks the py")
+                out.append("    // reference tier's `assert no_residue` performs and the")
+                out.append("    // registry/reflect half of `revl run --once`.")
+                out.append("    assert!(root.registry().len() == 0"
+                           " && root.reflect().services().len() == 0"
+                           " && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,")
+                out.append(f'            {_string(where + ": residue \u2014 the host runtime still holds state (R4/R1)")});')
+            else:  # pragma: no cover — the lowerer emits nothing else
+                raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         out.append("}")
         out.append("")
     return out
@@ -3182,7 +3332,14 @@ def _emit_v3(ir: dict) -> str:
     if functions:
         out.extend(_emit_v3_functions(functions, types, externs))
     if tests:
-        out.extend(_emit_v3_tests(tests, types, functions, externs))
+        pure = [t for t in tests if not t.get("lifecycle")]
+        lifecycle = [t for t in tests if t.get("lifecycle")]
+        if pure:
+            out.extend(_emit_v3_tests(pure, types, functions, externs))
+        if lifecycle:
+            out.extend(_emit_v3_lifecycle_tests(
+                lifecycle, types, functions, externs,
+                ir.get("services") or {}, components))
     out.extend(_emit_components(ir, components))
     return "\n".join(out).rstrip() + "\n"
 
@@ -3241,26 +3398,6 @@ def _refuse_fault_tests(ir) -> None:
         f"module that is not emitted for this tier."
     )
 
-def _refuse_lifecycle_tests(tests: list) -> None:
-    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
-
-    A lifecycle test is not a pure test unit: it loads components into a live
-    context, calls through provision keys, unloads them, and asserts
-    residue-freedom by reading the *host runtime's* introspection (R1/R4,
-    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
-    Refuse by name — a construct that is silently dropped by one renderer and
-    present in another is this project's recurring bug class.
-    """
-    for test in tests or []:
-        if test.get("lifecycle"):
-            raise EmitError(
-                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis-rs'} tier: "
-                "it drives a live composition (load/call/unload) and asserts R4 "
-                "residue-freedom through the host runtime's introspection, which only the "
-                "reference tier implements — run it with `revl test --backend py` "
-                "(docs/syntax-2.0.md §7.1)"
-            )
-
 
 def emit(ir: dict) -> str:
     """Emit one Rust module (crate root) for an IR document."""
@@ -3270,7 +3407,6 @@ def emit(ir: dict) -> str:
 
     _refuse_fault_tests(ir)
 
-    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1:
         return _emit_v1(ir)

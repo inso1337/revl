@@ -1847,12 +1847,103 @@ def _emit_ts_tests(tests: list, types: dict, functions: list, externs: list) -> 
     ctx = _Ctx(types, functions, externs)
     lines: list[str] = []
     for test in tests:
+        if test.get("lifecycle"):
+            # lifecycle tests are emitted by _emit_ts_lifecycle_tests — their
+            # body is a script over a live composition, not pure statements
+            continue
         lines.append(f"it({_string(test.get('name'))}, () => {{")
         if not test.get("body"):
             lines.append("  // (empty test body)")
         else:
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, lines, 2, test_mode=True)
+        lines.append("})")
+        lines.append("")
+    return lines
+
+
+def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
+                             externs: list, services: dict,
+                             components: list) -> list[str]:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as async vitest cases driving
+    a live cordis-ts context (FR-5).
+
+    A lifecycle test is a script over a *live* composition: load components
+    into a ``new Context()`` via the runtime's ``plug`` helper, call through
+    provision keys (``ctx.<key>`` — the same committed-view access the emitted
+    components use), unload them LIFO, and assert the runtime holds nothing.
+    ``assert no_residue`` reuses the runtime's R4 introspection
+    (``snapshotRuntime``/``assertNoResidue``, backends/typescript/runtime.ts),
+    which mirrors the py reference tier's residue check including its R1
+    live-host-resource accounting.
+    """
+    provided: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            provided[key] = service
+    method_tables = {
+        sname: (svc.get("methods") or {})
+        for sname, svc in services.items()
+    }
+    ctx = _Ctx(types, functions, externs)
+    lines: list[str] = []
+    for test in tests:
+        if not test.get("lifecycle"):
+            continue
+        where = f"lifecycle test {test['name']!r}"
+        lines.append(f"it({_string(test.get('name'))}, async () => {{")
+        lines.append("  // drives the composition on a real cordis context and")
+        lines.append("  // proves no residue after LIFO teardown (FR-5 / §7.1).")
+        lines.append("  const root = new Context()")
+        lines.append("  const _revl_baseline = snapshotRuntime(root)")
+        lines.append("  const _revl_fibers = new Map<string, any>()")
+        for step in test.get("body") or []:
+            kind = step.get("step")
+            if kind == "load":
+                component = step["component"]
+                cfg = step.get("config") or {}
+                cfg_items = ", ".join(
+                    f"{_ident(field, 'config field')}: {_expr(value, ctx)}"
+                    for field, value in cfg.items())
+                lines.append("  {")
+                lines.append(f"    const _f = plug(root, {component}, {{{cfg_items}}})")
+                lines.append("    await _f")
+                lines.append(f"    _revl_fibers.set({_string(component)}, await _f)")
+                lines.append("    await _revl_settle()")
+                lines.append("  }")
+            elif kind == "unload":
+                component = step["component"]
+                lines.append(f"  await (await _revl_fibers.get({_string(component)})).dispose()")
+                lines.append("  _revl_fibers.delete(" + _string(component) + ")")
+                lines.append("  await _revl_settle()")
+            elif kind == "call":
+                key = step["key"]
+                service = provided.get(key)
+                if service is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: no provider for key {key!r}")
+                method = (method_tables.get(service) or {}).get(step["method"])
+                if method is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: unknown method {step['method']!r}")
+                args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
+                await_ = "await " if method.get("async") else ""
+                call = f"root.{_ident(key, 'provision key')}.{_ident(step['method'], 'method')}({args})"
+                bind = step.get("bind")
+                if bind is not None:
+                    lines.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
+                else:
+                    lines.append(f"  {await_}{call}")
+                lines.append("  await _revl_settle()")
+            elif kind == "assert":
+                # reuse the pure-test assert rendering (equality goes through
+                # revlEq + vitest's matcher, with both sides in the message)
+                _v3_stmt({"step": "assert", "expr": step["expr"]}, ctx, lines,
+                         2, test_mode=True)
+            elif kind == "assert_no_residue":
+                lines.append("  // R4 + R1: same introspection the py reference")
+                lines.append("  // tier's `assert no_residue` performs.")
+                lines.append("  assertNoResidue(root, _revl_baseline)")
+            else:  # pragma: no cover — the lowerer emits nothing else
+                raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         lines.append("})")
         lines.append("")
     return lines
@@ -1914,12 +2005,22 @@ def _uses_spawn(ir: dict) -> bool:
     return found
 
 
+def _uses_lifecycle_tests(ir: dict) -> bool:
+    """True iff the document carries any `lifecycle test` block (§7.1), so the
+    module imports the runtime's plug + residue-introspection helpers and the
+    value `Context` import those drivers need."""
+    return any(t.get("lifecycle") for t in (ir.get("tests") or []))
+
+
 def _runtime_imports(ir: dict, runtime_import: str) -> str:
     """The `import { ... } from '<runtime>'` line. `spawn` is added only when a
-    spawn node is present (docs/design-v2-instances.md phase 2)."""
+    spawn node is present (docs/design-v2-instances.md phase 2); the lifecycle
+    drivers add `plug` + the no-residue introspection (FR-5, §7.1)."""
     names = ["host"]
     if _uses_spawn(ir):
         names.append("spawn")
+    if _uses_lifecycle_tests(ir):
+        names += ["plug", "snapshotRuntime", "assertNoResidue"]
     return f"import {{ {', '.join(names)} }} from '{runtime_import}'"
 
 
@@ -2007,7 +2108,10 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     out: list[str] = [
         "// Generated by revl backends/typescript/emit.py — do not edit.",
         "// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).",
-        "import type { Context } from 'cordis'",
+        # lifecycle drivers construct a live Context, so they need the value,
+        # not just the type; pure documents keep the type-only import.
+        ("import { Context } from 'cordis'"
+         if _uses_lifecycle_tests(ir) else "import type { Context } from 'cordis'"),
         _runtime_imports(ir, runtime_import),
     ]
     if tests:
@@ -2015,6 +2119,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     out.append("")
 
     out.extend(_revl_helpers(ir))
+    if _uses_lifecycle_tests(ir):
+        out.append("const _revl_settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))")
+        out.append("")
 
     if types:
         out.extend(_emit_ts_types(types))
@@ -2023,7 +2130,14 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
     if functions:
         out.extend(_emit_ts_functions(functions, types, externs))
     if tests:
-        out.extend(_emit_ts_tests(tests, types, functions, externs))
+        pure = [t for t in tests if not t.get("lifecycle")]
+        lifecycle = [t for t in tests if t.get("lifecycle")]
+        if pure:
+            out.extend(_emit_ts_tests(pure, types, functions, externs))
+        if lifecycle:
+            out.extend(_emit_ts_lifecycle_tests(
+                lifecycle, types, functions, externs,
+                ir.get("services") or {}, components))
 
     # Service interfaces (coeffect interfaces, DESIGN.md §3.1).
     for sname, service in services.items():
@@ -2115,26 +2229,6 @@ def _refuse_fault_tests(ir) -> None:
         f"module that is not emitted for this tier."
     )
 
-def _refuse_lifecycle_tests(tests: list) -> None:
-    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
-
-    A lifecycle test is not a pure test unit: it loads components into a live
-    context, calls through provision keys, unloads them, and asserts
-    residue-freedom by reading the *host runtime's* introspection (R1/R4,
-    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
-    Refuse by name — a construct that is silently dropped by one renderer and
-    present in another is this project's recurring bug class.
-    """
-    for test in tests or []:
-        if test.get("lifecycle"):
-            raise EmitError(
-                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis (TS)'} tier: "
-                "it drives a live composition (load/call/unload) and asserts R4 "
-                "residue-freedom through the host runtime's introspection, which only the "
-                "reference tier implements — run it with `revl test --backend py` "
-                "(docs/syntax-2.0.md §7.1)"
-            )
-
 
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
     """Emit one TypeScript module for an IR document (docs/backend-ir.md)."""
@@ -2144,7 +2238,6 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts") -> str:
 
     _refuse_fault_tests(ir)
 
-    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     # The unified `_Ctx` carrying the document type context is built inside
     # each _emit_* pass and threaded into every body (component and 2.0),
