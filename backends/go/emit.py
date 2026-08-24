@@ -220,6 +220,10 @@ class _Env:
         # surface types of locals/params, for stdlib-method dispatch and the
         # `??` / ternary result-type inference.
         self.var_types: dict[str, str | None] = {}
+        # item 113: the Go value type to instantiate the generic host Map with
+        # at a `Map.new()` acquisition (`MapNew[int64]()`); set transiently by
+        # the let-effect emitter, None everywhere else.
+        self.map_new_value: str | None = None
 
     def name_ref(self, ident: str) -> str:
         if ident in self.params:
@@ -293,6 +297,13 @@ def _expr(node, env: _Env, expected=None) -> str:
         recv, _, meth = fn.partition(".")
         go = _camel(recv) + _camel(meth)
         args = ", ".join(_expr(a, env) for a in node.get("args", []))
+        # item 113: the host Map is generic; Go cannot infer `V` from the
+        # argument-less constructor, so pin it explicitly (`MapNew[int64]()`).
+        # The value type is supplied by the enclosing let-effect; a Map.new with
+        # no learned type falls back to `string` (the historical surface).
+        if fn == "Map.new":
+            return "%s[%s](%s)" % (go, getattr(env, "map_new_value", None)
+                                   or "string", args)
         return "%s(%s)" % (go, args)
     if kind == "call":
         # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
@@ -1290,10 +1301,100 @@ def _emit_effect_step(step, env: _Env, out, indent):
 # --------------------------------------------------------------------------
 
 _BIND_HOST = {}  # bind name -> host type (populated per component)
+_BIND_MAP_VALUE = {}  # Map bind name -> Go value type (item 113)
 
 
 def _host_of_bind(bind):
     return _BIND_HOST.get(bind, "any")
+
+
+# --------------------------------------------------------------------------
+# host Map value type (item 113, FR-4)
+#
+# The host `Map.new()` object is generic over its value type (`type Map[V any]`
+# in the runtime), so a `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger
+# lowers Insert/Get against the *declared* value type instead of a hardcoded
+# String. Go cannot infer `V` from the argument-less `MapNew()`, so emit must
+# pin it at the acquisition. The value type is learned from `insert` call sites
+# across the whole component (like backends/rust/emit.py's _map_value_rust_type)
+# — the surface type of the value argument, then mapped to a Go type. No site
+# pinning a concrete type falls back to `string` (the historical surface, and
+# what a write-free / read-only Map keeps).
+# --------------------------------------------------------------------------
+
+def _map_insert_value_types(node, bind, env, out):
+    """Collect the surface types of the value argument at every
+    `bind.insert(k, v)` call inside an expression node (recurses)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "call" and node.get("method") == "insert":
+            target = node.get("target")
+            if (isinstance(target, dict)
+                    and (target.get("id") or target.get("name")) == bind):
+                args = node.get("args") or []
+                if len(args) >= 2:
+                    t = _comp_infer(args[1], env)
+                    if t is not None and "Never" not in str(t):
+                        out.append(t)
+        for v in node.values():
+            _map_insert_value_types(v, bind, env, out)
+    elif isinstance(node, list):
+        for x in node:
+            _map_insert_value_types(x, bind, env, out)
+
+
+def _infer_map_value_go_type(comp, services, bind):
+    """The Go value type of the host Map bound to `bind`, learned from its
+    `insert` sites across the activation body and every provide method. Falls
+    back to `string` when nothing pins a concrete value type."""
+    candidates: list[str] = []
+    body = comp.get("body") or []
+    for step in body:
+        if step.get("step") == "provide":
+            service = services.get(step.get("service") or "") or {}
+            svc_methods = service.get("methods") or {}
+            for method in step.get("methods") or []:
+                decl = svc_methods.get(method.get("name") or "", {})
+                ptypes = {p["name"]: p["type"] for p in decl.get("params", [])}
+                env = _Env([], [], set(), params=list(ptypes), receiver="s")
+                env.var_types.update(ptypes)
+                for body_step in method.get("body") or []:
+                    _scan_step_for_inserts(body_step, bind, env, candidates)
+        else:
+            env = _Env([], [], set())
+            _scan_step_for_inserts(step, bind, env, candidates)
+    for t in candidates:
+        gt = _go_type(t)
+        if gt and gt != "any":
+            return gt
+    return "string"
+
+
+def _scan_step_for_inserts(step, bind, env, candidates):
+    """Walk one component/method body step for `insert` value types, tracking
+    `let`/`var` bindings so a value referenced through a local still types."""
+    if not isinstance(step, dict):
+        return
+    kind = step.get("step")
+    if kind in ("let", "var"):
+        surface = _comp_infer(step.get("value"), env)
+        if surface is not None:
+            env.var_types[step.get("name")] = surface
+        _map_insert_value_types(step.get("value"), bind, env, candidates)
+        return
+    for key in ("acquire", "undo", "value", "expr", "setup", "body",
+                "then", "else"):
+        v = step.get(key)
+        if isinstance(v, list):
+            for item in v:
+                if item is not None and item.get("step"):
+                    _scan_step_for_inserts(item, bind, env, candidates)
+                else:
+                    _map_insert_value_types(item, bind, env, candidates)
+        elif isinstance(v, dict):
+            if v.get("step"):
+                _scan_step_for_inserts(v, bind, env, candidates)
+            else:
+                _map_insert_value_types(v, bind, env, candidates)
 
 
 _REQ_SERVICE = {}  # req name -> service type
@@ -1339,7 +1440,7 @@ def _default_lit(value, t):
 
 
 def _emit_component(comp, services, out):
-    global _BIND_HOST, _REQ_SERVICE
+    global _BIND_HOST, _REQ_SERVICE, _BIND_MAP_VALUE
     name = comp["name"]
     cname = _camel(name)
     requires = comp.get("requires", {}) or {}
@@ -1349,9 +1450,20 @@ def _emit_component(comp, services, out):
     # per-component maps
     _REQ_SERVICE = dict(requires)
     _BIND_HOST = {}
+    _BIND_MAP_VALUE = {}
     for step in body:
         if step.get("step") == "let-effect":
-            _BIND_HOST[step["bind"]] = _host_type_of_acquire(step["acquire"])
+            bind = step["bind"]
+            host = _host_type_of_acquire(step["acquire"])
+            # item 113 (FR-4): the host Map is generic over its value type. Pin
+            # `V` from the component's `insert` sites so every reference type
+            # (field, local, acquisition) instantiates `Map[V]` consistently.
+            if (step["acquire"].get("kind") == "host"
+                    and step["acquire"].get("fn") == "Map.new"):
+                gv = _infer_map_value_go_type(comp, services, bind)
+                _BIND_MAP_VALUE[bind] = gv
+                host = "%s[%s]" % (host, gv)
+            _BIND_HOST[bind] = host
 
     binds = [s["bind"] for s in body if s.get("step") == "let-effect"]
     reqs = list(requires.keys())
@@ -1464,8 +1576,12 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
     inner = pad + "\t"
     if s == "let-effect":
         bind = step["bind"]
-        host = _host_type_of_acquire(step["acquire"])
+        # item 113: use the generic host type learned in _emit_component
+        # (`Map[int64]`, `RevlMap[Msg]`, …), not the bare base name.
+        host = _host_of_bind(bind)
+        env.map_new_value = _BIND_MAP_VALUE.get(bind)
         acquire = _expr(step["acquire"], env)
+        env.map_new_value = None
         undo = step.get("undo")
         out.append("%svar %s *%s" % (pad, _bind_field(bind), host))
         out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
@@ -1790,6 +1906,12 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
         out.append("func %s(revlT *testing.T) {" % tname)
         out.append("\troot := stc.New()")
         out.append("\t_fibers := map[string]*stc.Fiber{}")
+        # item 102: the clock coeffect is package-global; reset it so this
+        # test's `advance` steps start from t=0 and see only its own timers,
+        # independent of any earlier lifecycle test in the file (mirrors the
+        # py/ts tiers' Clock/clockReset at test start).
+        if any(s.get("step") == "advance" for s in test.get("body") or []):
+            out.append("\tRevlClockReset()")
         for step in test.get("body") or []:
             kind = step.get("step")
             if kind == "load":
@@ -1904,6 +2026,13 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 out.append("\t\trevlT.Fatalf(%s, len(root.Fibers()), revlHostLive())"
                            % _go_string(where + ": residue — %d fiber(s), %d host resource(s) (R4/R1)"))
                 out.append("\t}")
+            elif kind == "advance":
+                # item 102: drive the clock coeffect forward (go has the same
+                # deterministic Clock as py/ts). A firing is a timeline step, so
+                # any due timer bodies run synchronously inside RevlClockAdvance
+                # before the next statement observes their effect
+                # (docs/time-coeffect.md §advance).
+                out.append("\tRevlClockAdvance(%d)" % int(step["ms"]))
             else:  # pragma: no cover — the lowerer emits nothing else
                 raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         out.append("}")
@@ -2171,29 +2300,34 @@ func (p *Pool) Execute(sql string) @INT@ {
 	return 0
 }
 
-// Map is a thread-safe string map.
-type Map struct {
+// Map is a thread-safe map with Str keys. The value type is generic — each
+// site's `Map.new()` pins `V` from how the map is used (FR-4: a revl
+// `Map[Str, Int]` counter or `Map[Str, List[Msg]]` ledger, not only String),
+// mirroring backends/rust/emit.py's `struct Map<V>`. Emit instantiates it at
+// the acquisition (`MapNew[int64]()`), so the boundary carries the declared
+// value type and Insert/Get type-check against the component's real values.
+type Map[V any] struct {
 	mu sync.Mutex
-	m  map[string]string
+	m  map[string]V
 }
 
-func MapNew() *Map {
+func MapNew[V any]() *Map[V] {
 	hostRecord("map.new")
 	revlHostAcquire()
-	return &Map{m: map[string]string{}}
+	return &Map[V]{m: map[string]V{}}
 }
-func (m *Map) Drop() { hostRecord("map.drop"); revlHostRelease() }
-func (m *Map) Insert(k, v string) {
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
+func (m *Map[V]) Insert(k string, v V) {
 	m.mu.Lock()
 	m.m[k] = v
 	m.mu.Unlock()
 }
-func (m *Map) Remove(k string) {
+func (m *Map[V]) Remove(k string) {
 	m.mu.Lock()
 	delete(m.m, k)
 	m.mu.Unlock()
 }
-func (m *Map) Get(k string) (string, bool) {
+func (m *Map[V]) Get(k string) (V, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	v, ok := m.m[k]
@@ -2203,17 +2337,17 @@ func (m *Map) Get(k string) (string, bool) {
 // Iteration surface (docs/stdlib-2.0.md §Map): the checker promises
 // `size()`/`keys()` on a host `Map.new()` receiver too, and emit lowers both
 // as method calls on this object. `Size` is the entry count as the tier's
-// revl Int (a Go `int` here, matching the service-method return type); `Keys`
+// revl Int (@INT@, matching the service-method return type); `Keys`
 // yields the keys in ascending canonical Str order (UTF-8 byte lexicographic —
 // go string < is exactly code-point order, matching sort.Strings; the inline
 // insertion sort keeps it import-free, as revlMapKeys does). Both are
 // read-only queries, no host trace — like Get.
-func (m *Map) Size() int {
+func (m *Map[V]) Size() @INT@ {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.m)
+	return @INT@(len(m.m))
 }
-func (m *Map) Keys() []string {
+func (m *Map[V]) Keys() []string {
 	m.mu.Lock()
 	ks := make([]string, 0, len(m.m))
 	for k := range m.m {
@@ -4074,6 +4208,16 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    # item 102: a lifecycle test's `advance` step drives the clock coeffect
+    # (RevlClockAdvance / RevlClockReset), which lives in the timer preamble.
+    # The timer components in scope normally flag it, but an `advance` alone is
+    # enough to require it — pull the preamble in regardless.
+    if any(
+        s.get("step") == "advance"
+        for t in (ir.get("tests") or []) if t.get("lifecycle")
+        for s in (t.get("body") or [])
+    ):
+        _COMP_NEEDS_TIMER = True
     _V3_MODE = (ver == 3)
     # emit()'s own component path never emits the document's declared types
     # (a v3 doc with types routes to the pure typed-core path, or — with a

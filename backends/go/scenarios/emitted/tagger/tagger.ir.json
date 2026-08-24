@@ -1,0 +1,168 @@
+{
+  "ir_version": 1,
+  "services": {
+    "Groups": {
+      "methods": {
+        "get_or": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            },
+            {
+              "name": "fallback",
+              "type": "List[Str]"
+            }
+          ],
+          "returns": "List[Str]",
+          "emission": false
+        },
+        "set": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            },
+            {
+              "name": "tags",
+              "type": "List[Str]"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Tagger",
+      "source": "backends/go/scenarios/tagger.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "g": "Groups"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "g",
+          "service": "Groups",
+          "methods": [
+            {
+              "name": "get_or",
+              "params": [
+                "key",
+                "fallback"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "??",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "name",
+                        "id": "store"
+                      },
+                      "method": "get",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "key"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "name",
+                      "id": "fallback"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "set",
+              "params": [
+                "key",
+                "tags"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "tags"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Tagger",
+        "file": "backends/go/scenarios/tagger.rvl",
+        "inject": [],
+        "provides": [
+          "g"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Tagger"
+    ]
+  }
+}
