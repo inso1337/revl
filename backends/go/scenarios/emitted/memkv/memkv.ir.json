@@ -1,0 +1,166 @@
+{
+  "ir_version": 1,
+  "services": {
+    "KV": {
+      "methods": {
+        "count": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        },
+        "all_keys": {
+          "params": [],
+          "returns": "List[Str]",
+          "emission": false
+        },
+        "put": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            },
+            {
+              "name": "value",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "MemKV",
+      "source": "backends/go/scenarios/memkv.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "kv": "KV"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "kv",
+          "service": "KV",
+          "methods": [
+            {
+              "name": "count",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "size",
+                    "args": []
+                  }
+                }
+              ]
+            },
+            {
+              "name": "all_keys",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "keys",
+                    "args": []
+                  }
+                }
+              ]
+            },
+            {
+              "name": "put",
+              "params": [
+                "key",
+                "value"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "value"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "MemKV",
+        "file": "backends/go/scenarios/memkv.rvl",
+        "inject": [],
+        "provides": [
+          "kv"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "MemKV"
+    ]
+  }
+}
