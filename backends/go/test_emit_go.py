@@ -275,6 +275,95 @@ def test_map_empty_renders_positionally_or_refuses_honestly():
         emit.emit(_compile('pub fn f() -> Int { var m = Map.empty() return 0 }'))
 
 
+# --------------------------------------------------------------------------
+# v3 typed-core placement (FR-8 follow-up): a v3 composition with components
+# AND top-level types/functions places on the go backend — the typed-core tier
+# (records/ADTs/pure fns) next to the live stc-go components, plus a bridge
+# that carries records (json-tagged structs) and variants ({"$kind","$value"})
+# across the seam. This is `emit_placement`, the source the runner's `emitted`
+# package is built from.
+# --------------------------------------------------------------------------
+
+V3_STEP_IR = ROOT / "examples" / "v3_step_scheduler.rvl"
+
+
+def _compile_ir(path: Path) -> dict:
+    import sys
+    sys.path.insert(0, str(ROOT / "src"))
+    from revl import compile_files
+    return compile_files([str(path)])
+
+
+def _placement_split(ir: dict):
+    """emit_placement -> (gen.go, bridge_gen.go) via the form-feed sentinel."""
+    src = emit.emit_placement(ir, package="emitted")
+    assert "\f" in src, "emit_placement must separate gen from bridge"
+    return src.split("\f", 1)
+
+
+def test_v3_typed_core_placement_emits_types_and_live_components():
+    """The combined module carries BOTH the typed-core tier and the stc-go
+    components — before this, emit_placement refused v3 typed-core documents
+    outright ("placement on the go backend needs v1/v2 services")."""
+    ir = _compile_ir(V3_STEP_IR)
+    gen, bridge = _placement_split(ir)
+    # typed-core tier: records with EXPORTED json-tagged fields (the bridge's
+    # plain-JSON wire encoding needs them; the pure tier keeps unexported
+    # fields byte-for-byte) + the ADT sealed interface
+    _has(gen, "type Row struct {")
+    _has(gen, 'Id int64 `json:"id"`')
+    _has(gen, "type Step interface { isStep() }")
+    _has(gen, "type StepFinal struct { Value string }")
+    # live stc-go components: service interface, key, impl, load helper
+    _has(gen, "type Scheduler interface {")
+    _has(gen, "Next(now Step) Step")
+    _has(gen, 'stc.NewKey[Scheduler]("sched")')
+    _has(gen, "func LoadSched(target *stc.Context) *stc.Fiber {")
+    # method bodies: record literal, ADT construction, ADT match (type switch)
+    _has(gen, 'return Row{Id: 1, Name: "ada"}')
+    _has(gen, "return StepFinal{Value: msg}")
+    _has(gen, "switch _m := now.(type) {")
+    _has(gen, "case StepFinal:")
+    # bridge: variant encode/decode helpers + wired proxy/dispatch
+    _has(bridge, "func _revlEncodeStep(v Step) any {")
+    _has(bridge, 'map[string]any{"$kind": "Final", "$value": c.Value}')
+    _has(bridge, "func _revlDecodeStep(raw json.RawMessage) Step {")
+    _has(bridge, "_revlEncodeStep(now)")
+    _has(bridge, "_r := _revlDecodeStep(_v)")
+
+
+def test_v3_typed_core_placement_host_collision_is_renamed():
+    """A declared record named like a legacy host-runtime type (Row) renames
+    the HOST side to RevlRow, so the two never collide in one package."""
+    ir = _compile_ir(V3_STEP_IR)
+    gen, _ = _placement_split(ir)
+    assert "type RevlRow = map[string]string" in gen
+    assert "type Row struct {" in gen
+
+
+def test_v3_typed_core_placement_records_round_trip_through_the_bridge():
+    """outcome.rvl's boundary shapes — a user ADT return, a Result[Row, Str]
+    return, and a record return — get decode/encode wired on both sides."""
+    ir = _compile_ir(ROOT / "examples" / "outcome.rvl")
+    gen, bridge = _placement_split(ir)
+    _has(gen, "type Found interface { isFound() }")
+    _has(gen, "type FoundHit struct { Value Row }")
+    _has(bridge, "func _revlEncodeFound(v Found) any {")
+    _has(bridge, "func _revlDecodeFound(raw json.RawMessage) Found {")
+    # Result[Row, Str] carries the record payload through $value (json tags)
+    _has(bridge, 'return map[string]any{"$kind": "Ok", "$value": _okv}, nil')
+    _has(bridge, "var _ok Row")
+
+
+def test_v3_pure_document_still_refuses_placement():
+    """A v3 document with no components has nothing to boot — placement stays
+    an honest refusal (the pure typed-core tier is `revl test` territory)."""
+    from revl import compile_source
+    ir = compile_source("pub fn add(a: Int, b: Int) -> Int { return a + b }")
+    with pytest.raises(emit.EmitError, match="no components"):
+        emit.emit_placement(ir, package="emitted")
+
+
 def _compile(source: str) -> dict:
     """revl source -> IR (the go test file only ever loaded checked-in IR)."""
     import sys

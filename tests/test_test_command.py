@@ -136,12 +136,12 @@ def test_all_fails_when_a_tier_fails(monkeypatch, capsys):
     def _failing(_ir):
         return ("fail", "boom")
 
-    for name in ("ts", "rust", "java", "wasm"):
+    for name in ("ts", "rust", "java", "wasm", "go"):
         monkeypatch.setitem(test_module.RUNNERS, name, _failing)
     assert test_module.test_command(ir, "all") == 1
     err = capsys.readouterr().err
-    assert "summary: 2 pass, 0 skipped, 4 failed" in err
-    assert "4 tier(s) failed" in err
+    assert "summary: 1 pass, 0 skipped, 5 failed" in err
+    assert "5 tier(s) failed" in err
 
 
 def test_all_mixed_verdicts_summarize_skips_separately(monkeypatch, capsys):
@@ -152,12 +152,16 @@ def test_all_mixed_verdicts_summarize_skips_separately(monkeypatch, capsys):
     def _skipping(_ir):
         return ("skip", "lifecycle tests are not lowerable on this tier yet")
 
-    for name in ("ts", "rust", "java"):
+    # Mock every non-reference tier so the verdict counts are deterministic
+    # regardless of which toolchains the runner happens to have (a frontend
+    # job without wasmtime, for instance, would otherwise turn wasm's real
+    # plain-test run into a skip and shift the summary).
+    for name in ("ts", "rust", "java", "wasm", "go"):
         monkeypatch.setitem(test_module.RUNNERS, name, _skipping)
     assert test_module.test_command(ir, "all") == 0
     out = capsys.readouterr().out
     assert "[ts] skip: lifecycle tests are not lowerable on this tier yet" in out
-    assert "summary: 3 pass, 3 skipped, 0 failed" in out
+    assert "summary: 1 pass, 5 skipped, 0 failed" in out
 
 
 

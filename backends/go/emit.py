@@ -127,6 +127,20 @@ _PRIM = {
 # scenarios. Set per emit() call; never read outside a single call.
 _V3_MODE = False
 
+# The declared record/variant types of the current document (ir["types"]),
+# for the component/method renderer: record literals need the struct name for
+# their field set, and ADT construction/match need the case -> (adt, payload)
+# layout. Only meaningful under _V3_MODE; empty for v1/v2.
+_V3_TYPES: dict = {}
+
+# Placement mode (emit_placement on a v3 typed-core composition): the module
+# mixes the pure typed-core tier with live stc-go components and the interop
+# bridge, so record structs are emitted with EXPORTED, json-tagged fields (the
+# go mirror of the rust tier's serde derives) so record values survive the
+# bridge's plain-JSON wire encoding. The pure tier (emit) keeps unexported
+# fields byte-for-byte with the frozen fixtures.
+_V3_PLACEMENT = False
+
 
 def _go_type(t) -> str:
     """Map a revl type name to a Go type (value position)."""
@@ -150,6 +164,11 @@ def _go_type(t) -> str:
         return "map[%s]%s" % (_go_type(k), _go_type(v))
     if t == "Row":
         return "Row"
+    # v3 typed-core: a declared user type (record/variant) renders with the
+    # name `_emit_v3_go_types` gave it (_v3_ident, not _camel — snake_case
+    # type names must agree between the declaration and every use site).
+    if _V3_MODE and t in _V3_TYPES:
+        return _v3_ident(t, "type name")
     # Unknown / user type: pass through as an exported identifier.
     return _camel(t)
 
@@ -394,45 +413,335 @@ def _expr(node, env: _Env, expected=None) -> str:
     if kind == "field":
         # `.length` on a sized value — the one field the frontend produces on
         # a non-record in component positions (a pure fn body spells the same
-        # access as the `len` node). Records are a v3 typed-core surface that
-        # the live stc-go world does not carry, so any other field access is a
+        # access as the `len` node). Records are a v3 typed-core surface: with
+        # the document's declared types in scope (placement mode) a field
+        # access on a record lowers to the struct field; otherwise it is a
         # named tier limit rather than a silent fall-through.
-        if node.get("name") != "length":
-            raise EmitError(
-                "field access is only lowerable on a sized value's `.length` "
-                "in the stc-go component world (records need a declared record "
-                "type, and declaring one routes the document to the typed-core "
-                "path, which carries no live component) - lift it into a "
-                "helper fn instead")
-        global _COMP_NEEDS_STDLIB
-        _COMP_NEEDS_STDLIB = True
-        target_node = node.get("target")
-        target = _expr(target_node, env)
-        rt = _comp_infer(target_node, env)
-        return ("revlStrLen(%s)" if rt == "Str" else "revlListLen(%s)") % target
+        if node.get("name") == "length":
+            global _COMP_NEEDS_STDLIB
+            _COMP_NEEDS_STDLIB = True
+            target_node = node.get("target")
+            target = _expr(target_node, env)
+            rt = _comp_infer(target_node, env)
+            return ("revlStrLen(%s)" if rt == "Str" else "revlListLen(%s)") % target
+        if _V3_MODE and _V3_PLACEMENT:
+            target_node = node.get("target")
+            tt = _comp_infer(target_node, env)
+            if isinstance(tt, str) and tt in _V3_TYPES \
+                    and _V3_TYPES[tt].get("kind") == "record":
+                target = _expr(target_node, env)
+                if target_node.get("kind") not in ("name", "var", "call", "host",
+                                                    "instance-get", "index", "field"):
+                    target = "(%s)" % target
+                return "%s.%s" % (target, _v3_field_ident(node.get("name")))
+        raise EmitError(
+            "field access is only lowerable on a sized value's `.length` "
+            "in the stc-go component world (records need a declared record "
+            "type, and declaring one routes the document to the typed-core "
+            "path, which carries no live component) - lift it into a "
+            "helper fn instead")
     if kind == "fn":
-        # a call to a top-level `fn` by name (component dialect). Unreachable
-        # in practice — a document declaring a pure `fn` routes to the typed-
-        # core path — but a named tier limit beats a fall-through.
+        # a call to a top-level `fn` by name (component dialect). In the v3
+        # typed-core world a document declaring a pure `fn` AND a component
+        # routes to the placement path, where the fn is a real declaration the
+        # method body can call; otherwise unreachable in practice — a named
+        # tier limit beats a fall-through.
         name = _v3_ident(node.get("name"), "function")
         args = ", ".join(_expr(a, env) for a in node.get("args") or [])
         return "%s(%s)" % (name, args)
-    if kind in ("record", "match", "arrow", "optfield", "optcall"):
+    if kind == "record":
+        # v3 typed-core only: a record literal needs the document's declared
+        # record type for its field set (the v1/v2 tier carries none).
+        if not (_V3_MODE and _V3_PLACEMENT and _V3_TYPES):
+            raise EmitError(
+                f"record is not lowerable in the stc-go component world "
+                f"(ir_version 1/2 documents carry no record/ADT types, and this "
+                f"tier has no record lowering in component bodies) - "
+                f"lift it into a helper fn instead")
+        fields = node.get("fields") or []
+        tname = _v3_record_type_for_fields([k for k, _ in fields])
+        body = ", ".join(
+            "%s: %s" % (_v3_field_ident(k), _expr(v, env)) for k, v in fields)
+        return "%s{%s}" % (tname, body)
+    if kind == "adt":
+        case = node.get("case")
+        if _V3_MODE and _V3_PLACEMENT and case in _v3_case_layout():
+            return _v3_comp_construct(node, env)
+        raise EmitError(
+            "Opt/Result construction is only supported in return position on "
+            "the cordis-go tier (got a bare value)")
+    if kind == "match":
+        if _V3_MODE:
+            # v3 method bodies: user ADTs lower to a type switch (needs the
+            # declared types, only present in placement mode); Opt/Result lower
+            # against the tuple convention and work in any v3 component.
+            return _go_comp_match(node, env, expected)
+        raise EmitError(
+            f"match is not lowerable in the stc-go component world yet "
+            f"(ir_version 1/2 documents carry no record/ADT types, and this "
+            f"tier has no match lowering in component bodies) - "
+            f"lift it into a helper fn instead")
+    if kind in ("arrow", "optfield", "optcall"):
         raise EmitError(
             f"{kind} is not lowerable in the stc-go component world yet "
             f"(ir_version 1/2 documents carry no record/ADT types, and this "
             f"tier has no match/arrow/`?.` lowering in component bodies) - "
             f"lift it into a helper fn instead")
-    if kind == "adt":
-        raise EmitError(
-            "Opt/Result construction is only supported in return position on "
-            "the cordis-go tier (got a bare value)")
     if kind == "record_update":
         raise EmitError(
             "functional record update `{r | f = e}` is not emitted by the go "
             "backend yet (implemented tiers: python, typescript) - see "
             "docs/records.md §6; lift it into a helper fn instead")
     raise EmitError("unsupported expr kind: %r" % (kind,))
+
+
+def _v3_field_ident(field: str) -> str:
+    """Record struct field name in the current mode. Placement mode exports
+    the field (with a json tag) so the bridge's plain-JSON wire encoding
+    round-trips record values — the go mirror of the rust tier's serde
+    derives; the pure tier keeps the source spelling byte-for-byte with the
+    frozen fixtures."""
+    if _V3_PLACEMENT:
+        return _camel(field)
+    return _v3_ident(field, "record field")
+
+
+def _v3_record_type_for_fields(fields) -> str:
+    """The declared record type whose field set is exactly `fields`, or a
+    named EmitError (mirrors `_V3GoCtx.record_type_for_fields` over the
+    module-level `_V3_TYPES`)."""
+    key = tuple(sorted(fields))
+    match: str | None = None
+    for name, spec in _V3_TYPES.items():
+        if spec.get("kind") == "record" \
+                and tuple(sorted(spec.get("fields") or {})) == key:
+            if match is not None:
+                raise EmitError(
+                    "cannot infer Go struct type for record literal with "
+                    f"fields {sorted(fields)!r} — more than one declared "
+                    "record has exactly those fields"
+                )
+            match = name
+    if match is None:
+        raise EmitError(
+            "cannot infer Go struct type for record literal with fields "
+            f"{sorted(fields)!r} — no record declared in this document has "
+            "exactly those fields"
+        )
+    return _v3_ident(match, "type name")
+
+
+def _v3_case_layout() -> dict[str, tuple[str, str | None]]:
+    """case name -> (ADT type name, payload surface), across every declared
+    variant. First declaration wins; ambiguous case names are resolved by the
+    node's own `type` key at the call site (the checker freezes it)."""
+    out: dict[str, tuple[str, str | None]] = {}
+    for name, spec in _V3_TYPES.items():
+        if spec.get("kind") != "variant":
+            continue
+        for case in spec.get("cases") or []:
+            cname = case.get("name")
+            if cname not in out:
+                out[cname] = (name, case.get("payload"))
+    return out
+
+
+def _v3_case_payload(adt: str, case: str) -> str | None:
+    """The payload surface of one case of a declared variant, else None."""
+    spec = _V3_TYPES.get(adt) or {}
+    for c in spec.get("cases") or []:
+        if c.get("name") == case:
+            return c.get("payload")
+    return None
+
+
+def _v3_comp_construct(node, env: _Env) -> str:
+    """A user-ADT construction in a component body: `<Variant><Case>{Value: ..}`
+    (or `<Variant><Case>{}` for a nullary case) — mirroring
+    `_go_v3_construct`'s user-variant branch, the tagged-union shape the v3
+    tier emits (`type Step = Final(Str) | NeedTool(..)` -> `StepFinal{...}`)."""
+    case = node.get("case")
+    layout = _v3_case_layout()
+    adt = node.get("type") or layout.get(case, (None, None))[0]
+    if not adt or adt not in _V3_TYPES \
+            or _V3_TYPES[adt].get("kind") != "variant":
+        raise EmitError(
+            f"cannot resolve ADT case {case!r} to a declared variant")
+    payload = _v3_case_payload(adt, case)
+    args = [_expr(a, env) for a in node.get("args") or []]
+    struct = "%s%s" % (_v3_ident(adt, "type name"), case)
+    if payload is None:
+        if args:
+            raise EmitError(f"variant case `{case}` takes no payload")
+        return "%s{}" % struct
+    if len(args) != 1:
+        raise EmitError(f"variant case `{case}` takes exactly one payload")
+    return "%s{Value: %s}" % (struct, args[0])
+
+
+def _go_comp_match(node, env: _Env, expected) -> str:
+    """A `match` in a component/method body (v3 typed-core placement).
+
+    User ADTs lower to the same sealed-interface type switch the pure tier
+    uses; Opt/Result lower against the stc-go tuple convention (`(T, bool)` /
+    `(T, E, bool)`), so their scrutinee must be a multi-value call. Both are
+    immediately-applied func literals, so the whole match is one Go
+    expression exactly like the pure tier's `_go_v3_match`."""
+    scrut_node = node.get("scrutinee")
+    st = _comp_infer(scrut_node, env)
+    arms = node.get("arms") or []
+    exp_t = _go_type(expected) if expected else None
+    if not exp_t:
+        for arm in arms:
+            exp_t = _go_type(_comp_infer(arm.get("body"), env))
+            if exp_t:
+                break
+    exp_t = exp_t or "any"
+
+    is_opt = isinstance(st, str) and st.startswith("Opt[") and st.endswith("]")
+    is_result = isinstance(st, str) and st.startswith("Result[") and st.endswith("]")
+    if is_opt or is_result:
+        return _go_comp_match_tuple(node, env, expected, st, is_opt, is_result,
+                                    exp_t)
+
+    scrutinee = _expr(scrut_node, env, st)
+    layout = _v3_case_layout()
+    lines = ["func() %s {" % exp_t]
+    lines.append("\tswitch _m := %s.(type) {" % scrutinee)
+    has_wild = False
+    saved_types = dict(env.var_types)
+    try:
+        for arm in arms:
+            pattern = arm.get("pattern")
+            bind = arm.get("bind")
+            if pattern == "_":
+                has_wild = True
+                lines.append("\tdefault:")
+                lines.append("\t\t_ = _m")
+                lines.append("\t\treturn %s" % _expr(arm.get("body"), env, expected))
+                continue
+            adt = (st if (isinstance(st, str) and st in _V3_TYPES)
+                   else layout.get(pattern, (None, None))[0])
+            if not adt or adt not in _V3_TYPES \
+                    or _V3_TYPES[adt].get("kind") != "variant":
+                raise EmitError(
+                    f"cannot resolve match case {pattern!r} against scrutinee "
+                    f"type {st!r} — no declared variant provides it")
+            payload = _v3_case_payload(adt, pattern)
+            case_type = "%s%s" % (_v3_ident(adt, "type name"), pattern)
+            lines.append("\tcase %s:" % case_type)
+            if bind:
+                if payload is None:
+                    raise EmitError(
+                        f"match arm binds {bind!r} but case {pattern!r} of "
+                        f"{adt} has no payload")
+                env.var_types[bind] = payload
+                lines.append("\t\t%s := _m.Value" % _safe_local(bind))
+                lines.append("\t\t_ = %s" % _safe_local(bind))
+            else:
+                lines.append("\t\t_ = _m")
+            lines.append("\t\treturn %s" % _expr(arm.get("body"), env, expected))
+    finally:
+        env.var_types = saved_types
+    if not has_wild:
+        lines.append("\tdefault:")
+        lines.append("\t\t_ = _m")
+        lines.append('\t\tpanic("unreachable: non-exhaustive match")')
+    lines.append("\t}")
+    lines.append("}()")
+    return "\n".join(lines)
+
+
+def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
+                         exp_t) -> str:
+    """`match` over an Opt/Result scrutinee in a component body.
+
+    The stc-go world carries Opt/Result as `(T, bool)` / `(T, E, bool)`
+    tuples in call positions, so the scrutinee must be a multi-value call
+    (a bare Opt/Result value cannot be a single Go expression)."""
+    scrut_node = node.get("scrutinee")
+    if scrut_node.get("kind") not in ("call", "host", "builtin"):
+        raise EmitError(
+            "match over an Opt/Result scrutinee on the cordis-go tier needs a "
+            f"call-shaped scrutinee (Opt/Result are return-position tuples); "
+            f"got a {scrut_node.get('kind')!r} scrutinee")
+    arms = node.get("arms") or []
+    ok_arm = next((a for a in arms if a.get("pattern") in ("Some", "Ok")), None)
+    err_arm = next((a for a in arms if a.get("pattern") in ("None", "Err")), None)
+    wild = next((a for a in arms if a.get("pattern") == "_"), None)
+    if scrut_node.get("kind") == "builtin" \
+            and scrut_node.get("method") in _GO_CHECKED_DIV:
+        # the total division forms: the stc-go Result tuple, multi-value
+        scrutinee = _comp_checked_div_expr(scrut_node, env)
+    else:
+        scrutinee = _expr(scrut_node, env, st)
+    saved_types = dict(env.var_types)
+    try:
+        if is_opt:
+            inner = st[4:-1]
+            lines = ["func() %s {" % exp_t]
+            lines.append("\t_v, _ok := %s" % scrutinee)
+            if ok_arm is not None:
+                bind = ok_arm.get("bind")
+                lines.append("\tif _ok {")
+                if bind:
+                    env.var_types[bind] = inner
+                    lines.append("\t\t%s := _v" % _safe_local(bind))
+                    lines.append("\t\t_ = %s" % _safe_local(bind))
+                else:
+                    lines.append("\t\t_ = _v")
+                lines.append("\t\treturn %s" % _expr(ok_arm.get("body"), env, expected))
+                lines.append("\t}")
+            elif wild is not None:
+                lines.append("\tif _ok {")
+                lines.append("\t\treturn %s" % _expr(wild.get("body"), env, expected))
+                lines.append("\t}")
+            lines.append("\t_ = _v")
+            if err_arm is not None:
+                bind = err_arm.get("bind")
+                if bind:
+                    env.var_types[bind] = inner
+                    lines.append("\t%s := _v; _ = %s" % (_safe_local(bind), _safe_local(bind)))
+                lines.append("\treturn %s" % _expr(err_arm.get("body"), env, expected))
+            elif wild is not None:
+                lines.append("\treturn %s" % _expr(wild.get("body"), env, expected))
+            else:
+                lines.append('\tpanic("unreachable: non-exhaustive match")')
+            lines.append("}()")
+            return "\n".join(lines)
+        ok, err = _v3_split_generic(st[7:-1])
+        lines = ["func() %s {" % exp_t]
+        lines.append("\t_v, _e, _ok := %s" % scrutinee)
+        if ok_arm is not None:
+            bind = ok_arm.get("bind")
+            lines.append("\tif _ok {")
+            if bind:
+                env.var_types[bind] = ok
+                lines.append("\t\t%s := _v" % _safe_local(bind))
+                lines.append("\t\t_ = %s" % _safe_local(bind))
+            else:
+                lines.append("\t\t_ = _v")
+            lines.append("\t\treturn %s" % _expr(ok_arm.get("body"), env, expected))
+            lines.append("\t}")
+        elif wild is not None:
+            lines.append("\tif _ok {")
+            lines.append("\t\treturn %s" % _expr(wild.get("body"), env, expected))
+            lines.append("\t}")
+        lines.append("\t_ = _e")
+        if err_arm is not None:
+            bind = err_arm.get("bind")
+            if bind:
+                env.var_types[bind] = err
+                lines.append("\t%s := _e; _ = %s" % (_safe_local(bind), _safe_local(bind)))
+            lines.append("\treturn %s" % _expr(err_arm.get("body"), env, expected))
+        elif wild is not None:
+            lines.append("\treturn %s" % _expr(wild.get("body"), env, expected))
+        else:
+            lines.append('\tpanic("unreachable: non-exhaustive match")')
+        lines.append("}()")
+        return "\n".join(lines)
+    finally:
+        env.var_types = saved_types
 
 
 def _spawn_expr(node, env: _Env) -> str:
@@ -541,6 +850,29 @@ def _comp_infer(node, env: _Env):
         # `Map.empty()` — the empty literal carries its pin when the author's
         # annotation supplied one (roadmap 76b); otherwise it stays unknown.
         return node.get("expected")
+    if k == "record":
+        # record literal -> the declared record type whose field set matches
+        try:
+            return _v3_record_type_for_fields(
+                [f[0] for f in node.get("fields") or []])
+        except EmitError:
+            return None
+    if k == "adt":
+        # construction -> the ADT type the checker froze onto the node (e.g.
+        # `Result[Any, Any]` for Ok/Err, `Found` for a user case)
+        t = node.get("type")
+        if t:
+            return t
+        return _v3_case_layout().get(node.get("case"), (None, None))[0]
+    if k == "match":
+        # a match's value type is its scrutinee's
+        return _comp_infer(node.get("scrutinee"), env)
+    if k == "field":
+        tt = _comp_infer(node.get("target"), env)
+        if isinstance(tt, str) and tt in _V3_TYPES \
+                and _V3_TYPES[tt].get("kind") == "record":
+            return (_V3_TYPES[tt].get("fields") or {}).get(node.get("name"))
+        return None
     return None
 
 
@@ -625,7 +957,49 @@ def _comp_builtin(method, recv_surface, target, args):
     if method == "remove":
         _COMP_NEEDS_MAP = True
         return "revlMapRemove(%s, %s)" % (target, args[0])
+    if method in _GO_CHECKED_DIV:
+        # The total division forms answer a Result, which the stc-go world
+        # carries as a (T, E, bool) tuple — only valid in the two positions
+        # that accept a multi-value expression: a `match` scrutinee and a
+        # `return` against a Result-typed method. A bare value use would
+        # emit Go that cannot compile, so it is refused here with the way
+        # out named (mirrors the Opt tuple convention on this tier).
+        raise EmitError(
+            f"{method} is only lowerable on the cordis-go tier as a `match` "
+            f"scrutinee or in a Result-returning `return` (Result is a "
+            f"return-position tuple here)")
     raise EmitError("unknown stdlib method: %r" % (method,))
+
+
+def _comp_checked_div_expr(node, env: _Env) -> str:
+    """The total division forms (docs/arithmetic.md) as the stc-go tier's
+    Result tuple `(T, E, bool)`: an immediately-applied func literal that
+    evaluates each operand once, returns `(0, reason, false)` on a zero
+    divisor (and on the Int.MIN / -1 overflow for the truncating form), else
+    the quotient. Only valid where a multi-value expression is: a `match`
+    scrutinee or a Result-returning `return`."""
+    method = node.get("method")
+    target = _expr(node.get("target"), env)
+    args = [_expr(a, env) for a in node.get("args") or []]
+    if len(args) != 1:
+        raise EmitError(f"{method} takes exactly one divisor")
+    if method != "checked_div_trunc":
+        # revlDivFloor / revlDivEuclid / revlMod live in the pure-tier
+        # int-arith preamble, which the stc-go component path does not emit —
+        # a named tier limit rather than a reference to an undefined helper.
+        raise EmitError(
+            f"{method} is not lowerable in the stc-go component world yet "
+            f"(the int-arith helpers are pure-tier only); use "
+            f"`checked_div_trunc` here")
+    quotient = "_a / _b"
+    return (
+        "func() (int64, string, bool) { "
+        f"var _a, _b int64; _a, _b = {target}, {args[0]}; "
+        f'if _b == 0 {{ return 0, "{_GO_DIV_ZERO_MSG}", false }}; '
+        "if _a == (-9223372036854775807 - 1) && _b == -1 "
+        '{ return 0, "revl: Int overflow", false }; '
+        f"return ({quotient}), \"\", true }}()"
+    )
 
 
 def _format(template: str, args: list[str]) -> str:
@@ -879,6 +1253,14 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
                    % (pad, _expr(expr, env, ret_surface)))
         out.append("%sreturn %s, false" % (pad, _go_zero(inner)))
         return
+    if rs.startswith("Result[") and isinstance(expr, dict) \
+            and expr.get("kind") == "builtin" \
+            and expr.get("method") in _GO_CHECKED_DIV:
+        # The total division forms answer a Result, carried on this tier as
+        # the (T, E, bool) tuple: the multi-value IIFE returns straight into
+        # the method's tuple signature.
+        out.append("%sreturn %s" % (pad, _comp_checked_div_expr(expr, env)))
+        return
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
 
@@ -1057,7 +1439,12 @@ def _emit_host_stubs(ir) -> list[str]:
 def _host_type_of_acquire(acquire):
     if acquire.get("kind") == "host":
         recv = acquire["fn"].split(".")[0]
-        return _camel(recv)
+        name = _camel(recv)
+        # placement mode renames the host-runtime type when a declared record
+        # collides (see _host_runtime); the impl struct field must agree.
+        if _V3_PLACEMENT and name in _V3_TYPES:
+            return "Revl" + name
+        return name
     if acquire.get("kind") == "spawn":
         # A `spawn` acquisition binds a live instance handle, not a host object.
         return "RevlSpawnHandle"
@@ -1649,13 +2036,30 @@ def _host_runtime() -> str:
     to compile: `PoolOpen(config.url, config.pool_size)` passed an int64 into
     an `int` parameter (docs/conformance.md; surfaced by FR-5's lifecycle
     tests on the go tier).
-    """
+
+    In v3 PLACEMENT mode, a declared record whose name collides with a legacy
+    host-runtime type (Row/Map/Pool) renames the host side to `Revl<Name>`;
+    the component codegen resolves the same host names through
+    `_host_type_of_acquire`, so both sides agree (the collision is the go
+    mirror of the rename java applies to a `double` function, docs/backend-
+    ir-v3.md §v3 — a type name the host already owns)."""
     int_ty = "int64" if _V3_MODE else "int"
-    return _HOST_RUNTIME.replace("@INT@", int_ty)
+    src = _HOST_RUNTIME.replace("@INT@", int_ty)
+    if _V3_PLACEMENT:
+        for name in _HOST_RUNTIME_RENAMES:
+            if name in _V3_TYPES:
+                src = re.sub(r"\b%s\b" % name, "Revl" + name, src)
+    return src
 
 
 def _needs_sync(ir) -> bool:
     return any(c.get("isolate") for c in ir.get("components", [])) or True
+
+
+# Legacy host-runtime type names a v3 typed-core document may declare as a
+# record. Placement mode renames the HOST side to `Revl<Name>` so the declared
+# record struct keeps its name (see _host_runtime / _host_type_of_acquire).
+_HOST_RUNTIME_RENAMES = ("Row", "Map", "Pool")
 
 
 _HOST_RUNTIME = r'''// ---- host runtime (minimal, recording) --------------------------------
@@ -2247,7 +2651,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         target = _go_v3_expr(target_node, ctx)
         if target_node.get("kind") not in _V3_GO_ATOMIC:
             target = f"({target})"
-        return f"{target}.{_v3_ident(node.get('name'), 'field')}"
+        return f"{target}.{_v3_field_ident(node.get('name'))}"
 
     if kind == "index":
         target_node = node.get("target")
@@ -2278,7 +2682,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         fields = node.get("fields") or []
         type_name = ctx.record_type_for_fields([k for k, _ in fields])
         body = ", ".join(
-            f"{_v3_ident(k, 'record field')}: {_go_v3_expr(v, ctx)}" for k, v in fields
+            f"{_v3_field_ident(k)}: {_go_v3_expr(v, ctx)}" for k, v in fields
         )
         return f"{type_name}{{{body}}}"
 
@@ -2553,7 +2957,7 @@ def _go_v3_optchain(node, ctx: _V3GoCtx, *, field=None, method=None, args=None):
         ret_surface = None
         if spec and spec.get("kind") == "record":
             ret_surface = (spec.get("fields") or {}).get(field)
-        body = f"_x.{_v3_ident(field, 'field')}"
+        body = f"_x.{_v3_field_ident(field)}"
     else:
         arg_renders = [_go_v3_expr(a, ctx) for a in args or []]
         # optcall receiver payload becomes _x; render the builtin against it.
@@ -2724,7 +3128,14 @@ def _emit_v3_go_types(types: dict) -> list[str]:
         if spec.get("kind") == "record":
             out.append(f"type {gname} struct {{")
             for field, ftype in (spec.get("fields") or {}).items():
-                out.append(f"\t{_v3_ident(field, 'record field')} {_go_v3_type(ftype, types)}")
+                if _V3_PLACEMENT:
+                    # Exported + json-tagged: the go mirror of the rust tier's
+                    # serde derives — the bridge's plain-JSON wire encoding
+                    # round-trips record values (proxy/stub args and replies).
+                    out.append(f"\t{_v3_field_ident(field)} {_go_v3_type(ftype, types)}"
+                               f" `json:\"{field}\"`")
+                else:
+                    out.append(f"\t{_v3_field_ident(field)} {_go_v3_type(ftype, types)}")
             out.append("}")
             out.append("")
         elif spec.get("kind") == "variant":
@@ -3411,8 +3822,15 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         # components and refuse the lifecycle steps.
         return _emit_v3_go(ir, package)
 
-    global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
+    global _V3_MODE, _V3_TYPES, _V3_PLACEMENT
+    global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     _V3_MODE = (ver == 3)
+    # emit()'s own component path never emits the document's declared types
+    # (a v3 doc with types routes to the pure typed-core path, or — with a
+    # lifecycle test — stays here without them), so no record/ADT is in scope
+    # and the v1/v2-style refusals must hold; placement mode is never on.
+    _V3_TYPES = {}
+    _V3_PLACEMENT = False
     _COMP_NEEDS_STDLIB = False
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
@@ -3509,8 +3927,85 @@ def _go_bridge_arg_expr(param) -> str:
     """A proxy method argument as an `any` for the wire args list. Scalars,
     lists, maps, records and Opt (`*T`, nil==null) json.Marshal canonically, so
     the local name is passed straight through — matching python's plain-JSON
-    encoding for those shapes."""
-    return _safe_local(param["name"])
+    encoding for those shapes. A v3 typed-core variant (or a container of one)
+    needs its generated `_revlEncode<Variant>` to reach the canonical
+    {"$kind","$value"} wire shape (records cross as plain JSON via their
+    json-tagged exported fields)."""
+    t = str(param["type"]).strip()
+    local = _safe_local(param["name"])
+    enc = _bridge_encode_expr(t, local)
+    return enc if enc is not None else local
+
+
+def _v3_declared_variant(t) -> str | None:
+    """`t` (a surface type name) when it is a variant declared in the current
+    document, else None."""
+    t = str(t).strip()
+    if t in _V3_TYPES and _V3_TYPES[t].get("kind") == "variant":
+        return t
+    return None
+
+
+def _revl_encode_fn(t) -> str:
+    return "_revlEncode%s" % _v3_ident(str(t).strip(), "type name")
+
+
+def _revl_decode_fn(t) -> str:
+    return "_revlDecode%s" % _v3_ident(str(t).strip(), "type name")
+
+
+def _bridge_encode_expr(revl_type, expr) -> str | None:
+    """None when `expr` (of static revl type) is already canonical on the wire
+    (json marshals it correctly); else the Go expression encoding it. Recurses
+    through List/Opt so a container of variants reaches the canonical shapes
+    (variants as {"$kind","$value"}, records as plain JSON)."""
+    t = str(revl_type).strip()
+    if _v3_declared_variant(t):
+        return "%s(%s)" % (_revl_encode_fn(t), expr)
+    if t.startswith("List[") and t.endswith("]"):
+        inner = t[5:-1]
+        enc = _bridge_encode_expr(inner, "_x")
+        if enc is None:
+            return None
+        return ("func() []any { _in := %s; _out := make([]any, len(_in)); "
+                "for _i, _x := range _in { _out[_i] = %s }; return _out }()"
+                % (expr, enc))
+    if t.startswith("Opt[") and t.endswith("]"):
+        inner = t[4:-1]
+        enc = _bridge_encode_expr(inner, "_o")
+        if enc is None:
+            return None
+        return ("func() any { if %s == nil { return nil }; "
+                "_o := *%s; return %s }()" % (expr, expr, enc))
+    return None
+
+
+def _bridge_decode_expr(revl_type, raw_expr) -> str | None:
+    """None when the plain `var x T; json.Unmarshal(raw, &x)` statement form
+    decodes correctly; else the Go expression decoding `raw_expr` (a
+    json.RawMessage) into the static type. Recurses through List/Opt for
+    containers of variants."""
+    t = str(revl_type).strip()
+    if _v3_declared_variant(t):
+        return "%s(%s)" % (_revl_decode_fn(t), raw_expr)
+    if t.startswith("List[") and t.endswith("]"):
+        inner = t[5:-1]
+        dec = _bridge_decode_expr(inner, "_e")
+        if dec is None:
+            return None
+        return ("func() %s { var _r []json.RawMessage; "
+                "_ = json.Unmarshal(%s, &_r); _out := make(%s, len(_r)); "
+                "for _i, _e := range _r { _out[_i] = %s }; return _out }()"
+                % (_go_type(t), raw_expr, _go_type(t), dec))
+    if t.startswith("Opt[") and t.endswith("]"):
+        inner = t[4:-1]
+        dec = _bridge_decode_expr(inner, "_p")
+        if dec is None:
+            return None
+        return ("func() %s { if len(%s) == 0 || string(%s) == \"null\" "
+                "{ return nil }; _p := %s; return &_p }()"
+                % (_go_type(t), raw_expr, raw_expr, dec))
+    return None
 
 
 def _emit_go_proxy_method(struct, mname, params, ret_revl, out):
@@ -3534,26 +4029,40 @@ def _emit_go_proxy_method(struct, mname, params, ret_revl, out):
 
 
 def _emit_go_proxy_decode(ret_revl, out):
-    """Decode the reply `_v` (json.RawMessage) into the method's Go return."""
+    """Decode the reply `_v` (json.RawMessage) into the method's Go return.
+
+    v3 typed-core: a user ADT reply (or one nested in Opt/Result) decodes via
+    the generated `_revlDecode<Variant>` from its canonical {"$kind","$value"}
+    wire shape; records decode via json.Unmarshal on their json-tagged
+    exported fields."""
     if ret_revl is None or str(ret_revl).strip() in ("", "Unit"):
         return  # void
     result = _go_result_inner(str(ret_revl))
     if result is not None:
         ok_go, err_go = result
+        ok_revl, err_revl = _v3_split_generic(str(ret_revl)[7:-1])
         out.append('\tvar _tag struct {')
         out.append('\t\tKind  string          `json:"$kind"`')
         out.append('\t\tValue json.RawMessage `json:"$value"`')
         out.append("\t}")
         out.append("\t_ = json.Unmarshal(_v, &_tag)")
         out.append('\tif _tag.Kind == "Ok" {')
-        out.append("\t\tvar _ok %s" % ok_go)
-        out.append("\t\t_ = json.Unmarshal(_tag.Value, &_ok)")
+        ok_dec = _bridge_decode_expr(ok_revl, "_tag.Value")
+        if ok_dec is not None:
+            out.append("\t\t_ok := %s" % ok_dec)
+        else:
+            out.append("\t\tvar _ok %s" % ok_go)
+            out.append("\t\t_ = json.Unmarshal(_tag.Value, &_ok)")
         out.append("\t\tvar _zeroE %s" % err_go)
         out.append("\t\treturn _ok, _zeroE, true")
         out.append("\t}")
         out.append("\tvar _zeroT %s" % ok_go)
-        out.append("\tvar _err2 %s" % err_go)
-        out.append("\t_ = json.Unmarshal(_tag.Value, &_err2)")
+        err_dec = _bridge_decode_expr(err_revl, "_tag.Value")
+        if err_dec is not None:
+            out.append("\t_err2 := %s" % err_dec)
+        else:
+            out.append("\tvar _err2 %s" % err_go)
+            out.append("\t_ = json.Unmarshal(_tag.Value, &_err2)")
         out.append("\treturn _zeroT, _err2, false")
         return
     opt = _go_opt_inner(str(ret_revl))
@@ -3562,9 +4071,18 @@ def _emit_go_proxy_decode(ret_revl, out):
         out.append("\t\tvar _zero %s" % opt)
         out.append("\t\treturn _zero, false")
         out.append("\t}")
-        out.append("\tvar _r %s" % opt)
-        out.append("\t_ = json.Unmarshal(_v, &_r)")
-        out.append("\treturn _r, true")
+        if _v3_declared_variant(opt):
+            out.append("\t_d := %s(_v)" % _revl_decode_fn(opt))
+            out.append("\treturn &_d, true")
+        else:
+            out.append("\tvar _r %s" % opt)
+            out.append("\t_ = json.Unmarshal(_v, &_r)")
+            out.append("\treturn _r, true")
+        return
+    dec = _bridge_decode_expr(str(ret_revl), "_v")
+    if dec is not None:
+        out.append("\t_r := %s" % dec)
+        out.append("\treturn _r")
         return
     out.append("\tvar _r %s" % _go_type(ret_revl))
     out.append("\t_ = json.Unmarshal(_v, &_r)")
@@ -3579,11 +4097,16 @@ def _emit_go_dispatch_encode(call, ret_revl, out):
         return
     result = _go_result_inner(str(ret_revl))
     if result is not None:
+        ok_revl, err_revl = _v3_split_generic(str(ret_revl)[7:-1])
         out.append("\t\t_okv, _errv, _ok := %s" % call)
         out.append("\t\tif _ok {")
-        out.append('\t\t\treturn map[string]any{"$kind": "Ok", "$value": _okv}, nil')
+        ok_enc = _bridge_encode_expr(ok_revl, "_okv")
+        out.append('\t\t\treturn map[string]any{"$kind": "Ok", "$value": %s}, nil'
+                   % (ok_enc if ok_enc is not None else "_okv"))
         out.append("\t\t}")
-        out.append('\t\treturn map[string]any{"$kind": "Err", "$value": _errv}, nil')
+        err_enc = _bridge_encode_expr(err_revl, "_errv")
+        out.append('\t\treturn map[string]any{"$kind": "Err", "$value": %s}, nil'
+                   % (err_enc if err_enc is not None else "_errv"))
         return
     opt = _go_opt_inner(str(ret_revl))
     if opt is not None:
@@ -3591,7 +4114,14 @@ def _emit_go_dispatch_encode(call, ret_revl, out):
         out.append("\t\tif !_ok {")
         out.append("\t\t\treturn nil, nil")
         out.append("\t\t}")
-        out.append("\t\treturn _v, nil")
+        if _v3_declared_variant(opt):
+            out.append("\t\treturn %s(*_v), nil" % _revl_encode_fn(opt))
+        else:
+            out.append("\t\treturn _v, nil")
+        return
+    enc = _bridge_encode_expr(str(ret_revl), call)
+    if enc is not None:
+        out.append("\t\treturn %s, nil" % enc)
         return
     out.append("\t\treturn %s, nil" % call)
 
@@ -3605,8 +4135,12 @@ def _emit_go_dispatch(sname, methods, out):
         params = m.get("params", []) or []
         out.append("\tcase %s:" % _go_string(mname))
         for i, p in enumerate(params):
-            out.append("\t\tvar a%d %s" % (i, _go_type(p["type"])))
-            out.append("\t\t_ = json.Unmarshal(_revlArg(args, %d), &a%d)" % (i, i))
+            dec = _bridge_decode_expr(str(p["type"]), "_revlArg(args, %d)" % i)
+            if dec is not None:
+                out.append("\t\ta%d := %s" % (i, dec))
+            else:
+                out.append("\t\tvar a%d %s" % (i, _go_type(p["type"])))
+                out.append("\t\t_ = json.Unmarshal(_revlArg(args, %d), &a%d)" % (i, i))
         call = "svc.%s(%s)" % (_camel(mname),
                                ", ".join("a%d" % i for i in range(len(params))))
         _emit_go_dispatch_encode(call, m.get("returns"), out)
@@ -3615,6 +4149,71 @@ def _emit_go_dispatch(sname, methods, out):
                'service %s", method)' % sname)
     out.append("}")
     out.append("")
+
+
+def _emit_v3_bridge_helpers(types: dict) -> list[str]:
+    """Per-variant `_revlEncode<Variant>` / `_revlDecode<Variant>` for the
+    bridge: the canonical ADT wire shape {"$kind", "$value"} (the same
+    encoding backends/python/bridge.py uses), mirroring how the v3 tier
+    represents variants (sealed interface + case structs). Records need no
+    helpers — their placement-mode json-tagged exported fields marshal
+    canonically. Payloads recurse through `_bridge_encode_expr` /
+    `_bridge_decode_expr` so a variant payload nested in List/Opt also
+    round-trips."""
+    out: list[str] = []
+    for name, spec in (types or {}).items():
+        if spec.get("kind") != "variant":
+            continue
+        gname = _v3_ident(name, "type name")
+        enc = _revl_encode_fn(name)
+        dec = _revl_decode_fn(name)
+        out.append("// %s encodes a %s to the canonical ADT wire shape" % (enc, gname))
+        out.append('// ({"$kind", "$value"} — docs/interop-bridge.md §3).')
+        out.append("func %s(v %s) any {" % (enc, gname))
+        out.append("\tswitch c := v.(type) {")
+        for case in spec.get("cases") or []:
+            cname = case.get("name")
+            cstruct = "%s%s" % (gname, cname)
+            payload = case.get("payload")
+            if payload is None:
+                out.append("\tcase %s:" % cstruct)
+                out.append('\t\treturn map[string]any{"$kind": %s}' % _go_string(cname))
+                continue
+            pv = _bridge_encode_expr(str(payload), "c.Value")
+            out.append("\tcase %s:" % cstruct)
+            out.append('\t\treturn map[string]any{"$kind": %s, "$value": %s}'
+                       % (_go_string(cname), pv if pv is not None else "c.Value"))
+        out.append("\t}")
+        out.append('\tpanic("revl: unhandled %s case in bridge encode")' % gname)
+        out.append("}")
+        out.append("")
+        out.append("func %s(raw json.RawMessage) %s {" % (dec, gname))
+        out.append("\tvar _tag struct {")
+        out.append('\t\tKind  string          `json:"$kind"`')
+        out.append('\t\tValue json.RawMessage `json:"$value"`')
+        out.append("\t}")
+        out.append("\t_ = json.Unmarshal(raw, &_tag)")
+        out.append("\tswitch _tag.Kind {")
+        for case in spec.get("cases") or []:
+            cname = case.get("name")
+            cstruct = "%s%s" % (gname, cname)
+            payload = case.get("payload")
+            out.append("\tcase %s:" % _go_string(cname))
+            if payload is None:
+                out.append("\t\treturn %s{}" % cstruct)
+                continue
+            pv = _bridge_decode_expr(str(payload), "_tag.Value")
+            if pv is not None:
+                out.append("\t\treturn %s{Value: %s}" % (cstruct, pv))
+            else:
+                out.append("\t\tvar _p %s" % _go_type(payload))
+                out.append("\t\t_ = json.Unmarshal(_tag.Value, &_p)")
+                out.append("\t\treturn %s{Value: _p}" % cstruct)
+        out.append("\t}")
+        out.append('\tpanic("revl: unknown %s case in bridge decode: " + _tag.Kind)' % gname)
+        out.append("}")
+        out.append("")
+    return out
 
 
 def _emit_go_bridge(ir: dict) -> list[str]:
@@ -3775,25 +4374,259 @@ def _emit_go_bridge(ir: dict) -> list[str]:
     return out
 
 
+def _emit_v3_placement(ir: dict, package: str) -> str:
+    """A v3 typed-core composition for the placement runner, in ONE package:
+    the pure typed-core tier (record structs, ADT sealed interfaces, pure
+    `fn`s, externs, plain `test` blocks — ordinary Go) PLUS the live stc-go
+    components (service interfaces, keys, impls, load helpers) PLUS the
+    interop bridge. This is the go mirror of the rust tier's `_emit_v3`
+    (types + components in one module), extended with the bridge the placement
+    runner links against.
+
+    Record structs are emitted with EXPORTED, json-tagged fields (`_V3_PLACEMENT`)
+    so record values survive the bridge's plain-JSON wire encoding — the go
+    mirror of the rust tier's serde derives. The pure tier (`emit`) keeps
+    unexported fields byte-for-byte with the frozen fixtures."""
+    types = ir.get("types") or {}
+    functions = ir.get("functions") or []
+    externs = ir.get("externs") or []
+    tests = ir.get("tests") or []
+    components = ir.get("components") or []
+    ctx = _V3GoCtx(types, functions, externs)
+
+    global _V3_MODE, _V3_TYPES, _V3_PLACEMENT
+    global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
+    _V3_MODE = True
+    _V3_TYPES = types
+    _V3_PLACEMENT = True
+    _COMP_NEEDS_STDLIB = False
+    _COMP_NEEDS_MAP = False
+    _COMP_NEEDS_PARSE_INT = False
+
+    has_lifecycle = any(t.get("lifecycle") for t in tests)
+    has_spawn = _spawn_targets(ir) and any(
+        comp.get("body") or comp.get("provides") for comp in components)
+
+    # render every body first so the feature flags settle before assembly
+    body: list[str] = []
+    if types:
+        body.extend(_emit_v3_go_types(types))
+    if externs:
+        body.extend(_emit_v3_go_externs(externs, ctx))
+    if functions:
+        body.extend(_emit_v3_go_functions(functions, ctx))
+    pure_tests = [t for t in tests if not t.get("lifecycle")]
+    if pure_tests:
+        body.extend(_emit_v3_go_tests(pure_tests, ctx))
+    if has_lifecycle:
+        # a lifecycle test is a script over the live composition (FR-5): it
+        # drives the stc-go LoadX helpers below, so it is emitted after them
+        # and must reference them (it appends to `body` in place).
+        _emit_stc_lifecycle_tests(ir, body)
+
+    # ---- live stc-go components -----------------------------------------
+    body.append("")
+    body.append("// ---- live stc-go components (placement) -------------------")
+    body.extend(_emit_services(ir.get("services", {})))
+    _emit_keys(ir, body)
+    _emit_realm_helper(ir, body)
+    for comp in components:
+        _emit_component(comp, ir.get("services", {}), body)
+    _emit_load_helpers(ir, body)
+    _emit_spawn_support(ir, body)
+    host_stubs = _emit_host_stubs(ir)
+
+    # feature flags, mirroring _emit_v3_go's blob scan for the pure tier
+    blob = json.dumps({
+        "types": types, "functions": functions,
+        "externs": externs, "tests": tests,
+    })
+    used_opt = ("Opt[" in blob) or ('"optfield"' in blob) or ('"optcall"' in blob)
+    if ctx.needs_parse_int:
+        used_opt = True
+    used_map = ('"maplit"' in blob) or any(
+        f'"method": "{m}"' in blob for m in ("set", "lookup", "has",
+                                             "size", "keys", "remove"))
+    if used_map:
+        used_opt = True
+    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+
+    imports: list[str] = []
+    if pure_tests or has_lifecycle:
+        imports.append('\t"testing"')
+    if ctx.needs_fmt:
+        imports.append('\t"fmt"')
+    if has_lifecycle:
+        imports.append('\t"reflect"')
+        imports.append('\t"time"')
+        imports.append('\tstdctx "context"')
+    if ctx.needs_reflect and not has_lifecycle:
+        imports.append('\t"reflect"')
+    if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
+        imports.append('\t"strings"')
+        imports.append('\t"unicode/utf8"')
+    if ctx.needs_ftoa:
+        imports.append('\t"math"')
+        imports.append('\t"strconv"')
+        imports.append('\t"strings"')
+    if has_spawn:
+        imports.append('\tstdctx "context"')
+    # the stc-go side always needs fmt + sync + the runtime
+    imports.append('\t"fmt"')
+    imports.append('\t"sync"')
+    imports.append('\tstc "github.com/0xdenny218/stc-go"')
+
+    out: list[str] = []
+    out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
+    out.append("// revl -> cordis-go (ir_version 3, typed-core + live components):")
+    out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
+    out.append("// components and the interop bridge, in one package (placement).")
+    out.append("package %s" % package)
+    out.append("")
+    if imports:
+        out.append("import (")
+        out.extend(sorted(set(imports)))
+        out.append(")")
+        out.append("")
+    out.append("var _ = fmt.Sprintf")
+    out.append("")
+    out.append(_host_runtime())
+    if ctx.needs_reflect and not has_lifecycle:
+        # structural equality (record/ADT `==` through DeepEqual)
+        out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
+        out.append("")
+    if ctx.needs_float_div:
+        out.append("func revlDiv(a, b float64) float64 { return a / b }")
+        out.append("")
+    if ctx.needs_ftoa:
+        out.append(_V3_FTOA_HELPER)
+        out.append("")
+    if ctx.needs_overflow:
+        out.append("func revlAdd(a, b int64) int64 {")
+        out.append("\ts := a + b")
+        out.append("\tif (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn s")
+        out.append("}")
+        out.append("")
+        out.append("func revlSub(a, b int64) int64 {")
+        out.append("\td := a - b")
+        out.append("\tif (b < 0 && d < a) || (b > 0 && d > a) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn d")
+        out.append("}")
+        out.append("")
+        out.append("func revlMul(a, b int64) int64 {")
+        out.append("\tif a == 0 || b == 0 {")
+        out.append("\t\treturn 0")
+        out.append("\t}")
+        out.append("\tp := a * b")
+        out.append("\tif p/b != a {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn p")
+        out.append("}")
+        out.append("")
+    if ctx.needs_overflow32:
+        out.append("func revlAddI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) + int64(b)) }")
+        out.append("func revlSubI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) - int64(b)) }")
+        out.append("func revlMulI32(a, b int32) int32 { return revlToI32("
+                   "int64(a) * int64(b)) }")
+        out.append("func revlToI32(v int64) int32 {")
+        out.append("\tif v < -2147483648 || v > 2147483647 {")
+        out.append('\t\tpanic("revl: Int32 overflow")')
+        out.append("\t}")
+        out.append("\treturn int32(v)")
+        out.append("}")
+        out.append("")
+    if ctx.needs_int_arith:
+        out.append("func revlDivTrunc(a, b int64) int64 {")
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn a / b")
+        out.append("}")
+        out.append("")
+        out.append("func revlDivFloor(a, b int64) int64 {")
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\tq := a / b")
+        out.append("\tif a%b != 0 && ((a < 0) != (b < 0)) {")
+        out.append("\t\tq--")
+        out.append("\t}")
+        out.append("\treturn q")
+        out.append("}")
+        out.append("")
+        out.append("func revlDivEuclid(a, b int64) int64 {")
+        out.append("\tif b > 0 {")
+        out.append("\t\treturn revlDivFloor(a, b)")
+        out.append("\t}")
+        out.append("\treturn -revlDivFloor(a, -b)")
+        out.append("}")
+        out.append("")
+        out.append("func revlMod(a, b int64) int64 {")
+        out.append("\tm := b")
+        out.append("\tif m < 0 {")
+        out.append("\t\tm = -m")
+        out.append("\t}")
+        out.append("\tr := a % m")
+        out.append("\tif r < 0 {")
+        out.append("\t\tr += m")
+        out.append("\t}")
+        out.append("\treturn r")
+        out.append("}")
+        out.append("")
+    if used_opt:
+        out.append(_V3_OPT_PREAMBLE)
+    if ctx.needs_parse_int or _COMP_NEEDS_PARSE_INT:
+        # after the Opt preamble: revlParseInt's return type is RevlOpt
+        out.append(_V3_PARSE_INT_HELPER)
+    if used_result:
+        out.append(_V3_RESULT_PREAMBLE)
+    if used_map or _COMP_NEEDS_MAP:
+        out.append(_V3_MAP_PREAMBLE)
+    if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
+        out.append(_V3_STDLIB_PREAMBLE)
+    out.extend(body)
+    out.extend(host_stubs)
+
+    return "\n".join(out).rstrip() + "\n"
+
+
 def emit_placement(ir: dict, package: str = "emitted") -> str:
     """The Go source for a placement runner's `emitted` package: the ordinary
-    v1/v2 module (proxied/served interfaces, impls, load helpers) followed by
-    the interop-bridge file (proxy/stub/dispatch + runner entry points). Emitted
+    module (proxied/served interfaces, impls, load helpers) followed by the
+    interop-bridge file (proxy/stub/dispatch + runner entry points). Emitted
     as two logical files concatenated with a form-feed sentinel the build step
-    splits on, so each carries its own import block."""
-    # The bridge references the live stc-go component scaffolding (service
-    # interfaces, keys, Load helpers). A v3 document with any top-level pure
-    # declaration routes emit() to the pure typed-core path (no stc component),
-    # so the bridge would not link — the go tier bridges v1/v2 services only.
+    splits on, so each carries its own import block.
+
+    A v3 typed-core composition (components + top-level pure declarations)
+    takes the combined path: the typed-core tier and the live stc-go
+    components in one module, plus the bridge — records and ADTs cross the
+    seam (records as json-tagged structs, variants as {"$kind","$value"})."""
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
-    if ir.get("ir_version") == 3 and (not ir.get("components") or has_top_level):
-        raise EmitError("placement on the go backend needs v1/v2 services; this "
-                        "composition is v3 typed-core (no live stc-go component)")
-    module = emit(ir, package)
+    if ir.get("ir_version") == 3:
+        if not ir.get("components"):
+            raise EmitError(
+                "placement on the go backend needs at least one live "
+                "component to boot; this v3 document is pure typed-core "
+                "(no components)")
+        if has_top_level:
+            module = _emit_v3_placement(ir, package)
+        else:
+            module = emit(ir, package)
+    else:
+        module = emit(ir, package)
     bridge_lines = _emit_go_bridge(ir)
     if not bridge_lines:
         raise EmitError("placement needs at least one `service` to bridge")
+    bridge_lines.extend(_emit_v3_bridge_helpers(ir.get("types") or {}))
     header = [
         "// Code generated by backends/go/emit.py (placement bridge) — DO NOT EDIT.",
         "// revl interop bridge over a Unix socket; wire-compatible with",
