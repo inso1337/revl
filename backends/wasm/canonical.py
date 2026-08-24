@@ -670,45 +670,6 @@ class _Canon:
 
 import re as _re
 
-# Top-level WIT type-declaration keywords. `revl export wit` (slice-1) emits a
-# referenced `record`/`variant`/`enum` at the PACKAGE top level, which is not
-# valid WIT — a named type must live inside an `interface` (or `world`). That
-# was latent while slice-3 only crossed `Str` (no named type is ever emitted for
-# a Str-only signature); it surfaces here the moment a record/variant crosses.
-# We cannot touch the frontend exporter (src/revl/*), so we relocate those
-# declarations into the interface body for the WIT the component embeds — a
-# pure syntactic fix that keeps the interface's shape byte-for-byte and makes
-# the document parseable. (The frontend bug is flagged separately.)
-_WIT_TYPE_KW = _re.compile(r"^(record|variant|enum|flags|type)\b")
-
-
-def _relocate_types_into_interface(wit: str, iface: str) -> str:
-    """Move any top-level `record`/`variant`/`enum` lines into `interface iface`
-    so the emitted WIT is valid. No-op when the exporter emitted none (the
-    Str-only path)."""
-    lines = wit.split("\n")
-    decls: list[str] = []
-    kept: list[str] = []
-    depth = 0
-    for line in lines:
-        stripped = line.strip()
-        # only relocate declarations that sit OUTSIDE any brace block
-        if depth == 0 and _WIT_TYPE_KW.match(stripped):
-            decls.append("  " + stripped)
-            continue
-        kept.append(line)
-        depth += line.count("{") - line.count("}")
-    if not decls:
-        return wit
-    out: list[str] = []
-    for line in kept:
-        out.append(line)
-        if _re.match(rf"^interface {_re.escape(iface)} \{{\s*$", line.strip()):
-            out.extend(decls)
-    # collapse the blank line the relocation may have left where the decls were
-    text = "\n".join(out)
-    return _re.sub(r"\n\n\n+", "\n\n", text)
-
 
 class _Cursor:
     def __init__(self, items: list[tuple[str, str]]) -> None:
@@ -877,8 +838,11 @@ def _assemble(*, service: str, methods: dict, types: dict, core_wat: str,
     iface = _kebab_type(service)
     synthetic = {"services": {service: {"methods": methods}},
                  "types": types, "externs": []}
-    interface_wit = _relocate_types_into_interface(
-        export_wit(synthetic, service=service, package=package), iface)
+    # `export_wit` (slice-1) already emits any referenced named type
+    # (`record`/`variant`/`enum`) INSIDE the interface body — valid WIT — since
+    # item 97 (ec97d07). The component embeds its output directly; no
+    # relocation is needed.
+    interface_wit = export_wit(synthetic, service=service, package=package)
     world_name = f"{iface}-component"
     wit = (
         interface_wit.rstrip()

@@ -3396,6 +3396,14 @@ class _V3Emitter:
         if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
             raise EmitError(f"{where}: length is only lowerable for Str/Bytes/List")
         target = self._expr(node.get("target"), scope, where, target_ty)
+        # Mirror the `.length()` method path (`_builtin_expr`): a `Str` counts
+        # code points by decoding UTF-8 (docs/strings.md), never the raw u32
+        # byte-length prefix. `Bytes`/`List` count elements, which *is* the
+        # prefix. The property form `x.length` reaches here as a `len` node, so
+        # it must make the same distinction the method form does — otherwise a
+        # multibyte Str literal folds to its byte count (item 104).
+        if target_ty == "Str":
+            return _E(f"(i64.extend_i32_u (call $str_cp_length {target.wat}))", "Int")
         return _E(f"(i64.extend_i32_u (i32.load {target.wat}))", "Int")
 
     def _if_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
