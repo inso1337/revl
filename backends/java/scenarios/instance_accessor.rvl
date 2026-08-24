@@ -1,0 +1,40 @@
+// Instance accessor (`s.<key>`) scenario for the cordis4j (Java) tier
+// (docs/design-v2-instances.md "Instance accessor — frozen").
+//
+// Each Worker provides `counter` into its own fresh local realm. WorkerA's
+// `value()` returns 7, WorkerB's returns 9, so the two spawned instances are
+// distinguishable *through their handles*. The Supervisor spawns w1 (WorkerA)
+// and w2 (WorkerB) and exposes `read_a`/`read_b`, each reading its own worker's
+// `counter` back through the handle it alone holds — the positive
+// supervision-tree direction: `read_a` returns 7 (w1's provision), `read_b`
+// returns 9 (w2's), proving each handle resolves ITS OWN instance's realm and
+// not the other's. The root cannot resolve `counter` at all (each worker
+// isolated its own realm), the negative direction.
+
+service Counter { fn value() -> Int }
+
+service Reader {
+  fn read_a() -> Int
+  fn read_b() -> Int
+}
+
+component WorkerA provides counter: Counter {
+  provide counter {
+    fn value() = 7
+  }
+}
+
+component WorkerB provides counter: Counter {
+  provide counter {
+    fn value() = 9
+  }
+}
+
+component Supervisor provides reader: Reader {
+  let w1 = effect spawn WorkerA undo w1.dispose()
+  let w2 = effect spawn WorkerB undo w2.dispose()
+  provide reader {
+    fn read_a() = w1.counter.value()
+    fn read_b() = w2.counter.value()
+  }
+}
