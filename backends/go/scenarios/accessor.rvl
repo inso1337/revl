@@ -1,0 +1,28 @@
+// Instance-accessor scenario for the cordis-go tier
+// (docs/design-v2-instances.md, "Instance accessor — frozen"). Phase 1's
+// spawn handle exposed only `.dispose()`; `s.<key>` closes property (d)'s
+// positive direction — a spawner reading a provision back from its OWN
+// instance, gated to the handle it alone holds. App spawns two Cell instances
+// of the SAME template (ids 1 and 2), each providing `counter` in its own
+// fresh local realm, and reads each back through the handle it holds:
+// `read_a` must be 1 and `read_b` must be 2 (a read that crossed handles or
+// realms would return the wrong number). gen_exec_test.go proves the positive
+// and the negative (the root cannot resolve `counter`) by RUNNING on stc-go.
+service Counter { fn value() -> Int }
+service Reader { fn read_a() -> Int fn read_b() -> Int }
+
+component Cell provides counter: Counter {
+  config { id: Int }
+  provide counter {
+    fn value() = config.id
+  }
+}
+
+component App provides reader: Reader {
+  let a = effect spawn Cell with { id: 1 } undo a.dispose()
+  let b = effect spawn Cell with { id: 2 } undo b.dispose()
+  provide reader {
+    fn read_a() = a.counter.value()
+    fn read_b() = b.counter.value()
+  }
+}

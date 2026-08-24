@@ -513,3 +513,30 @@ sampled.
   fine; `o?.name`, `o?.name ?? d` and a `match` unwrap all stay accepted;
   `xs[0]`, `s.charAt(0)` and a `_` arm stay accepted). A soundness check with
   no false-positive test is a check nobody can safely tighten later.
+
+## Record updates on receivers with no named type (unchecked)
+
+`{ r | f = e }` is field-checked only when `r`'s type is *known*: a declared
+record parameter, a named binding, or a value read from a typed position. A
+receiver whose type the checker cannot recover — in practice, a `let`-bound
+**anonymous record literal** (`let a = { h: "x" }`) — has no name to look up,
+so the update's field names and value types are **not checked**, and neither
+are later reads through the binding. Verified trigger:
+
+```rvl,accept
+type C = { h: Str }
+fn main() -> Int {
+  let a = { h: "x" }
+  let b = { a | h = 5 }   // Int into a Str-shaped record: compiles
+  assert b.h == 5
+  return 0
+}
+```
+
+Blast radius: wrong-answer-class, local to records built and consumed as
+anonymous literals; any flow through a *declared* boundary (parameter,
+service method, annotated let) recovers checking immediately. Closing it
+means giving anonymous record literals real structural types that unify
+with nominal records at declared boundaries — a language-design item (the
+same shape as roadmap item 11's widening marker), not a patch. Filed for
+the roadmap; this entry is its fence.

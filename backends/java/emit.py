@@ -1271,7 +1271,41 @@ def _expr(
     if kind == "spawn":
         return _v3_spawn(node, ctx, rename, env)
 
+    if kind == "instance-get":
+        return _v3_instance_get(node, ctx, rename, env)
+
     raise EmitError(f"unsupported v3 expression kind {kind!r}")
+
+
+def _v3_instance_get(
+    node: dict,
+    ctx: _V3Ctx,
+    rename: dict[str, str] | None,
+    env: "_Env | None",
+) -> str:
+    """Lower the instance accessor `s.<key>` (docs/design-v2-instances.md,
+    "Instance accessor — frozen").
+
+    `target` is a name bound to a `spawn` handle (`RevlSpawnHandle`); `key` is a
+    key the spawned component provides. The matching `spawn` isolated that key's
+    service into the instance's OWN private local realm (a fork()-isolated child
+    `Context`, per-spawn-unique label), and the handle stored that child context.
+    Resolving through it — `<handle>.get(<Svc>.class)` — yields THAT instance's
+    provision and no other's: only the spawner holding this handle reaches it,
+    so a sibling instance (a different realm) and the root cannot
+    (supervision-tree addressing). `service` is frozen inline on the node (the
+    typing rule's result), so this tier never re-derives it — mirroring how
+    `_v3_spawn` reads the realm services and the cordis-py reference
+    (backends/python/emit.py + runtime.py `SpawnHandle.get`).
+    """
+    target = _expr(node.get("target"), ctx, rename, env)
+    key = node.get("key")
+    if not isinstance(key, str) or not key.isidentifier():
+        raise EmitError(f"bad instance-get key {key!r}")
+    service = node.get("service")
+    if not isinstance(service, str) or not service.isidentifier():
+        raise EmitError(f"bad instance-get service {service!r}")
+    return f"{target}.get({_ident(service, 'service')}.class)"
 
 
 def _v3_spawn(
@@ -2754,9 +2788,33 @@ def _uses_spawn(ir: dict) -> bool:
     return walk(ir.get("components"))
 
 
-def _emit_spawn_handle() -> list[str]:
+def _uses_instance_get(ir: dict) -> bool:
+    """True when any component body reads a provision back off a spawn handle
+    (`instance-get`, the instance accessor `s.<key>`). It gates the extra
+    context-holding capability on `RevlSpawnHandle`: a spawn-only document keeps
+    the pre-accessor handle verbatim, so its output stays byte-identical (the
+    accessor is a strict superset added only where a document uses it)."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("kind") == "instance-get":
+                return True
+            return any(walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(walk(value) for value in node)
+        return False
+
+    return walk(ir.get("components"))
+
+
+def _emit_spawn_handle(with_get: bool = False) -> list[str]:
     """The value a `spawn` acquisition binds: a live component instance
     (docs/design-v2-instances.md, phase 1), reclaimed by its own `dispose()`.
+
+    When `with_get` (the document uses the instance accessor `s.<key>`), the
+    handle also stores the instance's fork()-isolated child `Context` and
+    exposes `get(<Svc>.class)`, which resolves a provision through THAT realm —
+    the runtime side of `instance-get`. It is gated so a spawn-only document
+    keeps the original handle byte-for-byte.
 
     `spawn` plugs the target template as a CHILD instance of the spawner: each
     key it provides is isolated into a FRESH LOCAL realm (a per-spawn-unique
@@ -2770,16 +2828,33 @@ def _emit_spawn_handle() -> list[str]:
     spawner's own `undo` inverse — and the parent scope's safety net that stops
     an un-disposed instance outliving its spawner — are harmless no-ops once the
     instance is already gone."""
-    return [
+    lines = [
         "/** A live spawned-component instance (docs/design-v2-instances.md). */",
         "static final class RevlSpawnHandle {",
         "    private static final java.util.concurrent.atomic.AtomicLong SPAWN_SEQ =",
         "        new java.util.concurrent.atomic.AtomicLong();",
         "    private final java.util.concurrent.atomic.AtomicReference<Disposable> instance;",
-        "",
-        "    private RevlSpawnHandle(Disposable instance) {",
-        "        this.instance = new java.util.concurrent.atomic.AtomicReference<>(instance);",
-        "    }",
+    ]
+    if with_get:
+        lines += [
+            "    // The instance's fork()-isolated child context — the realm each",
+            "    // provided key was isolated into. The accessor `s.<key>` resolves",
+            "    // a provision back through it (supervision-tree addressing).",
+            "    private final Context ctx;",
+            "",
+            "    private RevlSpawnHandle(Disposable instance, Context ctx) {",
+            "        this.instance = new java.util.concurrent.atomic.AtomicReference<>(instance);",
+            "        this.ctx = ctx;",
+            "    }",
+        ]
+    else:
+        lines += [
+            "",
+            "    private RevlSpawnHandle(Disposable instance) {",
+            "        this.instance = new java.util.concurrent.atomic.AtomicReference<>(instance);",
+            "    }",
+        ]
+    lines += [
         "",
         "    /** Plug `plugin` as a child instance: each provided service is",
         "     * isolated into a fresh local realm (a per-spawn-unique label, so",
@@ -2791,7 +2866,16 @@ def _emit_spawn_handle() -> list[str]:
         "        for (Class<?> service : realms) {",
         "            child = child.isolate(service, realm);",
         "        }",
-        "        return new RevlSpawnHandle(plugin.apply(child));",
+    ]
+    if with_get:
+        lines += [
+            "        return new RevlSpawnHandle(plugin.apply(child), child);",
+        ]
+    else:
+        lines += [
+            "        return new RevlSpawnHandle(plugin.apply(child));",
+        ]
+    lines += [
         "    }",
         "",
         "    /** Reclaim the instance now — run its own LIFO teardown. Idempotent. */",
@@ -2802,9 +2886,23 @@ def _emit_spawn_handle() -> list[str]:
         "        }",
         "        return 0L;",
         "    }",
+    ]
+    if with_get:
+        lines += [
+            "",
+            "    /** Read a provision the instance published, in ITS local realm:",
+            "     * `s.<key>` -> `get(<Svc>.class)`. Only the spawner holding this",
+            "     * handle reaches it — a sibling (a different realm) and the root",
+            "     * cannot (supervision-tree addressing, docs/design-v2-instances.md). */",
+            "    <T> T get(Class<T> service) {",
+            "        return ctx.get(service);",
+            "    }",
+        ]
+    lines += [
         "}",
         "",
     ]
+    return lines
 
 
 def _emit_v3(ir: dict, package_name: str) -> str:
@@ -2848,7 +2946,8 @@ def _emit_v3(ir: dict, package_name: str) -> str:
     if tests:
         out.extend(["    " + line if line else line for line in _emit_v3_tests(tests, types, functions, externs)])
     if _uses_spawn(ir):
-        out.extend(["    " + line if line else line for line in _emit_spawn_handle()])
+        out.extend(["    " + line if line else line
+                    for line in _emit_spawn_handle(with_get=_uses_instance_get(ir))])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
             component, services, types, functions, externs, components,

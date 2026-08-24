@@ -1826,6 +1826,9 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
     if kind == "spawn":
         return _v3_spawn(node, ctx, rename)
 
+    if kind == "instance-get":
+        return _v3_instance_get(node, ctx, rename)
+
     raise EmitError(f"unsupported expression kind {kind!r} in Rust backend")
 
 
@@ -1869,6 +1872,40 @@ def _v3_spawn(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
         "RevlSpawnHandle::new(__revl_fiber, __revl_sctx) }"
     )
 
+
+def _v3_instance_get(node: dict, ctx: _V3Ctx, rename: dict[str, str]) -> str:
+    """Lower the instance accessor `s.<key>` (docs/design-v2-instances.md).
+
+    `s : Instance[C]` is a name bound to a `spawn` handle — the emitted
+    `RevlSpawnHandle`, which stored the child's own isolated context (the same
+    LOCAL realm the matching `spawn` isolated the provided key into). Reading
+    `s.<key>` resolves `key` through THAT context, yielding this instance's
+    provision and no other's: `RevlSpawnHandle::get` delegates to
+    `Context::get_unchecked` (cordis-rs-0.3.0/src/context.rs:358), the
+    realm-scoped read. Provisions are stored as `Box<dyn Service>` (the same
+    boxing `ctx.provide`/`ctx.require` use), so the type argument mirrors a
+    `require`, and the returned `Arc<Box<dyn Service>>` is directly method-
+    callable — `s.<key>.method(..)` is the enclosing `call`/`field` node.
+
+    Supervision-tree addressing holds because only the handle holder reaches
+    that context: a sibling isolated into a different local realm, and the
+    root, resolve `None` (the negative the scenario proves). `service` is the
+    frozen inline typing result, so no re-derivation here. The two `expect`s
+    are the crash-only contract for a read the frontend already proved sound —
+    `key` is a provision of `C` (else a compile error, never emitted) and the
+    instance is live when its spawner reads it."""
+    handle = _render_expr(node.get("target"), ctx, rename)
+    service = node.get("service")
+    if not isinstance(service, str) or not service:
+        raise EmitError(f"instance-get: bad frozen service type {service!r}")
+    key = node.get("key")
+    if not isinstance(key, str) or not key.isidentifier():
+        raise EmitError(f"instance-get: bad key {key!r}")
+    return (
+        f"{handle}.get::<Box<dyn {service}>>({_string(key)})"
+        '.expect("revl: instance-get resolution failed")'
+        '.expect("revl: instance provision absent")'
+    )
 
 
 # The total, value-returning division forms (docs/arithmetic.md): same
