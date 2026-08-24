@@ -159,13 +159,14 @@ def test_user_cache_golden_byte_equality():
 def test_host_objects_are_real_java_runtime_classes():
     src = emit.emit(_ir("user_cache"))
     assert "UnsupportedOperationException" not in src
-    assert "private final java.util.HashMap<String, String> values = new java.util.HashMap<>();" in src
+    # FR-4: the host Map is generic over its value type (learned per site).
+    assert "private final java.util.HashMap<String, V> values = new java.util.HashMap<>();" in src
     # `new` is a Java reserved word — the constructor must be renamed.
-    assert "public static Map create()" in src
+    assert "public static <V> Map<V> create()" in src
     assert "static Map new()" not in src
     assert "Map.new()" not in src.replace("`Map.new()`", "")
-    assert "public void insert(String key, String value)" in src
-    assert "public java.util.Optional<String> get(String key)" in src
+    assert "public void insert(String key, V value)" in src
+    assert "public java.util.Optional<V> get(String key)" in src
     assert "public static Pool open(String url, long poolSize)" in src
     assert "return java.util.List.of();" in src
     # Pool.execute reports rows-affected; 1 matches python/TS/rust (the
@@ -226,7 +227,7 @@ def test_component_if_setup_and_fail_emit_real_java():
     )
     src = emit.emit(ir)
     assert "import io.cordis4j.core.CordisException;" in src
-    assert "var scratch = Map.create();" in src
+    assert "Map<String> scratch = Map.create();" in src
     assert "if ((replicas < 1L))" in src
     assert 'throw new CordisException(String.valueOf("at least one replica required"));' in src
     assert 'final var url = "postgres://db";' in src
@@ -971,3 +972,186 @@ def test_map_value_type_lowers_to_persistent_hashmaps():
 @pytest.mark.skipif(JAVAC is None, reason="no working javac")
 def test_javac_compiles_the_map_value_type(tmp_path):
     _javac_compile(tmp_path, emit.emit(compile_source(MAP_SRC + STDLIB_SRC)))
+
+
+# --------------------------------------------------------------------------
+# FR-4 (FEATURE-REQUESTS.md FR-4 / docs/v2.0-roadmap.md item 77(c)) — non-
+# String values in the HOST Map. The session ledger (`Map[Str, List[Msg]]`)
+# used to emit a hardcoded `HashMap<String, String>` and fail javac
+# ("incompatible types: List<Msg> cannot be converted to String"); the host
+# Map is now generic over its value type, learned per site from the IR's
+# `insert` calls.
+# --------------------------------------------------------------------------
+
+LEDGER_SRC = """
+type Msg = { role: Str, content: Str }
+service SessionStore {
+  fn load(id: Str) -> List[Msg]
+  emission fn append(id: Str, msg: Msg)
+}
+component SessionLedger provides sessions: SessionStore {
+  let store = effect Map.new() undo store.drop()
+  provide sessions {
+    fn load(id) = store.get(id) ?? []
+    fn append(id, msg) {
+      let prev = store.get(id) ?? []
+      effect store.insert(id, prev.push(msg))
+      undo   store.insert(id, prev)
+    }
+  }
+}
+"""
+
+HOST_MAP_TYPES_SRC = """
+service Counters {
+  fn get(k: Str) -> Int
+  fn put(k: Str, v: Int)
+}
+component Counters provides counters: Counters {
+  let store = effect Map.new() undo store.drop()
+  provide counters {
+    fn get(k) = store.get(k) ?? 0
+    fn put(k, v) { effect store.insert(k, v) undo store.remove(k) }
+  }
+}
+service Tags {
+  fn get(k: Str) -> List[Str]
+  fn put(k: Str, v: List[Str])
+}
+component Tags provides tags: Tags {
+  let store = effect Map.new() undo store.drop()
+  provide tags {
+    fn get(k) = store.get(k) ?? []
+    fn put(k, v) { effect store.insert(k, v) undo store.remove(k) }
+  }
+}
+service Flags {
+  fn get(k: Str) -> Bool
+  fn put(k: Str, v: Bool)
+}
+component Flags provides flags: Flags {
+  let store = effect Map.new() undo store.drop()
+  provide flags {
+    fn get(k) = store.get(k) ?? false
+    fn put(k, v) { effect store.insert(k, v) undo store.remove(k) }
+  }
+}
+"""
+
+RECORD_VALUE_SRC = """
+type Profile = { name: Str, age: Int }
+service ProfileStore {
+  fn get(k: Str) -> Opt[Profile]
+  fn put(k: Str, p: Profile)
+}
+component Profiles provides profiles: ProfileStore {
+  let store = effect Map.new() undo store.drop()
+  provide profiles {
+    fn get(k) = store.get(k)
+    fn put(k, p) { effect store.insert(k, p) undo store.remove(k) }
+  }
+}
+"""
+
+
+def test_ledger_shape_carries_the_map_value_type():
+    """The session-ledger shape: the emitted provider field and constructor
+    pin `Map<java.util.List<Msg>>` (FR-4), the host Map class is generic, and
+    the historical hardcoding is gone."""
+    src = emit.emit(compile_source(LEDGER_SRC))
+    assert "public static final class Map<V>" in src
+    assert "private final java.util.HashMap<String, V> values" in src
+    assert "public void insert(String key, V value)" in src
+    assert "public java.util.Optional<V> get(String key)" in src
+    assert "public static <V> Map<V> create()" in src
+    assert "private final Map<java.util.List<Msg>> store;" in src
+    assert "Map<java.util.List<Msg>> store = Map.create();" in src
+    assert "HashMap<String, String>" not in src
+
+
+def test_int_and_list_map_values_reach_the_emitted_types():
+    src = emit.emit(compile_source(HOST_MAP_TYPES_SRC))
+    assert "private final Map<java.lang.Long> store;" in src
+    assert "private final Map<java.util.List<String>> store;" in src
+    assert "private final Map<java.lang.Boolean> store;" in src
+    assert "Map<java.lang.Long> store = Map.create();" in src
+    assert "Map<java.util.List<String>> store = Map.create();" in src
+    assert "Map<java.lang.Boolean> store = Map.create();" in src
+    src = emit.emit(compile_source(RECORD_VALUE_SRC))
+    assert "private final Map<Profile> store;" in src
+    assert "Map<Profile> store = Map.create();" in src
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_ledger_shaped_map_component(tmp_path):
+    """The FR-4 exit criterion: the harness's core state shape (session ledger
+    `Map[Str, List[Msg]]`, Msg a record) COMPILES on the java tier."""
+    _javac_compile(tmp_path, emit.emit(compile_source(LEDGER_SRC)))
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_int_bool_and_list_map_values(tmp_path):
+    """Map[Str, Int], Map[Str, Bool] and Map[Str, List[Str]] host maps."""
+    _javac_compile(tmp_path, emit.emit(compile_source(HOST_MAP_TYPES_SRC)))
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_record_map_value(tmp_path):
+    """A record value type (`Map[Str, Profile]`) — the ledger's Msg minus the
+    List wrapper."""
+    _javac_compile(tmp_path, emit.emit(compile_source(RECORD_VALUE_SRC)))
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_runs_non_string_map_values_on_the_stub_runtime(tmp_path):
+    """Runtime proof, not just a compile: a Map[Str, Int] and a Map[Str,
+    List[Str]] host map are driven through the stub reference runtime —
+    insert/get round-trip non-String values, absent keys fall back, and
+    teardown leaves nothing behind (the no-residue shape)."""
+    out = _javac_compile(tmp_path, emit.emit(compile_source(HOST_MAP_TYPES_SRC)))
+    runner = tmp_path / "RunHostMaps.java"
+    runner.write_text(
+        "public class RunHostMaps {\n"
+        "    public static void main(String[] args) throws Exception {\n"
+        "        io.cordis4j.core.Context ctx = new io.cordis4j.core.Context();\n"
+        "        var d = new revl.Components.CountersPlugin().apply(ctx);\n"
+        "        revl.Components.Counters c = ctx.get(revl.Components.Counters.class);\n"
+        "        c.put(\"a\", 7L);\n"
+        "        if (c.get(\"a\") != 7L) {\n"
+        "            System.err.println(\"Map[Str, Int] round-trip failed\");\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        if (c.get(\"missing\") != 0L) {\n"
+        "            System.err.println(\"Map[Str, Int] absent-key fallback failed\");\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        d.dispose();\n"
+        "        ctx = new io.cordis4j.core.Context();\n"
+        "        d = new revl.Components.TagsPlugin().apply(ctx);\n"
+        "        revl.Components.Tags t = ctx.get(revl.Components.Tags.class);\n"
+        "        t.put(\"t\", java.util.List.of(\"x\", \"y\"));\n"
+        "        if (!t.get(\"t\").equals(java.util.List.of(\"x\", \"y\"))) {\n"
+        "            System.err.println(\"Map[Str, List[Str]] round-trip failed\");\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        if (!t.get(\"none\").isEmpty()) {\n"
+        "            System.err.println(\"Map[Str, List[Str]] absent-key fallback failed\");\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        d.dispose();\n"
+        "        System.out.println(\"HOST_MAPS_OK\");\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    compile_runner = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_runner.returncode == 0, compile_runner.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "RunHostMaps"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "HOST_MAPS_OK" in run.stdout
