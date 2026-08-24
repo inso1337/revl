@@ -90,6 +90,80 @@ def test_object_literal_provide_shape_is_recovered():
                                            {"name": "at", "type": "Float"}]
 
 
+# ------------------------------ DSH's real plugin shapes (roadmap item 116)
+
+def test_service_subclass_via_a_non_service_base_is_recovered():
+    """(a) A `Service` subclass reached through a project-local base class
+    (`class Sessions extends BaseStore`, `BaseStore extends Service`) is
+    recovered through the real base chain, not just a literal `extends Service`."""
+    source = import_cordis_file(str(FIXTURES / "subclassed.ts"))
+    assert "class Sessions extends BaseStore (a Service subclass via BaseStore)" in source
+    ir = compile_source(source, "subclassed.rvl")
+    methods = _methods(ir, "Sessions")
+    # the subclass's own operation is present ...
+    assert methods["lookup"]["params"] == [{"name": "id", "type": "Str"}]
+    assert methods["lookup"]["returns"] == "Opt[Str]"
+    # ... and a public method inherited from the local base class is merged in
+    assert methods["size"]["returns"] == "Int"
+    assert ir["components"][0]["provides"] == {"sessions": "Sessions"}
+
+
+def test_decorated_methods_are_recognized_as_operations():
+    """(b) A method carrying decorators (`@cache`, `@throttle(100)`, `@audit.log`)
+    is still recognized: the decorator is skipped to reach the underlying `def`,
+    and no phantom operation is minted from the decorator name."""
+    source = import_cordis_file(str(FIXTURES / "decorated.ts"))
+    ir = compile_source(source, "decorated.rvl")
+    methods = _methods(ir, "Metrics")
+    assert set(methods) == {"read", "record"}          # not `cache`/`throttle`/…
+    assert methods["record"]["params"] == [{"name": "key", "type": "Str"},
+                                           {"name": "value", "type": "Int"}]
+    # a `@revl:pure` JSDoc above a decorated method still reaches the method
+    assert "plain by assertion: `@revl:pure`" in source
+    assert methods["read"]["emission"] is False
+    assert _extern_classes(ir)["cordis_metrics_read"] == "pure"
+
+
+def test_named_record_from_a_local_import_is_transcribed():
+    """(c) A record/interface type defined in another local module and imported
+    is followed and transcribed as a revl `type` — including a record it nests
+    from a further module — instead of the nominal type being refused."""
+    source = import_cordis_file(str(FIXTURES / "records.ts"))
+    # both the directly-referenced record and the one it nests are declared,
+    # dependency-first so the file compiles as-is
+    assert "type GeoPoint = { lat: Float, lng: Float }" in source
+    assert source.index("type GeoPoint") < source.index("type UserRecord")
+    ir = compile_source(source, "records.rvl")
+    assert set(ir["types"]) == {"GeoPoint", "UserRecord"}
+    fields = ir["types"]["UserRecord"]["fields"]
+    assert fields["display_name"] == "Str"             # camelCase -> snake_case
+    assert fields["home"] == "Opt[GeoPoint]"           # optional nested record
+    assert fields["tags"] == "List[Str]"
+    methods = _methods(ir, "Directory")
+    assert methods["register"]["params"] == [{"name": "user", "type": "UserRecord"}]
+    # the `UserId = string` alias resolves inline (revl has no type alias)
+    assert methods["lookup"]["params"] == [{"name": "id", "type": "Str"}]
+    assert methods["lookup"]["returns"] == "Opt[UserRecord]"
+    assert "record type `UserRecord` transcribed from" in source
+
+
+def test_a_nominal_type_with_no_local_definition_is_still_refused():
+    """The record-following of (c) does not weaken the refusal: a nominal type
+    that is neither defined in the file nor reachable through a *local* import
+    (here a bare name, and a name imported from a package) is still refused."""
+    plugin = """
+    import { Widget } from 'some-package'
+    export const provide = 'x'
+    export class X extends Service {
+      constructor(ctx) { super(ctx, 'x') }
+      draw(w: Widget): void {}
+    }
+    """
+    with pytest.raises(RevlError) as excinfo:
+        import_cordis(plugin, filename="x.ts")
+    assert "nominal type `Widget` is not defined in this file" in str(excinfo.value)
+
+
 # --------------------------------------------------------- the emission rule
 
 def test_untyped_ts_defaults_every_operation_to_emission():
