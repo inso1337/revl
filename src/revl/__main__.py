@@ -1570,6 +1570,22 @@ def main(argv: list[str] | None = None) -> int:
                 surface = (f"emissions: {', '.join(emissions)}"
                            if emissions else "no emissions")
                 print(f"  {name} × dynamic  ({surface})")
+        instances = manifest.get("instances") or []
+        if instances:
+            # Capability attenuation per instance (item 66,
+            # docs/capability-attenuation.md): the spawner → child narrowing.
+            # A child's granted set is a checked subset of what the spawner
+            # holds; `attenuated` is the authority dropped on the way down —
+            # the least-authority proof, per lineage edge.
+            print("\ncapability attenuation (per instance — lineage narrows, "
+                  "never widens):")
+            for edge in instances:
+                holds = ", ".join(edge.get("holds") or []) or "—"
+                granted = ", ".join(edge.get("granted") or []) or "—"
+                dropped = ", ".join(edge.get("attenuated") or [])
+                tail = f"  (dropped: {dropped})" if dropped else ""
+                print(f"  {edge['parent']} → {edge['child']}: "
+                      f"holds [{holds}] ⊇ grants [{granted}]{tail}")
         if declared_externs:
             print("\nexterns (verbatim host code — unchecked inside, typed at the boundary):")
             for ext in declared_externs:
