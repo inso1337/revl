@@ -1,0 +1,506 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Model": {
+      "methods": {
+        "complete": {
+          "params": [
+            {
+              "name": "h",
+              "type": "List[Str]"
+            }
+          ],
+          "returns": "Str",
+          "emission": true
+        }
+      }
+    },
+    "Loop": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            }
+          ],
+          "returns": "Step",
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "<string>",
+      "config": [
+        {
+          "name": "max_steps",
+          "type": "Int",
+          "default": 8
+        }
+      ],
+      "requires": {
+        "model": "Model"
+      },
+      "provides": {
+        "agent": "Loop"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "agent",
+          "service": "Loop",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "session_id"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "msgs",
+                  "value": {
+                    "kind": "list",
+                    "items": [
+                      {
+                        "kind": "lit",
+                        "value": "prompt"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "run_loop",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msgs"
+                      },
+                      {
+                        "kind": "arrow",
+                        "params": [
+                          "msgs2"
+                        ],
+                        "captures": [],
+                        "body": {
+                          "kind": "fn",
+                          "name": "decode_response",
+                          "args": [
+                            {
+                              "kind": "call",
+                              "target": {
+                                "kind": "req",
+                                "name": "model"
+                              },
+                              "method": "complete",
+                              "args": [
+                                {
+                                  "kind": "name",
+                                  "id": "msgs2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "kind": "config",
+                        "field": "max_steps"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "<string>",
+        "inject": [
+          "model"
+        ],
+        "provides": [
+          "agent"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent"
+    ]
+  },
+  "types": {
+    "ToolReq": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "name": "Str",
+        "args": "Str"
+      }
+    },
+    "Step": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Final",
+          "payload": "Str"
+        },
+        {
+          "name": "NeedTool",
+          "payload": "ToolReq"
+        }
+      ]
+    }
+  },
+  "functions": [
+    {
+      "name": "decode_response",
+      "params": [
+        {
+          "name": "resp",
+          "type": "Str"
+        }
+      ],
+      "returns": "Step",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "builtin",
+              "method": "slice",
+              "target": {
+                "kind": "var",
+                "name": "resp"
+              },
+              "args": [
+                {
+                  "kind": "lit",
+                  "value": 0
+                },
+                {
+                  "kind": "lit",
+                  "value": 6
+                }
+              ]
+            },
+            "right": {
+              "kind": "lit",
+              "value": "FINAL "
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Step",
+                "case": "Final",
+                "args": [
+                  {
+                    "kind": "builtin",
+                    "method": "slice",
+                    "target": {
+                      "kind": "var",
+                      "name": "resp"
+                    },
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": 6
+                      },
+                      {
+                        "kind": "builtin",
+                        "method": "length",
+                        "target": {
+                          "kind": "var",
+                          "name": "resp"
+                        },
+                        "args": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "adt",
+            "type": "Step",
+            "case": "NeedTool",
+            "args": [
+              {
+                "kind": "record",
+                "fields": [
+                  [
+                    "name",
+                    {
+                      "kind": "builtin",
+                      "method": "slice",
+                      "target": {
+                        "kind": "var",
+                        "name": "resp"
+                      },
+                      "args": [
+                        {
+                          "kind": "lit",
+                          "value": 0
+                        },
+                        {
+                          "kind": "lit",
+                          "value": 10
+                        }
+                      ]
+                    }
+                  ],
+                  [
+                    "args",
+                    {
+                      "kind": "lit",
+                      "value": ""
+                    }
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "run_loop",
+      "params": [
+        {
+          "name": "msgs",
+          "type": "List[Str]"
+        },
+        {
+          "name": "step",
+          "type": "(List[Str]) -> Step"
+        },
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Step",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "<=",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Step",
+                "case": "Final",
+                "args": [
+                  {
+                    "kind": "lit",
+                    "value": "max_steps exhausted"
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "step"
+              },
+              "args": [
+                {
+                  "kind": "var",
+                  "name": "msgs"
+                }
+              ]
+            },
+            "arms": [
+              {
+                "pattern": "Final",
+                "bind": "answer",
+                "body": {
+                  "kind": "adt",
+                  "type": "Step",
+                  "case": "Final",
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "answer"
+                    }
+                  ]
+                },
+                "payload_type": "Str"
+              },
+              {
+                "pattern": "NeedTool",
+                "bind": "req",
+                "body": {
+                  "kind": "call",
+                  "callee": {
+                    "kind": "var",
+                    "name": "run_loop"
+                  },
+                  "args": [
+                    {
+                      "kind": "builtin",
+                      "method": "push",
+                      "target": {
+                        "kind": "var",
+                        "name": "msgs"
+                      },
+                      "args": [
+                        {
+                          "kind": "field",
+                          "target": {
+                            "kind": "var",
+                            "name": "req"
+                          },
+                          "name": "name"
+                        }
+                      ]
+                    },
+                    {
+                      "kind": "var",
+                      "name": "step"
+                    },
+                    {
+                      "kind": "bin",
+                      "op": "-",
+                      "left": {
+                        "kind": "var",
+                        "name": "n"
+                      },
+                      "right": {
+                        "kind": "lit",
+                        "value": 1
+                      },
+                      "operands": "Int"
+                    }
+                  ]
+                },
+                "payload_type": "ToolReq"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "captured",
+      "params": [],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "n",
+          "value": {
+            "kind": "lit",
+            "value": 1
+          },
+          "mutable": true
+        },
+        {
+          "step": "let",
+          "name": "f",
+          "value": {
+            "kind": "arrow",
+            "params": [
+              "x"
+            ],
+            "captures": [
+              "n"
+            ],
+            "body": {
+              "kind": "bin",
+              "op": "+",
+              "left": {
+                "kind": "var",
+                "name": "x"
+              },
+              "right": {
+                "kind": "var",
+                "name": "n"
+              }
+            }
+          },
+          "mutable": false
+        },
+        {
+          "step": "assign",
+          "name": "n",
+          "value": {
+            "kind": "bin",
+            "op": "+",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 10
+            },
+            "operands": "Int"
+          }
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "f"
+            },
+            "args": [
+              {
+                "kind": "lit",
+                "value": 5
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
