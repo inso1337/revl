@@ -2587,18 +2587,27 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # a component consuming a Result should not have to call out to a fn
         scrutinee = _lower_component_pure_expr(expr.scrutinee, env, scope,
                                                callables, pure_only)
+        scrutinee_type = _expr_static_type(expr.scrutinee, env.type_env, env.types)
         _check_match_exhaustiveness(expr, env.type_env, env.types, filename)
         arms = []
         for pattern, bind, body in expr.arms:
             inner = dict(scope)
+            payload_type = _arm_payload_type(scrutinee_type, pattern, env.types)
             if bind is not None:
                 safe = _safe_name(bind, set(scope.values()))
                 inner[bind] = safe
-            arms.append({
+            arm = {
                 "pattern": pattern,
                 "bind": inner.get(bind) if bind is not None else None,
                 "body": _lower_component_pure_expr(body, env, inner, callables, pure_only),
-            })
+            }
+            # the payload type a match arm binds, when the scrutinee's static
+            # type is recoverable — the same key the pure-fn lowering
+            # (`_lower_pure_expr`) writes, so a backend that must cast (java's
+            # tagged Result) can do so in component/method bodies too
+            if payload_type is not None:
+                arm["payload_type"] = payload_type
+            arms.append(arm)
         return {"kind": "match", "scrutinee": scrutinee, "arms": arms}
     if isinstance(expr, ExprLit):
         if expr.value is None:
