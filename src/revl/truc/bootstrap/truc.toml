@@ -1,0 +1,39 @@
+# truc-as-a-truc-project — the bootstrap fixpoint (slice S5).
+#
+# This manifest expresses *truc itself* as a truc project: its own eight
+# components are the assembly. Running `truc assemble` on this project admits
+# every one of truc's components through revl's own G2/G4 gate — the same gate
+# truc runs on every other assembly — and composes them into truc's running
+# composition. The dogfood punchline: truc manages itself, admitted by the gate
+# it admits everyone else with (docs/design/truc-architecture.md §7, Stage 1).
+#
+# The eight components cross-import by relative `use` (assembler.rvl imports the
+# Plan service from planner.rvl; workspace.rvl imports the externs), so they are
+# named here as the project's own `[assembly].entry` — in place, where those
+# relative imports resolve — rather than vendored one-per-dir under trucs/. That
+# is faithful to what a truc project is: entry is the composition you author,
+# trucs/ is what you fetch. truc authors truc, so truc *is* the entry.
+#
+# entry paths are relative to truc's package root (src/revl/truc/); the bootstrap
+# test anchors them to the live checkout. The registry is referenced but unused
+# here — this assembly fetches nothing ([trucs] is empty); it admits and composes
+# what truc already is. The regenerate-or-red pin is bootstrap/assembly.golden.json:
+# if this self-assembly ever drifts from that committed composition, CI goes red.
+
+[assembly]
+name = "truc"
+entry = [
+  "components/registry_client.rvl",  # rim  — index: Index
+  "components/fetcher.rvl",           # rim  — fetch: Fetch
+  "components/gatekeeper.rvl",        # rim  — gate: Gate
+  "components/workspace.rvl",         # rim  — ws: Workspace
+  "components/planner.rvl",           # pure — plan: Plan  (the brain; zero authority)
+  "components/assembler.rvl",         # core — asm: Assembler
+  "components/shipper.rvl",           # rim  — ship: Shipper
+  "components/cli.rvl",               # core — cli: Cli
+]
+
+[registries]
+local = { path = "../../../../registry" }
+
+[trucs]
