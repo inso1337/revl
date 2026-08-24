@@ -35,10 +35,62 @@ from typing import Any, Callable, Optional
 __all__ = [
     "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "StateIncompatible",
-    "add_trace", "arm_fault_probe", "disarm_fault_probe", "fmt", "live_instances",
-    "plug", "realm_label", "remove_trace", "resolved_config", "set_trace",
-    "spawn", "trace_observers",
+    "TransientError", "add_trace", "arm_fault_probe", "disarm_fault_probe", "fmt",
+    "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
+    "retry_idempotent", "set_trace", "spawn", "trace_observers",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Delivery semantics (docs/delivery-semantics.md, roadmap item 44)
+# ---------------------------------------------------------------------------
+#
+# The IR promotes idempotency to a checked property: `emission idempotent fn`.
+# Only that promise earns the runtime a new right — to *auto-retry* the
+# emission on a transient failure, because re-delivering it is defined to have
+# the same effect as delivering it once (`f(f(x)) == f(x)` on the server).
+#
+# A host signals "this failure was transient — the emission did not durably
+# land, so re-issuing it is well-defined" by raising `TransientError`. Any
+# other exception is a real error and is never retried. And a `TransientError`
+# from a *non*-idempotent emission is still never retried: without the checked
+# property, a second delivery could double the effect, so the runtime has no
+# right to it. This is the whole point of making idempotency a checked flag.
+
+class TransientError(RuntimeError):
+    """A host-signalled transient delivery failure of an emission.
+
+    Raising this from an emission's host body tells the runtime the emission
+    did not durably land (a dropped connection, a 503, a timeout before the
+    server committed). The runtime retries it *iff* the emission is declared
+    `idempotent`; for any other emission it propagates unchanged.
+    """
+
+
+async def retry_idempotent(call, *, idempotent: bool = False,
+                           attempts: int = 3, where: str = ""):
+    """Invoke ``call`` and, for an idempotent emission, auto-retry a transient
+    failure up to ``attempts`` times.
+
+    ``call`` is a zero-argument callable that performs one delivery; its result
+    is awaited if awaitable. A :class:`TransientError` is retried only when
+    ``idempotent`` is true — a non-idempotent emission gets exactly one attempt
+    and the transient failure propagates. Every non-transient exception
+    propagates immediately, retries or not.
+    """
+    budget = attempts if idempotent else 1
+    last: TransientError | None = None
+    for _ in range(budget):
+        try:
+            result = call()
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except TransientError as exc:  # noqa: PERF203 — retry is the point
+            last = exc
+    # budget exhausted (or a single non-idempotent attempt): re-raise the
+    # transient failure so the caller still sees a failed delivery
+    raise last
 
 
 # ---------------------------------------------------------------------------

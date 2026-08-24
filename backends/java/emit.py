@@ -1834,6 +1834,10 @@ def _emit_service_interfaces(services: dict) -> list[str]:
                 for p in method.get("params") or []
             )
             ret = _java_type(method.get("returns")) if method.get("returns") else "void"
+            if method.get("idempotent"):
+                # delivery semantics (item 44): safe to re-deliver, so the
+                # runtime may auto-retry a transient failure of this emission
+                out.append("    /** idempotent: the runtime may auto-retry a transient failure. */")
             out.append(f"    {ret} {mname}({params});")
         out.append("}")
         out.append("")

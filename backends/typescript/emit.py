@@ -1908,6 +1908,9 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
                 returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
+            if method.get("idempotent"):
+                out.append("  /** idempotent — safe to re-deliver; the runtime may "
+                           "auto-retry a transient failure (item 44) */")
             out.append(f"  {mname}({params}): {returns}")
         out.append("}")
         out.append("")
@@ -1977,6 +1980,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
                 returns = f"Promise<{returns}>"
             if method.get("emission"):
                 out.append("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
+            if method.get("idempotent"):
+                out.append("  /** idempotent — safe to re-deliver; the runtime may "
+                           "auto-retry a transient failure (item 44) */")
             out.append(f"  {mname}({params}): {returns}")
         out.append("}")
         out.append("")

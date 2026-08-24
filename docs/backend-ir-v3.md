@@ -10,7 +10,7 @@ v1-shaped source still emits `ir_version: 1` byte-identically.
 | 2 | realms and interception | all six |
 | 3 | types, pure functions, externs, tests, and the component-body constructs below | all six |
 
-Ground truth is `tools/conformance.py`: it emits 48 constructs through every
+Ground truth is `tools/conformance.py`: it emits 49 constructs through every
 backend and reports what each does. A tier that cannot express something must
 raise a clear `EmitError` naming the limit — never emit wrong code, never
 crash. (`docs/conformance.md` records where that contract has been broken.)
