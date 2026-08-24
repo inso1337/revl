@@ -1,0 +1,64 @@
+// Fixture for tests/test_canary.py — the baseline composition of a verified
+// canary (roadmap item 59). N = 3 tenants, each its own realm (`tenant_a`,
+// `tenant_b`, `tenant_c`), each a store providing `kv` and an app consuming it.
+// Both stores provide `kv`; per-(key, realm) disjointness (G2) makes that
+// legal, and it is exactly why a canary's slice is a realm: a second provider
+// of `kv` can only live in a different realm. A canary designates ONE realm
+// (say `tenant_a`) for a successor generation; the other N-1 are the baseline
+// the revert must leave provably untouched (`survivors`).
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantBStore provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantCStore provides kv: Kv {
+  isolate kv in realm("tenant_c")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantAApp requires kv: Kv {
+  isolate kv in realm("tenant_a")
+  effect kv.set("who", "alice") undo kv.set("who", "")
+}
+
+component TenantBApp requires kv: Kv {
+  isolate kv in realm("tenant_b")
+  effect kv.set("who", "bob") undo kv.set("who", "")
+}
+
+component TenantCApp requires kv: Kv {
+  isolate kv in realm("tenant_c")
+  effect kv.set("who", "carol") undo kv.set("who", "")
+}
