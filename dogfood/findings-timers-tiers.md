@@ -42,3 +42,19 @@ by arrows), and no-lifecycle documents short-circuit without building. The
 cannot be annotated`), so there is no in-language workaround. Ask: a
 value-generic host Map on go (`Map[V]` or `map[string]any` + typed
 accessors), or refuse non-string Map values honestly at emit time.
+
+## Finding #31 — item 101's clone misses the `_Env` provide-method path
+
+Restoring the mtier agent's assistant re-append (the item-95 workaround)
+re-surfaced E0382 on rust: `emit sessions.append(sid, Msg { role: ...,
+content: answer })` then `return answer`. `answer` is a LOCAL (`let`
+binding); `_method_body_lines` clones only PARAMS into the acquire rename
+(`acquire_rename[param] = param.clone()`), never locals, so the record
+field renders bare and moves. Item 101's `_by_value_arg` clones live in the
+`_V3Ctx`/`_render_expr` path (module fns, pure methods) — effectful provide
+methods render through `_Env`/`_method_body_lines`, which the fix did not
+touch. The author's three pinning tests pass (they exercise `_V3Ctx`
+shapes); the mtier re-append — the very shape item 101 was filed for —
+still fails. Ask: clone reused non-Copy locals at the emit/effect acquire
+in the `_Env` path too. Repro: `mtier/agent.rvl` with the re-append
+restored; with the workaround the mtier is green 2/2 on rust.
