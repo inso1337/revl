@@ -1,0 +1,67 @@
+// truc — the G8 host boundary (slice S1).
+//
+// These externs are the *entire* list of things truc can do to the world:
+// run `revl audit` on truc and this is exactly what it enumerates. Every body
+// is a one-line delegation into `revl.truc._host` (first-party Python in this
+// repo, reviewed like any other), so the boundary surface stays readable here
+// and the logic stays testable there. py bodies only in v1 (truc boots
+// in-process on the py tier — src/revl/run.py::_Driver); other tiers gain
+// bodies only if truc is ever wanted standalone-compiled (a non-goal).
+//
+// Capability labelling note (deviation from the design sketch, docs/design/
+// truc-architecture.md §2): the parser accepts `emission[cap]` on *service
+// methods*, not on `extern` declarations (parser.py::extern_decl), and an
+// extern contributes its own name as the capability (docs/capabilities.md
+// §2). truc therefore uses bare `emission` on its boundary — valid, and still
+// fully audited (the rim components carry the emissions, the core/pure ones do
+// not). Capability-scoped labels are a later refinement.
+
+// ---- pure (no observable effect) ----
+
+pub extern pure fn sha256_hex(data: Str) -> Str
+  = @py { from revl.truc._host import sha256_hex; return sha256_hex(data) }
+
+pub extern pure fn json_parse(s: Str) -> Any
+  = @py { import json; return json.loads(s) }
+
+pub extern pure fn json_stringify(v: Any) -> Str
+  = @py { import json; return json.dumps(v) }
+
+pub extern pure fn host_exists(path: Str) -> Bool
+  = @py { from revl.truc._host import exists; return exists(path) }
+
+// ---- registry read path (emission) ----
+
+pub extern emission fn host_index_read(registry: Str) -> Str
+  = @py { from revl.truc._host import index_read; return index_read(registry) }
+
+pub extern emission fn host_index_row(registry: Str, name: Str) -> Str
+  = @py { from revl.truc._host import index_row; return index_row(registry, name) }
+
+pub extern emission fn host_entry_read(registry: Str, name: Str) -> Str
+  = @py { from revl.truc._host import entry_read; return entry_read(registry, name) }
+
+// ---- filesystem (emission; scope = the project dir) ----
+
+pub extern emission fn host_manifest_read(project_dir: Str) -> Str
+  = @py { from revl.truc._host import toml_manifest; return toml_manifest(project_dir) }
+
+pub extern emission fn host_read(path: Str) -> Str
+  = @py { from revl.truc._host import read_file; return read_file(path) }
+
+pub extern emission fn host_read_sources(project_dir: Str, spec: Str) -> Str
+  = @py { from revl.truc._host import read_sources; return read_sources(project_dir, spec) }
+
+pub extern emission fn host_commit_add(project_dir: Str, plan: Str) -> Str
+  = @py { from revl.truc._host import commit_add; return commit_add(project_dir, plan) }
+
+pub extern emission fn host_write_assembly(project_dir: Str, manifest: Str) -> Str
+  = @py { from revl.truc._host import write_assembly; return write_assembly(project_dir, manifest) }
+
+pub extern emission fn host_print(text: Str)
+  = @py { from revl.truc._host import printout; printout(text) }
+
+// ---- THE GATE (emission) ----
+
+pub extern emission fn host_admit_all(ordered_json: Str) -> Str
+  = @py { from revl.truc._host import admit_all; return admit_all(ordered_json) }

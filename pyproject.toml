@@ -11,6 +11,7 @@ test = ["pytest>=8.0", "pytest-asyncio"]
 
 [project.scripts]
 revl = "revl.__main__:main"
+truc = "revl.truc:main"
 
 [build-system]
 requires = ["hatchling"]

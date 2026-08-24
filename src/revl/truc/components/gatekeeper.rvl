@@ -1,0 +1,19 @@
+// GateKeeper (rim) — THE differentiator. `admit` runs a set of in-memory
+// sources through revl's own admission gate (compile_files, in-process). A
+// component that would break the assembly (G2/G3/G4) is refused *here*, with
+// a why-trace, before it ever joins. truc adds no resolution logic of its
+// own — it calls the same gate everything else in the system passes.
+
+use "../externs.rvl" { host_admit_all }
+
+pub service Gate {
+  // Admit an ordered list of {path, source, name} incrementally through the
+  // gate; the verdict names the first candidate that would not join.
+  emission fn admit_all(orderedJson: Str) -> Str
+}
+
+component GateKeeper provides gate: Gate {
+  provide gate {
+    fn admit_all(orderedJson) = emit host_admit_all(orderedJson)
+  }
+}
