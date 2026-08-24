@@ -502,40 +502,38 @@ rejection.
   nullary constructor now types as its ADT, so `match FirstTime { ... }` is
   checked; only genuinely unknown scrutinees are silent.
 
-## G8 audit-surface gaps (fenced, not closed)
+## G8 audit-surface gaps
 
 The G8 boundary surface (`revl audit`, and the `host:`/`emit:` crossing tokens
 `revl audit --diff` gates on) is meant to be the *enumerable* set of host
 reaches — "everything that reaches the host must appear on the audit surface"
-(docs/rejections.md, G8). One enumeration gap is known and fenced here, the way
-the runtime divergences above are; the adversarial suite pins it.
+(docs/rejections.md, G8). One enumeration gap was known and fenced here; it is
+now **RESOLVED** (item 24), and the record is kept for provenance.
 
-- **G8 enumeration is incomplete for first-class host reaches** (found by the
-  gate threat-model program, docs/threat-model.md; pinned
-  `tests/test_adversarial_gate.py::test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface`,
-  `xfail(strict)`). A host `extern` reached **only** through a first-class
-  function value — `indirect(ship, a)` rather than `ship(a)` — does **not**
-  appear in `revl audit`'s per-component `externs` list, so it produces no
-  `host:<component>:<extern>` crossing token. *Trigger:* a bare-`emission`
-  provide-method (declared capability already `*`) whose body hands an emission
-  extern to a dispatcher instead of calling it by name; contrast the direct
-  call, which surfaces `host:C:ship`. *Blast radius:* (a) `revl audit`
-  under-reports the host boundary of that component — a reviewer sees fewer
-  host blocks than run; (b) `revl audit --diff` (the authority-drift gate)
-  cannot detect a widening that adds such a reach, because the added crossing
-  has no token. *What is NOT affected — the compensating control:* the
-  load-bearing G4 defence holds. The operation is still correctly flagged
-  `readOnlyHint: false` / `destructiveHint: true` at the MCP tool layer (the
-  emission fixed point propagates `*` through the first-class reference), and
-  the same launder in a *plain* (read-only) operation is *refused* at compile
-  time — so no operation is ever mislabelled read-only, and this stays within a
-  bare emission's already-declared `*` authority rather than exceeding it. It
-  is an *enumeration* incompleteness, not a read-only lie. *Fix:* teach
-  `_boundary` (`src/revl/__main__.py`) to fold first-class emission references
-  into the per-component `externs`/`capabilities` surface, reusing the
-  first-class reachability the G4 fixed point (`emission_analysis.py`,
-  `lower._emitting_capabilities`) already computes; when it lands, the pinned
-  test flips green and this fence closes.
+- **G8 enumeration for first-class host reaches — RESOLVED (item 24)** (found by
+  the gate threat-model program, docs/threat-model.md; the pin
+  `tests/test_adversarial_gate.py::test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface`
+  is now a plain passing assertion, no longer `xfail`). *The gap that was:* a
+  host `extern` reached **only** through a first-class function value —
+  `indirect(ship, a)` rather than `ship(a)` — did **not** appear in `revl
+  audit`'s per-component `externs` list, so it produced no
+  `host:<component>:<extern>` crossing token; `revl audit --diff` (the
+  authority-drift gate) could not detect a widening that added such a reach.
+  Throughout, the load-bearing G4 defence held — the operation was still
+  correctly flagged `readOnlyHint: false` / `destructiveHint: true`, and the
+  same launder in a *plain* (read-only) operation was *refused* at compile
+  time — so it was an *enumeration* incompleteness, never a read-only lie.
+  *How it was closed:* `_boundary` (`src/revl/__main__.py`) now folds the
+  first-class reach the G4 fixed point already computes onto the audit surface.
+  For each component body it collects first-class *value* references the same
+  way the emission analysis does — reusing `emission_analysis._calls_in`'s
+  value channel (read-only; no change to `emission_analysis.py`) — and joins
+  each referenced callable's capabilities from `_emitting_capabilities` into the
+  per-component host set. A laundered host extern now surfaces the identical
+  `host:<component>:<extern>` crossing as a direct call, so `revl audit --diff`
+  flags a regeneration that adds a first-class-laundered reach instead of
+  silently accepting it. The `*` first-class-dispatch marker still appears when
+  the dispatched value is genuinely unnameable.
 
 ## Contract rejection coverage (the executable spec)
 
