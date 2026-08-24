@@ -41,3 +41,15 @@ async_out = BACKEND / "golden" / "async_http.ts"
 async_out.write_text(emit(json.loads(async_ir.read_text(encoding="utf-8"))),
                      encoding="utf-8")
 print(f"regenerated {async_out} from {async_ir}")
+
+# phase-2 async fn-coloring (roadmap item 90): the harness agent-loop shape —
+# a module `fn` that funnels an async extern each turn of a bounded recursion,
+# decoding through a sync callback arrow. The frontend fixed point colors the
+# fn async; the emitter renders `async function …: Promise<T>` with the async
+# call sites (extern, recursive self-call, match-arm arrows) awaited. tsc-
+# validated by `npm run typecheck` — the exit test for item 90.
+loop_ir = BACKEND / "tests" / "fixtures" / "async_agent_loop.ir.json"
+loop_out = BACKEND / "golden" / "async_agent_loop.ts"
+loop_out.write_text(emit(json.loads(loop_ir.read_text(encoding="utf-8"))),
+                    encoding="utf-8")
+print(f"regenerated {loop_out} from {loop_ir}")

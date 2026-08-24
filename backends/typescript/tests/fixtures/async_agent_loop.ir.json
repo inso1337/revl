@@ -1,0 +1,393 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Loop": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "p",
+              "type": "Str"
+            }
+          ],
+          "returns": "Step",
+          "emission": true,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "async_agent_loop.rvl",
+      "config": [
+        {
+          "name": "max_steps",
+          "type": "Int",
+          "default": 8
+        }
+      ],
+      "requires": {},
+      "provides": {
+        "agent": "Loop"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "agent",
+          "service": "Loop",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "prompt"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "agent_loop",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "prompt"
+                      },
+                      {
+                        "kind": "var",
+                        "name": "decode_response"
+                      },
+                      {
+                        "kind": "config",
+                        "field": "max_steps"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "async_agent_loop.rvl",
+        "inject": [],
+        "provides": [
+          "agent"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent"
+    ]
+  },
+  "types": {
+    "ToolReq": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "name": "Str",
+        "args": "Str"
+      }
+    },
+    "Step": {
+      "params": [],
+      "kind": "variant",
+      "cases": [
+        {
+          "name": "Final",
+          "payload": "Str"
+        },
+        {
+          "name": "NeedTool",
+          "payload": "ToolReq"
+        }
+      ]
+    }
+  },
+  "functions": [
+    {
+      "name": "decode_response",
+      "params": [
+        {
+          "name": "resp",
+          "type": "Str"
+        }
+      ],
+      "returns": "Step",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "builtin",
+              "method": "slice",
+              "target": {
+                "kind": "var",
+                "name": "resp"
+              },
+              "args": [
+                {
+                  "kind": "lit",
+                  "value": 0
+                },
+                {
+                  "kind": "lit",
+                  "value": 6
+                }
+              ]
+            },
+            "right": {
+              "kind": "lit",
+              "value": "FINAL "
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Step",
+                "case": "Final",
+                "args": [
+                  {
+                    "kind": "builtin",
+                    "method": "slice",
+                    "target": {
+                      "kind": "var",
+                      "name": "resp"
+                    },
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": 6
+                      },
+                      {
+                        "kind": "builtin",
+                        "method": "length",
+                        "target": {
+                          "kind": "var",
+                          "name": "resp"
+                        },
+                        "args": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "adt",
+            "type": "Step",
+            "case": "NeedTool",
+            "args": [
+              {
+                "kind": "record",
+                "fields": [
+                  [
+                    "name",
+                    {
+                      "kind": "builtin",
+                      "method": "slice",
+                      "target": {
+                        "kind": "var",
+                        "name": "resp"
+                      },
+                      "args": [
+                        {
+                          "kind": "lit",
+                          "value": 0
+                        },
+                        {
+                          "kind": "lit",
+                          "value": 10
+                        }
+                      ]
+                    }
+                  ],
+                  [
+                    "args",
+                    {
+                      "kind": "lit",
+                      "value": ""
+                    }
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "agent_loop",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "Str"
+        },
+        {
+          "name": "decode",
+          "type": "(Str) -> Step"
+        },
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Step",
+      "public": false,
+      "body": [
+        {
+          "step": "if",
+          "cond": {
+            "kind": "bin",
+            "op": "<=",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 0
+            }
+          },
+          "then": [
+            {
+              "step": "return",
+              "expr": {
+                "kind": "adt",
+                "type": "Step",
+                "case": "Final",
+                "args": [
+                  {
+                    "kind": "lit",
+                    "value": "max_steps exhausted"
+                  }
+                ]
+              }
+            }
+          ],
+          "else": null
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "match",
+            "scrutinee": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "decode"
+              },
+              "args": [
+                {
+                  "kind": "call",
+                  "callee": {
+                    "kind": "var",
+                    "name": "model_complete"
+                  },
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "prompt"
+                    }
+                  ]
+                }
+              ]
+            },
+            "arms": [
+              {
+                "pattern": "Final",
+                "bind": "answer",
+                "body": {
+                  "kind": "adt",
+                  "type": "Step",
+                  "case": "Final",
+                  "args": [
+                    {
+                      "kind": "var",
+                      "name": "answer"
+                    }
+                  ]
+                },
+                "payload_type": "Str"
+              },
+              {
+                "pattern": "NeedTool",
+                "bind": "req",
+                "body": {
+                  "kind": "call",
+                  "callee": {
+                    "kind": "var",
+                    "name": "agent_loop"
+                  },
+                  "args": [
+                    {
+                      "kind": "field",
+                      "target": {
+                        "kind": "var",
+                        "name": "req"
+                      },
+                      "name": "name"
+                    },
+                    {
+                      "kind": "var",
+                      "name": "decode"
+                    },
+                    {
+                      "kind": "bin",
+                      "op": "-",
+                      "left": {
+                        "kind": "var",
+                        "name": "n"
+                      },
+                      "right": {
+                        "kind": "lit",
+                        "value": 1
+                      },
+                      "operands": "Int"
+                    }
+                  ]
+                },
+                "payload_type": "ToolReq"
+              }
+            ]
+          }
+        }
+      ],
+      "async": true
+    }
+  ],
+  "externs": [
+    {
+      "name": "model_complete",
+      "class": "emission",
+      "params": [
+        {
+          "name": "prompt",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": "\n      const r = await Promise.resolve({ text: () => Promise.resolve(\"FINAL \" + prompt) })\n      return await r.text()\n    "
+      },
+      "async": true
+    }
+  ]
+}

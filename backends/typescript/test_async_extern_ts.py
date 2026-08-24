@@ -55,3 +55,37 @@ def test_async_http_golden_is_current():
     m = _load_ts_emit()
     golden = (BACKEND / "golden" / "async_http.ts").read_text(encoding="utf-8")
     assert m.emit(_ir()) == golden
+
+
+def _agent_loop_ir():
+    return json.loads((BACKEND / "tests" / "fixtures" / "async_agent_loop.ir.json")
+                      .read_text(encoding="utf-8"))
+
+
+def test_agent_loop_colored_fn_emits_awaited_async_ts():
+    """Item 90 exit test — the harness agent-loop shape: a module `fn` that
+    funnels an async extern each turn of a bounded recursion, colored async by
+    the frontend fixed point. The emitter renders it `async function …:
+    Promise<T>` and awaits every async call site — the extern, the recursive
+    self-call, and the match-arm arrows. tsc-validated by `npm run typecheck`;
+    this folds the same invariant into the Python suite."""
+    m = _load_ts_emit()
+    out = m.emit(_agent_loop_ir())
+    # the colored fn is async and returns a Promise
+    assert ("export async function agent_loop(prompt: string, "
+            "decode: ((a0: string) => Step), n: bigint): Promise<Step> {") in out
+    # the direct async-extern call is awaited
+    assert "decode((await model_complete(prompt)))" in out
+    # the recursive self-call (a colored callee) is awaited too
+    assert "await agent_loop(req.name, decode, revlI64(n - 1n))" in out
+    # the match IIFE and its arm arrows are async and awaited (else the await
+    # would land in a sync arrow — a tsc error)
+    assert "return (await (async ($revl_match_1) => {" in out
+    # the sync decoder stays a plain function — not every fn is colored
+    assert "export function decode_response(resp: string): Step {" in out
+
+
+def test_agent_loop_golden_is_current():
+    m = _load_ts_emit()
+    golden = (BACKEND / "golden" / "async_agent_loop.ts").read_text(encoding="utf-8")
+    assert m.emit(_agent_loop_ir()) == golden
