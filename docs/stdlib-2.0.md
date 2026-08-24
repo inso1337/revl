@@ -84,7 +84,9 @@ canonical-ABI string/list model and rejects the rest (`indexOf`, `split`,
 `join`, `repeat`) with its usual named tier error — not yet lowerable on
 that tier. The FR-6/FR-9 additions (`startsWith`, `endsWith`, `to_int`)
 DO lower on wasm: byte-comparison helpers are exact for UTF-8 prefixes, and
-the `$str_to_int` helper parses straight to the tier's Opt cell.
+the `$str_to_int` helper parses straight to the tier's Opt cell. The full
+wasm tier-capability matrix (values, builtins, service boundary shapes, and
+each hard refusal) is **docs/wasm-capabilities.md**.
 
 ## `Map`: the persistent value type (graduated from Planned)
 

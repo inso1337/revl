@@ -124,18 +124,17 @@ def test_run_ts_no_longer_refuses_flatly():
     assert 'missing required config "url"' in result.stderr
 
 
-def test_run_refuses_an_emitting_tier_with_the_friendly_not_wired_message():
-    """Every emitter tier that has no `run` driver takes the same path to the
-    same neighboring facts (item 72): `--backend go` used to die in argparse
-    with 'invalid choice' while ts got the friendly 'emits but has no run
-    driver' message. ts is now wired (FR-2) and only go takes the refusal,
-    which names the real backend directory."""
-    result = _run_cli([USER_CACHE, "--backend", "go"])
-    assert result.returncode == 2, result.stderr
-    assert "not wired yet" in result.stderr
-    assert "runs today" in result.stderr
-    assert "go tier emits" in result.stderr
-    assert "backends/go/" in result.stderr
+def test_every_emitting_tier_is_now_runnable():
+    """FR-2 + FR-8 closed the last two not-wired gaps: py, ts, rust, java,
+    wasm and go are all runnable (each non-py tier as a separate process over
+    the bridge seam). USER_CACHE needs PgDatabase.url, so every backend now
+    reaches the config preflight (rc 1) instead of a flat not-wired refusal —
+    the friendly refusal path no longer exists for any emitting tier."""
+    for backend in ("py", "ts", "rust", "java", "wasm", "go"):
+        result = _run_cli([USER_CACHE, "--backend", backend])
+        assert result.returncode == 1, (backend, result.stderr)
+        assert "not wired yet" not in result.stderr
+        assert 'missing required config "url"' in result.stderr
 
 
 def test_required_config_problem_uses_the_ir_schema():
