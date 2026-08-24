@@ -1,0 +1,13 @@
+{
+  "lockVersion": 0,
+  "note": "truc's own stage-0 composition file list (docs/design/truc-architecture.md §7). The launcher compiles exactly these; that compile IS truc passing its own gate on every boot. externs.rvl is pulled in as an import, so it is not listed as a root. Slice S5 extends this file into truc's full self-description (truc.toml + trucs/ + pinned hashes).",
+  "files": [
+    "components/registry_client.rvl",
+    "components/fetcher.rvl",
+    "components/gatekeeper.rvl",
+    "components/workspace.rvl",
+    "components/planner.rvl",
+    "components/assembler.rvl",
+    "components/cli.rvl"
+  ]
+}

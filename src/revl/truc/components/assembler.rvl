@@ -1,0 +1,65 @@
+// Assembler (core) — orchestrates the flagship loop. It injects the four rim
+// components and the pure Planner and threads them: read intent, gather
+// sources, run the gate, and let the Planner decide what a refusal means. It
+// holds no authority of its own beyond the rim methods it calls; every branch
+// and every string lives in the pure Planner, so the sequence here is a flat
+// list of `let`/`emit` steps (a provide method cannot itself branch — G6).
+
+use "registry_client.rvl" { Index }
+use "fetcher.rvl" { Fetch }
+use "gatekeeper.rvl" { Gate }
+use "workspace.rvl" { Workspace }
+use "planner.rvl" { Plan }
+
+pub service Assembler {
+  emission fn add(name: Str) -> Int
+  emission fn assemble() -> Int
+  emission fn unknown(cmd: Str) -> Int
+}
+
+component Assembler
+  requires index: Index, fetch: Fetch, gate: Gate, ws: Workspace, plan: Plan
+  provides asm: Assembler
+{
+  provide asm {
+    // §8.1 — fetch, admit against the current assembly *before vendoring*,
+    // then (only on ok) vendor + pin. A truc that would not join is never
+    // written to disk: commit_add gets "" and does nothing.
+    fn add(name) {
+      let m = emit ws.manifest(".")
+      let reg = plan.registry_of(m)
+      let row = emit index.row(reg, name)
+      let entryJson = emit fetch.entry(reg, name)
+      let spec = plan.assemble_spec(m)
+      let g = emit ws.read_sources(".", spec)
+      let ordered = plan.ordered_with_candidate(g, name, entryJson)
+      let v = emit gate.admit_all(ordered)
+      let r = plan.add_report(row, name, entryJson, v)
+      emit ws.commit_add(".", plan.report_commit(r))
+      emit ws.print(plan.report_msg(r))
+      return plan.report_code(r)
+    }
+
+    // §8.2 — read intent + proof, hash-verify the vendor dir, admit the whole
+    // set through the gate, compose on ok. All-or-nothing: on refusal the
+    // Planner returns empty compose-sources, so build/ is untouched.
+    fn assemble() {
+      let m = emit ws.manifest(".")
+      let lock = emit ws.read("truc.lock")
+      let spec = plan.assemble_spec(m)
+      let g = emit ws.read_sources(".", spec)
+      let d = plan.drift(lock, g)
+      let ordered = plan.ordered_sources(g)
+      let v = emit gate.admit_all(ordered)
+      let r = plan.assemble_report(d, v, g)
+      emit ws.write_assembly(".", plan.report_sources(r))
+      emit ws.print(plan.report_msg(r))
+      return plan.report_code(r)
+    }
+
+    fn unknown(cmd) {
+      emit ws.print(`truc: unknown command "${cmd}" — usage: truc <add NAME | assemble>`)
+      return 2
+    }
+  }
+}

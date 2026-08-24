@@ -1,0 +1,16 @@
+// RegistryClient (rim) — reads the registry index. One of truc's four
+// authority-bearing components; its whole reach is `host_index_read`.
+
+use "../externs.rvl" { host_index_read, host_index_row }
+
+pub service Index {
+  emission fn load(registry: Str) -> Str
+  emission fn row(registry: Str, name: Str) -> Str
+}
+
+component RegistryClient provides index: Index {
+  provide index {
+    fn load(registry) = emit host_index_read(registry)
+    fn row(registry, name) = emit host_index_row(registry, name)
+  }
+}

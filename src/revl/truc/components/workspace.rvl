@@ -1,0 +1,31 @@
+// Workspace (rim) — the project-directory boundary: truc.toml / truc.lock /
+// trucs/ / build/, plus the clock and stdout. Every fs write goes through
+// here, and each write extern is a no-op when handed an empty plan, so
+// "disk untouched on refusal" is a decision the pure planner makes.
+
+use "../externs.rvl" {
+  host_manifest_read, host_read, host_exists, host_read_sources,
+  host_commit_add, host_write_assembly, host_print
+}
+
+pub service Workspace {
+  emission fn manifest(projectDir: Str) -> Str
+  emission fn read(path: Str) -> Str
+  fn exists(path: Str) -> Bool
+  emission fn read_sources(projectDir: Str, spec: Str) -> Str
+  emission fn commit_add(projectDir: Str, plan: Str) -> Str
+  emission fn write_assembly(projectDir: Str, manifest: Str) -> Str
+  emission fn print(text: Str)
+}
+
+component Workspace provides ws: Workspace {
+  provide ws {
+    fn manifest(projectDir) = emit host_manifest_read(projectDir)
+    fn read(path) = emit host_read(path)
+    fn exists(path) = host_exists(path)
+    fn read_sources(projectDir, spec) = emit host_read_sources(projectDir, spec)
+    fn commit_add(projectDir, plan) = emit host_commit_add(projectDir, plan)
+    fn write_assembly(projectDir, manifest) = emit host_write_assembly(projectDir, manifest)
+    fn print(text) = emit host_print(text)
+  }
+}

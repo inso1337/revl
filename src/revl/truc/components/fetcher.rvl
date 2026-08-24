@@ -1,0 +1,14 @@
+// Fetcher (rim) — reads one registry entry, verbatim, as JSON
+// {source, manifest, dossier?}. A truc is exactly this triple, vendored.
+
+use "../externs.rvl" { host_entry_read }
+
+pub service Fetch {
+  emission fn entry(registry: Str, name: Str) -> Str
+}
+
+component Fetcher provides fetch: Fetch {
+  provide fetch {
+    fn entry(registry, name) = emit host_entry_read(registry, name)
+  }
+}
