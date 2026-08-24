@@ -1447,9 +1447,25 @@ def _check_arrow_args(args, params, tenv: dict, types: dict,
     if not filename:
         return
     for i, (arg, param) in enumerate(zip(args, params)):
-        if isinstance(arg, ExprArrow) and parse_type(param)[0] == FN_HEAD:
+        phead, pargs = parse_type(param)
+        if isinstance(arg, ExprArrow) and phead == FN_HEAD:
             check_ast(arg, param, tenv, types, filename,
                       f"argument {i + 1} of {what}")
+        elif not isinstance(arg, ExprArrow) and phead == FN_HEAD and pargs \
+                and parse_type(pargs[-1])[0] == "Async":
+            # item 92 v1: only an arrow may flow into an async parameter — a
+            # bare value would need an `as_async` coercion wrapper the blocking
+            # backends do not yet erase (a filed follow-up).
+            raise RevlError(
+                filename, getattr(arg, "line", 0) or 0,
+                f"argument {i + 1} of {what} is declared "
+                f"`{render_type(param)}` (async), but only an arrow may be "
+                "passed into an async parameter in v1",
+                hint="wrap it in an arrow, e.g. `x => f(x)`, so the emitter can "
+                     "place the async boundary "
+                     "(docs/design/async-function-values.md)",
+                code="A1", category="async-propagation",
+            )
 
 
 def call_function_value(expr, fn_type: str, what: str, arg_types: list,
