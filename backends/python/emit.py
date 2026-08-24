@@ -466,6 +466,11 @@ class _ComponentEmitter:
         # to a colored fn / async local is awaited only then (the frontend
         # admits such a call only inside an async op).
         self._in_async = False
+        # item 141: are we rendering INSIDE an arrow body? An async arrow's tail
+        # emission stays a plain coroutine-returning lambda (item 92) that its
+        # awaiting call site settles — so the await-seed must NOT fire inside an
+        # arrow, only in the method body's own statement/return/expression spots.
+        self._in_arrow = False
         # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
         self.isolate = component.get("isolate") or {}
         self.intercept = component.get("intercept") or {}
@@ -512,10 +517,22 @@ class _ComponentEmitter:
                 if not isinstance(method, str) or not method.isidentifier():
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-                return f"{target}.{method}({args})"
-            callee = self._expr(expr.get("callee"), where)
-            args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-            return f"{callee}({args})"
+                rendered = f"{target}.{method}({args})"
+            else:
+                callee = self._expr(expr.get("callee"), where)
+                args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
+                rendered = f"{callee}({args})"
+            # item 141 await-seed: an emission of an async service op — through a
+            # req key (`emit model.complete(p)`) or a spawn handle — produces a
+            # coroutine. Await it wherever it lands in an async body: not only a
+            # statement/return, but a NESTED expression position such as a
+            # ternary arm (`p == "go" ? emit m.complete(p) : "idle"`), so no
+            # coroutine leaks unawaited. `_py_yields_coroutine` is the same
+            # predicate the arrow renderer uses, so the two stay in lockstep.
+            if self._in_async and not self._in_arrow \
+                    and _py_yields_coroutine(expr, self.requires):
+                return f"(await {rendered})"
+            return rendered
         if kind == "host":
             fn = expr.get("fn") or ""
             root, _, rest = fn.partition(".")
@@ -531,7 +548,11 @@ class _ComponentEmitter:
             # coroutine — await it inside an async method body. item 115: an
             # async extern is likewise an `async def`, so await its call too
             # (an `unload` awaiting `host_dispose(fiber)`, async-extern.md §8).
-            if self._in_async and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
+            # item 141: suppressed inside an arrow body — a colored tail call
+            # there stays a plain coroutine-returning lambda its awaiting call
+            # site settles, never an `await` inside a lambda.
+            if self._in_async and not self._in_arrow \
+                    and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
                 return f"(await {name}({args}))"
             return f"{name}({args})"
         if kind == "match":
@@ -602,14 +623,19 @@ class _ComponentEmitter:
             return "[" + ", ".join(self._expr(item, where) for item in expr.get("items") or []) + "]"
         if kind == "arrow":
             params = ", ".join(expr.get("params") or [])
-            if expr.get("async"):
-                # item 92: an async-flagged callback arrow. A lambda cannot be
-                # `async`, so the shape is decided statically (tail-coroutine ->
-                # plain lambda; sync -> `_revl_as_async` wrap; mixed -> refused).
-                return _py_async_arrow(
-                    expr.get("body"), params,
-                    lambda b: self._expr(b, where), requires=self.requires)
-            return f"lambda {params}: {self._expr(expr.get('body'), where)}"
+            prev_arrow = self._in_arrow
+            self._in_arrow = True  # item 141: suppress the await-seed in the body
+            try:
+                if expr.get("async"):
+                    # item 92: an async-flagged callback arrow. A lambda cannot be
+                    # `async`, so the shape is decided statically (tail-coroutine ->
+                    # plain lambda; sync -> `_revl_as_async` wrap; mixed -> refused).
+                    return _py_async_arrow(
+                        expr.get("body"), params,
+                        lambda b: self._expr(b, where), requires=self.requires)
+                return f"lambda {params}: {self._expr(expr.get('body'), where)}"
+            finally:
+                self._in_arrow = prev_arrow
         if kind == "format":
             self.uses.add("fmt")
             template = expr.get("template")
