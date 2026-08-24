@@ -4,7 +4,7 @@ docs/quarantine-tier.md).
 Two layers, mirroring the wasm tier's existing policy (test_canonical_abi.py):
 
   * the FLOW-LOGIC tests run everywhere, with no toolchain — a rejected
-    candidate never reaches the substrate, an aggregate candidate is deferred
+    candidate never reaches the substrate, an un-lowerable candidate is deferred
     honestly, the admission gate refuses/bypasses per policy + operator, and the
     swap gate is inert without a requiring policy;
   * the SUBSTRATE tests build a real component and run it under wasmtime's
@@ -42,9 +42,11 @@ FAULTING = (
     "}"
 )
 
-# no Str-surface function — the aggregate follow-on (records/lists/variants
-# across the boundary), gated on the parallel canonical work.
-AGGREGATE = 'fn add(a: Int, b: Int) -> Int { return a + b }'
+# no canonical-ABI-emittable boundary function: `Float` never reaches the wasm
+# canonical boundary (Float/Map/resources/function-values are still un-lowerable
+# after the aggregate merge landed scalars/records/lists/variants). It compiles
+# and passes admission, but has no boundary function to present -> deferred.
+UNLOWERABLE = 'fn scale(x: Float) -> Float { return x * 2.0 }'
 
 # does not compile — admission refuses it before the substrate.
 BROKEN = 'fn nope(s: Str) -> Str { return t }'
@@ -83,18 +85,19 @@ def test_rejected_candidate_never_reaches_the_substrate():
     assert report["gauntlet"]["verdict"] == "rejected"
 
 
-def test_aggregate_candidate_is_deferred_honestly():
-    report = Q.run(Session(), {"source": AGGREGATE})
+def test_unlowerable_candidate_is_deferred_honestly():
+    report = Q.run(Session(), {"source": UNLOWERABLE})
     assert report["verdict"] == "deferred"
     assert report["substrate"]["status"] == "deferred"
-    # the reason names the aggregate follow-on, not a fake pass
-    assert "follow-on" in report["substrate"]["note"]
+    # the reason names what is still un-lowerable at the canonical boundary,
+    # not a fake pass
+    assert "un-lowerable" in report["substrate"]["note"]
 
 
 def test_deferred_needs_no_toolchain():
     # emit_component raises before any binary is invoked, so this holds even on
     # a machine with no wasm toolchain at all.
-    report = Q.run(Session(), {"source": AGGREGATE})
+    report = Q.run(Session(), {"source": UNLOWERABLE})
     assert report["verdict"] == "deferred"
 
 
