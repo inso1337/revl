@@ -33,11 +33,12 @@ import weakref
 from typing import Any, Callable, Optional
 
 __all__ = [
-    "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
+    "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "StateIncompatible",
-    "TransientError", "add_trace", "arm_fault_probe", "disarm_fault_probe", "fmt",
-    "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
-    "retry_idempotent", "set_trace", "spawn", "trace_observers",
+    "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "disarm_fault_probe",
+    "fmt", "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
+    "retry_idempotent", "schedule_after", "schedule_every", "set_trace", "spawn",
+    "trace_observers",
 ]
 
 
@@ -1101,6 +1102,151 @@ class Job:
         cls._handles.clear()
         cls.runs.clear()
         cls._serial = 0
+
+
+# ---------------------------------------------------------------------------
+# Time as a coeffect (roadmap item 57, docs/time-coeffect.md)
+# ---------------------------------------------------------------------------
+#
+# A timer (`every 30s { … }` / `after 5m { … }`) is a *revertible schedule*:
+# arming it registers a firing with the clock, and its inverse is cancellation,
+# so the emitted body yields `lambda: handle.cancel()` and the component's own
+# teardown drains it like any other effect (no orphaned interval — the R1/R4
+# residue proof catches a leak through the same `schedule`/`cancel` acquire
+# pair Pool.open/close uses).
+#
+# Determinism is the whole point: the clock is a *coeffect the harness
+# provides*, not wall-clock. `Clock.now()` only moves when something calls
+# `Clock.advance(ms)` — `revl test`/replay drives it — so a firing is a
+# deterministic step in the timeline (`fires on the 3rd tick`), never a race,
+# and the fault sweep (item 30) can inject "fail at the third firing". A
+# production driver would pump `advance` from a real monotonic source; the
+# reference tier keeps it explicit so tests are reproducible.
+
+
+class TimerHandle:
+    """One armed timer. Live until it is cancelled (`every`, and an `after`
+    before it fires) or has fired to completion (`after`). Cancellation is the
+    schedule's inverse — idempotent, and a no-op once the timer is spent."""
+
+    __slots__ = ("serial", "mode", "interval_ms", "_body", "state", "next_at", "fired")
+
+    def __init__(self, mode: str, interval_ms: int, body: Callable[[], Any]) -> None:
+        if mode not in ("every", "after"):  # pragma: no cover — emitter invariant
+            raise ValueError(f"timer mode must be 'every' or 'after', got {mode!r}")
+        if not isinstance(interval_ms, int) or interval_ms <= 0:  # pragma: no cover
+            raise ValueError(f"timer interval must be a positive int (ms), got {interval_ms!r}")
+        Clock._serial += 1
+        self.serial = Clock._serial
+        self.mode = mode
+        self.interval_ms = interval_ms
+        self._body = body
+        self.state = "live"
+        self.next_at = Clock._now_ms + interval_ms
+        self.fired = 0
+        Clock._timers.append(self)
+        _record(f"{self._tag}.schedule {mode} {interval_ms}ms")
+
+    @property
+    def _tag(self) -> str:
+        return f"timer#{self.serial}"
+
+    def cancel(self) -> bool:
+        """live -> cancelled (True); a no-op returning False once spent. The
+        derived inverse the emitted body yields — running it on teardown proves
+        the schedule leaves no residue."""
+        if self.state != "live":
+            return False
+        self.state = "cancelled"
+        _record(f"{self._tag}.cancel")
+        return True
+
+    def _fire(self) -> None:
+        self.fired += 1
+        Clock._firings.append((self.serial, Clock._now_ms))
+        _record(f"{self._tag}.fire #{self.fired} at {Clock._now_ms}ms")
+        self._body()
+        if self.mode == "after":
+            # a one-shot's schedule is spent once it fires; release it through
+            # the same `cancel` verb so the residue trace stays balanced and the
+            # teardown's own `handle.cancel()` is a clean no-op.
+            self.state = "done"
+            _record(f"{self._tag}.cancel")
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return f"<timer#{self.serial} {self.mode} {self.interval_ms}ms {self.state}>"
+
+
+class Clock:
+    """The clock coeffect (item 57). Time advances only when the harness calls
+    :meth:`advance`; timer firings are deterministic timeline steps, not
+    wall-clock races (docs/time-coeffect.md)."""
+
+    _now_ms = 0
+    _serial = 0
+    _timers: list = []      # every TimerHandle ever armed, registration order
+    _firings: list = []     # (timer serial, now_ms) per firing, in fire order
+
+    @classmethod
+    def now(cls) -> int:
+        return cls._now_ms
+
+    @classmethod
+    def advance(cls, ms: int) -> int:
+        """Advance logical time by ``ms``, firing every timer that comes due —
+        earliest first, ties broken by arm order — and re-arming `every`
+        timers across the whole span. Returns the number of firings, so a test
+        can assert exactly how many steps an advance produced."""
+        if not isinstance(ms, int) or ms < 0:
+            raise ValueError(f"clock advance must be a non-negative int (ms), got {ms!r}")
+        target = cls._now_ms + ms
+        count = 0
+        # An event loop rather than a per-timer pass: an `every` re-arms and may
+        # fire again within the same advance, and firings must interleave across
+        # timers in true time order. Bounded because each iteration consumes one
+        # firing and every `next_at` strictly increases (interval_ms > 0).
+        while True:
+            due = [t for t in cls._timers
+                   if t.state == "live" and t.next_at <= target]
+            if not due:
+                break
+            timer = min(due, key=lambda t: (t.next_at, t.serial))
+            cls._now_ms = timer.next_at
+            if timer.mode == "every":
+                timer.next_at += timer.interval_ms
+            timer._fire()
+            count += 1
+        cls._now_ms = target
+        return count
+
+    @classmethod
+    def pending(cls) -> int:
+        """Live timers — a teardown that abandons one leaves this > 0 (mirrors
+        ``Job.pending``); the countable form of the no-orphaned-interval proof."""
+        return sum(1 for t in cls._timers if t.state == "live")
+
+    @classmethod
+    def firings(cls) -> list:
+        """The recorded firing log: ``(timer serial, fired-at ms)`` in order."""
+        return list(cls._firings)
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._now_ms = 0
+        cls._serial = 0
+        cls._timers = []
+        cls._firings = []
+
+
+def schedule_every(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
+    """Arm a periodic timer against the clock coeffect (`every`). The returned
+    handle's :meth:`~TimerHandle.cancel` is the schedule's inverse."""
+    return TimerHandle("every", interval_ms, body)
+
+
+def schedule_after(interval_ms: int, body: Callable[[], Any]) -> TimerHandle:
+    """Arm a one-shot delayed timer against the clock coeffect (`after`)."""
+    return TimerHandle("after", interval_ms, body)
 
 
 class Map(_Closable):

@@ -116,6 +116,28 @@ class EffectStmt:
 
 
 @dataclass
+class TimerStmt:
+    """`every <n><unit> { <emit>* }` / `after <n><unit> { <emit>* }` — a timer
+    (docs/time-coeffect.md, roadmap item 57).
+
+    A timer is a **revertible schedule**: acquiring it registers work with the
+    clock coeffect, and its inverse is cancellation, so unloading the component
+    (or its enclosing frame) provably cancels its timers — no orphaned interval
+    outlives the activation that armed it (the residue probe, item 18, would
+    otherwise catch the leak). The body runs at activation-time stratum with
+    the component's declared capabilities, so a firing cannot smuggle an
+    emission past G4/G8; its reach is audited like any other component reach.
+
+    `mode` is `"every"` (periodic) or `"after"` (one-shot delay); `interval_ms`
+    is the resolved delay in milliseconds; `body` is the list of `EmitStmt`s
+    the timer runs on each firing."""
+    mode: str
+    interval_ms: int
+    body: list
+    line: int
+
+
+@dataclass
 class FailStmt:
     message: object
     line: int
@@ -1203,6 +1225,16 @@ class Parser:
         if tok.kind == "kw" and tok.value == "effect":
             acquire, undo, line, setup = self.effect_form(tok.line)
             return EffectStmt(acquire, undo, line, setup)
+        if tok.kind == "kw" and tok.value in ("every", "after"):
+            if in_method:
+                raise self.err(
+                    tok.line,
+                    f"`{tok.value}` timers are only allowed in a component activation body",
+                    hint="a timer is a revertible schedule the activation frame owns; "
+                         "arm it in the component body, not a provide method "
+                         "(docs/time-coeffect.md)",
+                )
+            return self.timer()
         if tok.kind == "kw" and tok.value == "fail":
             if in_method:
                 raise self.err(
@@ -1335,6 +1367,67 @@ class Parser:
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup
+
+    # duration units -> milliseconds. `ms` before `m` and `s` in the lexer's
+    # eyes is moot — the unit is a whole ident token here, matched verbatim.
+    _DURATION_UNITS = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+    def timer(self) -> "TimerStmt":
+        """`every 30s { emit … }` / `after 5m { emit … }` (item 57).
+
+        The delay is `<int><unit>` (e.g. `30s`, `5m`, `250ms`); the body is one
+        or more `emit` statements that run at each firing. Kept to emissions in
+        this first slice — a firing that acquires long-lived effects, guards, or
+        nests further timers is a documented follow-on (docs/time-coeffect.md);
+        the audited reach a timer needs is exactly its emissions."""
+        kw = self.next()  # `every` | `after`
+        mode = kw.value
+        num = self.peek()
+        if num.kind != "int":
+            raise self.err(num.line,
+                           f"expected a whole-number delay after `{mode}`, found {num.value!r}",
+                           hint=f"a timer delay is `<n><unit>`, e.g. `{mode} 30s {{ … }}` "
+                                "(units: ms, s, m, h, d)")
+        if num.value <= 0:
+            raise self.err(num.line,
+                           f"a `{mode}` delay must be positive (found {num.value})",
+                           hint="a zero or negative interval has no meaning for a schedule")
+        self.next()
+        unit_tok = self.peek()
+        if unit_tok.kind != "ident" or unit_tok.value not in self._DURATION_UNITS:
+            found = unit_tok.value if unit_tok.kind in ("ident", "kw") else repr(unit_tok.value)
+            raise self.err(unit_tok.line,
+                           f"expected a duration unit after `{mode} {num.value}`, found {found}",
+                           hint="units are `ms`, `s`, `m`, `h`, `d` — write the delay with no "
+                                f"space, e.g. `{mode} {num.value}s {{ … }}`")
+        self.next()
+        interval_ms = num.value * self._DURATION_UNITS[unit_tok.value]
+        self.expect("{")
+        body: list = []
+        while not self.at("}"):
+            inner = self.stmt(in_method=False)
+            if not isinstance(inner, EmitStmt):
+                raise self.err(
+                    getattr(inner, "line", kw.line),
+                    f"a `{mode}` timer body records emissions only",
+                    hint="a timer firing runs at activation-time stratum with the "
+                         "component's declared capabilities; its body is `emit` "
+                         "statement(s). Richer bodies are a documented follow-on "
+                         "(docs/time-coeffect.md)")
+            if inner.compensate is not None:
+                raise self.err(
+                    inner.line,
+                    "a timer-body `emit` cannot declare `compensate`",
+                    hint="a periodic firing is not a one-shot acquisition, so there is "
+                         "no single teardown to compensate; the timer's own "
+                         "cancellation is its inverse (docs/time-coeffect.md)")
+            body.append(inner)
+        self.expect("}")
+        if not body:
+            raise self.err(kw.line,
+                           f"an `{mode}` timer body is empty",
+                           hint="a timer with no `emit` does nothing; drop it or give it work")
+        return TimerStmt(mode, interval_ms, body, kw.line)
 
     def spawn_expr(self) -> "SpawnExpr":
         """`spawn <Component> [with { field: <expr>, ... }]`."""

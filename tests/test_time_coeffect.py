@@ -1,0 +1,365 @@
+"""Time as a coeffect — `every`/`after` timers (roadmap item 57).
+
+A timer is a **textbook revertible effect**: `every 30s { … }` / `after 5m { … }`
+acquire a *schedule whose inverse is cancellation*, derived teardown like any
+other effect, so unloading the component provably cancels its timers (no
+orphaned interval — the residue probe, item 18, would otherwise catch the
+leak). The body runs at activation-time stratum with the component's declared
+capabilities, so the audit sees a firing's reach like any other reach (G4/G8).
+And under `revl test`/replay the **clock is a coeffect the harness provides**,
+so a firing is a deterministic timeline step, not a wall-clock race.
+
+These tests pin all four claims on the reference tiers (py + ts):
+
+  * syntax parses, lowers to an additive `timer` step (`ir_version` stays 3),
+    and typechecks;
+  * a timer body reaching an undeclared emission is refused (G4), and the reach
+    it *does* have surfaces to `revl audit` (G8) as component reach;
+  * the schedule is revertible — cancellation is the derived inverse, and a
+    torn-down timer leaves no residue and never fires again;
+  * the clock is a coeffect — injected advances make firings deterministic
+    timeline steps ("fires on the 3rd tick");
+
+and the documented follow-on: go/rust/wasm refuse timers honestly.
+"""
+
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl import compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
+from revl.lower import _collect_emit_caps  # noqa: E402
+from revl.parser import Parser, TimerStmt, EmitStmt  # noqa: E402
+
+
+def _emitter(backend: str):
+    spec = importlib.util.spec_from_file_location(
+        f"{backend}_emit", ROOT / "backends" / backend / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+HEARTBEAT = """
+service Log { emission fn write(msg: Str) }
+
+component Heartbeat requires log: Log {
+  every 30s { emit log.write("tick") }
+  after 5m { emit log.write("warmup done") }
+}
+"""
+
+
+# ---------------------------------------------------------------- syntax + IR
+
+def test_every_and_after_parse():
+    prog = Parser(HEARTBEAT, "<t>").parse()
+    body = prog.components[0].body
+    timers = [s for s in body if isinstance(s, TimerStmt)]
+    assert [t.mode for t in timers] == ["every", "after"]
+    assert [t.interval_ms for t in timers] == [30_000, 300_000]
+    # a timer body is a list of `emit` statements (the audited reach)
+    assert all(isinstance(e, EmitStmt) for t in timers for e in t.body)
+
+
+@pytest.mark.parametrize("src,ms", [
+    ("every 250ms { emit log.write(\"x\") }", 250),
+    ("every 5s { emit log.write(\"x\") }", 5_000),
+    ("after 2m { emit log.write(\"x\") }", 120_000),
+    ("after 1h { emit log.write(\"x\") }", 3_600_000),
+    ("every 1d { emit log.write(\"x\") }", 86_400_000),
+])
+def test_duration_units_resolve_to_ms(src, ms):
+    prog = Parser(
+        f"service Log {{ emission fn write(msg: Str) }}\n"
+        f"component C requires log: Log {{ {src} }}", "<t>").parse()
+    assert prog.components[0].body[0].interval_ms == ms
+
+
+def test_timer_lowers_to_additive_step_at_v3():
+    ir = compile_source(HEARTBEAT, "<t>")
+    assert ir["ir_version"] == 3  # additive — no bump beyond 3
+    steps = ir["components"][0]["body"]
+    every = next(s for s in steps if s.get("step") == "timer" and s["mode"] == "every")
+    assert every["interval_ms"] == 30_000
+    assert every["body"] == [
+        {"step": "emit", "expr": {"kind": "call",
+                                  "target": {"kind": "req", "name": "log"},
+                                  "method": "write",
+                                  "args": [{"kind": "lit", "value": "tick"}]}}]
+
+
+def test_timer_has_no_undo_slot():
+    """The schedule is not an emission (crossing time is not crossing the
+    system boundary); its inverse is the runtime's cancellation, derived — so
+    the IR step carries no `undo` (unlike an `effect`/`let-effect` step)."""
+    ir = compile_source(HEARTBEAT, "<t>")
+    for step in ir["components"][0]["body"]:
+        if step.get("step") == "timer":
+            assert "undo" not in step
+
+
+def test_bad_duration_is_refused():
+    with pytest.raises(RevlError, match="duration unit"):
+        compile_source("service L { emission fn w(m: Str) }\n"
+                        "component C requires l: L { every 30 { emit l.w(\"x\") } }", "<t>")
+    with pytest.raises(RevlError, match="whole-number delay"):
+        compile_source("service L { emission fn w(m: Str) }\n"
+                        "component C requires l: L { every s { emit l.w(\"x\") } }", "<t>")
+
+
+def test_empty_timer_body_is_refused():
+    with pytest.raises(RevlError, match="records emissions|empty"):
+        compile_source("service L { emission fn w(m: Str) }\n"
+                        "component C requires l: L { every 5s { } }", "<t>")
+
+
+def test_timer_only_in_activation_body_not_a_method():
+    with pytest.raises(RevlError, match="only allowed in a component activation body"):
+        compile_source(
+            "service L { emission fn w(m: Str) }\n"
+            "component C requires l: L provides p: L {\n"
+            "  provide p { fn w(m) { every 5s { emit l.w(\"x\") } } }\n"
+            "}", "<t>")
+
+
+def test_timer_after_provide_is_refused():
+    """A timer is an acquisition (its schedule is armed at activation and
+    reverted on teardown), so it cannot follow a `provide` — it would be
+    cancelled while dependents can still fire it (linker rule A2)."""
+    with pytest.raises(RevlError, match="acquisition after `provide`"):
+        compile_source(
+            "service L { emission fn w(m: Str) }\n"
+            "component C requires l: L provides p: L {\n"
+            "  provide p { fn w(m) = emit l.w(m) }\n"
+            "  every 5s { emit l.w(\"x\") }\n"
+            "}", "<t>")
+
+
+# ---------------------------------------------------------- capability audit
+
+def test_timer_body_reaching_undeclared_emission_is_refused():
+    """G4: the firing runs with the component's declared capabilities — a body
+    reaching a service the component does not require is refused exactly like a
+    top-level `emit` would be."""
+    with pytest.raises(RevlError, match="`bus` is not a declared requirement"):
+        compile_source(
+            "service Log { emission fn write(m: Str) }\n"
+            "service Bus { emission fn send(x: Str) }\n"
+            "component C requires log: Log { every 10s { emit bus.send(\"x\") } }", "<t>")
+
+
+def test_timer_reach_surfaces_to_the_capability_analysis():
+    """G8: the boundaries a firing crosses are component reach — the same
+    `_collect_emit_caps` the G4 machinery and `revl audit` read must see them."""
+    ir = compile_source(
+        "service Log { emission fn write(m: Str) }\n"
+        "component C requires log: Log { every 10s { emit log.write(\"x\") } }", "<t>")
+    caps: set = set()
+    _collect_emit_caps(ir["components"][0]["body"], caps)
+    assert caps == {"log"}
+
+
+def test_timer_reach_shows_in_audit(capsys):
+    from revl.__main__ import main  # noqa: PLC0415
+    path = ROOT / "examples" / "heartbeat.rvl"
+    assert path.exists(), "the item-57 example must ship"
+    main(["audit", str(path)])
+    out = capsys.readouterr().out
+    # the timer's emission is a boundary crossing on the audit surface
+    assert "log.write" in out
+
+
+# ------------------------------------------ runtime: revertible + clock coeffect
+#
+# These drive the real cordis-py *runtime scheduler* (backends/python/runtime.py)
+# directly — no cordis-py install needed — so the revertibility and determinism
+# proofs run in the default `pytest tests/`.
+
+@pytest.fixture()
+def rt():
+    spec = importlib.util.spec_from_file_location(
+        "revl_runtime_57", ROOT / "backends" / "python" / "runtime.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.Clock.reset()
+    return module
+
+
+def test_clock_is_a_coeffect_firings_are_deterministic(rt):
+    """Time does not pass on its own: a firing happens only when the harness
+    advances the clock, and it lands on an exact tick — 'fires on the 3rd
+    tick', not a wall-clock race."""
+    seen = []
+    rt.schedule_every(10, lambda: seen.append(rt.Clock.now()))
+    assert rt.Clock.now() == 0 and seen == []          # nothing fires unbidden
+    fired = rt.Clock.advance(35)                        # inject 35ms of time
+    assert fired == 3 and seen == [10, 20, 30]          # deterministic steps
+    assert rt.Clock.firings()[2] == (1, 30)             # the 3rd firing, at 30ms
+
+
+def test_unload_cancels_an_every_timer_no_residue_no_orphan_firing(rt):
+    """The pinned revertibility test: arm an `every` timer, tear the activation
+    down (run the yielded inverse), and assert no residue and no orphaned
+    firing — the schedule leaves nothing behind."""
+    seen = []
+    handle = rt.schedule_every(10, lambda: seen.append(rt.Clock.now()))
+    rt.Clock.advance(25)                                # fires at 10, 20
+    assert seen == [10, 20]
+    assert rt.Clock.pending() == 1                      # live schedule = residue
+    # teardown runs the derived inverse (the emitted `yield lambda: h.cancel()`)
+    assert handle.cancel() is True
+    assert rt.Clock.pending() == 0                      # no residue
+    rt.Clock.advance(1000)                              # lots more time passes
+    assert seen == [10, 20]                             # but no orphaned firing
+
+
+def test_residue_trace_pairs_schedule_with_cancel(rt):
+    """The no-residue proof reuses the same acquire/release trace Pool.open/close
+    uses: `schedule` is balanced by `cancel`, so an uncancelled timer is caught
+    by the existing residue machinery (`_LIFECYCLE_ACQUIRE`)."""
+    log = []
+    unsub = rt.add_trace(log.append)
+    try:
+        h = rt.schedule_every(10, lambda: None)
+        assert any(e.endswith(".schedule every 10ms") for e in log)
+        h.cancel()
+        assert any(e == f"{h._tag}.cancel" for e in log)
+    finally:
+        unsub()
+
+
+def test_after_is_one_shot_spent_after_firing(rt):
+    """`after` fires once and is spent — no residue, and the teardown's own
+    `cancel()` is a clean no-op."""
+    seen = []
+    handle = rt.schedule_after(50, lambda: seen.append("boom"))
+    assert rt.Clock.advance(49) == 0 and seen == []     # not yet
+    assert rt.Clock.advance(11) == 1 and seen == ["boom"]  # fires at 50
+    assert rt.Clock.pending() == 0                       # spent — no residue
+    assert handle.cancel() is False                      # teardown no-op
+    assert rt.Clock.advance(1000) == 0                   # never fires again
+
+
+def test_multiple_timers_fire_in_deterministic_time_order(rt):
+    """Firings interleave across timers in true time order, ties broken by arm
+    order — a total, reproducible timeline the fault sweep can index into."""
+    order = []
+    rt.schedule_every(10, lambda: order.append("a"))    # a: 10,20,30
+    rt.schedule_every(15, lambda: order.append("b"))    # b: 15,30
+    rt.Clock.advance(30)
+    assert order == ["a", "b", "a", "a", "b"]           # 10a 15b 20a 30a 30b
+
+
+# --------------------------------------------------------- emitted-code shape
+
+def test_python_emit_schedules_and_yields_cancel():
+    ir = compile_source(HEARTBEAT, "<t>")
+    src = _emitter("python").emit(ir)
+    assert "from runtime import" in src
+    assert "schedule_every(30000" in src
+    assert "schedule_after(300000" in src
+    # the derived inverse joins the same LIFO disposer stack as every effect
+    assert ".cancel()" in src and "yield lambda:" in src
+
+
+def test_typescript_emit_schedules_and_yields_cancel():
+    ir = compile_source(HEARTBEAT, "<t>")
+    src = _emitter("typescript").emit(ir)
+    assert "host.scheduleEvery(30000" in src
+    assert "host.scheduleAfter(300000" in src
+    assert ".cancel()" in src and "yield () =>" in src
+
+
+def test_emitted_python_body_reverts_cleanly():
+    """End-to-end on the emitted module: install its activation-body generator
+    against the real runtime scheduler + a stub Frame, fire the timer, then run
+    the yielded inverses — assert the schedule is gone and never fires again."""
+    ir = compile_source(
+        "service Log { emission fn write(m: Str) }\n"
+        "component Beat requires log: Log { every 10s { emit log.write(\"tick\") } }",
+        "<t>")
+    src = _emitter("python").emit(ir)
+
+    real_rt = importlib.util.module_from_spec(
+        importlib.util.spec_from_file_location(
+            "revl_runtime_57e", ROOT / "backends" / "python" / "runtime.py"))
+    real_rt.__spec__.loader.exec_module(real_rt)
+    real_rt.Clock.reset()
+
+    captured: dict = {}
+
+    class _StubFrame:
+        def __init__(self, ctx, name):
+            self.ctx = ctx
+        def install(self, body):
+            captured["body"] = body
+        def drain(self):
+            return None
+
+    # the emitted module does `from runtime import Frame, schedule_*`; shadow it
+    fake = types.ModuleType("runtime")
+    fake.Frame = _StubFrame
+    fake.schedule_every = real_rt.schedule_every
+    fake.schedule_after = real_rt.schedule_after
+    saved = sys.modules.get("runtime")
+    sys.modules["runtime"] = fake
+    try:
+        ns: dict = {}
+        exec(compile(src, "<emitted>", "exec"), ns)
+        writes = []
+        ctx = types.SimpleNamespace(log=types.SimpleNamespace(write=writes.append))
+        ns["Beat"]["apply"](ctx, {})
+        # drive the activation-body generator: collect its yielded inverses
+        disposers = []
+        for value in captured["body"]():
+            if callable(value) and getattr(value, "__name__", "") == "<lambda>":
+                disposers.append(value)
+        real_rt.Clock.advance(25_000)                # timer fires at 10s, 20s
+        assert writes == ["tick", "tick"]
+        assert real_rt.Clock.pending() == 1          # schedule is live residue
+        for dispose in reversed(disposers):          # teardown, LIFO
+            dispose()
+        assert real_rt.Clock.pending() == 0          # revertible: no residue
+        real_rt.Clock.advance(1_000_000)
+        assert writes == ["tick", "tick"]            # no orphaned firing
+    finally:
+        if saved is not None:
+            sys.modules["runtime"] = saved
+        else:
+            del sys.modules["runtime"]
+
+
+# --------------------------------------------- documented follow-on: other tiers
+
+@pytest.mark.parametrize("tier", ["go", "rust", "wasm"])
+def test_other_tiers_refuse_timers_honestly(tier):
+    """go/rust/wasm are a documented follow-on: their emitters refuse a `timer`
+    step rather than silently mis-lowering it (docs/time-coeffect.md)."""
+    ir = compile_source(
+        "service Log { emission fn write(m: Str) }\n"
+        "component C requires log: Log { every 10s { emit log.write(\"x\") } }", "<t>")
+    emit = _emitter(tier)
+    with pytest.raises(Exception) as exc:
+        emit.emit(ir)
+    assert "timer" in str(exc.value)
+
+
+def test_test_harness_reports_a_clean_follow_on_skip():
+    """`revl test` surfaces the tier refusal as a clean skip-with-reason, never
+    a false pass or an opaque dump."""
+    from revl.test import run_go, run_rust, run_wasm  # noqa: PLC0415
+    ir = compile_source(
+        "service Log { emission fn write(m: Str) }\n"
+        "component C requires log: Log { every 10s { emit log.write(\"x\") } }", "<t>")
+    for runner, tier in [(run_go, "go"), (run_rust, "rust"), (run_wasm, "wasm")]:
+        verdict, reason = runner(ir)
+        assert verdict == "skip"
+        assert "not yet lowerable" in reason and tier in reason

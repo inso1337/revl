@@ -95,6 +95,7 @@ from .parser import (
     ServiceDecl,
     SpawnExpr,
     TestDecl,
+    TimerStmt,
     TypeDecl,
     UnloadStmt,
     WhileStmt,
@@ -2663,6 +2664,15 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         for comp in program.components
         for stmt in comp.body
     )
+    # a timer (`every`/`after`, item 57) is additive v3: a consumer predating
+    # the construct refuses the whole document rather than silently dropping a
+    # `timer` body step it cannot schedule (docs/time-coeffect.md). ir_version
+    # stays 3 — no bump beyond it.
+    uses_timers = any(
+        isinstance(stmt, TimerStmt)
+        for comp in program.components
+        for stmt in comp.body
+    )
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
     uses_v3 = any(not name.startswith("__") for name in types) or bool(fns) or bool(externs) or bool(tests)
     uses_v3 = uses_v3 or any(
@@ -2671,6 +2681,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         for svc in services.values()
     )
     uses_v3 = uses_v3 or uses_components_2
+    uses_v3 = uses_v3 or uses_timers
     # a `fault_tests` section is an additive v3 feature; the version bump is
     # itself a guard, so a consumer that predates the section refuses the
     # whole document instead of silently dropping the fault tests
@@ -3586,12 +3597,16 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 intercept[stmt.key] = stmt.metadata
             continue
         action_seen = True
-        if isinstance(stmt, (LetEffect, EffectStmt)) and provide_seen_line is not None:
+        if isinstance(stmt, (LetEffect, EffectStmt, TimerStmt)) and provide_seen_line is not None:
             raise RevlError(
                 filename, stmt.line,
                 "acquisition after `provide` — an effect acquired after a provision "
                 "would be reverted while dependents can still call the service",
-                hint="move acquisitions above the `provide` block (linker rule A2)",
+                hint="move acquisitions above the `provide` block (linker rule A2). "
+                     "A timer is an acquisition too: its schedule is armed at "
+                     "activation and cancelled on teardown (docs/time-coeffect.md)"
+                     if isinstance(stmt, TimerStmt) else
+                     "move acquisitions above the `provide` block (linker rule A2)",
             )
         if isinstance(stmt, EffectStmt) and isinstance(stmt.acquire, SpawnExpr):
             # a spawn's inverse is the instance's own teardown, which needs a
@@ -3674,6 +3689,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             body.append(_lower_component_if(stmt, env, callables or set()))
         elif isinstance(stmt, EmitStmt):
             body.append(_lower_emit_step(stmt, env))
+        elif isinstance(stmt, TimerStmt):
+            body.append(_lower_timer_step(stmt, env))
         elif isinstance(stmt, AwaitStmt):
             body.append({"step": "await", "expr": _lower_expr(stmt.expr, env, mode="setup")})
         elif isinstance(stmt, ProvideStmt):
@@ -4114,6 +4131,28 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
         # compensation is teardown-position: emissions are permitted bare (A5)
         step["compensate"] = _lower_expr(stmt.compensate, env, mode="undo")
     return step
+
+
+def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:
+    """`every`/`after` -> a `timer` body step (item 57, docs/time-coeffect.md).
+
+    A timer is a revertible schedule; the step carries the delay and the
+    emissions the firing runs. The body's `emit` statements lower through the
+    *same* `_lower_emit_step` and the *same* `env` as a top-level emit, so the
+    firing is bounded by exactly the component's declared capabilities — a
+    timer body reaching an undeclared service is refused at G1/G4 like any other
+    emission, and `_collect_emit_caps` (which recurses into the nested `body`)
+    surfaces the firing's reach to the G8 audit as component reach. The schedule
+    itself is not an emission (crossing time is not crossing the system
+    boundary); its inverse is the runtime's cancellation, derived like any other
+    effect teardown, so it carries no `undo` slot in the IR."""
+    body = [_lower_emit_step(inner, env) for inner in stmt.body]
+    return {
+        "step": "timer",
+        "mode": stmt.mode,
+        "interval_ms": stmt.interval_ms,
+        "body": body,
+    }
 
 
 def _instance_get_call(node: dict, env: Env):

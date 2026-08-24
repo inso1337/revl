@@ -163,6 +163,7 @@ export function resetHost(): void {
   mapCounter = 0
   jobCounter = 0
   jobHandles.length = 0
+  Clock.reset()
 }
 
 function record(entry: string): void {
@@ -373,6 +374,153 @@ export function jobHandleList(): JobHandle[] {
   return [...jobHandles]
 }
 
+// ---------------------------------------------------------------------------
+// Time as a coeffect (roadmap item 57, docs/time-coeffect.md)
+//
+// A timer (`every 30s { … }` / `after 5m { … }`) is a *revertible schedule*:
+// arming it registers a firing with the clock, and its inverse is cancellation,
+// so the emitted body yields `() => handle.cancel()` and the component's own
+// teardown reverts it like any other effect — no orphaned interval outlives the
+// activation (a leak would surface through `liveResources`, the same R4 residue
+// set Pool/Map use).  The clock is a *coeffect the harness provides*, not
+// wall-clock: `Clock.now()` moves only when something calls `Clock.advance(ms)`
+// (`revl test`/replay drives it), so a firing is a deterministic timeline step
+// (`fires on the 3rd tick`), never a race.  The reference tier mirrors
+// backends/python/runtime.py tick-for-tick.
+// ---------------------------------------------------------------------------
+
+export type TimerMode = 'every' | 'after'
+export type TimerState = 'live' | 'cancelled' | 'done'
+
+let timerCounter = 0
+const timers: TimerHandle[] = []
+
+export class TimerHandle {
+  readonly serial: number
+  readonly mode: TimerMode
+  readonly intervalMs: number
+  private readonly body: () => void
+  private status: TimerState = 'live'
+  nextAt: number
+  fired = 0
+
+  constructor(mode: TimerMode, intervalMs: number, body: () => void) {
+    if (!Number.isInteger(intervalMs) || intervalMs <= 0) {
+      throw new Error(`timer interval must be a positive integer (ms), got ${intervalMs}`)
+    }
+    this.serial = ++timerCounter
+    this.mode = mode
+    this.intervalMs = intervalMs
+    this.body = body
+    this.nextAt = Clock.now() + intervalMs
+    timers.push(this)
+    liveResources.add(this.label)
+    record(`${this.label}.schedule ${mode} ${intervalMs}ms`)
+  }
+
+  get label(): string {
+    return `timer#${this.serial}`
+  }
+
+  state(): TimerState {
+    return this.status
+  }
+
+  /** live -> cancelled (true); a no-op returning false once spent. The derived
+   *  inverse the emitted body yields — running it on teardown proves the
+   *  schedule leaves no residue. */
+  cancel(): boolean {
+    if (this.status !== 'live') return false
+    this.status = 'cancelled'
+    liveResources.delete(this.label)
+    record(`${this.label}.cancel`)
+    return true
+  }
+
+  /** @internal — driven only by Clock.advance. */
+  fire(now: number): void {
+    this.fired += 1
+    clockFirings.push([this.serial, now])
+    record(`${this.label}.fire #${this.fired} at ${now}ms`)
+    this.body()
+    if (this.mode === 'after') {
+      // a one-shot's schedule is spent once it fires; release it through the
+      // same path as cancel so `liveResources` clears and the teardown's own
+      // `handle.cancel()` is a clean no-op.
+      this.status = 'done'
+      liveResources.delete(this.label)
+      record(`${this.label}.cancel`)
+    }
+  }
+}
+
+const clockFirings: Array<[number, number]> = []
+let clockNow = 0
+
+/** The clock coeffect (item 57): time advances only when the harness calls
+ *  `advance`, so timer firings are deterministic timeline steps. */
+export const Clock = {
+  now(): number {
+    return clockNow
+  },
+  /** Advance logical time by `ms`, firing every timer that comes due —
+   *  earliest first, ties broken by arm order — re-arming `every` timers across
+   *  the whole span. Returns the firing count so a test can assert exactly how
+   *  many steps an advance produced. */
+  advance(ms: number): number {
+    if (!Number.isInteger(ms) || ms < 0) {
+      throw new Error(`clock advance must be a non-negative integer (ms), got ${ms}`)
+    }
+    const target = clockNow + ms
+    let count = 0
+    // An event loop: an `every` re-arms and may fire again within one advance,
+    // and firings interleave across timers in true time order. Bounded because
+    // each pass consumes one firing and every nextAt strictly increases.
+    for (;;) {
+      let next: TimerHandle | undefined
+      for (const t of timers) {
+        if (t.state() !== 'live' || t.nextAt > target) continue
+        if (
+          next === undefined ||
+          t.nextAt < next.nextAt ||
+          (t.nextAt === next.nextAt && t.serial < next.serial)
+        ) {
+          next = t
+        }
+      }
+      if (next === undefined) break
+      clockNow = next.nextAt
+      if (next.mode === 'every') next.nextAt += next.intervalMs
+      next.fire(clockNow)
+      count += 1
+    }
+    clockNow = target
+    return count
+  },
+  /** Live timers — a teardown that abandons one leaves this > 0. */
+  pending(): number {
+    return timers.filter((t) => t.state() === 'live').length
+  },
+  /** The recorded firing log: `[timerSerial, firedAtMs]` in order. */
+  firings(): Array<[number, number]> {
+    return clockFirings.map((f) => [f[0], f[1]])
+  },
+  reset(): void {
+    clockNow = 0
+    timerCounter = 0
+    timers.length = 0
+    clockFirings.length = 0
+  },
+}
+
+export function scheduleEvery(intervalMs: number, body: () => void): TimerHandle {
+  return new TimerHandle('every', intervalMs, body)
+}
+
+export function scheduleAfter(intervalMs: number, body: () => void): TimerHandle {
+  return new TimerHandle('after', intervalMs, body)
+}
+
 let mapCounter = 0
 
 export class MapHandle {
@@ -528,6 +676,10 @@ export const host = {
     pending: pendingJobs,
     TICKS: JOB_TICKS,
   },
+  // time as a coeffect (item 57): a timer body compiles to `host.scheduleEvery`
+  // / `host.scheduleAfter`, whose handle's `cancel()` is the schedule's inverse.
+  scheduleEvery,
+  scheduleAfter,
   applyConfigDefaults,
 }
 

@@ -18,6 +18,9 @@ KEYWORDS = {
     "handoff",
     # instance-parametric components (docs/design-v2-instances.md)
     "spawn",
+    # time as a coeffect (docs/time-coeffect.md, roadmap item 57): `every`/
+    # `after` acquire a revertible schedule whose inverse is cancellation.
+    "every", "after",
     # v2.0 full-language (docs/syntax-2.0.md)
     "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail",
