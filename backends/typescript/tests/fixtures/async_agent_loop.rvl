@@ -1,0 +1,46 @@
+// item 90 — phase-2 async fn-coloring exit test (docs/design/async-extern.md
+// §3). The harness's agent-loop shape: a top-level module `fn` that funnels an
+// async extern (`model_complete`) each turn of a bounded recursion, decoding
+// each response with a plain (sync) callback arrow. Reaching the async extern
+// directly colors `agent_loop` async by the frontend fixed point; the arrow
+// value `decode` stays uncolored (an arrow carries no async color — a
+// first-class async value would be refused). The colored fn compiles,
+// typechecks, and emits `async function …: Promise<T>` with every async call
+// site awaited — `tsc --noEmit` green.
+
+type ToolReq = { name: Str, args: Str }
+type Step = Final(Str) | NeedTool(ToolReq)
+
+extern emission async fn model_complete(prompt: Str) -> Str
+  = @ts {
+      const r = await Promise.resolve({ text: () => Promise.resolve("FINAL " + prompt) })
+      return await r.text()
+    }
+
+fn decode_response(resp: Str) -> Step {
+  if (resp.slice(0, 6) == "FINAL ") {
+    return Final(resp.slice(6, resp.length()))
+  }
+  return NeedTool({ name: resp.slice(0, 10), args: "" })
+}
+
+// colored async: reaches `model_complete` directly, and recurses. `decode` is
+// a sync arrow callback — funneled through, never itself async.
+fn agent_loop(prompt: Str, decode: (Str) -> Step, n: Int) -> Step {
+  if (n <= 0) { return Final("max_steps exhausted") }
+  return match decode(model_complete(prompt)) {
+    Final(answer) => Final(answer),
+    NeedTool(req) => agent_loop(req.name, decode, n - 1),
+  }
+}
+
+service Loop { emission async fn run(p: Str) -> Step }
+
+component Agent provides agent: Loop {
+  config { max_steps: Int = 8 }
+  provide agent {
+    async fn run(prompt) {
+      return agent_loop(prompt, decode_response, config.max_steps)
+    }
+  }
+}
