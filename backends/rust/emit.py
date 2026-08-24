@@ -230,7 +230,23 @@ def _rust_fn_type(name: str, types: dict | None, position: str) -> str:
         raise EmitError(_FN_TYPE_REFUSAL.format(name=name))
     params, ret = _split_fn_type(name)
     rendered = ", ".join(_rust_type(p, types) for p in params)
-    return f"impl Fn({rendered}) -> {_rust_type(ret, types)}"
+    return f"impl Fn({rendered}) -> {_rust_type(_erase_async(ret), types)}"
+
+
+def _erase_async(ret: str) -> str:
+    """Erase the async color from a function-type return (roadmap item 92/94).
+
+    `Async[T]` colors a first-class callback on the py/ts tiers (async/await);
+    the rust tier has no async-fn machinery, so an `Async[T]` return erases to
+    its concrete `T` — `(Str) -> Async[Str]` lowers `impl Fn(String) -> String`,
+    not the `impl Fn(String) -> Value` that leaked when the unknown `Async` head
+    fell through to the opaque `Value` fallback. `Async` is position-restricted
+    to a fn-type return (typecheck.py), so this is the only site it reaches here.
+    """
+    r = ret.strip()
+    if r.startswith("Async[") and r.endswith("]"):
+        return r[len("Async["):-1].strip()
+    return ret
 
 
 def _split_fn_type(name: str) -> tuple[list[str], str]:
