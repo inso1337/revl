@@ -404,8 +404,12 @@ class _ScriptedProc:
     repoints, and on teardown emits the per-process no-residue proof the real
     runner now prints before `DOWN`."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, cmd: list | None = None, spec_path: str | None = None,
+                 spec: dict | None = None):
         self.name = name
+        self.cmd = cmd or []
+        self.spec_path = spec_path
+        self.spec = spec or {}
         self.stdout = _Stdout()
         self.stdin = _Stdin(self)
         self._alive = True
@@ -465,7 +469,8 @@ def _wire_conductor(tmp_path, monkeypatch, inputs):
 
     def fake_popen(cmd, **kwargs):
         spec = json.loads(Path(cmd[-1]).read_text(encoding="utf-8"))
-        proc = _ScriptedProc(spec["name"])
+        proc = _ScriptedProc(spec["name"], cmd=list(cmd), spec_path=cmd[-1],
+                             spec=spec)
         procs[spec["name"]] = proc
         return proc
 
@@ -525,4 +530,43 @@ def test_conductor_refuses_an_inadmissible_swap_and_boots_no_successor(tmp_path,
     assert not [n for n in procs if "__t" in n], list(procs)
     # the original provider is still the one serving (never torn down by a swap)
     assert set(procs) == {"provider", "consumer"}
+
+
+def test_placement_accepts_ts_as_an_alias_for_node(tmp_path, monkeypatch):
+    """The manifest names the TypeScript tier `node` while every other surface
+    says `ts`; the conductor must accept both spellings and boot the node
+    runner for either (roadmap item 72)."""
+    app = _write(tmp_path, "app.rvl", _SWAPPABLE_APP)
+    plc = _write(tmp_path, "app_ts.toml", _SWAPPABLE_PLACEMENT.replace(
+        "components = [\"Consumer\"]", "backend = \"ts\"\ncomponents = [\"Consumer\"]", 1))
+    procs = _wire_conductor(tmp_path, monkeypatch, [":q"])
+
+    # the ts alias canonicalizes to the node tier, so the preflight needs a
+    # node runtime to be "installed": stub the cordis-ts install dir and node
+    # on PATH (the preflight check is not what this test is about). The TS
+    # emitter subprocess is stubbed too, so no real emit runs.
+    fake_ts = tmp_path / "typescript"
+    (fake_ts / "node_modules" / "cordis").mkdir(parents=True)
+    monkeypatch.setattr(_placement, "_TS_DIR", fake_ts)
+    monkeypatch.setattr(_placement, "_emit_ts_module",
+                        lambda ir, tmp: str(fake_ts / "_gen" / "mod.ts"))
+    original_which = _placement.shutil.which
+
+    def fake_which(cmd, **kw):
+        if cmd == "node":
+            return "/usr/bin/node"
+        return original_which(cmd, **kw)
+
+    monkeypatch.setattr(_placement.shutil, "which", fake_which)
+
+    rc = _placement.run_placement([app], plc, once=False)
+    assert rc == 0
+
+    # the consumer process was spawned through the *node* runner (the ts
+    # alias canonicalized, so the conductor never saw a backend it could
+    # not build or spawn)
+    consumer_cmd = procs["consumer"].cmd
+    assert "placement_runner.ts" in " ".join(consumer_cmd)
+    # the alias is normalized in the spec the child receives too
+    assert procs["consumer"].spec["backend"] == "node"
 
