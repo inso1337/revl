@@ -51,7 +51,8 @@ withholding. See demo.py scenarios 6-8.
   canonical-ABI-shaped representation (`u32` length/count prefix, then one
   8-byte slot per field/element); the module exports `memory` so a host can
   read results. Supported builtins: `length`, `push`, `concat`, `slice`,
-  `charAt`, `charCodeAt`.
+  `charAt`, `charCodeAt`, `to_str`, `startsWith`, `endsWith`, `to_int`
+  (the Str parse; the Int32 widen is the sign-extend).
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
 
 ## Widths: `Int` is i64, addresses are i32

@@ -1,0 +1,43 @@
+// The revl stdlib JSON module (FR-3, docs/stdlib-json.md).
+//
+// Real tool calls carry structured args (DSH tools take JSON); before this
+// module the harness's mock wire protocol had to be flattened to
+// `TOOL_CALL name arg1 arg2` and parsed by hand. These two externs give a
+// component the JSON story the harness needs, scoped to the value types
+// revl already carries (Str/Int/Bool/Float/List/Opt/records): `parse` turns
+// a Str into a revl value (`Any` — the wildcard the type algebra uses for
+// values whose static type only the runtime knows), `stringify` turns one
+// back into a Str.
+//
+// Each tier's implementation is the `@<backend>` body beside the signature
+// (the extern-body mechanism, docs/syntax-2.0.md §extern). Import with a
+// named `use`:
+//
+//     use "stdlib/json.rvl" { json_parse, json_stringify }
+//
+// Tier status (see docs/stdlib-json.md for the full table and the path to
+// the remaining tiers):
+//   * py — `json.loads` / `json.dumps`; executed by the test suite.
+//   * ts — `JSON.parse` / `JSON.stringify`; emitted by the test suite.
+//   * rs — an `Any` extern return type-erases to `cordis::Value` on this
+//     tier, so a parsed record cannot be read back (no field access); the
+//     module ships no @rs body until the emitter types Any-typed bindings
+//     by their declared type. Refused with the honest "no @rs body" message.
+//   * java — where a provider's Jackson/Gson plugs in; no JDK JSON API, so
+//     none until a provider is on the `javac` classpath.
+//   * go — needs the emitter to add `encoding/json` to the module's
+//     imports for verbatim extern bodies (not yet wired); same refusal.
+//   * wasm — the substrate value model (Int/Bool/Str/List) cannot hold
+//     Float/Map/records, so a JSON value has no representation there.
+//
+// The `Any` return is what makes `parse` usable: it flows into any typed
+// position (`let tc: ToolCall = json_parse(s)`), which is how a harness
+// recovers a record of tool args from a wire string.
+
+pub extern pure fn json_parse(s: Str) -> Any
+  = @py { import json; return json.loads(s) }
+  = @ts { return JSON.parse(s) }
+
+pub extern pure fn json_stringify(v: Any) -> Str
+  = @py { import json; return json.dumps(v) }
+  = @ts { return JSON.stringify(v) }

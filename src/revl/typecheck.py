@@ -542,6 +542,13 @@ _BUILTIN_SIG = {
     "split": ("Str", ["Str"], "List[Str]"),
     "join": ("List", ["Str"], "Str"),
     "repeat": ("Str", ["Int"], "Str"),
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # protocol parsing is prefix-tagged (`FINAL `, `TOOL_CALL `), and the
+    # harness hit a real off-by-one (`"TOOL_CALL "` is 10 chars, sliced 9)
+    # that `slice`-then-compare cannot catch. Str-only, matching the family
+    # of the other Str-builtins.
+    "startsWith": ("Str", ["Str"], "Bool"),
+    "endsWith": ("Str", ["Str"], "Bool"),
     # Integer division and modulo, named rather than defaulted (§0 keeps `/`
     # and `%` meaning what TypeScript means by them; these say what they do).
     # docs/arithmetic.md gives the definitions and the divergence they close.
@@ -554,7 +561,15 @@ _BUILTIN_SIG = {
     # `.to_int32()` narrows Int -> Int32; it can lose bits, so it is ALWAYS
     # explicit and re-imposes the 32-bit bound at runtime, trapping
     # `revl: Int32 overflow` exactly as Int traps at the i64 edge.
-    "to_int": ("Int32", [], "Int"),
+    # `to_int` is also the `Str -> Opt[Int]` parsing builtin (FR-9): the first
+    # method whose spelling is shared by two receiver families, so its entry
+    # is a dict keyed by family rather than a single sig — `builtin_check`
+    # picks the row by the receiver head and refuses a receiver that matches
+    # neither.
+    "to_int": {
+        "Int32": ("Int32", [], "Int"),
+        "Str": ("Str", [], "Opt[Int]"),
+    },
     "to_int32": ("Int", [], "Int32"),
     # The total, value-returning forms (docs/arithmetic.md, "Still open"):
     # same rounding convention as their faulting counterparts, but a zero
@@ -725,7 +740,26 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     sig = _BUILTIN_SIG.get(method)
     if sig is None:
         return None
-    family, params, ret = sig
+    if isinstance(sig, dict):
+        # A method spelled for several receiver families (`to_int`: the Int32
+        # widening AND the Str parse — docs/arithmetic.md and docs/stdlib-2.0.md
+        # §Str.to_int). Select the row by the receiver head; a receiver that
+        # matches no row is refused, listing the admitted families — the same
+        # shape as the single-family error below, so the two paths read alike.
+        thead, _ = parse_type(target_type)
+        row = sig.get(thead)
+        if row is None:
+            if filename and target_type is not None:
+                raise RevlError(
+                    filename, line,
+                    f"builtin `{method}` has no form for a "
+                    f"`{render_type(target_type)}` receiver "
+                    f"(its receiver families: {', '.join(sorted(sig))})",
+                    code="T1", category="type-mismatch")
+            return None
+        family, params, ret = row
+    else:
+        family, params, ret = sig
     thead, targs = parse_type(target_type)
     if filename and target_type is not None:
         if family == "sized" and thead not in _SIZED_HEADS:

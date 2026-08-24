@@ -1844,7 +1844,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         args = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
-        return _v3_builtin(node.get("method"), target, args)
+        return _v3_builtin(node.get("method"), target, args, node.get("recv"))
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename)
@@ -1968,10 +1968,13 @@ def _v3_checked_div(method: str, target: str, arg: str) -> str:
             f'else {{ Ok::<i64, String>({ok}) }} }}')
 
 
-def _v3_builtin(method: str, target: str, args: list[str]) -> str:
+def _v3_builtin(method: str, target: str, args: list[str],
+                recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched via the Revl*Ops
     helper traits so every (method, Str|List) pair from the spec table
-    compiles — Rust resolves the receiver type statically."""
+    compiles — Rust resolves the receiver type statically. `recv` carries
+    the receiver's static type only where the lowering must dispatch on it
+    (`to_int`: the Int32 widen vs the Str parse)."""
     if method == "length":
         return f"{target}.revl_length()"
     if method == "push":
@@ -1992,6 +1995,13 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"{target}.revl_join(&{args[0]})"
     if method == "repeat":
         return f"{target}.revl_repeat({args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # `str::starts_with`/`ends_with` match on char-boundary patterns, so a
+    # code-point prefix of a UTF-8 string is exactly a prefix here.
+    if method == "startsWith":
+        return f"{target}.revl_starts_with(&{args[0]})"
+    if method == "endsWith":
+        return f"{target}.revl_ends_with(&{args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): a std HashMap, cloned on
     # write. Every revl value type derives Clone on this tier, so the copy
     # is total; `lookup` answers Option<V> (the tier's Opt) via cloned().
@@ -2019,7 +2029,13 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
     # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int is
     # a lossless `as i64`; narrowing Int -> Int32 goes through `i32::try_from`,
     # which returns Err out of range — `.expect` turns that into the trap.
+    # `to_int` is ALSO the Str parse (FR-9, docs/stdlib-2.0.md §Str.to_int):
+    # `str::parse::<i64>` is total on the ASCII digits (leading `-` allowed)
+    # and answers `Err` for empty/partial/`+` spellings AND out-of-i64-range
+    # values, so `.ok()` is exactly the tier's `Opt[Int]`.
     if method == "to_int":
+        if recv == "Str":
+            return f"{{ ({target}).parse::<i64>().ok() }}"
         return f"(({target}) as i64)"
     if method == "to_int32":
         return f'(i32::try_from({target}).expect("revl: Int32 overflow"))'
@@ -2063,6 +2079,8 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_concat(&self, other: &String) -> String;",
         "    fn revl_split(&self, sep: &String) -> Vec<String>;",
         "    fn revl_repeat(&self, n: i64) -> String;",
+        "    fn revl_starts_with(&self, prefix: &String) -> bool;",
+        "    fn revl_ends_with(&self, suffix: &String) -> bool;",
         "}",
         "impl RevlStrOps for String {",
         "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }",
@@ -2088,6 +2106,8 @@ def _stdlib_helper_traits() -> list[str]:
         "        }",
         "    }",
         "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }",
+        "    fn revl_starts_with(&self, prefix: &String) -> bool { self.starts_with(prefix.as_str()) }",
+        "    fn revl_ends_with(&self, suffix: &String) -> bool { self.ends_with(suffix.as_str()) }",
         "}",
         "trait RevlStrListOps {",
         "    fn revl_join(&self, sep: &String) -> String;",

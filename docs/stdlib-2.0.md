@@ -21,6 +21,8 @@ revl refuses.)
 | `split(sep)` | 1 | Str | pieces between separators; `""` → 1-char strings; trailing empties kept | inline dispatch | `x.split(sep)` |
 | `join(sep)` | 1 | List[Str] | elements joined by sep | `sep.join(x)` | `x.join(sep)` |
 | `repeat(n)` | 1 | Str | n copies concatenated | `x * n` | `x.repeat(n)` |
+| `startsWith(p)` | 1 | Str | prefix probe: `p` is the receiver's first `p.length()` code points (FR-6) | `x.startswith(p)` | `x.startsWith(p)` |
+| `endsWith(p)` | 1 | Str | suffix probe: `p` is the receiver's last `p.length()` code points (FR-6) | `x.endswith(p)` | `x.endsWith(p)` |
 | `div_trunc(b)` | 1 | Int | integer division rounding toward zero | built | `Math.trunc(a / b)` |
 | `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
 | `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
@@ -33,6 +35,7 @@ revl refuses.)
 | `lookup(k)` | 1 | Map | value under `k` as `Opt[V]` | `x.get(k)` | `x.get(k)` |
 | `has(k)` | 1 | Map | key membership | `k in x` | `x.has(k)` |
 | `to_str()` | 0 | Int | decimal rendering, `-` for negatives | `str(x)` | `x.toString()` |
+| `to_int()` | 0 | Str | ASCII-digit parse → `Opt[Int]` (FR-9); ALSO the Int32→Int widen (§ below) | lambda | `revlParseInt(x)` |
 
 - `push`/`concat` are **persistent** (value semantics) — consistent with
   capture-by-value and G6: no revl value is ever mutated in place. Rebind:
@@ -79,7 +82,9 @@ v1 documents are unaffected. The wasm tier lowers the fixed-shape builtins
 (`length`, `push`, `concat`, `slice`, `charAt`, `charCodeAt`) over its
 canonical-ABI string/list model and rejects the rest (`indexOf`, `split`,
 `join`, `repeat`) with its usual named tier error — not yet lowerable on
-that tier.
+that tier. The FR-6/FR-9 additions (`startsWith`, `endsWith`, `to_int`)
+DO lower on wasm: byte-comparison helpers are exact for UTF-8 prefixes, and
+the `$str_to_int` helper parses straight to the tier's Opt cell.
 
 ## `Map`: the persistent value type (graduated from Planned)
 
@@ -269,6 +274,58 @@ namespace to pollute (the same grain that made Map's surface methods), and
 an Int-only receiver family is already how the checker dispatches Int-only
 builtins (`div_trunc` and friends). The name follows the type, not the
 host — `to_str`, spelled after the revl type `Str`, on every tier.
+
+### `Str.startsWith(p)` / `Str.endsWith(p)`: the prefix/suffix probes (FR-6)
+
+`x.startsWith(p)` is true iff the first `p.length()` code points of `x`
+equal `p`; `x.endsWith(p)` is true iff its last `p.length()` code points do.
+The empty string is a prefix and a suffix of every string (so
+`x.startsWith("")` is always true), and a string is a prefix of itself.
+The probes are **Str-only** — declared on the Str family exactly like
+`charAt`/`split` — and both arguments count in code points
+(docs/strings.md), never UTF-16 units.
+
+They exist because protocol parsing is the harness's daily bread: the wire
+format is prefix-tagged (`FINAL `, `TOOL_CALL `), and the harness hit a real
+off-by-one (`"TOOL_CALL "` is 10 chars, sliced 9) that
+`resp.slice(0, 9) == "TOOL_CALL "` cannot catch — the checker sees two
+strings compare equal-or-not, never the fence's *shape*. `startsWith` names
+the intent.
+
+Lowering is native on every tier (`str.startswith`, `String.prototype.
+startsWith`, `str::starts_with`, `String.startsWith`, `strings.HasPrefix`,
+and a byte-comparison WAT helper on wasm — a code-point prefix of a valid
+UTF-8 string is exactly a byte prefix). All six tiers carry it.
+
+### `Str.to_int()`: the parsing builtin (FR-9)
+
+`s.to_int()` parses `s` as an `Int` and answers `Opt[Int]`: `Some(n)` on the
+ASCII digits with an optional leading `-` (`"42"`, `"-7"`, `"007"`), `None`
+for **everything else** — empty, `"-"`, `"+"`-prefixed, whitespace, partial
+digit runs (`"12a"`), non-ASCII digits, and **out-of-i64-range magnitudes**
+(`"9223372036854775808"` is `None`, exactly like a non-digit; `Int.MIN`
+itself — `"-9223372036854775808"` — parses, whose magnitude has no positive
+representative, the same edge `Int.to_str` renders). It mirrors
+`Int.to_str()`: the same name family, the reverse direction, the same total
+domain (every `Int` renders, every digit string parses).
+
+It is a *method*, not a free function, on purpose (the `Int.to_str()` grain),
+and it is the first builtin whose **spelling is shared by two receiver
+families**: `to_int` is also the Int32→Int widening (docs/arithmetic.md,
+"Sized integers"). The checker dispatches by receiver head — `Int32.to_int`
+widens, `Str.to_int` parses — and a receiver that is neither (`Bool.to_int`,
+`Int.to_int`) is refused listing both families. The IR carries the receiver's
+static type on the builtin node (`recv`), because the backends must dispatch
+the same way and no tier can infer it from the method name alone.
+
+The Opt result composes exactly like every other Opt: `s.to_int() ?? 0`,
+`match s.to_int() { Some(v) => v, None => 0 }`. Every tier's lowering is a
+one-liner over its native parse (`int()` under an ASCII/range gate on py,
+a regex-guarded `BigInt` on ts, `str::parse::<i64>().ok()` on rust,
+`Long.parseLong` under an ASCII gate on java, a hand-rolled unsigned
+accumulator on go and wasm — the wasm helper is the one that needs care,
+since `Int.MIN`'s magnitude is 2^63 and every larger magnitude must be
+`None`).
 
 ## Versioning
 

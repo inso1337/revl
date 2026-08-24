@@ -110,6 +110,9 @@ _BUILTIN_METHODS = {
     "length": 0, "push": 1, "slice": 2, "charAt": 1,
     "charCodeAt": 1, "indexOf": 1, "concat": 1,
     "split": 1, "join": 1, "repeat": 1,
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # Str-only, one Str argument.
+    "startsWith": 1, "endsWith": 1,
     # Integer division and modulo. `/` and `%` keep the meaning TypeScript
     # gives them (§0); these name what they do, so no tier has to guess and
     # none can quietly pick its host's convention (docs/arithmetic.md).
@@ -2252,9 +2255,17 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                                 f"builtin `{method}` takes {arity} argument(s), "
                                 f"{len(expr.args)} given")
             _refuse_zero_divisor(method, expr.args, filename, expr.line)
-            return {"kind": "builtin", "method": method,
-                    "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
-                    "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
+            node: dict = {"kind": "builtin", "method": method,
+                          "target": _lower_pure_expr(expr.callee.target, scope, callables, alias_fns, filename, type_env, types),
+                          "args": [_lower_pure_expr(a, scope, callables, alias_fns, filename, type_env, types) for a in expr.args]}
+            if method == "to_int":
+                # `to_int` is spelled for two receiver families (Int32 widen,
+                # Str parse) — the backends must dispatch on the receiver's
+                # static type, which the IR node would otherwise not carry
+                # (the same reason `un` annotates Int negation). Annotate it,
+                # exactly as the checker selected the row.
+                node["recv"] = infer_ast(expr.callee.target, type_env, types, None)
+            return node
         # A call argument that widens Int -> Float is marked on the argument
         # node (`_mark_widen`) so every backend emits the conversion — the
         # `ident(3)` gap in docs/arithmetic.md. Generic signatures are
@@ -2816,10 +2827,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     raise RevlError(filename, line,
                                     f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
                                     f"argument(s), {len(args)} given")
-                return {"kind": "builtin", "method": method,
-                        "target": _lower_component_pure_expr(expr.callee.target, env, scope,
-                                                             callables, pure_only),
-                        "args": args}
+                node: dict = {"kind": "builtin", "method": method,
+                              "target": _lower_component_pure_expr(expr.callee.target, env, scope,
+                                                                   callables, pure_only),
+                              "args": args}
+                if method == "to_int":
+                    # receiver-family dispatch (`recv`), as in a fn body
+                    node["recv"] = infer_ir({"kind": "name", "id": scope[root]},
+                                            env.type_env, env.types, env.services)
+                return node
             if root in scope:
                 # A method on a local that is a *known* stdlib-bearing value
                 # (Str/List/Bytes) must be a builtin — builtins were already
@@ -2866,8 +2882,13 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 raise RevlError(filename, line,
                                 f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
                                 f"argument(s), {len(args)} given")
-            return {"kind": "builtin", "method": method, "target": target,
-                    "args": args}
+            node: dict = {"kind": "builtin", "method": method, "target": target,
+                          "args": args}
+            if method == "to_int":
+                # receiver-family dispatch (`recv`), as in a fn body
+                node["recv"] = infer_ast(expr.callee.target, env.type_env,
+                                         env.types, None)
+            return node
         return {"kind": "call",
                 "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
                                                      pure_only),
