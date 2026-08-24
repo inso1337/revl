@@ -2152,6 +2152,11 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
         lines.append("  // drives the composition on a real cordis context and")
         lines.append("  // proves no residue after LIFO teardown (FR-5 / §7.1).")
         lines.append("  const root = new Context()")
+        if any(s.get("step") == "advance" for s in test.get("body") or []):
+            # item 102: the clock coeffect is a module-global; reset it so this
+            # test's `advance` steps start from t=0 and see only its own timers,
+            # independent of any earlier lifecycle test in the file.
+            lines.append("  host.clockReset()")
         lines.append("  const _revl_baseline = snapshotRuntime(root)")
         lines.append("  const _revl_fibers = new Map<string, any>()")
         for step in test.get("body") or []:
@@ -2195,6 +2200,13 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                 # revlEq + vitest's matcher, with both sides in the message)
                 _v3_stmt({"step": "assert", "expr": step["expr"]}, ctx, lines,
                          2, test_mode=True)
+            elif kind == "advance":
+                # item 102: drive the clock coeffect forward. A firing is a
+                # deterministic timeline step, so `_revl_settle` after it lets
+                # the fired body's async work (if any) settle before the next
+                # statement observes it (docs/time-coeffect.md §advance).
+                lines.append(f"  host.clockAdvance({int(step['ms'])})")
+                lines.append("  await _revl_settle()")
             elif kind == "assert_no_residue":
                 lines.append("  // R4 + R1: same introspection the py reference")
                 lines.append("  // tier's `assert no_residue` performs.")
