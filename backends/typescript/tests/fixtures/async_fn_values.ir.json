@@ -1,0 +1,228 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Model": {
+      "methods": {
+        "complete": {
+          "params": [
+            {
+              "name": "msgs",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": true,
+          "async": true
+        }
+      }
+    },
+    "Runner": {
+      "methods": {
+        "run": {
+          "params": [
+            {
+              "name": "prompt",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": true,
+          "async": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "RealModel",
+      "source": "async_fn_values.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "model": "Model"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "model",
+          "service": "Model",
+          "methods": [
+            {
+              "name": "complete",
+              "params": [
+                "msgs"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "remote",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "msgs"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Agent",
+      "source": "async_fn_values.rvl",
+      "config": [],
+      "requires": {
+        "model": "Model"
+      },
+      "provides": {
+        "runner": "Runner"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "runner",
+          "service": "Runner",
+          "methods": [
+            {
+              "name": "run",
+              "params": [
+                "prompt"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "agent_loop",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "prompt"
+                      },
+                      {
+                        "kind": "arrow",
+                        "params": [
+                          "msgs"
+                        ],
+                        "captures": [],
+                        "body": {
+                          "kind": "call",
+                          "target": {
+                            "kind": "req",
+                            "name": "model"
+                          },
+                          "method": "complete",
+                          "args": [
+                            {
+                              "kind": "name",
+                              "id": "msgs"
+                            }
+                          ]
+                        },
+                        "async": true,
+                        "returns": "Async[Str]"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "RealModel",
+        "file": "async_fn_values.rvl",
+        "inject": [],
+        "provides": [
+          "model"
+        ]
+      },
+      {
+        "name": "Agent",
+        "file": "async_fn_values.rvl",
+        "inject": [
+          "model"
+        ],
+        "provides": [
+          "runner"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "RealModel",
+      "Agent"
+    ]
+  },
+  "functions": [
+    {
+      "name": "agent_loop",
+      "params": [
+        {
+          "name": "current",
+          "type": "Str"
+        },
+        {
+          "name": "complete",
+          "type": "(Str) -> Async[Str]"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "resp",
+          "value": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "complete"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "current"
+              }
+            ]
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "resp"
+          }
+        }
+      ],
+      "async": true
+    }
+  ],
+  "externs": [
+    {
+      "name": "remote",
+      "class": "emission",
+      "params": [
+        {
+          "name": "msgs",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "ts": " return msgs + \" -> reply\" "
+      },
+      "async": true
+    }
+  ]
+}

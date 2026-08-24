@@ -89,3 +89,31 @@ def test_agent_loop_golden_is_current():
     m = _load_ts_emit()
     golden = (BACKEND / "golden" / "async_agent_loop.ts").read_text(encoding="utf-8")
     assert m.emit(_agent_loop_ir()) == golden
+
+
+def _fn_values_ir():
+    return json.loads((BACKEND / "tests" / "fixtures" / "async_fn_values.ir.json")
+                      .read_text(encoding="utf-8"))
+
+
+def test_async_fn_value_callback_emits_awaited_promise_ts():
+    """Item 92 exit test (finding #21) — the callback-arrow shape. The async
+    color rides the declared function type `(Str) -> Async[Str]`: `agent_loop`
+    colors async, its `complete` parameter types as `Promise<T>`, and the call
+    site awaits it; the call-site arrow renders `async` so its body may reach
+    the async op without an await landing in a sync arrow. tsc-validated by
+    `npm run typecheck`."""
+    m = _load_ts_emit()
+    out = m.emit(_fn_values_ir())
+    assert ("export async function agent_loop(current: string, "
+            "complete: ((a0: string) => Promise<string>)): Promise<string> {") in out
+    assert "const resp = (await complete(current))" in out
+    # the callback arrow renders async and its call site is awaited
+    assert "(async (msgs: any) =>" in out
+    assert "(await agent_loop(prompt," in out
+
+
+def test_async_fn_values_golden_is_current():
+    m = _load_ts_emit()
+    golden = (BACKEND / "golden" / "async_fn_values.ts").read_text(encoding="utf-8")
+    assert m.emit(_fn_values_ir()) == golden
