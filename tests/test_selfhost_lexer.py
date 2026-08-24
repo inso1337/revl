@@ -23,6 +23,7 @@ CORPUS = [
     "examples/beacon.rvl",
     "examples/tenants.rvl",
     "backends/rust/scenarios/probe.rvl",
+    "tests/fixtures/triple_string.rvl",  # item 87: triple-quoted `"""` forms
     "selfhost/lexer.rvl",  # the money shot: the lexer lexes itself
 ]
 

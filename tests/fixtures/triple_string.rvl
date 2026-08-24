@@ -1,0 +1,22 @@
+// Cross-check fixture for the self-hosted lexer (item 87): triple-quoted
+// verbatim strings. Lexed by both src/revl/lexer.py and selfhost/lexer.rvl
+// and compared token-for-token. Not a runnable program — only its tokens
+// matter — but it must lex cleanly under the reference lexer.
+
+let single = """hello"""
+
+let multi = """
+first line
+second line
+"""
+
+let empty = """"""
+
+let quotes = """has "one" and ""two"" inside"""
+
+let after = """no leading blank"""
+
+let indented = """
+  keeps its indentation
+    and this deeper line
+"""
