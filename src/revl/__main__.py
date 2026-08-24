@@ -14,7 +14,7 @@ from .diagnostics import explain, obligations, report
 from .errors import RevlError
 from .fmt import migrate_source
 from .holes import render as render_holes
-from .run import KNOWN_BACKENDS, run_command
+from .run import KNOWN_BACKENDS, RUNNABLE_BACKENDS, run_command
 from .test import test_command
 
 # G8 audit: the pseudo-boundary recorded when a component reaches host code
@@ -1679,12 +1679,11 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="boot a composition on a Cordis runtime; streams the lifecycle/host trace (hold + REPL, --watch, or --plan)")
     run.add_argument("files", nargs="+")
     run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
-                     help="target runtime tier (default: py; py, rust, java and "
-                          "wasm are runnable — rust/java/wasm boot as a "
-                          "separate process, --once for the "
-                          "boot/teardown round-trip; a missing runtime is a skip with a "
-                          "reason and a nonzero exit; ts and go emit but have no "
-                          "run driver yet)")
+                     help="target runtime tier (default: py). All tiers run: "
+                          f"{', '.join(RUNNABLE_BACKENDS)} — py boots in-process, "
+                          "the rest each boot as a separate process over the bridge "
+                          "seam; --once for the boot/teardown round-trip; a missing "
+                          "runtime is a skip with a reason and a nonzero exit")
     run.add_argument("--config", default=None,
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--watch", action="store_true",
