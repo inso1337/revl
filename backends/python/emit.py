@@ -708,6 +708,8 @@ class _ComponentEmitter:
             # skips every later step instead of running to the next yield
             out.add(indent, f"await {self._expr(step.get('expr'), where)}")
             out.add(indent, "yield None  # iteration boundary (A1)")
+        elif kind == "timer":
+            self._timer(out, indent, step, where)
         elif kind == "provide":
             self._provide(out, indent, step, where)
         elif kind == "return":
@@ -715,6 +717,36 @@ class _ComponentEmitter:
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
         out.add(0)
+
+    def _timer(self, out: _Lines, indent: int, step: dict, where: str) -> None:
+        """A `timer` body step (item 57): a revertible schedule.
+
+        The firing closure holds the timer body's emissions; `schedule_every`/
+        `schedule_after` register it with the clock coeffect and return a
+        handle, and the yielded `handle.cancel()` is the derived inverse — so
+        unloading the component drains this like any other effect and provably
+        cancels the timer (no orphaned interval; residue-free teardown).  The
+        clock does not advance on its own: `revl test`/replay drives it, which
+        is what makes a firing a deterministic timeline step rather than a
+        wall-clock race (docs/time-coeffect.md)."""
+        mode = step.get("mode")
+        schedule = "schedule_every" if mode == "every" else "schedule_after"
+        self.uses.add(schedule)
+        self._counter += 1
+        fn = f"_timer_{self._counter}"
+        handle = f"{fn}_h"
+        out.add(indent, f"def {fn}():")
+        emissions = step.get("body") or []
+        if not emissions:  # pragma: no cover — the parser rejects an empty body
+            out.add(indent + 1, "pass")
+        for emission in emissions:
+            if emission.get("step") != "emit":  # pragma: no cover — lowerer invariant
+                raise EmitError(f"{where}: a timer body carries emissions only, "
+                                f"found {emission.get('step')!r}")
+            out.add(indent + 1, self._expr(emission.get("expr"), where))
+        interval = int(step.get("interval_ms"))
+        out.add(indent, f"{handle} = {schedule}({interval}, {fn})")
+        out.add(indent, f"yield lambda: {handle}.cancel()")
 
     def _provide(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         name = _ident(step.get("name"), f"{where}: provide key")
@@ -1515,7 +1547,10 @@ def _emit_fault_tests(fault_tests: list, names: list) -> "_Lines":
 
 # The reference tier's host-builtin vocabulary (docs/backend-ir.md §Host
 # builtins; runtime.Pool / runtime.Map): acquisition verb -> release verb.
-_LIFECYCLE_ACQUIRE = {"new": "drop", "open": "close"}
+# A timer (item 57) joins the same table: `schedule` is acquired at activation,
+# `cancel` releases it on teardown, so an uncancelled timer surfaces as residue
+# through the exact machinery that catches a pool left open (docs/time-coeffect.md).
+_LIFECYCLE_ACQUIRE = {"new": "drop", "open": "close", "schedule": "cancel"}
 
 
 _LIFECYCLE_HARNESS = '''

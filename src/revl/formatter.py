@@ -68,6 +68,7 @@ _KEYWORDS = {
     "effect", "undo", "emit", "emission", "provide", "fn", "return",
     "true", "false", "null", "isolate", "intercept", "realm", "in", "with",
     "handoff",
+    "every", "after",
     "spawn", "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail", "hole",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
@@ -270,6 +271,12 @@ def _space_between(prev: _Piece, cur: _Piece) -> bool:
 
     # dot access binds tight on both sides
     if c in (".", "?.") or p in (".", "?."):
+        return False
+    # a duration literal keeps its unit tight: `30s`, `5m`, `250ms` (item 57).
+    # A number piece is the only _WORD that starts with a digit, and one of the
+    # five unit idents can follow it only in a timer delay — the IR gate proves
+    # the join changes nothing (both spellings lex to int + unit ident).
+    if pk == _WORD and p[:1].isdigit() and ck == _WORD and c in ("ms", "s", "m", "h", "d"):
         return False
     # never a space before a closing structural token or a separator
     if c in (",", ":", ";", ")", "]"):
