@@ -166,7 +166,9 @@ def test_py_tier_preflights_the_missing_cordis_runtime(monkeypatch):
     monkeypatch.setattr(revl_test, "_cordis_available", lambda: False)
     ir = compile_files([str(ROOT / "examples" / "lifecycle_cache.rvl")])
     outcome, message = revl_test.run_py(ir)
-    assert outcome == "fail"
+    # FR-5: an absent runtime is a skip-with-reason, exactly like every other
+    # tier's missing-toolchain gate — never a fail that reads as a regression.
+    assert outcome == "skip"
     assert message.startswith("preflight:")
     assert "sh backends/python/setup.sh" in message
     assert "backends/python/.venv/bin/python -m revl test" in message

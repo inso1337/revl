@@ -6,6 +6,11 @@ that backend's existing execution recipe (the same subprocess shapes the
 per-tier suites use). A tier whose toolchain is absent is *skipped with a
 reason* — a skipped tier is never reported as passing, and ``--all`` is the
 portability assertion: it fails the run if any *available* tier fails.
+
+``--all`` reports one verdict line per tier — ``pass`` / ``skip: reason`` /
+``fail`` — and a ``summary: N pass, M skipped, K failed`` line, so a by-design
+refusal (a lifecycle test on a tier that does not lower it yet, a missing
+toolchain) reads as a skip, never as a regression (FR-5).
 """
 
 from __future__ import annotations
@@ -129,7 +134,11 @@ def run_py(ir: dict) -> tuple[str, str]:
         # verdict for an environment problem whose remedy is one command
         # (findings-uxprobe.md, longest stall).
         if "from cordis import" in source and not _cordis_available():
-            return ("fail", _PY_RUNTIME_REMEDY)
+            # An absent runtime is an environment skip, never a fail: the other
+            # tiers treat a missing toolchain the same way, and `--all` must
+            # not read as a regression because this interpreter lacks cordis-py
+            # (FR-5; the module docstring's "toolchain absent -> skip" contract).
+            return ("skip", _PY_RUNTIME_REMEDY)
         module = types.ModuleType("revl_test_module")
         # Register before exec: the emitter renders record types as @dataclass,
         # and dataclasses._process_class resolves each field via
@@ -454,7 +463,7 @@ RUNNERS: dict[str, callable] = {
     "go": run_go,
 }
 
-_TAG = {"pass": "ok", "skip": "skipped", "fail": "FAIL"}
+_TAG = {"pass": "pass", "skip": "skip", "fail": "fail"}
 
 
 def sweep_command(ir: dict) -> int:
@@ -508,21 +517,24 @@ def test_command(ir: dict, backend: str, sweep: bool = False) -> int:
         return 0
 
     if backend == "all":
-        failures = 0
+        verdicts = {"pass": 0, "skip": 0, "fail": 0}
         for name, runner in RUNNERS.items():
             outcome, message = runner(ir)
+            verdicts[outcome] += 1
             print(f"[{name}] {_TAG[outcome]}: {message}")
-            if outcome == "fail":
-                failures += 1
-        if failures:
-            print(f"{failures} tier(s) failed", file=sys.stderr)
+        summary = (f"summary: {verdicts['pass']} pass, "
+                   f"{verdicts['skip']} skipped, {verdicts['fail']} failed")
+        if verdicts["fail"]:
+            print(summary, file=sys.stderr)
+            print(f"{verdicts['fail']} tier(s) failed", file=sys.stderr)
             return 1
+        print(summary)
         print("all tiers passed")
         return 0
 
     outcome, message = RUNNERS[backend](ir)
     if outcome == "pass":
-        print(f"[{backend}] ok: {message}")
+        print(f"[{backend}] pass: {message}")
         return 0
-    print(f"[{backend}] {message}", file=sys.stderr)
+    print(f"[{backend}] {_TAG[outcome]}: {message}", file=sys.stderr)
     return 1
