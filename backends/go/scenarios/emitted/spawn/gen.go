@@ -12,6 +12,23 @@ import (
 var _ = fmt.Sprintf
 
 // ---- host runtime (minimal, recording) --------------------------------
+
+// R1 live-resource accounting (docs/backend-ir.md §Required semantics, the
+// same pairing the py reference tier's `assert no_residue` checks): every host
+// object acquired must be released by its `undo`, or the lifecycle
+// `assert no_residue` fails. The counter is package-wide, so it is per-test
+// and cross-test safe: a clean test returns to zero.
+var _revlLiveMu sync.Mutex
+var _revlLiveHostResources int
+
+func revlHostAcquire() { _revlLiveMu.Lock(); _revlLiveHostResources++; _revlLiveMu.Unlock() }
+func revlHostRelease() { _revlLiveMu.Lock(); _revlLiveHostResources--; _revlLiveMu.Unlock() }
+func revlHostLive() int {
+	_revlLiveMu.Lock()
+	defer _revlLiveMu.Unlock()
+	return _revlLiveHostResources
+}
+
 // A deterministic in-memory stand-in for revl host objects, instrumented so
 // scenarios can assert the exact effect/undo order of emitted code.
 
@@ -46,19 +63,20 @@ type Row = map[string]string
 // Pool is a deterministic in-memory connection pool.
 type Pool struct {
 	url  string
-	size int
+	size int64
 }
 
-func PoolOpen(url string, size int) *Pool {
+func PoolOpen(url string, size int64) *Pool {
 	hostRecord("pool.open")
+	revlHostAcquire()
 	return &Pool{url: url, size: size}
 }
-func (p *Pool) Close() { hostRecord("pool.close") }
+func (p *Pool) Close() { hostRecord("pool.close"); revlHostRelease() }
 func (p *Pool) Query(sql string) []Row {
 	hostRecord("pool.query:" + sql)
 	return nil
 }
-func (p *Pool) Execute(sql string) int {
+func (p *Pool) Execute(sql string) int64 {
 	hostRecord("pool.execute:" + sql)
 	return 0
 }
@@ -71,9 +89,10 @@ type Map struct {
 
 func MapNew() *Map {
 	hostRecord("map.new")
+	revlHostAcquire()
 	return &Map{m: map[string]string{}}
 }
-func (m *Map) Drop() { hostRecord("map.drop") }
+func (m *Map) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map) Insert(k, v string) {
 	m.mu.Lock()
 	m.m[k] = v

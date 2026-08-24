@@ -41,15 +41,33 @@ This goes in the compiler spec, not the runtimes.
 
 ## Upstream issues surfaced (to file / track)
 
-- **cordis (TS) residue bug**: `assertActive` checks `uid !== null`, not
-  lifecycle state, so an undo can register an effect during deactivation that
-  lands after the unload snapshot and is never disposed — permanent residue.
-  Pinned repro: `backends/typescript/tests/upstream.test.ts` ("finding 2").
-  This is the G5 gap; feeds cordiverse/cordis#39 review.
-- **cordis-py dict-plugin `Config`**: `registry.plugin()` reads `inject` via
-  `dict.get` but `Config` via `getattr`, so dict plugins can't carry a schema;
-  emitted code validates config inside `apply` as a workaround. One-line
-  upstream fix; candidate follow-up to geohotstan/cordis-py#1.
+- **cordis (TS) residue bug** (RESOLVED — fixed in the pinned fork,
+  `inso1337/cordis@harden-assert-active` commit `c8b94b2`, PR draft at
+  `docs/upstream/cordis-ts-assertActive.md`; do NOT open the upstream PR
+  without the coordinator's confirmation): `assertActive` checked `uid !==
+  null`, not lifecycle state, so an undo could register an effect during
+  deactivation that landed after the unload snapshot and was never disposed —
+  permanent residue, the G5 gap, on the tier the README calls the portability
+  proof. The fork's `assertActive` now also refuses `FiberState.UNLOADING`
+  (`effect()`, `ctx.on()`, `ctx.plugin()`, `restart()` and `update()` all
+  inherit the guard), and the repo's TS tooling pins the fork revision in
+  `backends/typescript/package.json` (codeload tarball at the fork commit)
+  until the fix merges upstream (feeds cordiverse/cordis#39 review). The
+  repro at `backends/typescript/tests/upstream.test.ts` ("finding 2") was a
+  red-on-fix characterization test; it now pins the fixed behavior (the exact
+  playbook that closed cordis-py's A8 async gap).
+- **cordis-py dict-plugin `Config`** (RESOLVED — one-line fix in the pinned
+  fork, `inso1337/cordis-py@harden-fiber-lifecycle` commit `1c5e6f1`, now
+  pinned by `backends/python/setup.sh` per roadmap item 76(c); follow-up
+  candidate to geohotstan/cordis-py#1): `registry.plugin()` read `inject`
+  via `dict.get` but `Config` via `getattr`, so dict plugins couldn't carry
+  a schema and emitted code validated config inside `apply` as a workaround.
+  The fork now reads `Config` with the same `isinstance(dict)` branch as
+  `inject`; the emitter ships the schema as `'Config'` on the plugin dict and
+  drops the in-`apply` resolution (`ConfigSchema.validate` speaks cordis-py's
+  `{issues, value}` protocol; the Frame still attributes the `<name>.config`
+  trace and R4 `resolved_config` state; the replay harness — which calls
+  emitted `apply` directly — applies the same resolution itself).
 - **cordis-py ordering provenance** (documented, not a bug): the fiber's
   unload empirically starts disposals newest-first, but this is disclaimed by
   its docs; the py adapter's drain derives R1 from the *documented* contract
@@ -80,6 +98,18 @@ This goes in the compiler spec, not the runtimes.
   torn-state freedom: after disposal, every completed effect has run its
   inverse, in LIFO order. Authors relying on "emission after boundary never
   happens once diverted" get that guarantee on py/wasm, not on rs.
+
+  **Decision (2026-08-24): A1's contracted invariant is promoted to torn-state
+  freedom.** The weaker invariant that holds on *every* tier becomes the
+  wording of the A1 contract; the per-tier difference is spec, not surprise.
+  "Emission after boundary never happens once diverted" is a py/wasm tier
+  property, not the contract: on cordis-rs a divert during a component `await`
+  defers (post-boundary steps run, then everything reverts LIFO), and that is
+  compliant. No upstream fix (fork+PR: don't hold the fiber transition lock
+  across the await boundary) at this time — cordis-rs stays pinned at 0.3.0,
+  and the race-loop assertion pins the promoted invariant so it cannot drift.
+  Revisit the stronger guarantee only if a consumer's correctness actually
+  depends on divert-at-boundary on the rs tier.
 - **cordis4j global-realm divergence** (documented, runtime-verified): revl's
   contract (docs/design-v2-realms.md) is that realms are keyed by label and
   **equal realm-label strings denote the same realm** — two components that
@@ -262,6 +292,17 @@ with checked `$int_*` helpers. The one residual split is the *message*: a
 wasm trap carries no payload, so it faults with `unreachable` where the
 hosted tiers raise a labelled overflow error (see docs/arithmetic.md).
 
+**Decision (2026-08-24): the bare-`unreachable` trap is accepted as a
+documented tier limit.** A wasm trap carries no payload by design — the fault
+channel is the trap itself, not a value the module can hand back — so a
+designated fault-reason export before the trap would buy a labelled message
+at the cost of a second, concurrent error channel (an export the module must
+write *and* the host must read) for information the trap already conveys.
+The labelled-error difference is diagnostic depth, not semantics: every tier
+faults, and no tier continues past the fault. Revisit only if a tool wants
+to distinguish overflow from a programmatic `unreachable` on the wasm tier;
+until then the tier documents "faults with `unreachable`, no payload".
+
 Not everything diverges: `<` on `Str` is lexicographic by code point on every
 tier, including across the case boundary, and is asserted alongside the pins
 so this section is not read as "arithmetic is broken generally".
@@ -356,7 +397,8 @@ Arrow bodies are now checked against their enclosing scope, which is where the
 first four used to hide. Do not re-fence any of these; each has an executable
 rejection.
 
-- **Host-object results are untyped** (by design, host provenance — *narrowed*):
+- **Host-object results are untyped** (by design, host provenance — *closed as
+  of roadmap 75(b)*):
   the method *names, arities, and argument types* on a constructor-tracked
   receiver are now checked: `Map.new()` infers the family, and a method call on
   it is validated against the stub surface spelled in `_HOST_ARG_SIG`
@@ -364,13 +406,25 @@ rejection.
   dynamic dispatch and crash at host runtime, is now a compile error
   (`HOST-METHOD`). What stays opaque is the *result*: no table entry claims to
   know what a stub returns, so a value flowing out of `store.get(k)` carries no
-  type and is unchecked wherever it goes. Receivers whose provenance no
-  constructor pins (an extern's return) type unknown; the lowerer refuses
-  non-stdlib method *names* on them, but a stdlib-named method on such a
-  receiver lowers as that builtin and is wrong at runtime — that residual
-  sliver, plus host-object results, is the remaining fence. Still the
-  deliberate G8 trust boundary: host objects are on the audit surface, not the
-  checked surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are
+  type and is unchecked wherever it goes — **but it can no longer call a method
+  on the way out**. Receivers whose provenance no constructor pins (an extern's
+  return, a host-object result, a type parameter) type unknown; every method
+  call on them is now refused, stdlib-named or not (`t24_opaque_receiver_builtin.rvl`;
+  the stdlib-named-method sliver — `pool.remove("k")` lowering as the Map
+  `remove` builtin — is closed with the same HOST-METHOD diagnostic), so a
+  value cannot lower *through* the builtin table into a misdispatch. Only a
+  receiver the checker can *prove* is a Str/List/Int/Int32/Bytes/Map value
+  takes the table; an annotation (`let v: Str = store.get(k)`) is how a host
+  result becomes provable. The fence is now exactly "host-object **results**
+  are on the audit surface" — the G8 line as designed, with no accidental hole
+  through the builtin table. Tooling half of the same closure: the stdlib
+  method table and the host-verb surface are checked disjoint at *table-edit*
+  time — a module-load assertion in `typecheck.py`/`lower.py` fails with the
+  colliding name if either table is extended with a name from the other
+  (`remove` is the one sanctioned overlap, safe because dispatch is by
+  receiver kind; dogfood/findings-mapiter.md §2). Still the deliberate G8
+  trust boundary: host objects are on the audit surface, not the checked
+  surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are
   typed and their misuse is refused, in `fn` bodies and (as of the setup op
   sweep) in component effect blocks alike.
 
@@ -395,12 +449,16 @@ rejection.
   name, a strict superset of the implicit single-uppercase heuristic
   (docs/generics.md). What remains open:
 
-  (a) the implicit rule is still positional-by-spelling and still on — a
-  one-letter signature type is generic whether or not the author meant it, so a
-  typo'd one-letter name becomes a type parameter rather than an error. The
-  explicit `[T]` list lets an author say what they mean; it does not let them
-  turn the heuristic off. (b) Parameters cannot be bounded, or shared across
-  signatures. (c) Only `fn` and `extern` quantify — service `provide`-methods
+  (a) ~~the implicit rule is still positional-by-spelling and still on~~ —
+  **CLOSED as of roadmap 75(c)**: a signature that carries an explicit `[T]`
+  list turns the implicit heuristic OFF for that signature — declared means
+  declared, and a stray one-letter name is an ordinary undeclared (opaque
+  nominal) type that errors where it is used instead of silently quantifying
+  (`t25_explicit_tparam_heuristic_off.rvl`; the interaction is pinned in
+  docs/generics.md). (b) Parameters cannot be bounded, or shared across
+  signatures — **bounds (`[T: Ord]`) stay deferred**: no consumer demands them
+  yet, and the decision (not the machinery) is pinned in docs/generics.md.
+  (c) Only `fn` and `extern` quantify — service `provide`-methods
   are checked through a separate path and are not in the shared signature
   table, so they take no list, and a one-letter name in a record field or an
   ADT payload is an ordinary opaque nominal type, like any other undeclared

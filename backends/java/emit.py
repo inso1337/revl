@@ -110,6 +110,39 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+# Dispatcher conformance (roadmap item 76a). This tier converged to ONE
+# expression renderer (`_expr`) covering both IR dialects, so the table below
+# has a single entry: every kind the frontend can produce in either position
+# must render through it, or be deliberately refused with a named
+# tier-limit EmitError — never the "unsupported v3 expression kind"
+# fall-through. `arrow` in VALUE position is refused (`_ARROW_VALUE_REFUSAL`):
+# a called arrow is beta-reduced by `_v3_call`, so the refusal only ever fires
+# where the value has no lowerable home. tests/test_expr_dispatcher_
+# conformance.py checks this table against src/revl/lower.py's EXPR_KINDS and
+# against the renderer's source. `hole` is refused at the document level by
+# the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "renderer": frozenset({
+        "adt", "bin", "builtin", "call", "config", "field", "fn", "format",
+        "host", "if", "index", "instance-get", "interp", "len", "list", "lit",
+        "maplit", "match", "name", "record", "req", "spawn", "un", "var",
+    }),
+}
+EXPR_REFUSED: frozenset[str] = frozenset({
+    # functional record update (docs/records.md §6): refused with a named
+    # error — "lift it into a helper fn instead"
+    "record_update",
+    # optional chaining (docs/syntax-2.0.md §3.2): refused with a named
+    # error — "unwrap with `match` or `??` for now"
+    "optfield", "optcall",
+    # an arrow VALUE (a called arrow beta-reduces via `_v3_call`); refused
+    # with `_ARROW_VALUE_REFUSAL` — the value has no functional interface to
+    # target on this tier
+    "arrow",
+    "hole",
+})
+
+
 def _is_fn_type(name: object) -> bool:
     """Is this surface type a function type, `(P, ...) -> R`?
 
@@ -509,14 +542,17 @@ def _v3_len(target: str) -> str:
     return f"revlLength({target})"
 
 
-def _v3_builtin(method: object, target: str, args: list[str]) -> str:
+def _v3_builtin(method: object, target: str, args: list[str],
+                recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched through the
     `revl*` static overloads (emitted once per file) — javac resolves the
     receiver's static type, so every (method, Str|List) pair from the spec
     table compiles. The previous inline lowerings picked one type per method
     (`subList` broke Str.slice, `String.concat` broke List.concat) and the
     `instanceof java.util.List` ternaries did not compile for receivers
-    statically typed `String`."""
+    statically typed `String`. `recv` carries the receiver's static type only
+    where the lowering must dispatch on it (`to_int`: the Int32 widen vs the
+    Str parse)."""
     # The total forms (docs/arithmetic.md): same quotient as the faulting
     # operation, but a zero divisor yields Err(reason) instead of throwing —
     # `fail` is refused in a pure fn, so the error travels as a value. The
@@ -544,6 +580,12 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
     # Math.toIntExact, which throws ArithmeticException out of the int range —
     # the same fault the other Int32 operations give.
     if method == "to_int":
+        if recv == "Str":
+            # Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): Long.parseLong
+            # is total on the ASCII digits (leading `-` allowed) and throws on
+            # empty/partial/`+` spellings AND out-of-long-range values; the
+            # helper maps the throw to the tier's Opt None (Optional.empty()).
+            return f"revlParseInt({target})"
         return f"((long) ({target}))"
     if method == "to_int32":
         return f"Math.toIntExact({target})"
@@ -564,6 +606,13 @@ def _v3_builtin(method: object, target: str, args: list[str]) -> str:
         return f"revlJoin({target}, {args[0]})"
     if method == "repeat":
         return f"revlRepeat({target}, {args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
+    # A code-point prefix of a string is a UTF-16 prefix (code-point
+    # boundaries never split), so the native startsWith/endsWith are exact.
+    if method == "startsWith":
+        return f"{target}.startsWith({args[0]})"
+    if method == "endsWith":
+        return f"{target}.endsWith({args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): persistent HashMaps —
     # revlMapSet copies before it puts, so the receiver never mutates.
     if method == "set":
@@ -655,6 +704,26 @@ def _emit_stdlib_helpers() -> list[str]:
         "}",
         "private static String revlRepeat(String s, long n) {",
         "    return s.repeat((int) Math.max(0L, n));",
+        "}",
+        "// Str.to_int (FR-9, docs/stdlib-2.0.md §Str.to_int): Long.parseLong is",
+        "// total on the ASCII digits (leading `-` allowed) and throws on empty,",
+        "// partial, `+`-prefixed AND out-of-long-range spellings; the throw is",
+        "// mapped to the tier's Opt None (Optional.empty()). parseLong would",
+        "// also accept non-ASCII decimal digits (Character.digit), so the",
+        "// ASCII gate runs first — revl's spec is ASCII-only.",
+        "private static java.util.Optional<Long> revlParseInt(String s) {",
+        "    if (s.isEmpty()) { return java.util.Optional.empty(); }",
+        "    int i = 0;",
+        "    if (s.charAt(0) == '-') {",
+        "        i = 1;",
+        "        if (s.length() == 1) { return java.util.Optional.empty(); }",
+        "    }",
+        "    for (; i < s.length(); i++) {",
+        "        char c = s.charAt(i);",
+        "        if (c < '0' || c > '9') { return java.util.Optional.empty(); }",
+        "    }",
+        "    try { return java.util.Optional.of(Long.parseLong(s)); }",
+        "    catch (NumberFormatException e) { return java.util.Optional.empty(); }",
         "}",
         "// The Map value type (docs/stdlib-2.0.md §Map): persistent maps —",
         "// set copies before it puts; lookup answers the tier's Optional.",
@@ -1194,7 +1263,7 @@ def _expr(
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
         args = [_expr(a, ctx, rename, env) for a in node.get("args") or []]
-        return _v3_builtin(node.get("method"), target, args)
+        return _v3_builtin(node.get("method"), target, args, node.get("recv"))
 
     if kind == "len":
         return _v3_len(_expr(node.get("target"), ctx, rename, env))
@@ -1834,6 +1903,10 @@ def _emit_service_interfaces(services: dict) -> list[str]:
                 for p in method.get("params") or []
             )
             ret = _java_type(method.get("returns")) if method.get("returns") else "void"
+            if method.get("idempotent"):
+                # delivery semantics (item 44): safe to re-deliver, so the
+                # runtime may auto-retry a transient failure of this emission
+                out.append("    /** idempotent: the runtime may auto-retry a transient failure. */")
             out.append(f"    {ret} {mname}({params});")
         out.append("}")
         out.append("")

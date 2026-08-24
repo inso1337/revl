@@ -380,3 +380,93 @@ def test_emitted_function_type_code_survives_its_own_toolchain():
         checked += 1
     if not checked:
         pytest.skip("neither the python nor the TypeScript toolchain is available")
+
+
+# ---------------------------------------------------------------------------
+# Arrow parameters bind in provide-method scope (roadmap 77a / FR-1)
+# docs/expressible-iteration.md — the pure-helper + callback-arrow escape.
+# ---------------------------------------------------------------------------
+
+FR1_LOOP_SRC = '''type ToolReq = { name: Str, args: Str }
+type Step = Final(Str) | NeedTool(ToolReq)
+
+fn decode_response(resp: Str) -> Step {
+  if (resp.slice(0, 6) == "FINAL ") {
+    return Final(resp.slice(6, resp.length()))
+  }
+  return NeedTool({ name: resp.slice(0, 10), args: "" })
+}
+
+fn run_loop(msgs: List[Str], step: (List[Str]) -> Step, n: Int) -> Step {
+  if (n <= 0) { return Final("max_steps exhausted") }
+  return match step(msgs) {
+    Final(answer) => Final(answer),
+    NeedTool(req) => run_loop(msgs.push(req.name), step, n - 1),
+  }
+}
+
+service Model { emission fn complete(h: List[Str]) -> Str }
+service Loop { emission fn run(p: Str) -> Str }
+component Agent requires model: Model provides agent: Loop {
+  config { max_steps: Int = 8 }
+  provide agent {
+    fn run(session_id) {
+      let msgs = ["prompt"]
+      let first = emit model.complete(msgs)
+      return match decode_response(first) {
+        Final(answer) => answer,
+        NeedTool(req) => run_loop(msgs.push(req.name),
+                                  msgs2 => decode_response(emit model.complete(msgs2)),
+                                  config.max_steps - 1),
+      }
+    }
+  }
+}
+'''
+
+
+def test_arrow_param_binds_in_provide_method_scope():
+    """FR-1 exit criterion 1+2: the callback-arrow's parameter resolves inside a
+    provide-method body, and a bounded recursive loop with an emitting callback
+    compiles (the harness's agent-loop shape)."""
+    ir = compile_source(FR1_LOOP_SRC)
+    assert ir["ir_version"] == 3
+    import json
+    text = json.dumps(ir)
+    # the callback arrow binds its parameter and the emission flows through it
+    assert '"arrow"' in text and '"msgs2"' in text
+    assert "complete" in text
+
+
+def test_arrow_param_emission_gate_stays_honest():
+    """FR-1 exit criterion 3: a *plain* method whose callback reaches an
+    emission is still refused with the G4 diagnostic — the gate is not
+    weakened by the new binding."""
+    src = FR1_LOOP_SRC.replace(
+        "service Loop { emission fn run(p: Str) -> Str }",
+        "service Loop { fn run(p: Str) -> Str }")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    assert "declared plain, but this implementation reaches" in str(excinfo.value)
+
+
+def test_arrow_param_not_misread_as_a_requirement():
+    """FR-1 exit criterion 4: an arrow parameter is no longer diagnosed as a
+    missing component requirement (FR-12). The binding resolves it, so a
+    well-formed callback compiles; the misdirected hint is gone."""
+    src = '''service Model { emission fn complete(h: List[Str]) -> Str }
+service Loop { emission fn run(p: Str) -> Str }
+component App requires model: Model provides loop: Loop {
+  provide loop {
+    fn run(prompt) {
+      let msgs = ["hi"]
+      return apply(prompt, msgs, msgs2 => emit model.complete(msgs2))
+    }
+  }
+}
+fn apply(p: Str, ms: List[Str], f: (List[Str]) -> Str) -> Str {
+  return f(ms)
+}
+'''
+    ir = compile_source(src)
+    assert ir["ir_version"] == 3

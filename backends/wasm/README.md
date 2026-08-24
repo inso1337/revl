@@ -32,14 +32,18 @@ withholding. See demo.py scenarios 6-8.
 
 ## Tier restrictions (all hard EmitErrors, never silent)
 
+The full matrix — which values, which string builtins, and which service
+boundary shapes the substrate carries, with the exact refusal each emits — is
+**docs/wasm-capabilities.md**. The headline rows:
+
 | not lowerable | why | where it lives instead |
 |---|---|---|
 | `config` blocks | no instantiation-config channel yet | hosted backends |
 | host builtins (`Pool`, `Map`; `Job` outside `await`) | different host namespace | express state through coeffects |
-| method-time effects | the accumulator is fixed at activation | hosted backends |
-| non-Int component services | the component tier carries scalars only | hosted backends / WIT tier |
-| variant values + `match` in v3 fns | no tagged unions in core Wasm | documented layout comments |
-| `indexOf` builtin | not lowered yet | hosted backends |
+| method-time effects / compensation | the accumulator is fixed at activation | hosted backends |
+| `Float` / `Map` / function-typed values (any position) | no value representation in the canonical-ABI model (Float has only the interpolation subset) | hosted backends / WIT tier |
+| `split` / `join` / `repeat` / `indexOf` builtins | string-splitting/joining/searching not lowered yet | hosted backends |
+| non-scalar instance-accessor payloads (`spawn`) | a pointer would cross into memory the spawner does not own | hosted backends |
 
 ## Now supported (v2 + typed v3)
 
@@ -47,11 +51,18 @@ withholding. See demo.py scenarios 6-8.
   (`coeffect:tenant_a/kv` / `provide:tenant_a/kv.<op>`), and metadata is
   carried in `revl:isolate` / `revl:intercept` custom sections. Intercept
   enforcement remains host-side (advisory on this tier).
-- **ir v3 Str/List/record values**: emitted in a linear-memory
+- **ir v3 Str/List/record/variant values**: emitted in a linear-memory
   canonical-ABI-shaped representation (`u32` length/count prefix, then one
   8-byte slot per field/element); the module exports `memory` so a host can
   read results. Supported builtins: `length`, `push`, `concat`, `slice`,
-  `charAt`, `charCodeAt`.
+  `charAt`, `charCodeAt`, `to_str`, `startsWith`, `endsWith`, `to_int`
+  (the Str parse; the Int32 widen is the sign-extend — the full list is
+  the matrix doc, docs/wasm-capabilities.md).
+- **`match` / variants in component and method bodies**: tagged-union cells
+  (`[u32 tag][pad][payload]`), including `match` over `Opt`/`Result`.
+- **rich service boundaries**: a Str/List/record/variant/`Opt`/`Result`
+  service param or return crosses as a pointer into the module's memory —
+  the v3 value model widened the boundary beyond scalars.
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
 
 ## Widths: `Int` is i64, addresses are i32

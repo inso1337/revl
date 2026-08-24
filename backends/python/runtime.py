@@ -35,10 +35,62 @@ from typing import Any, Callable, Optional
 __all__ = [
     "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
     "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "StateIncompatible",
-    "add_trace", "arm_fault_probe", "disarm_fault_probe", "fmt", "live_instances",
-    "plug", "realm_label", "remove_trace", "resolved_config", "set_trace",
-    "spawn", "trace_observers",
+    "TransientError", "add_trace", "arm_fault_probe", "disarm_fault_probe", "fmt",
+    "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
+    "retry_idempotent", "set_trace", "spawn", "trace_observers",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Delivery semantics (docs/delivery-semantics.md, roadmap item 44)
+# ---------------------------------------------------------------------------
+#
+# The IR promotes idempotency to a checked property: `emission idempotent fn`.
+# Only that promise earns the runtime a new right — to *auto-retry* the
+# emission on a transient failure, because re-delivering it is defined to have
+# the same effect as delivering it once (`f(f(x)) == f(x)` on the server).
+#
+# A host signals "this failure was transient — the emission did not durably
+# land, so re-issuing it is well-defined" by raising `TransientError`. Any
+# other exception is a real error and is never retried. And a `TransientError`
+# from a *non*-idempotent emission is still never retried: without the checked
+# property, a second delivery could double the effect, so the runtime has no
+# right to it. This is the whole point of making idempotency a checked flag.
+
+class TransientError(RuntimeError):
+    """A host-signalled transient delivery failure of an emission.
+
+    Raising this from an emission's host body tells the runtime the emission
+    did not durably land (a dropped connection, a 503, a timeout before the
+    server committed). The runtime retries it *iff* the emission is declared
+    `idempotent`; for any other emission it propagates unchanged.
+    """
+
+
+async def retry_idempotent(call, *, idempotent: bool = False,
+                           attempts: int = 3, where: str = ""):
+    """Invoke ``call`` and, for an idempotent emission, auto-retry a transient
+    failure up to ``attempts`` times.
+
+    ``call`` is a zero-argument callable that performs one delivery; its result
+    is awaited if awaitable. A :class:`TransientError` is retried only when
+    ``idempotent`` is true — a non-idempotent emission gets exactly one attempt
+    and the transient failure propagates. Every non-transient exception
+    propagates immediately, retries or not.
+    """
+    budget = attempts if idempotent else 1
+    last: TransientError | None = None
+    for _ in range(budget):
+        try:
+            result = call()
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except TransientError as exc:  # noqa: PERF203 — retry is the point
+            last = exc
+    # budget exhausted (or a single non-idempotent attempt): re-raise the
+    # transient failure so the caller still sees a failed delivery
+    raise last
 
 
 # ---------------------------------------------------------------------------
@@ -638,9 +690,12 @@ class ConfigSchema:
     """Config fields as ``(name, type, default)`` triples; ``default=None``
     means required (IR ``"default": null``).
 
-    Resolved inside the emitted ``apply`` rather than through the runtime's
-    ``resolve_config``: cordis-py reads ``Config`` off dict plugins with
-    ``getattr``, which never sees dict keys — see REPORT.md.
+    The emitted plugin dict carries the schema as ``'Config'``, and
+    cordis-py's ``resolve_config`` validates/resolves before ``apply`` runs
+    (dict plugins read ``Config`` via ``dict.get`` since fork commit
+    ``1c5e6f1`` — see REPORT.md F2). ``validate`` speaks cordis-py's Config
+    protocol (``{issues, value}`` result); ``resolve`` is kept for
+    hand-written host code that validates eagerly and wants a plain dict.
     """
 
     def __init__(self, fields: list, name: Optional[str] = None) -> None:
@@ -650,8 +705,7 @@ class ConfigSchema:
         # `<name>.config` trace event without a Frame.
         self.name = name
 
-    def resolve(self, config: Any) -> dict:
-        global _pending_config
+    def _resolve(self, config: Any) -> tuple[dict, list, list]:
         value = dict(config or {})
         defaulted: list = []
         issues = []
@@ -670,12 +724,42 @@ class ConfigSchema:
                 ok = False  # bool is an int subclass; keep Int honest
             if not ok:
                 issues.append(f'config field "{name}" expects {type_name}')
-        if issues:
-            raise ConfigError("invalid config:\n" + "\n".join(f"  - {issue}" for issue in issues))
+        return value, defaulted, issues
+
+    def _park(self, value: dict, defaulted: list) -> None:
+        global _pending_config
         _pending_config = (dict(value), defaulted)
         if self.name is not None:
             _flush_config_trace(self.name)
+
+    def resolve(self, config: Any) -> dict:
+        value, defaulted, issues = self._resolve(config)
+        if issues:
+            raise ConfigError("invalid config:\n" + "\n".join(f"  - {issue}" for issue in issues))
+        self._park(value, defaulted)
         return value
+
+    def validate(self, config: Any) -> "_ConfigResult":
+        """cordis-py ``Config.validate`` protocol: return ``{issues, value}``
+        instead of raising (fiber.resolve_config turns a truthy ``issues``
+        into a ValidationError and the fiber lands FAILED). A valid
+        resolution is parked exactly like ``resolve`` so the component's
+        Frame — built next in the emitted ``apply`` — still attributes the
+        ``<name>.config`` trace event and R4 ``resolved_config`` state."""
+        value, defaulted, issues = self._resolve(config)
+        if not issues:
+            self._park(value, defaulted)
+        return _ConfigResult(issues, value)
+
+
+class _ConfigResult:
+    """The ``{issues, value}`` object cordis-py's ``resolve_config`` expects."""
+
+    __slots__ = ("issues", "value")
+
+    def __init__(self, issues: list, value: dict) -> None:
+        self.issues = issues
+        self.value = value
 
 
 # ---------------------------------------------------------------------------

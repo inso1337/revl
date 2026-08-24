@@ -21,10 +21,12 @@ Mapping (DESIGN.md §7 — the backend contract is small):
 Documented limits (tracked in docs/v2.0-roadmap.md):
 
 - Host objects (`Pool`/`Map`/`Job`) are a minimal real runtime: `Map` is a
-  thread-safe `HashMap<String, String>`, `Pool` is a real bounded connection
-  pool over a deterministic in-memory database, and `Job::run` returns a real
-  cancellable future.  Pool/Job semantics are defined once for every tier in
-  backends/python/runtime.py under ".. _pool-job-semantics:".
+  thread-safe `HashMap<String, V>` with `V` inferred per site from the IR
+  (FR-4 — the session ledger `Map[Str, List[Msg]]` compiles), `Pool` is a real
+  bounded connection pool over a deterministic in-memory database, and
+  `Job::run` returns a real cancellable future.  Pool/Job semantics are
+  defined once for every tier in backends/python/runtime.py under
+  ".. _pool-job-semantics:".
 - Component `await` steps lower to `plugin_async` + `.await`; cordis-rs drives
   the activation future for the fiber (A1).
 - Config `default` values are emitted on `impl Default for <Comp>Config`, and
@@ -93,6 +95,35 @@ def _mname(name: str) -> str:
 
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
+
+
+# Dispatcher conformance (roadmap item 76a). This tier converged to ONE
+# expression renderer (`_render_expr`, wrapped by `_expr`) covering both IR
+# dialects, so the table below has a single entry: every kind the frontend can
+# produce in either position must render through it, or be deliberately
+# refused with a named tier-limit EmitError — never the "unsupported
+# expression kind" fall-through. The refused kinds here are genuine tier
+# limits, each with a named refusal and a workaround in the emitter.
+# tests/test_expr_dispatcher_conformance.py checks this table against
+# src/revl/lower.py's EXPR_KINDS and against the renderer's source. `hole` is
+# refused at the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "renderer": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "interp", "len",
+        "list", "lit", "maplit", "match", "name", "record", "req", "spawn",
+        "un", "var",
+    }),
+}
+EXPR_REFUSED: frozenset[str] = frozenset({
+    # functional record update (docs/records.md §6): refused with a named
+    # error — "lift it into a helper fn instead"
+    "record_update",
+    # optional chaining (docs/syntax-2.0.md §3.2): refused with a named
+    # error — "unwrap with `match` or `??` for now"
+    "optfield", "optcall",
+    "hole",
+})
 
 
 def _is_fn_type(name: object) -> bool:
@@ -199,22 +230,25 @@ def _camel(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
 
-def _string(value: str) -> str:
+def _string(value) -> str:
     """A Rust double-quoted string literal, escaped *from code points*.
 
     The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
     Rust source is UTF-8 and spells a non-ASCII scalar as `\\u{XXXX}` — it
     rejects the lone-surrogate `\\uXXXX` escapes `json.dumps` emits, which is
-    why every non-ASCII literal used to fail to compile on this tier. ASCII is
-    byte-identical to the old `json.dumps` output (printable ASCII verbatim;
-    `\\n`/`\\r`/`\\t`/`\\"`/`\\\\` the same), so v1 goldens stay frozen.
+    why every non-ASCII literal used to fail to compile on this tier.
 
-    A non-`str` input (e.g. a list of requirement names) keeps the old
-    `json.dumps` serialization unchanged — only real `Str` values take the
-    code-point path.
+    One escape dialect for the whole function: a non-`str` input (the list of
+    requirement names behind `Inject::new([...])`) is serialized structurally,
+    with every string element escaped through the same code-point path. The
+    old `json.dumps` fallback is gone — byte-stability is never grounds for a
+    dual code path (docs/conformance.md, "Golden policy").
     """
+    if isinstance(value, list):
+        return "[" + ", ".join(_string(item) for item in value) + "]"
     if not isinstance(value, str):
-        return json.dumps(value)
+        raise EmitError(f"cannot serialize {type(value).__name__} as a Rust "
+                        f"string literal: {value!r}")
     out = ['"']
     for ch in value:
         cp = ord(ch)
@@ -448,6 +482,9 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             if method.get("emission"):
                 out.append("    /// emission: crosses the system boundary (DESIGN.md §3.5)")
+            if method.get("idempotent"):
+                out.append("    /// idempotent: safe to re-deliver — the runtime "
+                           "may auto-retry a transient failure (item 44)")
             out.append(f"    fn {mname}(&self, {params}) -> {ret};")
         out.append("}")
         out.append("")
@@ -486,30 +523,63 @@ def _emit_host_stubs(ir: dict) -> list[str]:
     walk(ir.get("types"))
 
     out: list[str] = []
+    lifecycle_present = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    if "Map" in used or "Pool" in used or lifecycle_present:
+        # R1 live-resource accounting (docs/backend-ir.md §Required semantics,
+        # the same pairing the py reference tier's `assert no_residue` checks):
+        # every host object acquired must be released by its `undo`, or the
+        # lifecycle `assert no_residue` fails. The counter is process-wide, so
+        # it is per-test and cross-test safe: a clean test returns to zero.
+        # Thread-local: `cargo test` runs each #[test] on its own thread, and
+        # a process-wide counter would race across tests running in parallel.
+        out.extend([
+            "/// R1 live-resource counter (lifecycle `assert no_residue`).",
+            "/// Thread-local because `cargo test` runs tests on parallel",
+            "/// threads: each test must observe only its own acquisitions.",
+            "thread_local! {",
+            "    static REVL_LIVE_HOST_RESOURCES: std::cell::Cell<i64> = const {",
+            "        std::cell::Cell::new(0)",
+            "    };",
+            "}",
+            "",
+        ])
     if "Map" in used:
         out.extend(
             [
-                "/// revl host object: a small thread-safe string map.",
-                "pub struct Map {",
-                "    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,",
+                # FR-4 (docs/v2.0-roadmap.md item 77(c)): the host Map is
+                # generic over its value type, `V` inferred per site from how
+                # the map is used (the session ledger is `Map[Str, List[Msg]]`).
+                # Every revl value type derives Clone on this tier, so the
+                # `get` copy (via `.cloned()`) is total.
+                "/// revl host object: a small thread-safe map with String keys.",
+                "/// The value type is generic — each site's `Map.new()` pins `V`",
+                "/// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).",
+                "pub struct Map<V> {",
+                "    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,",
                 "}",
-                "impl Map {",
+                "impl<V> Map<V> {",
                 "    pub fn new() -> Self {",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
                 "        Self {",
                 "            inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),",
                 "        }",
                 "    }",
                 "    pub fn drop_(&self) {",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
                 "        self.inner.lock().unwrap().clear();",
                 "    }",
-                "    pub fn insert(&self, key: String, value: String) {",
+                "    pub fn insert(&self, key: String, value: V) {",
                 "        self.inner.lock().unwrap().insert(key, value);",
                 "    }",
-                "    pub fn remove(&self, key: String) {",
-                "        self.inner.lock().unwrap().remove(&key);",
+                "    pub fn remove(&self, key: &String) {",
+                "        self.inner.lock().unwrap().remove(key);",
                 "    }",
-                "    pub fn get(&self, key: String) -> Option<String> {",
-                "        self.inner.lock().unwrap().get(&key).cloned()",
+                "}",
+                "impl<V: Clone> Map<V> {",
+                "    // The key is borrowed, not moved: a component that reads then",
+                "    // writes the same key (the session ledger) keeps owning it.",
+                "    pub fn get(&self, key: &String) -> Option<V> {",
+                "        self.inner.lock().unwrap().get(key).cloned()",
                 "    }",
                 "}",
                 "",
@@ -539,6 +609,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "        if size < 1 {",
                 "            panic!(\"pool size must be an integer >= 1 (got {})\", size);",
                 "        }",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
                 "        Self {",
                 "            url,",
                 "            size,",
@@ -630,6 +701,7 @@ def _emit_host_stubs(ir: dict) -> list[str]:
                 "        if already_closed {",
                 "            panic!(\"pool.close after close/drop — use-after-free\");",
                 "        }",
+                "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
                 "    }",
                 "    pub fn query(&self, _sql: String) -> Vec<Value> {",
                 "        let conn = self.borrow_conn(\"query\");",
@@ -750,7 +822,7 @@ def _binds(component: dict) -> list[str]:
     return [s["bind"] for s in component.get("body") or [] if s.get("step") == "let-effect"]
 
 
-def _host_of(component: dict, bind: str) -> str:
+def _host_of(component: dict, bind: str, map_values: dict[str, str] | None = None) -> str:
     for s in component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
             acquire = s.get("acquire") or {}
@@ -759,8 +831,206 @@ def _host_of(component: dict, bind: str) -> str:
             # so a provide-method that captures it can call `.dispose()`.
             if acquire.get("kind") == "spawn":
                 return "RevlSpawnHandle"
-            return (acquire.get("fn") or "").split(".")[0] or "Value"
+            host = (acquire.get("fn") or "").split(".")[0] or "Value"
+            # FR-4: the host Map is generic over its value type, learned from
+            # the IR's `insert` sites (defaults to the historical `String`).
+            if host == "Map" and map_values is not None:
+                return f"Map<{map_values.get(bind, 'String')}>"
+            return host
     return "Value"
+
+
+# ---------------------------------------------------------------------------
+# FR-4: the host Map's value type, learned from the IR (docs/v2.0-roadmap.md
+# item 77(c)).  The frontend types a Map by its value parameter — every
+# `store.insert(k, v)` names the map's value type — so the emitter carries it
+# into the generic `Map<V>` it emits: provider-struct fields become
+# `Arc<Map<Vec<Msg>>>` and the constructor becomes `Map::<Vec<Msg>>::new()`.
+# This is a *tiny* oracle for the shapes an `insert` value takes in practice
+# (a parameter, a literal, a list, a stdlib result like `push`, a free-fn or
+# required-service call, a record literal, an ADT case).  Anything it cannot
+# prove stays `None` and the emitter falls back to `String` — the historical
+# surface — so String-valued maps keep emitting byte-identically.
+# ---------------------------------------------------------------------------
+
+
+def _map_value_expr_type(node: dict, var_types: dict, env: _Env) -> str | None:
+    """Best-effort *surface* type of an expression for Map value inference."""
+    if not isinstance(node, dict):
+        return None
+    kind = node.get("kind")
+    if kind in ("name", "var"):
+        return var_types.get(node.get("id") or node.get("name"))
+    if kind == "lit":
+        value = node.get("value")
+        if isinstance(value, bool):
+            return "Bool"
+        if isinstance(value, int):
+            return "Int"
+        if isinstance(value, float):
+            return "Float"
+        if isinstance(value, str):
+            return "Str"
+        return None
+    if kind in ("format", "interp"):
+        return "Str"
+    if kind == "list":
+        items = node.get("items") or []
+        if not items:
+            return None  # an untyped `[]` pins nothing
+        first = _map_value_expr_type(items[0], var_types, env)
+        if first is None:
+            return None
+        return f"List[{first}]"
+    if kind == "builtin":
+        method = node.get("method")
+        args = node.get("args") or []
+        # `push` returns the receiver list extended by its argument, so the
+        # result's element type is the argument's type even when the receiver
+        # (e.g. a `store.get(k) ?? []` binding) has no known surface type.
+        if method == "push" and args:
+            elem = _map_value_expr_type(args[0], var_types, env)
+            if elem is not None:
+                return f"List[{elem}]"
+        if method in ("length", "charCodeAt", "indexOf", "to_int"):
+            return "Int"
+        if method in ("charAt", "join", "repeat", "to_str", "slice"):
+            return "Str"
+        if method == "split":
+            return "List[Str]"
+        if method == "concat":
+            return _map_value_expr_type(node.get("target"), var_types, env)
+        return None
+    if kind == "fn":
+        # free-function call: the declared return type
+        name = node.get("name")
+        for fn in env.functions:
+            if fn.get("name") == name:
+                return fn.get("returns")
+        return None
+    if kind == "call":
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "req":
+            service_name = (env.component.get("requires") or {}).get(target.get("name"))
+            if service_name is not None:
+                service = env.services.get(service_name)
+                if service is not None:
+                    decl = ((service.get("methods") or {})
+                            .get(node.get("method") or "") or {})
+                    return decl.get("returns")
+        return None
+    if kind == "record":
+        try:
+            return env.v3_ctx().record_type_for_fields(
+                [k for k, _ in node.get("fields") or []])
+        except EmitError:
+            return None
+    if kind == "adt":
+        # lowered ADT construction carries its type on the node
+        return node.get("type")
+    if kind == "bin" and node.get("op") == "??":
+        # `a ?? b` with an unknown left (a host `get`) is circular — the map
+        # value type is exactly what we are learning; use the right side only
+        # when it types concretely (a literal fallback).
+        right = _map_value_expr_type(node.get("right"), var_types, env)
+        if right is not None and "Never" not in right:
+            return right
+        return None
+    return None
+
+
+def _map_expr_inserts(node, bind: str, var_types: dict, env: _Env,
+                      candidates: list[str]) -> None:
+    """Collect candidate value types from `bind.insert(k, v)` anywhere in an
+    expression; recurses into sub-expressions."""
+    if not isinstance(node, dict):
+        return
+    if node.get("kind") == "call":
+        target = node.get("target")
+        if (isinstance(target, dict) and target.get("kind") == "name"
+                and target.get("id") == bind and node.get("method") == "insert"):
+            args = node.get("args") or []
+            if len(args) >= 2:
+                t = _map_value_expr_type(args[1], var_types, env)
+                if t is not None and "Never" not in t:
+                    candidates.append(t)
+        for arg in node.get("args") or []:
+            _map_expr_inserts(arg, bind, var_types, env, candidates)
+        _map_expr_inserts(target, bind, var_types, env, candidates)
+        return
+    for value in node.values():
+        if isinstance(value, list):
+            for item in value:
+                _map_expr_inserts(item, bind, var_types, env, candidates)
+        elif isinstance(value, dict):
+            _map_expr_inserts(value, bind, var_types, env, candidates)
+
+
+def _map_insert_candidates(step: dict, bind: str, var_types: dict, env: _Env,
+                           candidates: list[str]) -> None:
+    """Walk one component-body step for `insert` calls on `bind`."""
+    kind = step.get("step")
+    if kind in ("effect", "let-effect"):
+        _map_expr_inserts(step.get("acquire"), bind, var_types, env, candidates)
+        _map_expr_inserts(step.get("undo"), bind, var_types, env, candidates)
+        for nested in step.get("setup") or []:
+            _map_insert_candidates(nested, bind, var_types, env, candidates)
+    elif kind in ("let", "assign"):
+        _map_expr_inserts(step.get("value"), bind, var_types, env, candidates)
+    elif kind == "return":
+        _map_expr_inserts(step.get("expr"), bind, var_types, env, candidates)
+    elif kind == "if":
+        for nested in step.get("then") or []:
+            _map_insert_candidates(nested, bind, var_types, env, candidates)
+        for nested in step.get("else") or []:
+            _map_insert_candidates(nested, bind, var_types, env, candidates)
+
+
+def _map_value_rust_type(env: _Env, bind: str) -> str | None:
+    """The Rust value type of a host Map binding, learned from its `insert`
+    call sites across the whole component (activation body + every provide
+    method). `None` when no site pins a concrete type — the emitter then
+    falls back to `String` (the historical surface)."""
+    candidates: list[str] = []
+    for step in env.component.get("body") or []:
+        if step.get("step") == "provide":
+            service = env.services.get(step.get("service") or "")
+            if service is None:
+                continue
+            for method in step.get("methods") or []:
+                var_types = {
+                    p.get("name"): p.get("type")
+                    for p in ((service.get("methods") or {})
+                              .get(method.get("name") or "", {})).get("params") or []
+                }
+                for body_step in method.get("body") or []:
+                    _map_insert_candidates(body_step, bind, var_types, env, candidates)
+        else:
+            _map_insert_candidates(step, bind, {}, env, candidates)
+    if not candidates:
+        return None
+    distinct: list[str] = []
+    for t in candidates:
+        if t not in distinct:
+            distinct.append(t)
+    # A genuinely mixed map cannot be one revl `Map[Str, V]`; the first
+    # concrete candidate (document order) is deterministic, and a real
+    # conflict surfaces loudly in rustc at the mismatched `insert`.
+    return distinct[0]
+
+
+def _component_map_values(env: _Env) -> dict[str, str]:
+    """bind -> Rust value type for every host Map binding in the component."""
+    out: dict[str, str] = {}
+    for s in env.component.get("body") or []:
+        if s.get("step") != "let-effect":
+            continue
+        acquire = s.get("acquire") or {}
+        if acquire.get("kind") != "host" or not (acquire.get("fn") or "").startswith("Map."):
+            continue
+        surface = _map_value_rust_type(env, s["bind"])
+        out[s["bind"]] = _rust_type(surface, env.types) if surface else "String"
+    return out
 
 
 def _param_type(env: _Env, key: str, mname: str, p: str) -> str:
@@ -1032,13 +1302,17 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     out: list[str] = []
 
     config_ty = _emit_config_struct(component, out)
+    # FR-4: bind -> Rust value type for each host Map binding, so provider
+    # struct fields and `Map::new()` carry a concrete `V` instead of leaving
+    # `Map<_>` open.
+    map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
-            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b)}>,")
+            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b, map_values)}>,")
         if env.reqs:
             for local, req_service in env.reqs.items():
                 out.append(f"    {local}: Arc<Box<dyn {req_service}>>,")
@@ -1062,9 +1336,12 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                    if _method_return(env, key, original_mname) else "()")
             # A provide-method body is rendered by the shared expression renderer, which
             # needs the parameter types to tell a string `+` from a numeric one.
+            # Host Map bindings are registered too (as a `Map[...]` marker) so the
+            # renderer knows their `get`/`remove` keys must be borrowed (FR-4).
             env.v3_ctx().var_types = {
-                p: _param_type(env, key, original_mname, p)
-                for p in method.get("params") or []
+                **{b: f"Map[{v}]" for b, v in map_values.items()},
+                **{p: _param_type(env, key, original_mname, p)
+                   for p in method.get("params") or []},
             }
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
@@ -1214,13 +1491,17 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     out: list[str] = []
 
     config_ty = _emit_config_struct(component, out)
+    # FR-4: bind -> Rust value type for each host Map binding, so provider
+    # struct fields and `Map::new()` carry a concrete `V` instead of leaving
+    # `Map<_>` open.
+    map_values = _component_map_values(env)
 
     for key, service in env.provides.items():
         _ident(key, "provision")
         struct = f"{cname}{_camel(key)}"
         out.append(f"struct {struct} {{")
         for b in _binds(component):
-            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b)}>,")
+            out.append(f"    {_ident(b, 'binding')}: Arc<{_host_of(component, b, map_values)}>,")
         # a provide-method may call a required service, so the provider owns
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
@@ -1242,9 +1523,12 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
                    if _method_return(env, key, mname) else "()")
             # A provide-method body is rendered by the shared expression renderer, which
             # needs the parameter types to tell a string `+` from a numeric one.
+            # Host Map bindings are registered too (as a `Map[...]` marker) so the
+            # renderer knows their `get`/`remove` keys must be borrowed (FR-4).
             env.v3_ctx().var_types = {
-                p: _param_type(env, key, mname, p)
-                for p in method.get("params") or []
+                **{b: f"Map[{v}]" for b, v in map_values.items()},
+                **{p: _param_type(env, key, mname, p)
+                   for p in method.get("params") or []},
             }
             out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {_method_body(env, method)} }}")
         out.append("}")
@@ -1317,6 +1601,13 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             _emit_setup_step(setup, env, out, indent)
         bind = _ident(step["bind"], "binding")
         acquire = _expr(step["acquire"], env)
+        # FR-4: pin the host Map's value type at the constructor so rustc
+        # never has to infer it — a binding no provider struct captures, or
+        # one whose only typed use is a `get`, would leave `Map<V>` open.
+        acq = step.get("acquire") or {}
+        if acq.get("kind") == "host" and acq.get("fn") == "Map.new":
+            v = _component_map_values(env).get(step["bind"], "String")
+            acquire = f"Map::<{v}>::new()"
         out.append(f"{pad}let {bind} = Arc::new({acquire});")
         undo_name = f"{bind}_undo"
         out.append(f"{pad}let {undo_name} = {bind}.clone();")
@@ -1723,10 +2014,23 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
                 target_node = callee_node.get("target") or {}
                 method = callee_node.get("name")
                 if target_node.get("kind") == "var" and target_node.get("name") in _V3_HOST_ROOTS:
-                    return f"{target_node['name']}::{_mname(method)}({args})"
+                    hargs = arg_exprs
+                    if target_node["name"] == "Map" and method in ("get", "remove") and hargs:
+                        # FR-4: the host Map borrows its key, so the caller keeps
+                        # owning it (read-then-write on one key compiles).
+                        hargs = [f"&{hargs[0]}", *hargs[1:]]
+                    return f"{target_node['name']}::{_mname(method)}({', '.join(hargs)})"
                 target = _render_expr(target_node, ctx, rename)
                 if target_node.get("kind") not in _ATOMIC_KINDS:
                     target = f"({target})"
+                if (target_node.get("kind") == "var"
+                        and method in ("get", "remove")
+                        and str(ctx.var_types.get(target_node.get("name") or "") or "")
+                            .startswith("Map[")):
+                    # FR-4: same borrow for a host-Map binding read through a
+                    # 2.0-style callee (`store.get(k)` in a pure fn body).
+                    arg_exprs = [f"&{arg_exprs[0]}", *arg_exprs[1:]] if arg_exprs else []
+                    args = ", ".join(arg_exprs)
                 return f"{target}.{_ident(method, 'method')}({args})"
             callee_name = callee_node.get("name") if callee_node.get("kind") == "var" else None
             if callee_name is not None and (
@@ -1740,7 +2044,17 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         # component form: `target.method(args)`.
         target = node.get("target") or {}
         method = _ident(_mname(node.get("method")), "method")
-        args = ", ".join(_render_expr(a, ctx, rename) for a in node.get("args") or [])
+        arg_exprs = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+        if (target.get("kind") == "name"
+                and node.get("method") in ("get", "remove")
+                and str(ctx.var_types.get(target.get("id") or "") or "")
+                    .startswith("Map[")):
+            # FR-4: the host Map borrows its key (revl `Str` keys), so the
+            # caller keeps owning it — a component that reads then writes the
+            # same key (the session ledger) compiles without a clone.
+            if arg_exprs:
+                arg_exprs[0] = f"&{arg_exprs[0]}"
+        args = ", ".join(arg_exprs)
         if target.get("kind") == "req":
             recv = _ident(target.get("name"), "requirement")
             if rename and target.get("name") in rename:
@@ -1809,7 +2123,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
         args = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
-        return _v3_builtin(node.get("method"), target, args)
+        return _v3_builtin(node.get("method"), target, args, node.get("recv"))
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename)
@@ -1933,10 +2247,13 @@ def _v3_checked_div(method: str, target: str, arg: str) -> str:
             f'else {{ Ok::<i64, String>({ok}) }} }}')
 
 
-def _v3_builtin(method: str, target: str, args: list[str]) -> str:
+def _v3_builtin(method: str, target: str, args: list[str],
+                recv: str | None = None) -> str:
     """The stdlib surface (docs/stdlib-2.0.md), dispatched via the Revl*Ops
     helper traits so every (method, Str|List) pair from the spec table
-    compiles — Rust resolves the receiver type statically."""
+    compiles — Rust resolves the receiver type statically. `recv` carries
+    the receiver's static type only where the lowering must dispatch on it
+    (`to_int`: the Int32 widen vs the Str parse)."""
     if method == "length":
         return f"{target}.revl_length()"
     if method == "push":
@@ -1957,6 +2274,13 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
         return f"{target}.revl_join(&{args[0]})"
     if method == "repeat":
         return f"{target}.revl_repeat({args[0]})"
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # `str::starts_with`/`ends_with` match on char-boundary patterns, so a
+    # code-point prefix of a UTF-8 string is exactly a prefix here.
+    if method == "startsWith":
+        return f"{target}.revl_starts_with(&{args[0]})"
+    if method == "endsWith":
+        return f"{target}.revl_ends_with(&{args[0]})"
     # The Map value type (docs/stdlib-2.0.md §Map): a std HashMap, cloned on
     # write. Every revl value type derives Clone on this tier, so the copy
     # is total; `lookup` answers Option<V> (the tier's Opt) via cloned().
@@ -1984,7 +2308,13 @@ def _v3_builtin(method: str, target: str, args: list[str]) -> str:
     # Int/Int32 width conversions (docs/arithmetic.md). Widening Int32 -> Int is
     # a lossless `as i64`; narrowing Int -> Int32 goes through `i32::try_from`,
     # which returns Err out of range — `.expect` turns that into the trap.
+    # `to_int` is ALSO the Str parse (FR-9, docs/stdlib-2.0.md §Str.to_int):
+    # `str::parse::<i64>` is total on the ASCII digits (leading `-` allowed)
+    # and answers `Err` for empty/partial/`+` spellings AND out-of-i64-range
+    # values, so `.ok()` is exactly the tier's `Opt[Int]`.
     if method == "to_int":
+        if recv == "Str":
+            return f"{{ ({target}).parse::<i64>().ok() }}"
         return f"(({target}) as i64)"
     if method == "to_int32":
         return f'(i32::try_from({target}).expect("revl: Int32 overflow"))'
@@ -2028,6 +2358,8 @@ def _stdlib_helper_traits() -> list[str]:
         "    fn revl_concat(&self, other: &String) -> String;",
         "    fn revl_split(&self, sep: &String) -> Vec<String>;",
         "    fn revl_repeat(&self, n: i64) -> String;",
+        "    fn revl_starts_with(&self, prefix: &String) -> bool;",
+        "    fn revl_ends_with(&self, suffix: &String) -> bool;",
         "}",
         "impl RevlStrOps for String {",
         "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }",
@@ -2053,6 +2385,8 @@ def _stdlib_helper_traits() -> list[str]:
         "        }",
         "    }",
         "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }",
+        "    fn revl_starts_with(&self, prefix: &String) -> bool { self.starts_with(prefix.as_str()) }",
+        "    fn revl_ends_with(&self, suffix: &String) -> bool { self.ends_with(suffix.as_str()) }",
         "}",
         "trait RevlStrListOps {",
         "    fn revl_join(&self, sep: &String) -> String;",
@@ -2288,6 +2622,10 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
     out: list[str] = []
     used: set[str] = set()
     for test in tests:
+        if test.get("lifecycle"):
+            # lifecycle tests are emitted by _emit_v3_lifecycle_tests — their
+            # body is a script over a live composition, not pure statements
+            continue
         base = _snake(test.get("name") or "test")
         base = re.sub(r"[^A-Za-z0-9_]", "_", base)
         if not base or base[0].isdigit():
@@ -2305,6 +2643,128 @@ def _emit_v3_tests(tests: list, types: dict, functions: list, externs: list) -> 
         else:
             for stmt in test["body"]:
                 _v3_stmt(stmt, ctx, out, 1, test_mode=True)
+        out.append("}")
+        out.append("")
+    return out
+
+
+def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
+                             externs: list, services: dict,
+                             components: list) -> list[str]:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as ``#[test]`` fns driving a
+    live cordis-rs context.
+
+    A lifecycle test is a script over a *live* composition: load components
+    into a ``cordis::Context``, call through provision keys, unload them LIFO,
+    and assert the runtime holds nothing afterwards. It lowers to the tier's
+    native test idiom exactly the way a plain ``test`` block does (FR-5):
+    ``#[test]`` fns that reuse the generated bridge plumbing — ``_revl_load``
+    for loads, typed ``ctx.require`` calls through the service traits for
+    calls — and prove ``assert no_residue`` with the same introspection the
+    ``run --once`` driver uses (``registry().len() == 0`` and
+    ``reflect().services().len() == 0``, docs/backend-ir.md R4).
+
+    The lowerer checks the script statically (every key's provider must be
+    loaded, G2 provision disjointness), so a refused call is a compile error
+    before any of this runs; here the script becomes Rust.
+    """
+    if not services:
+        raise EmitError(
+            "a lifecycle test loads components and calls through provision "
+            "keys, so it needs at least one service in the document to drive; "
+            "this document declares none"
+        )
+    provided: dict[str, str] = {}
+    for component in components:
+        for key, service in (component.get("provides") or {}).items():
+            provided[key] = service
+    method_tables = {
+        sname: (svc.get("methods") or {})
+        for sname, svc in services.items()
+    }
+    ctx = _V3Ctx(types, functions, externs, components)
+    out: list[str] = []
+    used: set[str] = set()
+    for test in tests:
+        if not test.get("lifecycle"):
+            continue
+        where = f"lifecycle test {_string(test['name'])}"
+        base = _snake(test.get("name") or "lifecycle")
+        base = re.sub(r"[^A-Za-z0-9_]", "_", base)
+        if not base or base[0].isdigit():
+            base = "lifecycle_" + base
+        name = f"revl_lifecycle_{base}"
+        counter = 0
+        while name in used:
+            counter += 1
+            name = f"revl_lifecycle_{base}_{counter}"
+        used.add(name)
+        out.append("#[test]")
+        out.append(f"fn {name}() {{")
+        out.append("    // drives the composition on a real cordis-rs context and")
+        out.append("    // proves no residue after LIFO teardown (FR-5 / §7.1).")
+        out.append("    let root = cordis::Context::new();")
+        out.append("    let mut _revl_fibers: Vec<(&str, cordis::Fiber)> = Vec::new();")
+        for step in test.get("body") or []:
+            kind = step.get("step")
+            if kind == "load":
+                component = step["component"]
+                snake = _snake(component)
+                cfg = step.get("config") or {}
+                cfg_items = ", ".join(
+                    f"{_string(field)}: {_render_expr(value, ctx, {})}"
+                    for field, value in cfg.items())
+                out.append("    {")
+                out.append("        let _cfg = serde_json::json!("
+                           f'{{{_string(component)}: {{{cfg_items}}}}});')
+                out.append(f'        let _f = _revl_load(&root, {_string(snake)}, &_cfg)'
+                           f".expect({_string(where + ': load ' + component)});")
+                out.append(f'        _f.wait().expect({_string(where + ": " + component + " did not reach ACTIVE (R2)")});')
+                out.append(f"        _revl_fibers.push(({_string(snake)}, _f));")
+                out.append("    }")
+            elif kind == "unload":
+                component = step["component"]
+                snake = _snake(component)
+                out.append(f'    if let Some(pos) = _revl_fibers.iter().position(|(n, _)| *n == {_string(snake)}) {{')
+                out.append("        let (_, _f) = _revl_fibers.remove(pos);")
+                out.append(f"        _f.dispose().expect({_string(where + ': unload ' + component)});")
+                out.append("    }")
+            elif kind == "call":
+                key = step["key"]
+                service = provided.get(key)
+                if service is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: no provider for key {key!r}")
+                method_name = _mname(step["method"])
+                method = (method_tables.get(service) or {}).get(step["method"])
+                if method is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: unknown method {step['method']!r}")
+                args = ", ".join(_render_expr(arg, ctx, {})
+                                 for arg in step.get("args") or [])
+                call = (f'root.require::<Box<dyn {service}>>({_string(key)})'
+                        f".expect({_string(where + ': ' + key + ' is ACTIVE (R2)')})"
+                        f".{method_name}({args})")
+                bind = step.get("bind")
+                if bind is not None:
+                    out.append(f"    let {_ident(bind, 'lifecycle binding')} = {call};")
+                    if method.get("returns"):
+                        ctx.var_types[bind] = method.get("returns")
+                else:
+                    out.append(f"    let _ = {call};")
+            elif kind == "assert":
+                out.append(f"    assert!({_render_expr(step['expr'], ctx, {})}, "
+                           f"{_string(where + ': assertion failed')});")
+            elif kind == "assert_no_residue":
+                out.append("    // R4 + R1: the composition must leave the live runtime")
+                out.append("    // holding nothing — no plugin, no provided service, no")
+                out.append("    // unreleased host resource — the same checks the py")
+                out.append("    // reference tier's `assert no_residue` performs and the")
+                out.append("    // registry/reflect half of `revl run --once`.")
+                out.append("    assert!(root.registry().len() == 0"
+                           " && root.reflect().services().len() == 0"
+                           " && REVL_LIVE_HOST_RESOURCES.with(|c| c.get()) == 0,")
+                out.append(f'            {_string(where + ": residue \u2014 the host runtime still holds state (R4/R1)")});')
+            else:  # pragma: no cover — the lowerer emits nothing else
+                raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
         out.append("}")
         out.append("")
     return out
@@ -2872,7 +3332,14 @@ def _emit_v3(ir: dict) -> str:
     if functions:
         out.extend(_emit_v3_functions(functions, types, externs))
     if tests:
-        out.extend(_emit_v3_tests(tests, types, functions, externs))
+        pure = [t for t in tests if not t.get("lifecycle")]
+        lifecycle = [t for t in tests if t.get("lifecycle")]
+        if pure:
+            out.extend(_emit_v3_tests(pure, types, functions, externs))
+        if lifecycle:
+            out.extend(_emit_v3_lifecycle_tests(
+                lifecycle, types, functions, externs,
+                ir.get("services") or {}, components))
     out.extend(_emit_components(ir, components))
     return "\n".join(out).rstrip() + "\n"
 
@@ -2931,26 +3398,6 @@ def _refuse_fault_tests(ir) -> None:
         f"module that is not emitted for this tier."
     )
 
-def _refuse_lifecycle_tests(tests: list) -> None:
-    """`lifecycle test` blocks (syntax-2.0 §7.1) are reference-tier only.
-
-    A lifecycle test is not a pure test unit: it loads components into a live
-    context, calls through provision keys, unloads them, and asserts
-    residue-freedom by reading the *host runtime's* introspection (R1/R4,
-    docs/backend-ir.md). That driver exists only in the cordis-py emitter.
-    Refuse by name — a construct that is silently dropped by one renderer and
-    present in another is this project's recurring bug class.
-    """
-    for test in tests or []:
-        if test.get("lifecycle"):
-            raise EmitError(
-                f"lifecycle test {test.get('name')!r} is not lowerable on the {'cordis-rs'} tier: "
-                "it drives a live composition (load/call/unload) and asserts R4 "
-                "residue-freedom through the host runtime's introspection, which only the "
-                "reference tier implements — run it with `revl test --backend py` "
-                "(docs/syntax-2.0.md §7.1)"
-            )
-
 
 def emit(ir: dict) -> str:
     """Emit one Rust module (crate root) for an IR document."""
@@ -2960,7 +3407,6 @@ def emit(ir: dict) -> str:
 
     _refuse_fault_tests(ir)
 
-    _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1:
         return _emit_v1(ir)

@@ -35,6 +35,12 @@ What is NOT the ``run`` once-path's job (honestly fenced, not faked):
   RPC client against a served stub. Without ``--once`` the driver notes the gap
   and completes the same once round-trip rather than pretending to hold a REPL.
 
+The emitted module is Java 21 (the emitter lowers ``match`` to pattern
+``switch`` expressions, docs/v2.0-roadmap.md item 77(e)), so the driver compiles
+with ``--release 21`` — the same gate ``revl test --backend java`` uses, and
+what the real cordis4j runtime (JDK 21) wants. Compiling the emitted module at
+17 is the bug this driver used to carry: any ``match`` failed javac.
+
 Runtime availability is a gate, not a lie: with no working JDK the driver *skips
 with a reason* and exits nonzero, exactly as the py tier does for a missing
 cordis-py (never a green run that booted nothing). macOS ships a ``javac`` shim
@@ -58,6 +64,12 @@ from .errors import RevlError
 _BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
 _JAVA_DIR = _BACKENDS_DIR / "java"
 _PLACEMENT_DIR = _JAVA_DIR / "placement"
+
+# The emitted module is Java 21 (pattern `switch` from `match`), the same
+# release `revl test --backend java` compiles at and the real cordis4j runtime
+# (JDK 21) wants. Kept as a module constant so the gate is assertable without a
+# JDK on PATH (tests/test_run_java.py).
+JAVAC_RELEASE = "21"
 
 
 def _responds(exe: str) -> bool:
@@ -108,12 +120,13 @@ def java_runtime_reason() -> str | None:
 
     The single-process ``run --once`` boot compiles the emitted module and the
     once-runner against the in-repo cordis4j stubs and runs them on a JVM, so all
-    it needs is a *working* JDK (>= 17). A missing JDK is a skip-with-reason, not
-    a red run — the same shape the rust tier uses for a missing cargo/cordis-rs.
+    it needs is a *working* JDK (>= 21, the release the emitter targets). A
+    missing JDK is a skip-with-reason, not a red run — the same shape the rust
+    tier uses for a missing cargo/cordis-rs.
     """
     if _working_jdk_bin() is None:
         return ("no working JDK found (javac/java that respond to -version).\n"
-                "       install a JDK (>= 17), or point JAVA_HOME/JAVA21_HOME at one, then re-run.\n"
+                "       install a JDK (>= 21), or point JAVA_HOME/JAVA21_HOME at one, then re-run.\n"
                 "       (macOS ships a javac shim that errors until a JDK is installed.)")
     return None
 
@@ -153,14 +166,14 @@ def _build(ir: dict, tmp: Path, jdk_bin: str) -> str:
     javac = str(Path(jdk_bin) / "javac")
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
     compile_runner = subprocess.run(
-        [javac, "--release", "17", "-d", str(out), *stubs,
+        [javac, "--release", JAVAC_RELEASE, "-d", str(out), *stubs,
          str(_PLACEMENT_DIR / "PlacementRunner.java"), str(_PLACEMENT_DIR / "RunOnce.java")],
         capture_output=True, text=True,
     )
     if compile_runner.returncode:
         raise RuntimeError(f"javac (runner) failed:\n{compile_runner.stderr.strip()}")
     compile_components = subprocess.run(
-        [javac, "--release", "17", "-cp", str(out), "-d", str(out), str(gen / "Components.java")],
+        [javac, "--release", JAVAC_RELEASE, "-cp", str(out), "-d", str(out), str(gen / "Components.java")],
         capture_output=True, text=True,
     )
     if compile_components.returncode:

@@ -28,7 +28,6 @@ _PG_DATABASE_CONFIG = ConfigSchema([
 
 
 def _pg_database_apply(ctx, config):
-    config = _PG_DATABASE_CONFIG.resolve(config)
     frame = Frame(ctx, 'PgDatabase')
 
     def _body():
@@ -56,6 +55,7 @@ PgDatabase = {
     'name': 'PgDatabase',
     'inject': [],
     'apply': _pg_database_apply,
+    'Config': _PG_DATABASE_CONFIG,
 }
 
 

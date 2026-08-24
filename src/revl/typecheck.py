@@ -38,7 +38,10 @@ Design (see the "type safety" milestone discussion):
   type parameter; it is marked when the signature table is built, is a wildcard
   only inside that fn's own body, and is unified against the actual arguments
   at every call site. A single-uppercase name that *is* declared (`type S = A |
-  B`) is an ordinary nominal type and is checked as one.
+  B`) is an ordinary nominal type and is checked as one. An explicit `[T]`
+  list (roadmap 75(c)) turns the implicit heuristic OFF for that signature:
+  only the listed names are type parameters, and a stray one-letter name is an
+  ordinary undeclared (opaque nominal) type that errors where it is used.
 
 Two expression dialects are covered:
 - `infer_ast`   — parser AST (Expr*) used by pure fn bodies (stratum 1);
@@ -244,16 +247,24 @@ def collect_tparams(type_names, declared: dict, explicit=()) -> set[str]:
     author can name one the heuristic would miss (`fn first[Elem](xs:
     List[Elem]) -> Elem`). An explicit name is included even if it never
     appears in a parameter or return, so its mere declaration marks the
-    signature generic — exactly the same set the implicit path would build."""
+    signature generic — exactly the same set the implicit path would build.
+
+    Type-parameter hygiene (roadmap 75(c)): an explicit list turns the
+    implicit heuristic OFF for that signature. Declared means declared — with
+    `fn f[T](...)`, only `T` is a type parameter; a stray one-letter name
+    (`E`) is an ordinary undeclared (opaque nominal) type and is checked like
+    any other, so a typo'd name errors where it is used instead of silently
+    quantifying and wildcarding at every call site (docs/generics.md)."""
     explicit = set(explicit)
     found: set[str] = set(explicit)
+    implicit = not explicit  # `[T]` present => declared means declared
 
     def walk(name: str | None) -> None:
         if not name:
             return
         head, args = parse_type(name)
         if head and not args and (head in explicit
-                                  or is_tparam_name(head, declared)):
+                                  or (implicit and is_tparam_name(head, declared))):
             found.add(head)
         for arg in args:
             walk(arg)
@@ -531,6 +542,13 @@ _BUILTIN_SIG = {
     "split": ("Str", ["Str"], "List[Str]"),
     "join": ("List", ["Str"], "Str"),
     "repeat": ("Str", ["Int"], "Str"),
+    # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith):
+    # protocol parsing is prefix-tagged (`FINAL `, `TOOL_CALL `), and the
+    # harness hit a real off-by-one (`"TOOL_CALL "` is 10 chars, sliced 9)
+    # that `slice`-then-compare cannot catch. Str-only, matching the family
+    # of the other Str-builtins.
+    "startsWith": ("Str", ["Str"], "Bool"),
+    "endsWith": ("Str", ["Str"], "Bool"),
     # Integer division and modulo, named rather than defaulted (§0 keeps `/`
     # and `%` meaning what TypeScript means by them; these say what they do).
     # docs/arithmetic.md gives the definitions and the divergence they close.
@@ -543,7 +561,15 @@ _BUILTIN_SIG = {
     # `.to_int32()` narrows Int -> Int32; it can lose bits, so it is ALWAYS
     # explicit and re-imposes the 32-bit bound at runtime, trapping
     # `revl: Int32 overflow` exactly as Int traps at the i64 edge.
-    "to_int": ("Int32", [], "Int"),
+    # `to_int` is also the `Str -> Opt[Int]` parsing builtin (FR-9): the first
+    # method whose spelling is shared by two receiver families, so its entry
+    # is a dict keyed by family rather than a single sig — `builtin_check`
+    # picks the row by the receiver head and refuses a receiver that matches
+    # neither.
+    "to_int": {
+        "Int32": ("Int32", [], "Int"),
+        "Str": ("Str", [], "Opt[Int]"),
+    },
     "to_int32": ("Int", [], "Int32"),
     # The total, value-returning forms (docs/arithmetic.md, "Still open"):
     # same rounding convention as their faulting counterparts, but a zero
@@ -639,6 +665,40 @@ for _dotted, _params in _HOST_ARG_SIG.items():
     _HOST_FAMILIES.setdefault(_family, {})[_method] = _params
 
 
+# The stdlib method table (`_BUILTIN_SIG` here, `_BUILTIN_METHODS` in
+# lower.py) and the host-verb surface (`_HOST_FAMILIES` above) must stay
+# disjoint except for the ONE documented overlap (`remove`,
+# docs/stdlib-2.0.md §Map). This is checked HERE, at table-edit time — the
+# moment either module is imported — not at golden-diff time: the mapiter run
+# proved that editing one table silently reclassifies every call site on the
+# other side (adding `remove` turned every host stub's `store.remove(k)` into
+# a stdlib builtin and broke 16 tests) with the disjointness invariant living
+# only in a test assertion (dogfood/findings-mapiter.md §2). Dispatch is by
+# receiver kind, so any overlap beyond the sanctioned one is a landmine the
+# tests only find later.
+_HOST_VERB_NAMES = frozenset(
+    _method for _methods in _HOST_FAMILIES.values() for _method in _methods)
+_SANCTIONED_OVERLAP = frozenset({"remove"})
+
+
+def _check_method_namespace_disjoint(builtin_names, table: str) -> None:
+    """Fail at table-edit time if a stdlib method name collides with a host
+    verb beyond the documented `remove` overlap."""
+    extra = set(builtin_names) & _HOST_VERB_NAMES - _SANCTIONED_OVERLAP
+    if extra:
+        raise RuntimeError(
+            "stdlib/host method-name collision in " + table + ": "
+            + ", ".join(sorted(f"`{n}`" for n in extra))
+            + " appear in both the stdlib method table and the host stub "
+            "surface; only `remove` is a documented overlap "
+            "(docs/stdlib-2.0.md §Map) — rename one side at the table, "
+            "not in a test"
+        )
+
+
+_check_method_namespace_disjoint(_BUILTIN_SIG, "_BUILTIN_SIG")
+
+
 def host_family_check(family: str, method: str, arg_types: list,
                       filename: str | None, line: int) -> None:
     """Check a method call on a family-typed host receiver."""
@@ -680,7 +740,26 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
     sig = _BUILTIN_SIG.get(method)
     if sig is None:
         return None
-    family, params, ret = sig
+    if isinstance(sig, dict):
+        # A method spelled for several receiver families (`to_int`: the Int32
+        # widening AND the Str parse — docs/arithmetic.md and docs/stdlib-2.0.md
+        # §Str.to_int). Select the row by the receiver head; a receiver that
+        # matches no row is refused, listing the admitted families — the same
+        # shape as the single-family error below, so the two paths read alike.
+        thead, _ = parse_type(target_type)
+        row = sig.get(thead)
+        if row is None:
+            if filename and target_type is not None:
+                raise RevlError(
+                    filename, line,
+                    f"builtin `{method}` has no form for a "
+                    f"`{render_type(target_type)}` receiver "
+                    f"(its receiver families: {', '.join(sorted(sig))})",
+                    code="T1", category="type-mismatch")
+            return None
+        family, params, ret = row
+    else:
+        family, params, ret = sig
     thead, targs = parse_type(target_type)
     if filename and target_type is not None:
         if family == "sized" and thead not in _SIZED_HEADS:
@@ -1468,6 +1547,14 @@ def infer_ir(node, tenv: dict, types: dict, services: dict,
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): bottom-typed empty value.
         return "Map[Str, Never]"
+    if kind == "list":
+        # a list literal is pinned by its elements (mirrors `infer_ast`'s
+        # ExprList), so `[1, 2].length()` types as `List[Int]`, not None
+        item = None
+        for e in node.get("items") or []:
+            t = infer_ir(e, tenv, types, services, filename, line)
+            item = t if item is None else join(item, t)
+        return f"List[{item}]" if item else "List[Never]"
 
     if kind == "bin":
         lt = infer_ir(node.get("left"), tenv, types, services, filename, line)

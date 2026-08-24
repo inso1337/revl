@@ -13,15 +13,17 @@ pub trait Database: Send + Sync {
 
 pub trait Cache: Send + Sync {
     fn get(&self, key: String) -> Option<String>;
-    /// emission — crosses the system boundary (DESIGN.md §3.5)
+    /// emission: crosses the system boundary (DESIGN.md §3.5)
     fn put(&self, key: String, value: String) -> ();
 }
 
-/// revl host object: a small thread-safe string map.
-pub struct Map {
-    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+/// revl host object: a small thread-safe map with String keys.
+/// The value type is generic — each site's `Map.new()` pins `V`
+/// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).
+pub struct Map<V> {
+    inner: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, V>>>,
 }
-impl Map {
+impl<V> Map<V> {
     pub fn new() -> Self {
         Self {
             inner: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -30,31 +32,142 @@ impl Map {
     pub fn drop_(&self) {
         self.inner.lock().unwrap().clear();
     }
-    pub fn insert(&self, key: String, value: String) {
+    pub fn insert(&self, key: String, value: V) {
         self.inner.lock().unwrap().insert(key, value);
     }
-    pub fn remove(&self, key: String) {
-        self.inner.lock().unwrap().remove(&key);
+    pub fn remove(&self, key: &String) {
+        self.inner.lock().unwrap().remove(key);
     }
-    pub fn get(&self, key: String) -> Option<String> {
-        self.inner.lock().unwrap().get(&key).cloned()
+}
+impl<V: Clone> Map<V> {
+    // The key is borrowed, not moved: a component that reads then
+    // writes the same key (the session ledger) keeps owning it.
+    pub fn get(&self, key: &String) -> Option<V> {
+        self.inner.lock().unwrap().get(key).cloned()
     }
 }
 
-/// revl host object: a deterministic in-memory database fake.
+/// revl host object: a bounded connection pool over a deterministic
+/// in-memory database (no driver dependency).  Semantics are shared
+/// across tiers — backends/python/runtime.py, `.. _pool-job-semantics:`:
+/// `size` connections numbered 1..size, acquire/release accounting,
+/// statements borrow a connection for their duration, `close` releases
+/// everything, and exhaustion / use-after-close panic.
 pub struct Pool {
-    _url: String,
-    _size: i64,
+    url: String,
+    size: i64,
+    state: std::sync::Mutex<PoolState>,
+}
+struct PoolState {
+    idle: Vec<i64>,
+    in_use: Vec<i64>,
+    closed: bool,
 }
 impl Pool {
     pub fn open(url: String, size: i64) -> Self {
-        Self { _url: url, _size: size }
+        if size < 1 {
+            panic!("pool size must be an integer >= 1 (got {})", size);
+        }
+        Self {
+            url,
+            size,
+            state: std::sync::Mutex::new(PoolState {
+                idle: (1..=size).collect(),
+                in_use: Vec::new(),
+                closed: false,
+            }),
+        }
     }
-    pub fn close(&self) {}
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+    pub fn capacity(&self) -> i64 {
+        if self.state.lock().unwrap().closed { 0i64 } else { self.size }
+    }
+    pub fn in_use(&self) -> i64 {
+        self.state.lock().unwrap().in_use.len() as i64
+    }
+    pub fn available(&self) -> i64 {
+        self.state.lock().unwrap().idle.len() as i64
+    }
+    // NB: never panic while the guard is held — a panic under the
+    // lock poisons the Mutex, and every later call would then fail
+    // with a PoisonError instead of the intended message (which is
+    // not what the other tiers do: there the pool stays usable).
+    fn borrow_conn(&self, op: &str) -> i64 {
+        let outcome = {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                Err(format!("pool.{} after close/drop — use-after-free", op))
+            } else if state.idle.is_empty() {
+                Err(format!(
+                    "pool.{} exhausted (size={}, in_use={})",
+                    op,
+                    self.size,
+                    state.in_use.len()
+                ))
+            } else {
+                let conn = state.idle.remove(0);
+                state.in_use.push(conn);
+                Ok(conn)
+            }
+        };
+        match outcome {
+            Ok(conn) => conn,
+            Err(message) => panic!("{}", message),
+        }
+    }
+    fn give_back(&self, conn: i64) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(pos) = state.in_use.iter().position(|c| *c == conn) {
+            state.in_use.remove(pos);
+        }
+        state.idle.push(conn);
+        state.idle.sort_unstable();
+    }
+    pub fn acquire(&self) -> i64 {
+        self.borrow_conn("acquire")
+    }
+    pub fn release(&self, conn: i64) {
+        let outcome = {
+            let state = self.state.lock().unwrap();
+            if state.closed {
+                Err(String::from("pool.release after close/drop — use-after-free"))
+            } else if !state.in_use.contains(&conn) {
+                Err(format!("pool.release conn={} is not checked out", conn))
+            } else {
+                Ok(())
+            }
+        };
+        if let Err(message) = outcome {
+            panic!("{}", message);
+        }
+        self.give_back(conn);
+    }
+    pub fn close(&self) {
+        let already_closed = {
+            let mut state = self.state.lock().unwrap();
+            if state.closed {
+                true
+            } else {
+                state.in_use.clear();
+                state.idle.clear();
+                state.closed = true;
+                false
+            }
+        };
+        if already_closed {
+            panic!("pool.close after close/drop — use-after-free");
+        }
+    }
     pub fn query(&self, _sql: String) -> Vec<Value> {
-        vec![Value::new(String::from("fake-row"))]
+        let conn = self.borrow_conn("query");
+        self.give_back(conn);
+        Vec::new()
     }
     pub fn execute(&self, _sql: String) -> i64 {
+        let conn = self.borrow_conn("execute");
+        self.give_back(conn);
         1i64
     }
 }
@@ -103,19 +216,19 @@ pub fn pg_database() -> cordis::PluginHandle {
 }
 
 struct UserCacheCache {
-    store: Arc<Map>,
+    store: Arc<Map<String>>,
     db: Arc<Box<dyn Database>>,
     ctx: Arc<cordis::Context>,
 }
 impl Cache for UserCacheCache {
-    fn get(&self, key: String) -> Option<String> { self.store.get(key) }
+    fn get(&self, key: String) -> Option<String> { self.store.get(&key) }
     fn put(&self, key: String, value: String) -> () {
         let store_undo = self.store.clone();
         let db_undo = self.db.clone();
         let key_undo = key.clone();
         let value_undo = value.clone();
         let _ = self.store.insert(key.clone(), value.clone());
-        let _ = self.ctx.effect("UserCache.put.effect.0", move || { store_undo.remove(key_undo); Ok(()) });
+        let _ = self.ctx.effect("UserCache.put.effect.0", move || { store_undo.remove(&key_undo); Ok(()) });
         let _ = self.db.execute(format!("INSERT INTO cache_log VALUES ({0})", key.clone()));
     }
 }
@@ -126,7 +239,7 @@ pub fn user_cache() -> cordis::PluginHandle {
         cordis::Inject::new(["db"]),
         |ctx, config| {
             let db = ctx.require::<Box<dyn Database>>("db")?;
-            let store = Arc::new(Map::new());
+            let store = Arc::new(Map::<String>::new());
             let store_undo = store.clone();
             let db_undo = db.clone();
             ctx.effect("UserCache.store.undo", move || { store_undo.drop_(); Ok(()) })?;
@@ -258,9 +371,16 @@ pub fn plugin_by_name(name: &str) -> Option<cordis::PluginHandle> {
     }
 }
 
+pub fn _revl_isolate_ctx(ctx: &cordis::Context, name: &str) -> cordis::Context {
+    match name {
+        _ => ctx.clone(),
+    }
+}
+
 pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value) -> Option<cordis::Fiber> {
     match name {
         "pg_database" => {
+            let ctx = _revl_isolate_ctx(ctx, "pg_database");
             let _c = config.get("PgDatabase").cloned().unwrap_or(serde_json::Value::Null);
             Some(ctx.plugin(pg_database(), PgDatabaseConfig {
                 url: _c.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| String::new()),
@@ -268,6 +388,7 @@ pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value)
             }))
         },
         "user_cache" => {
+            let ctx = _revl_isolate_ctx(ctx, "user_cache");
             Some(ctx.plugin(user_cache(), ()))
         },
         _ => None,

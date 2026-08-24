@@ -13,8 +13,12 @@ something: RFC 9110 §9.2.1 defines `GET`/`HEAD`/`OPTIONS`/`TRACE` as safe, and
 an author who writes `get:` adopts that contract. This importer honours that
 in-band claim and refuses to infer anything beyond it — `PUT` and `DELETE` are
 idempotent by specification and stay `emission`, because repeating an
-operation says nothing about undoing it. Every classification, and every
-override of one, is written next to the operation it applies to.
+operation says nothing about undoing it. The idempotency of `PUT`/`DELETE`
+(§9.2.2) is a *second* claim the importer carries into the source the same
+way: those operations import as `emission idempotent fn`, the checked IR
+property that earns the runtime its auto-retry right (roadmap item 44, docs/
+delivery-semantics.md). Every classification, and every override of one, is
+written next to the operation it applies to.
 
 `test_a_plain_operation_backed_by_an_emission_is_rejected` is why the plain
 form is still safe: G4 makes a service declaration an upper bound, so the
@@ -248,10 +252,13 @@ def test_the_verb_is_recorded_as_a_claim_not_a_proof():
 def test_idempotent_is_not_reversible():
     """PUT and DELETE are idempotent by specification, which says nothing
     about undoing them — the generated header says so rather than leaving a
-    reader to assume the importer confused the two."""
+    reader to assume the importer confused the two. The delivery claim now
+    rides alongside: the operation imports as `emission idempotent fn`."""
     source = import_openapi(_one("put"), filename="probe.json")
     assert "`PUT` is not safe by specification: `emission` (G8)" in source
-    assert "PUT and DELETE are idempotent by" in source
+    assert "RFC 9110 §9.2.2 defines PUT" in source
+    assert "repeating safely says nothing about undoing" in source
+    assert "emission idempotent fn put_thing()" in source
 
 
 def test_x_revl_emission_true_overrides_a_safe_verb(tmp_path):

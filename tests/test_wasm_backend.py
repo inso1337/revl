@@ -164,6 +164,31 @@ _COMPONENT_CASES = [
      123, 3),
     ("int-to-str-negative-len",
      _component("{ let s = (0 - x).to_str()  return s.length() }"), 45, 3),
+    # `startsWith`/`endsWith` (FR-6) run through the byte-prefix helpers
+    ("str-prefix-true", _component("{ let s = x.to_str()  return s.startsWith(\"12\") ? 1 : 0 }"),
+     123, 1),
+    ("str-prefix-false", _component("{ let s = x.to_str()  return s.startsWith(\"9\") ? 1 : 0 }"),
+     123, 0),
+    ("str-prefix-empty", _component("{ let s = x.to_str()  return s.startsWith(\"\") ? 1 : 0 }"),
+     123, 1),
+    ("str-suffix-true", _component("{ let s = x.to_str()  return s.endsWith(\"23\") ? 1 : 0 }"),
+     123, 1),
+    ("str-suffix-false", _component("{ let s = x.to_str()  return s.endsWith(\"9\") ? 1 : 0 }"),
+     123, 0),
+    # `Str.to_int` (FR-9) parses through $str_to_int; the Opt stays inside
+    # the module and unwraps with `??` (the canonical-ABI probe is Int-only)
+    ("str-to-int-some", _component("{ let s = x.to_str()  return s.to_int() ?? -1 }"),
+     42, 42),
+    ("str-to-int-negative",
+     _component("{ let s = (0 - x).to_str()  return s.to_int() ?? -1 }"), 7, -7),
+    ("str-to-int-empty", _component("{ let o = \"\".to_int()  return o ?? -1 }"),
+     0, -1),
+    ("str-to-int-garbage", _component("{ let o = \"12a\".to_int()  return o ?? -1 }"),
+     0, -1),
+    ("str-to-int-overflow", _component("{ let o = \"9223372036854775808\".to_int()  return o ?? -1 }"),
+     0, -1),
+    ("str-to-int-min", _component("{ let s = x.to_str()  return s.to_int() ?? 0 }"),
+     -9223372036854775808, -9223372036854775808),
     # `??` on an Opt that never leaves the module
     ("nullish-some", _component("{ let o = Some(x)  return o ?? 7 }"), 42, 42),
     ("nullish-none", _component("{ let o = None  return o ?? 7 }"), 42, 7),
@@ -254,12 +279,18 @@ def test_boundary_refusals_say_why_not_unknown_kind():
     cannot cross the scalar service boundary is this tier's design."""
     emitter = _emitter()
     for source, expected in [
-        # a compound value returned from a service operation
-        (_component("{ let xs = [1, 2]  return xs }"), "cannot cross this tier's scalar service boundary"),
-        # a compound value passed to a coeffect
+        # a compound value returned from a service operation. A *typed*
+        # compound (`let xs = [1, 2]  return xs`) is now refused by the
+        # checker: the provide-method let sweep types the binding (roadmap
+        # 75(b)), so `return xs` against an `Int` service return is a compile
+        # error before any tier sees it. An anonymous record literal has no
+        # recoverable type, so it still reaches this tier's boundary.
+        (_component("{ return { a: 1 } }"), "cannot cross this tier's scalar service boundary"),
+        # a compound value passed to a coeffect (same story: `b.g(xs)` with
+        # `xs: List[Int]` is checker-refused; an anonymous record passes)
         ("service B { fn g(n: Int) -> Int }\n" + _SVC
          + "component C requires b: B provides s: S "
-           "{ provide s { fn f(x) { let xs = [1]  return b.g(xs) } } }",
+           "{ provide s { fn f(x) { return b.g({ a: 1 }) } } }",
          "cannot cross this tier's scalar coeffect boundary"),
         # an extern with no @wasm body is not a missing case either
         ("extern pure fn h(n: Int) -> Int = @py { return n } = @ts { return n }\n"
