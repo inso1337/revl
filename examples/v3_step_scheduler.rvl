@@ -1,0 +1,33 @@
+// A v3 typed-core composition for the go run driver (FR-8 follow-up, go v3
+// placement): a record service return, an ADT-typed service boundary (the
+// agent-loop `Step` — `Final` | `NeedTool`), and an ADT `match` in a
+// provide-method body. Before the go placement path learned the v3 typed-core
+// world this composition was refused at emit ("placement on the go backend
+// needs v1/v2 services"); now it places and runs the boot -> LIFO teardown ->
+// no-residue round-trip on the stc-go placement runner (tests/test_run_go.py).
+type Row = { id: Int, name: Str }
+type ToolCall = { name: Str, args: List[Str] }
+type Step = Final(Str) | NeedTool(ToolCall)
+
+service Scheduler {
+  fn describe(now: Step) -> Str
+  fn next(now: Step) -> Step
+  fn report() -> Row
+}
+
+component Sched provides sched: Scheduler {
+  provide sched {
+    fn describe(now) = match now {
+      Final(msg) => msg,
+      NeedTool(tool) => tool.name,
+    }
+    fn next(now) = match now {
+      Final(msg) => Final(msg),
+      NeedTool(tool) => NeedTool(tool),
+    }
+    fn report() = { id: 1, name: "ada" }
+  }
+}
+
+component SchedUser requires sched: Scheduler {
+}
