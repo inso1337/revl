@@ -1,0 +1,186 @@
+{
+  "ir_version": 1,
+  "services": {
+    "Tally": {
+      "methods": {
+        "total": {
+          "params": [],
+          "returns": "Int",
+          "emission": false
+        },
+        "get": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "bump": {
+          "params": [
+            {
+              "name": "key",
+              "type": "Str"
+            },
+            {
+              "name": "amount",
+              "type": "Int"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Counter",
+      "source": "backends/go/scenarios/counter.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "tally": "Tally"
+      },
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "tally",
+          "service": "Tally",
+          "methods": [
+            {
+              "name": "total",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "size",
+                    "args": []
+                  }
+                }
+              ]
+            },
+            {
+              "name": "get",
+              "params": [
+                "key"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "??",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "name",
+                        "id": "store"
+                      },
+                      "method": "get",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "key"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 0
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "bump",
+              "params": [
+                "key",
+                "amount"
+              ],
+              "body": [
+                {
+                  "step": "effect",
+                  "acquire": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "insert",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      },
+                      {
+                        "kind": "name",
+                        "id": "amount"
+                      }
+                    ]
+                  },
+                  "undo": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "name",
+                      "id": "store"
+                    },
+                    "method": "remove",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "key"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Counter",
+        "file": "backends/go/scenarios/counter.rvl",
+        "inject": [],
+        "provides": [
+          "tally"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Counter"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+service Tally {
+  fn total() -> Int
+  fn get(key: Str) -> Int
+  emission fn bump(key: Str, amount: Int)
+}
+
+component Counter provides tally: Tally {
+  let store = effect Map.new() undo store.drop()
+
+  provide tally {
+    fn total()   = store.size()
+    fn get(key)  = store.get(key) ?? 0
+    fn bump(key, amount) {
+      effect store.insert(key, amount)
+      undo   store.remove(key)
+    }
+  }
+}

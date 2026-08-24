@@ -18,6 +18,17 @@ python3 "$here/emit.py" "$root/backends/typescript/tests/fixtures/tenants.ir.jso
 python3 "$here/emit.py" "$here/scenarios/emitted/memkv/memkv.ir.json" memkv \
   > "$here/scenarios/emitted/memkv/gen.go"
 
+# host `Map.new()` value type — the host Map is generic over V (item 113,
+# FR-4). counter.rvl exercises `Map[Str, Int]` (Insert/Get of Int values) and
+# tagger.rvl exercises `Map[Str, List[Str]]`; before item 113 the host Map held
+# String values only, so both failed `go build` (`cannot use n (int) as string
+# value`). Compiled from scenarios/{counter,tagger}.rvl by the frozen frontend;
+# gen_exec_test.go proves the value round-trip RUNS on stc-go.
+python3 "$here/emit.py" "$here/scenarios/emitted/counter/counter.ir.json" counter \
+  > "$here/scenarios/emitted/counter/gen.go"
+python3 "$here/emit.py" "$here/scenarios/emitted/tagger/tagger.ir.json" tagger \
+  > "$here/scenarios/emitted/tagger/gen.go"
+
 # --- instance-parametric spawn (docs/design-v2-instances.md, phase 1) ------
 # spawn.ir.json is compiled from scenarios/spawn.rvl by the frozen frontend
 # (`revl compile`); the emitter lowers its `spawn` acquisitions to child-fiber
@@ -43,6 +54,16 @@ python3 "$here/emit.py" "$here/scenarios/emitted/accessor/accessor.ir.json" acce
 python3 "$here/emit.py" "$here/scenarios/emitted/timer/timer.ir.json" timer \
   > "$here/scenarios/emitted/timer/gen.go"
 
+# --- `advance` lifecycle step drives the go Clock (item 102, go half) --------
+# advance.ir.json is compiled from scenarios/advance.rvl by the frozen frontend
+# (`revl compile`). A `lifecycle test` with `advance <n><unit>` lowers the step
+# to RevlClockAdvance(N) (and RevlClockReset() at test start), so a timer's
+# firing is an assertable step — before item 102 the go emitter refused
+# `advance` outright. The emitted file IS the proof: it is a `*_test.go` whose
+# `Test…` funcs RUN the every/after timelines on real stc-go under `go test`.
+python3 "$here/emit.py" "$here/scenarios/emitted/advance/advance.ir.json" advance \
+  > "$here/scenarios/emitted/advance/gen_advance_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -59,9 +80,12 @@ if command -v gofmt >/dev/null 2>&1; then
   gofmt -w "$here/scenarios/emitted/usercache/gen.go" \
            "$here/scenarios/emitted/tenants/gen.go" \
            "$here/scenarios/emitted/memkv/gen.go" \
+           "$here/scenarios/emitted/counter/gen.go" \
+           "$here/scenarios/emitted/tagger/gen.go" \
            "$here/scenarios/emitted/spawn/gen.go" \
            "$here/scenarios/emitted/accessor/gen.go" \
            "$here/scenarios/emitted/timer/gen.go" \
+           "$here/scenarios/emitted/advance/gen_advance_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

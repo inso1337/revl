@@ -41,7 +41,12 @@ Go ≥ 1.25).
 Service keys are interned per binding name (`_keyDb = stc.NewKey[Database]("db")`)
 so a provider's `provide db` and a consumer's `requires db` resolve the same
 key. Host objects (`Pool`, `Map`) are a minimal, recording in-memory runtime
-so scenarios can assert exact effect/undo order.
+so scenarios can assert exact effect/undo order. The host `Map` is generic over
+its value type (`type Map[V any]`, item 113): a `Map.new()` acquisition pins
+`V` from the component's `insert` sites, so `Map[Str, Int]` / `Map[Str, List[_]]`
+carry their declared value type (`MapNew[int]()`, `MapNew[[]string]()`) instead
+of a hardcoded string. `scenarios/emitted/{counter,tagger}` prove the int and
+list round-trips by RUNNING on stc-go.
 
 ### Realm placement is done at the load site (not inside `Apply`)
 

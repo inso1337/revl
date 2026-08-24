@@ -204,6 +204,15 @@ Pool does. The exit tests
 `backends/rust/scenarios/timer.rs`) prove deterministic firing and
 unload-cancels-no-residue by RUNNING on the real stc-go / cordis-rs runtimes.
 
+On **go** the `advance` lifecycle step also drives that clock (item 102's go
+half): a `lifecycle test`'s `advance <n><unit>` lowers to `RevlClockAdvance(N)`
+(with `RevlClockReset()` at test start, so each test's timeline is independent),
+firing the due timer bodies before the next statement observes them — the same
+in-language firing the py/ts reference tiers assert. The go exit test lives in
+`backends/go/scenarios/emitted/advance/gen_advance_test.go` (a self-running
+`*_test.go` emitted from `advance.ir.json`), and `revl test --backend go
+examples/lifecycle_timer.rvl` runs the every/after timelines end to end.
+
 On **wasm** the construct still refuses honestly: the emitter rejects a `timer`
 step rather than silently mis-lowering it, and `revl test` reports the refusal
 as a clean skip —
@@ -225,9 +234,10 @@ contract in this document is the specification it will implement.
 | lowering → `advance` step (item 102) | `src/revl/lower.py` (`_lower_lifecycle_body`) |
 | clock coeffect + timer scheduler | `backends/python/runtime.py`, `backends/typescript/runtime.ts` |
 | py/ts emitters (timer + `advance`) | `backends/python/emit.py`, `backends/typescript/emit.py` |
-| `host.clockAdvance`/`clockReset` (item 102) | `backends/typescript/runtime.ts` |
+| go emitter (timer + `advance`, item 102 go half) | `backends/go/emit.py` (`_emit_stc_lifecycle_tests` lowers `advance` → `RevlClockAdvance`, `RevlClockReset` at test start) |
+| `host.clockAdvance`/`clockReset` (item 102) | `backends/typescript/runtime.ts`; go's `RevlClockAdvance`/`RevlClockReset` live in `_TIMER_PREAMBLE` |
 | honest `timer`-step refusal on wasm | `src/revl/test.py` |
 | rust `advance` step → `revl_clock_advance(ms)` (item 112 rust half; drives item 99's Clock, clock reset at test start) | `backends/rust/emit.py` (`_emit_v3_lifecycle_tests`) |
-| honest `advance`-step refusal on go/wasm (py/ts/rust drive it; wiring the in-language driver into the remaining lifecycle emitters is a follow-on) | their `_lifecycle_step` dispatch in `backends/{go,wasm}/emit.py` |
+| honest `advance`-step refusal on wasm (py/ts/go/rust drive it; wasm has no live-composition lifecycle machinery yet, so it refuses the whole lifecycle test) | `backends/wasm/emit.py` lifecycle dispatch |
 | exit tests | `tests/test_time_coeffect.py`, `backends/typescript/tests/time_coeffect.test.ts` |
 | examples | `examples/heartbeat.rvl` (timers), `examples/lifecycle_timer.rvl` (`advance`) |
