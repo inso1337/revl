@@ -312,6 +312,13 @@ def compile_files(paths: list[str], manifest: dict | None = None,
             # `provides` is a {key: service} map. When only a bare manifest was
             # supplied this stays empty and the gate stays conservative.
             "provision_services": _provision_services(manifest),
+            # key -> {type, component}: the state hand-off each running provider
+            # exports (roadmap item 53). Read off the full IR document's
+            # `components` (whose `handoff` survives lowering), not the manifest
+            # projection. A dropped provider's hand-off is exactly what a
+            # replacement must accept, so dropped entries stay in — the gate
+            # compares the replacement's *accepted* shape against them.
+            "handoffs": _running_handoffs(manifest),
         }
     document = check_and_lower(merged, ambient)
     if manifest is not None:
@@ -345,3 +352,22 @@ def _provision_services(manifest: dict) -> dict[str, str]:
             for key, service in provides.items():
                 mapping[key] = service
     return mapping
+
+
+def _running_handoffs(manifest: dict) -> dict[str, dict]:
+    """The state hand-off each running provider *exports*, keyed by the
+    provided key it hangs off (roadmap item 53).
+
+    Read off the full IR document's `components`, whose `handoff` field
+    (`{"key", "type"}`) survives lowering — the manifest projection drops it.
+    A provider being *replaced* by this admission still contributes: its
+    exported shape is exactly what the replacement's `accept` must be
+    compatible with, so nothing is filtered here. A bare-manifest caller (no
+    full `components`) yields an empty map and the hand-off gate is a no-op."""
+    handoffs: dict[str, dict] = {}
+    for comp in manifest.get("components") or []:
+        h = comp.get("handoff")
+        if isinstance(h, dict) and h.get("key"):
+            handoffs[h["key"]] = {"type": h.get("type"),
+                                  "component": comp.get("name")}
+    return handoffs

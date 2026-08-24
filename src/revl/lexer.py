@@ -12,6 +12,10 @@ KEYWORDS = {
     "true", "false", "null",
     # v2: realms & interception
     "isolate", "intercept", "realm", "in", "with",
+    # verified state hand-off on hot-swap (roadmap item 53, the `code_change`
+    # gap): a stateful provider's live state crosses to its successor,
+    # type-checked at admission (docs/state-handoff.md).
+    "handoff",
     # instance-parametric components (docs/design-v2-instances.md)
     "spawn",
     # v2.0 full-language (docs/syntax-2.0.md)

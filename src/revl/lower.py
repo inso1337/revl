@@ -74,6 +74,7 @@ from .parser import (
     ExprVar,
     FnDecl,
     ForStmt,
+    HandoffStmt,
     IfStmt,
     Interp,
     InterceptStmt,
@@ -2606,6 +2607,13 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                 )
         components.append(lowered_comp)
 
+    # state hand-off admission (roadmap item 53): a candidate provider that
+    # *accepts* a `handoff` on a key some running provider *exports* must accept
+    # a §5-compatible shape — else the swap would drop the predecessor's state.
+    # No-op unless the ambient carries running hand-offs (a swap against a
+    # stateful running provider), so a fresh compile is unaffected.
+    _admit_handoff_replacement(program, components, ambient)
+
     # G4/G6 across the spawn boundary: a spawner's declared emission upper
     # bound must cover what its spawned instances emit (decision 8). Checked
     # here, after every component's emission surface is known.
@@ -2729,10 +2737,13 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
 from .admission import (  # noqa: E402,F401
     _Drift,
     _Touchers,
+    _admit_handoff_replacement,
     _admit_service_replacement,
     _caps_str,
     _caps_widen,
     _drift_error,
+    _handoff_compatible,
+    _handoff_error,
     _service_compatible,
     _service_equal,
     _service_from_ir,
@@ -3336,8 +3347,41 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     provide_seen_line: int | None = None
     isolate: dict[str, str] = {}
     intercept: dict[str, dict] = {}
+    handoff: dict | None = None
     action_seen = False
     for stmt in comp.body:
+        if isinstance(stmt, HandoffStmt):
+            # `handoff <key>: <Type>` (roadmap item 53): the verified state
+            # hand-off of a stateful provider. A prelude declaration — it names
+            # what this provider's live state *is*, before any effect creates
+            # it — and targets a key this component provides (its own state
+            # crosses to whoever re-provides that key). At most one per
+            # component: a component's activation frame holds one resource
+            # vector, so one declared shape describes it without ambiguity.
+            if action_seen:
+                raise RevlError(
+                    filename, stmt.line,
+                    "`handoff` must precede every effect, emit, await, and provide statement",
+                    hint="a hand-off declares the provider's state shape before any "
+                         "effect creates it (prelude rule, docs/state-handoff.md)",
+                )
+            if stmt.key not in provides:
+                raise RevlError(
+                    filename, stmt.line,
+                    f"`{stmt.key}` is not a declared provision of {comp.name}",
+                    hint="`handoff` targets a key this component provides — it is the "
+                         "state a successor re-providing that key inherits (item 53)",
+                )
+            if handoff is not None:
+                raise RevlError(
+                    filename, stmt.line,
+                    f"{comp.name} declares more than one `handoff` — a component has one "
+                    f"activation frame, so it hands off one state shape",
+                    hint="thread every piece of live state through the one hand-off type "
+                         "(a record or Map), docs/state-handoff.md",
+                )
+            handoff = {"key": stmt.key, "type": stmt.state_type}
+            continue
         if isinstance(stmt, (IsolateStmt, InterceptStmt)):
             # prelude rule: realm/metadata declarations derive the resolution
             # context (Def. 27/29) and must precede every dependency access
@@ -3496,6 +3540,11 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         lowered["isolate"] = isolate
     if intercept:
         lowered["intercept"] = intercept
+    # item 53: the state hand-off contract, additive — a stateless component
+    # (the overwhelming majority) carries no `handoff` key, so its IR is
+    # byte-identical to before. `ir_version` stays 3.
+    if handoff is not None:
+        lowered["handoff"] = handoff
     return lowered
 
 
