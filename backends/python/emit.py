@@ -121,6 +121,17 @@ def _py_yields_coroutine(node: Any, requires: Any = None,
             if (svc, node.get("method")) in _PY_ASYNC_SVC_OPS:
                 return True
         callee = node.get("callee")
+        # a provision method call off a spawn handle (`w.<key>.<method>(...)`,
+        # item 106): the receiver is an `instance-get` carrying the service
+        # type the handle's key yields, frozen inline by the lowering. It
+        # suspends exactly as a `req`-target async op does — mirror that check
+        # against the same async-op table so an arrow tail-calling a spawned
+        # async worker renders as a plain coroutine lambda, not a sync wrap.
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            recv = callee.get("target")
+            if isinstance(recv, dict) and recv.get("kind") == "instance-get" \
+                    and (recv.get("service"), callee.get("name")) in _PY_ASYNC_SVC_OPS:
+                return True
         if isinstance(callee, dict) and callee.get("kind") == "var":
             nm = callee.get("name")
             if nm in _PY_COLORED_FNS or nm in async_locals:
@@ -2010,7 +2021,16 @@ def emit(ir: dict) -> str:
     if _PY_USES_AS_ASYNC:
         out.add(0, "def _revl_as_async(_f):")
         out.add(1, "async def _g(*_a, **_k):")
-        out.add(2, "return _f(*_a, **_k)")
+        # belt-and-suspenders (item 106): `_f` is classified sync here, so a
+        # bare `return _f(...)` normally suffices. But if a misclassification
+        # ever routes a coroutine-returning body through this wrapper (e.g. a
+        # handle-emission arrow the color analysis failed to see), returning it
+        # would leak an unawaited coroutine. Await whatever is awaitable, and
+        # pass a genuinely-sync result straight through — correct either way.
+        out.add(2, "_r = _f(*_a, **_k)")
+        out.add(2, "if hasattr(_r, \"__await__\"):")
+        out.add(3, "return await _r")
+        out.add(2, "return _r")
         out.add(1, "return _g")
         out.add(0)
         out.add(0)
