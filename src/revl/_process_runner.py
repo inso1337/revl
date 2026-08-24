@@ -119,7 +119,9 @@ async def run(spec: dict) -> None:
 
     # 1. proxies for keys provided by other processes
     for key, info in (spec.get("proxies") or {}).items():
-        proxy = bridge.proxy_component(key, info["methods"], info["socket"], module)
+        proxy = bridge.proxy_component(key, info["methods"], info["socket"], module,
+                                       deadline=info.get("deadline"),
+                                       deadlines=info.get("deadlines"))
         clients[key] = proxy["_client"]
         fiber = root.plugin(proxy)
         await fiber
