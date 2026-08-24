@@ -2411,7 +2411,8 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
     uses_v3 = any(not name.startswith("__") for name in types) or bool(fns) or bool(externs) or bool(tests)
     uses_v3 = uses_v3 or any(
-        svc.commutative or any(m.async_ or m.commutative for m in svc.methods.values())
+        svc.commutative or any(m.async_ or m.commutative or m.idempotent
+                               for m in svc.methods.values())
         for svc in services.values()
     )
     uses_v3 = uses_v3 or uses_components_2
@@ -2456,6 +2457,9 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                            if m.capabilities is not None else {}),
                         **({"async": True} if m.async_ else {}),
                         **({"commutative": True} if m.commutative else {}),
+                        # delivery semantics (roadmap item 44): the checked
+                        # right for the runtime to auto-retry this emission
+                        **({"idempotent": True} if m.idempotent else {}),
                     }
                     for m in svc.methods.values()
                 },

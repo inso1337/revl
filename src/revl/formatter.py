@@ -70,6 +70,7 @@ _KEYWORDS = {
     "spawn", "type", "use", "pub", "var", "while", "for", "of", "if", "else",
     "match", "test", "assert", "async", "as", "fail", "hole",
     "extern", "acquire", "pure", "compensate", "await", "verified", "commutative",
+    "idempotent",
 }
 
 _OPENERS = {"(", "[", "{"}
