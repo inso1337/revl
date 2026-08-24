@@ -142,6 +142,25 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+# Dispatcher conformance (roadmap item 76a). This tier converged to ONE
+# expression renderer (`_expr`) covering both IR dialects, so the table below
+# has a single entry: every kind the frontend can produce in either position
+# must render through it, or be deliberately refused with a named
+# tier-limit EmitError — never the "unsupported expression kind"
+# fall-through. tests/test_expr_dispatcher_conformance.py checks this table
+# against src/revl/lower.py's EXPR_KINDS and against the renderer's source.
+# `hole` is refused at the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "renderer": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "interp", "len",
+        "list", "lit", "maplit", "match", "name", "optcall", "optfield",
+        "record", "record_update", "req", "spawn", "un", "var",
+    }),
+}
+EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")

@@ -95,6 +95,35 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+# Dispatcher conformance (roadmap item 76a). This tier converged to ONE
+# expression renderer (`_render_expr`, wrapped by `_expr`) covering both IR
+# dialects, so the table below has a single entry: every kind the frontend can
+# produce in either position must render through it, or be deliberately
+# refused with a named tier-limit EmitError — never the "unsupported
+# expression kind" fall-through. The refused kinds here are genuine tier
+# limits, each with a named refusal and a workaround in the emitter.
+# tests/test_expr_dispatcher_conformance.py checks this table against
+# src/revl/lower.py's EXPR_KINDS and against the renderer's source. `hole` is
+# refused at the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "renderer": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "interp", "len",
+        "list", "lit", "maplit", "match", "name", "record", "req", "spawn",
+        "un", "var",
+    }),
+}
+EXPR_REFUSED: frozenset[str] = frozenset({
+    # functional record update (docs/records.md §6): refused with a named
+    # error — "lift it into a helper fn instead"
+    "record_update",
+    # optional chaining (docs/syntax-2.0.md §3.2): refused with a named
+    # error — "unwrap with `match` or `??` for now"
+    "optfield", "optcall",
+    "hole",
+})
+
+
 def _is_fn_type(name: object) -> bool:
     """Is this surface type a function type, `(P, ...) -> R`?
 
