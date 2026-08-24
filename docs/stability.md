@@ -16,14 +16,21 @@ the single producer of IR and emitters accept v1 only — there is no
 compatibility window to maintain because there is only one producer. If your
 tool consumes revl's v1 IR, it will keep parsing.
 
-**v1 goldens are byte-identical.** Every emitter has a checked-in golden for the
-reference composition (`backends/<tier>/golden/user_cache.<ext>`), and the
-suites assert the emitter reproduces it **byte for byte**. This is a hard
-project invariant, not an aspiration: a change that alters emitted v1 output by
-a single byte fails the suite and does not land. Concretely, if you have pinned
-a revl version and emitted a component, re-emitting the same source with any
-release that carries the same `ir_version` produces the same bytes. That is what
-lets a downstream system cache, diff, or reproduce emitted artifacts.
+**v1 goldens are snapshots, not a freeze.** Every emitter has a checked-in
+golden for the reference composition (`backends/<tier>/golden/user_cache.<ext>`),
+and the suites assert the emitter reproduces it **byte for byte**. The invariant
+that enforces is "emitter output never changes *unreviewed*", never "output
+never changes": regenerating a golden plus reviewing its diff is always an
+acceptable resolution (docs/conformance.md, "Golden policy"). This used to be a
+hard freeze — "a change that alters emitted v1 output by a single byte fails
+the suite and does not land" — which read like a downstream promise while
+protecting nobody (the emitters had no external consumers) and bending emitter
+design toward byte-stability instead of correctness. If you have pinned a revl
+version, re-emitting the same source with that release produces the same bytes,
+which is what lets a downstream system cache, diff, or reproduce emitted
+artifacts *within a pinned release*; across releases, emitter output may change
+reviewed. Byte-freezing may return — deliberately, as a versioned promise —
+when a real external consumer appears.
 
 **The guarantees are the stable contract of the language.** G1–G8 and the
 lifecycle rules A1–A8 ([DESIGN.md](../DESIGN.md) §4) define what "it compiled"
@@ -103,8 +110,10 @@ version and read the release notes:
 None of the above is trust-me. The invariants are mechanically checked on every
 change:
 
-- v1 goldens are asserted byte-identical in the frontend and per-backend
-  suites;
+- the goldens are asserted byte-identical in the default suite — a change
+  that alters emitter output without regenerating and reviewing the golden
+  fails, and a regenerated golden carries its reviewed diff (snapshot policy,
+  docs/conformance.md);
 - the rejection suite (`examples/rejections/` + `tests/test_frontend.py`
   `REJECTIONS`) is the executable, *exhaustive-by-test* definition of what the
   checker refuses;
