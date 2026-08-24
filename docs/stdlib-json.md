@@ -80,6 +80,52 @@ a tier that cannot run the module says so at emit time, never silently.
    substrate tier — the same prerequisite FR-4/FR-11 raise; documented as a
    deliberate tier refusal until then.
 
+## The multi-tier tradeoff (decision recorded, roadmap item 81)
+
+This module's per-tier scope is not a private stdlib detail — it decides how
+wide a *composition that carries structured data* can run. The harness made
+that concrete. Its milestone-2 switch from a string wire protocol
+(`TOOL_CALL add 2 3`, parsed by hand) to a JSON one (`{"kind":"tool",…}`,
+parsed by `json_parse`) moved the composition's reach from **"runs on
+py/ts/rust/go" to "runs on py/ts"** — because the moment the wire format is
+JSON, every tier in the composition must be able to parse JSON, and only py
+and ts have `@py`/`@ts` bodies for it.
+
+The narrowing is not a bug; it is the honesty gate working. `json_parse` ships
+no `@rs`/`@go` body (the FR-3 scope above), so rust and go refuse at emit time
+rather than shipping something broken. The exact message a user sees on the
+rust tier is:
+
+```
+extern `json_parse` has no @rs body — not portable to this backend (available: py, ts)
+```
+
+and identically on go (`no @go body … (available: py, ts)`). Two independent
+reasons keep those bodies off today, both structural rather than incidental:
+
+- **rust** — an `Any` extern return type-erases to `cordis::Value` (a
+  cloneable `Arc<dyn Any + Send + Sync>`), and the emitter types a binding by
+  the extern's *return*, not by its declared annotation. So even with a
+  `serde_json` body, the harness's core pattern
+  (`let tc: ToolCall = json_parse(s); tc.name`) could not read a field back —
+  the parsed value is opaque at the type level.
+- **go** — the go emitter adds imports for *builtins*, not for verbatim extern
+  bodies, so a `@go` body cannot reach `encoding/json`. The import machinery
+  has to learn to pull in what an extern body names before any body can run.
+
+**The decision:** structured args on all six tiers needs the JSON module to
+gain `@rs`/`@go` bodies — on rust, type an `Any`-binding by its declared type
+(then `serde_json`); on go, wire `encoding/json` into the module's import
+block (see "What is left" above for the full per-tier path) — *or* a per-tier
+wire protocol negotiated at the seam. Until then, **the string protocol
+remains the full-tier fallback**: a composition that flattens its wire format
+to `name arg1 arg2` runs on py/ts/rust/go/java/wasm, and the price is that the
+args are positional strings rather than a structured document. A composition
+that wants structured args over JSON is a py/ts composition today — and even
+the ts half carries its own residual blocker for a *real* provider (item 80,
+async extern bodies: an HTTP call is a `Promise`, and extern bodies cannot yet
+`await`).
+
 ## Why externs, not builtins
 
 FR-6/FR-9 (`startsWith`/`endsWith`/`to_int`) are *builtins*: the lowering
