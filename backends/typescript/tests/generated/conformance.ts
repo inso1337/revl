@@ -76,7 +76,7 @@ export function Missing(): Outcome {
 
 
 export function shout(s: string): string {
-  return s.toUpperCase()
+  return s.toUpperCase() 
 }
 
 export function double(n: bigint): bigint {
