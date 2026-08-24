@@ -96,6 +96,35 @@ def test_a_new_extern_is_detected_and_fails():
     assert result["widened"] is True
 
 
+def test_a_first_class_laundered_new_extern_is_detected_and_fails():
+    """The item-24 launder: the regeneration reaches `write` only through a
+    first-class value handed to a dispatcher (`indirect(write, a)`), never by
+    name. `_boundary` folds that G4 first-class reach onto the surface, so the
+    laundered widening produces the SAME `host:Quiet:write` crossing a direct
+    call would — audit --diff catches it instead of silently accepting it."""
+    prev_src = """
+    extern emission fn write(msg: Str) -> Str = @py { return msg }
+    fn passthru(x: Str) -> Str { return x }
+    service S { emission fn op(a: Str) -> Str }
+    component Quiet provides s: S {
+      provide s { fn op(a) = passthru(a) }
+    }
+    """
+    new_src = """
+    extern emission fn write(msg: Str) -> Str = @py { return msg }
+    fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
+    service S { emission fn op(a: Str) -> Str }
+    component Quiet provides s: S {
+      provide s { fn op(a) = indirect(write, a) }
+    }
+    """
+    prev = _audit(prev_src)
+    new = _audit(new_src)
+    result = evaluate(prev, new)
+    assert "host:Quiet:write" in result["added"]
+    assert result["widened"] is True
+
+
 def test_a_removal_passes():
     # going from WIDER back to BASE gives up the Front emission — safe
     prev = _audit(WIDER)

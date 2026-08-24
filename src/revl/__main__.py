@@ -159,6 +159,23 @@ def _boundary(ir: dict) -> dict:
                 if "*" in fn_caps:
                     unknown_dispatch = True
 
+        # First-class launder (G8 item 24): a host extern reached ONLY as a
+        # value handed to a dispatcher — `indirect(ship, a)` — is named in no
+        # call position, so the walk above never sees it. It is exactly the
+        # reach the G4 fixed point already tracks to keep the read-only hint
+        # sound: `_calls_in`'s value channel records the escaping callable, and
+        # `fn_caps_map` says which boundaries that value carries. Fold that same
+        # first-class reach onto the surface so a laundered `host:` crossing is
+        # enumerated identically to a direct call (audit --diff can then see it).
+        from .emission_analysis import _calls_in  # noqa: PLC0415 — lazy, like plan
+        value_refs: set = set()
+        _calls_in(comp.get("body") or [], set(), values=value_refs)
+        for ref in value_refs:
+            ref_caps = fn_caps_map.get(ref) or set()
+            host |= {c for c in ref_caps if c != "*"}
+            if "*" in ref_caps:
+                unknown_dispatch = True
+
         if unknown_dispatch:
             host.add(_UNKNOWN_DISPATCH)
 
