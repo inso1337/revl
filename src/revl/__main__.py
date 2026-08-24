@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from ._paths import backends_root
 from .compiler import compile_files
 from .distribute import distributability
 from .diagnostics import explain, obligations, report
@@ -1024,7 +1025,7 @@ def _run_repair(args) -> int:
     candidate)."""
     # the session boots a real cordis runtime; put backends/python on the path
     # exactly as `run` does.
-    backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
+    backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
     from .mcp import repair as _repair  # noqa: PLC0415
@@ -1177,7 +1178,7 @@ def _run_recover(args) -> int:
     # the recovery module reads `replay.WriteAheadLog`, a backend module — put
     # backends/python on the path exactly as `run` does, but *without* needing a
     # cordis runtime (recovery works from the durable log, the process is dead).
-    backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
+    backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
 

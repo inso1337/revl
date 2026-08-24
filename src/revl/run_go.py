@@ -58,9 +58,10 @@ from pathlib import Path
 # package) the cross-tier bridge already uses. We drive the resulting binary in
 # `once` mode.
 from . import placement as _placement
+from ._paths import backends_root
 from .errors import RevlError
 
-_BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
+_BACKENDS_DIR = backends_root()
 _GO_DIR = _BACKENDS_DIR / "go"
 _GO_RUNNER = _GO_DIR / "placement_runner"
 _GO_SCENARIOS = _GO_DIR / "scenarios"

@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from pathlib import Path
 
+from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 
@@ -38,7 +38,7 @@ HISTORY_LIMIT = 64
 
 def _backend():
     """Import the cordis-py runtime, with the same guidance `revl run` gives."""
-    backend_dir = Path(__file__).resolve().parents[3] / "backends" / "python"
+    backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
     try:
@@ -62,7 +62,7 @@ def replay_module():
     step-back and the forward plan are pure python over the accumulator, so
     they can be exercised without a runtime installed.
     """
-    backend_dir = Path(__file__).resolve().parents[3] / "backends" / "python"
+    backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
     import replay  # noqa: PLC0415 — backend import after path setup
