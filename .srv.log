@@ -1,9 +1,0 @@
-::1 - - [23/Aug/2026 06:08:25] "GET /index.html HTTP/1.1" 200 -
-::1 - - [23/Aug/2026 06:08:25] "GET /vendor/revl-2.0.0-py3-none-any.whl HTTP/1.1" 200 -
-::1 - - [23/Aug/2026 06:08:29] "GET /index.html HTTP/1.1" 200 -
-::1 - - [23/Aug/2026 06:08:29] "GET /style.css HTTP/1.1" 200 -
-::1 - - [23/Aug/2026 06:08:29] "GET /app.js HTTP/1.1" 200 -
-::1 - - [23/Aug/2026 06:08:29] "GET /examples.js HTTP/1.1" 200 -
-::1 - - [23/Aug/2026 06:08:29] code 404, message File not found
-::1 - - [23/Aug/2026 06:08:29] "GET /favicon.ico HTTP/1.1" 404 -
-::1 - - [23/Aug/2026 06:08:35] "GET /vendor/revl-2.0.0-py3-none-any.whl HTTP/1.1" 200 -
