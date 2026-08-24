@@ -574,7 +574,14 @@ class _Scanner:
                 return []
             parent = by_name.get(base)
             if parent is None:
-                return None
+                # `base` is not a class in this file — it comes from another
+                # package. Cordis's convention names every service base `*Service`
+                # (`RemoteService`, `TypertRemoteService`, …), so a `*Service`
+                # external base is a service root: the subclass's own decorated
+                # methods are recovered. A non-`Service`-named package base has
+                # nothing to stand behind it, so the chain terminates honestly
+                # (`None`) and the class is not treated as a service.
+                return [] if base.endswith("Service") else None
             rest = chain_of(parent, seen | {cls["name"]})
             return None if rest is None else [parent, *rest]
 
@@ -615,10 +622,16 @@ class _Scanner:
             plugin.methods = list(merged.values())
             if cls["base"] in self._service_roots():
                 plugin.surface_origin = f"class {cls['name']} extends {cls['base']}"
-            else:
+            elif chain:
                 plugin.surface_origin = (
                     f"class {cls['name']} extends {cls['base']} "
                     f"(a Service subclass via {' -> '.join(a['name'] for a in chain)})")
+            else:
+                # an external base with no local chain: recognised as a service
+                # root by the cordis `*Service` naming convention.
+                plugin.surface_origin = (
+                    f"class {cls['name']} extends {cls['base']} "
+                    f"(an external `*Service` base, treated as a Service root)")
             static_provide = re.search(r"\bstatic\s+provide\s*=\s*['\"`]([^'\"`]+)",
                                        self.code[cls["start"]:])
             if static_provide:
@@ -702,8 +715,20 @@ class _Records:
         if not spec.startswith(".") or not os.path.isfile(from_module):
             return None
         root = os.path.normpath(os.path.join(os.path.dirname(from_module), spec))
-        for cand in (root + ".ts", root + ".tsx", root + ".d.ts", root + ".mts",
-                     os.path.join(root, "index.ts")):
+        # A relative import may carry an explicit extension: `./types.ts` (the
+        # real source, the NodeNext/DSH spelling), or `./types.js` / `.mjs`
+        # (ESM/NodeNext, whose `.js` resolves back to the `.ts` source). Try the
+        # path as spelt first, then strip a recognised extension so the usual
+        # candidate search finds the module file. `.d.ts` is checked before `.ts`
+        # so a declaration file is stripped whole, not down to `types.d`.
+        literal = root
+        for ext in (".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts",
+                    ".js", ".jsx", ".mjs", ".cjs"):
+            if root.endswith(ext):
+                root = root[:-len(ext)]
+                break
+        for cand in (literal, root + ".ts", root + ".tsx", root + ".d.ts",
+                     root + ".mts", os.path.join(root, "index.ts")):
             if os.path.isfile(cand):
                 return cand
         return None
