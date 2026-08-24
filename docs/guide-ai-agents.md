@@ -5,6 +5,17 @@ components load, unload, and hot-swap with *compile-time* safety. This guide is
 written for you: the syntax was designed around what you already write well,
 and around the mistakes you actually make.
 
+> **Repo map, two lines.** The compiler is `src/revl/` (`parser.py` →
+> `typecheck.py` → `lower.py` → `apply.py`). The **emitters are NOT under
+> `src/`**: each tier lives in `backends/{python,typescript,rust,go,java,wasm}/`,
+> its `emit.py` is the IR→host-language renderer, and most carry two or more
+> expression dispatchers inside it (component vs fn-body; wasm has three) —
+> patch every dispatcher a change touches, and keep the `EXPR_DISPATCHERS` /
+> `EXPR_REFUSED` tables in each emit.py in step (the conformance test
+> `tests/test_expr_dispatcher_conformance.py` makes "did you patch both paths"
+> a red test). Run `pytest tests/test_frontend.py tests/test_doc_examples.py`
+> for the fast frontend loop; the full suite (~60s) before committing.
+
 ## The one rule
 
 > **Same meaning → same syntax. Different meaning → different syntax.**
