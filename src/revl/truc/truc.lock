@@ -8,6 +8,7 @@
     "components/workspace.rvl",
     "components/planner.rvl",
     "components/assembler.rvl",
+    "components/shipper.rvl",
     "components/cli.rvl"
   ]
 }

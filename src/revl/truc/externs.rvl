@@ -76,3 +76,26 @@ pub extern emission fn host_print(text: Str)
 
 pub extern emission fn host_admit_all(ordered_json: Str) -> Str
   = @py { from revl.truc._host import admit_all; return admit_all(ordered_json) }
+
+// ---- ship / publish (emission; slice S4) ----
+
+// The publishing project's ship intent, gathered from truc.toml [assembly] +
+// [ship] and the *target registry's* policy (registry-side policy.json). One
+// read extern so the pure Shipper decides everything downstream from data.
+pub extern emission fn host_ship_context(project_dir: Str) -> Str
+  = @py { from revl.truc._host import ship_context; return ship_context(project_dir) }
+
+// The proving ground (item 31, revl.mcp.gauntlet) run cold on the shipped
+// source: {verdict, lifecycle, admission, dossierText}. ship RE-RUNS it to
+// verify the author's supplied evidence is current for THIS source before it
+// is stamped (regenerate-or-red, the registry.verify discipline on evidence).
+pub extern emission fn host_gauntlet(source: Str) -> Str
+  = @py { from revl.truc._host import gauntlet_evidence; return gauntlet_evidence(source) }
+
+// The publish I/O: write registry/components/<name>/, regenerate the index
+// via revl.registry.build_index (manifest.json is REGENERATED, never copied),
+// then carry the discoverability fields (description/tags) into the index row.
+// A no-op on an empty plan, so "registry untouched on refusal" is a pure
+// Shipper decision (the empty-guard, mirroring host_commit_add).
+pub extern emission fn host_publish(plan_json: Str) -> Str
+  = @py { from revl.truc._host import publish; return publish(plan_json) }
