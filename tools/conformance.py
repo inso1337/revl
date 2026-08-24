@@ -72,6 +72,12 @@ CASES: list[tuple[str, str, str]] = [
     ("service", "commutative op",
      _component("  provide s { fn f(x) = x }",
                 services="service S { commutative fn f(x: Int) -> Int }\n")),
+    # delivery semantics (roadmap item 44): `idempotent` is the sibling of
+    # `commutative` — an algebraic property declared on an emission; tiers
+    # render it as metadata/comment (the py tier consumes it for retries)
+    ("service", "idempotent emission op",
+     _component("  provide s { fn f(x) = 1 }",
+                services="service S { emission idempotent fn f(x: Int) -> Int }\n")),
     ("service", "void return",
      _component("  provide s { fn f(x) { return } }",
                 services="service S { fn f(x: Int) }\n")),

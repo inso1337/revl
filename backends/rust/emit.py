@@ -95,6 +95,35 @@ class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
 
+# Dispatcher conformance (roadmap item 76a). This tier converged to ONE
+# expression renderer (`_render_expr`, wrapped by `_expr`) covering both IR
+# dialects, so the table below has a single entry: every kind the frontend can
+# produce in either position must render through it, or be deliberately
+# refused with a named tier-limit EmitError — never the "unsupported
+# expression kind" fall-through. The refused kinds here are genuine tier
+# limits, each with a named refusal and a workaround in the emitter.
+# tests/test_expr_dispatcher_conformance.py checks this table against
+# src/revl/lower.py's EXPR_KINDS and against the renderer's source. `hole` is
+# refused at the document level by the pre-emit walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "renderer": frozenset({
+        "adt", "arrow", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "host", "if", "index", "instance-get", "interp", "len",
+        "list", "lit", "maplit", "match", "name", "record", "req", "spawn",
+        "un", "var",
+    }),
+}
+EXPR_REFUSED: frozenset[str] = frozenset({
+    # functional record update (docs/records.md §6): refused with a named
+    # error — "lift it into a helper fn instead"
+    "record_update",
+    # optional chaining (docs/syntax-2.0.md §3.2): refused with a named
+    # error — "unwrap with `match` or `??` for now"
+    "optfield", "optcall",
+    "hole",
+})
+
+
 def _is_fn_type(name: object) -> bool:
     """Is this surface type a function type, `(P, ...) -> R`?
 
@@ -199,22 +228,25 @@ def _camel(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
 
-def _string(value: str) -> str:
+def _string(value) -> str:
     """A Rust double-quoted string literal, escaped *from code points*.
 
     The IR stores a `Str` literal as Unicode scalar values (docs/strings.md).
     Rust source is UTF-8 and spells a non-ASCII scalar as `\\u{XXXX}` — it
     rejects the lone-surrogate `\\uXXXX` escapes `json.dumps` emits, which is
-    why every non-ASCII literal used to fail to compile on this tier. ASCII is
-    byte-identical to the old `json.dumps` output (printable ASCII verbatim;
-    `\\n`/`\\r`/`\\t`/`\\"`/`\\\\` the same), so v1 goldens stay frozen.
+    why every non-ASCII literal used to fail to compile on this tier.
 
-    A non-`str` input (e.g. a list of requirement names) keeps the old
-    `json.dumps` serialization unchanged — only real `Str` values take the
-    code-point path.
+    One escape dialect for the whole function: a non-`str` input (the list of
+    requirement names behind `Inject::new([...])`) is serialized structurally,
+    with every string element escaped through the same code-point path. The
+    old `json.dumps` fallback is gone — byte-stability is never grounds for a
+    dual code path (docs/conformance.md, "Golden policy").
     """
+    if isinstance(value, list):
+        return "[" + ", ".join(_string(item) for item in value) + "]"
     if not isinstance(value, str):
-        return json.dumps(value)
+        raise EmitError(f"cannot serialize {type(value).__name__} as a Rust "
+                        f"string literal: {value!r}")
     out = ['"']
     for ch in value:
         cp = ord(ch)
@@ -448,6 +480,9 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             if method.get("emission"):
                 out.append("    /// emission: crosses the system boundary (DESIGN.md §3.5)")
+            if method.get("idempotent"):
+                out.append("    /// idempotent: safe to re-deliver — the runtime "
+                           "may auto-retry a transient failure (item 44)")
             out.append(f"    fn {mname}(&self, {params}) -> {ret};")
         out.append("}")
         out.append("")

@@ -488,12 +488,58 @@ def sweep_command(ir: dict) -> int:
     return 0
 
 
-def test_command(ir: dict, backend: str, sweep: bool = False) -> int:
+def mock_requires_command(ir: dict) -> int:
+    """`revl test --mock-requires`: run every `lifecycle test` in mock world
+    (docs/auto-mocks.md).
+
+    Every `requires` a loaded component leaves unsatisfied is filled by a
+    generated mock — item-37-typed, seeded, deterministic responses; an
+    `emission` operation is recorded-not-crossed — so a consumer is
+    lifecycle-tested with zero real providers and zero setup code. It runs on
+    the py reference tier (the only tier that boots the runtime for a lifecycle
+    test), so a missing cordis-py runtime is a *skip with a reason*, never a
+    pass.
+    """
+    from .mocks import lifecycle_tests, run_mock_requires  # noqa: PLC0415 — lazy: needs cordis
+
+    if not lifecycle_tests(ir):
+        print("no `lifecycle test` to mock (--mock-requires runs lifecycle tests "
+              "against auto-generated mock providers)")
+        return 0
+    if not _cordis_available():
+        print("[mock-requires] skipped: booting a composition in mock world "
+              "activates components for real and needs the cordis-py runtime, "
+              "which this interpreter does not have\n"
+              "        set it up:  sh backends/python/setup.sh\n"
+              "        then rerun under that interpreter:  "
+              "backends/python/.venv/bin/python -m revl test --mock-requires")
+        return 0
+    try:
+        failures, _total = run_mock_requires(ir)
+    except ModuleNotFoundError as error:  # pragma: no cover — guarded above
+        print(f"[mock-requires] skipped: the cordis-py runtime is not installed "
+              f"({error.name!r} missing — sh backends/python/setup.sh)")
+        return 0
+    return 1 if failures else 0
+
+
+def test_command(ir: dict, backend: str, sweep: bool = False,
+                 mock_requires: bool = False) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
 
     With ``sweep`` set, run the exhaustive fault sweep instead (py tier only —
     the only tier that executes fault tests); ``--backend`` does not apply.
+
+    With ``mock_requires`` set, run every `lifecycle test` in mock world — every
+    unmet `requires` satisfied by a generated mock, zero real providers (py tier
+    only; docs/auto-mocks.md).
     """
+    if mock_requires:
+        if backend not in ("py", "all"):
+            print(f"[mock-requires] note: mock world runs on the py reference "
+                  f"tier only, not `{backend}` (docs/auto-mocks.md)")
+        return mock_requires_command(ir)
+
     if sweep:
         if backend not in ("py", "all"):
             print(f"[sweep] note: the fault sweep runs on the py reference "
