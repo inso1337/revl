@@ -413,8 +413,32 @@ export class MapHandle {
     this.data.delete(key)
   }
 
-  get size(): number {
-    return this.data.size
+  // Iteration surface (docs/stdlib-2.0.md §Map). The checker promises
+  // `size()`/`keys()` on a host `Map.new()` receiver too, and emit.py lowers
+  // both as plain method calls on this object — so they must exist as methods,
+  // not the bare `size` getter this class used to carry (which `store.size()`
+  // would have tried to *call*). They mirror the value-Map builtins exactly:
+  // `size()` is the entry count as a bigint (revl Int is a bigint on this
+  // tier, as Pool.execute already returns), `keys()` yields the keys in
+  // ascending canonical Str (code-point) order. Read-only — no host trace,
+  // like the value-Map queries.
+  size(): bigint {
+    this.assertLive('size')
+    return BigInt(this.data.size)
+  }
+
+  keys(): string[] {
+    this.assertLive('keys')
+    // Canonical order is code-point order; JS's default sort is UTF-16
+    // code-unit order, which diverges past U+FFFF, so compare via Array.from
+    // (the same comparator emit.py inlines for the value-Map `keys`).
+    return ([...this.data.keys()] as string[]).sort((a, b) => {
+      const A = Array.from(a), B = Array.from(b)
+      for (let i = 0; i < Math.min(A.length, B.length); i++) {
+        if (A[i] !== B[i]) return A[i] < B[i] ? -1 : 1
+      }
+      return A.length - B.length
+    })
   }
 
   drop(): void {
