@@ -2910,10 +2910,30 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 node["recv"] = infer_ast(expr.callee.target, env.type_env,
                                          env.types, None)
             return node
-        return {"kind": "call",
-                "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
-                                                     pure_only),
-                "args": args}
+        callee_node = _lower_component_pure_expr(expr.callee, env, scope, callables,
+                                                 pure_only)
+        # a provision method call off a spawn handle (`s.<key>.<method>(...)`)
+        # crosses the boundary exactly as a `req` emission does, so the same
+        # `emit`-marker discipline applies — an unmarked emission is refused
+        # (G4), not silently lowered. The `req` path enforces this inline
+        # (`_component_req_call`); the handle path reaches the generic
+        # fall-through, so the check lives here.
+        inst = _instance_get_call({"kind": "call", "callee": callee_node,
+                                   "args": args}, env)
+        if inst is not None:
+            recv, decl = inst
+            if decl.emission and getattr(env, "_expr_mode", "setup") == "setup":
+                handle = recv.get("target") if isinstance(recv.get("target"), dict) else {}
+                spelled = ".".join(p for p in (handle.get("id"), recv.get("key"),
+                                               callee_node.get("name")) if p)
+                raise RevlError(
+                    filename, line,
+                    f"call to emission `{spelled}` must be marked `emit` (G4)",
+                    hint="an emission crosses the system boundary and cannot be reverted; "
+                         "`emit` makes that visible at the call site",
+                    code="G4", category="emission",
+                )
+        return {"kind": "call", "callee": callee_node, "args": args}
     if isinstance(expr, ExprBin):
         return {"kind": "bin", "op": expr.op,
                 "left": _lower_component_pure_expr(expr.left, env, scope, callables,
@@ -3674,6 +3694,32 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     return step
 
 
+def _instance_get_call(node: dict, env: Env):
+    """If `node` is a method call whose receiver is a provision read off a
+    spawn handle (`s.<key>.<method>(...)`), return `(instance_get, decl)`:
+    the `instance-get` node and the `MethodDecl` for the method on the service
+    that key yields — else `None`.
+
+    A provision method call does not lower to a `req`-target call; the pure
+    expression stratum lowers `s.<key>` to an `instance-get`, and the trailing
+    `.<method>(...)` wraps it in a `field` callee (`_lower_component_pure_expr`
+    ExprCall fall-through). So the receiver is reached through `callee`, not the
+    `target` slot a required-service call uses."""
+    if node.get("kind") != "call":
+        return None
+    callee = node.get("callee")
+    if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+        return None
+    recv = callee.get("target")
+    if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
+        return None
+    svc = env.services.get(recv.get("service"))
+    if svc is None:
+        return None
+    decl = svc.methods.get(callee.get("name"))
+    return (recv, decl) if decl is not None else None
+
+
 def _is_emission_call(node: dict, env: Env) -> bool:
     # an `emission` extern (or a function reaching one) is a boundary
     # crossing exactly as a service emission is, so `emit` marks it too
@@ -3681,7 +3727,14 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         return True
     if node.get("kind") != "call":
         return False
-    target = node["target"]
+    target = node.get("target")
+    if target is None:
+        # a provision method call off a spawn handle carries its receiver in
+        # `callee` (an `instance-get`), not the `req` `target` slot — walk the
+        # handle's provision to the service and read the method's emission-ness
+        # there rather than assuming a `req` target (which KeyError'd here)
+        inst = _instance_get_call(node, env)
+        return inst is not None and inst[1].emission
     if target.get("kind") != "req":
         return False
     svc = env.services[env.requires[target["name"]]]
@@ -3949,10 +4002,19 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
 
 def _node_desc(node: dict) -> str:
     if node.get("kind") == "call":
-        target = node["target"]
-        if target.get("kind") == "req":
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "req":
             return f"`{target['name']}.{node['method']}`"
-        return f"a call to `{node['method']}`"
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            recv = callee.get("target")
+            if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                # a provision method call off a spawn handle: name it the way
+                # it was written, `<key>.<method>`, so the diagnostic points at
+                # the provision access rather than "a call to <method>"
+                return f"`{recv.get('key')}.{callee.get('name')}`"
+            return f"a call to `{callee.get('name')}`"
+        return f"a call to `{node.get('method')}`"
     return f"a {node.get('kind', 'value')} expression"
 
 
