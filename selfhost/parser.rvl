@@ -525,10 +525,10 @@ fn p_postfix(ts: List[Token], i: Int) -> PR {
 fn arrow_ahead(ts: List[Token], i: Int) -> Bool {
   if (!at(ts, i, "(")) { return false }
   let h = tk(ts, i + 1)
-  let after = tk(ts, i + 2).kind
+  let third = tk(ts, i + 2).kind
   if (h.kind != ")") {
     if (h.kind != "ident") { return false }
-    if (after != "," && after != ")" && after != ":") { return false }
+    if (third != "," && third != ")" && third != ":") { return false }
   }
   var j = i
   var depth = 0
