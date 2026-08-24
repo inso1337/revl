@@ -339,10 +339,11 @@ def test_emitted_python_body_reverts_cleanly():
 
 # --------------------------------------------- documented follow-on: other tiers
 
-@pytest.mark.parametrize("tier", ["go", "rust", "wasm"])
+@pytest.mark.parametrize("tier", ["wasm"])
 def test_other_tiers_refuse_timers_honestly(tier):
-    """go/rust/wasm are a documented follow-on: their emitters refuse a `timer`
-    step rather than silently mis-lowering it (docs/time-coeffect.md)."""
+    """wasm remains a documented follow-on: its emitter refuses a `timer` step
+    rather than silently mis-lowering it (docs/time-coeffect.md). go and rust
+    now lower timers (`test_go_rust_lower_timers`)."""
     ir = compile_source(
         "service Log { emission fn write(m: Str) }\n"
         "component C requires log: Log { every 10s { emit log.write(\"x\") } }", "<t>")
@@ -350,6 +351,26 @@ def test_other_tiers_refuse_timers_honestly(tier):
     with pytest.raises(Exception) as exc:
         emit.emit(ir)
     assert "timer" in str(exc.value)
+
+
+@pytest.mark.parametrize("tier", ["go", "rust"])
+def test_go_rust_lower_timers(tier):
+    """go and rust are no longer a follow-on: their emitters lower `every`/
+    `after` to a schedule/cancel effect on the clock coeffect (item 57). The
+    executable proofs — deterministic firing + unload-cancels-no-residue on the
+    real stc-go / cordis-rs runtimes — live in backends/{go,rust}. Here we pin
+    that the emitter accepts the step and wires the schedule into the effect
+    ledger with cancellation as its inverse."""
+    ir = compile_source(
+        "service Log { emission fn write(m: Str) }\n"
+        "component C requires log: Log { every 10s { emit log.write(\"x\") } }", "<t>")
+    src = _emitter(tier).emit(ir)
+    if tier == "go":
+        assert "revlScheduleEvery(10000, func() {" in src
+        assert ".Cancel(); return nil }" in src
+    else:
+        assert "revl_schedule_every(10000, move || {" in src
+        assert "revl_cancel(" in src
 
 
 def test_test_harness_reports_a_clean_follow_on_skip():

@@ -123,18 +123,34 @@ follow-on. A timer is an acquisition, so like every acquisition it must precede
 any `provide` in the body (linker rule A2) and is not allowed inside a
 provide-method body.
 
-## Other tiers (documented follow-on)
+## Other tiers
 
-Timers lower and run on the reference tiers, **Python and TypeScript**. On
-**go, rust, and wasm** the construct refuses honestly: those emitters reject a
-`timer` step rather than silently mis-lowering it, and `revl test` reports the
-refusal as a clean skip —
+Timers lower and run on **Python, TypeScript, go, and rust**. The go and rust
+tiers mirror the reference contract tick-for-tick: each carries a
+`Clock`/`RevlTimer` scheduler (`backends/go/emit.py`'s `_TIMER_PREAMBLE`,
+`backends/rust/emit.py`'s `_revl_timer_preamble`) whose time advances only on
+`RevlClockAdvance` / `revl_clock_advance` — firing due timers earliest-first,
+ties by arm order, re-arming `every` across the span — so replay is
+deterministic. A `timer` step lowers to a schedule armed inside the tier's
+effect ledger (`ctx.Effect` on go, `ctx.effect` on rust) with cancellation as
+the derived inverse, yielded into the same LIFO disposer stack every other
+effect uses. Arming takes a live-resource slot (go's `revlHostAcquire`, rust's
+`REVL_LIVE_HOST_RESOURCES`) that cancel — and a spent `after` — returns, so a
+leaked `every` timer surfaces through the exact R1 residue accounting a leaked
+Pool does. The exit tests
+(`backends/go/scenarios/emitted/timer/gen_exec_test.go`,
+`backends/rust/scenarios/timer.rs`) prove deterministic firing and
+unload-cancels-no-residue by RUNNING on the real stc-go / cordis-rs runtimes.
 
-> timers (`every`/`after`, item 57) are not yet lowerable on the go tier — the
-> reference tiers are py + ts; a documented follow-on (docs/time-coeffect.md)
+On **wasm** the construct still refuses honestly: the emitter rejects a `timer`
+step rather than silently mis-lowering it, and `revl test` reports the refusal
+as a clean skip —
 
-Lowering timers on those tiers is future work; the schedule/cancel + clock
-contract in this document is the specification they will implement.
+> timers (`every`/`after`, item 57) are not yet lowerable on the wasm tier — a
+> documented follow-on (docs/time-coeffect.md)
+
+Lowering timers on the wasm tier is future work; the schedule/cancel + clock
+contract in this document is the specification it will implement.
 
 ## Where it lives
 

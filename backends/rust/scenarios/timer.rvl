@@ -1,0 +1,23 @@
+// Timer scenario for the cordis-rs tier (item 57, docs/time-coeffect.md).
+// A timer is a *revertible schedule*: `every`/`after` acquire a schedule whose
+// inverse is cancellation, wired into the same effect ledger that reverts any
+// other effect. Heartbeat arms a periodic + a one-shot timer; Sink provides the
+// Log its firings emit to. timer.rs proves — by RUNNING on real cordis-rs —
+// that firings are deterministic under RevlClockAdvance and that unloading the
+// component cancels its timers residue-free (no orphaned interval).
+service Log { emission fn write(msg: Str) }
+
+component Sink provides log: Log {
+  provide log {
+    fn write(msg) {}
+  }
+}
+
+component Heartbeat requires log: Log {
+  every 30s {
+    emit log.write("tick")
+  }
+  after 5m {
+    emit log.write("warmup done")
+  }
+}
