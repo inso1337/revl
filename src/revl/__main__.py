@@ -1269,6 +1269,22 @@ def main(argv: list[str] | None = None) -> int:
              "sandbox allow-list applies to it (repeatable); `*` = every "
              "component")
 
+    diff_cmd = sub.add_parser(
+        "diff",
+        help="semantic composition diff: the IR-level structural delta between "
+             "two compositions (components added/removed/changed, emissions "
+             "gained/lost, provide/require edges added/broken) — the PR-review "
+             "tool for agent-generated compositions (docs/revl-diff.md)")
+    diff_cmd.add_argument(
+        "before", metavar="BEFORE",
+        help="the earlier composition: a compiled IR/interchange JSON document "
+             "(`revl compile -o` or `revl audit --json`) or a `.rvl` source")
+    diff_cmd.add_argument(
+        "after", metavar="AFTER",
+        help="the later composition (same accepted forms as BEFORE)")
+    diff_cmd.add_argument("--json", action="store_true",
+                          help="machine-readable delta an agent can consume")
+
     version_cmd = sub.add_parser(
         "version",
         help="derive the required semver bump from the interface diff against "
@@ -1891,6 +1907,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "contract":
         return _run_contract(args)
+
+    if args.command == "diff":
+        # its own two-input loader (each side an IR/interchange doc or a
+        # source), so it is routed before the single shared compile step
+        from .composition_diff import diff as composition_diff  # noqa: PLC0415
+        from .composition_diff import load_composition, render as render_diff
+
+        try:
+            before = load_composition(args.before)
+            after = load_composition(args.after)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        delta = composition_diff(before, after)
+        if args.json:
+            print(json.dumps(delta, indent=2))
+        else:
+            print(render_diff(delta, args.before, args.after))
+        return 0
 
     # historical query mode reads a recorded run (files, not source), so it is
     # routed before the compile-from-source step every other command shares
