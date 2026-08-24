@@ -28,9 +28,11 @@ discipline of `Map.set`. Multiple updates apply to the same base (`{r | x =
 
 ## 3. Type rules
 
-- `r` must carry a **named record type**; anything else is refused
-  ("record update requires a record type").
-- every named field must exist in that record's declaration.
+- `r` must carry a record type — **named**, or the **structural** type of an
+  anonymous literal (§3.1); anything else is refused ("record update requires a
+  record type").
+- every named field must exist in that record's declaration (or the structural
+  literal's shape).
 - each replacement expression must match the declared field type.
 - the result's type **is** `r`'s type — an update flows anywhere the base
   record flows without re-annotation.
@@ -42,6 +44,31 @@ fn moved(p: Point) -> Point {
     return { p | x = p.x + 1 }
 }
 ```
+
+### 3.1. Structural vs nominal at declared boundaries (item 71)
+
+An **anonymous** record literal (`let a = { h: "x" }`) has no nominal name to
+look up. It infers a **structural record type**, spelled `{field: Type, ...}`
+in canonical (sorted) order. That shape is what makes an update on an anonymous
+receiver checkable: `{ a | h = 5 }` on the `{ h: Str }` above is refused
+(`update of field \`h\` expects \`Str\`, got \`Int\``), and `{ a | missing = … }`
+is refused for naming a field the shape does not have. Reads through the binding
+(`a.h`) are checked the same way.
+
+The structural type lives **only in the checker**. It is not a second kind of
+record you can declare — there is no surface syntax for it — and it never
+reaches the IR: the `record` / `record_update` nodes carry no type, an inferred
+`let` type is not emitted, and the emitted type table stays nominal. This is the
+same discipline as the `?T` widening marker (item 11): a checker-level
+annotation that leaves the emitted structure byte-identical.
+
+At any **declared boundary** — an annotated `let`, a `return`, an argument — a
+structural type **unifies field-wise** with the nominal record it meets: the
+field sets must match and each field type must be compatible. The `List[Never]`
+bottom rule applies recursively (an empty-list field flows into any `List[T]`),
+because `Never` is a wildcard in the elementwise compatibility check. So
+`let a = { h: "x" }` still flows into a `C = { h: Str }` position exactly as a
+named `C` value would, while a shape that disagrees is refused at the boundary.
 
 ## 4. Block-bodied match arms
 
