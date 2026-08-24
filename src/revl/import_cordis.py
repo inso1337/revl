@@ -106,6 +106,11 @@ _UNRECOVERABLE_NAMES = {"any", "unknown", "object", "Function", "symbol"}
 _BUILTIN_TYPES = {"Str", "Int", "Float", "Bool", "Bytes", "Unit",
                   "List", "Map", "Opt", "Result"}
 
+#: revl's built-in value constructors — a synthesized variant case landing on
+#: one of these would shadow it, so the collision is reported (mirrors the WIT
+#: importer's `_BUILTIN_CASES`).
+_BUILTIN_CASES = {"Some", "None", "Ok", "Err"}
+
 
 class Unrecoverable(Exception):
     """A type that has no honest revl spelling from the evidence at hand.
@@ -698,6 +703,7 @@ class _Records:
         self._pending: set[str] = set()          # revl names being built (cycles)
         self.decls: dict[str, str] = {}          # revl type name -> declaration
         self.origin: dict[str, str] = {}         # revl type name -> where found
+        self.kind: dict[str, str] = {}           # revl type name -> "record"/"variant"
 
     # -- module loading / import resolution -------------------------------
     def _load(self, path: str) -> str:
@@ -842,7 +848,13 @@ class _Records:
                 fields = inherited + fields
             return {"module": ctx, "fields": fields}
 
-        tm = re.search(r"(?:export\s+)?type\s+" + esc + r"\s*=\s*", text)
+        # `type Name = …`, or a *generic* alias `type Name<T> = …` (e.g. DSH's
+        # `type Branded<T> = string & { readonly __brand: T }`). The generic
+        # parameters are matched (and dropped): the alias body is resolved as
+        # written, and any use of a parameter that survives resolution refuses
+        # honestly, exactly like an unmapped nominal.
+        tm = re.search(r"(?:export\s+)?type\s+" + esc + r"\s*(?:<[^=]*>\s*)?=\s*",
+                       text)
         if tm:
             tail = text[tm.end():].lstrip()
             if tail.startswith("{"):
@@ -878,6 +890,15 @@ class _Records:
         if "alias" in found:
             self._ctx.append(found["module"])
             try:
+                # A *literal-only* union alias (`type PluginFiberPhase =
+                # 'pending' | 'loading' | … | null`) is the one union revl can
+                # name: the string literals ARE the tags, so it synthesizes a
+                # variant named after the alias. Everything else — a single
+                # aliased type, or a union that mixes in a non-literal — resolves
+                # (or refuses) through the ordinary path.
+                variant = self._maybe_literal_union(ts_name, found["alias"], names)
+                if variant is not None:
+                    return variant
                 return _resolve_type(found["alias"], names, self)
             finally:
                 self._ctx.pop()
@@ -898,10 +919,66 @@ class _Records:
                 return None
             self.decls[revl] = f"type {revl} = {{ {', '.join(fields)} }}"
             self.origin[revl] = f"`{ts_name}` in {found['module']}"
+            self.kind[revl] = "record"
         finally:
             self._ctx.pop()
             self._pending.discard(revl)
         return revl
+
+    def resolve_alias_body(self, name: str, names: _Names) -> str | None:
+        """Follow a *generic* alias `name` (e.g. `Branded`) to its right-hand
+        side and resolve that, so `Branded<'X'>` becomes the alias body's revl
+        type. Returns None when `name` is not a reachable alias (a real record,
+        or an unknown nominal — left for the caller to refuse)."""
+        ctx = self._ctx[-1] if self._ctx else self.filename
+        found = self._find_def(name, ctx)
+        if found is None or "alias" not in found:
+            return None
+        self._ctx.append(found["module"])
+        try:
+            return _resolve_type(found["alias"], names, self)
+        finally:
+            self._ctx.pop()
+
+    def _maybe_literal_union(self, ts_name: str, body: str,
+                             names: _Names) -> str | None:
+        """Synthesize a named revl `variant` from a literal-only union alias body,
+        registering its declaration. `| null` / `| undefined` members wrap the
+        whole variant in `Opt`. Returns the revl type (`Variant` or
+        `Opt[Variant]`), or None when the body is not a pure literal union (a
+        single member, or a union that mixes literals with a real type) — which
+        then resolves or refuses through the ordinary path, unchanged."""
+        members = _split_top(body, "|")
+        if len(members) < 2:
+            return None
+        nullish = {"null", "undefined"}
+        optional = any(m in nullish for m in members)
+        literals = [_string_literal(m) for m in members if m not in nullish]
+        # every non-nullish member must be a *string* literal — the tags. A
+        # union that mixes a literal with a non-literal type (`'a' | number`) is
+        # a genuine sum type with no tag, and stays refused honestly.
+        if not literals or any(v is None for v in literals):
+            return None
+
+        revl = names.type_name(ts_name)
+        if revl not in self.decls and revl not in self._pending:
+            cases: list[str] = []
+            seen: set[str] = set()
+            for value in literals:
+                case = _pascal(value)
+                if case in seen:                 # two literals that pascal-collide
+                    continue
+                seen.add(case)
+                if case in _BUILTIN_CASES:
+                    names.renames.append(
+                        f"variant case `{revl}.{case}` (from literal "
+                        f"`'{value}'`) shadows revl's built-in `{case}` "
+                        "constructor")
+                cases.append(case)
+            self.decls[revl] = f"type {revl} = {' | '.join(cases)}"
+            self.origin[revl] = f"literal union `{ts_name}` in {self._ctx[-1]}"
+            self.kind[revl] = "variant"
+        return f"Opt[{revl}]" if optional else revl
 
 
 def _resolve_type(ts: str, names: _Names,
@@ -925,6 +1002,10 @@ def _resolve_type(ts: str, names: _Names,
                                 "which has no honest revl spelling")
 
     # union: `T | null` / `T | undefined` -> Opt[T]; anything wider is refused.
+    # (A *literal-only* union — the tags-are-the-cases case — is synthesized into
+    # a named variant one layer up, in `_Records.resolve`, where the alias name
+    # that gives the variant its name is still in hand; by the time a bare body
+    # reaches here that name is gone, so a many-membered union refuses.)
     members = _split_top(ts, "|")
     if len(members) > 1:
         nullish = {"null", "undefined"}
@@ -935,6 +1016,20 @@ def _resolve_type(ts: str, names: _Names,
                                     "`variant`, which this file does not define")
         inner = _resolve_type(concrete[0], names, records)
         return inner if inner.startswith("Opt[") else f"Opt[{inner}]"
+
+    # intersection: revl has no intersection type, but a *branded primitive* —
+    # `string & { readonly __brand: T }`, DSH's `Branded<T>` expansion — is, at
+    # the value boundary this importer crosses, just its primitive. Drop the
+    # brand object(s) and resolve the lone remaining member; anything else (two
+    # real types intersected) has no revl spelling and refuses.
+    inter = _split_top(ts, "&")
+    if len(inter) > 1:
+        carriers = [m for m in inter if not m.strip().startswith("{")]
+        if len(carriers) == 1:
+            return _resolve_type(carriers[0], names, records)
+        raise Unrecoverable(ts, "an intersection of concrete types has no revl "
+                                "spelling (only a primitive branded by an object "
+                                "literal, `string & { __brand }`, is a primitive)")
 
     if ts.startswith("Promise<") and ts.endswith(">"):
         return _resolve_type(ts[len("Promise<"):-1], names, records)
@@ -963,6 +1058,20 @@ def _resolve_type(ts: str, names: _Names,
                                 "nominal, so declare a named type and annotate "
                                 "with it, or model it as a field of a record")
     if "<" in ts:
+        # An unknown generic application `Name<...>`. Before refusing, try to
+        # follow `Name` to a local *generic alias* and resolve its body: DSH's
+        # `Branded<T> = string & { readonly __brand: T }` resolves, through the
+        # intersection rule above, to `Str` — principled, not a name special-case.
+        gm = re.match(r"([A-Za-z_$][\w$]*)\s*<.*>$", ts)
+        if gm and records is not None:
+            expanded = records.resolve_alias_body(gm.group(1), names)
+            if expanded is not None:
+                return expanded
+        # Documented heuristic fallback: an unresolvable `Branded<...>` (the
+        # alias is out of reach, e.g. it lives in an un-followed package) is a
+        # branded string by DSH convention, so it maps to `Str`.
+        if gm and gm.group(1) == "Branded":
+            return "Str"
         raise Unrecoverable(ts, "a generic type this importer does not map "
                                 "(known: `Array`, `Promise`, `Record`)")
     if re.fullmatch(r"[A-Za-z_$][\w$]*", ts):
@@ -1197,7 +1306,9 @@ class _Generator:
                      "operation `emission`")
 
         for name in self.records.decls:
-            self.note(f"record type `{name}` transcribed from "
+            kind = self.records.kind.get(name, "record")
+            verb = "synthesized from" if kind == "variant" else "transcribed from"
+            self.note(f"{kind} type `{name}` {verb} "
                       f"{self.records.origin[name]}")
 
         parts = [self._header()]

@@ -154,6 +154,32 @@ bare `type X = string` alias resolves inline (revl has no type alias). A nominal
 type that is *not* reachable through a local import — a bare undefined name, or
 one imported from a *package* — is still refused (§4).
 
+**DSH's idiomatic types.** Two patterns the DeepSeek-Harness plugins lean on
+would otherwise stop the importer one layer below the record surface, so both are
+now seen through — following the same resolve-don't-guess rule:
+
+- **Branded strings.** DSH tags its ids — `type PluginEntryId = Branded<'…'>`,
+  where `type Branded<T> = string & { readonly __brand: T }`. `Branded<…>` is an
+  unmapped generic, but the importer resolves the `Branded` alias to its body and
+  reads the intersection: a primitive branded by an object literal
+  (`string & { __brand }`) is, at this boundary, just the primitive. So `Branded<…>`
+  collapses to `Str`, and the outer alias (`PluginEntryId`) resolves through it —
+  a field typed `PluginEntryId` imports as `Str`. This is principled, not a name
+  match: any `T & { … }` whose one non-object member is a mapped type resolves to
+  that member. (If the `Branded` alias itself is out of reach — it lives in an
+  un-followed package — an `Branded<…>` application falls back to `Str` by
+  convention, which is the one documented name heuristic.)
+- **Literal-only unions.** A closed set of string tags —
+  `type PluginFiberPhase = 'pending' | 'loading' | … | null` — was refused as
+  "a sum type with no tag". But for a literal-only union the string literals *are*
+  the tags, so the importer synthesizes a named `variant` (the inverse of revl's
+  variant → TS-union lowering): each literal becomes a PascalCase case, and the
+  variant is named after the alias. A `| null` / `| undefined` member wraps the
+  whole variant in `Opt` (`Opt[PluginFiberPhase]`); a union with no such member
+  maps to the bare variant. A union that mixes a literal with a *non-literal* type
+  (`'a' | number`) has no tag on the non-literal arm and stays refused honestly —
+  only pure literal-only unions synthesize.
+
 ### Type mapping (TypeScript → revl)
 
 | TypeScript | revl | note |
@@ -165,10 +191,12 @@ one imported from a *package* — is still refused (§4).
 | `Uint8Array` / `Buffer` / `ArrayBuffer` | `Bytes` | |
 | `T[]` / `Array<T>` / `ReadonlyArray<T>` | `List[T]` | |
 | `Record<K, V>` | `Map[K, V]` | |
-| `T \| null` / `T \| undefined` | `Opt[T]` | any *wider* union is refused (§4) |
+| `T \| null` / `T \| undefined` | `Opt[T]` | a *literal-only* wider union synthesizes a `variant` (§3); any other wider union is refused (§4) |
 | `Promise<T>` | `T` | not a revl `async fn`: that keyword governs `await` boundaries in the *provider*, and this provider only forwards to an extern. The asynchrony lives inside the host body, which resolves the Promise before returning `T` (recorded as a `// note:`) |
 | `void` / `undefined` / `never` return | *(no result)* | |
 | a string / numeric literal type | `Str` / `Int` | |
+| a *literal-only* union `'a' \| 'b' \| null` | a named `variant` (in `Opt` when a `null` member is present) | synthesized from the string tags and named after the alias (§3) |
+| a branded string `Branded<'X'>` (`Branded<T> = string & { __brand }`) | `Str` | the `Branded` alias resolves through its intersection to `string` (§3) |
 | a named `interface` / `type … = { … }` / data `class` | a revl record `type` | followed in the plugin file or a *local* import, and emitted ahead of the service; fields cross camelCase → snake_case, an optional field becomes `Opt[T]` (§3) |
 
 Names cross conventions: a plugin's camelCase methods, parameters and the
@@ -192,8 +220,9 @@ refusal names the construct, its line, and the way forward.
 | `any` / `unknown` / `object` / `Function` / `symbol` | TypeScript's untyped escape hatches — no honest revl spelling | give the method a real type |
 | an inline object / tuple type `{ a: string }` | revl records are *nominal* | declare a named type and annotate with it |
 | a **nominal** type with no record definition in this file or a local import (`UserRecord`) | there is no definition to stand behind the name (a *local* record is followed and transcribed instead — see §3) | declare its revl `type` by hand and reference it, or make it an `interface` / `type` in a local module |
-| a union of several concrete types (`A \| B`) | a sum type with no tag has no revl spelling | declare a named `variant` |
-| a generic other than `Array` / `Promise` / `Record` | not mapped | reshape it, or wrap by hand |
+| a union of several concrete types (`A \| B`), or a union mixing a literal with a non-literal (`'a' \| number`) | a sum type with no tag has no revl spelling (a *literal-only* union is the exception — it synthesizes a `variant`, §3) | declare a named `variant`, or make it literal-only |
+| an intersection of two concrete types (`A & B`, not a primitive branded by an object literal) | revl has no intersection type; only `string & { __brand }`-style brands collapse to their primitive (§3) | model it as a record, or reshape the plugin |
+| a generic other than `Array` / `Promise` / `Record` (and a resolvable `Branded<…>`) | not mapped | reshape it, or wrap by hand |
 | a plugin with **no** recoverable provided service | nothing to wrap | expose one of the `provide` forms in §3, or pass `--service` |
 | a provided service with **no** readable method surface (a dynamically-built object) | it cannot be read statically | declare its `service` by hand |
 | a service whose **every** operation is unrecoverable | nothing callable remains to generate | annotate the plugin and re-import |
