@@ -1,0 +1,229 @@
+// Shipper (rim + core) — `truc ship <name>` publishes a component into a
+// registry, gated by two policies the human settled:
+//
+//   1. the *registry's* declared evidence policy (registry-side policy.json:
+//      "gauntlet" = the official stance, audit + gauntlet evidence; "audit" =
+//      admission only; "none" = compiles). ship reads the TARGET registry's
+//      policy and enforces exactly it — the official registry refuses a
+//      component that lacks passing gauntlet evidence, an additional registry
+//      per its own policy.
+//   2. discoverability — ship REFUSES to publish anything another agent could
+//      not find: a human/agent-readable description and search tags are
+//      mandatory (the provide/require surfaces + capabilities/emissions come
+//      from the compiler audit and ride into the published index row too).
+//
+// Every branch and decision is a pure free fn below (revl audit sees the
+// Shipper *component* as a thin rim: it emits the boundary externs and threads
+// the pure verdicts, exactly the Planner/Assembler split). "Registry untouched
+// on refusal" is a pure decision: a refusal returns an empty publish plan and
+// host_publish is a no-op on empty — the empty-guard, mirroring commit_add.
+//
+// Evidence is author-supplied and ship-verified. The author runs the proving
+// ground (item 31, `revl_gauntlet`) ahead of time and carries its dossier in
+// the project ([ship] evidence = "dossier.json"); ship RE-RUNS the gauntlet on
+// the shipped source and refuses unless the fresh run still passes — the
+// registry.verify regenerate-or-red discipline applied to the evidence itself,
+// so a stale dossier for a since-changed source cannot rubber-stamp a ship. A
+// cold gauntlet passes anything that compiles, so the evidence bar that has
+// teeth is *deliberate authorship* (the dossier must be present) verified
+// against the current source, not a re-derivable pass/fail.
+
+use "../externs.rvl" {
+  json_parse, json_stringify,
+  host_ship_context, host_gauntlet, host_admit_all, host_publish, host_print
+}
+
+// ---- shapes crossing in ----
+
+type ShipCtx = {
+  source: Str,
+  description: Str,
+  tags: List[Str],
+  registryName: Str,
+  registryPath: Str,
+  policy: Str,
+  existingNames: List[Str],
+  evidencePresent: Bool,
+  evidenceVerdict: Str,
+  evidenceLifecycle: Str
+}
+type Audit    = { ok: Bool, diagnostic: Str }
+type Evidence = { verdict: Str, lifecycle: Str, admission: Str, dossierText: Str }
+type ShipCand = { path: Str, source: Str, name: Str }
+
+// ---- shapes crossing out ----
+
+type PublishPlan = {
+  publish: Bool,
+  registryPath: Str,
+  name: Str,
+  source: Str,
+  description: Str,
+  tags: List[Str],
+  stampDossier: Bool,
+  dossierText: Str
+}
+type ShipReport = { code: Int, message: Str, plan: Str }
+
+// ---- accessors the orchestration threads ----
+
+fn ship_source(ctxJson: Str) -> Str {
+  let c: ShipCtx = json_parse(ctxJson)
+  return c.source
+}
+
+// The single candidate the gate admits cold (a virtual path — the source is
+// in memory, not on disk under the registry yet). ok here == "it compiles",
+// the (a) half of the official policy and the whole of the "audit" policy.
+fn ship_ordered(ctxJson: Str) -> Str {
+  let c: ShipCtx = json_parse(ctxJson)
+  var out: List[ShipCand] = []
+  out = out.push({ path: "/__truc_ship__/component.rvl", source: c.source, name: "" })
+  let fixed = out
+  return json_stringify(fixed)
+}
+
+// ---- pure helpers ----
+
+fn name_in(xs: List[Str], s: Str) -> Bool {
+  for (x of xs) {
+    if (x == s) {
+      return true
+    }
+  }
+  return false
+}
+
+fn evidence_passes(c: ShipCtx, fresh: Evidence) -> Bool {
+  // present (deliberate authorship) AND both the supplied record and a fresh
+  // re-run agree it is admissible and the lifecycle battery passed.
+  return c.evidencePresent
+    && c.evidenceVerdict == "admissible"
+    && c.evidenceLifecycle == "passed"
+    && fresh.verdict == "admissible"
+    && fresh.lifecycle == "passed"
+}
+
+fn make_report(code: Int, message: Str, plan: Str) -> Str {
+  let r: ShipReport = { code: code, message: message, plan: plan }
+  return json_stringify(r)
+}
+
+fn refuse(message: Str) -> Str {
+  return make_report(1, "truc: refused — ".concat(message), "")
+}
+
+// ---- THE DECISION (pure) ----
+
+fn ship_report(ctxJson: Str, name: Str, auditJson: Str, freshJson: Str) -> Str {
+  let c: ShipCtx = json_parse(ctxJson)
+  let audit: Audit = json_parse(auditJson)
+  let fresh: Evidence = json_parse(freshJson)
+
+  // 1. DISCOVERABILITY — refuse an under-described component, naming what's
+  //    missing (the human's decision 2). Another agent must be able to find it.
+  var missing = ""
+  if (c.description == "") {
+    missing = "description"
+  }
+  if (c.tags.length() == 0) {
+    if (missing != "") {
+      missing = missing.concat(", ")
+    }
+    missing = missing.concat("tags")
+  }
+  if (missing != "") {
+    return refuse(`under-described component "${name}": missing ${missing}. Publishing is refused until the component says what it is (description) and how to find it (tags), so revl_resolve / registry search can surface it.`)
+  }
+
+  // 2. ADMISSION / AUDIT — it must at least compile clean (the (a) half of
+  //    every policy; the gate is revl's own compile_files, in-process).
+  if (!audit.ok) {
+    return refuse(`"${name}" does not admit — it must compile clean to be published:
+`.concat(audit.diagnostic))
+  }
+
+  // 3. FIRST-COME — the registry has a single namespace, names are claimed by
+  //    "the directory did not exist" (docs/registry.md §1).
+  if (name_in(c.existingNames, name)) {
+    return refuse(`"${name}" is already published in registry "${c.registryName}" (names are first-come; pick another name).`)
+  }
+
+  // 4. EVIDENCE, per the TARGET registry's declared policy.
+  var stamp = false
+  if (c.policy == "gauntlet") {
+    if (!c.evidencePresent) {
+      return refuse(`registry "${c.registryName}" requires gauntlet evidence to publish "${name}", and none was supplied. Run the proving ground (revl_gauntlet, item 31) and carry its dossier in the project ([ship] evidence = "dossier.json") before shipping to this registry.`)
+    }
+    if (!evidence_passes(c, fresh)) {
+      return refuse(`the gauntlet evidence for "${name}" does not pass for the current source (supplied: ${c.evidenceVerdict}/${c.evidenceLifecycle}; fresh re-run: ${fresh.verdict}/${fresh.lifecycle}). Re-run the gauntlet on the source you are shipping.`)
+    }
+    stamp = true
+  }
+
+  // 5. PUBLISH PLAN — the only registry-mutating step. build_index recomputes
+  //    provides/requires/capabilities/emissions; ship carries description/tags
+  //    into the row so the entry is discoverable.
+  let stampFinal = stamp
+  let plan: PublishPlan = {
+    publish: true,
+    registryPath: c.registryPath,
+    name: name,
+    source: c.source,
+    description: c.description,
+    tags: c.tags,
+    stampDossier: stampFinal,
+    dossierText: fresh.dossierText
+  }
+  let ev = evidence_word(stampFinal)
+  return make_report(0, `truc: published "${name}" to registry "${c.registryName}" — admitted through the gate${ev}; discoverable in index.json (provides/requires/capabilities/description/tags).`, json_stringify(plan))
+}
+
+fn evidence_word(stamp: Bool) -> Str {
+  if (stamp) {
+    return ", gauntlet evidence stamped into the entry"
+  }
+  return ""
+}
+
+// ---- report accessors ----
+
+fn ship_plan_of(rj: Str) -> Str {
+  let r: ShipReport = json_parse(rj)
+  return r.plan
+}
+fn ship_msg_of(rj: Str) -> Str {
+  let r: ShipReport = json_parse(rj)
+  return r.message
+}
+fn ship_code_of(rj: Str) -> Int {
+  let r: ShipReport = json_parse(rj)
+  return r.code
+}
+
+// ---- the service + the thin rim component ----
+
+pub service Shipper {
+  emission fn run(projectDir: Str, name: Str) -> Int
+}
+
+component Shipper provides ship: Shipper {
+  provide ship {
+    // The flagship ship loop: gather intent + policy, admit (audit), re-run the
+    // gauntlet to verify the supplied evidence, let the pure decision above
+    // choose publish-or-refuse, then the one registry-mutating emission. A
+    // refusal returns an empty plan and host_publish does nothing — the
+    // registry is untouched (all-or-nothing, the empty-guard).
+    fn run(projectDir, name) {
+      let ctx = emit host_ship_context(projectDir)
+      let ordered = ship_ordered(ctx)
+      let audit = emit host_admit_all(ordered)
+      let source = ship_source(ctx)
+      let fresh = emit host_gauntlet(source)
+      let r = ship_report(ctx, name, audit, fresh)
+      emit host_publish(ship_plan_of(r))
+      emit host_print(ship_msg_of(r))
+      return ship_code_of(r)
+    }
+  }
+}
