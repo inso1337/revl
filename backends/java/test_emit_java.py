@@ -447,6 +447,55 @@ def test_javac_compiles_method_level_compensate(tmp_path):
     _javac_compile(tmp_path, emit.emit(ir))
 
 
+# host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 86).
+# The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
+# on a host `Map.new()` receiver too, and emit lowers both as plain method calls
+# on the runtime object. The generated `Map<V>` class therefore has to carry
+# them, or the emitted component fails javac (`cannot find symbol: method
+# size()`). Mirrors backends/python/tests/test_host_map_iter.py.
+_HOST_MAP_ITER_SRC = """
+service KV {
+  fn count() -> Int
+  fn all_keys() -> List[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+component MemKV provides kv: KV {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn count()    = store.size()
+    fn all_keys() = store.keys()
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+"""
+
+
+def test_host_map_backs_keys_and_size():
+    """The generated `Map<V>` runtime carries `size`/`keys`, and the provide
+    body lowers them as method calls on the store."""
+    src = emit.emit(compile_source(_HOST_MAP_ITER_SRC, "memkv.rvl"))
+    # runtime methods exist, with value-Map semantics: Int -> long count, and
+    # keys in canonical (code-point) order.
+    assert "public long size() {" in src
+    assert "public java.util.List<String> keys() {" in src
+    assert "int ca = a.codePointAt(i), cb = b.codePointAt(j);" in src
+    # provide body lowers to method calls on the host object
+    assert "return this.store.size();" in src
+    assert "return this.store.keys();" in src
+
+
+@pytest.mark.skipif(JAVAC is None, reason="no working javac")
+def test_javac_compiles_host_map_iteration(tmp_path):
+    """The reproduction gate: before `size`/`keys` were added to the runtime,
+    the emitted component failed javac (`cannot find symbol: method size()`)."""
+    _javac_compile(tmp_path, emit.emit(compile_source(_HOST_MAP_ITER_SRC, "memkv.rvl")))
+
+
 CORDIS4J_CLASSES = os.environ.get("REVL_CORDIS4J_CLASSES")
 
 

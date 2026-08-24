@@ -170,6 +170,52 @@ describe('Job — real, cancellable async', () => {
   })
 })
 
+describe('MapHandle — iteration surface (keys / size)', () => {
+  // The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) also
+  // type-check on a host `Map.new()` receiver, and emit.py lowers both as plain
+  // method calls on this object — so they must exist as methods (this class
+  // used to carry only a `size` *getter*, which `store.size()` would have tried
+  // to call). Semantics mirror the value-Map builtins and the python host Map.
+  it('size() is the entry count as a bigint (revl Int)', () => {
+    const store = new MapHandle()
+    expect(store.size()).toBe(0n)
+    store.insert('b', '2')
+    store.insert('a', '1')
+    expect(store.size()).toBe(2n)
+    store.remove('a')
+    expect(store.size()).toBe(1n)
+  })
+
+  it('keys() returns the keys in ascending canonical (code-point) order', () => {
+    const store = new MapHandle()
+    store.insert('banana', 'yellow')
+    store.insert('apple', 'red')
+    store.insert('cherry', 'red')
+    expect(store.keys()).toEqual(['apple', 'banana', 'cherry'])
+  })
+
+  it('keys()/size() are read-only — no host trace record', () => {
+    const store = new MapHandle()
+    store.insert('k', 'v')
+    const seen: string[] = []
+    const off = onHostEvent((entry) => seen.push(entry))
+    try {
+      store.size()
+      store.keys()
+    } finally {
+      off()
+    }
+    expect(seen).toEqual([])
+  })
+
+  it('keys()/size() are refused after drop', () => {
+    const store = new MapHandle()
+    store.drop()
+    expect(() => store.size()).toThrow(/after drop/)
+    expect(() => store.keys()).toThrow(/after drop/)
+  })
+})
+
 describe('tracing — multi-observer', () => {
   it('lets two observers coexist and unsubscribe independently', () => {
     const first: string[] = []
