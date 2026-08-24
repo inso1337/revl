@@ -87,18 +87,22 @@ EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 # ---------------------------------------------------------------- async (item 92)
 #
-# py has no fn-level async machinery in v1/v2 — module fns are plain `def`,
-# externs erase their async flag into blocking bodies (async-extern.md §8), and
+# py has no fn-level async machinery in v1/v2 — module fns are plain `def` and
 # only provide methods go async. Item 92 adds `async def` colored fns and awaited
-# call sites, mirroring the ts slice. Two documents-wide facts drive the await
+# call sites, mirroring the ts slice. Documents-wide facts drive the await
 # decisions; they are set once at the top of `emit()` and read by both the module
 # `_expr` and the `_ComponentEmitter` renderer.
 #
-# The py await-seed deliberately EXCLUDES externs: on this tier an async extern
-# erased to a blocking `def`, so awaiting its (non-awaitable) result would raise
-# `TypeError`. ts awaits {async externs, colored fns, async locals}; py awaits
-# {colored fns, async locals, async service ops}.
+# item 115 (async-extern.md §8): an *async* extern is no longer erased to a
+# blocking `def`. It emits an `async def` (so its verbatim @py body may `await`
+# a host operation — e.g. `await fiber.dispose()` in an `unload`) and every
+# admitted call site awaits it, closing the finding-#32 gap that made a host
+# suspension inexpressible on py. A NON-async extern still erases to a blocking
+# `def` and is never awaited. So the py await-seed now matches ts's shape:
+# ts awaits {async externs, colored fns, async locals}; py awaits
+# {async externs, colored fns, async locals, async service ops}.
 _PY_COLORED_FNS: set = set()        # module fn names emitted `async def`
+_PY_ASYNC_EXTERNS: set = set()      # extern names emitted `async def` (item 115)
 _PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operations
 # per-body context, threaded through the stateless module `_expr`:
 _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
@@ -109,8 +113,9 @@ _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wra
 def _py_yields_coroutine(node: Any, requires: Any = None,
                          async_locals: "frozenset[str]" = frozenset()) -> bool:
     """True if evaluating `node` produces an awaitable on the py tier — a call
-    of an async service op through a req key, an async-colored module fn, or an
-    async value local. Externs are erased/blocking here, so they never do."""
+    of an async service op through a req key, an async-colored module fn, an
+    async extern (item 115: now an `async def`, no longer erased/blocking), or
+    an async value local."""
     if not isinstance(node, dict):
         return False
     kind = node.get("kind")
@@ -134,9 +139,9 @@ def _py_yields_coroutine(node: Any, requires: Any = None,
                 return True
         if isinstance(callee, dict) and callee.get("kind") == "var":
             nm = callee.get("name")
-            if nm in _PY_COLORED_FNS or nm in async_locals:
+            if nm in _PY_COLORED_FNS or nm in _PY_ASYNC_EXTERNS or nm in async_locals:
                 return True
-    if kind == "fn" and node.get("name") in _PY_COLORED_FNS:
+    if kind == "fn" and node.get("name") in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
         return True
     return False
 
@@ -523,8 +528,10 @@ class _ComponentEmitter:
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             # item 92: a call to a colored (async def) module fn returns a
-            # coroutine — await it inside an async method body.
-            if self._in_async and name in _PY_COLORED_FNS:
+            # coroutine — await it inside an async method body. item 115: an
+            # async extern is likewise an `async def`, so await its call too
+            # (an `unload` awaiting `host_dispose(fiber)`, async-extern.md §8).
+            if self._in_async and name in (_PY_COLORED_FNS | _PY_ASYNC_EXTERNS):
                 return f"(await {name}({args}))"
             return f"{name}({args})"
         if kind == "match":
@@ -1271,12 +1278,14 @@ def _expr(node: dict) -> str:
     if kind == "call":
         call = f"{_expr(node['callee'])}({', '.join(_expr(a) for a in node['args'])})"
         # item 92: awaiting a colored fn or an async value local, in an async
-        # body. Externs are excluded (they erased to a blocking `def`, whose
-        # result is not awaitable). The frontend admits such a call only in an
-        # async context, so `_PY_IN_ASYNC` holds when this fires.
+        # body. item 115: an async extern is now an `async def` too, so it joins
+        # the await-seed (a NON-async extern still erases to a blocking `def`
+        # and is excluded — its result is not awaitable). The frontend admits
+        # such a call only in an async context, so `_PY_IN_ASYNC` holds here.
         callee = node.get("callee")
         if _PY_IN_ASYNC and isinstance(callee, dict) and callee.get("kind") == "var" \
                 and (callee.get("name") in _PY_COLORED_FNS
+                     or callee.get("name") in _PY_ASYNC_EXTERNS
                      or callee.get("name") in _PY_AWAIT_LOCALS):
             return f"(await {call})"
         return call
@@ -1470,7 +1479,12 @@ def _emit_externs(externs: list) -> "_Lines":
                 f"extern `{name}` has no @py body — not portable to this backend "
                 f"(available: {', '.join(sorted(bodies)) or 'none'})"
             )
-        out.add(0, f"def {name}({params}):")
+        # item 115 (async-extern.md §8): an async extern emits an `async def`
+        # so its verbatim @py body may `await` a host operation; every admitted
+        # call site awaits it (see the await-seed and `_py_yields_coroutine`).
+        # A non-async extern stays a blocking `def`, unchanged.
+        kw = "async def" if ext.get("async") else "def"
+        out.add(0, f"{kw} {name}({params}):")
         body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
@@ -1832,12 +1846,14 @@ def emit(ir: dict) -> str:
     if not components and not types and not functions and not externs and not tests:
         raise EmitError("IR document has no components, types, functions, externs, or tests")
 
-    # item 92: the two document-wide async facts that drive the py await
+    # item 92/115: the document-wide async facts that drive the py await
     # decisions, set before any body renders (the module `_expr` and the
-    # component emitter read them). Externs are deliberately absent from the
-    # await-seed — they erase to blocking `def`s on this tier.
-    global _PY_COLORED_FNS, _PY_ASYNC_SVC_OPS, _PY_USES_AS_ASYNC
+    # component emitter read them). item 115: async externs now emit `async def`
+    # and so join the await-seed; a non-async extern still erases to a blocking
+    # `def` and is deliberately absent.
+    global _PY_COLORED_FNS, _PY_ASYNC_EXTERNS, _PY_ASYNC_SVC_OPS, _PY_USES_AS_ASYNC
     _PY_COLORED_FNS = {fn.get("name") for fn in functions if fn.get("async")}
+    _PY_ASYNC_EXTERNS = {ext.get("name") for ext in externs if ext.get("async")}
     _PY_ASYNC_SVC_OPS = {
         (svc_name, m_name)
         for svc_name, svc in services.items()

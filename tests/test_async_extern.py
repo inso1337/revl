@@ -224,3 +224,119 @@ def test_ts_emits_colored_fn_as_async_with_awaited_transitive_call():
     assert "export async function outer(u: string, b: string): Promise<string> {" in out
     assert "return (await http_post(u, b))" in out
     assert "return (await mid(u, b))" in out
+
+
+# -- slice 4: py emit (roadmap item 115, async-extern.md §8) -----------------
+#
+# Closes harness finding #32: before item 115 the py tier erased EVERY extern —
+# async or not — to a blocking `def`, so an async extern whose @py body wanted
+# to `await` a host operation (dispose a fiber, settle a promise) was a syntax
+# error, and its async caller leaked the coroutine by never awaiting. py now
+# emits an async extern as `async def` and awaits it at every admitted site,
+# mirroring the ts slice — a component CAN await a host operation on py.
+
+def _emit_py(ir):
+    import importlib.util
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "revl_py_emit_async", root / "backends" / "python" / "emit.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m.emit(ir)
+
+
+# an async extern whose @py body genuinely `await`s a host coroutine — the
+# shape that was a `SyntaxError` when erased to a blocking `def`.
+_EXT_PY = (
+    'extern emission async fn host_dispose(handle: Str) -> Str\n'
+    '  = @py { return (await __import__("asyncio").sleep(0, handle + " gone")) }\n'
+)
+
+
+def test_py_emits_async_extern_as_async_def_and_awaited_call():
+    ir = compile_source(
+        _EXT_PY
+        + 'service Loader { emission async fn unload(handle: Str) -> Str }\n'
+        + 'component Plugin provides loader: Loader {\n'
+        + '  provide loader { async fn unload(handle) = host_dispose(handle) }\n'
+        + '}\n', 't.rvl')
+    out = _emit_py(ir)
+    # the extern is an `async def`, so its verbatim `await` body is legal python
+    assert "async def host_dispose(handle):" in out
+    # the async provide method awaits the async extern — no coroutine leak
+    assert "return (await host_dispose(handle))" in out
+    # and the whole module is syntactically valid python (the erased `def`
+    # holding an `await` used to be a SyntaxError here)
+    compile(out, "<emitted>", "exec")
+
+
+def test_py_non_async_extern_stays_a_blocking_def_and_is_not_awaited():
+    ir = compile_source(
+        'extern emission fn tag(x: Str) -> Str = @py { return x + "!" }\n'
+        + 'service Tagger { emission async fn go(x: Str) -> Str }\n'
+        + 'component Tag provides tagger: Tagger {\n'
+        + '  provide tagger { async fn go(x) = tag(x) }\n'
+        + '}\n', 't.rvl')
+    out = _emit_py(ir)
+    # a NON-async extern is unchanged: a blocking `def`, never awaited
+    assert "def tag(x):" in out
+    assert "async def tag(" not in out
+    assert "return tag(x)" in out
+    assert "await tag(" not in out
+
+
+def test_py_colored_module_fn_awaits_the_async_extern():
+    # a module fn reaching the async extern is phase-2 colored -> `async def`,
+    # and awaits the extern at the admitted call site (mirrors the ts item-90
+    # transitive-await test above).
+    ir = compile_source(
+        _EXT_PY
+        + 'fn mid(h: Str) -> Str { return host_dispose(h) }\n', 't.rvl')
+    out = _emit_py(ir)
+    assert "async def mid(h):" in out
+    assert "return (await host_dispose(h))" in out
+
+
+def test_exit_py_async_extern_await_runs_with_no_coroutine_leak(tmp_path):
+    # exit test for finding #32: an async extern whose @py body awaits a real
+    # host coroutine, awaited by its async caller, executed on the cordis-py
+    # reference runtime. RuntimeWarning-as-error turns any unawaited coroutine
+    # ("... was never awaited") into a failure — the leak the fix closes.
+    pytest.importorskip(
+        "cordis",
+        reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    exit_src = (
+        _EXT_PY
+        + 'service Loader { emission async fn unload(handle: Str) -> Str }\n'
+        + 'component Plugin provides loader: Loader {\n'
+        + '  provide loader { async fn unload(handle) = host_dispose(handle) }\n'
+        + '}\n'
+        + 'lifecycle test "async extern awaited in unload" {\n'
+        + '  load Plugin\n'
+        + '  let out = call loader.unload("fiber-7")\n'
+        + '  assert out == "fiber-7 gone"\n'
+        + '  unload Plugin\n  assert no_residue\n'
+        + '}\n'
+    )
+    (tmp_path / "runtime.py").write_text(
+        (root / "backends" / "python" / "runtime.py").read_text())
+    (tmp_path / "app.py").write_text(_emit_py(compile_source(exit_src, "exit.rvl")))
+    (tmp_path / "driver.py").write_text(
+        "import warnings\n"
+        "warnings.simplefilter('error', RuntimeWarning)\n"
+        "import app\n"
+        "for _name, _fn in app.REVL_TESTS:\n"
+        "    _fn()\n"
+        "    print('PASS', _name)\n")
+    result = subprocess.run(
+        [sys.executable, "driver.py"], cwd=tmp_path,
+        capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, (
+        f"emitted py async-extern exit test failed:\n{result.stdout}\n{result.stderr}")
+    assert result.stdout.count("PASS") == 1, result.stdout
