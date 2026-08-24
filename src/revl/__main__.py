@@ -549,6 +549,68 @@ def _run_apply(args) -> int:
     return 0 if report["applied"] else 1
 
 
+def _run_contract(args) -> int:
+    """`revl contract` — federated contracts between sovereign compositions
+    (docs/federation.md, roadmap item 58).
+
+    `export` projects composition A's compiled IR into its consumer surface
+    (the pinnable contract of what A requires from a provider). `check` runs a
+    provider B's current manifest against a pinned surface through the same
+    §5/drift predicate `revl version` uses (`version.diff_services`): a MAJOR
+    drift is a contract break, and the gate exits nonzero naming it.
+    """
+    from .federation import check, consumer_surface, render
+
+    if args.contract_command == "export":
+        try:
+            ir = compile_files(args.files)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        surface = consumer_surface(ir, consumer=args.consumer)
+        print(json.dumps(surface, indent=2))
+        return 0
+
+    # check: --consumer is a pinned surface artifact; --provider is either a
+    # single compiled manifest .json or one/more .rvl sources compiled here.
+    try:
+        with open(args.consumer, encoding="utf-8") as handle:
+            consumer_doc = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {args.consumer}: {error}", file=sys.stderr)
+        return 1
+
+    provider_paths = list(args.provider)
+    if len(provider_paths) == 1 and provider_paths[0].endswith(".json"):
+        try:
+            with open(provider_paths[0], encoding="utf-8") as handle:
+                provider_ir = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"error: cannot read {provider_paths[0]}: {error}",
+                  file=sys.stderr)
+            return 1
+        provider_label = provider_paths[0]
+    else:
+        try:
+            provider_ir = compile_files(provider_paths)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        provider_label = "the provider"
+
+    try:
+        result = check(consumer_doc, provider_ir)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(render(result, args.consumer, provider_label))
+    return 0 if result["satisfied"] else 1
+
+
 def _print_apply(report: dict, args) -> None:
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2))
@@ -872,6 +934,37 @@ def main(argv: list[str] | None = None) -> int:
              "`--against` reads) and exit, instead of deriving a bump")
     version_cmd.add_argument("--json", action="store_true",
                              help="machine-readable derivation")
+
+    contract = sub.add_parser(
+        "contract",
+        help="federated contracts between sovereign compositions: export a "
+             "consumer surface, or check a provider against a pinned one "
+             "(docs/federation.md)")
+    contract_sub = contract.add_subparsers(dest="contract_command", required=True)
+    contract_export = contract_sub.add_parser(
+        "export",
+        help="project composition A's compiled IR into its consumer surface — "
+             "the pinnable contract of everything A requires from a provider")
+    contract_export.add_argument("files", nargs="+")
+    contract_export.add_argument(
+        "--consumer", metavar="LABEL", default=None,
+        help="a name for the consumer, echoed into the artifact and its "
+             "verdicts (defaults to none)")
+    contract_check = contract_sub.add_parser(
+        "check",
+        help="does a provider's current manifest still satisfy a consumer's "
+             "pinned surface? FAILs (nonzero) on a §5 drift that breaks it")
+    contract_check.add_argument(
+        "--consumer", metavar="A-pinned.json", required=True,
+        help="the consumer surface a provider must satisfy (produce it with "
+             "`revl contract export <A-sources>`)")
+    contract_check.add_argument(
+        "--provider", metavar="B", required=True, nargs="+",
+        help="the provider's current composition: its .rvl sources (compiled "
+             "here), or a single compiled manifest .json (`revl compile -o` / "
+             "`revl version --emit-manifest`)")
+    contract_check.add_argument("--json", action="store_true",
+                                help="machine-readable verdict")
 
     erase = sub.add_parser(
         "erase-report",
@@ -1298,6 +1391,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "apply":
         return _run_apply(args)
+
+    if args.command == "contract":
+        return _run_contract(args)
 
     # historical query mode reads a recorded run (files, not source), so it is
     # routed before the compile-from-source step every other command shares

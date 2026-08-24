@@ -127,6 +127,14 @@ CASES: list[tuple[str, str, str]] = [
                 services="service Bus { emission fn send(n: Int) -> Int }\n"
                          "service S { emission fn f(x: Int) -> Int }\n",
                 requires="requires bus: Bus")),
+    # FR-1 (roadmap 77a): an arrow literal in a provide-method body binds its
+    # parameters in the method's scope — the pure-helper + callback-arrow
+    # escape (docs/expressible-iteration.md). The ts tier used to refuse the
+    # arrow's own parameter as an unbound name; the corpus had no arrow-in-
+    # method case, so the divergence was invisible to the matrix.
+    ("method", "arrow param binds in method scope (FR-1)",
+     "fn apply2(n: Int, f: (Int) -> Int) -> Int { return f(n) }\n"
+     + _component("  provide s { fn f(x) { return apply2(x, v => v + 1) } }")),
 
     # ---- expressions (in a method body, the position that has diverged)
     ("expr", "arithmetic", _component("  provide s { fn f(x) = x + 1 * 2 }")),
