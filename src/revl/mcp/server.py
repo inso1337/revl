@@ -33,6 +33,7 @@ from . import edit as _edit
 from . import operator as _operator
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
+from . import repair as _repair
 from .persist import RestoreError
 from .. import query as Q
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
@@ -328,6 +329,20 @@ def _tool_gauntlet(arguments: dict) -> dict:
         return _session_error("provide `source` or `files` — the gauntlet "
                               "grades a candidate component")
     return _gauntlet.run(SESSION, arguments)
+
+
+def _tool_repair(arguments: dict) -> dict:
+    """The repair loop (roadmap item 62, docs/repair-loop.md): from a fault's
+    causal trace, run regenerate/reuse -> gauntlet -> policy -> widening-ack ->
+    hot-swap unattended, within a self-repair policy, and return the incident
+    dossier. A candidate that would WIDEN the composition's outward reach pauses
+    for a human ack instead of swapping; an ineligible component halts. The
+    running composition is mutated only by the final swap, only when every gate
+    is green (the loop orchestrates the landed machinery; it reimplements none)."""
+    if not arguments.get("component"):
+        return _session_error("`component` is required — the faulting component "
+                              "to repair")
+    return _repair.run_repair(SESSION, arguments)
 
 
 # -- composition persistence (docs/persistence.md) ------------------------
@@ -927,6 +942,68 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_gauntlet,
+    },
+    {
+        "name": "revl_repair",
+        "description": "The repair loop (roadmap item 62): a faulting component "
+                       "fixes itself, within policy. Give the fault's causal "
+                       "trace (`trace`, item-27 events, or `traceFile`) and a "
+                       "regenerated `candidate` (`{source|files|modules}`) — or a "
+                       "`need` for the reuse check to find an existing fix (item "
+                       "49) — and the loop runs unattended: gauntlet (item 31) -> "
+                       "boundary policy (item 33) -> capability-widening ack (item "
+                       "21) -> hot-swap (item 23), authorized by the SELF-REPAIR "
+                       "POLICY (`selfRepairPolicy`) that says which components may "
+                       "self-repair and which capabilities a repair may touch. A "
+                       "candidate that would WIDEN what the composition reaches "
+                       "outside the system PAUSES for a human ack (status "
+                       "awaiting-ack) instead of swapping; an ineligible component "
+                       "halts. Returns the INCIDENT DOSSIER: every step (fault, "
+                       "why, slice, candidate, verdicts, swap, authority) "
+                       "reconstructed from the causal trace alone. The running "
+                       "composition is mutated only by the final swap, only when "
+                       "every gate is green. `apply:false` plans without swapping. "
+                       "See docs/repair-loop.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "component": {"type": "string",
+                              "description": "the faulting component to repair"},
+                "trace": {"type": "array",
+                          "description": "the causal trace: item-27 lifecycle "
+                                         "event objects (from `revl run --trace`)"},
+                "traceFile": {"type": "string",
+                              "description": "path to a JSONL causal trace "
+                                             "(alternative to inline `trace`)"},
+                "predicate": {"type": "string",
+                              "description": "a bisect predicate to localize the "
+                                             "fault to a step (item 40); needs a "
+                                             "session loaded with record:true"},
+                "candidate": {"type": "object",
+                              "description": "the regenerated repair: "
+                                             "{source|files|modules}"},
+                "need": {"description": "a need spec for the registry reuse check "
+                                        "(item 49) — a `service` decl, a fill "
+                                        "spec, or a shape object"},
+                "selfRepairPolicy": {
+                    "description": "which components may self-repair and which "
+                                   "capabilities a repair may touch — a dict "
+                                   "({eligible, mayTouch, ackOnWiden}) or DSL "
+                                   "text. Absent = closed (nothing self-repairs)."},
+                "accept": {"type": "array", "items": {"type": "string"},
+                           "description": "widening crossings already acknowledged "
+                                          "(item 21 ack tokens)"},
+                "apply": {"type": "boolean",
+                          "description": "perform the swap (default true); false "
+                                         "runs every gate but does not swap"},
+                "registry": {"type": "string",
+                             "description": "registry dir for the reuse check "
+                                            "(default $REVL_REGISTRY)"},
+            },
+            "required": ["component"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_repair,
     },
     {
         "name": "revl_rollback",

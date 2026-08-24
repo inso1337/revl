@@ -223,6 +223,8 @@ def test_initialize_and_tools_list():
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # generation history + operator undo (docs/generation-history.md)
                           "revl_undo",
+                          # the repair loop (docs/repair-loop.md, item 62)
+                          "revl_repair",
                           # deltas, not documents (docs/mcp-bridge.md, item 50)
                           "revl_edit",
                           # the proving ground (docs/gauntlet.md)

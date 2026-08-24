@@ -963,6 +963,90 @@ def _run_dash(args) -> int:
     return 0
 
 
+def _run_repair(args) -> int:
+    """`revl repair <files> --component NAME ...` — the repair loop (item 62).
+
+    Boots the composition into a session, then runs the unattended loop:
+    regenerate/reuse -> gauntlet -> policy -> widening-ack -> hot-swap, bounded
+    by a self-repair policy, and prints the incident dossier. Exit status: 0 when
+    the fault was repaired (or planned clean with --plan), 2 when the loop paused
+    for a human ack (a widening), 1 otherwise (ineligible / rejected / no
+    candidate)."""
+    # the session boots a real cordis runtime; put backends/python on the path
+    # exactly as `run` does.
+    backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
+    from .mcp import repair as _repair  # noqa: PLC0415
+    from .mcp.session import Session, SessionError  # noqa: PLC0415
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if ir.get("holes"):
+        print("error: the composition has open typed holes; fill them before "
+              "repair", file=sys.stderr)
+        return 1
+
+    session = Session()
+    try:
+        session.load(ir, record=not args.no_record)
+    except SessionError as error:
+        print(f"error: cannot boot the composition: {error}", file=sys.stderr)
+        return 1
+
+    if args.boundary_policy:
+        from .policy import load_policy, PolicyError  # noqa: PLC0415
+        try:
+            session.boundary_policy = load_policy(args.boundary_policy)
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot read boundary policy: {error}", file=sys.stderr)
+            return 1
+
+    arguments: dict = {"component": args.component, "apply": not args.plan,
+                       "accept": list(args.accept)}
+    if args.trace:
+        try:
+            arguments["traceFile"] = args.trace
+        except OSError as error:  # pragma: no cover
+            print(f"error: cannot read trace: {error}", file=sys.stderr)
+            return 1
+    if args.predicate:
+        arguments["predicate"] = args.predicate
+    if args.candidate:
+        try:
+            arguments["candidate"] = {
+                "source": "\n".join(Path(p).read_text(encoding="utf-8")
+                                    for p in args.candidate)}
+        except OSError as error:
+            print(f"error: cannot read candidate: {error}", file=sys.stderr)
+            return 1
+    if args.self_repair_policy:
+        try:
+            arguments["selfRepairPolicy"] = Path(
+                args.self_repair_policy).read_text(encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot read self-repair policy: {error}",
+                  file=sys.stderr)
+            return 1
+
+    dossier = _repair.run_repair(session, arguments)
+
+    if args.json:
+        print(json.dumps(dossier, indent=2))
+    else:
+        print(_repair.render_incident(dossier))
+
+    status = (dossier.get("incident") or {}).get("status")
+    if status in (_repair.STATUS_REPAIRED, _repair.STATUS_PLANNED):
+        return 0
+    if status == _repair.STATUS_AWAITING_ACK:
+        return 2
+    return 1
+
+
 def _run_recover(args) -> int:
     """`revl recover --wal FILE` — crash recovery over a write-ahead log
     (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
@@ -1527,10 +1611,49 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--json", action="store_true",
                       help="print the structured model instead of the text view")
 
+    repair = sub.add_parser(
+        "repair",
+        help="the repair loop (item 62): a faulting component fixes itself, "
+             "within policy — regenerate/reuse -> gauntlet -> policy -> "
+             "widening-ack -> hot-swap, unattended, with an incident dossier "
+             "(docs/repair-loop.md)")
+    repair.add_argument("files", nargs="+",
+                        help=".rvl sources — the running composition to repair")
+    repair.add_argument("--component", required=True,
+                        help="the faulting component to repair")
+    repair.add_argument("--trace", default=None, metavar="FILE",
+                        help="a JSONL causal trace (`revl run --trace`): the "
+                             "fault's why (item 27)")
+    repair.add_argument("--candidate", action="append", default=[], metavar="FILE",
+                        help="the regenerated repair source(s) — a whole "
+                             "composition to swap in (repeatable)")
+    repair.add_argument("--self-repair-policy", default=None, metavar="FILE",
+                        help="which components may self-repair and which "
+                             "capabilities a repair may touch; absent = closed "
+                             "(nothing self-repairs)")
+    repair.add_argument("--boundary-policy", default=None, metavar="FILE",
+                        help="an item-33 boundary policy for the reach gate")
+    repair.add_argument("--predicate", default=None, metavar="EXPR",
+                        help="a bisect predicate to slice the fault to a step "
+                             "(item 40)")
+    repair.add_argument("--accept", action="append", default=[], metavar="CROSSING",
+                        help="acknowledge a widening crossing (item 21 ack "
+                             "token; repeatable)")
+    repair.add_argument("--plan", action="store_true",
+                        help="run every gate but do not swap (a rehearsal)")
+    repair.add_argument("--no-record", action="store_true",
+                        help="load without recording (disables the timeline "
+                             "slice; the loop still runs)")
+    repair.add_argument("--json", action="store_true",
+                        help="print the incident dossier as JSON")
+
     args = parser.parse_args(argv)
 
     if args.command == "explain":
         return _run_explain(args)
+
+    if args.command == "repair":
+        return _run_repair(args)
 
     if args.command == "fmt":
         return _run_fmt(args)
