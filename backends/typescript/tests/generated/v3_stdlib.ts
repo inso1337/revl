@@ -6,9 +6,15 @@ import { host } from '../../runtime.ts'
 function revlLen(x: string | ArrayLike<unknown>): bigint {
   return BigInt(typeof x === "string" ? Array.from(x).length : x.length)
 }
-function revlSlice<T>(x: string | T[], a: bigint, b: bigint): string | T[] {
+function revlSlice(x: string, a: bigint, b: bigint): string
+function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array
+function revlSlice<T>(x: T[], a: bigint, b: bigint): T[]
+function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[]
+function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {
   const i = Number(a), j = Number(b)
-  return typeof x === "string" ? Array.from(x).slice(i, j).join("") : x.slice(i, j)
+  return typeof x === "string"
+    ? Array.from(x).slice(i, j).join("")
+    : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = Array.from(s)[Number(i)]
