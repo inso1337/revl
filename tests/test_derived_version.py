@@ -148,6 +148,115 @@ def test_identical_is_patch_no_changes():
     assert result["nextVersion"] == "1.4.3"
 
 
+# --------------------- the roadmap's remaining named cases (DESIGN §5)
+
+def test_widened_param_is_minor():
+    # `get`'s parameter widens Int -> Float (numeric widening): a value a
+    # consumer passed (an Int) still fits (contravariant), so the predicate
+    # stays silent and the change is additive surface -> minor.
+    current = _composition(
+        "  fn get(key: Float) -> Str\n"
+        "  emission fn write(key: Str, value: Str)")
+    previous = _composition(
+        "  fn get(key: Int) -> Str\n"
+        "  emission fn write(key: Str, value: Str)")
+    result = _bump(current, previous_src=previous)
+    assert result["bump"] == "minor"
+    change = next(c for c in result["changes"] if c["method"] == "get")
+    assert change["kind"] == "widened" and change["bump"] == "minor"
+
+
+def test_widened_return_is_major():
+    # `get`'s return widens Int -> Float: a consumer uses the result as Int,
+    # which a Float no longer satisfies (covariant) -> the predicate flags it,
+    # so it is a breaking reshape -> major.
+    current = _composition(
+        "  fn get(key: Str) -> Float\n"
+        "  emission fn write(key: Str, value: Str)")
+    previous = _composition(
+        "  fn get(key: Str) -> Int\n"
+        "  emission fn write(key: Str, value: Str)")
+    result = _bump(current, previous_src=previous)
+    assert result["bump"] == "major"
+    change = next(c for c in result["changes"] if c["method"] == "get")
+    assert change["kind"] == "signature" and change["bump"] == "major"
+
+
+def test_narrowed_return_is_minor():
+    # the reverse, Float -> Int, is covariant-safe: the consumer uses the
+    # result at the old, wider type -> compatible surface -> minor.
+    current = _composition(
+        "  fn get(key: Str) -> Int\n"
+        "  emission fn write(key: Str, value: Str)")
+    previous = _composition(
+        "  fn get(key: Str) -> Float\n"
+        "  emission fn write(key: Str, value: Str)")
+    result = _bump(current, previous_src=previous)
+    assert result["bump"] == "minor"
+    change = next(c for c in result["changes"] if c["method"] == "get")
+    assert change["kind"] == "widened" and change["bump"] == "minor"
+
+
+def test_capability_scope_narrowed_is_minor():
+    # `write` stays an emission but its capability scope narrows
+    # [db, log] -> [db]: the authority shrinks, strictly purer -> minor.
+    current = _composition(
+        "  fn get(key: Str) -> Str\n"
+        "  emission[db] fn write(key: Str, value: Str)")
+    previous = _composition(
+        "  fn get(key: Str) -> Str\n"
+        "  emission[db, log] fn write(key: Str, value: Str)")
+    result = _bump(current, previous_src=previous)
+    assert result["bump"] == "minor"
+    change = next(c for c in result["changes"] if c["method"] == "write")
+    assert change["kind"] == "widened" and change["bump"] == "minor"
+
+
+def test_capability_scope_widened_is_major():
+    # the reverse widens what the operation may reach: a consumer's G8 audit
+    # of the call site changes meaning -> major, same as gaining an emission.
+    current = _composition(
+        "  fn get(key: Str) -> Str\n"
+        "  emission[db, log] fn write(key: Str, value: Str)")
+    previous = _composition(
+        "  fn get(key: Str) -> Str\n"
+        "  emission[db] fn write(key: Str, value: Str)")
+    result = _bump(current, previous_src=previous)
+    assert result["bump"] == "major"
+    change = next(c for c in result["changes"] if c["method"] == "write")
+    assert change["kind"] == "emission" and change["bump"] == "major"
+
+
+def test_service_commutative_flip_is_major():
+    # adding the service-wide `commutative` promise reorders every consumer's
+    # calls, so the predicate flags it at the service level -> major.
+    current = _composition(
+        "  fn get(key: Str) -> Str\n"
+        "  emission fn write(key: Str, value: Str)")
+    previous = "commutative " + _composition(
+        "  fn get(key: Str) -> Str\n"
+        "  emission fn write(key: Str, value: Str)")
+    result = _bump(current, previous_src=previous)
+    assert result["bump"] == "major"
+    change = next(c for c in result["changes"] if c["method"] is None)
+    assert change["kind"] == "commutative" and change["bump"] == "major"
+
+
+def test_arity_change_is_major():
+    # `get` grows a parameter: existing call sites pass one -> the predicate
+    # flags the arity change -> major.
+    current = _composition(
+        "  fn get(key: Str, extra: Str) -> Str\n"
+        "  emission fn write(key: Str, value: Str)")
+    current = current.replace(
+        "    fn get(key) = store.get(key)\n",
+        "    fn get(key, extra) = store.get(key)\n")
+    result = _bump(current)
+    assert result["bump"] == "major"
+    change = next(c for c in result["changes"] if c["method"] == "get")
+    assert change["kind"] == "signature" and change["bump"] == "major"
+
+
 # ------------------------------------------------- computed next version
 
 @pytest.mark.parametrize("current, previous_version, expected", [
