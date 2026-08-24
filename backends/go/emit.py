@@ -364,14 +364,20 @@ def _expr(node, env: _Env, expected=None) -> str:
         return "[]%s{%s}" % (go_elem, rendered)
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): same positional-inference
-        # limit as the v3 tier — refuse rather than mis-emit.
+        # limit as the v3 tier — refuse rather than mis-emit. The pin is the
+        # expected Map type: a typed fn return/parameter, or the annotated
+        # `let/var x: Map[K, V] = Map.empty()` the frontend threads onto the
+        # node as `expected` (roadmap 76b) — the author's own annotation.
+        if expected is None:
+            expected = node.get("expected")
         if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
             k, v = _v3_split_generic(expected[4:-1])
             return "map[%s]%s{}" % (_go_type(k), _go_type(v))
         raise EmitError(
             "an untyped empty Map needs an expected Map type on this tier "
             "(Go infers literals positionally, not from later use) - pin it "
-            "via a typed fn return/parameter or any annotated flow")
+            "via a typed fn return, or an annotated `let`/`var` "
+            "declaration (the positions this tier actually reads)")
     if kind == "index":
         return "%s[%s]" % (_expr(node.get("target"), env),
                            _expr(node.get("index"), env))
@@ -531,6 +537,10 @@ def _comp_infer(node, env: _Env):
         return "Bool" if node.get("op") == "!" else _comp_infer(node.get("operand"), env)
     if k == "builtin":
         return _v3_builtin_ret_type(node.get("method"), _comp_infer(node.get("target"), env))
+    if k == "maplit":
+        # `Map.empty()` — the empty literal carries its pin when the author's
+        # annotation supplied one (roadmap 76b); otherwise it stays unknown.
+        return node.get("expected")
     return None
 
 
@@ -1671,10 +1681,17 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         if isinstance(tt, str) and tt.startswith("List[") and tt.endswith("]"):
             return tt[5:-1]
         return None
+    if kind == "len":
+        # `xs.length` in a pure fn body: Int, whatever the sized receiver.
+        return "Int"
     if kind == "builtin":
         return _v3_builtin_ret_type(
             node.get("method"), _go_v3_infer_type(node.get("target"), ctx)
         )
+    if kind == "maplit":
+        # `Map.empty()` — the empty literal carries its pin when the author's
+        # annotation supplied one (roadmap 76b); otherwise it stays unknown.
+        return node.get("expected")
     if kind == "call":
         callee = node.get("callee") or {}
         if callee.get("kind") == "var":
@@ -1950,14 +1967,20 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         # `Map.empty()` (docs/stdlib-2.0.md §Map). Go infers composite
         # literals positionally, never from later use, so an unpinned empty
         # map is refused rather than emitted as non-compiling Go — the same
-        # honesty as an untyped empty list on tiers that cannot infer it.
+        # honesty as an untyped empty list on tiers that cannot infer it. The
+        # pin is the expected Map type: a typed fn return/parameter, or the
+        # annotated `let/var x: Map[K, V] = Map.empty()` the frontend threads
+        # onto the node as `expected` (roadmap 76b).
+        if expected is None:
+            expected = node.get("expected")
         if isinstance(expected, str) and expected.startswith("Map[") and expected.endswith("]"):
             k, v = _v3_split_generic(expected[4:-1])
             return f"map[{_go_v3_type(k, ctx.types)}]{_go_v3_type(v, ctx.types)}{{}}"
         raise EmitError(
             "an untyped empty Map needs an expected Map type on this tier "
             "(Go infers literals positionally, not from later use) - pin it "
-            "via a typed fn return/parameter or any annotated flow")
+            "via a typed fn return, or an annotated `let`/`var` "
+            "declaration (the positions this tier actually reads)")
 
     if kind == "arrow":
         names = node.get("params") or []

@@ -1723,6 +1723,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         lowered_value = _lower_pure_expr(stmt.value, scope, callables, alias_fns, filename, type_env, types)
         # an annotated `let x: Float = 3` is a coercion site too (docs/arithmetic.md)
         _mark_widen(declared, actual_declared, lowered_value)
+        _pin_empty_literal(declared, lowered_value)
         body.append({"step": "let", "name": stmt.name,
                      "value": lowered_value,
                      "mutable": stmt.mutable})
@@ -2048,6 +2049,25 @@ def _mark_widen(expected: str | None, actual: str | None, node: dict | None) -> 
         # names the target width; python absorbs it (one int type).
         node["widen"] = "Int"
     return node
+
+
+def _pin_empty_literal(declared: str | None, node: dict | None) -> None:
+    """An annotated `let`/`var` pins an empty-collection literal (roadmap 76b).
+
+    `var m: Map[Str, Int] = Map.empty()` lowers to a `maplit` node that knows
+    nothing about the author's annotation — the checker accepts the empty map
+    (it types `Map[Str, Never]`, bottom, and flows into any `Map[K, V]`) but
+    the go tier refuses an unpinned empty Map because Go infers composite
+    literals positionally, not from later use. The annotation the author
+    already wrote is the pin, so the frontend — the single IR producer, and
+    the only stage that knows the declared type — attaches it to the literal:
+    ``"expected": "Map[Str, Int]"`` on the `maplit` node. The marker is
+    additive and appears only where an annotation exists, so v1/v2/v3
+    reference documents without one stay byte-identical.
+    """
+    if declared is None or not isinstance(node, dict) or node.get("kind") != "maplit":
+        return
+    node["expected"] = declared
 
 
 def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filename: str,
@@ -3344,6 +3364,10 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     # (docs/function-types.md §limits).
                     check_type_wellformed(filename, mstmt.line, mstmt.type)
                     env.type_env[safe] = mstmt.type
+                    # ... and it pins an empty-collection literal on the right:
+                    # `var m: Map[Str, Int] = Map.empty()` is the author's own
+                    # expected type (roadmap 76b), carried on the `maplit` node
+                    _pin_empty_literal(mstmt.type, value)
                 mbody.append({"step": "let", "name": safe, "value": value,
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):

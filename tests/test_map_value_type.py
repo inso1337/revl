@@ -247,6 +247,50 @@ def test_go_refuses_an_unpinned_empty_map():
         go.emit(ir)
 
 
+def test_go_pins_an_annotated_empty_map_without_a_helper_fn():
+    """Roadmap 76b: `var m: Map[Str, Int] = Map.empty()` — the annotation the
+    author already wrote IS the pin. The frontend threads the declared type
+    onto the maplit node (`"expected"`), so the go tier emits a concrete
+    `map[...]` literal instead of refusing — in fn bodies and method bodies
+    alike. The mapiter workaround (a typed-return helper fn per literal) is
+    no longer ceremony."""
+    ir = compile_source(
+        'fn build(k: Str) -> Map[Str, Int] {\n'
+        '  var m: Map[Str, Int] = Map.empty()\n'
+        '  return m.set(k, 1)\n'
+        '}\n')
+    out = _backend("go").emit(ir)
+    assert "map[string]int64{}" in out
+    # the IR carries the author's annotation on the literal
+    let = [s for s in ir["functions"][0]["body"] if s["step"] == "let"][0]
+    assert let["value"]["kind"] == "maplit"
+    assert let["value"]["expected"] == "Map[Str, Int]"
+    # the exact method-body form the mapiter agent hit on the go tier
+    src = ('service S { fn f() -> Int }\n'
+           'component C provides s: S {\n'
+           '  provide s { fn f() { var m: Map[Str, Int] = Map.empty()  return 1 } }\n'
+           '}\n')
+    out2 = _backend("go").emit(compile_source(src, "pin-method.rvl"))
+    assert "map[string]int{}" in out2
+
+
+def test_go_unpinned_hint_names_the_positions_that_actually_pin():
+    """The refusal's hint must describe the rule the checker actually has: a
+    typed fn return, or an annotated `let`/`var`. It must not claim a typed
+    parameter pins — `takes(Map.empty())` still refuses on this tier, because
+    the go call renderer does not thread parameter types as expected types."""
+    ir = compile_source(
+        'fn build() -> Map[Str, Int] { var m = Map.empty()  return m }\n',
+        "unpinned.rvl")
+    go = _backend("go")
+    with pytest.raises(go.EmitError) as excinfo:
+        go.emit(ir)
+    msg = str(excinfo.value)
+    assert "typed fn return" in msg
+    assert "annotated `let`/`var`" in msg
+    assert "parameter" not in msg
+
+
 # ---- review round 2 regressions ----------------------------------------------
 #
 # Two escaped bugs, both reproduced end-to-end by review:
