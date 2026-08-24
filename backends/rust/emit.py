@@ -1410,6 +1410,63 @@ def _method_undo_rename(env: _Env, method: dict) -> dict[str, str]:
     return rename
 
 
+def _expr_var_names(node: object, acc: set[str]) -> None:
+    """Collect every bare variable name referenced in an IR expression subtree.
+
+    Used to find which method-body locals an `undo`/`compensate` closure reads,
+    so exactly those are pre-cloned for the `move` closure (item 114)."""
+    if isinstance(node, dict):
+        if node.get("kind") in ("var", "name", "req"):
+            ident = node.get("id") or node.get("name")
+            if ident is not None:
+                acc.add(ident)
+        for value in node.values():
+            _expr_var_names(value, acc)
+    elif isinstance(node, list):
+        for item in node:
+            _expr_var_names(item, acc)
+
+
+def _acquire_moved_locals(node: object, ctx: "_V3Ctx", acc: set[str]) -> None:
+    """Method-body locals the acquire consumes *by value without a clone*.
+
+    Only one acquire construct moves a bare local uncloned: a host-Map method
+    that takes its argument by value — `insert(key, value)` (its `get`/`remove`
+    borrow the key, and service-call / record / free-fn arguments are already
+    cloned by `_by_value_arg`). Those bare-identifier arguments are the ones an
+    `undo` that re-reads them must clone ahead of (item 114)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "call" and "callee" not in node:
+            target = node.get("target") or {}
+            recv = target.get("id") or target.get("name") or ""
+            recv_ty = str(ctx.var_types.get(recv) or "")
+            if recv_ty.startswith("Map[") and node.get("method") not in ("get", "remove"):
+                for arg in node.get("args") or []:
+                    if isinstance(arg, dict) and arg.get("kind") in ("var", "name"):
+                        ident = arg.get("id") or arg.get("name")
+                        if ident is not None:
+                            acc.add(ident)
+        for value in node.values():
+            _acquire_moved_locals(value, ctx, acc)
+    elif isinstance(node, list):
+        for item in node:
+            _acquire_moved_locals(item, ctx, acc)
+
+
+def _undo_reclone_locals(acquire_node: object, undo_node: object,
+                         body_locals: set[str], ctx: "_V3Ctx") -> set[str]:
+    """Method-body locals an `undo`/`compensate` closure reads *and* the paired
+    acquire consumed by value — exactly the locals the move closure would find
+    already moved (E0382). Empty when there is no undo."""
+    if undo_node is None:
+        return set()
+    undo_refs: set[str] = set()
+    _expr_var_names(undo_node, undo_refs)
+    moved: set[str] = set()
+    _acquire_moved_locals(acquire_node, ctx, moved)
+    return undo_refs & moved & body_locals
+
+
 def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) -> None:
     pad = "    " * indent
     for bind in _binds(env.component):
@@ -1418,6 +1475,31 @@ def _method_undo_clones(env: _Env, method: dict, out: list[str], indent: int) ->
         out.append(f"{pad}let {req}_undo = self.{req}.clone();")
     for param in method.get("params") or []:
         out.append(f"{pad}let {param}_undo = {param}.clone();")
+
+
+def _provide_let_type(env: _Env, value: object, ctx: "_V3Ctx") -> str | None:
+    """Surface type of a `let` right-hand side inside a provide-method body.
+
+    Extends `_v3_infer_type` (the item-101 mechanism — var alias / ADT /
+    free-fn return / list / Str-Float-certain) with the one source that only
+    exists in a provide body and never in a pure 2.0 fn: a *required-service
+    method call* (`let answer = model.complete(seed)`). Its declared return type
+    is read from the service signature, so a later by-value use of the local —
+    an emit/effect through a record or a service-call argument — clones instead
+    of moving it (E0382, roadmap item 114). Conservative like `_v3_infer_type`:
+    it names a type only when the call resolves to a declared method return."""
+    inferred = _v3_infer_type(value, ctx)
+    if inferred is not None:
+        return inferred
+    if isinstance(value, dict) and value.get("kind") == "call" and "callee" not in value:
+        target = value.get("target") or {}
+        method = value.get("method")
+        if target.get("kind") == "req":
+            service = env.reqs.get(target.get("name"))
+            if service and service in env.services:
+                methods = env.services[service].get("methods") or {}
+                return (methods.get(method) or {}).get("returns")
+    return None
 
 
 def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> None:
@@ -1431,6 +1513,11 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
     """
     pad = "    " * indent
     rename = _method_scope_rename(env)
+    # Method-body locals bound so far (`let key = ...`). A `move` undo closure
+    # that reads one must capture a *clone* of it, because the acquire it pairs
+    # with may have already consumed the original by value (a host-Map
+    # `insert(key, ..)` moves its key without a call-site clone) — item 114.
+    body_locals: set[str] = set()
     for index, step in enumerate(method.get("body") or []):
         kind = step.get("step")
         if kind == "return":
@@ -1448,28 +1535,51 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             # only when it carries a compensate — the `*_undo` clones exist
             # exactly when that closure exists.
             registers_undo = kind == "effect" or step.get("compensate") is not None
+            undo_node = step.get("compensate") if kind == "emit" else step.get("undo")
+            acquire_node = step.get("acquire") or step.get("expr")
             if registers_undo:
                 _method_undo_clones(env, method, out, indent)
-            acquire = _expr(step.get("acquire") or step.get("expr"), env, acquire_rename)
+                # Pre-clone into `<l>_undo`, before the acquire runs, each
+                # method-body local the undo reads AND the acquire consumes by
+                # value (a host-Map `insert(key, ..)` moves its key without a
+                # call-site clone), so the move closure owns a copy the acquire's
+                # move cannot invalidate (item 114). Locals the acquire only
+                # borrows (`prev.push(..)`) or clones stay bare.
+                for local in sorted(_undo_reclone_locals(
+                        acquire_node, undo_node, body_locals, env.v3_ctx())):
+                    out.append(f"{pad}let {local}_undo = {local}.clone();")
+                    undo_rename[local] = f"{local}_undo"
+            acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
             if not registers_undo:
                 continue
-            undo = (
-                _expr(step["compensate"], env, undo_rename)
-                if kind == "emit"
-                else _expr(step["undo"], env, undo_rename)
-            )
+            undo = _expr(undo_node, env, undo_rename)
             out.append(
                 f"{pad}let _ = self.ctx.effect({label}, move || {{ {undo}; Ok(()) }});"
             )
         elif kind in ("let", "assign"):
             name = _ident(step.get("name"), "binding")
+            # Seed the local's inferred type into the shared type table so a
+            # later by-value use of it — a record field, a service-call/emit
+            # argument (`emit sessions.append(id, Msg { content: answer })` then
+            # `return answer`) — clones instead of moving it (E0382). Item 101
+            # did this for the pure-fn path (`_v3_stmt`) but the effectful
+            # provide-method renderer was missed, so a `let`-bound non-Copy local
+            # reused after an emit/effect still moved (roadmap item 114).
+            # `_by_value_arg` clones only a still-typed non-Copy identifier;
+            # Copy scalars and fresh temporaries stay untouched, and over-cloning
+            # a still-live immutable revl value is sound.
+            inferred = _provide_let_type(env, step.get("value"), env.v3_ctx())
             if kind == "let":
                 rename.pop(name, None)  # a local shadows an outer rename
                 out.append(f"{pad}let {'mut ' if step.get('mutable') else ''}"
                            f"{name} = {_expr(step['value'], env, rename)};")
             else:
                 out.append(f"{pad}{name} = {_expr(step['value'], env, rename)};")
+            if inferred is not None:
+                env.v3_ctx().var_types[step.get("name")] = inferred
+            if kind == "let" and step.get("name") is not None:
+                body_locals.add(step.get("name"))
         elif kind == "await":
             raise EmitError("await steps are not allowed inside method bodies (A1)")
         else:
@@ -3041,6 +3151,13 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
         out.append("    // drives the composition on a real cordis-rs context and")
         out.append("    // proves no residue after LIFO teardown (FR-5 / §7.1).")
         out.append("    let root = cordis::Context::new();")
+        if _lifecycle_uses_advance(test):
+            # item 112: the clock coeffect is a thread-local the cargo-test
+            # thread pool may reuse across tests; reset it so this test's
+            # `advance` steps start from t=0 and fire only its own timers,
+            # independent of any earlier lifecycle test (mirrors the py tier's
+            # `Clock.reset()`). Load happens below, so this test's timers survive.
+            out.append("    revl_clock_reset();")
         out.append("    let mut _revl_fibers: Vec<(&str, cordis::Fiber)> = Vec::new();")
         for step in test.get("body") or []:
             kind = step.get("step")
@@ -3090,6 +3207,15 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
             elif kind == "assert":
                 out.append(f"    assert!({_render_expr(step['expr'], ctx, {})}, "
                            f"{_string(where + ': assertion failed')});")
+            elif kind == "advance":
+                # item 112 (rust half): drive the clock coeffect forward, firing
+                # every timer that comes due (`revl_clock_advance`, item 99). A
+                # firing is a deterministic timeline step, so a later `assert`
+                # can observe the fired emissions — the rust mirror of the py/ts
+                # `Clock.advance(ms)` (docs/time-coeffect.md §advance). The body
+                # of a fired timer runs synchronously inside the advance loop, so
+                # no settle step is needed on this tier.
+                out.append(f"    let _ = revl_clock_advance({int(step['ms'])});")
             elif kind == "assert_no_residue":
                 out.append("    // R4 + R1: the composition must leave the live runtime")
                 out.append("    // holding nothing — no plugin, no provided service, no")
@@ -3152,6 +3278,21 @@ def _uses_timer(components: list) -> bool:
         return False
 
     return any(walk(component.get("body")) for component in components)
+
+
+def _lifecycle_uses_advance(test: dict) -> bool:
+    """True iff a lifecycle test drives the clock coeffect (an `advance` step).
+
+    An `advance`-using test needs `revl_clock_advance`/`revl_clock_reset` from
+    the timer preamble even in the (degenerate) case where no loaded component
+    arms a timer, so the preamble emission keys off this as well as `_uses_timer`
+    (item 112)."""
+    return any(step.get("step") == "advance" for step in test.get("body") or [])
+
+
+def _tests_use_advance(tests: list) -> bool:
+    return any(t.get("lifecycle") and _lifecycle_uses_advance(t)
+               for t in tests or [])
 
 
 def _revl_timer_preamble() -> list[str]:
@@ -3815,7 +3956,7 @@ def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
     out.extend(_emit_service_traits(ir.get("services") or {}, ir.get("types") or {}))
     out.extend(_emit_host_stubs(ir))
-    if _uses_timer(components):
+    if _uses_timer(components) or _tests_use_advance(ir.get("tests") or []):
         out.extend(_revl_timer_preamble())
     if _uses_stdlib(ir):
         out.extend(_stdlib_helper_traits())
