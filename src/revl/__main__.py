@@ -305,6 +305,19 @@ def _run_mcp(args) -> int:
                           "this session runs as", file=sys.stderr)
                 return 1
             SESSION.operator = operator
+        # boundary policy (item 33): bind a policy to the session so its agent
+        # sandbox is enforced and, with `leases enforced`, the item-61 lease
+        # advisory becomes an admission refusal. Opt-in, like the profile above.
+        if getattr(args, "policy", None):
+            from .policy import PolicyError, load_policy
+            from .mcp.server import SESSION
+
+            try:
+                SESSION.sandbox = load_policy(args.policy)
+            except (OSError, PolicyError) as error:
+                print(f"error: cannot load policy {args.policy}: {error}",
+                      file=sys.stderr)
+                return 1
         # composition persistence (docs/persistence.md): a snapshot passed on
         # the command line is re-admitted through the same gate a live restore
         # runs — a component the current checker rejects aborts the boot loudly
@@ -1286,6 +1299,15 @@ def main(argv: list[str] | None = None) -> int:
                            help="which operator in the profile this session runs "
                                 "as (its session token); optional when the profile "
                                 "declares exactly one operator")
+    # boundary policy (item 33) for the served session: bounds the agent
+    # sandbox and, with `leases enforced`, promotes the item-61 component-lease
+    # advisory to an admission refusal. Opt-in — omit for advisory-only leases.
+    mcp_serve.add_argument("--policy", default=None, metavar="POLICY",
+                           help="a boundary-policy file (item 33) bound to this "
+                                "session: its `mcp` sandbox bounds admitted agent "
+                                "code, and `leases enforced` refuses a swap that "
+                                "would replace a component another operator leases "
+                                "(item 61). Omit for advisory-only leases")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")

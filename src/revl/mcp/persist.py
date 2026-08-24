@@ -137,8 +137,18 @@ def snapshot(session) -> dict:
             "inputs (snapshot captures the sources a live admission was given, "
             "not a dump of runtime objects)")
 
-    return build_snapshot(session.ir, session.origin, session.config,
+    snap = build_snapshot(session.ir, session.origin, session.config,
                           session.recorder is not None)
+    # component leases (item 61): reflect the active workspace claims into the
+    # persisted meta, so a snapshot records who was iterating on what. Leases
+    # are wall-clock TTL claims, so only the still-live ones are carried and
+    # restore drops any that have since expired (docs/component-leases.md).
+    book = getattr(session, "leases", None)
+    if snap is not None and book is not None:
+        active = book.document()
+        if active:
+            snap["meta"]["leases"] = active
+    return snap
 
 
 # ---------------------------------------------------------------- restore
@@ -163,6 +173,22 @@ def _recompile(sources: dict) -> dict:
     from .session import SessionError  # noqa: PLC0415
 
     raise SessionError("snapshot has no `sources` to restore")
+
+
+def _restore_leases(session, docs) -> None:
+    """Re-seat persisted component leases (item 61) at their absolute expiry,
+    dropping any already elapsed. Best-effort: a malformed entry is skipped,
+    never fatal to the restore."""
+    book = getattr(session, "leases", None)
+    if book is None:
+        return
+    for doc in docs:
+        try:
+            book.reinstate(doc["component"], doc["holder"],
+                           float(doc.get("acquired") or doc["expiry"]),
+                           float(doc["expiry"]))
+        except (KeyError, TypeError, ValueError):
+            continue
 
 
 def _origin_from(sources: dict) -> dict:
@@ -221,6 +247,9 @@ def restore(session, snap: dict) -> dict:
             f"longer reproduce the snapshotted composition")
 
     state = session.load(ir, config, record=record, origin=_origin_from(sources))
+    # rehydrate still-live component leases (item 61) onto the fresh book; ones
+    # whose wall-clock TTL has elapsed since the snapshot are silently dropped.
+    _restore_leases(session, meta.get("leases") or [])
     return {
         "restored": True,
         "components": meta.get("components") or [],
