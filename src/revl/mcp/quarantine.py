@@ -28,14 +28,15 @@ The feature sentence: *the gauntlet proves a candidate runs correctly; the
 quarantine tier proves it cannot escape while doing so — physically, in the
 sandbox, before it touches a hosted tier.*
 
-Honest scope (item 45, this slice). The canonical ABI slice that landed
-(41-s3) presents the pure functions whose whole signature is ``Str`` — one
-``Str``-taking, ``Str``-returning function is the minimal component a real host
-loads. So the quarantine tier targets the **Str-surface** candidate: a common
-untrusted-transform shape. A candidate that needs **records / lists / variants
-across the quarantine boundary** is a documented follow-on, gated on the
-parallel aggregate canonical work; such a candidate is *deferred honestly* here
-(verdict ``deferred``), never faked through a boundary that cannot yet carry it.
+Honest scope (item 45). The canonical ABI now lowers the pure functions whose
+whole signature (params + result) is canonically representable: scalars
+(``Int`` / ``Bool`` / ``Str``), records, lists, and variants / ``Opt`` /
+``Result``. So the quarantine tier presents any such candidate over the
+boundary. A candidate whose every boundary signature carries a type the
+canonical boundary still cannot lower — **Float, Map, resources, or
+function-values** — has no boundary function to present; such a candidate is
+*deferred honestly* here (verdict ``deferred``), never faked through a boundary
+that cannot yet carry it.
 
 Verdicts (in ``report["quarantine"]["verdict"]``):
 
@@ -46,8 +47,10 @@ Verdicts (in ``report["quarantine"]["verdict"]``):
                       is a caught trap, not an incident. Not eligible.
   * ``rejected``    — admission refused; the candidate never reached the
                       substrate (the gauntlet graded it, nothing ran).
-  * ``deferred``    — no ``Str``-surface boundary function to present over the
-                      canonical ABI (the aggregate follow-on). Honestly deferred.
+  * ``deferred``    — no canonical-ABI-emittable boundary function to present
+                      over the canonical ABI: every boundary signature carries a
+                      type still un-lowerable at the canonical boundary
+                      (Float / Map / resource / function-value). Honestly deferred.
   * ``unavailable`` — the standard toolchain (``wasm-tools`` / ``wasmtime``) is
                       absent, so the substrate battery could not run. The flow
                       logic (gauntlet grade, canonical lowering) still ran; only
@@ -181,8 +184,9 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
     trap (the candidate could not escape its linear memory) and recorded — never
     re-raised. The section's ``status`` is ``passed`` when every probe returned,
     ``trapped`` when any probe trapped, ``deferred`` when the candidate has no
-    Str-surface function to present (the aggregate follow-on), and
-    ``unavailable`` when the toolchain is absent."""
+    canonical-ABI-emittable boundary function to present (every boundary
+    signature carries a still-un-lowerable type — Float/Map/resource/
+    function-value), and ``unavailable`` when the toolchain is absent."""
     EmitError = canonical.EmitError
 
     # 1. Lower to the canonical ABI. No Str-surface function => the aggregate
@@ -195,10 +199,11 @@ def _run_substrate(canonical, ir: dict, service: str) -> dict:
             return {
                 "kind": "confined", "status": "deferred", "ran": False,
                 "reason": str(error),
-                "note": "no Str-surface boundary function — records/lists/"
-                        "variants across the quarantine boundary are the "
-                        "aggregate follow-on (gated on the parallel canonical "
-                        "work). Deferred, not faked.",
+                "note": "no canonical-ABI-emittable boundary function — every "
+                        "boundary signature carries a type that is still "
+                        "un-lowerable at the canonical boundary (Float, Map, "
+                        "resources, or function-values), so there is nothing to "
+                        "present over the ABI. Deferred, not faked.",
                 "functions": [],
                 "counts": {"probes": 0, "returned": 0, "trapped": 0},
             }
@@ -462,10 +467,11 @@ def _verdict_note(verdict: str) -> str:
         "trapped": "the candidate TRAPPED in the sandbox — a fault probe would "
                    "have escaped on a hosted tier, but here it was caught by "
                    "wasmtime, contained, the host never touched. Not eligible.",
-        "deferred": "the candidate has no Str-surface boundary function to "
-                    "present over the canonical ABI — records/lists/variants "
-                    "across the quarantine boundary are the aggregate follow-on. "
-                    "Deferred honestly.",
+        "deferred": "the candidate has no canonical-ABI-emittable boundary "
+                    "function to present over the canonical ABI — every boundary "
+                    "signature carries a type still un-lowerable at the canonical "
+                    "boundary (Float/Map/resource/function-value). Deferred "
+                    "honestly.",
         "unavailable": "the candidate was graded and lowered, but the substrate "
                        "battery could not run here (see substrate.reason). The "
                        "flow logic ran; only the physical sandbox run is skipped.",
