@@ -3546,6 +3546,30 @@ class _V3Emitter:
                 raise EmitError(f"{where}: unsupported v3 statement step {step!r}")
         return out
 
+    def _diverges(self, stmts: list) -> bool:
+        """Does this statement list return/trap on every path (never falling
+        through to its end)? Only the *last* statement can carry the whole
+        list, so it decides: a `return` diverges; an `if` diverges when it has
+        an `else` and both arms diverge. Everything else may fall through.
+
+        wasm's validator does no such flow analysis: an `if/else` with no result
+        type is always a fallthrough point to it, even when both arms `return`.
+        A non-unit function whose body ends in a diverging `if/else` therefore
+        reaches its end with an unsatisfied result unless a trailing
+        `unreachable` (stack-polymorphic) closes it — see `_emit_function`.
+        """
+        if not stmts:
+            return False
+        last = stmts[-1]
+        step = last.get("step")
+        if step == "return":
+            return True
+        if step == "if":
+            else_branch = last.get("else")
+            return bool(else_branch) and self._diverges(last.get("then") or []) \
+                and self._diverges(else_branch)
+        return False
+
     def _emit_for(self, stmt: dict, scope: _Scope, where: str, expected_return: str | None) -> list[str]:
         """`for (x of xs)` over a list `[u32 count][pad][slot0]…` in memory.
 
@@ -3672,6 +3696,18 @@ class _V3Emitter:
         self._reset_tmp_pool()
 
         body_lines = self._emit_stmts(fn.get("body") or [], scope, where, return_ty)
+        # A non-unit body that returns on all paths through a trailing diverging
+        # `if/else` (or nested such) leaves wasm's validator seeing a fallthrough
+        # past the result-less `if`, with the function result unsatisfied ("type
+        # mismatch: expected …, nothing on stack"). A bare trailing `return`
+        # already puts wasm in its stack-polymorphic unreachable state, so it
+        # needs nothing; only a diverging control structure does. Close it with
+        # a trailing, stack-polymorphic `unreachable`.
+        body_stmts = fn.get("body") or []
+        if (not test_mode and body_lines and not _is_unit_type(return_ty)
+                and body_stmts and body_stmts[-1].get("step") != "return"
+                and self._diverges(body_stmts)):
+            body_lines.append("unreachable")
         # deeper scratch pointers minted for nested allocations (see
         # `_acquire_tmp`); wasm requires every local declared in the header
         for extra in sorted(self._tmp_extra):

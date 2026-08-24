@@ -17,6 +17,9 @@ revl classification) and carries the rest of revl's *verified* lifecycle —
 them. `test_wit_cannot_carry_the_effect_that_revl_verifies` is that boundary.
 """
 
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +34,29 @@ from revl.import_wit import import_wit, import_wit_file  # noqa: E402
 from revl.export_wit import export_wit  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "wit"
+
+_WASM_TOOLS = shutil.which("wasm-tools")
+
+
+def _assert_parses_as_wit(wit: str, tmp_path: Path) -> None:
+    """Every user-defined `record`/`variant`/`enum` must live INSIDE an
+    `interface` — a top-level type is invalid WIT. Prefer `wasm-tools` as the
+    authority; fall back to a structural check (no type keyword appears at
+    column 0) when the toolchain is absent."""
+    # structural: no `record`/`variant`/`enum` declaration at the package top
+    # level (they only ever appear indented, inside an interface).
+    for line in wit.splitlines():
+        if re.match(r"^(record|variant|enum)\s", line):
+            raise AssertionError(f"top-level WIT type is invalid WIT: {line!r}")
+    if _WASM_TOOLS is None:
+        return
+    path = tmp_path / "exported.wit"
+    path.write_text(wit, encoding="utf-8")
+    proc = subprocess.run(
+        [_WASM_TOOLS, "component", "wit", str(path)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, (
+        f"wasm-tools rejected the exported WIT:\n{proc.stderr}\n---\n{wit}")
 
 
 def _compile(source: str, tmp_path: Path, name: str = "x.rvl") -> dict:
@@ -141,6 +167,51 @@ def test_import_export_round_trip_is_stable(fixture, service, tmp_path):
         assert t1[name] == decl
 
 
+# ---------------------------------------------- valid-WIT top-level shape
+
+def test_referenced_types_live_inside_the_interface(tmp_path):
+    """A referenced `record`/`variant`/`enum` must be declared INSIDE the
+    interface whose functions use it — a top-level type is invalid WIT."""
+    ir = _ir_from_wit("catalog.wit", tmp_path)
+    wit = export_wit(ir, service="Catalog")
+    _assert_parses_as_wit(wit, tmp_path)
+    # the type declarations sit inside `interface catalog { ... }`, indented
+    iface = wit[wit.index("interface catalog {"):]
+    assert "  record item {" in iface
+    assert "  enum availability {" in iface
+    assert "  variant lookup {" in iface
+    # and nothing between `package` and the first `interface` declares a type
+    preamble = wit[wit.index("package"):wit.index("interface catalog {")]
+    assert "record" not in preamble and "variant" not in preamble
+
+
+def test_composition_wit_parses_and_shares_a_type_via_use(tmp_path):
+    """When two exported interfaces reference the same type, one interface
+    owns the declaration and the other pulls it in with a `use` — the whole
+    document parses as valid WIT."""
+    ir = {
+        "types": {"Widget": {"kind": "record",
+                             "fields": {"id": "Int", "label": "Str"}}},
+        "services": {
+            "A": {"methods": {"make": {
+                "params": [{"name": "label", "type": "Str"}],
+                "returns": "Widget"}}},
+            "B": {"methods": {"inspect": {
+                "params": [{"name": "w", "type": "Widget"}],
+                "returns": "Str"}}},
+        },
+        "components": [{"provides": {"a": "A", "b": "B"}}],
+    }
+    wit = export_wit(ir, composition=True)
+    _assert_parses_as_wit(wit, tmp_path)
+    # interface `a` owns the record; interface `b` brings it in with `use`
+    iface_a = wit[wit.index("interface a {"):wit.index("interface b {")]
+    assert "  record widget {" in iface_a
+    iface_b = wit[wit.index("interface b {"):]
+    assert "use a.{widget};" in iface_b
+    assert "record widget" not in iface_b
+
+
 # ------------------------------------------------- the composition surface
 
 def test_composition_exports_every_provided_service(tmp_path):
@@ -148,6 +219,7 @@ def test_composition_exports_every_provided_service(tmp_path):
     wit = export_wit(ir, composition=True)
     assert "interface catalog {" in wit
     assert "interface store {" in wit
+    _assert_parses_as_wit(wit, tmp_path)
 
 
 # ------------------------------------------------- the effects boundary

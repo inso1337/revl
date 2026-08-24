@@ -172,6 +172,45 @@ def test_v3_functions_golden_is_byte_identical():
     assert wat == golden
 
 
+def test_diverging_if_else_body_validates_and_runs(tmp_path):
+    """A function whose whole body is a diverging `if/else` (both arms return)
+    emitted wasm that fell through the result-less `if` to the function end,
+    leaving the i64 result unsatisfied — `wasm-tools validate` rejected it with
+    'expected i64 but nothing on stack'. The emitter now closes such a body
+    with a trailing `unreachable` (stack-polymorphic), so it type-checks and
+    runs. Regression pin for item 96."""
+    emit = _emitter()
+    source = """
+        fn pick(n: Int) -> Int {
+          if (n < 0) { return 0 } else { return 1 }
+        }
+        fn nested(n: Int) -> Int {
+          if (n < 0) { return 0 } else { if (n === 0) { return 5 } else { return 9 } }
+        }
+    """
+    wat = emit.emit(compile_source(source))["functions"]
+    # the diverging-if body is closed with a trailing `unreachable`
+    pick = wat[wat.index("(func $pick"):wat.index("(func $nested")]
+    assert "unreachable)" in pick.rstrip()
+
+    # the module type-checks (wasm-tools if present)
+    wasm_tools = shutil.which("wasm-tools")
+    if wasm_tools:
+        import subprocess
+        wat_path = tmp_path / "div.wat"
+        wat_path.write_text(wat, encoding="utf-8")
+        proc = subprocess.run([wasm_tools, "validate", str(wat_path)],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+
+    # and it executes to the returned value on the real runtime
+    invoke = _run_module(tmp_path, source)
+    assert invoke("pick", -5) == 0
+    assert invoke("pick", 3) == 1
+    assert invoke("nested", 0) == 5
+    assert invoke("nested", 7) == 9
+
+
 def test_version_gate_accepts_1_2_3_and_rejects_4():
     emit = _emitter()
     base = {
