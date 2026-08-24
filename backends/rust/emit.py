@@ -147,6 +147,52 @@ def _is_fn_type(name: object) -> bool:
     return False
 
 
+# Surface types whose Rust lowering is `Copy` — passing them by value never
+# moves, so a repeated by-value use needs no clone. Everything else (Str, List,
+# Opt, Map, records, ADTs) lowers to a non-`Copy` owned value.
+_RUST_COPY_TYPES = {"Int", "Bool", "Float"}
+
+
+def _arg_ref_name(arg_node: object) -> str | None:
+    """The identifier an argument names, when the argument is a bare variable
+    reference (`var`/`name`/`req`) rather than a fresh-temporary expression.
+
+    Only bare references risk a use-after-move: a call, literal, or constructor
+    already produces its own owned value, so it is never wrapped.
+    """
+    if not isinstance(arg_node, dict):
+        return None
+    kind = arg_node.get("kind")
+    if kind == "var":
+        return arg_node.get("name")
+    if kind == "name":
+        return arg_node.get("id") or arg_node.get("name")
+    if kind == "req":
+        return arg_node.get("name")
+    return None
+
+
+def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Wrap a by-value free-function argument so the call cannot consume a value
+    the caller still needs (E0382). revl passes values, not moves, so a non-Copy
+    value argument is `.clone()`d — always sound, since revl values are immutable
+    — and a function-typed argument is passed by reference (`&F: Fn`), because an
+    `impl Fn(..)` parameter is not `Clone`. Copy scalars and non-identifier
+    argument expressions (fresh temporaries) are passed through untouched.
+    """
+    name = _arg_ref_name(arg_node)
+    if name is None:
+        return rendered
+    ty = ctx.var_types.get(name)
+    if ty is None:
+        return rendered
+    if _is_fn_type(ty):
+        return f"&{rendered}"
+    if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+        return rendered
+    return f"{rendered}.clone()"
+
+
 # A declared function type still has no single Rust lowering — but the choice
 # is not a guess once the *position* is known (docs/function-types.md §4).
 # `_rust_type` threads that position: a `fn`/`extern` parameter or return is an
@@ -890,6 +936,82 @@ def _binds(component: dict) -> list[str]:
     return [s["bind"] for s in component.get("body") or [] if s.get("step") == "let-effect"]
 
 
+def _has_config(component: dict) -> bool:
+    return bool(component.get("config"))
+
+
+# The plugin closure's local `config` may be *partially moved* by an effect
+# closure that captures a config field (`move || { .. config.tag .. }`), so a
+# later `config.clone()` at a provide-construction site would fail (E0382). The
+# provide struct is therefore built from a full clone taken up front, before any
+# effect runs — this is the name of that binding.
+_PROVIDE_CONFIG_LOCAL = "__revl_provide_config"
+
+
+def _references_config(node: object) -> bool:
+    """Does this IR subtree read component config (a `config` expression node)?"""
+    if isinstance(node, dict):
+        if node.get("kind") == "config":
+            return True
+        return any(_references_config(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_references_config(v) for v in node)
+    return False
+
+
+def _provision_methods(component: dict, key: str) -> list:
+    provide = next(
+        (s for s in component.get("body") or []
+         if s.get("step") == "provide" and s.get("name") == key),
+        None,
+    )
+    return (provide or {}).get("methods") or []
+
+
+def _provision_uses_config(component: dict, key: str) -> bool:
+    """Does provision `key`'s method surface read config? Only then does its
+    provide struct need to capture config — capturing it unconditionally would
+    both add dead fields and force a `config.clone()` that races effect closures
+    which partially move config (the Worker scenario)."""
+    return _has_config(component) and any(
+        _references_config(m) for m in _provision_methods(component, key)
+    )
+
+
+def _component_provide_uses_config(component: dict) -> bool:
+    return _has_config(component) and any(
+        _provision_uses_config(component, key)
+        for key in (component.get("provides") or {})
+    )
+
+
+def _config_struct_field(component: dict, key: str) -> list[str]:
+    """The provide-struct field capturing component config, so a provide-method
+    body can read `self.config.<field>` — `config` is otherwise not in method
+    scope (E0425). Empty unless this provision's methods read config."""
+    if not _provision_uses_config(component, key):
+        return []
+    cname = _ident(component.get("name"), "component")
+    return [f"    config: {cname}Config,"]
+
+
+def _config_ctor_field(component: dict, key: str) -> list[str]:
+    """The struct-construction fragment for the captured config field, sourced
+    from the up-front clone (`_PROVIDE_CONFIG_LOCAL`) so it survives any effect
+    closure that partially moved the plugin's local `config`."""
+    if not _provision_uses_config(component, key):
+        return []
+    return [f"config: {_PROVIDE_CONFIG_LOCAL}.clone()"]
+
+
+def _emit_provide_config_local(component: dict, indent: int) -> list[str]:
+    """The up-front `let __revl_provide_config = config.clone();`, emitted right
+    after config application (before any effect) when a provision captures config."""
+    if not _component_provide_uses_config(component):
+        return []
+    return [f"{'    ' * indent}let {_PROVIDE_CONFIG_LOCAL} = config.clone();"]
+
+
 def _host_of(component: dict, bind: str, map_values: dict[str, str] | None = None) -> str:
     for s in component.get("body") or []:
         if s.get("step") == "let-effect" and s.get("bind") == bind:
@@ -1159,6 +1281,8 @@ def _pure_method_statements(env: _Env, method: dict, rename: dict) -> str:
 def _method_body(env: _Env, method: dict) -> str:
     rename = {b: f"self.{b}" for b in _binds(env.component)}
     rename.update({local: f"self.{local}" for local in env.reqs})
+    if _has_config(env.component):
+        rename["config"] = "self.config"
     return _pure_method_statements(env, method, rename)
 
 
@@ -1251,6 +1375,8 @@ def _method_scope_rename(env: _Env) -> dict[str, str]:
     rename = {b: f"self.{b}" for b in _binds(env.component)}
     for req in env.reqs:
         rename[req] = f"self.{req}"
+    if _has_config(env.component):
+        rename["config"] = "self.config"
     return rename
 
 
@@ -1384,6 +1510,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         if env.reqs:
             for local, req_service in env.reqs.items():
                 out.append(f"    {local}: Arc<Box<dyn {req_service}>>,")
+        out.extend(_config_struct_field(component, key))
         if has_effectful:
             out.append("    ctx: Arc<cordis::Context>,")
         out.append("}")
@@ -1448,6 +1575,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     out.append(f"        cordis::{inject},")
     out.append(closure)
     out.extend(_emit_config_application(component, config_ty, indent=3))
+    out.extend(_emit_provide_config_local(component, indent=3))
     # Realm isolation is NOT applied here. cordis evaluates a plugin's reactive
     # `Inject` gate against the context the plugin is registered on, before this
     # closure ever runs — so isolating `ctx` inside the body cannot scope the
@@ -1466,6 +1594,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
             fields = ", ".join(
                 [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
                 + [f"{local}: {local}.clone()" for local in env.reqs]
+                + _config_ctor_field(env.component, key)
                 + (["ctx: Arc::new(ctx.clone())"] if has_effectful else [])
             )
             out.append(f"            let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
@@ -1574,6 +1703,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         # the same bindings the effectful path captures (java does this too)
         for local, req_service in env.reqs.items():
             out.append(f"    {local}: Arc<Box<dyn {req_service}>>,")
+        out.extend(_config_struct_field(component, key))
         out.append("}")
         out.append(f"impl {service} for {struct} {{")
         provide = next(
@@ -1612,6 +1742,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     out.append(f"        cordis::{inject},")
     out.append(closure)
     out.extend(_emit_config_application(component, config_ty, indent=3))
+    out.extend(_emit_provide_config_local(component, indent=3))
     for local, service in env.reqs.items():
         out.append(f"            let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
     for step in component.get("body") or []:
@@ -1726,6 +1857,7 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         fields = ", ".join(
             [f"{_ident(b, 'binding')}: {b}.clone()" for b in _binds(env.component)]
             + [f"{local}: {local}.clone()" for local in env.reqs]
+            + _config_ctor_field(env.component, key)
         )
         out.append(f"{pad}let {key}_box: Box<dyn {service}> = Box::new({struct} {{ {fields} }});")
         out.append(f"{pad}ctx.provide({_string(key)}, {key}_box)?;")
@@ -1788,8 +1920,38 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
 
 
 def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
-    """The surface type of an expression when it is knowable, else None."""
-    return "Str" if _v3_is_str(node, ctx) else None
+    """The surface type of an expression when it is knowable, else None.
+
+    Conservative: it names a type only when the node makes it certain — a
+    variable alias, an ADT construction, a free-function/extern call's declared
+    return, a list literal, or a `Str`/`Float`-certain node. The result seeds
+    `var_types`, so a `let`-bound local (`let dec = decode(..)`) is typed the
+    same way a parameter is, and a later by-value use of it can decide whether a
+    clone is needed (`_by_value_arg`).
+    """
+    if isinstance(node, dict):
+        kind = node.get("kind")
+        if kind in ("name", "var", "req"):
+            return ctx.var_types.get(node.get("id") or node.get("name"))
+        if kind == "adt":
+            return ctx.case_adt.get(node.get("case"))
+        if kind == "fn":
+            return ctx.fn_returns.get(node.get("name"))
+        if kind == "call" and "callee" in node:
+            callee = node.get("callee") or {}
+            if callee.get("kind") == "var":
+                cn = callee.get("name")
+                if cn in ctx.case_adt:
+                    return ctx.case_adt.get(cn)
+                if cn in ctx.fn_returns:
+                    return ctx.fn_returns.get(cn)
+        if kind == "list":
+            return "List"
+    if _v3_is_str(node, ctx):
+        return "Str"
+    if _v3_is_float(node):
+        return "Float"
+    return None
 
 
 def _v3_is_float(node: object) -> bool:
@@ -1818,6 +1980,14 @@ class _V3Ctx:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # Declared return type of every free function / extern, so a `let`
+        # binding to a call can be typed (`let dec = decode(..)` -> `Reply`) and
+        # a later by-value use knows to clone (see `_by_value_arg`).
+        self.fn_returns: dict[str, str | None] = {
+            fn.get("name"): fn.get("returns") for fn in functions or []
+        }
+        for ext in externs or []:
+            self.fn_returns.setdefault(ext.get("name"), ext.get("returns"))
         # target component name -> whether it declares a typed config struct.
         # A `spawn` acquisition uses this to build the plug-time config value:
         # `<Comp>Config { .. }` when the template has config fields, else `()`.
@@ -1984,8 +2154,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         # Component guards (`if (config.n < 1) { fail .. }`) reach this renderer
         # through the surrounding `bin`/`un` node, and `_method_body`/setup put a
         # local `let config = <Comp>Config { .. }` in scope, so config reads the
-        # same way whether it arrives via the component or the 2.0 path.
-        return f"config.{_ident(node.get('field'), 'config field')}.clone()"
+        # same way whether it arrives via the component or the 2.0 path. Inside a
+        # provide-method body there is no local `config`, so the method rename map
+        # points the base at the captured struct field (`self.config`).
+        base = (rename.get("config") if rename else None) or "config"
+        return f"{base}.{_ident(node.get('field'), 'config field')}.clone()"
 
     if kind == "host":
         # component dialect: `Pool.open(..)` -> `Pool::open(..)`.
@@ -2003,7 +2176,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
     if kind == "fn":
         # component dialect: a free-function call `name(..)`.
         name = _ident(node.get("name"), "function")
-        args = ", ".join(_render_expr(a, ctx, rename) for a in node.get("args") or [])
+        args = ", ".join(
+            _by_value_arg(a, _render_expr(a, ctx, rename), ctx)
+            for a in node.get("args") or []
+        )
         return f"{name}({args})"
 
     if kind == "adt":
@@ -2108,7 +2284,14 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
             callee = _render_expr(callee_node, ctx, rename)
             if callee_node.get("kind") not in _ATOMIC_KINDS:
                 callee = f"({callee})"
-            return f"{callee}({args})"
+            # A free-function / function-value call passes its arguments by value
+            # (revl value semantics), so a non-Copy value or `impl Fn` argument
+            # reused after the call would otherwise move (E0382).
+            bv_args = ", ".join(
+                _by_value_arg(a, r, ctx)
+                for a, r in zip(node.get("args") or [], arg_exprs)
+            )
+            return f"{callee}({bv_args})"
         # component form: `target.method(args)`.
         target = node.get("target") or {}
         method = _ident(_mname(node.get("method")), "method")

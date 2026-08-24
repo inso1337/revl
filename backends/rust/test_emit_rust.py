@@ -455,6 +455,149 @@ def test_cargo_check_compiles_agent_loop_declared_function_types(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Roadmap item 93 — three rust-emitter compile bugs the string-protocol harness
+# loop shape hit once item 91's fn-type lowering exposed the bodies around it
+# (dogfood finding #22). Each is pinned by a minimal shape that a real
+# `cargo check` accepts, mirroring the item-91 cargo gate above.
+#
+#   (a) config was not in scope in a provide-method body (E0425): the body read
+#       a bare `config`, but the provider struct never captured it.
+#   (b) a persistent `push` rebind (`current = current.push(..)`) failed because
+#       `current` had already been moved by a by-value use earlier in the turn.
+#   (c) a non-Copy ADT value and an `impl Fn` parameter used more than once were
+#       consumed on first use (E0382).
+
+
+def test_config_reference_in_provide_body_captures_config_field():
+    """(a) A provide-method body that reads config compiles: the provider struct
+    captures config and the body reads it through `self.config`, not a bare
+    `config` that is out of method scope."""
+    src = emit.emit(compile_source(
+        "service S { fn get() -> Str }\n"
+        "component C provides s: S {\n"
+        "  config { name: Str }\n"
+        "  provide s { fn get() = config.name }\n"
+        "}\n"
+    ))
+    assert "config: CConfig," in src
+    assert "self.config.name.clone()" in src
+    # a bare `config.name` in the impl block (no leading `self.`) is the bug.
+    assert "{ config.name.clone() }" not in src
+
+
+def test_provide_struct_omits_config_when_methods_never_read_it():
+    """The capture is demand-driven: a provision whose methods never read config
+    gains no config field (avoiding a dead field and a `config.clone()` that
+    would race an effect closure that partially moved config — the Worker
+    scenario)."""
+    src = emit.emit(compile_source(
+        "service S { fn get() -> Int }\n"
+        "component C provides s: S {\n"
+        "  config { name: Str }\n"
+        "  provide s { fn get() = 0 }\n"
+        "}\n"
+    ))
+    assert "struct CS {\n}" in src
+    assert "__revl_provide_config" not in src
+
+
+@needs_cargo
+def test_cargo_check_config_in_provide_body(tmp_path):
+    """(a) real cargo gate: config-in-provide compiles."""
+    src = emit.emit(compile_source(
+        "service S { fn get() -> Str }\n"
+        "component C provides s: S {\n"
+        "  config { name: Str = \"x\" }\n"
+        "  provide s { fn get() = config.name }\n"
+        "}\n"
+    ))
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_cargo_check_non_copy_value_and_impl_fn_reused(tmp_path):
+    """(c) real cargo gate: a non-Copy ADT used by two calls and an `impl Fn`
+    parameter passed by value inside a loop both compile — the reused value is
+    cloned, the function value is passed by reference (`&f: Fn`)."""
+    src = emit.emit(compile_source(
+        "type Reply = Tool(Str) | Final(Str)\n"
+        "fn is_tool(d: Reply) -> Bool { return match d { Tool(x) => true, Final(x) => false } }\n"
+        "fn body(d: Reply) -> Str { return match d { Tool(x) => x, Final(x) => x } }\n"
+        "fn handle(dec: Reply) -> Str {\n"
+        "  if (is_tool(dec)) { return body(dec) }\n"
+        "  return body(dec)\n"
+        "}\n"
+        "fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) }\n"
+        "fn drive(call: (Str) -> Str, items: List[Str]) -> Str {\n"
+        "  var acc = \"seed\"\n"
+        "  for (it of items) { acc = apply(call, it) }\n"
+        "  return acc\n"
+        "}\n"
+    ))
+    assert "is_tool(dec.clone())" in src
+    assert "apply(&call, it)" in src
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_cargo_check_harness_loop_shape_config_push_and_callbacks(tmp_path):
+    """(a)+(b)+(c) together: the string-protocol harness loop shape — a bounded
+    loop that funnels a message list through an `impl Fn` `complete` callback,
+    rebinds the accumulator with a persistent `push`, decodes into a non-Copy
+    ADT used twice, and dispatches through a second `impl Fn` `call_tool` — all
+    driven from a provide-method that reads config. This is the shape that
+    `revl run --backend rust --once` failed to build (finding #22)."""
+    src = emit.emit(compile_source(
+        "type Reply = Tool(Str) | Final(Str)\n"
+        "fn is_tool(dec: Reply) -> Bool { return match dec { Tool(x) => true, Final(x) => false } }\n"
+        "fn exec_reply(dec: Reply, call_tool: (Str) -> Str) -> Str {\n"
+        "  return match dec { Tool(name) => call_tool(name), Final(answer) => answer }\n"
+        "}\n"
+        "fn decode(resp: Str) -> Reply {\n"
+        "  if (resp.slice(0, 6) == \"FINAL \") { return Final(resp.slice(6, resp.length())) }\n"
+        "  return Tool(resp.slice(0, 10))\n"
+        "}\n"
+        "fn agent_loop(msgs: List[Str], ticks: List[Int], complete: (List[Str]) -> Str,\n"
+        "              call_tool: (Str) -> Str) -> Str {\n"
+        "  var current = msgs\n"
+        "  var answer = \"none\"\n"
+        "  for (i of ticks) {\n"
+        "    let dec = decode(complete(current))\n"
+        "    if (is_tool(dec)) {\n"
+        "      let out = exec_reply(dec, call_tool)\n"
+        "      current = current.push(out)\n"
+        "    } else {\n"
+        "      answer = exec_reply(dec, call_tool)\n"
+        "    }\n"
+        "  }\n"
+        "  return answer\n"
+        "}\n"
+        "service Model { emission fn complete(h: List[Str]) -> Str }\n"
+        "service Tools { emission fn call(name: Str) -> Str }\n"
+        "service Agentic { emission fn complete(h: List[Str]) -> Str }\n"
+        "component Agent requires model: Model, tools: Tools provides agent: Agentic {\n"
+        "  config { max_steps: Int = 8, banner: Str = \"hi\" }\n"
+        "  provide agent {\n"
+        "    fn complete(h) {\n"
+        "      let seed = [config.banner]\n"
+        "      return agent_loop(seed, [1, 2, 3],\n"
+        "                        msgs2 => emit model.complete(msgs2),\n"
+        "                        name => emit tools.call(name))\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ))
+    # (b): the persistent push rebind survives — current was cloned for the
+    # by-value `complete(..)` consume, so the rebind still owns it.
+    assert "complete(current.clone())" in src
+    assert "current = current.revl_push(out)" in src
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 86).
 #
 # The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
