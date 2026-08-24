@@ -342,20 +342,13 @@ component C provides s: S {
     assert "host:C:ship" in crossings(audit_report(compile_source(source)))
 
 
-@pytest.mark.xfail(
-    reason="G8 enumeration gap: a host block reached only through a first-class "
-    "function value is correctly flagged non-read-only (G4 holds) but is not "
-    "enumerated in `revl audit`'s per-component externs / `host:` crossing "
-    "tokens, so `revl audit --diff` misses a first-class-laundered widening. "
-    "Fenced in docs/contract-errata.md; fix in `_boundary` (src/revl/__main__.py).",
-    strict=True,
-)
 def test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface():
     """The attack: reach `ship` only through a first-class value handed to a
     dispatcher (bare `emission` service, so it compiles). It runs at runtime
-    exactly as the direct call does, but produces NO `host:` crossing token —
-    an authority-drift blind spot. When the gap closes, this passes and the
-    xfail is removed."""
+    exactly as the direct call does. Item 24 folded the G4 first-class-reach
+    fixed point into `_boundary`, so the laundered reach now surfaces the same
+    `host:` crossing token as the direct call — no authority-drift blind spot.
+    Previously xfail (G8 enumeration gap); now resolved."""
     source = SHIP + """
 fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 service S { emission fn loud(a: Str) -> Str }
@@ -363,5 +356,6 @@ component C provides s: S {
   provide s { fn loud(a) = indirect(ship, a) }
 }
 """
-    # SHOULD surface `ship` the same way the direct call does — pinned failing.
+    # surfaces `ship` the same way the direct call does (see the baseline above).
+    assert "ship" in {e["name"] for e in _boundary(source, "C")["externs"]}
     assert "host:C:ship" in crossings(audit_report(compile_source(source)))

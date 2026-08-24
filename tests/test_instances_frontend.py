@@ -163,3 +163,82 @@ def test_g4_bound_that_covers_the_child_is_accepted():
 def test_g4_bound_that_misses_the_childs_capability_is_rejected():
     with pytest.raises(RevlError, match="spawns `Leaker`, which emits through `net`"):
         compile_source(G4_BASE.replace("{GATE}", "emission[db]"), "t.rvl")
+
+
+# -- emit through a spawn handle (item 82) ----------------------------------
+#
+# Calling a service operation through a spawn handle (`w.task.run(...)`) reads
+# the provision off the handle as an `instance-get`, not a `req` target. The
+# emission check used to assume a `req` target and raised `KeyError: 'target'`
+# on the handle spelling; it now walks the handle's provision to the service
+# and reads the operation's emission-ness there.
+
+HANDLE_BASE = """
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task {
+  emission[net] fn run(prompt: Str) -> Int
+  fn status() -> Int
+}
+component Worker requires net: Net provides task: Task {
+  provide task {
+    fn run(prompt: Str) { emit net.send(prompt) return 1 }
+    fn status() = 0
+  }
+}
+service Sup { {DECL} fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn go(prompt: Str) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      {BODY}
+      return 1
+    }
+  }
+}
+"""
+
+
+def _handle(decl: str, body: str):
+    return compile_source(
+        HANDLE_BASE.replace("{DECL}", decl).replace("{BODY}", body), "t.rvl")
+
+
+def test_emit_emission_through_handle_is_accepted():
+    """The regression: `emit w.task.run(prompt)` from an `emission`-declared
+    supervisor method compiles cleanly (used to KeyError in
+    `_is_emission_call`). The boundary is marked one level up."""
+    ir = _handle("emission", "emit w.task.run(prompt)")
+    assert ir["manifest"]["templates"] == ["Worker"]
+    go = next(c for c in ir["components"] if c["name"] == "Supervisor")
+    emit = go["body"][0]["methods"][0]["body"][1]
+    assert emit["step"] == "emit"
+    # the emission rides the provision-read shape: a `field` callee over the
+    # `instance-get`, not a `req` target
+    callee = emit["expr"]["callee"]
+    assert callee["kind"] == "field" and callee["name"] == "run"
+    assert callee["target"]["kind"] == "instance-get"
+    assert callee["target"]["key"] == "task"
+
+
+def test_non_emission_call_through_handle_is_accepted():
+    """A plain operation through the handle (`w.task.status()`) never needed a
+    marker and still compiles — the emission check correctly returns False for
+    it rather than crashing."""
+    ir = _handle("emission", "let s = w.task.status()")
+    assert ir["manifest"]["templates"] == ["Worker"]
+
+
+def test_unmarked_emission_through_handle_is_rejected():
+    """An emission reached through the handle without `emit` is refused with a
+    G4 marker diagnostic — not silently lowered, and not a KeyError."""
+    with pytest.raises(RevlError,
+                       match=r"call to emission `w\.task\.run` must be marked `emit` \(G4\)"):
+        _handle("emission", "let r = w.task.run(prompt)")
+
+
+def test_emit_on_non_emission_through_handle_is_rejected():
+    """The reverse guard: marking a non-emission handle call `emit` is refused
+    with a readable diagnostic (`_node_desc` no longer KeyErrors on the
+    provision-read shape), pointing at `task.status`."""
+    with pytest.raises(RevlError, match=r"`emit` on `task\.status`"):
+        _handle("emission", "emit w.task.status()")

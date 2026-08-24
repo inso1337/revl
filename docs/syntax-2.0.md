@@ -111,7 +111,10 @@ there is no syntactic path from a `fn` body to an effect.
 
 - literals: numbers, strings, booleans, `[a, b]`, `{ id: 1, name: "x" }`
 - template strings: `` `hello ${user.name}` `` — **replaces 1.x `$name`
-  interpolation** (breaking change; 1.x sources migrate mechanically)
+  interpolation** (breaking change; 1.x sources migrate mechanically). A
+  `${ ... }` body is captured by balancing braces string-aware, so a `}` inside
+  a nested string or comment does not end it early — `` `v=${m.lookup("}")}` ``
+  captures the whole `m.lookup("}")`.
 - operators: `+ - * / %`, comparisons, `&& || !`, ternary `c ? a : b`
 - `?.` optional chaining and `??` nullish coalescing — typed against `Opt[T]`
 - arrow functions `x => expr`, `(a, b) => { ... }`; captures are by-value
@@ -613,6 +616,10 @@ fndecl      := ['verified'] 'fn' IDENT '(' tparams? ')' ['->' type] block
 component   := (unchanged from 1.x) + blockeffect + fail
 extern      := 'extern' class 'fn' sig ['undo' expr] ['compensate' expr] hostbody+
 hostbody    := '=' '@' IDENT '{' <verbatim host text, brace-balanced> '}'
+                 -- brace-balancing skips host strings, char/rune literals and
+                 -- block comments, so a `}` inside `"}"` or `/* } */` does not
+                 -- close the body early; `}` still terminates after a line
+                 -- comment (bodies may be a single line: `@ts { // ... }`).
 expr        := TS-expression-subset  (see §3.2/§3.3)  + 'match' + block-expr
 stmt        := let | var | assign(var-only) | if | for-of | while | return | expr-stmt(calls)
 lcstmt      := load | unload | call | 'assert' ('no_residue' | expr)   (§7.1)

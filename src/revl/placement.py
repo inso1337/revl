@@ -54,6 +54,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,13 @@ from .errors import RevlError
 
 KNOWN_BACKENDS = ("py", "node", "ts", "rust", "java", "go")
 
+# Every seam call carries a deadline (docs/seam-deadlines.md): a cross-process
+# round-trip against a wedged provider must not block its consumer forever, so
+# each proxied seam gets a per-operation deadline default. This is the
+# composition-wide fallback (seconds); the placement file overrides it per
+# process (`seam_deadline`) or per operation (`[processes.<p>.seam_deadlines]`).
+DEFAULT_SEAM_DEADLINE = 30.0
+
 # The TypeScript tier is `node` in the placement manifest (the process runs
 # on the Node runtime) but `ts` on every other surface (run.py, `revl test`,
 # the README, the conformance matrix). Both spellings are accepted; `ts` is
@@ -77,6 +85,105 @@ _BACKEND_ALIASES = {"ts": "node"}
 
 def _canonical_backend(name: str) -> str:
     return _BACKEND_ALIASES.get(name, name)
+
+
+# --------------------------------------------------------------------------
+# network placement (roadmap item 56): a seam may name a machine (host:port)
+# instead of a local process. Transport is TCP + mutual TLS; identity per
+# process derives from the operator model (item 55). docs/network-placement.md.
+# --------------------------------------------------------------------------
+
+
+def seam_latency_ms(host: str, port: int, samples: int = 5,
+                    timeout: float = 1.0) -> float | None:
+    """A **real** per-seam latency number for a network seam: the median TCP
+    connect round-trip to ``host:port``, in milliseconds. This is the concrete
+    figure that replaces the audit's abstract "chatty and latency-bound" note
+    once a seam actually points at a machine. Returns None when the endpoint is
+    not reachable (the provider is not up yet), so the caller can fall back to a
+    configured RTT class."""
+    rtts: list[float] = []
+    for _ in range(max(1, samples)):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        start = time.perf_counter()
+        try:
+            sock.connect((host, port))
+        except OSError:
+            sock.close()
+            continue
+        rtts.append((time.perf_counter() - start) * 1000.0)
+        try:
+            sock.close()
+        except OSError:
+            pass
+    if not rtts:
+        return None
+    rtts.sort()
+    return round(rtts[len(rtts) // 2], 3)
+
+
+def _san_entry(host: str) -> str:
+    """A SAN clause for `host`: `IP:` for a dotted/colon literal, else `DNS:`."""
+    return f"IP:{host}" if host[:1].isdigit() or ":" in host else f"DNS:{host}"
+
+
+def generate_seam_certs(out_dir: Path, identities, hosts=("127.0.0.1", "localhost")) -> dict:
+    """Mint a throwaway CA and one leaf cert per identity for a **loopback**
+    network placement — self-signed *test* material only, never real keys
+    (docs/network-placement.md). Every leaf carries the same SAN set (so any
+    process verifies any other by host) and both ``serverAuth`` and
+    ``clientAuth`` EKUs, because over mTLS each process is both a provider and a
+    consumer. Uses the ``openssl`` CLI (no extra Python dependency).
+
+    Returns ``{identity: {"cert","key","ca","identity"}}``.
+    """
+    if shutil.which("openssl") is None:
+        raise RuntimeError(
+            "generate_test_certs needs the openssl CLI on PATH to mint loopback "
+            "test certificates; install it, or supply explicit cert/key/ca paths "
+            "under each process's [tls]")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ca_key, ca_crt = out_dir / "seam_ca.key", out_dir / "seam_ca.crt"
+
+    def _openssl(args: list[str]) -> None:
+        result = subprocess.run(["openssl", *args], capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"openssl {args[0]} failed:\n{result.stderr.strip()}")
+
+    _openssl(["req", "-x509", "-newkey", "ec",
+              "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+              "-keyout", str(ca_key), "-out", str(ca_crt),
+              "-days", "1", "-subj", "/CN=revl-seam-ca"])
+    ext = out_dir / "seam_leaf.ext"
+    san = ",".join(_san_entry(h) for h in hosts)
+    ext.write_text(f"subjectAltName={san}\nextendedKeyUsage=serverAuth,clientAuth\n",
+                   encoding="utf-8")
+    material: dict[str, dict] = {}
+    for identity in sorted(set(identities)):
+        key = out_dir / f"seam_{identity}.key"
+        csr = out_dir / f"seam_{identity}.csr"
+        crt = out_dir / f"seam_{identity}.crt"
+        _openssl(["req", "-newkey", "ec",
+                  "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+                  "-keyout", str(key), "-out", str(csr), "-subj", f"/CN={identity}"])
+        _openssl(["x509", "-req", "-in", str(csr), "-CA", str(ca_crt),
+                  "-CAkey", str(ca_key), "-CAcreateserial", "-out", str(crt),
+                  "-days", "1", "-extfile", str(ext)])
+        material[identity] = {"cert": str(crt), "key": str(key),
+                              "ca": str(ca_crt), "identity": identity}
+    return material
+
+
+def _operator_identities(profile_path: str) -> set[str]:
+    """The operator tokens a profile declares — a *read-only* reuse of the item
+    55 identity model (`src/revl/mcp/operator.py`). When a placement names an
+    ``operator_profile``, every network process's identity must be one of these
+    tokens, so a seam is attributable to a declared operator, not an ad-hoc
+    string."""
+    from .mcp.operator import load_profile  # noqa: PLC0415 — read-only reuse of item 55
+
+    return set(load_profile(profile_path).operators)
 
 _BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
 _TS_DIR = _BACKENDS_DIR / "typescript"
@@ -428,6 +535,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     placement = _load_placement(placement_path)
     processes = placement.get("processes") or {}
     config = placement.get("config") or {}
+    # composition-wide seam-deadline default; a process may override it, and a
+    # process may set per-operation deadlines (docs/seam-deadlines.md).
+    default_deadline = placement.get("seam_deadline", DEFAULT_SEAM_DEADLINE)
     if not processes:
         print("error: placement has no [processes]", file=sys.stderr)
         return 1
@@ -487,6 +597,109 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         shutil.rmtree(tmp, ignore_errors=True)
         return code
 
+    # --- network placement (item 56): a seam whose provider process declares an
+    # `address` crosses TCP + mutual TLS instead of a local UDS. Identity per
+    # process comes from the operator model (item 55). Every other seam stays a
+    # local UDS (default, no cert; full back-compat). docs/network-placement.md.
+    addresses: dict[str, tuple[str, int, float | None]] = {}
+    identities: dict[str, str] = {}
+    explicit_tls: dict[str, dict] = {}
+    for pname, pconf in processes.items():
+        addr = pconf.get("address")
+        if addr:
+            if addr.get("host") is None or addr.get("port") is None:
+                return abort(f"process {pname!r} `address` needs both host and port")
+            addresses[pname] = (str(addr["host"]), int(addr["port"]), addr.get("rtt_ms"))
+        tconf = pconf.get("tls") or {}
+        if tconf.get("identity"):
+            identities[pname] = str(tconf["identity"])
+        if tconf.get("cert"):
+            missing = [k for k in ("key", "ca", "identity") if not tconf.get(k)]
+            if missing:
+                return abort(f"process {pname!r} [tls] gives `cert` but not {', '.join(missing)}")
+            explicit_tls[pname] = {"cert": tconf["cert"], "key": tconf["key"],
+                                   "ca": tconf["ca"], "identity": tconf["identity"]}
+
+    # which processes take part in a network seam (as provider or consumer)?
+    network_processes: set[str] = set(addresses)  # a provider serves remotely
+    for pname in processes:
+        for key in requires[pname]:
+            if key in provides[pname]:
+                continue
+            if owner.get(key) in addresses:
+                network_processes.add(pname)          # this consumer crosses TCP
+                network_processes.add(owner[key])     # to that provider
+
+    # identity per process (item 55): every network process must name one, and —
+    # when an operator profile is configured — it must be a declared operator.
+    profile_path = placement.get("operator_profile")
+    allowed_identities: set[str] | None = None
+    if profile_path:
+        try:
+            allowed_identities = _operator_identities(profile_path)
+        except (RevlError, OSError, ValueError) as exc:
+            return abort(f"cannot load operator_profile {profile_path!r}: {exc}")
+    for pname in sorted(network_processes):
+        if pname not in identities:
+            return abort(
+                f"process {pname!r} takes part in a network seam but declares no "
+                f'identity — add [processes.{pname}.tls] identity = "..." (a '
+                "network seam must present a per-process identity; item 56)")
+        if allowed_identities is not None and identities[pname] not in allowed_identities:
+            return abort(
+                f"process {pname!r} identity {identities[pname]!r} is not a declared "
+                f"operator in {profile_path!r} (identity per process is issued by "
+                "the operator model, item 55)")
+        if processes[pname].get("seam_deadline", default_deadline) is None:
+            return abort(
+                f"process {pname!r} takes part in a network seam but its "
+                "seam_deadline is null — a network round-trip needs a deadline "
+                "(item 54); set seam_deadline or leave it at the default")
+        # this cut ships the TCP+mTLS transport on the py runner; the rust/go/ts/
+        # java runners read only the local `socket` form. Refuse a network seam
+        # on those tiers rather than hand them an `endpoint` they cannot dial.
+        pbackend = _canonical_backend(processes[pname].get("backend", "py"))
+        if pbackend != "py":
+            return abort(
+                f"process {pname!r} is on the {pbackend} backend but takes part in "
+                "a network seam — the TCP+mTLS transport (item 56) is py-only in "
+                "this cut; place network seams on py processes")
+
+    # certificate material for every network identity: minted loopback *test*
+    # certs when `generate_test_certs`, else the explicit paths each [tls] gave.
+    certs: dict[str, dict] = {}
+    if network_processes:
+        want = {identities[p] for p in network_processes}
+        if placement.get("generate_test_certs"):
+            hosts = tuple(sorted({h for h, _, _ in addresses.values()}
+                                 | {"127.0.0.1", "localhost"}))
+            try:
+                minted = generate_seam_certs(tmp / "certs", want, hosts)
+            except RuntimeError as exc:
+                return abort(str(exc))
+            certs = {p: minted[identities[p]] for p in network_processes}
+        else:
+            for p in sorted(network_processes):
+                if p not in explicit_tls:
+                    return abort(
+                        f"process {p!r} is on a network seam but supplies no TLS "
+                        f"material — give [processes.{p}.tls] cert/key/ca/identity, or "
+                        "set generate_test_certs = true for loopback test certs")
+                certs[p] = explicit_tls[p]
+
+    def _serve_endpoint(pname: str) -> dict:
+        host, port, _ = addresses[pname]
+        return {"host": host, "port": port,
+                "tls": {**certs[pname], "server_hostname": host}}
+
+    def _proxy_endpoint(consumer: str, host_proc: str) -> tuple[dict, float | None]:
+        host, port, rtt = addresses[host_proc]
+        return ({"host": host, "port": port,
+                 "tls": {**certs[consumer], "server_hostname": host}}, rtt)
+
+    # (consumer, key, host, port, configured_rtt) for the latency report below
+    net_seams: list[tuple[str, str, str, int, float | None]] = []
+
     # base specs (backend-neutral)
     specs: dict[str, dict] = {}
     backends: dict[str, str] = {}
@@ -496,6 +709,11 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             return abort(f"process {pname!r} has unsupported backend {pconf.get('backend')!r} "
                          f"({', '.join(KNOWN_BACKENDS)})")
         backends[pname] = backend
+        # this process's seam-deadline default + optional per-operation map. Each
+        # proxy carries them so a wedged provider breaches the deadline as a
+        # distinguishable SeamDeadline rather than blocking the consumer forever.
+        p_deadline = pconf.get("seam_deadline", default_deadline)
+        p_deadlines = {m: float(s) for m, s in (pconf.get("seam_deadlines") or {}).items()}
         proxies: dict[str, dict] = {}
         for key, service in requires[pname].items():
             if key in provides[pname]:
@@ -503,8 +721,27 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             host = owner.get(key)
             if host is None:
                 return abort(f"key {key!r} required by {pname!r} is provided by no process")
-            proxies[key] = {"socket": sockets[host], "methods": methods.get(service, []), "service": service}
+            entry = {"methods": methods.get(service, []), "service": service,
+                     "deadline": p_deadline}
+            if host in addresses:
+                # a network seam: point the proxy at the machine over TCP+mTLS,
+                # and record its latency class (the configured RTT; the conductor
+                # also measures a real number once the provider is up, below).
+                endpoint, rtt = _proxy_endpoint(pname, host)
+                entry["endpoint"] = endpoint
+                entry["latency_ms"] = rtt
+                ehost, eport, _ = addresses[host]
+                net_seams.append((pname, key, ehost, eport, rtt))
+            else:
+                entry["socket"] = sockets[host]
+            if p_deadlines:
+                entry["deadlines"] = dict(p_deadlines)
+            proxies[key] = entry
         serve_keys = [k for k in provides[pname] if any(k in requires[q] and q != pname for q in processes)]
+        if pname in addresses:
+            # a network provider serves its full provided surface — remote
+            # consumers live in other placements and are not enumerable here.
+            serve_keys = list(provides[pname])
         spec = {
             "name": pname,
             "backend": backend,
@@ -520,11 +757,15 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # declaration* admits for each exported key, read off the IR. The
             # stub refuses anything else, so the served surface is exactly the
             # enumerable one (G8), matching what the proxy side forwards.
-            spec["serve"] = {
-                "socket": sockets[pname],
+            serve_spec = {
                 "keys": serve_keys,
                 "methods": {k: methods.get(provides[pname][k], []) for k in serve_keys},
             }
+            if pname in addresses:
+                serve_spec["endpoint"] = _serve_endpoint(pname)
+            else:
+                serve_spec["socket"] = sockets[pname]
+            spec["serve"] = serve_spec
         specs[pname] = spec
 
     import revl  # noqa: PLC0415
@@ -614,6 +855,23 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         note = ("real cordis4j (reactive)" if built["java"][0] == "real"
                 else "stub (non-reactive; set REVL_CORDIS4J_CLASSES + a JDK 21 for reactive withdrawal)")
         print(f"  java runtime: {note}", flush=True)
+    if net_seams:
+        print(f"  network seams (item 56): {len(net_seams)} over TCP+mTLS", flush=True)
+
+    def report_network_latency() -> None:
+        """Print the real per-seam latency for each network seam (item 56): the
+        measured TCP RTT once the provider is up, else the configured RTT class,
+        else unreachable. This is the abstract 'latency-bound' audit note made a
+        number now that the seam points at a machine."""
+        for consumer, key, host, port, configured in net_seams:
+            measured = seam_latency_ms(host, port)
+            if measured is not None:
+                detail = f"RTT ~{measured:g} ms (measured)"
+            elif configured is not None:
+                detail = f"RTT ~{float(configured):g} ms (configured)"
+            else:
+                detail = "RTT unknown (provider unreachable)"
+            print(f"  seam {consumer}.{key} -> tcp://{host}:{port}  {detail}", flush=True)
 
     # conductor-side state a live swap must keep coherent, keyed by process
     children: dict[str, tuple] = {}
@@ -804,10 +1062,16 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 missing = ", ".join(p for p in children if p not in up)
                 print(f"error: processes did not come up: {missing}", file=sys.stderr)
                 rc = 1
+            elif net_seams:
+                report_network_latency()
             _stop_all(children)
         elif _interactive():
+            if net_seams and _wait_for(lambda: len(up) == len(children), 60):
+                report_network_latency()
             swap_repl()
         else:
+            if net_seams and _wait_for(lambda: len(up) == len(children), 60):
+                report_network_latency()
             print("(placement up; Ctrl-C to tear down)", flush=True)
             for proc, _ in list(children.values()):
                 proc.wait()

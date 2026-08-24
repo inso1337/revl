@@ -117,15 +117,21 @@ async def run(spec: dict) -> None:
     clients: dict[str, object] = {}
     baseline_disposables = root.fiber._disposables.length
 
-    # 1. proxies for keys provided by other processes
+    # 1. proxies for keys provided by other processes. A proxy targets either a
+    # local UDS (`socket`) or a network TCP+mTLS seam (`endpoint`); the bridge
+    # normalizes both to an `Endpoint`. The deadline/withdrawal/canonical machinery
+    # applies unchanged over either transport (docs/network-placement.md).
     for key, info in (spec.get("proxies") or {}).items():
-        proxy = bridge.proxy_component(key, info["methods"], info["socket"], module)
+        target = info.get("endpoint") or info["socket"]
+        proxy = bridge.proxy_component(key, info["methods"], target, module,
+                                       deadline=info.get("deadline"),
+                                       deadlines=info.get("deadlines"))
         clients[key] = proxy["_client"]
         fiber = root.plugin(proxy)
         await fiber
         await _flush()
         fibers.append((f"{key}-proxy", fiber))
-        log("proxy", key, f"-> {info['socket']}")
+        log("proxy", key, f"-> {bridge.Endpoint.from_spec(target).describe()}")
 
     # 2. this process's own components, in IR load order
     for component in spec["components"]:
@@ -141,9 +147,13 @@ async def run(spec: dict) -> None:
     serve = spec.get("serve")
     if serve:
         # `methods` (key -> declared operations) is the stub's allowlist; fall
-        # back to the bare key list for a spec written before it existed.
-        server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve["socket"])
-        log("serve", ", ".join(serve["keys"]), f"-> {serve['socket']}")
+        # back to the bare key list for a spec written before it existed. The
+        # served endpoint is a UDS (`socket`) or a network TCP+mTLS seam
+        # (`endpoint`); over TCP the provider demands the consumer's cert (mTLS).
+        serve_target = serve.get("endpoint") or serve["socket"]
+        server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target)
+        log("serve", ", ".join(serve["keys"]),
+            f"-> {bridge.Endpoint.from_spec(serve_target).describe()}")
 
     # 4. probes: call provided services (may cross a seam), print results
     namespace = {key: root.get(key) for key in (spec.get("provides") or [])}

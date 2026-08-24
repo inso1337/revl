@@ -502,40 +502,38 @@ rejection.
   nullary constructor now types as its ADT, so `match FirstTime { ... }` is
   checked; only genuinely unknown scrutinees are silent.
 
-## G8 audit-surface gaps (fenced, not closed)
+## G8 audit-surface gaps
 
 The G8 boundary surface (`revl audit`, and the `host:`/`emit:` crossing tokens
 `revl audit --diff` gates on) is meant to be the *enumerable* set of host
 reaches — "everything that reaches the host must appear on the audit surface"
-(docs/rejections.md, G8). One enumeration gap is known and fenced here, the way
-the runtime divergences above are; the adversarial suite pins it.
+(docs/rejections.md, G8). One enumeration gap was known and fenced here; it is
+now **RESOLVED** (item 24), and the record is kept for provenance.
 
-- **G8 enumeration is incomplete for first-class host reaches** (found by the
-  gate threat-model program, docs/threat-model.md; pinned
-  `tests/test_adversarial_gate.py::test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface`,
-  `xfail(strict)`). A host `extern` reached **only** through a first-class
-  function value — `indirect(ship, a)` rather than `ship(a)` — does **not**
-  appear in `revl audit`'s per-component `externs` list, so it produces no
-  `host:<component>:<extern>` crossing token. *Trigger:* a bare-`emission`
-  provide-method (declared capability already `*`) whose body hands an emission
-  extern to a dispatcher instead of calling it by name; contrast the direct
-  call, which surfaces `host:C:ship`. *Blast radius:* (a) `revl audit`
-  under-reports the host boundary of that component — a reviewer sees fewer
-  host blocks than run; (b) `revl audit --diff` (the authority-drift gate)
-  cannot detect a widening that adds such a reach, because the added crossing
-  has no token. *What is NOT affected — the compensating control:* the
-  load-bearing G4 defence holds. The operation is still correctly flagged
-  `readOnlyHint: false` / `destructiveHint: true` at the MCP tool layer (the
-  emission fixed point propagates `*` through the first-class reference), and
-  the same launder in a *plain* (read-only) operation is *refused* at compile
-  time — so no operation is ever mislabelled read-only, and this stays within a
-  bare emission's already-declared `*` authority rather than exceeding it. It
-  is an *enumeration* incompleteness, not a read-only lie. *Fix:* teach
-  `_boundary` (`src/revl/__main__.py`) to fold first-class emission references
-  into the per-component `externs`/`capabilities` surface, reusing the
-  first-class reachability the G4 fixed point (`emission_analysis.py`,
-  `lower._emitting_capabilities`) already computes; when it lands, the pinned
-  test flips green and this fence closes.
+- **G8 enumeration for first-class host reaches — RESOLVED (item 24)** (found by
+  the gate threat-model program, docs/threat-model.md; the pin
+  `tests/test_adversarial_gate.py::test_first_class_laundered_host_reach_is_enumerated_on_the_g8_surface`
+  is now a plain passing assertion, no longer `xfail`). *The gap that was:* a
+  host `extern` reached **only** through a first-class function value —
+  `indirect(ship, a)` rather than `ship(a)` — did **not** appear in `revl
+  audit`'s per-component `externs` list, so it produced no
+  `host:<component>:<extern>` crossing token; `revl audit --diff` (the
+  authority-drift gate) could not detect a widening that added such a reach.
+  Throughout, the load-bearing G4 defence held — the operation was still
+  correctly flagged `readOnlyHint: false` / `destructiveHint: true`, and the
+  same launder in a *plain* (read-only) operation was *refused* at compile
+  time — so it was an *enumeration* incompleteness, never a read-only lie.
+  *How it was closed:* `_boundary` (`src/revl/__main__.py`) now folds the
+  first-class reach the G4 fixed point already computes onto the audit surface.
+  For each component body it collects first-class *value* references the same
+  way the emission analysis does — reusing `emission_analysis._calls_in`'s
+  value channel (read-only; no change to `emission_analysis.py`) — and joins
+  each referenced callable's capabilities from `_emitting_capabilities` into the
+  per-component host set. A laundered host extern now surfaces the identical
+  `host:<component>:<extern>` crossing as a direct call, so `revl audit --diff`
+  flags a regeneration that adds a first-class-laundered reach instead of
+  silently accepting it. The `*` first-class-dispatch marker still appears when
+  the dispatched value is genuinely unnameable.
 
 ## Contract rejection coverage (the executable spec)
 
@@ -572,29 +570,42 @@ sampled.
   `xs[0]`, `s.charAt(0)` and a `_` arm stay accepted). A soundness check with
   no false-positive test is a check nobody can safely tighten later.
 
-## Record updates on receivers with no named type (unchecked)
+## Record updates on receivers with no named type (RESOLVED — item 71)
 
-`{ r | f = e }` is field-checked only when `r`'s type is *known*: a declared
-record parameter, a named binding, or a value read from a typed position. A
-receiver whose type the checker cannot recover — in practice, a `let`-bound
-**anonymous record literal** (`let a = { h: "x" }`) — has no name to look up,
-so the update's field names and value types are **not checked**, and neither
-are later reads through the binding. Verified trigger:
+✅ **Closed by structural record types (roadmap item 71).** `{ r | f = e }` was
+field-checked only when `r`'s type was *known*: a declared record parameter, a
+named binding, or a value read from a typed position. A receiver whose type the
+checker could not recover — in practice, a `let`-bound **anonymous record
+literal** (`let a = { h: "x" }`) — had no name to look up, so the update's field
+names and value types were **not checked**, and neither were later reads through
+the binding. The trigger below compiled, an Int flowing into a Str-shaped
+record:
 
-```rvl,accept
+```rvl,reject
 type C = { h: Str }
 fn main() -> Int {
   let a = { h: "x" }
-  let b = { a | h = 5 }   // Int into a Str-shaped record: compiles
+  let b = { a | h = 5 }   // now refused: update of field `h` expects `Str`, got `Int`
   assert b.h == 5
   return 0
 }
 ```
 
-Blast radius: wrong-answer-class, local to records built and consumed as
-anonymous literals; any flow through a *declared* boundary (parameter,
-service method, annotated let) recovers checking immediately. Closing it
-means giving anonymous record literals real structural types that unify
-with nominal records at declared boundaries — a language-design item (the
-same shape as roadmap item 11's widening marker), not a patch. Filed for
-the roadmap; this entry is its fence.
+The fix was the design the roadmap called for, not a patch. An anonymous record
+literal now infers a **structural record type** — spelled `{field: Type, ...}`
+in canonical (sorted) order, in the checker only (`typecheck.py`
+`structural_fields` / `format_structural`). An update `{ a | f = e }` on it is
+field-checked against that shape: an undeclared field, or a replacement of the
+wrong type, is refused naming the guarantee (fixtures
+`t26_anon_record_update_wrong_type.rvl`, `t27_anon_record_update_undeclared_field.rvl`);
+reads through the binding are checked too.
+
+At every *declared* boundary the structural type **unifies field-wise with the
+nominal record it meets** — the field set must match and each field type must be
+compatible, with the `List[Never]` bottom rule falling out of the elementwise
+`compatible` recursion (`Never` is already a wildcard). This is the same shape
+as item 11's `?T` widening marker: a checker-level annotation that **never
+reaches the IR**. The `record` / `record_update` IR nodes carry no type, an
+inferred `let` type is not emitted, and the emitted `types` table stays nominal
+— so the v1/v2/v3 goldens are byte-identical and no emitter changed. See
+docs/records.md ("Structural vs nominal at declared boundaries").

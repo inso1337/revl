@@ -1,0 +1,180 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "ToolCall": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "name": "Str",
+        "args": "List[Str]"
+      }
+    }
+  },
+  "functions": [
+    {
+      "name": "tool_name",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "tc",
+          "value": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "json_parse"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "s"
+              }
+            ]
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "field",
+            "target": {
+              "kind": "var",
+              "name": "tc"
+            },
+            "name": "name"
+          }
+        }
+      ]
+    },
+    {
+      "name": "arg_count",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "tc",
+          "value": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "json_parse"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "s"
+              }
+            ]
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "builtin",
+            "method": "length",
+            "target": {
+              "kind": "field",
+              "target": {
+                "kind": "var",
+                "name": "tc"
+              },
+              "name": "args"
+            },
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "roundtrip",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "json_stringify"
+            },
+            "args": [
+              {
+                "kind": "call",
+                "callee": {
+                  "kind": "var",
+                  "name": "json_parse"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "s"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "json_parse",
+      "class": "pure",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Any",
+      "bodies": {
+        "py": " import json; return json.loads(s) ",
+        "ts": " return JSON.parse(s) "
+      }
+    },
+    {
+      "name": "json_stringify",
+      "class": "pure",
+      "params": [
+        {
+          "name": "v",
+          "type": "Any"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "py": " import json; return json.dumps(v) ",
+        "ts": " return JSON.stringify(v) "
+      }
+    }
+  ]
+}

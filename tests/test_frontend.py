@@ -116,6 +116,11 @@ REJECTIONS = {
     #       undeclared type and errors where it is used.
     "t24_opaque_receiver_builtin.rvl": "stdlib method `remove` on a value of unknown type",
     "t25_explicit_tparam_heuristic_off.rvl": "argument 1 of `typo(...)` expects `List[U]`, got `List[Int]`",
+    # item 71: an update on an anonymous record literal is field-checked against
+    # the literal's own structural shape — the wrong-answer-class gap that used
+    # to escape checking (docs/contract-errata.md, now RESOLVED).
+    "t26_anon_record_update_wrong_type.rvl": "update of field `h` expects `Str`, got `Int`",
+    "t27_anon_record_update_undeclared_field.rvl": "`missing`, which is not a field of `{h: Str}`",
     "host_method_not_on_surface.rvl": "`Map` has no method `putt`",
     "v2_verified_direct_recursion.rvl": "verified fn `recurse` is not total",
     "g1_undeclared_access.rvl": "`db` is not a declared requirement of Logger",
@@ -132,6 +137,12 @@ REJECTIONS = {
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
+    # item 82: an emission reached through a spawn handle (`w.task.run(...)`,
+    # an `instance-get` provision access) must still be marked `emit` — an
+    # unmarked crossing is refused, not silently lowered (and no longer a
+    # `KeyError` in `_is_emission_call`).
+    "g4_unmarked_handle_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
     "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",

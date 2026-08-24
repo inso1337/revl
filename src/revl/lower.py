@@ -2505,10 +2505,22 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # here, after every component's emission surface is known.
     _check_spawn_emission_bounds(components, services, spawn_reg, program.filename)
 
+    # Capability attenuation across the spawn boundary (item 66): a child's
+    # capability set must be a checked subset of its spawner's held authority,
+    # so lineage narrows monotonically and a supervisor cannot amplify. Returns
+    # the per-instance attenuation chain for the G8 audit surface.
+    attenuation_chain = _check_spawn_attenuation(
+        components, spawn_reg, program.filename)
+
     fault_tests = _lower_fault_tests(program, components, program.filename)
 
     manifest = _link(program, components, ambient.get("components") or [],
                      templates=spawn_reg["templates"])
+    if attenuation_chain:
+        # additive, spawn-only: a non-spawning composition has no `instances`
+        # key, so its manifest is byte-identical to before (docs/capability-
+        # attenuation.md).
+        manifest["instances"] = attenuation_chain
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
@@ -2898,10 +2910,30 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 node["recv"] = infer_ast(expr.callee.target, env.type_env,
                                          env.types, None)
             return node
-        return {"kind": "call",
-                "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
-                                                     pure_only),
-                "args": args}
+        callee_node = _lower_component_pure_expr(expr.callee, env, scope, callables,
+                                                 pure_only)
+        # a provision method call off a spawn handle (`s.<key>.<method>(...)`)
+        # crosses the boundary exactly as a `req` emission does, so the same
+        # `emit`-marker discipline applies — an unmarked emission is refused
+        # (G4), not silently lowered. The `req` path enforces this inline
+        # (`_component_req_call`); the handle path reaches the generic
+        # fall-through, so the check lives here.
+        inst = _instance_get_call({"kind": "call", "callee": callee_node,
+                                   "args": args}, env)
+        if inst is not None:
+            recv, decl = inst
+            if decl.emission and getattr(env, "_expr_mode", "setup") == "setup":
+                handle = recv.get("target") if isinstance(recv.get("target"), dict) else {}
+                spelled = ".".join(p for p in (handle.get("id"), recv.get("key"),
+                                               callee_node.get("name")) if p)
+                raise RevlError(
+                    filename, line,
+                    f"call to emission `{spelled}` must be marked `emit` (G4)",
+                    hint="an emission crosses the system boundary and cannot be reverted; "
+                         "`emit` makes that visible at the call site",
+                    code="G4", category="emission",
+                )
+        return {"kind": "call", "callee": callee_node, "args": args}
     if isinstance(expr, ExprBin):
         return {"kind": "bin", "op": expr.op,
                 "left": _lower_component_pure_expr(expr.left, env, scope, callables,
@@ -3662,6 +3694,32 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     return step
 
 
+def _instance_get_call(node: dict, env: Env):
+    """If `node` is a method call whose receiver is a provision read off a
+    spawn handle (`s.<key>.<method>(...)`), return `(instance_get, decl)`:
+    the `instance-get` node and the `MethodDecl` for the method on the service
+    that key yields — else `None`.
+
+    A provision method call does not lower to a `req`-target call; the pure
+    expression stratum lowers `s.<key>` to an `instance-get`, and the trailing
+    `.<method>(...)` wraps it in a `field` callee (`_lower_component_pure_expr`
+    ExprCall fall-through). So the receiver is reached through `callee`, not the
+    `target` slot a required-service call uses."""
+    if node.get("kind") != "call":
+        return None
+    callee = node.get("callee")
+    if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+        return None
+    recv = callee.get("target")
+    if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
+        return None
+    svc = env.services.get(recv.get("service"))
+    if svc is None:
+        return None
+    decl = svc.methods.get(callee.get("name"))
+    return (recv, decl) if decl is not None else None
+
+
 def _is_emission_call(node: dict, env: Env) -> bool:
     # an `emission` extern (or a function reaching one) is a boundary
     # crossing exactly as a service emission is, so `emit` marks it too
@@ -3669,7 +3727,14 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         return True
     if node.get("kind") != "call":
         return False
-    target = node["target"]
+    target = node.get("target")
+    if target is None:
+        # a provision method call off a spawn handle carries its receiver in
+        # `callee` (an `instance-get`), not the `req` `target` slot — walk the
+        # handle's provision to the service and read the method's emission-ness
+        # there rather than assuming a `req` target (which KeyError'd here)
+        inst = _instance_get_call(node, env)
+        return inst is not None and inst[1].emission
     if target.get("kind") != "req":
         return False
     svc = env.services[env.requires[target["name"]]]
@@ -3937,10 +4002,19 @@ def _lower_postfix(expr: Postfix, env: Env, mode: str):
 
 def _node_desc(node: dict) -> str:
     if node.get("kind") == "call":
-        target = node["target"]
-        if target.get("kind") == "req":
+        target = node.get("target")
+        if isinstance(target, dict) and target.get("kind") == "req":
             return f"`{target['name']}.{node['method']}`"
-        return f"a call to `{node['method']}`"
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "field":
+            recv = callee.get("target")
+            if isinstance(recv, dict) and recv.get("kind") == "instance-get":
+                # a provision method call off a spawn handle: name it the way
+                # it was written, `<key>.<method>`, so the diagnostic points at
+                # the provision access rather than "a call to <method>"
+                return f"`{recv.get('key')}.{callee.get('name')}`"
+            return f"a call to `{callee.get('name')}`"
+        return f"a call to `{node.get('method')}`"
     return f"a {node.get('kind', 'value')} expression"
 
 
@@ -4172,6 +4246,142 @@ def _spawn_emission_surface(components: list[dict], services: dict) -> dict[str,
     # the transitive closure over the spawn graph is applied by the caller,
     # which holds the edge list
     return surface
+
+
+def _spawn_reached_surface(components: list[dict]) -> dict[str, set]:
+    """Per-component *actual* capability reach — the boundaries a component's
+    own code crosses, drawn from its lowered body (`_collect_emit_caps`, the
+    G4 capability machinery): the required key of every `emit` step, and `*`
+    for any host emission or first-class dispatch that no key can name.
+
+    This is deliberately more precise than `_spawn_emission_surface`, which
+    over-approximates from a provided service's *declaration* (a bare
+    `emission` provider counts as `*`). Attenuation asks what an instance can
+    actually reach — bounded by the keys it wires through `requires` — so the
+    least-authority claim is exact: a worker that only ever emits through
+    `kv_a` provably does not reach `kv_b`, whatever its service promises."""
+    surface: dict[str, set] = {}
+    for comp in components:
+        caps: set = set()
+        _collect_emit_caps(comp.get("body") or [], caps)
+        surface[comp["name"]] = caps
+    return surface
+
+
+def _spawn_surface_closure(base: dict[str, set], edges: list) -> dict[str, set]:
+    """Fold the spawn graph into a per-component base surface: after this, a
+    component's set is everything it can emit *plus* everything its transitive
+    spawned children can (`docs/capabilities.md`). The least fixed point the
+    edge list induces — the same closure `_check_spawn_emission_bounds` takes,
+    factored out so the attenuation check reads the *reachable* set of a child
+    (its own emissions and its descendants') against what a spawner holds."""
+    closed: dict[str, set] = {name: set(caps) for name, caps in base.items()}
+    changed = True
+    while changed:
+        changed = False
+        for parent, child in edges:
+            before = len(closed.setdefault(parent, set()))
+            closed[parent].update(closed.get(child, set()))
+            if len(closed[parent]) != before:
+                changed = True
+    return closed
+
+
+def _held_capabilities(comp: dict, base_surface: set) -> set:
+    """What a component *holds* — the capabilities it may pass down to a child
+    it spawns (item 66, lineage). A component holds a boundary when it has
+    wired access to it: every key in its `requires` clause (a `requires db: DB`
+    is the right to reach `db`), together with every boundary its own body
+    already crosses (`base_surface`: its `emit` steps and the emission methods
+    it provides, including the unnameable host `*`). This is the spawner's own
+    authority, *not* its transitive spawn closure — a parent cannot launder a
+    capability it lacks by routing it through one child into another."""
+    return set((comp.get("requires") or {}).keys()) | set(base_surface)
+
+
+def _activation_spawn_sites(comp: dict) -> "list[dict]":
+    """The `spawn` nodes in a component's *activation* body — the top-level
+    supervision `let s = effect spawn C ...`, excluding spawns nested inside a
+    `provide` method. Provide-method spawns carry an `emission[...]` clause that
+    already bounds them (`_check_spawn_emission_bounds`); the activation body
+    has no such clause, which is exactly the hole item 66 closes: without an
+    attenuation rule a supervisor is a capability amplifier."""
+    sites: list[dict] = []
+    for step in comp.get("body") or []:
+        if step.get("step") == "provide":
+            continue
+        sites.extend(_find_spawn_nodes(step))
+    return sites
+
+
+def _check_spawn_attenuation(components: list[dict],
+                             spawn_reg: dict, filename: str) -> list[dict]:
+    """Capability attenuation on spawn (item 66): a spawned child's capability
+    set must be a **checked subset** of its spawner's — monotone shrinkage, the
+    direction §5 admits for purity. A spawn may narrow (pass down less), never
+    widen (grant a boundary the parent does not hold), so spawning cannot
+    amplify authority and each per-tenant instance gets least-authority for
+    free: an instance whose template reaches only `kv_a` provably cannot reach
+    `kv_b`, even when the spawner holds both.
+
+    Reuses the G4 capability-bound machinery (`_spawn_emission_surface`): the
+    child's *reachable* set is its emission surface closed over its own spawn
+    subtree, the spawner's *held* set is its requires-wired authority. Where G4
+    bounds a component's declaration, item 33 the composition, and item 55 the
+    operators, this bounds **lineage**.
+
+    Applies to activation-body spawns (see `_activation_spawn_sites`); returns
+    the per-instance attenuation chain (spawner → child narrowing) for the G8
+    audit surface. Raises on a widening spawn, naming the chain."""
+    edges = spawn_reg.get("edges") or []
+    if not edges:
+        return []
+    base = _spawn_reached_surface(components)
+    reachable = _spawn_surface_closure(base, edges)
+
+    chain: list[dict] = []
+    seen: set = set()
+    for comp in components:
+        held = _held_capabilities(comp, base.get(comp["name"], set()))
+        for spawn in _activation_spawn_sites(comp):
+            child = spawn.get("component")
+            child_reach = reachable.get(child, set())
+            extra = sorted(child_reach - held)
+            line = spawn.get("line", comp.get("line", 1))
+            if extra:
+                held_str = ", ".join(f"`{c}`" for c in sorted(held)) or "no capabilities"
+                offending = ", ".join(
+                    "an unnameable host boundary" if c == "*" else f"`{c}`"
+                    for c in extra)
+                raise RevlError(
+                    comp.get("source") or filename, line,
+                    f"`{comp['name']}` spawns `{child}`, granting it {offending}, "
+                    f"but `{comp['name']}` holds only {held_str} — a spawn may "
+                    "narrow a child's capabilities, never widen them",
+                    hint="a spawned child's capability set must be a subset of "
+                         f"its spawner's (attenuation, item 66) — `{comp['name']}` "
+                         f"cannot pass down {offending} it does not hold; add the "
+                         f"matching `requires` to `{comp['name']}` so it holds what "
+                         f"it grants, or drop the capability from `{child}` "
+                         "(monotone shrinkage: narrowing is sound, widening is not)",
+                    code="G4", category="capability-attenuation",
+                )
+            edge = (comp["name"], child)
+            if edge in seen:
+                continue
+            seen.add(edge)
+            # the attenuation chain per instance: what the spawner holds, what
+            # the instance is granted (its reachable set), and what was dropped
+            # on the way down — the least-authority proof, per lineage edge.
+            chain.append({
+                "parent": comp["name"],
+                "child": child,
+                "holds": sorted(held),
+                "granted": sorted(child_reach),
+                "attenuated": sorted(held - child_reach),
+                "line": line,
+            })
+    return chain
 
 
 def _check_spawn_emission_bounds(components: list[dict], services: dict,
