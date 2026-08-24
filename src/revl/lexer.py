@@ -234,6 +234,13 @@ def lex(source: str, filename: str) -> list[Token]:
                     tokens.append(Token("arrow" if op == "->" else op, op, line))
                     i += len(op)
                     break
+        elif source.startswith('"""', i):
+            # Triple-quoted verbatim string: raw text (newlines included) up to
+            # the next `"""`. Distinct from the single-`"` form only in that it
+            # may span lines; both yield the same `string` token kind.
+            start_line = line
+            i, value, line = _lex_triple_string(source, i + 3, line, filename)
+            tokens.append(Token("string", value, start_line))
         elif c == '"':
             i, value = _lex_string(source, i + 1, line, filename)
             tokens.append(Token("string", value, line))
@@ -356,6 +363,42 @@ def _lex_string(source: str, i: int, line: int, filename: str):
         buf.append(c)
         i += 1
     raise RevlError(filename, line, "unterminated string literal")
+
+
+def _lex_triple_string(source: str, i: int, line: int, filename: str):
+    """Triple-quoted verbatim string `\"\"\" ... \"\"\"`.
+
+    The body is the *literal* characters between the delimiters, newlines and
+    all — there is no escape processing and no `${...}` interpolation, matching
+    the no-escape semantics of the single-`\"` form (`\"a\\nb\"` is a literal
+    backslash-`n`). Its one added power is that the body may span lines, so an
+    agent can author a multi-line `.rvl` literal without concatenation.
+
+    Only `\"\"\"` closes the string; a lone `\"` or `\"\"` inside the body is
+    ordinary text. A single newline immediately after the opening `\"\"\"` is
+    stripped, so a literal that opens on its own line does not begin with a
+    blank line (Python/Swift/Kotlin all do this). `\"\"\"\"\"\"` is the empty
+    string.
+
+    Returns (index-after-closing-delimiter, text, line).
+    """
+    n = len(source)
+    # Strip a single leading newline right after the opening delimiter.
+    if i < n and source[i] == "\n":
+        line += 1
+        i += 1
+    start_line = line
+    buf: list[str] = []
+    while i < n:
+        if source.startswith('"""', i):
+            return i + 3, "".join(buf), line
+        c = source[i]
+        if c == "\n":
+            line += 1
+        buf.append(c)
+        i += 1
+    raise RevlError(
+        filename, start_line, "unterminated triple-quoted string literal")
 
 
 def _lex_template(source: str, i: int, line: int, filename: str):
