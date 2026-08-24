@@ -124,11 +124,31 @@ def java_runtime_reason() -> str | None:
     missing JDK is a skip-with-reason, not a red run — the same shape the rust
     tier uses for a missing cargo/cordis-rs.
     """
-    if _working_jdk_bin() is None:
+    bin_dir = _working_jdk_bin()
+    if bin_dir is None:
         return ("no working JDK found (javac/java that respond to -version).\n"
                 "       install a JDK (>= 21), or point JAVA_HOME/JAVA21_HOME at one, then re-run.\n"
                 "       (macOS ships a javac shim that errors until a JDK is installed.)")
+    # the emitter lowers `match` to Java 21 pattern switches (FR-10 / item
+    # 77(e)), so the run driver compiles at --release 21. A JDK older than 21
+    # responds to -version yet cannot build the composition — that must be a
+    # skip-with-reason, not a red run (the frontend CI image used to carry one).
+    if not _accepts_release21(Path(bin_dir) / "javac"):
+        return ("the working JDK is older than 21 (the emitter's `match` lowers to\n"
+                "       Java 21 pattern switches — FR-10 / roadmap item 77(e)); install a JDK\n"
+                "       (>= 21), or point JAVA_HOME/JAVA21_HOME at one, then re-run.")
     return None
+
+
+def _accepts_release21(javac: Path) -> bool:
+    """``True`` when this javac accepts ``--release 21`` (a JDK >= 21)."""
+    try:
+        probe = subprocess.run(
+            [str(javac), "--release", "21", "-version"],
+            capture_output=True, text=True, timeout=30)
+        return probe.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _load_order(ir: dict) -> list[str]:
