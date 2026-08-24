@@ -410,15 +410,33 @@ package, never a prior truc.
   compile *is* an admission (a cold-start `compile_files` runs G2/G3/A6
   over the whole composition) — so every boot of truc is truc passing its
   own gate. No pre-built artifact, no snapshot to trust.
-- **Stage 1 (the fixpoint test).** truc's own source tree carries
-  `truc.toml` + `truc.lock` + `trucs/` describing *itself* (its pure
-  components published to the local registry; the rim with its externs is
-  the `[assembly].entry`). The dogfood exit test: run `truc assemble` on
-  truc's own project dir and assert the regenerated lock and vendor hashes
-  are byte-identical to the committed ones — regenerate-or-red, the same
-  discipline as `registry.verify` and the conformance baselines. CI runs
-  it; a truc change that breaks truc's ability to assemble truc is a red
-  build, not a discovery.
+- **Stage 1 (the fixpoint test) — as shipped (S5).** truc's own source tree
+  carries `bootstrap/truc.toml` describing *itself*: truc's eight components
+  are the `[assembly].entry`. The dogfood exit test
+  (`tests/test_truc_bootstrap.py`): run truc's assemble path on that project
+  and assert the regenerated composition is byte-identical to the committed
+  `bootstrap/assembly.golden.json` — regenerate-or-red, the same discipline as
+  `registry.verify` and the conformance baselines. CI runs it (the gate is
+  `compile_files`, frontend Python, so the check runs in `pytest tests/` with
+  no runtime and never skips); a truc change that breaks truc's ability to
+  assemble truc is a red build, not a discovery.
+
+  **Deviation from the sketch (honest note).** The sketch imagined truc's pure
+  components *published to the local registry and vendored under `trucs/`*. In
+  practice truc's components cross-import by relative `use` (`assembler.rvl`
+  imports the `Plan` service from `planner.rvl`; `workspace.rvl` imports
+  `../externs.rvl`), so they are not self-contained single-file registry
+  entries the way `registry/components/*/component.rvl` are — vendoring one per
+  `trucs/<name>/` dir would break those imports. The faithful expression is
+  therefore *entry*, not *trucs/*: truc's components are named as the project's
+  own `[assembly].entry`, in place, where their imports resolve. That is exactly
+  what a truc project is — `entry` is the composition you author, `trucs/` is
+  what you fetch — and truc authors truc. The gate, the incremental admit, and
+  the regenerate-or-red pin are all still exercised on truc's own component set;
+  only the vendoring dir is moot because truc fetches nothing to assemble
+  itself. Rewriting the eight into self-contained registry-entry form (inline
+  service redeclaration) so they could round-trip through `add`/`trucs/` is a
+  possible later polish, not a requirement of the fixpoint.
 - **No stage needs a running registry service** — the local registry is a
   directory (docs/registry.md §1), and stage 0 does not even need that.
 
@@ -547,10 +565,16 @@ The whole §8.1/§8.2 loop, local paths only, no publish, no alias.
 - Exit: ship a new component from a temp project; `registry.verify` stays
   green; re-shipping an existing name is refused (first-come).
 
-### Slice 5 — the bootstrap fixpoint (truc assembles truc)
-- **Creates:** truc's own `truc.toml`/`trucs/` self-description +
-  `tests/test_truc_bootstrap.py` (+ CI hook beside the registry-verify job).
-- Depends on slices 1 and 4 (truc's pure components must be shippable).
+### Slice 5 — the bootstrap fixpoint (truc assembles truc) ✅ landed
+- **Creates:** `src/revl/truc/bootstrap/truc.toml` (truc-as-a-truc-project, its
+  eight components as `[assembly].entry` — see the Stage-1 deviation note in §7),
+  `src/revl/truc/bootstrap/assembly.golden.json` (the pinned composition), and
+  `tests/test_truc_bootstrap.py`. No CI-file edit needed: the regenerate-or-red
+  gate is frontend Python (`compile_files` / `_host.admit_all`), so it runs in
+  the existing `pytest tests/` frontend job and never skips — the end-to-end
+  `truc assemble` CLI proof is an added bonus that runs where the cordis runtime
+  is present.
+- Depended on slices 1 and 4 (truc's assemble loop + rim/core/pure split).
 
 ### Slice 6 (later, unblocked by nothing above) — HTTP fetch arm, versioning
 - Gated on registry phase 2 (item 9); extern-body-only change by design.

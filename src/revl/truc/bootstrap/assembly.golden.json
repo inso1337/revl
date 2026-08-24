@@ -1,0 +1,87 @@
+{
+  "components": [
+    {
+      "name": "RegistryClient",
+      "file": "registry_client.rvl",
+      "inject": [],
+      "provides": [
+        "index"
+      ]
+    },
+    {
+      "name": "Fetcher",
+      "file": "fetcher.rvl",
+      "inject": [],
+      "provides": [
+        "fetch"
+      ]
+    },
+    {
+      "name": "GateKeeper",
+      "file": "gatekeeper.rvl",
+      "inject": [],
+      "provides": [
+        "gate"
+      ]
+    },
+    {
+      "name": "Workspace",
+      "file": "workspace.rvl",
+      "inject": [],
+      "provides": [
+        "ws"
+      ]
+    },
+    {
+      "name": "Planner",
+      "file": "planner.rvl",
+      "inject": [],
+      "provides": [
+        "plan"
+      ]
+    },
+    {
+      "name": "Assembler",
+      "file": "assembler.rvl",
+      "inject": [
+        "fetch",
+        "gate",
+        "index",
+        "plan",
+        "ws"
+      ],
+      "provides": [
+        "asm"
+      ]
+    },
+    {
+      "name": "Shipper",
+      "file": "shipper.rvl",
+      "inject": [],
+      "provides": [
+        "ship"
+      ]
+    },
+    {
+      "name": "CliDispatch",
+      "file": "cli.rvl",
+      "inject": [
+        "asm",
+        "ship"
+      ],
+      "provides": [
+        "cli"
+      ]
+    }
+  ],
+  "loadOrder": [
+    "RegistryClient",
+    "Fetcher",
+    "GateKeeper",
+    "Workspace",
+    "Planner",
+    "Shipper",
+    "Assembler",
+    "CliDispatch"
+  ]
+}
