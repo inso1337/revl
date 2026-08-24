@@ -1564,6 +1564,16 @@ def _emit_spawn_support(ir, out):
     out.append("func (h *RevlSpawnHandle) Ctx() *stc.Context {")
     out.append("\th.mu.Lock()")
     out.append("\tdefer h.mu.Unlock()")
+    out.append("\t// the instance's provision lives in the FIBER's live context (set at")
+    out.append("\t// async load, replaced on inertial reload), not the pre-load child ctx")
+    out.append("\t// the handle was constructed with — resolve through the fiber so the")
+    out.append("\t// accessor reads the instance's own realm, exactly like the py")
+    out.append("\t// reference's SpawnHandle.get (docs/design-v2-instances.md).")
+    out.append("\tif h.fiber != nil {")
+    out.append("\t\tif c := h.fiber.Context(); c != nil {")
+    out.append("\t\t\treturn c")
+    out.append("\t\t}")
+    out.append("\t}")
     out.append("\treturn h.ctx")
     out.append("}")
     out.append("")
@@ -1595,6 +1605,14 @@ def _emit_spawn_support(ir, out):
             out.append("\tfiber := child.Load(%s(cfg))" % cname)
         else:
             out.append("\tfiber := child.Load(%s())" % cname)
+        out.append("\t// stc-go loads asynchronously: the instance is 'live' (its provisions")
+        out.append("\t// resolvable) only once its fiber is Active. Wait for that here so the")
+        out.append("\t// handle the spawner binds is a live instance — the accessor's")
+        out.append("\t// s.<key>.method() reads through it without racing the async load")
+        out.append("\t// (matches the reference tier's synchronous spawn semantics).")
+        out.append("\tif err := fiber.Ready(stdctx.Background()); err != nil {")
+        out.append("\t\tpanic(\"revl: spawned instance \" + %s + \" failed to activate: \" + err.Error())" % _go_string(name))
+        out.append("\t}")
         out.append("\treturn newRevlSpawnHandle(fiber, child)")
         out.append("}")
         out.append("")
@@ -3376,6 +3394,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
     has_lifecycle = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    # a `spawn` needs the stdctx import too: revlSpawn* waits for the child
+    # fiber to be Active before returning the handle (see _emit_spawn_support).
+    has_spawn = _spawn_targets(ir) and any(
+        comp.get("body") or comp.get("provides") for comp in ir.get("components", []))
     if has_lifecycle and not ir.get("components"):
         raise EmitError(
             "a lifecycle test drives components over a live stc-go runtime, "
@@ -3417,8 +3439,9 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("import (")
     out.append('\t"fmt"')
     out.append('\t"sync"')
-    if has_lifecycle:
+    if has_lifecycle or has_spawn:
         out.append('\tstdctx "context"')
+    if has_lifecycle:
         out.append('\t"reflect"')
         out.append('\t"testing"')
         out.append('\t"time"')
