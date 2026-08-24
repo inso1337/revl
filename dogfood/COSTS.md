@@ -36,3 +36,16 @@ semantics should have been caught at review (the PR that merged it had a red
 go CI job); (2) the Map value type is not in the IR — both emitters re-derive
 it (carry it from the checker into the IR); (3) the pre-commit hook's 60s
 claim vs the real ~100s suite — raise the budget or gate it per-suite.
+
+| run | task | outcome | cost notes |
+|---|---|---|---|
+| harness-m2 | real HTTP provider + JSON protocol (milestone 2) | landed 4d6750b | extern-dedent emitter bug (item 78) — the session's longest single stall; fixed upstream |
+| harness-m3 | durable sessions + subagents (milestone 3) | landed 805ce91 | spawn-emit frontend crash (item 82) — worked around by moving `emission` one level up |
+| harness-m4 | fs tools + audit-diff approval gate (milestone 4) | landed cf7242b | the gate refused fs_exfil by design — zero cost, the feature working |
+| harness-m5 | web GUI shell (milestone 5) | landed bd7d5c7 | no new findings; G6 ternary pattern fully automatic by now |
+| harness-m6 | self-hosting admission + multi-session (milestone 6) | landed ad4403a | host-Map keys compile-but-crash (item 84); escape-sequence test source (item 85) |
+| harness-m7 | self-evolution (milestone 7) | landed 1664b36 | extern/session module-boundary (docs note) |
+| harness-m8 | self-hosting through the web shell (milestone 8) | landed 9444e0e | no new findings |
+| harness-m9 | real-model self-evolution (milestone 9) | landed d0943eb | evolver once() had to decode the JSON wire reply — a harness design fix, not a revl gap |
+| harness-m10 | multi-session web UI (milestone 10) | landed f1c9b62 | run_in(session,prompt); default-vs-named session coherence in tests |
+| harness-mtier | multi-tier proof (string protocol) | landed 41efe81 | rust declared fn types (item 89) — the last loop-shape tier gap |
