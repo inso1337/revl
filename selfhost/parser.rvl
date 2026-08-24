@@ -23,9 +23,9 @@ use "./lexer.rvl" { Token, lex_src }
 
 type BinN     = { op: Str, l: Expr, r: Expr, paren: Bool }
 type UnN      = { op: Str, e: Expr }
-type CallN    = { target: Expr, args: List[Expr] }
-type OptCallN = { target: Expr, name: Str, args: List[Expr] }
-type FieldN   = { target: Expr, name: Str }
+pub type CallN    = { target: Expr, args: List[Expr] }
+pub type OptCallN = { target: Expr, name: Str, args: List[Expr] }
+pub type FieldN   = { target: Expr, name: Str }
 type IndexN   = { target: Expr, idx: Expr }
 type IfN      = { cond: Expr, then_: Expr, els: Expr }
 pub type InitN = { name: Str, value: Expr }
