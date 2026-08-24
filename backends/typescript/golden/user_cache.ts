@@ -4,7 +4,7 @@ import type { Context } from 'cordis'
 import { host } from '../runtime.ts'
 
 export interface Database {
-  query(sql: string): Row[]
+  query(sql: string): unknown[]
   /** emission — crosses the system boundary (DESIGN.md §3.5) */
   execute(sql: string): bigint
 }
