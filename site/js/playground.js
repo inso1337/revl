@@ -6,6 +6,7 @@ import { EXAMPLES } from "./examples.js";
 import { highlightRevl } from "./revl-lang.js";
 
 const WHEEL = "vendor/revl-2.0.0-py3-none-any.whl";
+const CORDIS_WHEEL = "vendor/cordis-4.0.0-py3-none-any.whl";
 
 // The in-process driver — the same functions the CLI calls.
 const DRIVER = String.raw`
@@ -50,7 +51,181 @@ def run_playground(source):
     return json.dumps(out)
 `;
 
+// The LIVE driver — the real cordis-py runtime under Pyodide, driven through
+// revl.mcp.session.Session (the same machinery `revl mcp serve` uses).
+// Session's sync verbs block on a private loop via run_until_complete, which
+// Pyodide's WebLoop cannot block on — but with JSPI available, run_sync gives
+// exactly that blocking, so one patch makes the whole session API work.
+const LIVE_DRIVER = String.raw`
+import json, sys, types
+
+# cordis.hmr imports watchdog at module-import time; a browser has no
+# filesystem watcher and live mode never uses HMR — give it an inert stand-in.
+if "watchdog" not in sys.modules:
+    _wd = types.ModuleType("watchdog")
+    _ev = types.ModuleType("watchdog.events")
+    _ev.FileSystemEventHandler = object
+    _ob = types.ModuleType("watchdog.observers")
+    class _NoopObserver:
+        def schedule(self, *a, **k): pass
+        def start(self): pass
+        def stop(self): pass
+        def join(self, *a, **k): pass
+    _ob.Observer = _NoopObserver
+    _wd.events = _ev
+    _wd.observers = _ob
+    sys.modules["watchdog"] = _wd
+    sys.modules["watchdog.events"] = _ev
+    sys.modules["watchdog.observers"] = _ob
+
+from pyodide.ffi import can_run_sync, run_sync
+from revl.compiler import compile_source
+from revl.diagnostics import report
+from revl.errors import RevlError
+from revl.mcp import session as _sess
+
+LIVE_OK = can_run_sync()
+if LIVE_OK:
+    _sess.Session._run = lambda self, coro: run_sync(coro)
+
+_LIVE = {"s": None}
+
+
+def _graph(ir):
+    return [
+        {"name": c["name"],
+         "requires": sorted((c.get("requires") or {}).keys()),
+         "provides": sorted((c.get("provides") or {}).keys())}
+        for c in (ir.get("components") or [])
+    ]
+
+
+def _ops(ir, provided):
+    services = ir.get("services") or {}
+    out, seen = [], set()
+    for c in ir.get("components") or []:
+        for key, svc in sorted((c.get("provides") or {}).items()):
+            if key not in provided or key in seen:
+                continue
+            seen.add(key)
+            methods = services.get(svc, {}).get("methods", {})
+            out.append({"key": key, "service": svc, "methods": [
+                {"name": name,
+                 "params": [p.get("name") for p in (spec.get("params") or [])],
+                 "emission": bool(spec.get("emission"))}
+                for name, spec in methods.items()]})
+    return out
+
+
+def _snapshot(trace=None, extra=None):
+    s = _LIVE["s"]
+    st = s.state()
+    ir = s.ir or {}
+    out = {"ok": True, "live": True, "state": st, "graph": _graph(ir),
+           "ops": _ops(ir, set(st.get("providedKeys") or [])),
+           "trace": trace or []}
+    if extra:
+        out.update(extra)
+    return json.dumps(out, default=str)
+
+
+def _fail(exc):
+    if isinstance(exc, RevlError):
+        return json.dumps({"ok": False, "refused": True,
+                           "diagnostics": report(exc)["diagnostics"]})
+    return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+_PLACEHOLDER = {"Str": "demo", "Int": 1, "Float": 1.0, "Bool": False}
+
+
+def _demo_config(ir):
+    """Fill config fields that have no default with typed placeholders, so any
+    example boots; each fill is reported in the trace rather than hidden."""
+    cfg, notes = {}, []
+    for c in ir.get("components") or []:
+        for field in c.get("config") or []:
+            if field.get("default") is None and field["type"] in _PLACEHOLDER:
+                value = _PLACEHOLDER[field["type"]]
+                cfg.setdefault(c["name"], {})[field["name"]] = value
+                notes.append({"channel": "config", "subject": f"{c['name']}.{field['name']}",
+                              "detail": f"no default — filled with placeholder {value!r} for the live demo"})
+    return cfg, notes
+
+
+def live_boot(source):
+    try:
+        ir = compile_source(source, "live.rvl")
+    except Exception as exc:
+        return _fail(exc)
+    old = _LIVE["s"]
+    if old is not None and old.loaded:
+        try:
+            old.unload()
+        except Exception:
+            pass
+    s = _sess.Session()
+    _LIVE["s"] = s
+    cfg, notes = _demo_config(ir)
+    try:
+        loaded = s.load(ir, config=cfg or None)
+    except Exception as exc:
+        _LIVE["s"] = None
+        return _fail(exc)
+    return _snapshot(trace=notes + (loaded.get("trace") or []))
+
+
+def live_call(key, method, args_json):
+    s = _LIVE["s"]
+    if s is None or not s.loaded:
+        return json.dumps({"ok": False, "error": "nothing is live — press Boot first"})
+    try:
+        args = json.loads(args_json) if args_json.strip() else []
+        if not isinstance(args, list):
+            args = [args]
+        res = s.call(key, method, args)
+    except Exception as exc:
+        return _fail(exc)
+    return _snapshot(trace=res.get("trace") or [],
+                     extra={"result": res.get("result"),
+                            "called": f"{key}.{method}"})
+
+
+def live_swap(source):
+    s = _LIVE["s"]
+    if s is None or not s.loaded:
+        return json.dumps({"ok": False, "error": "nothing is live — press Boot first"})
+    replacing = tuple(c["name"] for c in (s.ir or {}).get("components") or [])
+    try:
+        # admission against the RUNNING manifest — the same gate revl_swap runs;
+        # a refused candidate changes nothing
+        ir = compile_source(source, "candidate.rvl", manifest=s.ir,
+                            replacing=replacing)
+        swapped = s.swap(ir)
+    except Exception as exc:
+        return _fail(exc)
+    return _snapshot(trace=swapped.get("trace") or [],
+                     extra={"swapped": True,
+                            "handoff": swapped.get("handoff")})
+
+
+def live_unload():
+    s = _LIVE["s"]
+    if s is None or not s.loaded:
+        return json.dumps({"ok": False, "error": "nothing is live"})
+    try:
+        un = s.unload()
+    except Exception as exc:
+        return _fail(exc)
+    _LIVE["s"] = None
+    return json.dumps({"ok": True, "live": False, "unloaded": un}, default=str)
+
+json.dumps({"live_ok": LIVE_OK})
+`;
+
 let runFn = null;
+let pyodideRef = null;
+let liveOk = false;
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
@@ -109,15 +284,32 @@ async function boot() {
   try {
     setMsg("Loading the Pyodide runtime…");
     const pyodide = await loadPyodide();
+    window.__pyodide = pyodide; // reachable for the live-mode driver + debugging
     setMsg("Installing the revl compiler…");
     await pyodide.loadPackage("micropip");
     const micropip = pyodide.pyimport("micropip");
     await micropip.install(new URL(WHEEL, window.location.href).href);
+    await micropip.install(new URL(CORDIS_WHEEL, window.location.href).href);
     setMsg("Wiring up…");
     pyodide.runPython(DRIVER);
     runFn = pyodide.globals.get("run_playground");
+    pyodideRef = pyodide;
+    setMsg("Waking the runtime (live mode)…");
+    try {
+      await pyodide.loadPackage("pyyaml"); // cordis imports yaml unconditionally
+      const liveInfo = JSON.parse(await pyodide.runPythonAsync(LIVE_DRIVER));
+      liveOk = !!liveInfo.live_ok;
+    } catch (err) {
+      console.warn("live mode unavailable:", err);
+      liveOk = false;
+    }
     $("overlay").classList.add("hidden");
     $("run").disabled = false;
+    if (liveOk) {
+      $("boot").disabled = false;
+    } else {
+      $("boot").title = "live mode needs a JSPI-capable browser (recent Chrome or Edge)";
+    }
   } catch (err) {
     setMsg("Failed to load: " + err);
     console.error(err);
@@ -406,5 +598,218 @@ document.querySelectorAll(".pg-tab").forEach((t) =>
   t.addEventListener("click", () => selectTab(t.dataset.panel)));
 
 $("run").addEventListener("click", runCurrent);
+
+/* ---------- live mode ------------------------------------------------------ */
+
+const sysPanel = $("sys-panel");
+const sysGraph = $("sys-graph");
+const sysOps = $("sys-ops");
+const sysTrace = $("sys-trace");
+const sysLabel = $("sys-label");
+
+async function runLive(expr, args) {
+  for (const [k, v] of Object.entries(args || {})) pyodideRef.globals.set(k, v);
+  const json = await pyodideRef.runPythonAsync(expr);
+  return JSON.parse(json);
+}
+
+function traceLine(html) {
+  const at = new Date().toLocaleTimeString([], { hour12: false });
+  sysTrace.insertAdjacentHTML("beforeend",
+    `<span class="tr-at">${at}</span> ${html}\n`);
+  sysTrace.parentElement.scrollTop = sysTrace.parentElement.scrollHeight;
+}
+
+const TR_COLORS = { fiber: "tr-fiber", host: "tr-host", load: "tr-load",
+                    unload: "tr-load", emission: "tr-emit", divert: "tr-emit",
+                    config: "tr-config" };
+
+function traceEvents(events) {
+  for (const e of events || []) {
+    const cls = TR_COLORS[e.channel] || "tr-dim";
+    traceLine(`<span class="${cls}">${esc(e.channel)}</span> ` +
+      `<span class="tr-subject">${esc(e.subject || "")}</span>` +
+      (e.detail ? ` <span class="tr-dim">— ${esc(e.detail)}</span>` : ""));
+  }
+}
+
+/* graph: layered by dependency depth, wires provider → consumer */
+function renderGraph(graph, states) {
+  const stateOf = {};
+  (states || []).forEach((c) => (stateOf[c.name] = c.state));
+  const providerOf = {};
+  graph.forEach((c) => c.provides.forEach((k) => (providerOf[k] = c.name)));
+  const byName = {};
+  graph.forEach((c) => (byName[c.name] = c));
+  const depth = {};
+  const depthOf = (name, seen) => {
+    if (depth[name] !== undefined) return depth[name];
+    if (seen.has(name)) return 0;
+    seen.add(name);
+    const c = byName[name];
+    const deps = (c.requires || []).map((k) => providerOf[k]).filter((p) => p && byName[p]);
+    depth[name] = deps.length ? Math.max(...deps.map((p) => depthOf(p, seen))) + 1 : 0;
+    return depth[name];
+  };
+  graph.forEach((c) => depthOf(c.name, new Set()));
+
+  const COLW = 200, ROWH = 84, NODEW = 168, NODEH = 62, PAD = 14;
+  const cols = {};
+  graph.forEach((c) => { (cols[depth[c.name]] ||= []).push(c); });
+  const nCols = Object.keys(cols).length;
+  const maxRows = Math.max(...Object.values(cols).map((l) => l.length));
+  const width = Math.max(nCols * COLW, 320);
+  const height = Math.max(maxRows * ROWH + PAD, 120);
+
+  const pos = {};
+  for (const [d, list] of Object.entries(cols)) {
+    const offset = (height - list.length * ROWH) / 2;
+    list.forEach((c, i) => {
+      pos[c.name] = { x: Number(d) * COLW + PAD, y: offset + i * ROWH + PAD / 2 };
+    });
+  }
+
+  let wires = "";
+  graph.forEach((c) => {
+    (c.requires || []).forEach((k) => {
+      const p = providerOf[k];
+      if (!p || !pos[p] || !pos[c.name]) return;
+      // consumer sits deeper than its provider: draw provider → consumer
+      const a = pos[p], b = pos[c.name];
+      const x1 = a.x + NODEW, y1 = a.y + NODEH / 2;
+      const x2 = b.x, y2 = b.y + NODEH / 2;
+      const mx = (x1 + x2) / 2;
+      wires += `<path d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" />`;
+    });
+  });
+
+  let nodes = "";
+  graph.forEach((c) => {
+    const st = stateOf[c.name] || "…";
+    const live = st === "ACTIVE";
+    const p = pos[c.name];
+    nodes += `<div class="node ${live ? "live" : "dimmed"}"
+      style="left:${p.x}px; top:${p.y}px; width:${NODEW}px">
+      <div class="nname">${esc(c.name)}</div>
+      <div class="nrole">${
+        c.requires.length ? "requires " + c.requires.map(esc).join(", ") : "no requires"
+      }${c.provides.length ? " · provides " + c.provides.map(esc).join(", ") : ""}</div>
+      <span class="npill">${esc(st.toLowerCase())}</span></div>`;
+  });
+
+  sysGraph.innerHTML =
+    `<div class="sys-canvas" style="width:${width + NODEW - COLW + PAD * 2}px; height:${height + PAD}px">
+       <svg class="wires" width="100%" height="100%">${wires}</svg>${nodes}</div>`;
+}
+
+function renderOps(ops) {
+  let html = "";
+  for (const op of ops || []) {
+    const options = op.methods.map((m) =>
+      `<option value="${esc(m.name)}">${esc(m.name)}(${m.params.join(", ")})${m.emission ? " ⚡" : ""}</option>`
+    ).join("");
+    html += `<div class="op-row" data-key="${esc(op.key)}">
+      <code class="op-key">${esc(op.key)}.</code>
+      <select class="op-method" aria-label="method on ${esc(op.key)}">${options}</select>
+      <input class="op-args" placeholder='args — e.g. "ada", 1' spellcheck="false" />
+      <button class="btn btn-ghost btn-sm op-call">Call</button></div>`;
+  }
+  sysOps.innerHTML = html;
+  sysOps.querySelectorAll(".op-row").forEach((row) => {
+    const fire = () => callOp(row);
+    row.querySelector(".op-call").addEventListener("click", fire);
+    row.querySelector(".op-args").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") fire();
+    });
+  });
+}
+
+async function callOp(row) {
+  const key = row.dataset.key;
+  const method = row.querySelector(".op-method").value;
+  const raw = row.querySelector(".op-args").value.trim();
+  let argsJson = "[]";
+  if (raw) {
+    try { argsJson = JSON.stringify(JSON.parse(`[${raw}]`)); }
+    catch { traceLine(`<span class="tr-err">args must be JSON values, e.g. "ada", 1</span>`); return; }
+  }
+  try {
+    const r = await runLive("live_call(LIVE_KEY, LIVE_METHOD, LIVE_ARGS)",
+      { LIVE_KEY: key, LIVE_METHOD: method, LIVE_ARGS: argsJson });
+    if (!r.ok) { liveFailure(r, `call ${key}.${method}`); return; }
+    traceEvents(r.trace);
+    traceLine(`<span class="tr-call">→ ${esc(key)}.${esc(method)}(${esc(raw)})</span> ` +
+      `<span class="tr-result">= ${esc(JSON.stringify(r.result))}</span>`);
+    renderSystem(r);
+  } catch (err) { traceLine(`<span class="tr-err">${esc(String(err))}</span>`); }
+}
+
+function renderSystem(snap) {
+  const st = snap.state || {};
+  sysPanel.hidden = false;
+  sysLabel.textContent = `live · generation ${st.generation ?? "?"}`;
+  renderGraph(snap.graph || [], st.components || []);
+  renderOps(snap.ops || []);
+  const active = (st.components || []).filter((c) => c.state === "ACTIVE").length;
+  $("status").innerHTML =
+    `<span class="verdict good">LIVE</span>` +
+    `<span>generation ${st.generation} — ${active} component${active === 1 ? "" : "s"} active, ` +
+    `running in this tab on cordis-py</span>`;
+}
+
+function liveFailure(r, what) {
+  if (r.diagnostics) {
+    render({ ok: false, diagnostics: r.diagnostics });
+    traceLine(`<span class="tr-err">✗ ${esc(what)} REFUSED — ` +
+      `${esc((r.diagnostics[0] || {}).code || "")} (running system untouched; see Diagnostics)</span>`);
+  } else {
+    traceLine(`<span class="tr-err">✗ ${esc(what)}: ${esc(r.error || "failed")}</span>`);
+  }
+}
+
+$("boot").addEventListener("click", async () => {
+  if (!liveOk) return;
+  $("boot").disabled = true;
+  try {
+    const r = await runLive("live_boot(LIVE_SRC)", { LIVE_SRC: editor.value });
+    if (!r.ok) { liveFailure(r, "boot"); return; }
+    sysTrace.innerHTML = "";
+    traceLine(`<span class="tr-load">▶ booted</span> <span class="tr-dim">— admitted through the gate, activated on cordis-py</span>`);
+    traceEvents(r.trace);
+    renderSystem(r);
+  } finally { $("boot").disabled = false; }
+});
+
+$("sys-swap").addEventListener("click", async () => {
+  try {
+    const r = await runLive("live_swap(LIVE_SRC)", { LIVE_SRC: editor.value });
+    if (!r.ok) { liveFailure(r, "swap"); return; }
+    traceEvents(r.trace);
+    traceLine(`<span class="tr-swap">⇄ hot-swapped</span> <span class="tr-dim">— ` +
+      `editor code re-admitted against the running system` +
+      `${r.handoff ? "; state crossed via handoff" : ""}</span>`);
+    renderSystem(r);
+  } catch (err) { traceLine(`<span class="tr-err">${esc(String(err))}</span>`); }
+});
+
+$("sys-unload").addEventListener("click", async () => {
+  try {
+    const r = await runLive("live_unload()", {});
+    if (!r.ok) { liveFailure(r, "unload"); return; }
+    const un = r.unloaded || {};
+    traceEvents(un.trace);
+    const checks = un.checks || {};
+    const proof = Object.entries(checks).map(([k, v]) => `${k} ${v ? "✓" : "✗"}`).join(" · ");
+    traceLine(un.noResidue
+      ? `<span class="tr-ok">■ unloaded — ✓ no residue (${proof})</span>`
+      : `<span class="tr-err">■ unloaded — residue detected! (${proof})</span>`);
+    sysGraph.innerHTML = "";
+    sysOps.innerHTML = "";
+    sysLabel.textContent = "unloaded — no residue proven";
+    $("status").innerHTML = un.noResidue
+      ? `<span class="verdict good">NO RESIDUE</span><span>teardown replayed every effect backwards — the proof is checked, not asserted</span>`
+      : `<span class="verdict bad">RESIDUE</span><span>teardown left state behind — see the trace</span>`;
+  } catch (err) { traceLine(`<span class="tr-err">${esc(String(err))}</span>`); }
+});
 
 boot();

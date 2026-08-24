@@ -33,11 +33,33 @@ External fetches: Pyodide from its CDN (cached after first load) and Google
 Fonts. Nothing typed into the playground leaves the page — the compiler runs
 client-side.
 
+## Live mode
+
+The playground is not compile-only: **▶ Boot** activates the composition in
+the browser on the real cordis-py runtime, driven through
+`revl.mcp.session.Session` — the same machinery `revl mcp serve` uses. The
+system graph, per-key operation invokers and the lifecycle trace render live;
+**⇄ Swap** re-admits the editor's code against the running manifest (state
+crosses where a `handoff` is declared, drift is refused), and **■ Unload**
+replays teardown and shows the checked no-residue verdict.
+
+Mechanics: `Session`'s sync verbs block on a private asyncio loop, which
+Pyodide's WebLoop cannot do — live mode patches `Session._run` to
+`pyodide.ffi.run_sync`, which needs JSPI (recent Chrome/Edge; the Boot button
+disables itself elsewhere). cordis-py ships as its own wheel
+(`vendor/cordis-*.whl`, built from the `backends/python/setup.sh` clone at the
+tested pin), and `cordis.hmr`'s watchdog import gets an inert browser shim.
+Components whose `config` fields have no default are booted with typed
+placeholders, each one reported in the trace.
+
 ## Regenerating the bundled assets
 
 ```
-python3 site/build.py     # wheel (via playground/build_wheel.py) + examples.js
+python3 site/build.py     # revl + cordis wheels, examples.js
 ```
+
+The cordis wheel needs the `backends/python/setup.sh` clone (or `CORDIS_PY`
+pointing at one).
 
 Only run this when `src/revl/` or the example set changes. The site touches
 nothing under `src/revl/`.

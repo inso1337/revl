@@ -1,0 +1,36 @@
+// LIVE DEMO — this one is meant to be *run*, not just checked.
+//
+//   1. press ▶ Boot — the composition activates in your browser, on the real
+//      cordis-py runtime; the system graph lights up
+//   2. call counter.incr() a few times, then counter.count()
+//   3. now EDIT this file — change "+1" to "+2", or make label() shout —
+//      and press ⇄ Swap: the gate re-admits your edit against the RUNNING
+//      system, and because Counter declares a `handoff`, the count SURVIVES
+//      the hot-swap (generation bumps, state stays)
+//   4. press ■ Unload — teardown replays every effect backwards, and the
+//      no-residue verdict is checked, not asserted
+//
+// Break it on purpose: rename `count` to `total` and press Swap — the gate
+// refuses the drift and the running system is untouched.
+
+service Tally {
+  fn count() -> Int
+  fn label() -> Str
+  fn incr() -> Int
+}
+
+component Counter provides counter: Tally {
+  handoff counter: Map[Str, Str]         // state crosses the swap, checked
+  let store = effect Map.new() undo store.drop()
+
+  provide counter {
+    fn count() = store.size()
+    fn label() = `counted ${store.size()}`
+    fn incr() {
+      let k = `n-${store.size()}`
+      effect store.insert(k, "+1")
+      undo   store.remove(k)
+      return store.size()
+    }
+  }
+}
