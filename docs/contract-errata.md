@@ -356,7 +356,8 @@ Arrow bodies are now checked against their enclosing scope, which is where the
 first four used to hide. Do not re-fence any of these; each has an executable
 rejection.
 
-- **Host-object results are untyped** (by design, host provenance — *narrowed*):
+- **Host-object results are untyped** (by design, host provenance — *closed as
+  of roadmap 75(b)*):
   the method *names, arities, and argument types* on a constructor-tracked
   receiver are now checked: `Map.new()` infers the family, and a method call on
   it is validated against the stub surface spelled in `_HOST_ARG_SIG`
@@ -364,13 +365,25 @@ rejection.
   dynamic dispatch and crash at host runtime, is now a compile error
   (`HOST-METHOD`). What stays opaque is the *result*: no table entry claims to
   know what a stub returns, so a value flowing out of `store.get(k)` carries no
-  type and is unchecked wherever it goes. Receivers whose provenance no
-  constructor pins (an extern's return) type unknown; the lowerer refuses
-  non-stdlib method *names* on them, but a stdlib-named method on such a
-  receiver lowers as that builtin and is wrong at runtime — that residual
-  sliver, plus host-object results, is the remaining fence. Still the
-  deliberate G8 trust boundary: host objects are on the audit surface, not the
-  checked surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are
+  type and is unchecked wherever it goes — **but it can no longer call a method
+  on the way out**. Receivers whose provenance no constructor pins (an extern's
+  return, a host-object result, a type parameter) type unknown; every method
+  call on them is now refused, stdlib-named or not (`t24_opaque_receiver_builtin.rvl`;
+  the stdlib-named-method sliver — `pool.remove("k")` lowering as the Map
+  `remove` builtin — is closed with the same HOST-METHOD diagnostic), so a
+  value cannot lower *through* the builtin table into a misdispatch. Only a
+  receiver the checker can *prove* is a Str/List/Int/Int32/Bytes/Map value
+  takes the table; an annotation (`let v: Str = store.get(k)`) is how a host
+  result becomes provable. The fence is now exactly "host-object **results**
+  are on the audit surface" — the G8 line as designed, with no accidental hole
+  through the builtin table. Tooling half of the same closure: the stdlib
+  method table and the host-verb surface are checked disjoint at *table-edit*
+  time — a module-load assertion in `typecheck.py`/`lower.py` fails with the
+  colliding name if either table is extended with a name from the other
+  (`remove` is the one sanctioned overlap, safe because dispatch is by
+  receiver kind; dogfood/findings-mapiter.md §2). Still the deliberate G8
+  trust boundary: host objects are on the audit surface, not the checked
+  surface. Stratum-1 stdlib methods on `Str` / `List` / `Bytes` are
   typed and their misuse is refused, in `fn` bodies and (as of the setup op
   sweep) in component effect blocks alike.
 
@@ -395,12 +408,16 @@ rejection.
   name, a strict superset of the implicit single-uppercase heuristic
   (docs/generics.md). What remains open:
 
-  (a) the implicit rule is still positional-by-spelling and still on — a
-  one-letter signature type is generic whether or not the author meant it, so a
-  typo'd one-letter name becomes a type parameter rather than an error. The
-  explicit `[T]` list lets an author say what they mean; it does not let them
-  turn the heuristic off. (b) Parameters cannot be bounded, or shared across
-  signatures. (c) Only `fn` and `extern` quantify — service `provide`-methods
+  (a) ~~the implicit rule is still positional-by-spelling and still on~~ —
+  **CLOSED as of roadmap 75(c)**: a signature that carries an explicit `[T]`
+  list turns the implicit heuristic OFF for that signature — declared means
+  declared, and a stray one-letter name is an ordinary undeclared (opaque
+  nominal) type that errors where it is used instead of silently quantifying
+  (`t25_explicit_tparam_heuristic_off.rvl`; the interaction is pinned in
+  docs/generics.md). (b) Parameters cannot be bounded, or shared across
+  signatures — **bounds (`[T: Ord]`) stay deferred**: no consumer demands them
+  yet, and the decision (not the machinery) is pinned in docs/generics.md.
+  (c) Only `fn` and `extern` quantify — service `provide`-methods
   are checked through a separate path and are not in the shared signature
   table, so they take no list, and a one-letter name in a record field or an
   ADT payload is an ordinary opaque nominal type, like any other undeclared
