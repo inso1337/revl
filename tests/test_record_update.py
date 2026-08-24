@@ -169,3 +169,31 @@ def test_block_arm_var_refused_at_parse():
                        "{ return match a { _ => { var d = 2  d } } }\n")
     assert "`var`" in str(excinfo.value)
 
+
+
+# --- the errata fence: updates on anonymously-typed receivers are unchecked.
+# Pinned so the fence in docs/contract-errata.md cannot rot silently, and so
+# whoever closes the structural-records design item flips these to refusals.
+
+
+def test_update_on_anonymous_let_receiver_is_unchecked_for_now():
+    src = '''type C = { h: Str }
+fn main() -> Int {
+  let a = { h: "x" }
+  let b = { a | h = 5 }
+  assert b.h == 5
+  return 0
+}
+'''
+    compile_source(src)  # accepted TODAY; refusal is the design item's exit test
+
+
+def test_update_through_a_declared_boundary_is_checked():
+    src = '''type C = { h: Str }
+fn bump(c: C) -> C {
+  return { c | h = 5 }
+}
+'''
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src)
+    assert "expects `Str`, got `Int`" in str(excinfo.value)

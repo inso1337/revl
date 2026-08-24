@@ -21,6 +21,7 @@ use revl_scenarios::Probe;
 use revl_scenarios::{boundary, fails_after, kv_consumer, kv_provider, realm_store_t, two_steps};
 use revl_scenarios::{realm_kv_consumer_t, Kv, _revl_isolate_ctx, _revl_realm};
 use revl_scenarios::{supervisor, Counter, Ctl};
+use revl_scenarios::{reader, Reading};
 use std::sync::{Arc, Mutex};
 
 struct Recorder {
@@ -325,4 +326,51 @@ fn spawn_instances_coexist_dispose_is_scoped_and_lifo() {
         ["d2", "d1:b"],
         "only worker B is reclaimed at supervisor teardown (A already gone): {after_dispose:?}"
     );
+}
+
+#[test]
+fn instance_accessor_reads_the_spawned_instances_own_provision() {
+    // The instance accessor `s.<key>` on the REAL cordis-rs runtime
+    // (docs/design-v2-instances.md, "Instance accessor — frozen"). `Reader`
+    // spawns two `Cell` instances — one with id 1, one with id 2 — each
+    // providing `counter` in its OWN fresh local realm, and its `read_a` /
+    // `read_b` read those provisions back through the two spawn handles it
+    // alone holds. This proves the DoD by RUNNING:
+    //   1. positive: `s.<key>.method(..)` returns THAT instance's provision —
+    //      read_a resolves cell A's realm (id 1), read_b resolves cell B's
+    //      (id 2); a read that reached a sibling would return the wrong id;
+    //   2. negative: the root — a stand-in for any sibling or outside party —
+    //      cannot resolve `counter`, so each provision stayed private to its
+    //      instance's local realm (supervision-tree addressing).
+    let root = cordis::Context::new();
+    let reader = root.plugin(reader(), ());
+    reader.wait().unwrap();
+
+    let reading = root
+        .get_unchecked::<Box<dyn Reading>>("reading")
+        .unwrap()
+        .expect("Reader provides `reading` in the shared realm");
+
+    // (1) positive: each handle reaches its OWN instance's provision, and no
+    // other's — the distinct ids prove the reads did not cross instances.
+    assert_eq!(
+        reading.read_a(),
+        1,
+        "`a.counter.value()` must return cell A's own provision (id 1)"
+    );
+    assert_eq!(
+        reading.read_b(),
+        2,
+        "`b.counter.value()` must return cell B's own provision (id 2)"
+    );
+
+    // (2) negative: neither instance's `counter` escaped to the root realm, so
+    // the accessor cannot be a back-door to a sibling's or the root's view.
+    assert!(
+        root.get_unchecked::<Box<dyn Counter>>("counter")
+            .unwrap()
+            .is_none(),
+        "an instance's provision must stay private to its local realm (only the handle holder reaches it)"
+    );
+    assert_eq!(reader.state(), cordis::FiberState::Active);
 }

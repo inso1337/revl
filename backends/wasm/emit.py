@@ -174,6 +174,11 @@ class _ComponentEmitter:
         # instance-parametric imports minted while lowering (rendered in _module)
         self.config_imports: dict[str, str] = {}   # field -> result wasm type
         self.spawn_imports: dict[str, list[str]] = {}  # template -> param wtys
+        # (component, key, op) -> (param wasm types, result wasm type or None):
+        # the instance-accessor ABI — reading a provision back through a spawn
+        # handle. Each resolves `key` in THAT instance's realm (B3), the private
+        # local realm the matching `spawn` isolated the key into.
+        self.instance_imports: dict[tuple[str, str, str], tuple[list[str | None], str | None]] = {}
         self.uses_dispose = False
         self.requires = component.get("requires") or {}
         self.provides = component.get("provides") or {}
@@ -342,6 +347,15 @@ class _ComponentEmitter:
             raise EmitError(f"{where}: a required service is only usable as a call target")
         if kind == "spawn":
             return self._lower_spawn(node, scope, types, where)
+        if kind == "instance-get":
+            # `s.<key>` in a value position (not `s.<key>.method(..)`) would be a
+            # bare *service* value; a service is not a scalar this tier can carry
+            # in a local — only the call form `s.<key>.method(..)` lowers, which
+            # is intercepted at the enclosing `call` node.
+            raise EmitError(
+                f"{where}: a spawn handle's provision `{node.get('key')}` is a "
+                f"service, not a value on this tier — call a method on it "
+                f"(`s.{node.get('key')}.method(..)`), don't bind it")
         if kind == "call":
             if node.get("callee") is not None:
                 # the frontend spells `Some(x)` (and other builtin
@@ -364,6 +378,10 @@ class _ComponentEmitter:
                 # i32 result (a disposal status the runtime returns); the handle
                 # itself is an i32 instance id.
                 return _E(f"(call $dispose_instance {slot})", "Bool")
+            if target.get("kind") == "instance-get":
+                # `s.<key>.method(..)` — reading a provision back through a spawn
+                # handle (docs/design-v2-instances.md "Instance accessor").
+                return self._lower_instance_get_call(node, target, scope, types, where)
             if target.get("kind") != "req":
                 raise EmitError(
                     f"{where}: scalar values have no methods — only calls on "
@@ -483,6 +501,84 @@ class _ComponentEmitter:
         # the handle is a host-frontier instance id (i32); `Instance[T]` is
         # advisory and never Int, so _wasm_ty carries it as i32.
         return _E(call, f"Instance[{target}]")
+
+    def _lower_instance_get_call(self, node: Any, get: dict, scope: dict[str, str],
+                                 types: dict[str, str | None], where: str) -> "_E":
+        """Lower `s.<key>.method(..)` — a provision read through a spawn handle
+        (the frozen `instance-get` IR node, docs/design-v2-instances.md).
+
+        `get` is the `instance-get` node: it carries the handle expr (`target`),
+        the target `component`, the provided `key`, and the frozen `service`
+        type the key yields. On this tier the handle is an i32 identifying the
+        instance's B3 realm; the read lowers to a host import that resolves
+        `key` in THAT instance's realm — the same realm-prefixed provider table
+        `spawn` published into (`#<n>/<key>`), yielding that instance's method
+        and no other's. Root/sibling hold no handle and share no realm, so they
+        cannot name it — supervision-tree addressing (decision 1/2).
+        """
+        component = get.get("component")
+        if not isinstance(component, str) or not component.isidentifier():
+            raise EmitError(f"{where}: bad instance-get component {component!r}")
+        key = get.get("key")
+        if not isinstance(key, str) or not key.isidentifier():
+            raise EmitError(f"{where}: bad instance-get key {key!r}")
+        service_name = get.get("service")
+        op = _ident(node.get("method"), f"{where}: method")
+        # The service type is frozen inline on the node (the typing rule's
+        # result), so this tier never re-derives it — it only reads the method's
+        # declared ABI off that service.
+        service = self.services.get(service_name)
+        if service is None:
+            raise EmitError(
+                f"{where}: instance-get names service {service_name!r}, which is "
+                f"not declared")
+        spec = (service.get("methods") or {}).get(op)
+        if spec is None:
+            raise EmitError(
+                f"{where}: {key}.{op} is not a method of {service_name} "
+                f"(the provision {component}.{key} yields)")
+        param_types = [param.get("type") for param in spec.get("params") or []]
+        return_type = spec.get("returns")
+        args = node.get("args") or []
+        if len(args) != len(param_types):
+            raise EmitError(
+                f"{where}: {key}.{op} takes {len(param_types)} argument(s), "
+                f"{len(args)} given")
+        # The handle is an i32 instance id; lowering it yields that i32 slot.
+        handle = self._lower(get.get("target"), scope, types, where)
+        param_wtys: list[str | None] = []
+        parts: list[str] = [handle.wat]
+        for i, (arg, ptype) in enumerate(zip(args, param_types)):
+            # The provision lives in a *different* instance's linear memory, so a
+            # rich (pointer) param would cross as a pointer into memory the
+            # spawner does not own — the same genuine boundary spawn/config draw.
+            # Scalars (Int/Bool) cross by value and resolve cleanly.
+            if not _is_scalar_type(ptype):
+                raise EmitError(
+                    f"{where}: {key}.{op} param {i} is {ptype!r} — only scalar "
+                    f"(Int/Bool) values cross the instance-accessor boundary on "
+                    f"this tier; a Str/record/List would cross as a pointer into "
+                    f"the instance's own memory (use a hosted backend)")
+            value = self._lower(arg, scope, types, where)
+            wty = _wasm_ty(ptype)
+            if _wasm_ty(value.ty) != wty:
+                raise EmitError(
+                    f"{where}: {key}.{op} param {i} expects {ptype!r} but got a "
+                    f"{value.ty!r} value — it crosses this tier's scalar boundary")
+            param_wtys.append(wty)
+            parts.append(value.wat)
+        if not _is_scalar_type(return_type) and not _is_unit_type(return_type):
+            raise EmitError(
+                f"{where}: {key}.{op} returns {return_type!r} — only scalar "
+                f"(Int/Bool) provisions cross the instance-accessor boundary on "
+                f"this tier; a rich return is a pointer into the instance's own "
+                f"memory (use a hosted backend)")
+        result_wty = _wasm_ty(return_type) if not _is_unit_type(return_type) else None
+        self.instance_imports[(component, key, op)] = (param_wtys, result_wty)
+        # $inst_<Component>_<key>_<op> — bound to the `instance:<Component>`
+        # `<key>.<op>` host import; the runtime resolves the handle's realm.
+        call = f"(call $inst_{component}_{key}_{op} {' '.join(parts)})".replace("  ", " ")
+        return _E(call, return_type)
 
     def _scalar_operator(self, node: Any, scope: dict[str, str],
                          types: dict[str, str | None], where: str) -> _E:
@@ -651,6 +747,20 @@ class _ComponentEmitter:
                     raise EmitError(f"{where}: template placeholder ${part} has no argument")
                 parts.append(["expr", self._to_v3(args[part], scope, types, where)])
             return {"kind": "interp", "parts": parts}
+        callee = node.get("callee")
+        if kind == "call" and isinstance(callee, dict) \
+                and callee.get("kind") == "field" \
+                and isinstance(callee.get("target"), dict) \
+                and callee["target"].get("kind") == "instance-get":
+            # `s.<key>.method(..)` in the v3 provide-method dialect: a field
+            # access (`.method`) on an `instance-get` target, then called. The
+            # accessor has no v3 spelling — lower it component-side (resolving
+            # `key` in the handle's realm) and splice the pre-lowered call in.
+            synth = {"target": callee["target"], "method": callee.get("name"),
+                     "args": node.get("args") or []}
+            value = self._lower_instance_get_call(synth, callee["target"],
+                                                  scope, types, where)
+            return {"kind": "__wat", "wat": value.wat, "ty": value.ty}
         if kind in ("config", "host", "req") or (kind == "call" and node.get("callee") is None):
             value = self._lower(node, scope, types, where)
             return {"kind": "__wat", "wat": value.wat, "ty": value.ty}
@@ -971,6 +1081,18 @@ class _ComponentEmitter:
             lines.append(f'  (import "spawn:{target}" "new" (func $spawn_{target}{sig} (result i32)))')
         if self.uses_dispose:
             lines.append('  (import "dispose" "instance" (func $dispose_instance (param i32) (result i32)))')
+        # instance-accessor ABI (docs/design-v2-instances.md "Instance accessor").
+        # `s.<key>.method(..)` reads a provision back through a spawn handle: the
+        # first param is the i32 handle (which realm to resolve `key` in), then
+        # the method's own scalar params. Inert unless the component reads a
+        # provision, so a non-accessor module's import section is byte-identical.
+        for (component, key, op), (param_wtys, result_wty) in sorted(self.instance_imports.items()):
+            method_params = " ".join(f"(param {w})" for w in param_wtys)
+            sig = f" {method_params}" if method_params else ""
+            result = f" (result {result_wty})" if result_wty else ""
+            lines.append(
+                f'  (import "instance:{component}" "{key}.{op}" '
+                f'(func $inst_{component}_{key}_{op} (param i32){sig}{result}))')
         if needs_memory:
             lines.append('  (memory (export "memory") 1)')
             for offset, data in self.v3.data_segments:
