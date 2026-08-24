@@ -3121,6 +3121,12 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
     has_lifecycle = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    if has_lifecycle and not ir.get("components"):
+        raise EmitError(
+            "a lifecycle test drives components over a live stc-go runtime, "
+            "but this document declares no components — there is nothing to "
+            "load or assert no residue over"
+        )
     if ver == 3 and (not ir.get("components") or (has_top_level and not has_lifecycle)):
         # A `lifecycle test` is a script over a live composition, so the
         # document must stay on the stc-go runtime path even though it also
