@@ -218,7 +218,7 @@ def derive(previous: dict, current_ir: dict,
     `previous` is a compiled IR document (it carries the `services` table);
     `current_ir` is the freshly compiled current composition. The bump is the
     join over every classified change; an identical interface yields `patch`
-    (a no-op version-wise) and an empty change list.
+    (no minor or major event) and an empty change list.
     """
     old_services = _services_of(previous, what="the previous manifest")
     new_services = _services_of(current_ir, what="the current composition")
@@ -248,8 +248,8 @@ def render(result: dict, against_label: str) -> str:
 
     if not changes:
         lines.append(
-            f"version: PATCH — the interface is unchanged from {against_label}; "
-            f"no bump is required.")
+            f"version: PATCH — the interface is unchanged from "
+            f"{against_label}; the only permitted bump is a patch (bug fixes).")
         if result.get("previousVersion"):
             lines.append(
                 f"  {result['previousVersion']} -> {result['nextVersion']}")
