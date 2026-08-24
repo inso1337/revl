@@ -183,6 +183,11 @@ step with its own reference; the entry points below index them.
 | **realm erasure** | `revl erase-report --realm R` — right-to-erasure evidence as a compiler artifact | [erase-report.md](docs/erase-report.md) |
 | **WIT bridge** | `revl import wit` / `revl export wit` — a revl service is a Wasm-component interface, both directions | [wit-bridge.md](docs/wit-bridge.md) |
 | **the component registry** | `revl_resolve` — find an admission-compatible component to import instead of regenerating one | [registry.md](docs/registry.md) |
+| **timers: `every` / `after`** | a timer is a revertible schedule — its inverse is cancellation, derived teardown; the clock is a coeffect, and the `advance` lifecycle statement makes firings assertable steps | [time-coeffect.md](docs/time-coeffect.md) |
+| **async: `Async[T]` + `async` externs** | asynchrony is a declared property, like emission-ness: async function values with coloring checked (A1), async host ops awaited on py/ts and erased on go/rust | [design/async-extern.md](docs/design/async-extern.md) |
+| **`handoff` — verified state hand-off** | a hot-swap of a stateful provider carries its state: the shape is declared, checked at admission (the §5 relation pointed at state), and drift is refused | [state-handoff.md](docs/state-handoff.md) |
+| **capability attenuation on `spawn`** | a spawn may narrow a child's capabilities, never widen — least authority per instance, checked | [capability-attenuation.md](docs/capability-attenuation.md) |
+| **stdlib JSON** | `json_parse` / `json_stringify` over Str/Int/Bool/Float/List/Opt/records — structured tool args without a hand-rolled wire format | [stdlib-json.md](docs/stdlib-json.md) |
 
 ## The toolchain is the developer surface
 
@@ -203,6 +208,14 @@ reachable from the CLI and, where it makes sense, as an MCP tool.
 | **Function types** | `(Int, Str) -> Bool` — arrows leave the unchecked frontier where a type is known | [function-types.md](docs/function-types.md) |
 | **Importers** | `revl import openapi` / `revl import wit` — an external contract becomes a typed service | [import-openapi.md](docs/import-openapi.md) · [import-wit.md](docs/import-wit.md) |
 | **MCP server** | `revl mcp serve` — the whole compiler as an agent admission gate; `revl mcp schema` derives tool safety hints from the *body* | [mcp-bridge.md](docs/mcp-bridge.md) |
+| **truc** | the component manager, written in revl: `add` / `rm` / `assemble` (`--check` dry run) / `ship` — every fetched component is admitted through the gate before it joins the assembly | [truc.md](docs/truc.md) |
+| **quarantine tier** | the gauntlet proves a candidate *runs correctly*; quarantine proves it *cannot escape while doing so* — in the wasm sandbox, trap-on-escape, before any hosted tier | [quarantine-tier.md](docs/quarantine-tier.md) |
+| **`revl canary`** | progressive delivery over realms: the successor takes a designated slice, promote or revert on evidence — the rollback is derived | [verified-canary.md](docs/verified-canary.md) |
+| **`revl repair`** | fault → diagnose → re-admit, inside declared bounds; stops for a human exactly where policy says it must | [repair-loop.md](docs/repair-loop.md) |
+| **operator capabilities** | G4 for the management plane: an operator profile gates which MCP verbs a session may reach | [operator-capabilities.md](docs/operator-capabilities.md) |
+| **network placement** | a placement seam names `host:port` — the same proxy/stub wiring and reactive withdrawal, across machines | [network-placement.md](docs/network-placement.md) |
+| **parallel activation** | boot scales with the dependency graph's depth, not the composition's size | [parallel-activation.md](docs/parallel-activation.md) |
+| **the token economy** | tokens-to-green is a committed metric, and `revl_ship` is one compound check+admit+publish verb | [token-economy.md](docs/token-economy.md) |
 
 ## Command & MCP-verb reference
 
@@ -223,6 +236,10 @@ index with flags is [docs/guide-humans.md §Tooling](docs/guide-humans.md#toolin
 | `revl run FILES` | boot on a Cordis runtime; `--backend {py,ts,rust,java,wasm,go}` all boot live (py in-process, the rest each a separate process), `--once`, `--watch`, `--record`, `--wal`, `--trace`, `--withdraw`, `--placement`, `--plan` | [replay.md](docs/replay.md) · [crash-recovery.md](docs/crash-recovery.md) |
 | `revl recover --wal FILE` | crash recovery: roll a write-ahead log forward or back to a checked verdict + residue proof | [crash-recovery.md](docs/crash-recovery.md) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check` runs the withdraw oracle | [why-runtime.md](docs/why-runtime.md) |
+| `revl truc VERB …` | the component manager namespaced under the compiler — `add`/`rm`/`assemble`/`ship`, forwarded as-is | [truc.md](docs/truc.md) |
+| `revl quarantine FILES [--service NAME] [--policy POLICY]` | run a candidate's battery inside the wasm sandbox — prove it cannot escape before admission | [quarantine-tier.md](docs/quarantine-tier.md) |
+| `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](docs/verified-canary.md) |
+| `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](docs/repair-loop.md) |
 | `revl serve --mcp FILES` | serve a booted composition's **own** provided operations as MCP tools | [mcp-bridge.md](docs/mcp-bridge.md) |
 | `revl mcp serve` | the compiler itself as an MCP server; `--restore SNAPSHOT.json` re-admits an evolved session | [mcp-bridge.md](docs/mcp-bridge.md) |
 | `revl mcp schema FILES` | project provided services to MCP tool definitions | [mcp-bridge.md](docs/mcp-bridge.md) |
@@ -248,6 +265,7 @@ replay REPL (`:timeline`, `:back`, `:forward`, `:inspect`, `:bisect`; see
 | `revl_load` · `revl_call` · `revl_state` · `revl_unload` | boot in memory, call an operation, inspect, tear down + prove no residue | [mcp-bridge.md](docs/mcp-bridge.md) |
 | `revl_swap` · `revl_edit` · `revl_rollback` | swap a generation, patch server-side source with deltas, undo | [mcp-bridge.md](docs/mcp-bridge.md) |
 | `revl_gauntlet` | grade a candidate — a verdict dossier from an isolated battery run | [gauntlet.md](docs/gauntlet.md) |
+| `revl_quarantine` · `revl_canary` · `revl_repair` · `revl_ship` | prove a candidate in the sandbox, canary it onto a realm slice, run the repair loop, or check+admit+publish in one compound verb | [quarantine-tier.md](docs/quarantine-tier.md) · [verified-canary.md](docs/verified-canary.md) · [repair-loop.md](docs/repair-loop.md) · [token-economy.md](docs/token-economy.md) |
 | `revl_resolve` | find an admission-compatible component to import | [registry.md](docs/registry.md) |
 | `revl_snapshot` · `revl_restore` | capture / re-admit an evolved composition across a restart | [persistence.md](docs/persistence.md) |
 | `revl_timeline` · `revl_inspect_step` · `revl_step_back` · `revl_replay_bisect` · `revl_replay_forward` | walk, inspect, unwind, binary-search and re-run a recorded accumulator | [replay.md](docs/replay.md) |

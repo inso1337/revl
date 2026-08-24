@@ -9,6 +9,9 @@ const KEYWORDS = new Set([
   "test", "prop", "fault", "lifecycle", "isolate", "intercept", "realm",
   "with", "verified", "hole", "async", "await", "fail", "assert",
   "step", "at", "true", "false",
+  // timers, instances, state handoff, lifecycle-test statements
+  "every", "after", "spawn", "handoff", "advance",
+  "load", "unload", "call", "no_residue",
 ]);
 
 // The four words that ARE the language's story get their own colors.
@@ -91,10 +94,12 @@ export function highlightRevl(src) {
       continue;
     }
 
-    // number
+    // number (with an optional duration unit: 30s, 5m, 250ms, 1h)
     if (/[0-9]/.test(c)) {
       let j = i;
       while (j < n && /[0-9._]/.test(src[j])) j++;
+      const unit = src.slice(j).match(/^(ms|[smh])(?![A-Za-z0-9_])/);
+      if (unit) j += unit[1].length;
       out += span("num", src.slice(i, j));
       i = j;
       continue;
