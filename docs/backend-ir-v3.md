@@ -38,9 +38,11 @@ components may provide the same key in different realms. See
                           "cases": [{"name": "Found", "payload": "Int"},
                                     {"name": "Missing", "payload": null}]}},
 "functions": [{"name": "add", "params": [{"name": "a", "type": "Int"}],
-               "returns": "Int", "public": true, "body": [<step>...]}],
+               "returns": "Int", "public": true, "body": [<step>...],
+               "async": true}],
 "externs":   [{"name": "sha", "class": "pure|acquire|emission",
                "bodies": {"py": "...", "ts": "..."},
+               "async": true,
                "undo": <expr>, "compensate": <expr>}],
 "tests":     [{"name": "inc", "body": [<step>...]}]
 ```
@@ -48,6 +50,14 @@ components may provide the same key in different realms. See
 - **`class` on an extern is load-bearing**: `pure` is trusted, `acquire`
   carries an inverse, `emission` is irreversible. A backend with no body for
   its own tag must refuse — that refusal is deliberate, not a gap.
+- **`"async": true`** (additive; absent means sync) marks a suspension color
+  (docs/design/async-extern.md). On an extern it is legal only for `class:
+  emission`; on a `function` entry it is *derived* — the frontend colors a fn
+  that transitively reaches an async extern and stamps the flag, so an emitter
+  needs no reachability analysis of its own. Colored tiers (ts, py) emit an
+  `async function`/`async def` and `await` every admitted call site; the
+  synchronous tiers (rust, go) erase the color; wasm refuses. `ir_version`
+  stays 3 — the key is purely additive.
 - A **function name may need renaming** for a host (java rejects `double`);
   the emitter renames consistently at declaration and call sites.
 

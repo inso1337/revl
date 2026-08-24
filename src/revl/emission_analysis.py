@@ -128,6 +128,54 @@ def _emitting_capabilities(fns: list, externs: list,
     return caps
 
 
+def _async_callables(fns: list, externs: list, witness: dict | None = None) -> set:
+    """Names an `await` must be inserted for: `async` externs, and functions
+    that reach one transitively through the static call graph.
+
+    The async twin of `_emitting_fns` (docs/design/async-extern.md §3, "v2:
+    transitive coloring through named `fn`s") — the same monotone closure over
+    a finite name set, seeded from the async externs instead of the emission
+    ones. A function is colored iff its body *calls* a colored callee; the
+    fixed point closes over the static call graph exactly as the emission one
+    does, so a `fn` calling a `fn` calling an async extern colors transitively.
+    Recursion and mutual recursion terminate: a cycle either contains a
+    seed-reaching member (all colored) or none.
+
+    Unlike the emission fixpoint there is deliberately **no `*`/first-class
+    widening**: an arrow type carries no color, so a function *value* cannot
+    smuggle the async color, and assuming-async would force the emitter to
+    `await` in a maybe-sync context, which is not writable. Such value-position
+    references are refused at their use site (lower.py), never folded in here.
+
+    `witness` (optional, filled in place) records why each derived name is
+    colored: `witness[caller] = callee`, the callee with the shortest onward
+    chain first (ties by name), mirroring `_emitting_capabilities` so the
+    author reads the shortest derivation deterministically. The graph is
+    acyclic by construction — an edge is only ever written for a name that was
+    not yet colored, pointing at one that already was."""
+    colored: set = {ext["name"] for ext in externs if ext.get("async")}
+    calls: dict[str, set] = {}
+    for fn in fns:
+        called: set = set()
+        _calls_in(fn.get("body") or [], called)
+        calls[fn["name"]] = called
+
+    changed = True
+    while changed:  # least fixed point over the call graph
+        changed = False
+        for name, called in calls.items():
+            if name in colored:
+                continue
+            reached = sorted(c for c in called if c in colored)
+            if reached:
+                colored.add(name)
+                if witness is not None:
+                    witness[name] = min(
+                        reached, key=lambda callee: _witness_depth(callee, witness))
+                changed = True
+    return colored
+
+
 def _capability_hint(service: str, method: str, declared, extra: list[str]) -> str:
     """The repair for a provider that exceeds its declared capability set."""
     nameable = [cap for cap in extra if cap != "*"]
