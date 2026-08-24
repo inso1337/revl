@@ -62,6 +62,7 @@ import threading
 import time
 from pathlib import Path
 
+from .activation import local_prereqs
 from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
@@ -669,6 +670,9 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         key_service.update(comp.get("provides") or {})
         key_service.update(comp.get("requires") or {})
     load_order = (ir.get("manifest") or {}).get("loadOrder") or [c["name"] for c in ir["components"]]
+    # §46: the manifest entries carry the G3 inject/provides structure the
+    # per-process activation DAG is reconstructed from (docs/parallel-activation.md).
+    manifest_entries = (ir.get("manifest") or {}).get("components") or []
 
     # 0700 by construction (mkdtemp), so the sockets under it are reachable
     # by this user only; removed again in the `finally` below.
@@ -826,11 +830,19 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             # a network provider serves its full provided surface — remote
             # consumers live in other placements and are not enumerable here.
             serve_keys = list(provides[pname])
+        own = [c for c in load_order if placed.get(c) == pname]
         spec = {
             "name": pname,
             "backend": backend,
             "files": [str(f) for f in files],
-            "components": [c for c in load_order if placed.get(c) == pname],
+            "components": own,
+            # §46: the intra-process dependency edges, reconstructed from the
+            # compiler's G3 inject/provides structure (not discovered at
+            # runtime). The runner activates independent branches concurrently
+            # and serializes only along these edges. Cross-process edges are
+            # already resolved as proxies before local activation, so they are
+            # (correctly) absent here. docs/parallel-activation.md.
+            "depends": local_prereqs(manifest_entries, subset=own),
             "config": config,
             "provides": list(provides[pname]),
             "proxies": proxies,

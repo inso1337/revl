@@ -133,14 +133,37 @@ async def run(spec: dict) -> None:
         fibers.append((f"{key}-proxy", fiber))
         log("proxy", key, f"-> {bridge.Endpoint.from_spec(target).describe()}")
 
-    # 2. this process's own components, in IR load order
-    for component in spec["components"]:
+    # 2. this process's own components. G3 proves the dependency graph is a
+    # checked DAG, so independent branches are provably independent and boot
+    # concurrently; only real provider -> consumer edges serialize (§46,
+    # docs/parallel-activation.md). `depends` carries those intra-process edges,
+    # reconstructed by placement.py from the compiler's inject/provides
+    # structure. Absent it (a spec written before §46), fall back to the old
+    # strictly-sequential chain so nothing becomes *less* ordered.
+    from revl.activation import (activate_concurrent,  # noqa: PLC0415
+                                 sequential_prereqs, teardown_lifo)
+
+    components = list(spec["components"])
+    prereqs = spec.get("depends")
+    if prereqs is None:
+        prereqs = sequential_prereqs(components)
+
+    async def _activate(component: str):
         config = (spec.get("config") or {}).get(component, {})
         fiber = root.plugin(getattr(module, component), config)
         await fiber
         await _flush()
-        fibers.append((component, fiber))
         log("load", component, f"state={FiberState(fiber.state).name}")
+        return fiber
+
+    completion, errors = await activate_concurrent(components, prereqs, _activate)
+    # completion is a valid topological order (a task finishes only after its
+    # prereqs did); teardown reverses it, so consumers fall before providers —
+    # LIFO within every chain, revert semantics preserved (G7).
+    for component, fiber in completion:
+        fibers.append((component, fiber))
+    for component, exc in errors:
+        log("load", component, f"ERROR {type(exc).__name__}: {exc}")
 
     # 3. serve the keys other processes need
     server = None
@@ -209,12 +232,19 @@ async def run(spec: dict) -> None:
 
     await stop.wait()
 
-    for label, fiber in reversed(fibers):
+    # LIFO teardown: `fibers` is [proxies..., own components in completion
+    # order], and completion is a valid topological order, so reversing it tears
+    # consumers down before providers within every chain (G7 revert semantics),
+    # then releases the external proxies last. teardown_lifo centralizes that
+    # reverse-order guarantee; disposal stays sequential (best-effort).
+    async def _dispose(_label, fiber):
         try:
             await fiber.dispose()
             await _flush()
         except Exception:  # noqa: BLE001; teardown is best-effort
             pass
+
+    await teardown_lifo(fibers, _dispose)
     if server is not None:
         server.close()
 
