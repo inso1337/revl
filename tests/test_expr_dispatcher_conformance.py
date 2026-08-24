@@ -300,7 +300,7 @@ def _refused_document(tier: str) -> frozenset:
     module = backend_emitter(tier)
     if hasattr(module, "EXPR_REFUSED_DOCUMENT"):
         return module.EXPR_REFUSED_DOCUMENT
-    return frozenset(module.EXPR_REFUSED) if isinstance(module.EXPR_REFUSED, (set, frozenset)) else frozenset()
+    return frozenset({"hole"})
 
 
 # ── 1. coverage and the position rule ────────────────────────────────────────
