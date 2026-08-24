@@ -120,8 +120,9 @@ def _load_canonical():
     """
     import sys  # noqa: PLC0415
 
-    root = pathlib.Path(__file__).resolve().parents[3]
-    backend = root / "backends" / "wasm"
+    from .._paths import backends_root  # noqa: PLC0415
+
+    backend = backends_root() / "wasm"
     canonical_path = backend / "canonical.py"
     emit_path = backend / "emit.py"
     if not canonical_path.is_file() or not emit_path.is_file():
