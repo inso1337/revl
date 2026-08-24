@@ -292,17 +292,54 @@ def test_python_renders_a_function_typed_record_field_as_callable():
     assert "from typing import Any, Callable, Optional, Union" in out
 
 
-@pytest.mark.parametrize("tier", ["rust", "java", "wasm"])
+@pytest.mark.parametrize("tier", ["java", "wasm"])
 def test_the_strict_tiers_refuse_a_declared_function_type_explicitly(tier):
     """A documented limit, not silently broken output: each of these tiers
-    would otherwise erase a function type to its opaque fallback (`Value`,
-    `Object`, an i32) and emit code that does not mean what was written."""
+    would otherwise erase a function type to its opaque fallback (`Object`, an
+    i32) and emit code that does not mean what was written.
+
+    rust is no longer among them: it lowers a declared function type in a
+    `fn`/`extern` parameter or return to `impl Fn(..)` (item 91,
+    docs/function-types.md §4). Its remaining escaping-position limit is pinned
+    by `test_rust_still_refuses_a_function_type_that_escapes` below."""
     emitter = _emitter(tier)
     with pytest.raises(Exception) as excinfo:
         emitter.emit(compile_source(
             "fn apply_(g: (Int) -> Int, x: Int) -> Int { return g(x) }\n"
             "service S { fn f(x: Int) -> Int }\n"
             "component C provides s: S { provide s { fn f(x) = apply_(x, 1) } }"))
+    message = str(excinfo.value)
+    assert "function type" in message
+    assert "docs/function-types.md" in message
+
+
+def test_rust_lowers_a_declared_function_type_parameter_and_return():
+    """Item 91: a declared function type in a `fn` parameter or return position
+    lowers to `impl Fn(..)` on rust (rustc monomorphises it), instead of the
+    old blanket refusal. The `agent_loop` shape — a top-level fn over effectful
+    callback arrows — is the motivating case (harness multi-tier proof)."""
+    out = _emitter("rust").emit(compile_source(
+        "fn agent_loop(prompt: Str, complete: (Str) -> Str, "
+        "call_tool: (Str) -> Str, max_steps: Int) -> Str {\n"
+        "  let first: Str = complete(prompt)\n"
+        "  return call_tool(first)\n"
+        "}\n"
+        "fn adder(n: Int) -> (Int) -> Int { return v => v + n }"))
+    assert "complete: impl Fn(String) -> String" in out
+    assert "call_tool: impl Fn(String) -> String" in out
+    assert "-> impl Fn(i64) -> i64" in out  # return position
+
+
+def test_rust_still_refuses_a_function_type_that_escapes():
+    """The position-aware lowering is honest about its remaining limit: a
+    function type that *escapes* — a record field, an ADT payload, a
+    `List`/`Opt`/`Map` element — still wants `Box<dyn Fn(..)>` constructed where
+    the arrow is created, which the emitter cannot yet do. It is refused by
+    name, not erased."""
+    with pytest.raises(Exception) as excinfo:
+        _emitter("rust").emit(compile_source(
+            "type Handler = { run: (Int) -> Str }\n"
+            "fn f(h: Handler) -> Str { let r: (Int) -> Str = h.run  return r(1) }"))
     message = str(excinfo.value)
     assert "function type" in message
     assert "docs/function-types.md" in message

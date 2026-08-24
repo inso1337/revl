@@ -207,29 +207,56 @@ is already reflected in the arrow node and in the enclosing declared types.
 |---|---|---|
 | **python** | ✅ implemented | arrows are `lambda`s; a declared function type renders as `Callable[[…], …]` in record annotations |
 | **typescript** | ✅ implemented | real parameter types on arrows; `(Int, Str) -> Bool` renders as `((a0: number, a1: string) => boolean)` |
-| **rust** | ⛔ refused, explicitly | a *declared* function type is refused; local arrows still lower |
-| **java** | ⛔ refused, explicitly | same; local arrows still beta-reduce as before |
+| **rust** | ◐ parameter/return positions | a `fn`/`extern` parameter or return lowers to `impl Fn(..)`; an *escaping* position (field, ADT payload, container element, service signature) is still refused; local arrows still lower |
+| **java** | ⛔ refused, explicitly | a *declared* function type is refused; local arrows still beta-reduce as before |
 | **wasm** | ⛔ refused, explicitly | same; local arrows still inline as before |
+
+### rust: position-aware lowering (item 91)
+
+rust used to refuse **every** declared function type. It no longer does. The
+key observation is that the choice of Rust lowering is not a guess once the
+*position* is known — it is exactly the choice a Rust programmer makes by hand:
+
+- a **`fn`/`extern` parameter or return** lowers to **`impl Fn(P, ...) -> R`**.
+  rustc monomorphises it, so `fn agent_loop(complete: (Str) -> Str, ...)`
+  becomes `fn agent_loop(complete: impl Fn(String) -> String, ...)` — the
+  callback is called directly (`complete(prompt)`), no boxing, no lifetime
+  annotation. A function *returned* (`fn adder(n: Int) -> (Int) -> Int`) is
+  `-> impl Fn(i64) -> i64`, and the `move |v| ...` arrow the body already
+  emits is returned as-is.
+- an **escaping position** — a struct field, an ADT payload, a `List`/`Opt`/
+  `Map` element, or a service-method signature (whose trait must stay
+  object-safe for `Box<dyn Service>`) — wants `Box<dyn Fn(..)>` *constructed at
+  the point the arrow is created*. revl's type still does not carry enough
+  position to do that boxing at the construction site, so these remain refused
+  **by name** rather than erased to the opaque `Value` fallback.
+
+The emitter threads the position (`param` / `return` / the default escaping
+`value`) through `_rust_type`; a function type nested inside a container is
+always the escaping position, so `List[(Int) -> Int]` is refused even as a
+parameter. Locals were never affected — an arrow bound to a `let` and called
+in the same body lowers because rustc infers its closure type.
 
 ### What "refused" means, precisely
 
-The three strict tiers refuse **a function type written in a declaration** —
-a `fn`/`extern` parameter or return, a service method signature, a record
-field, an ADT payload, a config field. They do **not** refuse arrows: an arrow
-bound to a local `let` and called in the same body lowers on all six tiers,
-exactly as it did before this change. Nothing that compiled on those tiers
-before compiles differently now.
+java and wasm refuse **a function type written in a declaration** — a
+`fn`/`extern` parameter or return, a service method signature, a record field,
+an ADT payload, a config field; rust now refuses only the *escaping* subset
+above. None of the tiers refuse arrows: an arrow bound to a local `let` and
+called in the same body lowers on all six tiers, exactly as it did before this
+change. Nothing that compiled on those tiers before compiles differently now.
 
 The refusals are deliberate limits with reasons, not silent gaps:
 
-- **rust** — Rust has no single type for "a callable". A parameter wants
-  `impl Fn(..)`, a return wants `impl Fn(..)` tied to one concrete closure,
-  and a struct field or `Vec` element wants `Box<dyn Fn(..)>` with an explicit
-  lifetime: three different lowerings whose choice depends on the position and
-  on whether the value escapes. revl's type does not carry that distinction,
-  so the emitter cannot pick one without guessing. Without the refusal,
-  `_rust_type` would erase a function type to its opaque `Value` fallback and
-  emit code that compiles and means something else.
+- **rust** (escaping positions only) — a struct field, a `Vec`/`Opt`/`Map`
+  element, an ADT payload, or a service-method signature wants
+  `Box<dyn Fn(..)>` with an explicit lifetime, boxed where the arrow is
+  created. revl's type carries the declaration position but not the arrow's
+  creation site, so the emitter cannot insert that `Box::new(..)` without
+  guessing. Without the refusal, `_rust_type` would erase the function type to
+  its opaque `Value` fallback and emit code that compiles and means something
+  else. Parameter and return positions do not have this problem and now lower
+  (see above).
 - **java** — a Java lambda needs a *nominal* target type, and the JDK's
   functional interfaces are neither generic over arity nor usable with
   primitives without boxing: `(Int) -> Int` is `IntUnaryOperator`, `(Int, Str)
