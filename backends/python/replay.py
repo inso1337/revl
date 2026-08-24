@@ -898,11 +898,13 @@ class Recorder:
                 continue
             setattr(module, name,
                     dict(plugin, apply=self._wrap_apply(
-                        name, plugin["apply"], comp.get("requires") or {}, services)))
+                        name, plugin["apply"], comp.get("requires") or {}, services,
+                        plugin.get("Config"))))
             names.append(name)
         return names
 
-    def _wrap_apply(self, name: str, apply, requires: dict, services: dict):
+    def _wrap_apply(self, name: str, apply, requires: dict, services: dict,
+                    config_schema=None):
         recorder = self
 
         def recording_apply(ctx, config):
@@ -911,6 +913,13 @@ class Recorder:
             if recorder.wal is not None:
                 timeline.attach_wal(recorder.wal, recorder._ir)
             recorder.timelines[name] = timeline
+            # The emitted apply no longer resolves config itself: the schema
+            # rides on the plugin dict as 'Config' and cordis-py's
+            # resolve_config runs before apply (fork commit 1c5e6f1). The
+            # replay harness calls apply directly, so it applies the same
+            # resolution here to keep the recorded body faithful.
+            if config_schema is not None:
+                config = config_schema.resolve(config)
             return apply(_RecordingContext(ctx, timeline, requires, services), config)
 
         recording_apply.__name__ = getattr(apply, "__name__", "apply")

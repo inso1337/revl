@@ -41,15 +41,33 @@ This goes in the compiler spec, not the runtimes.
 
 ## Upstream issues surfaced (to file / track)
 
-- **cordis (TS) residue bug**: `assertActive` checks `uid !== null`, not
-  lifecycle state, so an undo can register an effect during deactivation that
-  lands after the unload snapshot and is never disposed — permanent residue.
-  Pinned repro: `backends/typescript/tests/upstream.test.ts` ("finding 2").
-  This is the G5 gap; feeds cordiverse/cordis#39 review.
-- **cordis-py dict-plugin `Config`**: `registry.plugin()` reads `inject` via
-  `dict.get` but `Config` via `getattr`, so dict plugins can't carry a schema;
-  emitted code validates config inside `apply` as a workaround. One-line
-  upstream fix; candidate follow-up to geohotstan/cordis-py#1.
+- **cordis (TS) residue bug** (RESOLVED — fixed in the pinned fork,
+  `inso1337/cordis@harden-assert-active` commit `c8b94b2`, PR draft at
+  `docs/upstream/cordis-ts-assertActive.md`; do NOT open the upstream PR
+  without the coordinator's confirmation): `assertActive` checked `uid !==
+  null`, not lifecycle state, so an undo could register an effect during
+  deactivation that landed after the unload snapshot and was never disposed —
+  permanent residue, the G5 gap, on the tier the README calls the portability
+  proof. The fork's `assertActive` now also refuses `FiberState.UNLOADING`
+  (`effect()`, `ctx.on()`, `ctx.plugin()`, `restart()` and `update()` all
+  inherit the guard), and the repo's TS tooling pins the fork revision in
+  `backends/typescript/package.json` (codeload tarball at the fork commit)
+  until the fix merges upstream (feeds cordiverse/cordis#39 review). The
+  repro at `backends/typescript/tests/upstream.test.ts` ("finding 2") was a
+  red-on-fix characterization test; it now pins the fixed behavior (the exact
+  playbook that closed cordis-py's A8 async gap).
+- **cordis-py dict-plugin `Config`** (RESOLVED — one-line fix in the pinned
+  fork, `inso1337/cordis-py@harden-fiber-lifecycle` commit `1c5e6f1`, now
+  pinned by `backends/python/setup.sh` per roadmap item 76(c); follow-up
+  candidate to geohotstan/cordis-py#1): `registry.plugin()` read `inject`
+  via `dict.get` but `Config` via `getattr`, so dict plugins couldn't carry
+  a schema and emitted code validated config inside `apply` as a workaround.
+  The fork now reads `Config` with the same `isinstance(dict)` branch as
+  `inject`; the emitter ships the schema as `'Config'` on the plugin dict and
+  drops the in-`apply` resolution (`ConfigSchema.validate` speaks cordis-py's
+  `{issues, value}` protocol; the Frame still attributes the `<name>.config`
+  trace and R4 `resolved_config` state; the replay harness — which calls
+  emitted `apply` directly — applies the same resolution itself).
 - **cordis-py ordering provenance** (documented, not a bug): the fiber's
   unload empirically starts disposals newest-first, but this is disclaimed by
   its docs; the py adapter's drain derives R1 from the *documented* contract

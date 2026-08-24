@@ -37,14 +37,25 @@ disclaim — it is an artifact of task-creation order under `gather`, and an
 (b) the drain derives R1 from the documented per-effect contract instead.
 Either mechanism alone passes today's suite; only removing both fails it.
 
-### F2 — Dict plugins cannot carry `Config`
+### F2 — Dict plugins cannot carry `Config` (CLOSED in the pinned fork)
 
-`registry.plugin()` reads `inject` with `plugin.get("inject")` for dict
-plugins but reads `Config` with `getattr(plugin, "Config", None)`, which
-never sees dict keys. So the DESIGN §7 lowering "`config {}` → a schema" on
-the plugin dict cannot use the runtime's `resolve_config` path at all.
-Worked around by resolving defaults/validation inside the emitted `apply`
-(`runtime.ConfigSchema`). One-line fix worth sending upstream.
+`registry.plugin()` read `inject` with `plugin.get("inject")` for dict
+plugins but read `Config` with `getattr(plugin, "Config", None)`, which
+never sees dict keys — so the DESIGN §7 lowering "`config {}` → a schema" on
+the plugin dict could not use the runtime's `resolve_config` path, and the
+emitter worked around it by resolving defaults/validation inside the emitted
+`apply` (`runtime.ConfigSchema`).
+
+**Closed** by a one-line fix in our fork (`inso1337/cordis-py@
+harden-fiber-lifecycle` commit `1c5e6f1`, pinned in `setup.sh`): `Config`
+is now read with the same `isinstance(dict)` branch as `inject`. The emitter
+ships the schema as `'Config'` on the plugin dict and the emitted `apply`
+stops resolving config — cordis-py's `resolve_config` validates/resolves
+before `apply` runs, and `ConfigSchema.validate` (the cordis-py
+`{issues, value}` protocol) parks the resolved value so the component's
+Frame still attributes the `<name>.config` trace and R4 `resolved_config`
+state. The replay harness (which calls emitted `apply` directly) applies the
+same resolution itself. Follow-up candidate to geohotstan/cordis-py#1.
 
 ### F3 — Event callbacks receive a `this` argument first
 
