@@ -132,6 +132,7 @@ REJECTIONS = {
     "g4_unmarked_emission.rvl": "call to emission `db.execute` must be marked `emit` (G4)",
     "g4_emission_not_declared.rvl": "`Cache.put` is declared plain, but this implementation reaches `db.execute`",
     "g4_capability_not_declared.rvl": "`Cache.put` is declared `emission[db]`, but this implementation emits through `bus`",
+    "g4_spawn_widens_capability.rvl": "`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a`",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
     "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",
