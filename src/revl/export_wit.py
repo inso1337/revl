@@ -211,37 +211,70 @@ class _Exporter:
         return lines
 
     # -- collect the nominal types actually referenced --------------------
-    def _type_decls(self, referenced: set[str]) -> list[str]:
-        out: list[str] = []
-        for name in self.types:
-            if name not in referenced or name in self.resources:
+    def _nominal_refs(self, type_str: str | None) -> list[str]:
+        """The nominal type names a type string names, peeled out of any
+        `List`/`Opt`/`Result`/`Map` generic wrapper. `Result[Item, Str]` ->
+        `[Item]`; `Str` -> `[]`; `Item` -> `[Item]`. Pure — no side effects."""
+        if not type_str:
+            return []
+        head, args = _split_generic(type_str)
+        if head in _PRIMITIVES or head in ("List", "Opt", "Result", "Map",
+                                           "Unit"):
+            refs: list[str] = []
+            for arg in args:
+                refs.extend(self._nominal_refs(arg))
+            return refs
+        return [head]
+
+    def _type_closure(self, seeds: set[str]) -> set[str]:
+        """Every record/variant/enum reachable from `seeds` through record
+        fields and variant payloads. Resources are excluded — they emit as
+        `resource` blocks, not type declarations."""
+        out: set[str] = set()
+        stack = list(seeds)
+        while stack:
+            name = stack.pop()
+            if name in out or name in self.resources or name not in self.types:
                 continue
+            out.add(name)
             spec = self.types[name]
-            wit = _kebab_type(name)
-            if spec.get("kind") == "record":
-                fields = ", ".join(
-                    f"{_kebab_name(fname)}: {self.wit_type(ftype)}"
-                    for fname, ftype in (spec.get("fields") or {}).items())
-                out.append(f"record {wit} {{ {fields} }}")
-            elif spec.get("kind") == "variant":
-                cases = spec.get("cases") or []
-                if all(not c.get("payload") for c in cases):
-                    body = ", ".join(_kebab_type(c["name"]) for c in cases)
-                    out.append(f"enum {wit} {{ {body} }}")
-                else:
-                    body = ", ".join(
-                        _kebab_type(c["name"])
-                        + (f"({self.wit_type(c['payload'])})" if c.get("payload") else "")
-                        for c in cases)
-                    out.append(f"variant {wit} {{ {body} }}")
+            for ftype in (spec.get("fields") or {}).values():
+                stack.extend(self._nominal_refs(ftype))
+            for case in spec.get("cases") or []:
+                stack.extend(self._nominal_refs(case.get("payload")))
         return out
+
+    def _type_decl(self, name: str) -> str:
+        """The single-line WIT declaration for one nominal type."""
+        spec = self.types[name]
+        wit = _kebab_type(name)
+        if spec.get("kind") == "record":
+            fields = ", ".join(
+                f"{_kebab_name(fname)}: {self.wit_type(ftype)}"
+                for fname, ftype in (spec.get("fields") or {}).items())
+            return f"record {wit} {{ {fields} }}"
+        cases = spec.get("cases") or []
+        if all(not c.get("payload") for c in cases):
+            body = ", ".join(_kebab_type(c["name"]) for c in cases)
+            return f"enum {wit} {{ {body} }}"
+        body = ", ".join(
+            _kebab_type(c["name"])
+            + (f"({self.wit_type(c['payload'])})" if c.get("payload") else "")
+            for c in cases)
+        return f"variant {wit} {{ {body} }}"
 
     # -- the whole file ---------------------------------------------------
     def emit(self, service_names: list[str]) -> str:
         # assign each resource to the first service that owns its methods
         owner_of: dict[str, str] = {}
-        service_blocks: list[str] = []
+        # First pass: build each interface's function/resource body, capturing
+        # the nominal types each service references directly in its signatures.
+        built: list[tuple[str, str, list[str], set[str]]] = []
         for sname in service_names:
+            # capture the nominal types THIS service references on its own —
+            # a fresh set per service, so a type an earlier interface already
+            # named still counts as referenced here (it needs a `use`).
+            self._referenced = set()
             methods = (self.services.get(sname) or {}).get("methods") or {}
             grouped = self._resource_methods(methods)
             resource_lines: list[str] = []
@@ -260,17 +293,48 @@ class _Exporter:
                     continue
                 free_lines.extend(self._func_decl(_kebab_name(op_name), spec, "  "))
             iface = _kebab_type(sname)
-            body = resource_lines + free_lines
-            service_blocks.append(
-                f"/// revl service `{sname}` as a WIT interface.\n"
-                f"interface {iface} {{\n" + "\n".join(body) + "\n}")
+            direct = set(self._referenced)
+            built.append((sname, iface, resource_lines + free_lines, direct))
 
-        type_decls = self._type_decls(self._referenced)
+        # Referenced user-defined types must live INSIDE an interface (top-level
+        # `record`/`variant`/`enum` is invalid WIT). Assign each type to the
+        # first interface whose signatures reach it (directly or through another
+        # type's fields/payloads); every later interface that also references it
+        # brings it in with a `use`. Because ownership follows the first
+        # reaching interface, a `use` only ever points at an earlier interface —
+        # the cross-interface `use` graph is acyclic by construction.
+        type_owner: dict[str, str] = {}
+        for _sname, iface, _body, direct in built:
+            for name in sorted(self._type_closure(direct)):
+                type_owner.setdefault(name, iface)
+
+        service_blocks: list[str] = []
+        for _sname, iface, body, direct in built:
+            refs = self._type_closure(direct)
+            # types this interface references but another interface owns -> use
+            foreign: dict[str, list[str]] = {}
+            for name in refs:
+                owner = type_owner.get(name)
+                if owner and owner != iface:
+                    foreign.setdefault(owner, []).append(name)
+            use_lines = [
+                f"  use {owner}.{{"
+                + ", ".join(_kebab_type(n) for n in sorted(names)) + "};"
+                for owner, names in sorted(foreign.items())
+            ]
+            # types this interface owns, declared in stable `self.types` order
+            type_lines = [
+                f"  {self._type_decl(name)}"
+                for name in self.types
+                if type_owner.get(name) == iface
+            ]
+            iface_body = use_lines + type_lines + body
+            service_blocks.append(
+                f"/// revl service `{_sname}` as a WIT interface.\n"
+                f"interface {iface} {{\n" + "\n".join(iface_body) + "\n}")
 
         parts = [self._header(service_names)]
         parts.append(f"package {self.package};")
-        if type_decls:
-            parts.append("\n".join(type_decls))
         parts.extend(service_blocks)
         return "\n\n".join(parts) + "\n"
 
