@@ -684,6 +684,73 @@ def _run_why(args) -> int:
     return 0
 
 
+def _run_dash(args) -> int:
+    """`revl dash <files...>` — the supervisor's cockpit (item 63). A READ-ONLY
+    live view: the dependency graph (realms, seams), the causal trace, and the
+    pending-decisions queue (widening acks, policy exceptions) with evidence.
+
+    It sources everything from the read surfaces — `query` for the graph,
+    `why_runtime` for the trace, `audit_diff`/`policy` for the queue — and
+    mutates nothing. Live vs recorded is a matter of which optional inputs are
+    given: a `--live-state` snapshot colors the graph as it stands now; a
+    `--trace`/`--timeline` renders a recorded run with no runtime at all."""
+    from . import dash, why_runtime  # noqa: PLC0415
+
+    def _load_json(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    try:
+        ir = compile_files(args.files)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    trace = timeline = live_state = prev_audit = policy = None
+    try:
+        if args.trace:
+            trace = why_runtime.read_trace(args.trace)
+        if args.timeline:
+            timeline = _load_json(args.timeline)
+        if args.live_state:
+            live_state = _load_json(args.live_state)
+        if args.against:
+            prev_audit = _load_json(args.against)
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read dash input: {error}", file=sys.stderr)
+        return 1
+    if args.policy:
+        from .policy import load_policy, PolicyError  # noqa: PLC0415
+        try:
+            policy = load_policy(args.policy)
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot read policy {args.policy}: {error}",
+                  file=sys.stderr)
+            return 1
+
+    board = dash.Dashboard(
+        ir, live_state=live_state, trace=trace, timeline=timeline,
+        prev_audit=prev_audit, accepted=set(args.accept),
+        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope)
+
+    if args.json:
+        print(json.dumps(board.snapshot(), indent=2))
+        return 0
+
+    color = (not args.no_color) and sys.stdout.isatty()
+    if args.watch:
+        import time  # noqa: PLC0415
+        try:
+            while True:
+                sys.stdout.write("\033[2J\033[H" if color else "\n")
+                print(board.render(color=color), flush=True)
+                time.sleep(max(0.1, args.interval))
+        except KeyboardInterrupt:
+            return 0
+    print(board.render(color=color))
+    return 0
+
+
 def _run_recover(args) -> int:
     """`revl recover --wal FILE` — crash recovery over a write-ahead log
     (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
@@ -1150,6 +1217,50 @@ def main(argv: list[str] | None = None) -> int:
                           "recorded cascade; a mismatch is a defect (nonzero exit)")
     why.add_argument("--json", action="store_true", help="machine-readable output")
 
+    dash = sub.add_parser(
+        "dash",
+        help="the supervisor's cockpit (item 63): a READ-ONLY live view over a "
+             "session or a recorded run — the dependency graph (realms, seams), "
+             "the causal trace streaming, and the pending-decisions queue "
+             "(boundary-widening acks, policy exceptions) with evidence "
+             "attached (docs/dash.md)")
+    dash.add_argument("files", nargs="+",
+                      help=".rvl sources — the composition whose graph to show")
+    dash.add_argument("--trace", default=None, metavar="FILE",
+                      help="an item-27 lifecycle JSONL (`revl run --trace`): "
+                           "streams the causal pane with no live runtime")
+    dash.add_argument("--timeline", default=None, metavar="FILE",
+                      help="a replay recording JSON (a `revl_timeline` dump) for "
+                           "the effect/emission detail behind the lifecycle")
+    dash.add_argument("--live-state", default=None, metavar="FILE",
+                      help="a live-state snapshot JSON "
+                           "({generation, servedKeys, componentStates}, from a "
+                           "running session): colors the graph as it stands now")
+    dash.add_argument("--against", default=None, metavar="PREV.json",
+                      help="a previous `audit --json` document; the boundary "
+                           "additions since it become the widening queue (item 21)")
+    dash.add_argument("--accept", action="append", default=[], metavar="CROSSING",
+                      help="mark one added crossing as already acknowledged in "
+                           "the queue (the token printed after `+`; repeatable)")
+    dash.add_argument("--accept-all", action="store_true",
+                      help="mark every added crossing as acknowledged")
+    dash.add_argument("--policy", default=None, metavar="POLICY",
+                      help="a boundary policy file (item 33); its violations over "
+                           "the current audit are the policy-exception queue, "
+                           "each with its why-trace as evidence")
+    dash.add_argument("--mcp-scope", action="append", default=[], metavar="COMPONENT",
+                      help="treat COMPONENT as MCP/agent-admitted for the policy's "
+                           "`mcp` sandbox (repeatable); `*` = every component")
+    dash.add_argument("--watch", action="store_true",
+                      help="periodic-refresh loop: re-read the sources and reprint "
+                           "on an interval (read-only; Ctrl-C to stop)")
+    dash.add_argument("--interval", type=float, default=2.0, metavar="SECONDS",
+                      help="refresh interval for --watch (default: 2.0)")
+    dash.add_argument("--no-color", action="store_true",
+                      help="plain output with no ANSI color")
+    dash.add_argument("--json", action="store_true",
+                      help="print the structured model instead of the text view")
+
     args = parser.parse_args(argv)
 
     if args.command == "explain":
@@ -1163,6 +1274,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "why":
         return _run_why(args)
+
+    if args.command == "dash":
+        return _run_dash(args)
 
     if args.command == "recover":
         return _run_recover(args)
