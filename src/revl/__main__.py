@@ -785,6 +785,27 @@ def main(argv: list[str] | None = None) -> int:
              "sandbox allow-list applies to it (repeatable); `*` = every "
              "component")
 
+    version_cmd = sub.add_parser(
+        "version",
+        help="derive the required semver bump from the interface diff against "
+             "a previous composition (docs/derived-versioning.md)")
+    version_cmd.add_argument("files", nargs="+")
+    version_cmd.add_argument(
+        "--against", metavar="PREV.json", default=None,
+        help="a previous compiled composition document to diff against; the "
+             "bump is a measurement of the change (produce one with `revl "
+             "compile <sources> -o prev.json` or `--emit-manifest`)")
+    version_cmd.add_argument(
+        "--current-version", metavar="X.Y.Z", default=None,
+        help="the previous composition's declared version; when given, the "
+             "computed next version is printed too")
+    version_cmd.add_argument(
+        "--emit-manifest", action="store_true",
+        help="print the compiled composition document (the diff input a later "
+             "`--against` reads) and exit, instead of deriving a bump")
+    version_cmd.add_argument("--json", action="store_true",
+                             help="machine-readable derivation")
+
     erase = sub.add_parser(
         "erase-report",
         help="right-to-erasure evidence for one realm: in-process state gone "
@@ -1351,6 +1372,34 @@ def main(argv: list[str] | None = None) -> int:
                 verdict = distribution[name]
                 print(f"  {name:<{width}}  {verdict['verdict']:<20} "
                       f"{'; '.join(verdict['reasons'])}")
+        return 0
+
+    if args.command == "version":
+        from .version import derive, render  # noqa: PLC0415
+        if args.emit_manifest:
+            # the diff input for a later `--against`: the compiled composition,
+            # which (unlike an audit report) carries the `services` table.
+            print(json.dumps(ir, indent=2))
+            return 0
+        if not args.against:
+            print("error: `revl version` needs --against PREV.json (a previous "
+                  "compiled composition) or --emit-manifest", file=sys.stderr)
+            return 2
+        try:
+            with open(args.against, encoding="utf-8") as handle:
+                previous = json.load(handle)
+        except OSError as error:
+            print(f"error: cannot read {args.against}: {error}", file=sys.stderr)
+            return 1
+        try:
+            result = derive(previous, ir, previous_version=args.current_version)
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(render(result, args.against))
         return 0
 
     rendered = json.dumps(ir, indent=2)
