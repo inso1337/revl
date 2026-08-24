@@ -1120,6 +1120,254 @@ def _emit_load_helpers(ir, out):
         out.append("")
 
 
+
+
+def _go_lifecycle_arg(node, payload_surface, env):
+    """An Opt payload argument rendered in the payload's Go type.
+
+    `revlEq` compares through `any`, and Go's untyped-constant rule would turn
+    a bare `4` into `int` while the Opt payload is `int64` (v3) / `int32`
+    (Int32) — DeepEqual would then say the values differ. Pin the literal to
+    the payload's Go type instead of letting the `any` context infer it."""
+    if isinstance(node, dict) and node.get("kind") == "lit":
+        value = node.get("value")
+        if isinstance(value, int) and payload_surface in ("Int", "Int32"):
+            return "%s(%s)" % (_go_type(payload_surface), value)
+        if isinstance(value, float) and payload_surface == "Float":
+            return "float64(%s)" % repr(value)
+    return _expr(node, env, payload_surface)
+
+
+def _go_lifecycle_assert(expr, bind_types, env, where):
+    """A Go bool expression for a lifecycle `assert` step.
+
+    The cordis-go tier carries Opt only in return position (`(T, bool)`), so a
+    `bind == Some(..)` / `bind == None` comparison over an Opt-typed lifecycle
+    binding is lowered against the tuple explicitly — `revlEq` on the value
+    plus the presence bit. Plain scalar/structural asserts lower through the
+    ordinary component expression renderer. Anything else (an Opt-typed
+    binding used outside this shape) refuses loudly: the tier cannot express
+    it, and a silently-wrong assertion is worse than none."""
+    if expr.get("kind") == "var" and bind_types.get(expr.get("name"), "").startswith("Opt["):
+        raise EmitError(
+            f"{where}: an Opt-typed lifecycle binding can only be asserted "
+            f"against `Some(..)` or `None` on the cordis-go tier (Opt is "
+            f"return-position only); got {expr!r}")
+    if expr.get("kind") != "bin" or expr.get("op") not in ("==", "!=", "===", "!=="):
+        return _expr(expr, env)
+    op = expr.get("op")
+    left, right = expr.get("left"), expr.get("right")
+    negate = op in ("!=", "!==")
+    if left.get("kind") == "var":
+        name = left.get("name")
+        surface = bind_types.get(name, "")
+        if surface.startswith("Opt["):
+            go_bind = _safe_local(name)
+            payload = surface[4:-1]
+            # `Some(..)` is a call; `None` lowers to a bare var
+            if right.get("kind") == "call":
+                callee = right.get("callee") or {}
+                cname = callee.get("name")
+                if cname == "Some":
+                    args = right.get("args") or []
+                    if len(args) != 1:
+                        raise EmitError(f"{where}: `Some(..)` takes exactly one argument")
+                    arg = _go_lifecycle_arg(args[0], payload, env)
+                    inner = "(%s.ok && revlEq(%s.value, %s))" % (go_bind, go_bind, arg)
+                    return "(!(%s))" % inner if negate else inner
+            elif right.get("kind") == "var" and right.get("name") == "None":
+                inner = "(!%s.ok)" % go_bind
+                return "(!(%s))" % inner if negate else inner
+            raise EmitError(
+                f"{where}: an Opt-typed lifecycle binding can only be asserted "
+                f"against `Some(..)` or `None` on the cordis-go tier (Opt is "
+                f"return-position only); got {expr!r}")
+    return _expr(expr, env)
+
+
+def _component_config_fields(name, components):
+    for comp in components:
+        if comp["name"] == name:
+            return [(f.get("name"), f.get("type")) for f in (comp.get("config") or [])]
+    return []
+
+
+def _component_has_config(name, components):
+    for comp in components:
+        if comp["name"] == name:
+            return bool(comp.get("config"))
+    return False
+
+
+def _emit_stc_lifecycle_tests(ir, out) -> None:
+    """`lifecycle test` blocks (syntax-2.0 §7.1) as `func TestXxx(t *testing.T)`
+    driving the live stc-go runtime (FR-5).
+
+    A lifecycle test is a script over a *live* composition: load components
+    into a fresh ``stc.Context`` via the generated ``LoadX`` helpers, call
+    through provision keys with typed ``stc.Service`` resolutions (the exact
+    read the placement runner's probes use), unload them LIFO, and assert the
+    runtime holds nothing. ``assert no_residue`` proves R4 with the registry
+    mirror of the ``registry().len() == 0`` shape
+    (``len(root.Fibers()) == 0``) and R1 with the host runtime's live-resource
+    counter, matching the py reference tier's pairing.
+    """
+    tests = [t for t in (ir.get("tests") or []) if t.get("lifecycle")]
+    if not tests:
+        return
+    components = ir.get("components") or []
+    services = ir.get("services") or {}
+    if not services:
+        raise EmitError(
+            "a lifecycle test loads components and calls through provision "
+            "keys, so it needs at least one service in the document to drive; "
+            "this document declares none"
+        )
+    provided: dict[str, str] = {}
+    for comp in components:
+        for key, svc in (comp.get("provides") or {}).items():
+            provided[key] = svc
+    method_tables = {sname: (svc.get("methods") or {})
+                     for sname, svc in services.items()}
+    out.append("// ---- lifecycle tests (docs/syntax-2.0.md §7.1) ----------------")
+    out.append("// A `lifecycle test` drives the composition on a live stc-go")
+    out.append("// context: load components, call through provision keys, unload")
+    out.append("// LIFO, and assert no residue (R4 registry + R1 host resources).")
+    out.append("type revlOptPair[T any] struct {")
+    out.append("\tvalue T")
+    out.append("\tok    bool")
+    out.append("}")
+    out.append("")
+    out.append("func revlEq(a, b any) bool { return reflect.DeepEqual(a, b) }")
+    out.append("")
+    used: set = set()
+    for test in tests:
+        tname = _go_v3_test_name(test.get("name") or "lifecycle", used)
+        where = "lifecycle test %s" % _go_string(test["name"])
+        env = _Env([], [], [])
+        bind_types: dict[str, str] = {}
+        out.append("func %s(revlT *testing.T) {" % tname)
+        out.append("\troot := stc.New()")
+        out.append("\t_fibers := map[string]*stc.Fiber{}")
+        for step in test.get("body") or []:
+            kind = step.get("step")
+            if kind == "load":
+                component = step["component"]
+                cname = _camel(component)
+                cfg = step.get("config") or {}
+                fields = ", ".join(
+                    "%s: %s" % (_camel(fname), _expr(cfg[fname], env, ftype))
+                    for fname, ftype in _component_config_fields(component, components)
+                    if fname in cfg)
+                if _component_has_config(component, components):
+                    sig = "Load%s(root, %sConfig{%s})" % (cname, cname, fields)
+                else:
+                    sig = "Load%s(root)" % cname
+                out.append("\t{")
+                out.append("\t\t_f := %s" % sig)
+                out.append("\t\tif err := _f.Ready(stdctx.Background()); err != nil {")
+                out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, err)'
+                           % _go_string(where + ": load " + component))
+                out.append("\t\t}")
+                out.append("\t\t_fibers[%s] = _f" % _go_string(component))
+                out.append("\t}")
+            elif kind == "unload":
+                component = step["component"]
+                out.append("\tif _f, _ok := _fibers[%s]; _ok {" % _go_string(component))
+                out.append("\t\t_f.Dispose()")
+                out.append("\t\t// disposal is orchestrated asynchronously; a")
+                out.append("\t\t// reload must not collide with the old fiber's")
+                out.append("\t\t// provisions, so wait for it to be Gone")
+                out.append("\t\tfor i := 0; i < 200 && _f.State() != stc.StateGone; i++ {")
+                out.append("\t\t\ttime.Sleep(5 * time.Millisecond)")
+                out.append("\t\t}")
+                out.append("\t\tdelete(_fibers, %s)" % _go_string(component))
+                out.append("\t}")
+            elif kind == "call":
+                key = step["key"]
+                service = provided.get(key)
+                if service is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: no provider for key {key!r}")
+                method = (method_tables.get(service) or {}).get(step["method"])
+                if method is None:  # pragma: no cover — the lowerer rejects it
+                    raise EmitError(f"{where}: unknown method {step['method']!r}")
+                bind = step.get("bind")
+                ret_surface = method.get("returns")
+                params = method.get("params") or []
+                args = ", ".join(
+                    _expr(a, env, params[i].get("type") if i < len(params) else None)
+                    for i, a in enumerate(step.get("args") or []))
+                mcall = "(_svc).%s(%s)" % (_camel(step["method"]), args)
+                if bind is not None and str(ret_surface or "").startswith("Opt["):
+                    payload = ret_surface[4:-1]
+                    go_payload = _go_type(payload)
+                    bind_types[bind] = ret_surface
+                    env.var_types[bind] = ret_surface
+                    # the binding outlives the resolution block, so it is
+                    # declared before it (a revl binding is test-scoped)
+                    out.append("\tvar %s revlOptPair[%s]" % (_safe_local(bind), go_payload))
+                    out.append("\t{")
+                    out.append("\t\t_svc, _err := stc.Service[%s](root, %s)" %
+                               (_camel(service), _key_var(key)))
+                    out.append("\t\tif _err != nil {")
+                    out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, _err)'
+                               % _go_string(where + ": " + key + " is ACTIVE (R2)"))
+                    out.append("\t\t}")
+                    out.append("\t\t_r, _ok := %s" % mcall)
+                    out.append("\t\t%s = revlOptPair[%s]{value: _r, ok: _ok}"
+                               % (_safe_local(bind), go_payload))
+                    out.append("\t}")
+                elif bind is not None:
+                    bind_types[bind] = ret_surface or ""
+                    env.var_types[bind] = ret_surface
+                    go_bind = _go_type(ret_surface) if ret_surface else ""
+                    out.append("\tvar %s %s" % (_safe_local(bind), go_bind))
+                    out.append("\t{")
+                    out.append("\t\t_svc, _err := stc.Service[%s](root, %s)" %
+                               (_camel(service), _key_var(key)))
+                    out.append("\t\tif _err != nil {")
+                    out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, _err)'
+                               % _go_string(where + ": " + key + " is ACTIVE (R2)"))
+                    out.append("\t\t}")
+                    out.append("\t\t%s = %s" % (_safe_local(bind), mcall))
+                    out.append("\t}")
+                else:
+                    out.append("\t{")
+                    out.append("\t\t_svc, _err := stc.Service[%s](root, %s)" %
+                               (_camel(service), _key_var(key)))
+                    out.append("\t\tif _err != nil {")
+                    out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, _err)'
+                               % _go_string(where + ": " + key + " is ACTIVE (R2)"))
+                    out.append("\t\t}")
+                    if ret_surface:
+                        out.append("\t\t_ = %s" % mcall)
+                    else:
+                        out.append("\t\t%s" % mcall)
+                    out.append("\t}")
+            elif kind == "assert":
+                out.append("\tif !(%s) {" % _go_lifecycle_assert(
+                    step["expr"], bind_types, env, where))
+                out.append("\t\trevlT.Fatalf(%s)" % _go_string(where + ": assertion failed"))
+                out.append("\t}")
+            elif kind == "assert_no_residue":
+                out.append("\t// R4 + R1: the composition must leave the live")
+                out.append("\t// runtime holding nothing — the orchestrator reaps")
+                out.append("\t// disposed fibers asynchronously, so poll briefly.")
+                out.append("\tfor i := 0; i < 200; i++ {")
+                out.append("\t\tif len(root.Fibers()) == 0 && revlHostLive() == 0 {")
+                out.append("\t\t\tbreak")
+                out.append("\t\t}")
+                out.append("\t\ttime.Sleep(5 * time.Millisecond)")
+                out.append("\t}")
+                out.append("\tif !(len(root.Fibers()) == 0 && revlHostLive() == 0) {")
+                out.append("\t\trevlT.Fatalf(%s, len(root.Fibers()), revlHostLive())"
+                           % _go_string(where + ": residue — %d fiber(s), %d host resource(s) (R4/R1)"))
+                out.append("\t}")
+            else:  # pragma: no cover — the lowerer emits nothing else
+                raise EmitError(f"{where}: unknown lifecycle step {kind!r}")
+        out.append("}")
+        out.append("")
+
 # --------------------------------------------------------------------------
 # instance-parametric spawn (docs/design-v2-instances.md, phase 1)
 # --------------------------------------------------------------------------
@@ -1259,11 +1507,42 @@ def _go_literal(v) -> str:
 # module header + host runtime
 # --------------------------------------------------------------------------
 
+def _host_runtime() -> str:
+    """The emitted host runtime, with the Int width matched to the mode.
+
+    ir_version 1/2 components keep `int` (the frozen scenarios, byte-for-byte);
+    a v3-mode document converges on `int64` so the host Pool's Int positions
+    type-check against v3 component bodies (whose Int is int64). Before this,
+    a v3 document whose component opens a Pool or executes a statement failed
+    to compile: `PoolOpen(config.url, config.pool_size)` passed an int64 into
+    an `int` parameter (docs/conformance.md; surfaced by FR-5's lifecycle
+    tests on the go tier).
+    """
+    int_ty = "int64" if _V3_MODE else "int"
+    return _HOST_RUNTIME.replace("@INT@", int_ty)
+
+
 def _needs_sync(ir) -> bool:
     return any(c.get("isolate") for c in ir.get("components", [])) or True
 
 
 _HOST_RUNTIME = r'''// ---- host runtime (minimal, recording) --------------------------------
+
+// R1 live-resource accounting (docs/backend-ir.md §Required semantics, the
+// same pairing the py reference tier's `assert no_residue` checks): every host
+// object acquired must be released by its `undo`, or the lifecycle
+// `assert no_residue` fails. The counter is package-wide, so it is per-test
+// and cross-test safe: a clean test returns to zero.
+var _revlLiveMu sync.Mutex
+var _revlLiveHostResources int
+
+func revlHostAcquire() { _revlLiveMu.Lock(); _revlLiveHostResources++; _revlLiveMu.Unlock() }
+func revlHostRelease() { _revlLiveMu.Lock(); _revlLiveHostResources--; _revlLiveMu.Unlock() }
+func revlHostLive() int {
+	_revlLiveMu.Lock()
+	defer _revlLiveMu.Unlock()
+	return _revlLiveHostResources
+}
 // A deterministic in-memory stand-in for revl host objects, instrumented so
 // scenarios can assert the exact effect/undo order of emitted code.
 
@@ -1298,19 +1577,20 @@ type Row = map[string]string
 // Pool is a deterministic in-memory connection pool.
 type Pool struct {
 	url  string
-	size int
+	size @INT@
 }
 
-func PoolOpen(url string, size int) *Pool {
+func PoolOpen(url string, size @INT@) *Pool {
 	hostRecord("pool.open")
+	revlHostAcquire()
 	return &Pool{url: url, size: size}
 }
-func (p *Pool) Close()               { hostRecord("pool.close") }
+func (p *Pool) Close()               { hostRecord("pool.close"); revlHostRelease() }
 func (p *Pool) Query(sql string) []Row {
 	hostRecord("pool.query:" + sql)
 	return nil
 }
-func (p *Pool) Execute(sql string) int {
+func (p *Pool) Execute(sql string) @INT@ {
 	hostRecord("pool.execute:" + sql)
 	return 0
 }
@@ -1323,9 +1603,10 @@ type Map struct {
 
 func MapNew() *Map {
 	hostRecord("map.new")
+	revlHostAcquire()
 	return &Map{m: map[string]string{}}
 }
-func (m *Map) Drop() { hostRecord("map.drop") }
+func (m *Map) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map) Insert(k, v string) {
 	m.mu.Lock()
 	m.m[k] = v
@@ -2839,7 +3120,12 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     #     them with the converged expression renderer.
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
-    if ver == 3 and (not ir.get("components") or has_top_level):
+    has_lifecycle = any(t.get("lifecycle") for t in (ir.get("tests") or []))
+    if ver == 3 and (not ir.get("components") or (has_top_level and not has_lifecycle)):
+        # A `lifecycle test` is a script over a live composition, so the
+        # document must stay on the stc-go runtime path even though it also
+        # carries top-level `test` blocks (FR-5); the pure path would drop the
+        # components and refuse the lifecycle steps.
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP
@@ -2859,6 +3145,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         _emit_component(comp, ir.get("services", {}), body)
     _emit_load_helpers(ir, body)
     _emit_spawn_support(ir, body)
+    _emit_stc_lifecycle_tests(ir, body)
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -2868,6 +3155,11 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("import (")
     out.append('\t"fmt"')
     out.append('\t"sync"')
+    if has_lifecycle:
+        out.append('\tstdctx "context"')
+        out.append('\t"reflect"')
+        out.append('\t"testing"')
+        out.append('\t"time"')
     if _COMP_NEEDS_STDLIB:
         out.append('\t"strings"')
         out.append('\t"unicode/utf8"')
@@ -2877,7 +3169,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     out.append("")
     out.append("var _ = fmt.Sprintf")
     out.append("")
-    out.append(_HOST_RUNTIME)
+    out.append(_host_runtime())
     if _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
     if _COMP_NEEDS_MAP:

@@ -310,7 +310,10 @@ def run_go(ir: dict) -> tuple[str, str]:
 
     The v3 tier is ordinary Go with no dependencies, so unlike rust this needs
     no network — a bare `go.mod` is enough, and the tier is as cheap to execute
-    as python and TypeScript.
+    as python and TypeScript. A document carrying a `lifecycle test` lowers to
+    the live stc-go runtime path instead, so the throwaway module pins the
+    same stc-go require the go placement runner and the conformance validator
+    use (resolved from the local module cache; FR-5).
     """
     go = shutil.which("go")
     if go is None:
@@ -323,13 +326,22 @@ def run_go(ir: dict) -> tuple[str, str]:
             source = next(iter(source.values()))
     except Exception as error:  # noqa: BLE001 — an emit refusal is a tier failure
         return ("fail", f"emitter refused: {error}")
+    go_mod = "module revltest\n\ngo 1.25\n"
+    if any(t.get("lifecycle") for t in (ir.get("tests") or [])):
+        go_mod += ("\nrequire github.com/0xdenny218/stc-go "
+                   "v0.6.1-0.20260818143352-b3d6788a428e\n")
     with tempfile.TemporaryDirectory(prefix="revl_test_go_") as tmpd:
         tmp = Path(tmpd)
         (tmp / "gen_test.go").write_text(source, encoding="utf-8")
-        (tmp / "go.mod").write_text("module revltest\n\ngo 1.25\n", encoding="utf-8")
+        (tmp / "go.mod").write_text(go_mod, encoding="utf-8")
+        env = {**os.environ, "GOFLAGS": "-mod=mod"}
+        if "stc-go" in go_mod:
+            # the module is pinned and cached by the placement runner / the
+            # conformance validator; an offline resolve is the honest gate
+            env["GOPROXY"] = "off"
         result = subprocess.run([go, "test", "./..."], cwd=tmp,
                                 capture_output=True, text=True, timeout=600,
-                                env={**os.environ, "GOFLAGS": "-mod=mod"})
+                                env=env)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
