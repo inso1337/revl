@@ -1821,7 +1821,7 @@ fn build_cases(tbl: Tt) -> Ct {
   var i = 0
   while (i < names.length()) {
     let tn = names[i]
-    let spec = match tbl.lookup(tn) {
+    let spec: TySpec = match tbl.lookup(tn) {
       Some(s) => s,
       None    => { kind: "variant", fields: Map.empty(), cases: [] },
     }
