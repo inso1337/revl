@@ -220,7 +220,7 @@ index with flags is [docs/guide-humans.md §Tooling](docs/guide-humans.md#toolin
 | `revl query SUB …` | `emits-to`/`withdraw`/`depends-on`/`reaches`/`drift` over source; `emitted-between`/`touched` over a recorded run | [queries.md](docs/queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$` interpolation; `--check` for CI | [fmt.md](docs/fmt.md) |
 | `revl test FILES` | run in-file `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](docs/prop-test.md) · [fault-tests.md](docs/fault-tests.md) |
-| `revl run FILES` | boot on a Cordis runtime; `--backend {py,rust,java,wasm}` boot live (**ts refused**), `--once`, `--watch`, `--record`, `--wal`, `--trace`, `--withdraw`, `--placement`, `--plan` | [replay.md](docs/replay.md) · [crash-recovery.md](docs/crash-recovery.md) |
+| `revl run FILES` | boot on a Cordis runtime; `--backend {py,ts,rust,java,wasm,go}` all boot live (py in-process, the rest each a separate process), `--once`, `--watch`, `--record`, `--wal`, `--trace`, `--withdraw`, `--placement`, `--plan` | [replay.md](docs/replay.md) · [crash-recovery.md](docs/crash-recovery.md) |
 | `revl recover --wal FILE` | crash recovery: roll a write-ahead log forward or back to a checked verdict + residue proof | [crash-recovery.md](docs/crash-recovery.md) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check` runs the withdraw oracle | [why-runtime.md](docs/why-runtime.md) |
 | `revl serve --mcp FILES` | serve a booted composition's **own** provided operations as MCP tools | [mcp-bridge.md](docs/mcp-bridge.md) |
