@@ -64,6 +64,17 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   service param or return crosses as a pointer into the module's memory —
   the v3 value model widened the boundary beyond scalars.
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
+- **standard WASI Preview 2 component (`Str` boundary)** — `canonical.py`
+  (item 41 slice-3). The linear-memory representation above is the tier's *own*
+  ABI, read through the exported `memory`; `canonical.py` maps it to the
+  **standard canonical ABI** at the component boundary so a Component Model host
+  (wasmtime, wasmCloud, Spin, jco) can load it. It adds `cabi_realloc` and a
+  canonical export per pure `Str`-only function (bare `(ptr,len)` lift/lower +
+  return area), wraps the core module into a component with `wasm-tools
+  component embed`/`new`, and the component's exported interface is exactly
+  `revl export wit` (slice-1). Records/lists/variants at the canonical boundary
+  are the remaining follow-on. See `test_canonical_abi.py` (builds + runs it
+  under wasmtime's component model) and docs/wit-bridge.md §5.
 
 ## Widths: `Int` is i64, addresses are i32
 

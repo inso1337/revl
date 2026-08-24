@@ -1,0 +1,3 @@
+fn echo(s: Str) -> Str { return s }
+fn shout(s: Str) -> Str { return `${s}!` }
+fn greet(name: Str) -> Str { return `Hello, ${name}!` }
