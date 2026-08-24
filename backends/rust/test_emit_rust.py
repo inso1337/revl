@@ -714,6 +714,123 @@ def test_cargo_check_service_call_arg_reuse(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Roadmap item 114 — item 101's clone missed the `_Env` provide-method renderer.
+# Item 101 cloned reused non-Copy values that are *params* (record fields /
+# service-call args). But a `let`-bound *local* reused after an emit/effect was
+# never typed in the effectful `_method_body_lines` path, so it still moved
+# (E0382). The fix seeds the local's type — including a required-service method
+# call's declared return — so `_by_value_arg` clones it, and pre-clones any
+# method-body local an `undo` closure reads (a host-Map `insert(key, ..)` moves
+# its key with no call-site clone, then the undo re-reads it).
+
+
+def test_env_let_local_clones_when_reused_through_an_emit_record():
+    """A provide method binds a non-Copy local with `let`, passes it into an
+    `emit` service call inside a record literal, then returns it. The record
+    field moved the local, so the return would use a moved value (E0382) — the
+    emitter clones the reused local (item 114, the `_method_body_lines` gap that
+    item 101's `_V3Ctx` fix left)."""
+    src = emit.emit(compile_source(
+        "type Msg = { content: Str }\n"
+        "fn finalize(raw: Str) -> Str { return raw.concat(\"!\") }\n"
+        "service Sessions { emission fn append(id: Str, m: Msg) }\n"
+        "service Chat { emission fn reply(id: Str, raw: Str) -> Str }\n"
+        "component Server requires sessions: Sessions provides chat: Chat {\n"
+        "  provide chat {\n"
+        "    fn reply(id, raw) {\n"
+        "      let answer = finalize(raw)\n"
+        "      emit sessions.append(id, { content: answer })\n"
+        "      return answer\n"
+        "    }\n"
+        "  }\n"
+        "}\n"))
+    assert "content: answer.clone()" in src
+
+
+def test_env_service_call_bound_local_is_typed_by_declared_return():
+    """The same reuse where the local is bound from a *required-service* method
+    call (`let answer = model.complete(seed)`) — a source `_v3_infer_type` alone
+    cannot type. Item 114 reads the method's declared return, so the local is
+    cloned at the reuse site."""
+    src = emit.emit(compile_source(
+        "type Msg = { content: Str }\n"
+        "service Model { fn complete(seed: Str) -> Str }\n"
+        "service Sessions { emission fn append(id: Str, m: Msg) }\n"
+        "service Chat { emission fn reply(id: Str, seed: Str) -> Str }\n"
+        "component Server requires model: Model, sessions: Sessions provides chat: Chat {\n"
+        "  provide chat {\n"
+        "    fn reply(id, seed) {\n"
+        "      let answer = model.complete(seed)\n"
+        "      emit sessions.append(id, { content: answer })\n"
+        "      return answer\n"
+        "    }\n"
+        "  }\n"
+        "}\n"))
+    assert "content: answer.clone()" in src
+
+
+def test_env_undo_closure_preclones_a_body_local_the_acquire_consumed():
+    """An effect whose acquire consumes a method-body local by value (a host-Map
+    `insert(key, ..)`) while its `undo` re-reads that local: the local is
+    pre-cloned into `<l>_undo` before the acquire so the `move` undo closure owns
+    a copy the acquire's move cannot invalidate (item 114)."""
+    src = emit.emit(compile_source(
+        "service KV { fn count() -> Int  emission fn put() }\n"
+        "component MemKV provides kv: KV {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide kv {\n"
+        "    fn count() = store.size()\n"
+        "    fn put() {\n"
+        "      let key = `k-${store.size()}`\n"
+        "      effect store.insert(key, \"v\")\n"
+        "      undo   store.remove(key)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"))
+    assert "let key_undo = key.clone();" in src
+    assert "store_undo.remove(&key_undo)" in src
+
+
+@needs_cargo
+def test_cargo_check_env_local_reuse_and_undo_preclone(tmp_path):
+    """Real cargo gate for item 114 (mirrors item 101's gate): the `let answer`
+    reuse-through-emit shape and the host-Map insert/undo local-reuse shape both
+    `cargo check` clean — no E0382."""
+    src = emit.emit(compile_source(
+        "type Msg = { content: Str }\n"
+        "fn finalize(raw: Str) -> Str { return raw.concat(\"!\") }\n"
+        "service Model { fn complete(seed: Str) -> Str }\n"
+        "service Sessions { emission fn append(id: Str, m: Msg) }\n"
+        "service Chat { emission fn reply(id: Str, raw: Str) -> Str }\n"
+        "component Server requires model: Model, sessions: Sessions provides chat: Chat {\n"
+        "  provide chat {\n"
+        "    fn reply(id, raw) {\n"
+        "      let a1 = finalize(raw)\n"
+        "      let a2 = model.complete(a1)\n"
+        "      emit sessions.append(id, { content: a2 })\n"
+        "      return a2\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        "service KV { fn count() -> Int  emission fn put() }\n"
+        "component MemKV provides kv: KV {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide kv {\n"
+        "    fn count() = store.size()\n"
+        "    fn put() {\n"
+        "      let key = `k-${store.size()}`\n"
+        "      effect store.insert(key, \"v\")\n"
+        "      undo   store.remove(key)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"))
+    assert "content: a2.clone()" in src
+    assert "let key_undo = key.clone();" in src
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
 # host `Map.new()` iteration surface — `keys()` / `size()` (roadmap item 86).
 #
 # The value-Map builtins `size()`/`keys()` (docs/stdlib-2.0.md §Map) type-check
@@ -937,6 +1054,45 @@ def test_timer_runtime_on_real_cordis_rs(tmp_path):
     result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
     assert "1 passed" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 112 (rust half) — the `advance` lifecycle step. Item 102 gave
+# py/ts an `advance <n><unit>` lifecycle statement so a timer's firing is an
+# assertable timeline step; on rust it used to fail hard ("unknown lifecycle
+# step 'advance'"). Item 99 already gave rust a Clock, so `advance` lowers to
+# `revl_clock_advance(ms)` and a rust lifecycle test drives the clock exactly
+# like the reference tiers.
+
+
+def test_advance_lifecycle_lowers_to_the_clock():
+    """An `advance` step in a lifecycle test lowers to `revl_clock_advance(ms)`
+    (not a hard refusal), the clock preamble is pulled in, and the clock is
+    reset at test start so the test sees only its own timers."""
+    ir = compile_files([str(ROOT / "examples" / "lifecycle_timer.rvl")])
+    src = emit.emit(ir)
+    assert "let _ = revl_clock_advance(35000);" in src    # advance 35s
+    assert "let _ = revl_clock_advance(30000);" in src    # advance 30s
+    assert "pub fn revl_clock_advance(ms: i64) -> usize" in src
+    assert "revl_clock_reset();" in src
+
+
+@needs_cargo
+def test_advance_lifecycle_runs_on_real_cordis_rs(tmp_path):
+    """Item 112 exit criterion on the rust tier: the shared lifecycle_timer doc
+    (examples/lifecycle_timer.rvl) — an `every`/`after` timer advanced through
+    the clock coeffect — RUNS on real cordis-rs. Its two `advance`-driven
+    lifecycle tests fire the timers and assert the tick counts, the same doc the
+    py/ts tiers run. Proves `advance` is really lowered (clock moves, timer
+    body runs), not skipped."""
+    ir = compile_files([str(ROOT / "examples" / "lifecycle_timer.rvl")])
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(
+        emit.cargo_toml("revl_advance_scn"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "2 passed" in result.stdout
 
 
 @needs_cargo
