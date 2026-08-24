@@ -3022,7 +3022,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         "args": args}
             if name in callables:
                 return {"kind": "fn", "name": name,
-                        "args": _coerce_async_args(name, args, env)}
+                        "args": _coerce_async_args(name, args, env, line)}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
             # the same sliver guard as the var-root path above: a non-var
@@ -3391,11 +3391,17 @@ def _refuse_leaky_arrow(node, env, source: str, line: int = 0) -> None:
             _refuse_leaky_arrow(value, env, source)
 
 
-def _coerce_async_args(callee_name, args, env):
-    """At a component-body call to a module `fn`, admit an arrow (or coerce a
-    sync value) into each parameter declared `(…) -> Async[T]` (item 92). The
-    component path never runs `_check_arrow`, so the async color is stamped here
-    — the pure-fn path gets it from the checker's `_resolve_arrow` instead."""
+def _coerce_async_args(callee_name, args, env, line):
+    """At a component-body call to a module `fn`, admit an arrow into each
+    parameter declared `(…) -> Async[T]` (item 92) by stamping the async color
+    into the IR. The component path never runs `_check_arrow`, so this is where
+    the color is placed; the pure-fn path gets it from `_resolve_arrow` instead.
+
+    v1 admits only an *arrow* in an async slot (the harness's shape — a sync
+    arrow is the accepted sync->async coercion, an async-bodied one is colored).
+    A non-arrow value (a bare callable name, a fn-typed local) is refused: it
+    would need an `as_async` wrapper the blocking backends do not yet erase —
+    a filed follow-up, refused here rather than leaked."""
     sig = (env.types.get(FNS_KEY) or {}).get(callee_name)
     if not sig:
         return args
@@ -3410,10 +3416,16 @@ def _coerce_async_args(callee_name, args, env):
             if not arg.get("returns"):
                 arg["returns"] = render_type(parse_type(ptype)[1][-1])
         else:
-            # a named/other sync value into an async slot: the checked
-            # sync->async coercion (py wraps in an `async def`, ts is a no-op,
-            # blocking tiers erase the marker to its value).
-            out[i] = {"kind": "as_async", "value": arg}
+            raise RevlError(
+                env.filename, line,
+                f"argument {i + 1} of `{callee_name}(...)` is declared "
+                f"`{render_type(ptype)}` (async), but only an arrow may be "
+                "passed into an async parameter in v1",
+                hint="wrap it in an arrow, e.g. `x => f(x)`, so the emitter can "
+                     "place the async boundary "
+                     "(docs/design/async-function-values.md)",
+                code="A1", category="async-propagation",
+            )
     return out
 
 
