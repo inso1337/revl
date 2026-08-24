@@ -1,0 +1,129 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Log": {
+      "methods": {
+        "write": {
+          "params": [
+            {
+              "name": "msg",
+              "type": "Str"
+            }
+          ],
+          "returns": null,
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Sink",
+      "source": "backends/go/scenarios/emitted/timer/timer.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "log": "Log"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "log",
+          "service": "Log",
+          "methods": [
+            {
+              "name": "write",
+              "params": [
+                "msg"
+              ],
+              "body": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Heartbeat",
+      "source": "backends/go/scenarios/emitted/timer/timer.rvl",
+      "config": [],
+      "requires": {
+        "log": "Log"
+      },
+      "provides": {},
+      "body": [
+        {
+          "step": "timer",
+          "mode": "every",
+          "interval_ms": 30000,
+          "body": [
+            {
+              "step": "emit",
+              "expr": {
+                "kind": "call",
+                "target": {
+                  "kind": "req",
+                  "name": "log"
+                },
+                "method": "write",
+                "args": [
+                  {
+                    "kind": "lit",
+                    "value": "tick"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "step": "timer",
+          "mode": "after",
+          "interval_ms": 300000,
+          "body": [
+            {
+              "step": "emit",
+              "expr": {
+                "kind": "call",
+                "target": {
+                  "kind": "req",
+                  "name": "log"
+                },
+                "method": "write",
+                "args": [
+                  {
+                    "kind": "lit",
+                    "value": "warmup done"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Sink",
+        "file": "backends/go/scenarios/emitted/timer/timer.rvl",
+        "inject": [],
+        "provides": [
+          "log"
+        ]
+      },
+      {
+        "name": "Heartbeat",
+        "file": "backends/go/scenarios/emitted/timer/timer.rvl",
+        "inject": [
+          "log"
+        ],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "Sink",
+      "Heartbeat"
+    ]
+  }
+}

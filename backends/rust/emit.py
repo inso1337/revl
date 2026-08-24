@@ -533,6 +533,8 @@ class _Env:
         # needs to build the plug-time config value.
         self.components: list = components or []
         self._v3_ctx: _V3Ctx | None = None
+        # Per-component counter for unique timer local names (item 57).
+        self.timer_counter = 0
 
     def v3_ctx(self) -> _V3Ctx:
         if self._v3_ctx is None:
@@ -638,7 +640,10 @@ def _emit_host_stubs(ir: dict) -> list[str]:
 
     out: list[str] = []
     lifecycle_present = any(t.get("lifecycle") for t in (ir.get("tests") or []))
-    if "Map" in used or "Pool" in used or lifecycle_present:
+    # A timer takes a live-resource slot on arming (its schedule ↔ cancel joins
+    # the same R1 acquire/release accounting), so it needs the counter too.
+    timer_present = _uses_timer(ir.get("components") or [])
+    if "Map" in used or "Pool" in used or lifecycle_present or timer_present:
         # R1 live-resource accounting (docs/backend-ir.md §Required semantics,
         # the same pairing the py reference tier's `assert no_residue` checks):
         # every host object acquired must be released by its `undo`, or the
@@ -1849,6 +1854,43 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
+    elif kind == "timer":
+        # A `timer` step (item 57, docs/time-coeffect.md): a revertible
+        # schedule. Arming the timer is the acquire, cancellation its derived
+        # inverse — registered through the SAME `ctx.effect` ledger that reverts
+        # a Pool or a provision, so unloading the component provably cancels the
+        # timer with no orphaned interval (residue-free; the leak the residue
+        # probe hunts cannot occur). The firing closure holds the body's
+        # emissions and runs at activation-time stratum with the component's
+        # declared capabilities — each `emit` lowers through the same path a
+        # top-level emission does, so G4/G8 reach is audited. Time advances only
+        # on `revl_clock_advance`, so a firing is a deterministic timeline step,
+        # never a wall-clock race.
+        mode = step.get("mode")
+        schedule = "revl_schedule_every" if mode == "every" else "revl_schedule_after"
+        interval = int(step.get("interval_ms"))
+        env.timer_counter += 1
+        n = env.timer_counter
+        # Clone each required service the firing body may capture, under a
+        # per-timer name, so the `move` closure owns its own handle and a second
+        # timer (or a later step) can still use the original (no E0382). Mirrors
+        # how `effect`/`let-effect` clone reqs into their undo closures.
+        rename: dict[str, str] = {}
+        for req in env.reqs:
+            cloned = f"{req}_t{n}"
+            out.append(f"{pad}let {cloned} = {req}.clone();")
+            rename[req] = cloned
+        out.append(f"{pad}let _revl_timer_{n} = {schedule}({interval}, move || {{")
+        for em in step.get("body") or []:
+            if em.get("step") != "emit":  # lowerer invariant (scope: emissions)
+                raise EmitError(
+                    f"timer body carries emissions only, found {em.get('step')!r}")
+            out.append(f"{pad}    let _ = {_expr(em.get('expr'), env, rename=rename)};")
+        out.append(f"{pad}}});")
+        # the derived inverse: cancellation, yielded into the disposer stack.
+        label = _string(env.name + ".timer.undo")
+        out.append(f"{pad}ctx.effect({label}, move || {{ "
+                   f"revl_cancel(_revl_timer_{n}); Ok(()) }})?;")
     elif kind == "fail":
         message = _expr(step.get("message"), env)
         out.append(
@@ -3072,6 +3114,199 @@ def _uses_spawn(components: list) -> bool:
     return False
 
 
+def _uses_timer(components: list) -> bool:
+    """True when any component body (or a nested `if` branch) arms a timer."""
+    def walk(steps) -> bool:
+        for step in steps or []:
+            if step.get("step") == "timer":
+                return True
+            if step.get("step") == "if" and (
+                    walk(step.get("then")) or walk(step.get("else"))):
+                return True
+        return False
+
+    return any(walk(component.get("body")) for component in components)
+
+
+def _revl_timer_preamble() -> list[str]:
+    """The clock coeffect + timer scheduler (item 57), the rust mirror of
+    backends/python/runtime.py's Clock/TimerHandle — deterministic tick-for-tick.
+
+    Time moves only on `revl_clock_advance`, which fires due timers earliest
+    first (ties by arm order) and re-arms `every` across the span, so a firing
+    is a reproducible timeline step rather than a wall-clock race. Arming takes
+    a live-resource slot (the same thread-local `REVL_LIVE_HOST_RESOURCES` a
+    Pool/Map takes); cancel — and a spent `after` — returns it, so a leaked
+    `every` timer surfaces through the exact R1 residue accounting an
+    `assert no_residue` performs. Thread-local like that counter, so parallel
+    `cargo test` threads never share a clock. A timer handle is just its
+    serial (`u64`): the cancel closure the disposer stack holds captures only
+    that, so it stays `Send` with no `Rc` escaping the arming thread."""
+    return [
+        "/// clock coeffect + timer scheduler (item 57, docs/time-coeffect.md):",
+        "/// the rust mirror of backends/python/runtime.py's Clock/TimerHandle.",
+        "struct RevlTimer {",
+        "    serial: u64,",
+        "    mode: &'static str, // \"every\" | \"after\"",
+        "    interval_ms: i64,",
+        "    body: std::rc::Rc<dyn Fn()>,",
+        "    status: &'static str, // \"live\" | \"cancelled\" | \"done\"",
+        "    next_at: i64,",
+        "    fired: u64,",
+        "}",
+        "",
+        "#[derive(Default)]",
+        "struct RevlClock {",
+        "    now: i64,",
+        "    serial: u64,",
+        "    timers: Vec<RevlTimer>,",
+        "    firings: Vec<(u64, i64)>, // (timer serial, fired-at ms) in fire order",
+        "}",
+        "",
+        "thread_local! {",
+        "    static REVL_CLOCK: std::cell::RefCell<RevlClock> =",
+        "        std::cell::RefCell::new(RevlClock::default());",
+        "}",
+        "",
+        "fn revl_schedule(mode: &'static str, interval_ms: i64,",
+        "                 body: std::rc::Rc<dyn Fn()>) -> u64 {",
+        "    REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() + 1));",
+        "    REVL_CLOCK.with(|c| {",
+        "        let mut clock = c.borrow_mut();",
+        "        clock.serial += 1;",
+        "        let serial = clock.serial;",
+        "        let next_at = clock.now + interval_ms;",
+        "        clock.timers.push(RevlTimer {",
+        "            serial, mode, interval_ms, body,",
+        "            status: \"live\", next_at, fired: 0,",
+        "        });",
+        "        serial",
+        "    })",
+        "}",
+        "",
+        "/// Arm a periodic timer against the clock coeffect (`every`).",
+        "fn revl_schedule_every(interval_ms: i64, body: impl Fn() + 'static) -> u64 {",
+        "    revl_schedule(\"every\", interval_ms, std::rc::Rc::new(body))",
+        "}",
+        "",
+        "/// Arm a one-shot delayed timer against the clock coeffect (`after`).",
+        "fn revl_schedule_after(interval_ms: i64, body: impl Fn() + 'static) -> u64 {",
+        "    revl_schedule(\"after\", interval_ms, std::rc::Rc::new(body))",
+        "}",
+        "",
+        "/// The schedule's inverse — idempotent, a no-op once the timer is spent.",
+        "/// Running it on teardown returns the live-resource slot arming took, so",
+        "/// the schedule leaves no residue.",
+        "fn revl_cancel(serial: u64) -> bool {",
+        "    let released = REVL_CLOCK.with(|c| {",
+        "        let mut clock = c.borrow_mut();",
+        "        if let Some(t) = clock.timers.iter_mut().find(|t| t.serial == serial) {",
+        "            if t.status == \"live\" {",
+        "                t.status = \"cancelled\";",
+        "                return true;",
+        "            }",
+        "        }",
+        "        false",
+        "    });",
+        "    if released {",
+        "        REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
+        "    }",
+        "    released",
+        "}",
+        "",
+        "/// Advance logical time by `ms`, firing every timer that comes due —",
+        "/// earliest first, ties broken by arm order — and re-arming `every`",
+        "/// timers across the whole span. Returns the number of firings.",
+        "pub fn revl_clock_advance(ms: i64) -> usize {",
+        "    let target = REVL_CLOCK.with(|c| c.borrow().now) + ms;",
+        "    let mut count = 0usize;",
+        "    loop {",
+        "        // pick the earliest-due live timer, advance the clock to it, and",
+        "        // extract its body — all under one borrow that is dropped before",
+        "        // the body runs (the body is emissions-only and never re-enters).",
+        "        let step = REVL_CLOCK.with(|c| {",
+        "            let mut clock = c.borrow_mut();",
+        "            let mut pick: Option<usize> = None;",
+        "            for i in 0..clock.timers.len() {",
+        "                let t = &clock.timers[i];",
+        "                if t.status != \"live\" || t.next_at > target {",
+        "                    continue;",
+        "                }",
+        "                match pick {",
+        "                    None => pick = Some(i),",
+        "                    Some(j) => {",
+        "                        let tj = &clock.timers[j];",
+        "                        if t.next_at < tj.next_at",
+        "                            || (t.next_at == tj.next_at && t.serial < tj.serial)",
+        "                        {",
+        "                            pick = Some(i);",
+        "                        }",
+        "                    }",
+        "                }",
+        "            }",
+        "            let i = pick?;",
+        "            clock.now = clock.timers[i].next_at;",
+        "            if clock.timers[i].mode == \"every\" {",
+        "                let iv = clock.timers[i].interval_ms;",
+        "                clock.timers[i].next_at += iv;",
+        "            }",
+        "            clock.timers[i].fired += 1;",
+        "            let serial = clock.timers[i].serial;",
+        "            let now = clock.now;",
+        "            clock.firings.push((serial, now));",
+        "            let body = clock.timers[i].body.clone();",
+        "            let mode = clock.timers[i].mode;",
+        "            Some((i, body, mode))",
+        "        });",
+        "        let (i, body, mode) = match step {",
+        "            Some(v) => v,",
+        "            None => break,",
+        "        };",
+        "        body();",
+        "        if mode == \"after\" {",
+        "            // a one-shot is spent once it fires; release through the same",
+        "            // slot-return path cancel uses so the residue trace stays",
+        "            // balanced and teardown's own revl_cancel is a clean no-op.",
+        "            REVL_CLOCK.with(|c| c.borrow_mut().timers[i].status = \"done\");",
+        "            REVL_LIVE_HOST_RESOURCES.with(|c| c.set(c.get() - 1));",
+        "        }",
+        "        count += 1;",
+        "    }",
+        "    REVL_CLOCK.with(|c| c.borrow_mut().now = target);",
+        "    count",
+        "}",
+        "",
+        "/// Current logical time in ms.",
+        "pub fn revl_clock_now() -> i64 {",
+        "    REVL_CLOCK.with(|c| c.borrow().now)",
+        "}",
+        "",
+        "/// Live timers — a teardown that abandons one leaves this > 0 (the",
+        "/// countable no-orphaned-interval proof).",
+        "pub fn revl_clock_pending() -> usize {",
+        "    REVL_CLOCK.with(|c| c.borrow().timers.iter()",
+        "        .filter(|t| t.status == \"live\").count())",
+        "}",
+        "",
+        "/// The recorded firing log: (timer serial, fired-at ms) in fire order.",
+        "pub fn revl_clock_firings() -> Vec<(u64, i64)> {",
+        "    REVL_CLOCK.with(|c| c.borrow().firings.clone())",
+        "}",
+        "",
+        "/// Return the clock to time zero with no timers (call between scenarios).",
+        "pub fn revl_clock_reset() {",
+        "    REVL_CLOCK.with(|c| {",
+        "        let mut clock = c.borrow_mut();",
+        "        clock.now = 0;",
+        "        clock.serial = 0;",
+        "        clock.timers.clear();",
+        "        clock.firings.clear();",
+        "    });",
+        "}",
+        "",
+    ]
+
+
 def _revl_spawn_handle() -> list[str]:
     """The value a `spawn` acquisition binds: a live component instance, torn
     down by its own `.dispose()` (docs/design-v2-instances.md, phase 1).
@@ -3554,6 +3789,8 @@ def _emit_components(ir: dict, components: list) -> list[str]:
     out: list[str] = []
     out.extend(_emit_service_traits(ir.get("services") or {}, ir.get("types") or {}))
     out.extend(_emit_host_stubs(ir))
+    if _uses_timer(components):
+        out.extend(_revl_timer_preamble())
     if _uses_stdlib(ir):
         out.extend(_stdlib_helper_traits())
     if _uses_float_interp(ir):
