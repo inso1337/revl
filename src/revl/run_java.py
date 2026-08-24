@@ -59,9 +59,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ._paths import backends_root
 from .errors import RevlError
 
-_BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
+_BACKENDS_DIR = backends_root()
 _JAVA_DIR = _BACKENDS_DIR / "java"
 _PLACEMENT_DIR = _JAVA_DIR / "placement"
 

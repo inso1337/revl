@@ -54,7 +54,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-_BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
+from ._paths import backends_root
+
+_BACKENDS_DIR = backends_root()
 _WASM_DIR = _BACKENDS_DIR / "wasm"
 _HARNESS = _WASM_DIR / "run_harness.py"
 

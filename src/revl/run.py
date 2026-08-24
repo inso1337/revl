@@ -36,6 +36,7 @@ import sys
 import types
 from pathlib import Path
 
+from ._paths import backends_root
 from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
@@ -737,7 +738,7 @@ def run_command(args) -> int:
         from .run_wasm import run_wasm  # noqa: PLC0415 — lazy: no wasmtime needed to compile/plan
         return run_wasm(ir, config, args.files, once=once, interactive=interactive)
 
-    backend_dir = Path(__file__).resolve().parents[2] / "backends" / "python"
+    backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
     try:

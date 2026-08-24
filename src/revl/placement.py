@@ -62,6 +62,7 @@ import threading
 import time
 from pathlib import Path
 
+from ._paths import backends_root
 from .activation import local_prereqs
 from .compiler import compile_files
 from .distribute import distributability
@@ -186,7 +187,7 @@ def _operator_identities(profile_path: str) -> set[str]:
 
     return set(load_profile(profile_path).operators)
 
-_BACKENDS_DIR = Path(__file__).resolve().parents[2] / "backends"
+_BACKENDS_DIR = backends_root()
 _TS_DIR = _BACKENDS_DIR / "typescript"
 _RUST_RUNNER = _BACKENDS_DIR / "rust" / "placement_runner"
 _JAVA_DIR = _BACKENDS_DIR / "java"
