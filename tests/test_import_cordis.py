@@ -220,6 +220,95 @@ def test_a_js_extension_local_import_also_resolves():
     assert _methods(ir, "Inv")["snapshot"]["returns"] == "PluginInventorySnapshot"
 
 
+# ------------------- DSH's idiomatic TYPES: branded strings, literal unions
+#                                                          (roadmap item 137)
+
+def test_a_branded_string_field_imports_as_str():
+    """DSH brands its ids: `type PluginEntryId = Branded<'PluginEntryId'>`, where
+    `Branded<T> = string & { readonly __brand: T }`. `Branded<…>` is an unmapped
+    generic — but its alias resolves, through the intersection, to `string`, and
+    the outer alias resolves through it, so a `PluginEntryId` field imports as
+    `Str` (item 116/134 stopped here with "a generic type this importer does not
+    map")."""
+    source = import_cordis_file(str(FIXTURES / "branded.ts"))
+    # no leftover `Branded`/`PluginEntryId` type is emitted: it collapsed to Str
+    assert "Branded" not in source
+    assert "emission fn get(id: Str)" in source
+    ir = compile_source(source, "branded.rvl")
+    assert _methods(ir, "Entries")["get"]["params"] == [{"name": "id", "type": "Str"}]
+    assert _extern_classes(ir)["cordis_entries_get"] == "emission"
+
+
+def test_a_literal_only_union_becomes_a_named_variant():
+    """A literal-only union (`'pending' | 'loading' | … | null`) is refused today
+    as "a sum type with no tag" — but the string literals ARE the tags. It
+    synthesizes a `variant` named after the alias; a `| null` member wraps it in
+    `Opt`; a union with no `null` maps to the bare variant."""
+    source = import_cordis_file(str(FIXTURES / "literal_union.ts"))
+    assert ("type PluginFiberPhase = "
+            "Pending | Loading | Active | Failed | Unloading") in source
+    assert "type PluginLoadKind = Eager | Lazy" in source
+    ir = compile_source(source, "literal_union.rvl")
+    phase = ir["types"]["PluginFiberPhase"]
+    assert phase["kind"] == "variant"
+    assert [c["name"] for c in phase["cases"]] == \
+        ["Pending", "Loading", "Active", "Failed", "Unloading"]
+    methods = _methods(ir, "Fibers")
+    # `| null` -> Opt around the whole variant
+    assert methods["phase"]["returns"] == "Opt[PluginFiberPhase]"
+    # no `null` member -> the bare variant
+    assert methods["schedule"]["params"] == [{"name": "kind", "type": "PluginLoadKind"}]
+
+
+def test_a_union_mixing_a_literal_with_a_real_type_still_refuses():
+    """Only a *pure* literal-only union synthesizes. A union that mixes a literal
+    with a non-literal type has no tag on the non-literal arm, so it stays refused
+    honestly rather than inventing a case for `number`."""
+    plugin = """
+    import { Context, Service } from 'cordis'
+    type Thing = 'a' | number
+    export class Mix extends Service {
+      constructor(ctx) { super(ctx, 'mix') }
+      it(): Thing { return 'a' }
+    }
+    """
+    with pytest.raises(RevlError) as excinfo:
+        import_cordis(plugin, filename="mix.ts")
+    assert "sum type with no tag" in str(excinfo.value)
+
+
+def test_the_full_idiomatic_gateway_shape_imports_end_to_end():
+    """The whole DSH `PluginInventoryGateway` shape, combining items 116/134/137:
+    an external `*Service` base, `@Remote`-decorated operations, a `.ts`-extension
+    local import, and idiomatic types — a branded id, a literal-only phase union,
+    and records nesting both. The full service + externs + component emit."""
+    source = import_cordis_file(str(FIXTURES / "idiomatic.ts"))
+    # item 134: external base recovered as a Service root
+    assert ("class PluginInventoryGateway extends TypertRemoteService "
+            "(an external `*Service` base, treated as a Service root)") in source
+    # item 137: branded id collapsed to Str; literal union synthesized to a variant
+    assert "Branded" not in source
+    assert ("type PluginFiberPhase = "
+            "Pending | Loading | Active | Failed | Unloading") in source
+    # nested records transcribed, branded + union threaded through them
+    assert ("type PluginInventoryEntry = "
+            "{ id: Str, phase: Opt[PluginFiberPhase], loaded_at: Str }") in source
+    assert ("type PluginInventorySnapshot = "
+            "{ total: Int, entries: List[PluginInventoryEntry], "
+            "generated_at: Str }") in source
+
+    ir = compile_source(source, "idiomatic.rvl")
+    methods = _methods(ir, "PluginInventory")
+    assert set(methods) == {"list", "forget"}
+    assert methods["list"]["returns"] == "PluginInventorySnapshot"
+    # `@revl:pure` above the decorated `list` still weakens it (item 134)
+    assert methods["list"]["emission"] is False
+    assert _extern_classes(ir)["cordis_plugin_inventory_list"] == "pure"
+    # the branded id reaches the operation surface as Str
+    assert methods["forget"]["params"] == [{"name": "id", "type": "Str"}]
+    assert ir["components"][0]["provides"] == {"plugin_inventory": "PluginInventory"}
+
+
 # --------------------------------------------------------- the emission rule
 
 def test_untyped_ts_defaults_every_operation_to_emission():
