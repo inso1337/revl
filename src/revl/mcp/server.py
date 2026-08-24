@@ -30,6 +30,7 @@ from ..compiler import compile_files, compile_source
 from ..diagnostics import FIXES, GUARANTEES, report
 from . import fillspec
 from . import edit as _edit
+from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
 from . import gauntlet as _gauntlet
@@ -145,6 +146,83 @@ def _stamp_authority(payload: dict, decision) -> None:
                                       if decision.subjects else "")})
 
 
+# -- component leases (roadmap item 61, docs/component-leases.md) -------------
+
+def _refused_by_lease(refusal) -> dict:
+    """A swap refused because it would replace a component another operator
+    leases, under an enforcing policy (item 33). Same untouched-system,
+    why-trace shape `_refused_by_operator` gives for the management plane —
+    pointed at the workspace instead."""
+    from ..why import render as _render_why  # noqa: PLC0415
+    return {
+        "ok": False,
+        "admitted": False,
+        "swapped": False,
+        "authorized": False,
+        "note": "the running composition is untouched — a lease held by another "
+                "operator, enforced by policy, refused this replacement",
+        "lease": {"component": refusal.component, "heldBy": refusal.heldBy,
+                  "expiry": refusal.expiry, "operator": refusal.holder},
+        "why": refusal.why.to_json(),
+        "diagnostics": [{
+            "severity": "error", "code": "REVL", "category": "lease",
+            "message": refusal.message + "\n" + _render_why(refusal.why),
+        }],
+    }
+
+
+def _record_lease_trace(events: list[dict]) -> None:
+    """Ride the lease events into the causal trace (item 27): when a composition
+    is loaded, append them to the driver's event stream so `revl_state`'s trace
+    — and any trace query over it — carries "who held what lease when" beside
+    the lifecycle story."""
+    driver = getattr(SESSION, "_driver", None)
+    if driver is not None and events:
+        driver.events.extend(events)
+
+
+def _tool_lease(arguments: dict) -> dict:
+    """Claim, renew, or release an operator-scoped, TTL-bound lease on a
+    component name — the multi-agent workspace primitive (item 61).
+
+    A lease is not a lock: the running component keeps serving. It governs who
+    may *replace* it — advisory at plan/swap by default, refused at admission
+    under a policy that enforces leases. The holder is the session's operator
+    identity (item 55)."""
+    action = (arguments.get("action") or "claim").lower()
+    component = arguments.get("component")
+    if action not in ("claim", "renew", "release"):
+        return _session_error(
+            f"unknown lease action {action!r} — one of claim, renew, release")
+    if not component:
+        return _session_error("`component` is required — a component *name* to "
+                              "lease (leases govern who may replace it)")
+    holder = _leases.holder_identity(SESSION)
+    book = SESSION.leases
+    try:
+        if action == "release":
+            released = book.release(component, holder)
+        elif action == "renew":
+            book.renew(component, holder, arguments.get("ttl"))
+        else:
+            book.claim(component, holder, arguments.get("ttl"))
+    except _leases.LeaseError as error:
+        return _session_error(str(error))
+    events = book.drain_events()
+    _record_lease_trace(events)
+    payload = {
+        "ok": True,
+        "action": action,
+        "holder": holder,
+        "component": component,
+        "leases": book.document(),
+        "leaseEvents": events,
+    }
+    if action == "release":
+        payload["released"] = released
+    return payload
+
+
 def _origin(arguments: dict) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
     be snapshotted for re-admission (docs/persistence.md)."""
@@ -200,6 +278,15 @@ def _tool_swap(arguments: dict) -> dict:
     if not SESSION.loaded:
         return _session_error("nothing is loaded — call revl_load first")
     replacing = tuple(arguments.get("replacing") or ())
+
+    # component leases (item 61): under a policy that enforces leases, refuse a
+    # swap that would replace a component another operator holds — the acting
+    # half of the workspace, all-or-nothing like admission, running comp
+    # untouched. Advisory-by-default leases never reach here (check_swap returns
+    # None unless the policy enforces).
+    refusal = _leases.check_swap(SESSION, arguments)
+    if refusal is not None:
+        return _refused_by_lease(refusal)
 
     inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
     if not inline:
@@ -580,8 +667,15 @@ def _tool_plan(arguments: dict) -> dict:
         modules=arguments.get("modules"),
         replacing=tuple(arguments.get("replacing") or ()),
     )
-    return {**result, "against": against,
-            "note": "nothing was admitted, swapped or written — this is a plan"}
+    # component leases (item 61): advise — never block — when this swap would
+    # replace a component another operator leases. Surfaced so an agent sees
+    # the race before it swaps; the plan itself is unchanged.
+    payload = {**result, "against": against,
+               "note": "nothing was admitted, swapped or written — this is a plan"}
+    warnings = _leases.advise_plan(SESSION, arguments)
+    if warnings:
+        payload["leaseWarnings"] = warnings
+    return payload
 
 
 def _tool_audit(arguments: dict) -> dict:
@@ -978,6 +1072,39 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_state,
+    },
+    {
+        "name": "revl_lease",
+        "description": "Claim, renew or release an operator-scoped, TTL-bound "
+                       "LEASE on a component NAME — the multi-agent workspace "
+                       "primitive. A lease is NOT a lock: the running component "
+                       "keeps serving every call. It governs who may REPLACE it "
+                       "while you iterate — 'agent B is on UserCache until 14:32'. "
+                       "By default a swap that would replace someone else's leased "
+                       "component is WARNED at revl_plan/revl_swap but proceeds; "
+                       "under a boundary policy that declares `leases enforced` "
+                       "(item 33) that swap is REFUSED at admission, the running "
+                       "system untouched. The holder is the session's operator "
+                       "identity (item 55); active leases show in revl_state; every "
+                       "claim/renew/release/expiry rides the causal trace (item 27). "
+                       "Leases expire on their TTL, so a walked-away agent never "
+                       "wedges the workspace. See docs/component-leases.md.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["claim", "renew", "release"],
+                           "description": "claim (or extend) / renew / release; "
+                                          "default claim"},
+                "component": {"type": "string",
+                              "description": "the component name to lease"},
+                "ttl": {"type": "number",
+                        "description": "lease duration in seconds (claim/renew; "
+                                       "default 300)"},
+            },
+            "required": ["component"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_lease,
     },
     {
         "name": "revl_snapshot",
