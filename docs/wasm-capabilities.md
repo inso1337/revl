@@ -57,7 +57,7 @@ ABI model. The substrate's rule: **`length`, `push`, `concat`, `slice`,
 
 | builtin | on | wasm? | notes / exact refusal |
 |---|---|---|---|
-| `length()` | Str, Bytes, List | ✅ | Str counts **code points** (`$str_cp_length`); Bytes/List count from the u32 prefix |
+| `length()` / `.length` | Str, Bytes, List | ✅ | both the method and property forms: Str counts **code points** (`$str_cp_length`); Bytes/List count from the u32 prefix |
 | `push(v)` | List | ✅ | persistent, one 8-byte slot |
 | `concat(x)` | Str, Bytes, List | ✅ | `$str_concat` / `$list_concat` |
 | `slice(a, b)` | Str, Bytes, List | ✅ | Str slices on code-point boundaries; Bytes on byte offsets; List on element offsets |
