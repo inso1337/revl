@@ -40,6 +40,8 @@ from .typecheck import (
     parse_type,
     substitute,
     unify,
+    _is_wildcard,
+    _check_method_namespace_disjoint,
 )
 from .parser import (
     AssertStmt,
@@ -132,6 +134,15 @@ _BUILTIN_METHODS = {
     "to_str": 0,
 }
 
+# The disjointness this comment block promises is a *checked* claim, enforced
+# at module load (table-edit time), not at golden-diff time: editing this
+# table with a name from the host stub surface reclassifies every host call
+# site of that name and surfaces only as broken tests across the suite
+# (roadmap 75(b) tooling half; dogfood/findings-mapiter.md §2). `remove` is
+# the ONE sanctioned overlap (docs/stdlib-2.0.md §Map) — dispatch by receiver
+# kind is what makes it safe.
+_check_method_namespace_disjoint(_BUILTIN_METHODS, "_BUILTIN_METHODS")
+
 
 # Integer division and modulo are undefined at zero, and every tier says so
 # differently — python raises, rust and wasm trap, java throws, and TypeScript
@@ -152,6 +163,29 @@ def _refuse_zero_divisor(method: str, args, filename: str, line: int) -> None:
             f"`{method}` by a literal zero is undefined",
             hint="integer division and modulo have no value at zero; guard the "
                  "divisor (`if (b == 0) { ... }`) or use a non-zero constant")
+
+
+def _refuse_unpinned_stdlib_method(method: str, recv_t: str | None,
+                                   filename: str, line: int) -> None:
+    """The stdlib-named-method sliver (roadmap 75(b), docs/contract-errata.md
+    "Typing gaps"): a method call on a receiver whose type no constructor pins
+    must not lower as the builtin. At runtime the value is whatever the host
+    returned (or whatever the type parameter was instantiated with), not a
+    Str/List/Int/Int32/Bytes/Map value, so the builtin dispatch misbehaves on
+    every tier. Only a receiver the checker can *prove* is a stdlib value may
+    take the builtin table; everything else stays on the G8 audit surface,
+    refused here with the same HOST-METHOD diagnostic the family surface uses."""
+    shown = render_type(recv_t) or "unknown"
+    raise RevlError(
+        filename, line,
+        f"stdlib method `{method}` on a value of {shown} type — no constructor "
+        "pins this receiver as a Str/List/Int/Int32/Bytes/Map value, so the "
+        "checker refuses to lower the call as the builtin",
+        hint="host-object results carry no type (G8): annotate the binding "
+             "(`let v: Str = ...`) or route the value through a declared type "
+             "before calling methods on it",
+        code="HOST-METHOD", category="host-boundary",
+    )
 
 
 def _is_host_valued(expr, scope) -> bool:
@@ -821,9 +855,11 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
 
     Each signature's type parameters are marked here, once, so the rest of the
     checker can tell a universally quantified `T` from a nominal type that
-    merely has a one-letter name. Both forms feed the same set: implicit
-    single-uppercase names, and any explicit `fn id[T](...)` names the decl
-    carries (validated for shadowing here — see `validate_explicit_tparams`).
+    merely has a one-letter name. The set is the explicit `fn id[T](...)`
+    names the decl carries (validated for shadowing here — see
+    `validate_explicit_tparams`), plus — only when the decl carries NO list —
+    the implicit single-uppercase names (roadmap 75(c): an explicit list
+    turns the heuristic off; declared means declared).
     Marked types never reach the IR — this table is the checker's view, and
     `_lower_fns`/`_lower_externs` emit the author's spelling, byte-identical
     whether a parameter was implicit or explicit."""
@@ -2145,6 +2181,19 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                     hint="records carry data, not methods; call functions as `f(x)`, "
                          "and call arrows through a `let` binding",
                 )
+            # The stdlib-named-method sliver (roadmap 75(b)): only a receiver
+            # the checker can *prove* is a stdlib value (Str/List/Int/Int32/
+            # Bytes/Map) may take the builtin table. A receiver whose
+            # provenance no constructor pins — an extern's return, a
+            # host-object result, a type parameter — used to lower a
+            # stdlib-named method as that builtin and misdispatch at runtime.
+            # Refuse it like any other host-boundary method (HOST-METHOD); the
+            # fence then closes to exactly "host-object results are on the
+            # audit surface" (G8).
+            recv_t = _expr_static_type(expr.callee.target, type_env, types)
+            if _is_wildcard(recv_t):
+                _refuse_unpinned_stdlib_method(method, recv_t, filename,
+                                               expr.line)
             if len(expr.args) != arity:
                 raise RevlError(filename, expr.line,
                                 f"builtin `{method}` takes {arity} argument(s), "
@@ -2693,6 +2742,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     )
                 return _component_req_call(env, root, method, args, line)
             if method in _BUILTIN_METHODS:
+                # The stdlib-named-method sliver (roadmap 75(b)), same rule as
+                # a `fn` body: only a receiver the checker can *prove* is a
+                # stdlib value may take the builtin table. A local of unknown
+                # type (a host-object result such as `let v = store.get(k)`)
+                # used to lower a stdlib-named method as that builtin and
+                # misdispatch at runtime; refuse it (HOST-METHOD). Undeclared
+                # roots fall through and are caught by G1 name resolution.
+                if root in scope:
+                    recv_t = infer_ir({"kind": "name", "id": scope[root]},
+                                      env.type_env, env.types, env.services)
+                    if _is_wildcard(recv_t):
+                        _refuse_unpinned_stdlib_method(method, recv_t,
+                                                       filename, line)
                 if len(args) != _BUILTIN_METHODS[method]:
                     raise RevlError(filename, line,
                                     f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
@@ -2735,13 +2797,19 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "fn", "name": name, "args": args}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
+            # the same sliver guard as the var-root path above: a non-var
+            # receiver of unknown type (e.g. `open_pool("pg://").remove(k)`)
+            # must not lower as the builtin either
+            target = _lower_component_pure_expr(expr.callee.target, env, scope,
+                                                callables, pure_only)
+            recv_t = infer_ir(target, env.type_env, env.types, env.services)
+            if _is_wildcard(recv_t):
+                _refuse_unpinned_stdlib_method(method, recv_t, filename, line)
             if len(args) != _BUILTIN_METHODS[method]:
                 raise RevlError(filename, line,
                                 f"builtin `{method}` takes {_BUILTIN_METHODS[method]} "
                                 f"argument(s), {len(args)} given")
-            return {"kind": "builtin", "method": method,
-                    "target": _lower_component_pure_expr(expr.callee.target, env, scope,
-                                                         callables, pure_only),
+            return {"kind": "builtin", "method": method, "target": target,
                     "args": args}
         return {"kind": "call",
                 "callee": _lower_component_pure_expr(expr.callee, env, scope, callables,
@@ -3311,6 +3379,17 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     # (docs/function-types.md §limits).
                     check_type_wellformed(filename, mstmt.line, mstmt.type)
                     env.type_env[safe] = mstmt.type
+                else:
+                    # record the inferred type exactly as the activation-body
+                    # setup sweep does, so a later method on the binding is
+                    # checked against the *real* type (`let xs = [1, 2]` then
+                    # `xs.length()` is a List length, not an unpinned call) —
+                    # the stdlib-named-method guard (roadmap 75(b)) depends on
+                    # provable receiver types.
+                    inferred = infer_ir(value, env.type_env, env.types,
+                                        env.services)
+                    if inferred is not None:
+                        env.type_env[safe] = inferred
                 mbody.append({"step": "let", "name": safe, "value": value,
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):
