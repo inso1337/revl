@@ -66,6 +66,18 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   service param or return crosses as a pointer into the module's memory —
   the v3 value model widened the boundary beyond scalars.
 - **`await Job.run(name)`** continues to lower to the runtime's async host op.
+- **`lifecycle test` blocks (item 142)** — `revl test --backend wasm` boots the
+  emitted components on the live cordis-wasm runtime, calls through provision
+  keys, unloads LIFO, and proves no residue (`len(rt.fibers) == 0` R4 + the
+  coeffect table empty R1) — the substrate sibling of the py/rust/ts/go lifecycle
+  runners and the substrate mirror of the once-mode boot's no-residue proof. It
+  runs over the tier's **scalar** boundary (Int i64 / Bool i32); a test that
+  needs a `config` load, a non-scalar service boundary, or a timer skips *per
+  test, with a reason* (never a false pass). Driver: `src/revl/test.py`
+  (`run_wasm`) + `lifecycle.py` (classifier) + `lifecycle_harness.py` (the
+  cordis-wasm-side executor). See `examples/lifecycle_wasm.rvl` (runs) versus
+  `examples/lifecycle_cache.rvl` (config/Pool/Map, so it skips) and
+  docs/wasm-capabilities.md §Lifecycle tests.
 - **standard WASI Preview 2 component (`Str` boundary)** — `canonical.py`
   (item 41 slice-3). The linear-memory representation above is the tier's *own*
   ABI, read through the exported `memory`; `canonical.py` maps it to the

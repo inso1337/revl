@@ -1,0 +1,72 @@
+// Lifecycle tests that RUN on the wasm substrate tier (roadmap item 142).
+//
+// A `lifecycle test` (docs/syntax-2.0.md §7.1) is the paradigm's own guarantee
+// asserted from inside the language: load a composition, call through its
+// provision keys, unload it, and assert nothing was left behind (R4 registry
+// residue + R1 live resources). Unlike examples/lifecycle_cache.rvl — which
+// leans on `config`, `Pool` and `Map` (hosted-tier only) and so can only skip
+// on wasm — this mesh is written to the substrate's scalar instruction set:
+// Int-only services, no host builtins, no config. It therefore boots on the
+// live cordis-wasm runtime and its lifecycle is checked for real, the same way
+// `revl run --backend wasm --once` proves the once round-trip.
+
+service Kv {
+  fn get(k: Int) -> Int
+  fn set(k: Int, v: Int)
+}
+
+service Status {
+  fn shared() -> Int
+}
+
+// A stateless provider: it satisfies Beacon's `kv` coeffect without any host
+// state (a stateful store would need `Map`, which the substrate does not lower).
+// `get` answers a constant; `set` is a no-op sink — enough for Beacon's
+// activation effects to have an inverse to replay at teardown.
+component Store provides kv: Kv {
+  provide kv {
+    fn get(k)    = 0
+    fn set(k, v) {}
+  }
+}
+
+// The consumer: its activation runs two `effect … undo …` pairs against the kv
+// coeffect (the compiled activate_step/deactivate accumulator, in Wasm
+// globals), and it provides a Status service whose `shared` reads back through
+// the coeffect. Loading it drives the 2-step state machine to ACTIVE; unloading
+// it replays the inverses LIFO.
+component Beacon requires kv: Kv provides status: Status {
+  effect kv.set(7, 100) undo kv.set(7, 0)
+  effect kv.set(8, 200) undo kv.set(8, 0)
+
+  provide status {
+    fn shared() = kv.get(7)
+  }
+}
+
+// This one RUNS on wasm: every step is scalar-expressible, so the driver boots
+// the mesh, resolves `status` through the coeffect table, calls it, tears the
+// mesh down LIFO, and proves the live runtime holds nothing afterwards.
+lifecycle test "beacon boots, serves, and reverts cleanly" {
+  load Store
+  load Beacon
+  let seen = call status.shared()
+  assert seen == 0
+  unload Beacon
+  unload Store
+  assert no_residue
+}
+
+// A second scalar lifecycle over the same mesh: a reloaded Beacon comes back to
+// a clean ACTIVE state and leaves no residue on the second teardown either.
+lifecycle test "beacon reloads to a clean state" {
+  load Store
+  load Beacon
+  unload Beacon
+  load Beacon
+  let again = call status.shared()
+  assert again == 0
+  unload Beacon
+  unload Store
+  assert no_residue
+}

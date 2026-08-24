@@ -148,6 +148,34 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
 
+## Lifecycle tests on the substrate (item 142)
+
+A `lifecycle test` (docs/syntax-2.0.md §7.1) *runs* on the wasm tier when every
+step stays inside the scalar instruction set. `revl test --backend wasm` boots
+the emitted components on the live cordis-wasm runtime, calls through provision
+keys (resolve the key in the coeffect table Σ, invoke its op), unloads LIFO, and
+proves no residue — `len(rt.fibers) == 0` (R4) and the coeffect table `rt.table`
+empty (R1), the substrate mirror of the once-mode boot's no-residue proof. The
+driver lives in `src/revl/test.py` (`run_wasm`) + `backends/wasm/lifecycle.py`
+(which steps the substrate can express) and `backends/wasm/lifecycle_harness.py`
+(the cordis-wasm-side executor). `examples/lifecycle_wasm.rvl` is a scalar mesh
+that runs.
+
+What still **skips, per test, with a reason** (never a false pass):
+
+| the test … | why it skips |
+|---|---|
+| `load C with { … }` | a `config` block does not lower — no instantiation-config channel |
+| `call`/`assert` crossing a non-scalar boundary (`Str`/`List`/record/variant/`Opt`/`Result`/`Float`) | those cross as linear-memory pointers the host cannot marshal at the coeffect seam; only Int (i64) / Bool (i32) move across it |
+| an `advance` step | timers (`every`/`after`, item 57) are not yet lowerable (docs/time-coeffect.md) |
+| any component that does not lower (`Map`/`Pool`, method-time effects, …) | the whole mesh cannot boot, so its lifecycle tests skip with the emit reason |
+
+`examples/lifecycle_cache.rvl` hits the first and last rows (`config`, `Pool`,
+`Map`), so it skips on wasm while it runs on py/rust/ts/go. A skip is reported
+as `[wasm] skip: … — <reason>`; a lifecycle test the substrate *can* express and
+that then fails its assertion or leaves residue is a real `[wasm] fail:`, not a
+skip.
+
 ## Writing to the wasm subset
 
 A harness-shaped component that must also run on the substrate:
