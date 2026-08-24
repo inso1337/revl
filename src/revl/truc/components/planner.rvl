@@ -1,0 +1,235 @@
+// Planner (PURE) — the resolver brain. Resolution order, hash-drift
+// detection, candidate marshalling, and every add/assemble/refuse decision
+// are pure functions over JSON values: no externs are reachable from here, so
+// `revl test` covers the whole brain with no mocks and no emissions. This is
+// the component to be proudest of — run `revl audit` on truc and Planner
+// carries zero authority while the four rim components carry it all.
+//
+// Structured values cross the service boundary as Str JSON (docs/design/
+// truc-architecture.md §10.2, Str-JSON v1). Inside these pure fns the JSON is
+// parsed into declared record types and manipulated with full control flow.
+
+use "../externs.rvl" { json_parse, json_stringify, sha256_hex }
+
+// ---- shapes crossing in ----
+
+type Truc      = { name: Str, registry: Str }
+type Manifest  = { name: Str, registry: Str, entry: List[Str], trucs: List[Truc] }
+type Spec      = { entry: List[Str], trucs: List[Str] }
+type EntryFile = { path: Str, source: Str }
+type Vendored  = { name: Str, path: Str, source: Str }
+type Gathered  = { entry: List[EntryFile], vendored: List[Vendored] }
+type Ordered   = { path: Str, source: Str, name: Str }
+type LockRow   = { name: Str, sourceHash: Str }
+type LockFile  = { trucs: List[LockRow] }
+type Entry     = { name: Str, source: Str, manifest: Str }
+type IndexRow  = { name: Str, sourceHash: Str }
+type Verdict   = { ok: Bool, diagnostic: Str }
+type Drift     = { ok: Bool, message: Str }
+
+// ---- shapes crossing out ----
+
+type Report   = { code: Int, message: Str, sources: Str, commit: Str }
+type LockAdd  = { name: Str, registry: Str }
+type Commit   = { lockAdd: LockAdd }
+
+// ---- resolution ----
+
+// The registry path the composition resolves against (v1: one local registry).
+fn plan_registry_of(mj: Str) -> Str {
+  let m: Manifest = json_parse(mj)
+  return m.registry
+}
+
+// What `read_sources` must gather: the project's own entry files plus every
+// vendored truc, in truc.toml order. S1 needs no dependency reordering — the
+// gate performs the real compatibility check over the whole set.
+fn plan_assemble_spec(mj: Str) -> Str {
+  let m: Manifest = json_parse(mj)
+  var names: List[Str] = []
+  for (t of m.trucs) {
+    names = names.push(t.name)
+  }
+  let fixed = names
+  let s: Spec = { entry: m.entry, trucs: fixed }
+  return json_stringify(s)
+}
+
+// The ordered [{path, source, name}] the gate admits incrementally: the
+// project's own entry files first (they set the running composition), then
+// every vendored truc in truc.toml order. A refusal names the first candidate
+// that would not join (G2/G3/G4).
+fn plan_ordered_sources(gj: Str) -> Str {
+  let g: Gathered = json_parse(gj)
+  var out: List[Ordered] = []
+  for (e of g.entry) {
+    out = out.push({ path: e.path, source: e.source, name: "" })
+  }
+  for (v of g.vendored) {
+    out = out.push({ path: v.path, source: v.source, name: v.name })
+  }
+  let fixed = out
+  return json_stringify(fixed)
+}
+
+// Same, plus the fetched candidate appended last (a virtual path — it is not
+// on disk yet): `add` admits the candidate against the current assembly
+// *before* anything is vendored (§8.1).
+fn plan_ordered_with_candidate(gj: Str, name: Str, entryJson: Str) -> Str {
+  let g: Gathered = json_parse(gj)
+  let e: Entry = json_parse(entryJson)
+  var out: List[Ordered] = []
+  for (ef of g.entry) {
+    out = out.push({ path: ef.path, source: ef.source, name: "" })
+  }
+  for (v of g.vendored) {
+    out = out.push({ path: v.path, source: v.source, name: v.name })
+  }
+  let candPath = "/__truc_candidate__/".concat(name).concat("/component.rvl")
+  out = out.push({ path: candPath, source: e.source, name: name })
+  let fixed = out
+  return json_stringify(fixed)
+}
+
+// ---- hash-drift (the tamper check, §4.3) ----
+
+fn lock_hash(rows: List[LockRow], name: Str) -> Str {
+  for (r of rows) {
+    if (r.name == name) {
+      return r.sourceHash
+    }
+  }
+  return ""
+}
+
+// Recompute sha256 of every vendored component.rvl and compare to the pin.
+// Drift is a refusal, not a warning (registry.verify's regenerate-or-red
+// discipline, applied to the vendor dir).
+fn plan_drift(lockJson: Str, gj: Str) -> Str {
+  let g: Gathered = json_parse(gj)
+  var rows: List[LockRow] = []
+  if (lockJson != "") {
+    let lk: LockFile = json_parse(lockJson)
+    rows = lk.trucs
+  }
+  var ok = true
+  var message = ""
+  for (v of g.vendored) {
+    let expected = lock_hash(rows, v.name)
+    if (expected != "") {
+      let actual = sha256_hex(v.source)
+      if (expected != actual) {
+        ok = false
+        message = message.concat(`hash drift: vendored trucs/${v.name}/component.rvl (${actual}) does not match its truc.lock pin (${expected})
+`)
+      }
+    }
+  }
+  let final_ok = ok
+  let final_msg = message
+  let d: Drift = { ok: final_ok, message: final_msg }
+  return json_stringify(d)
+}
+
+// ---- reports ----
+
+fn report(code: Int, message: Str, sources: Str, commit: Str) -> Str {
+  let r: Report = { code: code, message: message, sources: sources, commit: commit }
+  return json_stringify(r)
+}
+
+// assemble: hash-verify, then admit; refusal is all-or-nothing (the manifest
+// slot is "" so the assembly write is a no-op and the disk is untouched).
+fn plan_assemble_report(dj: Str, vj: Str, gj: Str) -> Str {
+  let d: Drift = json_parse(dj)
+  if (!d.ok) {
+    return report(1, "truc: refused — ".concat(d.message), "", "")
+  }
+  let v: Verdict = json_parse(vj)
+  if (!v.ok) {
+    return report(1, `truc: refused — a petit bout would not join the assembly:
+`.concat(v.diagnostic), "", "")
+  }
+  let g: Gathered = json_parse(gj)
+  let n = g.vendored.length()
+  let vAny = json_parse(vj)
+  let manifestStr = json_stringify(vAny.manifest)
+  let msg = `truc: assembled ${n.to_str()} petit(s) bout(s) — every one admitted through the gate; wrote build/assembly.json`
+  return report(0, msg, manifestStr, "")
+}
+
+fn build_commit(name: Str) -> Str {
+  let c: Commit = { lockAdd: { name: name, registry: "local" } }
+  return json_stringify(c)
+}
+
+// add: unknown-name / hash-mismatch / admission are all refusals *before*
+// anything is vendored (commit "" = nothing written).
+fn plan_add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str {
+  if (rowJson == "") {
+    return report(1, `truc: refused — unknown component "${name}" (not in the registry index)`, "", "")
+  }
+  let row: IndexRow = json_parse(rowJson)
+  let e: Entry = json_parse(entryJson)
+  let actual = sha256_hex(e.source)
+  if (actual != row.sourceHash) {
+    return report(1, "truc: refused — registry entry disagrees with its own index (source-hash mismatch)", "", "")
+  }
+  let v: Verdict = json_parse(vj)
+  if (!v.ok) {
+    return report(1, `truc: refused — "${name}" would not join the assembly:
+`.concat(v.diagnostic), "", "")
+  }
+  return report(0, `truc: added "${name}" — admitted, vendored into trucs/, pinned in truc.lock`, "", build_commit(name))
+}
+
+// ---- report accessors (Str-JSON in, typed value out) ----
+
+fn plan_report_code(rj: Str) -> Int {
+  let r: Report = json_parse(rj)
+  return r.code
+}
+fn plan_report_msg(rj: Str) -> Str {
+  let r: Report = json_parse(rj)
+  return r.message
+}
+fn plan_report_sources(rj: Str) -> Str {
+  let r: Report = json_parse(rj)
+  return r.sources
+}
+fn plan_report_commit(rj: Str) -> Str {
+  let r: Report = json_parse(rj)
+  return r.commit
+}
+
+// ---- the pure service ----
+
+pub service Plan {
+  fn registry_of(mj: Str) -> Str
+  fn assemble_spec(mj: Str) -> Str
+  fn ordered_sources(gj: Str) -> Str
+  fn ordered_with_candidate(gj: Str, name: Str, entryJson: Str) -> Str
+  fn drift(lockJson: Str, gj: Str) -> Str
+  fn assemble_report(dj: Str, vj: Str, gj: Str) -> Str
+  fn add_report(rowJson: Str, name: Str, entryJson: Str, vj: Str) -> Str
+  fn report_code(rj: Str) -> Int
+  fn report_msg(rj: Str) -> Str
+  fn report_sources(rj: Str) -> Str
+  fn report_commit(rj: Str) -> Str
+}
+
+component Planner provides plan: Plan {
+  provide plan {
+    fn registry_of(mj) = plan_registry_of(mj)
+    fn assemble_spec(mj) = plan_assemble_spec(mj)
+    fn ordered_sources(gj) = plan_ordered_sources(gj)
+    fn ordered_with_candidate(gj, name, entryJson) = plan_ordered_with_candidate(gj, name, entryJson)
+    fn drift(lockJson, gj) = plan_drift(lockJson, gj)
+    fn assemble_report(dj, vj, gj) = plan_assemble_report(dj, vj, gj)
+    fn add_report(rowJson, name, entryJson, vj) = plan_add_report(rowJson, name, entryJson, vj)
+    fn report_code(rj) = plan_report_code(rj)
+    fn report_msg(rj) = plan_report_msg(rj)
+    fn report_sources(rj) = plan_report_sources(rj)
+    fn report_commit(rj) = plan_report_commit(rj)
+  }
+}
