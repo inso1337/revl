@@ -253,7 +253,10 @@ def test_lowerable_tiers_emit_lifecycle_drivers(backend):
     source = _emitter(backend).emit(ir)
     assert "cache reverts cleanly" in source
     assert "no_residue" in source or "residue" in source
-    assert "lifecycle" in source or "REVL_LIVE" in source
+    # the tier's native driver shape: a #[test] fn on rust, an async vitest
+    # case calling the runtime's no-residue introspection on ts
+    marker = "revl_lifecycle_" if backend == "rust" else "assertNoResidue"
+    assert marker in source
 
 
 @pytest.mark.parametrize("backend", ["python", "rust", "java", "typescript", "wasm"])
