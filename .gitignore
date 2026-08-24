@@ -8,3 +8,6 @@ __pycache__/
 # written by `revl run --placement` (backends/typescript/_gen/mod_*.ts): the
 # emitted cordis-ts module for a node-placed process, generated per run
 backends/typescript/_gen/
+
+# stray localhost access log (item 110a)
+.srv.log
