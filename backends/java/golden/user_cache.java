@@ -43,6 +43,29 @@ public final class Components {
         public java.util.Optional<V> get(String key) {
             return java.util.Optional.ofNullable(values.get(key));
         }
+        // Iteration surface (docs/stdlib-2.0.md §Map): the checker promises
+        // `size()`/`keys()` on a host `Map.new()` receiver, and emit lowers
+        // both as method calls on this object. `size` is the entry count as a
+        // long (revl Int); `keys` yields the keys in ascending canonical Str
+        // (code-point) order — String.compareTo is UTF-16 code-unit order, so
+        // the inline comparator walks code points to stay canonical past
+        // U+FFFF. Read-only queries, no host trace.
+        public long size() {
+            return values.size();
+        }
+        public java.util.List<String> keys() {
+            java.util.List<String> ks = new java.util.ArrayList<>(values.keySet());
+            ks.sort((a, b) -> {
+                int i = 0, j = 0;
+                while (i < a.length() && j < b.length()) {
+                    int ca = a.codePointAt(i), cb = b.codePointAt(j);
+                    if (ca != cb) { return Integer.compare(ca, cb); }
+                    i += Character.charCount(ca); j += Character.charCount(cb);
+                }
+                return Boolean.compare(i >= a.length(), j >= b.length());
+            });
+            return java.util.List.copyOf(ks);
+        }
     }
 
     // host object runtime (Pool) — a bounded connection pool over a
