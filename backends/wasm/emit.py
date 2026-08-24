@@ -99,6 +99,63 @@ class EmitError(ValueError):
     """The IR document cannot be lowered to the wasm tier."""
 
 
+# Dispatcher conformance (roadmap item 76a). This file carries THREE
+# expression dispatchers — `_ComponentEmitter._lower` (component/method
+# bodies; i32-native kinds plus everything the v3 value engine already models,
+# delegated through `_DELEGATED`), `_V3Emitter._expr` (pure fn bodies) and
+# `_V3Emitter._infer_type` (the fn-body type oracle) — and the sets below
+# declare, as data, the IR expression kinds each one must render, plus the
+# kinds each one deliberately refuses with a named tier-limit EmitError (never
+# the "unknown/unsupported expression kind" fall-through).
+# tests/test_expr_dispatcher_conformance.py checks them against the frontend
+# schema (src/revl/lower.py: EXPR_KINDS / EXPR_KINDS_FN / EXPR_KINDS_COMPONENT).
+#
+# The tier's deliberate absences are listed here explicitly, each with a named
+# refusal in the emitter: host builtins (`Map`/`Pool`), the Map VALUE type
+# (`maplit` — no representation on this tier), functional record update
+# (docs/records.md §6), arrow values (the module has no closures), and
+# optional chaining (`?.` — unwrap with `match`/`??`). `req`/`config`/`host`/
+# `instance-get` are component-only and position-conditional on this tier (a
+# `req` is usable only as a call target, `config` only inside a spawn target
+# template, `instance-get` only in call position); the component dispatcher
+# handles those call/template forms and the value forms raise the named
+# position refusal. `hole` is refused at the document level by the pre-emit
+# walk.
+EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
+    "component": frozenset({
+        "adt", "bin", "builtin", "call", "config", "field", "fn",
+        "format", "if", "index", "instance-get", "interp", "len", "list",
+        "lit", "match", "name", "record", "req", "spawn", "un", "var",
+    }),
+    "fn": frozenset({
+        "adt", "bin", "builtin", "call", "field", "if", "index", "interp",
+        "len", "list", "lit", "match", "record", "un", "var",
+    }),
+    "fn-infer": frozenset({
+        "adt", "bin", "builtin", "call", "field", "if", "index", "interp",
+        "len", "list", "lit", "match", "record", "un", "var",
+    }),
+}
+EXPR_REFUSED: dict[str, frozenset[str]] = {
+    "component": frozenset({
+        "arrow",         # no closures on this tier
+        "host",          # host builtins: no host surface on this tier
+        "maplit",        # the Map value type has no representation here
+        "optcall",       # `?.` — unwrap with `match`/`??`
+        "optfield",      # `?.` — unwrap with `match`/`??`
+        "record_update", # docs/records.md §6 — lift into a helper fn
+    }),
+    "fn": frozenset({
+        "arrow", "maplit", "optcall", "optfield", "record_update",
+    }),
+    "fn-infer": frozenset({
+        "arrow", "maplit", "optcall", "optfield", "record_update",
+    }),
+}
+# kinds refused at the document level on every position
+EXPR_REFUSED_DOCUMENT: frozenset[str] = frozenset({"hole"})
+
+
 def _is_fn_type(name: object) -> bool:
     """Is this surface type a function type, `(P, ...) -> R`?
 
@@ -451,6 +508,14 @@ class _ComponentEmitter:
                 f"{where}: functional record update `{{r | f = e}}` is not "
                 "emitted by the wasm backend yet (implemented tiers: python, "
                 "typescript) — see docs/records.md §6; lift it into a helper fn instead")
+        if kind == "maplit":
+            raise EmitError(
+                f"{where}: the Map value type is not lowerable on this tier yet — "
+                "no representation here; use a hosted backend")
+        if kind in ("optfield", "optcall"):
+            raise EmitError(
+                f"{where}: optional chaining (`?.`) is not yet lowerable on the "
+                f"wasm tier ({kind!r}) — unwrap with `match` or `??` for now")
         raise EmitError(f"{where}: unknown expression kind {kind!r}")
 
     def _lower_spawn(self, node: Any, scope: dict[str, str],
@@ -2354,6 +2419,15 @@ class _V3Emitter:
             raise EmitError(
                 "the Map value type is not lowerable on this tier yet — "
                 "no representation here; use a hosted backend")
+        if kind in ("optfield", "optcall"):
+            raise EmitError(
+                f"optional chaining (`?.`) is not yet lowerable on the wasm tier "
+                f"({kind!r}) — unwrap with `match` or `??` for now")
+        if kind == "record_update":
+            raise EmitError(
+                "functional record update `{r | f = e}` is not emitted by the "
+                "wasm backend yet (implemented tiers: python, typescript) — see "
+                "docs/records.md §6; lift it into a helper fn instead")
         raise EmitError(f"unsupported v3 expression kind {kind!r}")
 
     def _arrow_callee(self, callee: dict):
@@ -2538,6 +2612,10 @@ class _V3Emitter:
                 f"{where}: functional record update `{{r | f = e}}` is not "
                 "emitted by the wasm backend yet (implemented tiers: python, "
                 "typescript) — see docs/records.md §6; lift it into a helper fn instead")
+        if kind in ("optfield", "optcall"):
+            raise EmitError(
+                f"{where}: optional chaining (`?.`) is not yet lowerable on the "
+                f"wasm tier ({kind!r}) — unwrap with `match` or `??` for now")
         raise EmitError(f"{where}: unsupported v3 expression kind {kind!r}")
 
     def _opt_payload(self, ty: str | None) -> str | None:
