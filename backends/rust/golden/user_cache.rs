@@ -220,8 +220,8 @@ struct PgDatabaseDb {
     pool: Arc<Pool>,
 }
 impl Database for PgDatabaseDb {
-    fn query(&self, sql: String) -> Vec<Value> { self.pool.query(sql) }
-    fn execute(&self, sql: String) -> i64 { self.pool.execute(sql) }
+    fn query(&self, sql: String) -> Vec<Value> { self.pool.query(sql.clone()) }
+    fn execute(&self, sql: String) -> i64 { self.pool.execute(sql.clone()) }
 }
 
 pub fn pg_database() -> cordis::PluginHandle {
