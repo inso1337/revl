@@ -634,7 +634,43 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             f"{_ident(p, 'arrow parameter')}: "
             f"{_ts_v3_type(t) if isinstance(t, str) and t not in ('Any', 'Never') else 'any'}"
             for p, t in zip(names, declared))
-        return f"(({params}) => ({_expr(node['body'], ctx)}))"
+        # FR-1 (roadmap 77a): an arrow literal in a provide-method body binds
+        # its parameters in the arrow's body scope. The emitted `((msgs2) =>
+        # ...)` already binds the names, but the body renders against the
+        # enclosing component scope, where the fallback renderer checks every
+        # `name` against `scope.locals` and refused the parameter as unbound
+        # (`msgs2` — the name the frontend fix (1debdf2) now binds). Mirror
+        # `_v3_arm_body`: a child scope adds the params (`.add`, not `.bind` —
+        # the lambda's parameters shadow in TS exactly as they shadow in revl,
+        # so this is not the single-assignment rebinding). A pure 2.0 fn/test
+        # body has no component scope and resolves names verbatim, so nothing
+        # is bound there.
+        scope = ctx.component_scope
+        body_ctx = ctx
+        if names and scope is not None:
+            arrow_scope = scope.child()
+            for p in names:
+                arrow_scope.locals.add(_ident(p, "arrow parameter"))
+            body_ctx = ctx.with_scope(arrow_scope)
+        body = _expr(node["body"], body_ctx)
+        # Mutable `var` captures are snapshotted by value at arrow-creation
+        # time (docs/expressible-iteration.md Semantics), the py tier's
+        # `lambda x, n=n: ...` (backends/python/emit.py). JS default
+        # parameters cannot spell that — a parameter initializer's right-hand
+        # side resolves to the parameter itself and hits the TDZ — so the
+        # snapshot is an IIFE AROUND THE ARROW that shadows each capture with
+        # its current value: `((n) => ((x) => (x + n)))(n)`, evaluated when
+        # the arrow literal is created, exactly like a python default arg.
+        # (Wrapping the arrow *body* instead would re-snapshot on every call
+        # and observe the rebound `var` — a silent wrong answer.) An arrow
+        # with no captures is emitted exactly as before.
+        captures = node.get("captures") or []
+        if captures:
+            bound = [f"{_ident(c, 'capture')}: any" for c in captures]
+            args = [_ident(c, "capture") for c in captures]
+            return (f"(({', '.join(bound)}) => (({params}) => ({body})))"
+                    f"({', '.join(args)})")
+        return f"(({params}) => ({body}))"
 
     if kind == "match":
         return _v3_match_expr(node, ctx)

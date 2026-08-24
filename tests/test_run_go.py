@@ -40,6 +40,12 @@ from revl.run_go import go_runtime_reason  # noqa: E402
 # serves v1/v2 live stc-go components, which is exactly what this is.
 PAIR = str(ROOT / "examples" / "counter_pair.rvl")
 
+# A v3 typed-core composition (records, an ADT-typed service boundary, and an
+# ADT `match` in a provide-method body): the go placement path learned to
+# carry the typed-core tier next to the live stc-go components, so this
+# composition places and round-trips like the v1/v2 pair above.
+V3_STEP = str(ROOT / "examples" / "v3_step_scheduler.rvl")
+
 _GO_REASON = go_runtime_reason()
 needs_cordis_go = pytest.mark.skipif(
     _GO_REASON is not None,
@@ -136,3 +142,37 @@ def test_run_go_leaves_the_checkout_clean():
         capture_output=True, text=True, check=True).stdout
     assert after == before, \
         "the run modified tracked files:\n" + after
+
+
+@needs_cordis_go
+def test_run_go_v3_typed_core_places_and_round_trips():
+    """A v3 typed-core composition — a record service return, an ADT-typed
+    service boundary, and an ADT `match` in a provide-method body — places and
+    runs the same boot -> LIFO teardown -> no-residue round-trip as the v1/v2
+    pair. This was the FR-8 follow-up gap: the go placement path was wired for
+    the v1/v2 component dialect and refused v3 typed-core documents at emit
+    ("placement on the go backend needs v1/v2 services")."""
+    result = _run_cli([V3_STEP, "--backend", "go", "--once"], input_text="")
+    assert result.returncode == 0, result.stderr + result.stdout
+    out = result.stdout
+
+    # the typed-core composition boots as a real stc-go process: the provider
+    # (Sched) and its consumer (SchedUser) both reach active
+    assert "== load composition (go tier) ==" in out
+    assert "Sched" in out and "SchedUser" in out
+    assert "state=active" in out
+    assert "[run] UP" in out
+
+    # LIFO teardown: the consumer (SchedUser) is disposed before its provider
+    # (Sched) — reverse load order, the same contract as the v1/v2 pair. The
+    # runner pads the subject to 16 columns, so "swap  | Sched " (with the
+    # separating space) matches only the provider, not SchedUser.
+    down_user = out.index("swap  | SchedUser")
+    down_svc = out.index("swap  | Sched ")
+    assert down_user < down_svc, "consumer must tear down before its provider"
+
+    # the no-residue proof: no fiber left and no provided key still resolving
+    assert "0 live plugin(s)" in out
+    assert "0 service(s) still provided" in out
+    assert "NO-RESIDUE" in out
+    assert "[run] DOWN" in out
