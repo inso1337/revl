@@ -246,12 +246,30 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
+def _mangle(name: str) -> str:
+    """Rename a syntactically-valid identifier that collides with a *Java*
+    reserved word (`class`, `new`, `int`, `default`, …) so a valid revl
+    identifier that happens to be a Java keyword emits and RUNS instead of
+    crashing at emit (roadmap item 165).
+
+    This is the same A3 append-`_` scheme `_fn_name` already applies to
+    top-level callables (and `src/revl/lower.py::_safe_name` to revl keywords):
+    append `_` until the name is free. A pure function of the name, so the
+    declaration site and every use site agree without a table; a non-reserved
+    name is returned unchanged, so no existing program (none of which can name
+    a Java keyword — those crash today) changes its emitted output. Target
+    keywords only; the emitter scaffolding stays rejected in `_ident`."""
+    while name in _JAVA_RESERVED:
+        name += "_"
+    return name
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    if name in _JAVA_RESERVED or name in _EMITTER_RESERVED:
+    if name in _EMITTER_RESERVED:
         raise EmitError(f"{role} identifier collides with Java/reserved name: {name!r}")
-    return name
+    return _mangle(name)
 
 
 def _fn_name(name: object) -> str:
@@ -532,17 +550,19 @@ def _v3_var(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> st
         name in ctx.function_names or name in ctx.extern_names
     ):
         return _fn_name(name)
-    _ident(name, "name")
+    # a keyword-named local/case is renamed at its *use* the same way `_ident`
+    # renamed it at its declaration (item 165)
+    mangled = _ident(name, "name")
     if rename and name in rename:
         return rename[name]
     if name in ctx.arrows:
         # an arrow binding has no Java declaration to refer to (see "arrows")
         raise EmitError(_ARROW_VALUE_REFUSAL)
     if name in ctx.case_owners:
-        return name
+        return mangled
     if name == "None":
         return "java.util.Optional.empty()"
-    return name
+    return mangled
 
 
 def _v3_len(target: str) -> str:
