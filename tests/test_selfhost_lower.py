@@ -1,0 +1,326 @@
+"""The self-hosted ADMISSION GATE slice (selfhost/lower.rvl), compiled by revl,
+emitted through the python backend, executed, and cross-checked against the
+reference lowering gate (src/revl/lower.py's `check_and_lower` / `_link`, driven
+through `compile_source`) on the admission VERDICT.
+
+This is the fourth self-host differential oracle, in the exact shape of
+tests/test_selfhost_{lexer,parser,checker}.py: two independent implementations
+of one admission algebra — lower a checked program to the IR and enforce the
+cordis guarantees over it — are forced to agree on every input. Neither is the
+spec; a disagreement is a real defect in one of them.
+
+The gate answers one question: admit, or refuse and name the guarantee. So the
+oracle compares the VERDICT:
+  * accepted input -> both admit (reference raises nothing; selfhost returns "");
+  * refused input  -> both refuse with the SAME guarantee tag (G2 | G4 | A1)
+    AND, where the tag is one this slice spells fully, the SAME message text.
+
+The slice mirrors three guarantees, in the reference's own checking order
+(per-component G4 then A1 during lowering, then G2 at link):
+  * G4 (capability containment) — a plain-declared provider that reaches an
+    emission; an `emission[caps]` provider that emits outside its scope; an
+    unmarked required-service emission call.
+  * A1 (item 117) — a sync provide method that reaches an async callable (an
+    async extern or a transitively-colored fn) or an async service operation.
+  * G2 (provision disjointness) — two components providing one key (shared
+    realm).
+
+Corpus discipline (as in the checker oracle): every rejected program is one
+whose ONLY reference refusal is inside this slice — a T1/G1/G3/parse refusal
+would be out of slice on the selfhost side, so those are excluded and the test
+asserts, per case, that the reference's refusal classifies into {G2, G4, A1}.
+"""
+
+import importlib.util
+import random
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from revl import compile_files, compile_source  # noqa: E402
+from revl.errors import RevlError  # noqa: E402
+
+
+# ---------------------------------------------------------------- harness
+
+def _exec_emitted() -> dict:
+    ir = compile_files([str(ROOT / "selfhost" / "lower.rvl")])
+    assert ir["ir_version"] == 3
+    spec = importlib.util.spec_from_file_location(
+        "pyemit_selfhost_lower", ROOT / "backends" / "python" / "emit.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    had = "runtime" in sys.modules
+    previous = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        namespace = {}
+        exec(compile(module.emit(ir), "selfhost_lower.py", "exec"), namespace)
+    finally:
+        if had:
+            sys.modules["runtime"] = previous
+        else:
+            del sys.modules["runtime"]
+    return namespace
+
+
+@pytest.fixture(scope="module")
+def ns():
+    return _exec_emitted()
+
+
+@pytest.fixture(scope="module")
+def admit(ns):
+    """The gate's verdict: "" to admit, else "<tag>|<message>"."""
+    return ns["admit_src"]
+
+
+@pytest.fixture(scope="module")
+def admit_tag(ns):
+    """The coarse verdict: "" | "G2" | "G4" | "A1" | "BAD"."""
+    return ns["admit_tag"]
+
+
+# ------------------------------------------------- reference classifier
+
+def _classify(e: RevlError) -> str:
+    """The reference refusal rendered in the gate's guarantee vocabulary. A
+    RevlError.code is authoritative for A1/G4 (the checks that set one); G2 in
+    `_link` sets no code, so its message marker is used. Anything else is
+    OUT-OF-SLICE (the corpus must never hit it on a rejected case)."""
+    if e.code in ("G4", "A1"):
+        return e.code
+    m = e.message
+    if "provision conflict" in m and "(G2)" in m:
+        return "G2"
+    if ("declared plain, but this implementation reaches" in m
+            or "must be marked `emit`" in m
+            or "emits through" in m):
+        return "G4"
+    if "(A1)" in m:
+        return "A1"
+    return "OUT:" + m
+
+
+def _ref(src: str) -> tuple[str, str]:
+    """(tag, message): ("", "") if the reference admits, else its guarantee tag
+    and diagnostic message."""
+    try:
+        compile_source(src, "diff.rvl")
+        return ("", "")
+    except RevlError as e:
+        return (_classify(e), e.message)
+
+
+def _fixture(name: str) -> str:
+    return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text()
+
+
+def _agree(admit, src: str) -> None:
+    """Full agreement: both admit, or both refuse with the same tag AND (for a
+    tag this slice spells fully) the same message."""
+    ref_tag, ref_msg = _ref(src)
+    got = admit(src)
+    got_tag = got.split("|", 1)[0] if "|" in got else ("" if got == "" else got)
+    got_msg = got.split("|", 1)[1] if "|" in got else ""
+    if ref_tag == "":
+        assert got == "", f"reference admits, selfhost refused: {got!r}"
+    else:
+        assert got_tag == ref_tag, \
+            f"tag: selfhost {got_tag!r} != reference {ref_tag!r} ({got_msg!r})"
+        assert got_msg == ref_msg, \
+            f"msg: selfhost {got_msg!r} != reference {ref_msg!r}"
+
+
+# ---------------------------------------------------------------- corpus
+
+# Programs the reference admits — the gate must admit them too. Kept
+# reference-clean (no out-of-slice defect), so "" is the only agreement.
+ACCEPTED_PROGRAMS = [
+    ("honest provider", """
+service Cache { fn put(key: Str, value: Str) }
+component HonestCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+"""),
+    ("declared emission covers the body", """
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { emission fn put(key: Str, value: Str) }
+component C requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key, value) { emit db.execute(key) }
+  }
+}
+"""),
+    ("scoped declaration honored", """
+service Database { emission fn execute(sql: Str) -> Int }
+service Cache { emission[db] fn put(key: Str, value: Str) }
+component C requires db: Database provides cache: Cache {
+  provide cache {
+    fn put(key, value) { emit db.execute(key) }
+  }
+}
+"""),
+    ("two disjoint keys compose", """
+service D { fn q(s: Str) -> Int }
+service E { fn g(s: Str) -> Int }
+component A provides db: D { provide db { fn q(s) { return 1 } } }
+component B provides ev: E { provide ev { fn g(s) { return 1 } } }
+"""),
+    ("async op admits an async body", """
+extern emission async fn http_post(url: Str, body: Str) -> Str
+  = @py { return url }
+service Http { emission async fn post(url: Str, body: Str) -> Str }
+component Poster provides http: Http {
+  provide http { async fn post(url, body) = http_post(url, body) }
+}
+"""),
+    ("pure helper chain stays clean", """
+fn normalize(k: Str) -> Str { return k }
+service Cache { fn put(key: Str, value: Str) }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      let k = normalize(key)
+      effect store.insert(k, value)
+      undo   store.remove(k)
+    }
+  }
+}
+"""),
+]
+
+
+# (name, source, expected tag). The message is compared too, via _agree; the
+# reference's own text is the ground truth. Several are the documented
+# `expected error` of a checked-in rejection fixture.
+REJECTED_PROGRAMS = [
+    ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
+    ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
+    ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
+    ("a1 async extern in sync method",
+     _fixture("a1_async_extern_sync_method"), "A1"),
+    ("a1 async op via sync ternary",
+     _fixture("a1_async_op_sync_ternary"), "A1"),
+    ("g2 provision conflict", _fixture("g2_provision_conflict"), "G2"),
+    ("g4 multi-hop named-call chain", """extern emission fn audit_write(msg: Str) -> Int = @py { return 1 }
+fn audit_log(msg: Str) -> Int { return audit_write(msg) }
+fn write_through(key: Str) -> Int { return audit_log(key) }
+service Cache { fn put(key: Str, value: Str) }
+component LyingCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+      let n = write_through(key)
+    }
+  }
+}
+""", "G4"),
+    ("a1 transitively-colored fn in sync method", """extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url }
+fn helper(u: Str) -> Str { return http_post(u, u) }
+service Http { emission fn post(url: Str, body: Str) -> Str }
+component Poster provides http: Http {
+  provide http { fn post(url, body) = helper(url) }
+}
+""", "A1"),
+]
+
+
+@pytest.mark.parametrize("name_src", ACCEPTED_PROGRAMS,
+                         ids=[n for n, _ in ACCEPTED_PROGRAMS])
+def test_accepted_programs_agree(admit, name_src):
+    name, src = name_src
+    assert _ref(src) == ("", ""), f"corpus bug: reference refuses {name}"
+    _agree(admit, src)
+
+
+@pytest.mark.parametrize("case", REJECTED_PROGRAMS,
+                         ids=[n for n, _, _ in REJECTED_PROGRAMS])
+def test_rejected_programs_agree(admit, case):
+    name, src, tag = case
+    ref_tag, _ = _ref(src)
+    assert ref_tag == tag, \
+        f"corpus bug: reference tag for {name} is {ref_tag!r}, expected {tag!r}"
+    _agree(admit, src)
+
+
+# ---------------------------------------------------------------- G2 fuzz
+
+# A real differential over G2: random compositions of clean single-key
+# providers over a small key pool. The only possible refusal is a provision
+# conflict (or none), so the two linkers are each other's oracle on both the
+# verdict AND the "provided by both X and Y" wording — including the entry
+# order that decides which two components the message names.
+_KEYS = ["a", "b", "c"]
+
+
+def _compose(rng: random.Random) -> str:
+    n = rng.randint(2, 5)
+    lines = ["service S { fn op(x: Str) -> Str }"]
+    for i in range(n):
+        key = rng.choice(_KEYS)
+        lines.append(
+            f"component C{i} provides {key}: S {{ "
+            f"provide {key} {{ fn op(x) {{ return x }} }} }}")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_compositions_agree(admit, seed):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _compose(rng)
+        ref_tag, _ = _ref(src)
+        # the generator can only produce an admit or a G2 conflict
+        assert ref_tag in ("", "G2"), f"corpus bug: reference tag {ref_tag!r}"
+        _agree(admit, src)
+
+
+# ---------------------------------------------------------------- G4 fuzz
+
+# Random provider bodies over one required emission op, marked or not: the two
+# gates must agree on verdict AND message for the plain-provider G4 check and
+# the unmarked-emission G4 check, including the (frequent) clean case.
+def _provider(rng: random.Random) -> str:
+    declared_emission = rng.random() < 0.5
+    marked = rng.random() < 0.5
+    call = ("emit db.execute(key)" if marked else "let r = db.execute(key)")
+    decl = "emission fn put(key: Str)" if declared_emission else "fn put(key: Str)"
+    body_reaches = rng.random() < 0.7
+    inner = call if body_reaches else "let k = key"
+    return (
+        "service Database { emission fn execute(sql: Str) -> Int }\n"
+        f"service Cache {{ {decl} }}\n"
+        "component C requires db: Database provides cache: Cache {\n"
+        "  provide cache {\n"
+        f"    fn put(key) {{ {inner} }}\n"
+        "  }\n"
+        "}\n")
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_providers_agree(admit, seed):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _provider(rng)
+        ref_tag, _ = _ref(src)
+        # a provider over one emission op is admitted or refused by G4 only
+        assert ref_tag in ("", "G4"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
