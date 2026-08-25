@@ -64,7 +64,8 @@ withdrawing a provider cascades its dependents down with it (withdraw
 `TabRouter` and every tab goes). The page's look is a **versioned
 component**: `StyleV1` mounts the teal build; change both `v1`s to `v2` and
 Swap to ship `StyleV2` — the graph shows the version replace, the page reskins
-violet in place, and withdrawing the style unwinds to the unthemed baseline.
+violet in place. The skin is a provider the regions require, so withdrawing
+it cascades them down reactively — the dock brings them back.
 The fixed ◐ dock (bottom-right) is the JS
 chrome's one foothold: it appears only when part of the page is withdrawn and
 loads the absent components back

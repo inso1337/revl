@@ -31,9 +31,13 @@ service Editor {
   emission fn source() -> Str
 }
 
+service Skin {
+  fn name() -> Str
+}
+
 // ---------- the page's regions
 
-component EditorPane provides ed: Editor {
+component EditorPane requires skin: Skin provides ed: Editor {
   let slot = effect ui_mount_region("editor") undo ui_unmount_region("editor")
   provide ed {
     fn source() = emit ui_editor_source()
@@ -44,20 +48,25 @@ component Toolbar requires ed: Editor {
   let slot = effect ui_mount_region("toolbar") undo ui_unmount_region("toolbar")
 }
 
-component StatusBar {
+component StatusBar requires skin: Skin {
   let slot = effect ui_mount_region("status") undo ui_unmount_region("status")
 }
 
-component SystemPanel {
+component SystemPanel requires skin: Skin {
   let slot = effect ui_mount_region("system") undo ui_unmount_region("system")
 }
 
-// The page's look, as a versioned component. v1 is the teal build; change
-// both v1s to v2 and ⇄ Swap to ship the violet build of the same page.
-// Withdraw it (✕) and the page falls back to its unthemed look — the theme
-// leaves no residue because mounting it declared how it comes off.
-component StyleV1 {
-  let skin = effect ui_theme("v1") undo ui_theme_reset()
+// The page's look, as a versioned PROVIDER the regions depend on. v1 is the
+// teal build; change both v1s to v2 and ⇄ Swap to ship the violet build —
+// the graph shows StyleV2 replace StyleV1 at the next generation. The skin
+// is load-bearing: withdraw it (✕) and every region that requires it comes
+// down with it, reactively (R2/R3) — the ◐ dock brings them all back. Call
+// skin.name() below to ask the running page which build it is wearing.
+component StyleV1 provides skin: Skin {
+  let look = effect ui_theme("v1") undo ui_theme_reset()
+  provide skin {
+    fn name() = "v1"
+  }
 }
 
 // ---------- the result tabs
