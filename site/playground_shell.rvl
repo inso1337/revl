@@ -62,6 +62,11 @@ component SystemPanel requires skin: Skin {
 // is load-bearing: withdraw it (✕) and every region that requires it comes
 // down with it, reactively (R2/R3) — the ◐ dock brings them all back. Call
 // skin.name() below to ask the running page which build it is wearing.
+//
+// One at a time: the page's data-ui attribute is a single exclusive host
+// slot behind ui_theme, so a composition that mounts two Style components
+// fails loudly at activation — G2 guards provision KEYS, and a shared host
+// resource behind an extern is exactly what the G8 audit exists to surface.
 component StyleV1 provides skin: Skin {
   let look = effect ui_theme("v1") undo ui_theme_reset()
   provide skin {
