@@ -78,6 +78,31 @@ if "watchdog" not in sys.modules:
     sys.modules["watchdog.events"] = _ev
     sys.modules["watchdog.observers"] = _ob
 
+# playground_host — the ONE module the meta composition's externs may import.
+# It forwards to window.__metaHost, where the JS chrome exposes exactly three
+# DOM operations; everything the revl-owned UI does to the page goes through
+# here, which is why its G8 audit is short and true.
+_ph = types.ModuleType("playground_host")
+
+def _ph_mount(tab_id, label):
+    import js
+    js.window.__metaHost.mount(tab_id, label)
+    return 1
+
+def _ph_unmount(tab_id):
+    import js
+    js.window.__metaHost.unmount(tab_id)
+    return 0
+
+def _ph_select(tab_id):
+    import js
+    js.window.__metaHost.select(tab_id)
+
+_ph.mount = _ph_mount
+_ph.unmount = _ph_unmount
+_ph.select = _ph_select
+sys.modules["playground_host"] = _ph
+
 from pyodide.ffi import can_run_sync, run_sync
 from revl.compiler import compile_source
 from revl.diagnostics import report
@@ -595,7 +620,19 @@ function selectTab(name) {
     p.classList.toggle("active", p.id === "panel-" + name));
 }
 document.querySelectorAll(".pg-tab").forEach((t) =>
-  t.addEventListener("click", () => selectTab(t.dataset.panel)));
+  t.addEventListener("click", async () => {
+    const id = t.dataset.panel;
+    if (metaActive) {
+      // in meta mode the click is a service call on the running composition —
+      // the DOM only changes when its `ui_select` emission crosses the boundary
+      try {
+        const r = await runLive("live_call(LIVE_KEY, LIVE_METHOD, LIVE_ARGS)",
+          { LIVE_KEY: "tabs", LIVE_METHOD: "select", LIVE_ARGS: JSON.stringify([id]) });
+        if (r.ok) { traceEvents(r.trace); return; }
+      } catch { /* fall through to plain select */ }
+    }
+    selectTab(id);
+  }));
 
 $("run").addEventListener("click", runCurrent);
 
@@ -747,7 +784,7 @@ async function callOp(row) {
 function renderSystem(snap) {
   const st = snap.state || {};
   sysPanel.hidden = false;
-  sysLabel.textContent = `live · generation ${st.generation ?? "?"}`;
+  sysLabel.textContent = `${metaActive ? "◐ playground shell" : "live"} · generation ${st.generation ?? "?"}`;
   renderGraph(snap.graph || [], st.components || []);
   renderOps(snap.ops || []);
   const active = (st.components || []).filter((c) => c.state === "ACTIVE").length;
@@ -767,14 +804,72 @@ function liveFailure(r, what) {
   }
 }
 
+/* ---------- meta mode: the playground's own pane as a revl composition ----- */
+
+let metaActive = false;
+const TAB_IDS = ["diagnostics", "audit", "plan", "ir"];
+const tabEl = (id) => document.querySelector(`.pg-tab[data-panel="${id}"]`);
+const DEFAULT_LABELS = { diagnostics: "Diagnostics", audit: "G8 audit", plan: "Plan", ir: "IR" };
+
+window.__metaHost = {
+  mount(id, label) {
+    const t = tabEl(id);
+    if (!t) return;
+    // keep the status dot, replace the label text
+    const dot = t.querySelector(".dot");
+    t.textContent = "";
+    if (dot) t.appendChild(dot);
+    t.appendChild(document.createTextNode(label));
+    t.style.display = "";
+  },
+  unmount(id) {
+    const t = tabEl(id);
+    if (!t) return;
+    t.style.display = "none";
+    const panel = document.getElementById("panel-" + id);
+    if (panel) panel.classList.remove("active");
+    if (t.getAttribute("aria-selected") === "true") {
+      const next = TAB_IDS.find((x) => tabEl(x) && tabEl(x).style.display !== "none");
+      if (next) selectTab(next);
+    }
+  },
+  select(id) { selectTab(id); },
+};
+
+function metaRestore() {
+  metaActive = false;
+  for (const id of TAB_IDS) {
+    window.__metaHost.mount(id, DEFAULT_LABELS[id]);
+  }
+  selectTab("diagnostics");
+}
+
+const isMetaSource = (src) => src.includes("playground_host");
+
 $("boot").addEventListener("click", async () => {
   if (!liveOk) return;
   $("boot").disabled = true;
   try {
+    const meta = isMetaSource(editor.value);
+    if (meta) {
+      // the revl composition takes ownership of the pane: strip the JS-owned
+      // tabs so the activation below rebuilds them, one mount at a time
+      for (const id of TAB_IDS) {
+        const t = tabEl(id);
+        if (t) t.style.display = "none";
+      }
+    }
     const r = await runLive("live_boot(LIVE_SRC)", { LIVE_SRC: editor.value });
-    if (!r.ok) { liveFailure(r, "boot"); return; }
+    if (!r.ok) {
+      if (meta) metaRestore();
+      liveFailure(r, "boot");
+      return;
+    }
+    metaActive = meta;
     sysTrace.innerHTML = "";
-    traceLine(`<span class="tr-load">▶ booted</span> <span class="tr-dim">— admitted through the gate, activated on cordis-py</span>`);
+    traceLine(meta
+      ? `<span class="tr-swap">◐ meta</span> <span class="tr-dim">— this pane is now a revl composition; its tabs were just mounted by effect/undo pairs. Click around, edit the source, Swap.</span>`
+      : `<span class="tr-load">▶ booted</span> <span class="tr-dim">— admitted through the gate, activated on cordis-py</span>`);
     traceEvents(r.trace);
     renderSystem(r);
   } finally { $("boot").disabled = false; }
@@ -809,6 +904,14 @@ $("sys-unload").addEventListener("click", async () => {
     $("status").innerHTML = un.noResidue
       ? `<span class="verdict good">NO RESIDUE</span><span>teardown replayed every effect backwards — the proof is checked, not asserted</span>`
       : `<span class="verdict bad">RESIDUE</span><span>teardown left state behind — see the trace</span>`;
+    if (metaActive) {
+      // the composition just unbuilt the pane it was rendering into — let that
+      // sink in, then the JS chrome takes ownership back
+      setTimeout(() => {
+        metaRestore();
+        traceLine(`<span class="tr-dim">◐ the revl-owned pane unbuilt itself — JS chrome resumed ownership</span>`);
+      }, 2600);
+    }
   } catch (err) { traceLine(`<span class="tr-err">${esc(String(err))}</span>`); }
 });
 
