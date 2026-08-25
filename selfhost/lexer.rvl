@@ -293,6 +293,44 @@ fn scan_comment(source: Str, i: Int) -> Scan {
   return { j: jj, out: "", nl: 0 }
 }
 
+// Count newlines (code point 10) in s — the host-block line advance.
+fn count_nl(s: Str) -> Int {
+  var c = 0
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    if (code0(s.charAt(i)) == 10) { c += 1 }
+    i += 1
+  }
+  return c
+}
+
+// The `@backend { <verbatim, brace-balanced> }` host body (reference lexer's
+// `hostbody`): k is the opening `{`. Returns j = index just past the closing
+// `}`, out = the verbatim body between the braces. j = -1 unterminated.
+// Depth counting only: a host body whose host STRING or COMMENT carries a `}`
+// (e.g. `@py { s = "}" }`) is the reference matcher's trivia-aware case and is
+// not exercised by the covered corpus. The whole `@backend { … }` becomes ONE
+// token — the body is host text, not revl, so it is never tokenized as revl.
+fn scan_host_body(source: Str, k: Int) -> Scan {
+  var j = k + 1
+  let n = source.length()
+  var depth = 1
+  while (j < n) {
+    let cc = code0(source.charAt(j))
+    if (cc == 123) { depth += 1 }
+    if (cc == 125) {
+      depth -= 1
+      if (depth == 0) {
+        let jj = j
+        return { j: jj + 1, out: source.slice(k + 1, jj), nl: 0 }
+      }
+    }
+    j += 1
+  }
+  return { j: 0 - 1, out: "", nl: 0 }
+}
+
 // One lexing step at (i, line): the next state and at most one token
 // (kind "" means this step produced no token).
 fn step(source: Str, i: Int, line: Int) -> Step {
@@ -373,6 +411,35 @@ fn step(source: Str, i: Int, line: Int) -> Step {
     let jj = j
     let kind3 = isf ? "float" : "int"
     return { i: jj, line: line, tok: { kind: kind3, text: source.slice(i, jj), line: line } }
+  }
+  if (cc == 64) {
+    // `@backend { ... }` host body -> a single `hostbody` token (reference
+    // lexer parity). The token text encodes `<backend>{<verbatim body>`; the
+    // backend name is `[A-Za-z0-9_]+` (never a `{`), so the first `{` splits
+    // it from the body. A bare `@` (not followed by an identifier) is the
+    // ordinary `@` operator.
+    let nxt = source.slice(i + 1, i + 2)
+    if (nxt != "" && is_alpha(nxt)) {
+      let n1 = source.length()
+      var jb = i + 1
+      while (jb < n1 && (source.charAt(jb).is_alnum() || source.charAt(jb) == "_")) { jb += 1 }
+      let backend = source.slice(i + 1, jb)
+      var kb = jb
+      while (kb < n1 && code0(source.charAt(kb)) != 10 && source.charAt(kb).is_space()) { kb += 1 }
+      // whitespace before `{` may include a newline
+      while (kb < n1 && code0(source.charAt(kb)) == 10) { kb += 1 }
+      if (kb < n1 && source.charAt(kb) == "{") {
+        let hb = scan_host_body(source, kb)
+        if (hb.j == 0 - 1) {
+          return { i: source.length(), line: line,
+                   tok: { kind: "error", text: "unterminated host body", line: line } }
+        }
+        let nl = count_nl(source.slice(i, hb.j))
+        return { i: hb.j, line: line + nl,
+                 tok: { kind: "hostbody", text: backend.concat("{").concat(hb.out), line: line } }
+      }
+    }
+    return { i: i + 1, line: line, tok: { kind: "@", text: "@", line: line } }
   }
   if (singles().indexOf(c) != 0 - 1) {
     return { i: i + 1, line: line, tok: { kind: c, text: c, line: line } }
