@@ -47,10 +47,11 @@
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: the surface admits only a `spawn` acquire there, whose
 //     `cexpr` lands in slice 5;
-//   * `let_pattern` (record/list destructuring): the reference names its
-//     temporary `__revl_destructure_{id(node)}` from the Python object id, which
-//     a second implementation can never reproduce byte-for-byte (see the
-//     findings note) — a structural non-determinism, not a porting gap.
+//   * `let_pattern` (record/list destructuring): still unimplemented here, but no
+//     longer a PERMANENT exclusion — item 179 replaced the reference's
+//     `__revl_destructure_{id(node)}` (a nondeterministic Python object id) with a
+//     per-`_Lines` monotonic counter in deterministic emission order, so its bytes
+//     are now reproducible and a future slice CAN port + cross-check it.
 //
 // ------------------------------------------------------ the erased-IR boundary
 // revl has no dynamic `dict[str, Any]`, and the checker refuses stdlib methods
@@ -1672,10 +1673,11 @@ test "split_fn_type recognises a function type" {
 }
 
 // --------------------------------------------------------------- slice-4 units
-// In-file tests cannot call the file's own externs directly (test scope is
-// `_HOST_CALLABLES` + module fns, not externs), so the newline char is sourced
-// as a backtick literal (as stdlib/str.rvl's `nl` does), never via `newline()`.
-// `upper` is exercised byte-exactly by the services_config corpus fixture.
+// The newline char is sourced as a backtick literal (as stdlib/str.rvl's `nl`
+// does), tier-portable and independent of the `newline()` extern. (Item 182 now
+// makes a file's own externs callable from its `test` blocks too, but the
+// backtick form needs no extern at all.) `upper` is exercised byte-exactly by
+// the services_config corpus fixture.
 test "splitlines matches str.splitlines (drops the trailing-newline empty)" {
   let nlc = `
 `

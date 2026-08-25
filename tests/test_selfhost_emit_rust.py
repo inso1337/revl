@@ -17,9 +17,18 @@ scaffold and the free-function bodies:
 Covered subset (what emits byte-identical):
   * the module scaffold — ``_module_header(3)`` (banner, ``#![allow(..)]``,
     the ``use std::sync::Arc;`` / ``use cordis::Value;`` lines);
+  * the v3 typed-core (slice 2) — ``_emit_v3_types`` (a record as a
+    ``PartialEq``-deriving ``pub struct``, a variant as a serde-tagged
+    ``pub enum``); record literals (``Struct { .. }`` with the by-value field
+    clone) and field access; ADT construction (``Enum::Case`` /
+    ``Enum::Case(arg)`` and the built-in Result/Option constructors); ``match``
+    over user variants (bind + nullary patterns, the ``_`` wildcard vs the
+    appended ``unreachable!()``); user record/variant names in ``_rust_type``
+    (``List[Point]`` -> ``Vec<Point>``); and the ``_V3Ctx`` type inference
+    (``case_adt`` / ``case_payload`` / ``record_by_fields``);
   * ``_emit_v3_functions`` — each module fn as a Rust ``fn`` with ``_rust_type``
-    for scalar / ``List`` / ``Opt`` / ``Map`` / ``Result`` parameter and return
-    types, ``pub`` visibility, and ``todo!()`` for an empty body;
+    for scalar / ``List`` / ``Opt`` / ``Map`` / ``Result`` / user-type parameter
+    and return types, ``pub`` visibility, and ``todo!()`` for an empty body;
   * ``_v3_stmt`` — let/assign (with the ``var_types`` seeding that drives
     by-value clone decisions), return, if/while/for, the bare-expr ``let _ =``,
     and assert;
@@ -30,19 +39,23 @@ Covered subset (what emits byte-identical):
     call with ``_by_value_arg`` cloning, the ``widen`` markers, index, list,
     maplit, the sync arrow, and non-float ``${..}`` interpolation.
 
-Deliberately OUT (excluded from the corpus, deferred to Rust Path B slice 2+):
+Deliberately OUT (excluded from the corpus, deferred to Rust Path B slice 3+):
 components/services entirely (``_emit_component*``, service traits, effect/undo,
-``provide``/``req``/``config``, timers, the component-dialect expression kinds);
-the v3 typed-core (user ``type`` decls, record literals / functional update, ADT
-construction and ``match`` over user variants); the stdlib surface (every
-``builtin``/``len`` node and the ``_stdlib_helper_traits`` it pulls in); the
-Value/serde erasure surface (``_emit_bridge``, ``Pool``/``Map``/``Job`` host
-stubs); async coloring / spawn / instances / realms; externs and in-file
-``test``/lifecycle-test emission; the canonical Float->Str ``revl_ftoa`` (so
-float interpolation is excluded); the ``impl Fn(..)`` lowering of a declared
-function type; the non-ASCII reaches of ``_string`` beyond the ASCII core; and
-``let_pattern`` (the list form names a temporary from the output-buffer length,
-which a second implementation cannot reproduce).
+``provide``/``req``/``config``, timers, the component-dialect expression kinds) —
+these are ENTANGLED with the deferred erasure surface: a lone ``service``
+declaration fires ``_emit_bridge`` and any ``component`` additionally fires the
+host stubs and full impl machinery, so no service/component fixture is byte-exact
+without also porting the bridge; functional record-update ``{r | f = e}`` (the
+Rust reference itself *raises* on ``record_update`` — a structural exclusion, not
+merely un-ported); the stdlib surface (every ``builtin``/``len`` node and the
+``_stdlib_helper_traits`` it pulls in); the Value/serde erasure surface
+(``_emit_bridge``, ``Pool``/``Map``/``Job`` host stubs); async coloring / spawn /
+instances / realms; externs and in-file ``test``/lifecycle-test emission; the
+canonical Float->Str ``revl_ftoa`` (so float interpolation is excluded); the
+``impl Fn(..)`` lowering of a declared function type; the non-ASCII reaches of
+``_string`` beyond the ASCII core; and ``let_pattern`` (the list form names a
+temporary from the output-buffer length, which a second implementation cannot
+reproduce).
 """
 
 import importlib.util
@@ -65,6 +78,12 @@ CORPUS = [
     "strings.rvl",   # string `+` via format!, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow bound to a `let`
     "maps.rvl",      # the empty map literal and the Map/List generic type lowering
+    # slice 2 — the v3 typed-core:
+    "records.rvl",   # record `type` -> `pub struct`, record literal + field clone,
+                     #   field access, a record-typed field, List[Point] lowering
+    "variants.rvl",  # variant `type` -> serde-tagged `pub enum`, ADT construction
+                     #   (nullary + payload), `match` (bind / nullary / `_` wildcard
+                     #   vs `unreachable!()`), built-in Some/Ok coexisting
 ]
 
 
@@ -139,6 +158,24 @@ def test_selfhosted_emitter_output_scaffold(emitted):
     assert "use cordis::Value;" in src
     assert '.checked_add(b).expect("revl: Int overflow")' in src
     assert src.endswith("}\n")
+
+
+def test_selfhosted_emitter_typed_core_scaffold(emitted):
+    """Pin the typed-core surface (slice 2): a record lowers to a
+    ``PartialEq``-deriving ``pub struct``, a variant to a serde-tagged
+    ``pub enum``, an ADT case to ``Enum::Case``, and a wildcard-free ``match``
+    grows the ``unreachable!()`` fallthrough — so a regression in any of these
+    surfaces here, not only in the byte diff."""
+    rec = emitted["emit_src"](compile_files([str(CORPUS_DIR / "records.rvl")]))
+    assert "pub struct Point {" in rec
+    assert "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]" in rec
+    assert "Named { label: s.clone(), at: p.clone() }" in rec
+    var = emitted["emit_src"](compile_files([str(CORPUS_DIR / "variants.rvl")]))
+    assert '#[serde(tag = "$kind", content = "$value")]' in var
+    assert "pub enum Tree {" in var
+    assert "return Tree::Leaf;" in var
+    assert "Tree::Node(v) => v," in var
+    assert "_ => unreachable!()," in var
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):

@@ -70,3 +70,54 @@ def test_accepts_ctx_as_identifier(reference_ir):
     ok["components"][1]["body"][0]["undo"]["target"]["id"] = "ctx"
     source = emit.emit(ok)  # must not raise
     assert "_revl_ctx" in source and "_revl_frame" in source
+
+
+# item 179: the `let {…} = …` destructure temp used to be named from
+# `id(node)` — a Python object identity, which is stable within one process but
+# differs across a re-parse of the same IR. That made destructuring
+# un-byte-reproducible (and forced `let_pattern` out of the self-host byte
+# oracle, item 174). The temp is now named from a per-body monotonic counter,
+# a deterministic property of emission order.
+def _destructure_ir():
+    return {
+        "ir_version": emit.IR_VERSION,
+        "functions": [
+            {
+                "name": "f",
+                "params": [{"name": "r"}],
+                "body": [
+                    {"step": "let_pattern", "pattern": "record",
+                     "names": ["a", "b"],
+                     "value": {"kind": "var", "name": "r"}},
+                    {"step": "let_pattern", "pattern": "list",
+                     "names": ["c", "d"], "rest": None,
+                     "value": {"kind": "var", "name": "r"}},
+                    {"step": "return", "expr": {"kind": "var", "name": "a"}},
+                ],
+            }
+        ],
+    }
+
+
+def test_destructure_temp_naming_is_deterministic():
+    """The same IR emitted twice — and re-parsed via a JSON round-trip that
+    hands every node a fresh `id()` — must produce identical bytes."""
+    ir = _destructure_ir()
+    first = emit.emit(ir)
+    # a JSON round-trip rebuilds every node object with a different identity,
+    # exactly reproducing a re-parse; `id(node)` naming diverged here.
+    reparsed = emit.emit(json.loads(json.dumps(ir)))
+    assert first == emit.emit(ir)  # same objects, second pass
+    assert first == reparsed       # fresh objects, same bytes
+
+
+def test_destructure_temps_are_sequential_and_collision_free():
+    """Sibling destructures in one body get distinct, sequential temps under
+    the reserved `__revl_` prefix (no user identifier can collide)."""
+    source = emit.emit(_destructure_ir())
+    assert "__revl_destructure_1 = r" in source
+    assert "__revl_destructure_2 = r" in source
+    # no `id(node)`-style large-integer temp leaked through
+    assert "__revl_destructure_1" in source and "__revl_destructure_2" in source
+    # record: 1 def + 2 field reads; list: 1 def + 1 unpack read = 5 total
+    assert source.count("__revl_destructure_") == 5
