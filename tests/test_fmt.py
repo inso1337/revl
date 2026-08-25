@@ -187,15 +187,47 @@ MIGRATE_PROGRAM = (
 
 
 def test_cli_migrate_still_works_and_is_gated(tmp_path):
-    # The 1.x source does not compile (the 2.0 lexer rejects the legacy `$`);
-    # after migration it does, so the gate admits it as newly admissible.
+    # Since item 203, the legacy source COMPILES on its own (`$key` is now a
+    # literal), so migrating it to a `${key}` template is a deliberate
+    # literal->interpolation meaning change. The migrate gate
+    # (token_preserving=False) admits that intended semantic upgrade rather
+    # than refusing it as a meaning change, while a formatter reformat with the
+    # same IR delta would still be refused.
     f = tmp_path / "cache.rvl"
     f.write_text(MIGRATE_PROGRAM)
+    # The original really does compile as a literal now (the premise above).
+    compile_source(MIGRATE_PROGRAM, "cache.rvl")
     assert main(["fmt", "--migrate", str(f)]) == 0
     text = f.read_text()
     assert "emit db.execute(`INSERT INTO cache_log VALUES (${key})`)" in text
-    # Migrated output now compiles.
+    # Migrated output still compiles, now as an interpolating template.
     compile_source(text, "cache.rvl")
+
+
+def test_migrate_gate_admits_the_literal_to_template_upgrade():
+    # The gate the CLI uses for --migrate: the same rewrite the formatter would
+    # be REFUSED for (an IR change on a compiling original) is ADMITTED for
+    # migration, because token_preserving=False marks it a deliberate upgrade.
+    original = MIGRATE_PROGRAM
+    migrated = original.replace(
+        'emit db.execute("INSERT INTO cache_log VALUES ($key)")',
+        "emit db.execute(`INSERT INTO cache_log VALUES (${key})`)",
+    )
+    # formatter policy (token_preserving=True) refuses this IR change...
+    assert not ir_equivalent(original, migrated, "cache.rvl").admitted
+    # ...but the migrate policy admits it as the intended semantic upgrade.
+    assert ir_equivalent(
+        original, migrated, "cache.rvl", token_preserving=False).admitted
+
+
+def test_migrate_gate_still_refuses_a_rewrite_that_breaks_compilation():
+    # The one guarantee migration keeps: a mechanical pass that corrupted the
+    # source so it no longer compiles is REFUSED, even under the relaxed policy.
+    original = MIGRATE_PROGRAM
+    broken = original.replace("fn put(key, value)", "fn put(key, value")  # drop `)`
+    result = ir_equivalent(original, broken, "cache.rvl", token_preserving=False)
+    assert not result.admitted
+    assert "no longer compiles" in result.reason
 
 
 def test_migrate_gate_holds_on_identity():
