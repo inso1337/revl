@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
-  <title>revl — one checked front-end, six hardened runtimes</title>
+  <title>revl: one checked front-end, six hardened runtimes</title>
   <defs>
     <linearGradient id="teal" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0" stop-color="#2dd4bf"/>
@@ -23,7 +23,7 @@
   <text x="600" y="72" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
         font-size="46" font-weight="700" fill="#e6edf3">revl</text>
   <text x="600" y="104" text-anchor="middle" font-family="ui-sans-serif, -apple-system, Helvetica, Arial, sans-serif"
-        font-size="17" fill="#8b949e">revertible effects as a type system — one checked front-end, six hardened runtimes</text>
+        font-size="17" fill="#8b949e">revertible effects as a type system: one checked front-end, six hardened runtimes</text>
 
   <!-- source -->
   <rect x="470" y="132" width="260" height="54" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
@@ -87,6 +87,6 @@
   <!-- agent boundary -->
   <rect x="330" y="556" width="540" height="46" rx="10" fill="#0d1117" stroke="url(#violet)" stroke-width="1.8"/>
   <text x="600" y="585" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="16" fill="#c4b5fd">revl mcp serve — the compiler as an agent admission gate</text>
+        font-size="16" fill="#c4b5fd">revl mcp serve: the compiler as an agent admission gate</text>
   <path d="M 600 526 L 600 552" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arr-teal)"/>
 </svg>

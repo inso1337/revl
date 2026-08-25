@@ -9,7 +9,7 @@ and around the mistakes you actually make.
 > `typecheck.py` → `lower.py` → `apply.py`). The **emitters are NOT under
 > `src/`**: each tier lives in `backends/{python,typescript,rust,go,java,wasm}/`,
 > its `emit.py` is the IR→host-language renderer, and most carry two or more
-> expression dispatchers inside it (component vs fn-body; wasm has three) —
+> expression dispatchers inside it (component vs fn-body; wasm has three),
 > patch every dispatcher a change touches, and keep the `EXPR_DISPATCHERS` /
 > `EXPR_REFUSED` tables in each emit.py in step (the conformance test
 > `tests/test_expr_dispatcher_conformance.py` makes "did you patch both paths"
@@ -60,7 +60,7 @@ These are **excluded and named in diagnostics** ([syntax-2.0.md](syntax-2.0.md)
 | you wrote | the problem | write instead |
 |---|---|---|
 | `n++` / `n--` | mutation; expressions are pure | `n += 1` on a `var` |
-| `null` / `undefined` | no null in the type system | `None` (an `Opt[T]`) — see below |
+| `null` / `undefined` | no null in the type system | `None` (an `Opt[T]`), see below |
 | `class`, `new`, `this`, `function`, `import`, `export`, `typeof`, `delete` | excluded | `type` / `fn` / `use` |
 | `try { } catch { }` | failure is typed | `Result[T, E]`, or `fail` in a component body |
 | `async` arrows in pure code, generators | excluded | `async fn` in a *service* |
@@ -72,20 +72,20 @@ These are **excluded and named in diagnostics** ([syntax-2.0.md](syntax-2.0.md)
   name is refused, so this is safe.)
 - **Statements are separated by newlines; `;` is not a separator.** One
   statement per line is the whole rule.
-- **Strings have no escape sequences.** `"a\nb"` is four characters —
+- **Strings have no escape sequences.** `"a\nb"` is four characters,
   backslash, `n` and all. Build multi-line output by concatenation and
   `` `${…}` `` templates.
 - **A component activation body records effects only** (`let x = effect …
-  undo …`, `emit`, `fail`, `if`, `return`) — plain computation does not belong
+  undo …`, `emit`, `fail`, `if`, `return`), plain computation does not belong
   there. Put helper functions at top level and delegate from `provide { }`.
 
 ## Null safety (read this twice)
 
-There is **no `null`**. Absence is `Opt[T]` — the ADT `Some(value) | None`.
+There is **no `null`**. Absence is `Opt[T]`, the ADT `Some(value) | None`.
 `T?` is sugar for `Opt[T]`.
 
-- `T` flows into `Opt[T]` automatically (you may pass `Some(5)` — or just `5`
-  — where `Opt[Int]` is expected).
+- `T` flows into `Opt[T]` automatically (you may pass `Some(5)`, or just `5`,
+  where `Opt[Int]` is expected).
 - `Opt[T]` does **not** flow back into `T`. If a function returns `Opt[Str]`,
   unwrap before using the value:
 
@@ -98,7 +98,7 @@ fn describe(name: Opt[Str]) -> Str {
 }
 ```
 
-The diagnostic says: *`X` expects `T`, got `Opt[T]` — unwrap the optional
+The diagnostic says: *`X` expects `T`, got `Opt[T]`, unwrap the optional
 first: `match` on it, or use `??` to supply a fallback.*
 
 ## Types & match
@@ -122,7 +122,7 @@ return match outcome {
 
 ## Stratum 3: components & effects (slow down here)
 
-This is the paradigm — deliberately **not** TS syntax. A component declares
+This is the paradigm, deliberately **not** TS syntax. A component declares
 what it requires and provides; its body is *revertible effects*.
 
 ```revl
@@ -132,7 +132,7 @@ service Database {
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
-  emission fn put(key: Str, value: Str)   // its body emits — see "rules that bite"
+  emission fn put(key: Str, value: Str)   // its body emits (see "rules that bite")
 }
 
 component UserCache requires db: Database provides cache: Cache {
@@ -151,15 +151,15 @@ component UserCache requires db: Database provides cache: Cache {
 
 Rules that will reject you if you forget them:
 
-- **`effect E undo U`** — every mutation needs an inverse. A non-pure
+- **`effect E undo U`**, every mutation needs an inverse. A non-pure
   acquisition without `undo` is a compile error (G4).
-- **`emit`** — calling a declared `emission` operation without the `emit`
+- **`emit`**, calling a declared `emission` operation without the `emit`
   marker is an error (G4). An emission is irreversible; it must be *visible*.
-- **Undeclared access** — a component reaches the world only through its
+- **Undeclared access**, a component reaches the world only through its
   `requires` (G1). Using an undeclared name won't compile.
 - **No acquisition after `provide`** (A2); **no `await` in a provide-method
   body unless the operation is declared `async fn`** (A1).
-- **`fail "msg"`** — deliberate L-Raise: reverts accumulated effects and lands
+- **`fail "msg"`**, deliberate L-Raise: reverts accumulated effects and lands
   the component FAILED.
 
 ## The guarantees are your safety net
@@ -168,7 +168,7 @@ The checker enforces, at compile time, the invariants a runtime can't
 ([DESIGN.md](../DESIGN.md) §4): G1 declared-only access · G2 provision
 disjointness · G3 no dependency cycles · G4 inverse-or-emit · G5 no teardown
 effects · G6 purity outside `effect` · G7 LIFO-complete teardown · G8
-enumerable boundary. A program that compiles satisfies them — that is the
+enumerable boundary. A program that compiles satisfies them. That is the
 contract, and it is why a *generated* component is safe to self-deploy.
 
 ## Host blocks
@@ -215,8 +215,8 @@ These are the refusals most likely to stop a generated component. Each was
 added because real code got them wrong.
 
 **A service declaration bounds its providers.** If a method's body reaches an
-emission — directly, through an `emission` extern, or through a function that
-does — the *service* must declare it:
+emission, directly, through an `emission` extern, or through a function that
+does, the *service* must declare it:
 
 ```revl
 service Cache {
@@ -234,11 +234,11 @@ single most common rejection when a component writes anywhere.
 fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
 ```
 
-**Provide-methods take plain `fn` — no purity modifiers.** You cannot restate
+**Provide-methods take plain `fn`, no purity modifiers.** You cannot restate
 `emission` (or `async`) on a provider: emission-ness is inherited from the
 service declaration, which is the upper bound on every provider. Writing
-`emission fn submit(…)` inside a `provide` block is refused before typechecking
-— the modifier lives only in the service:
+`emission fn submit(…)` inside a `provide` block is refused before typechecking;
+the modifier lives only in the service:
 
 ```revl fragment
 provide queue {
@@ -262,7 +262,7 @@ provide greet {
 ```
 
 `let x = effect … undo …` still means the acquisition. In a component
-*activation* body a plain binding is refused — that body records effects.
+*activation* body a plain binding is refused: that body records effects.
 
 **`??` needs an optional on its left.** `a ?? b` on a non-optional is a type
 error: the fallback would be dead.
@@ -287,12 +287,12 @@ is your primary interface. The complete advertised verb set (from
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-bridge.md](mcp-bridge.md) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor) — you send the change, not the file | [mcp-bridge.md](mcp-bridge.md) |
+| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor), you send the change, not the file | [mcp-bridge.md](mcp-bridge.md) |
 | `revl_swap` · `revl_rollback` · `revl_unload` | replace a generation, undo that, tear down + prove no residue (R4) | [mcp-bridge.md](mcp-bridge.md) |
-| `revl_gauntlet` | grade a candidate — a verdict dossier (proved / tested / claimed) from an isolated battery run | [gauntlet.md](gauntlet.md) |
+| `revl_gauntlet` | grade a candidate, a verdict dossier (proved / tested / claimed) from an isolated battery run | [gauntlet.md](gauntlet.md) |
 | `revl_snapshot` · `revl_restore` | capture / re-admit your evolved composition across a restart | [persistence.md](persistence.md) |
 | `revl_timeline` · `revl_inspect_step` · `revl_step_back` · `revl_replay_bisect` · `revl_replay_forward` | walk, inspect, unwind, binary-search and re-run a recorded accumulator | [replay.md](replay.md) |
-| `revl_query_{emitters,withdraw,dependents,reach,drift}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? — over source, or against the live session | [queries.md](queries.md) |
+| `revl_query_{emitters,withdraw,dependents,reach,drift}` · `revl_live_query` | who emits to X? what breaks if I withdraw C? over source, or against the live session | [queries.md](queries.md) |
 | `revl_history_emitted_between` · `revl_history_lifetime` | the same query envelope over a recorded run | [queries.md](queries.md) |
 
 Two properties worth relying on: a **rejected candidate cannot deploy** (the
@@ -300,26 +300,26 @@ compile runs before the transition, so the running system keeps serving), and
 `revl_unload` **proves** the component left nothing behind before you commit
 it to disk. See [docs/mcp-bridge.md](mcp-bridge.md).
 
-### The modern agent loop — scaffold → fill → resolve → admit
+### The modern agent loop, scaffold → fill → resolve → admit
 
 The verbs above compose into one workflow, and it is the discoverable path from
 a vague need to an admitted component. Nothing touches the filesystem until the
 last step:
 
 1. **Scaffold with holes.** Write the component's shape and leave the parts you
-   are unsure of as typed holes — `let cap: Int = hole "worker pool size"`. A
+   are unsure of as typed holes, `let cap: Int = hole "worker pool size"`. A
    hole type-checks, so the rest of the draft still checks ([holes.md](holes.md)).
 2. **`revl_check` returns fill-specs.** A draft with holes compiles but can
-   never admit; `revl_check` comes back with each open hole's `fillSpec` — its
+   never admit; `revl_check` comes back with each open hole's `fillSpec`, its
    `line` and expected type. That is your worklist.
 3. **Fill via `revl_edit` deltas.** Send a `{hole: <line>, expr: "<fill>"}` edit
-   per hole — the server holds the source, so you transmit only the change, not
+   per hole, the server holds the source, so you transmit only the change, not
    the file. Deltas accumulate across calls; a refused patch advances nothing,
    so the working buffer never breaks. An edit that scaffolds a *new* hole comes
    back as another obligation with its own `fillSpec`, so you can iterate holes
    ([mcp-bridge.md §Deltas, not documents](mcp-bridge.md#deltas-not-documents--revl_edit)).
 4. **`revl_resolve` before you regenerate.** For any hole or requirement that is
-   a whole service, pass the need to `revl_resolve` — if an admission-compatible
+   a whole service, pass the need to `revl_resolve`, if an admission-compatible
    component already exists, importing it beats writing one, and the matched
    `source`/`manifest` ride back inline ([registry.md](registry.md)).
 5. **`revl_gauntlet` / `revl_admit` to land it.** When the draft is hole-free,
@@ -334,7 +334,7 @@ Where that is checked: the tool surface, its annotations and its structured
 rejections are gated by `tests/test_mcp.py`. Both properties above are gated
 by `tests/test_mcp_session.py`
 (`test_a_rejected_swap_leaves_the_running_system_serving`,
-`test_load_call_and_unload_with_no_residue`) — which needs the cordis-py
+`test_load_call_and_unload_with_no_residue`), which needs the cordis-py
 runtime and **skips in CI**. Run it yourself with
 `sh backends/python/setup.sh` before relying on it.
 
@@ -359,7 +359,7 @@ blocks run under `revl test`.
 own guarantees over a *live* composition (they need the cordis-py runtime;
 `sh backends/python/setup.sh` installs it):
 
-**`lifecycle test`** — load, call through provision keys, unload, and assert
+**`lifecycle test`**, load, call through provision keys, unload, and assert
 nothing was left behind ([syntax-2.0.md](syntax-2.0.md) §7.1):
 
 ```revl
@@ -394,7 +394,7 @@ The statements are `load X` (optionally `with { field: value, … }` for the
 component's config), `call key.op(args)` (bind its result with `let`),
 `unload X`, and `assert no_residue`.
 
-**`fault test "…" for Component`** — declares that activation *fails* at a
+**`fault test "…" for Component`**, declares that activation *fails* at a
 named step, then asserts the revert left nothing behind
 ([fault-tests.md](fault-tests.md)):
 
@@ -415,7 +415,7 @@ fault test "mid-activation failure reverts its acquisition" for Fragile {
 
 `fail at step N` pairs with the Nth effect form (or `fail`) in the component's
 activation body; the body may also say `assert effect <name>`. A fault test
-body allows only `fail at …` and `assert …` — nothing else parses.
+body allows only `fail at …` and `assert …`, nothing else parses.
 
 **Typed holes** round out the drafting loop: `let cap: Int = hole "worker pool
 size"` compiles, the obligation is listed with its expected type, and admission
@@ -423,16 +423,16 @@ refuses the draft until you fill it ([holes.md](holes.md)).
 
 ## Reading error messages
 
-Error messages are the interface — each names the guarantee and the fix.
+Error messages are the interface, each names the guarantee and the fix.
 Example:
 
-> `` `missing` is not declared in this function `` — hint: declare it with
+> `` `missing` is not declared in this function ``, hint: declare it with
 > `let`/`var` or add it as a parameter (G1).
 
 When a compile fails, read the *hint*; it usually states the exact rewrite.
 
-Three rejections are the verdict of a search over the whole composition — the
-G4 emission fixed point, a G3 dependency cycle, a G2 provision conflict — and
+Three rejections are the verdict of a search over the whole composition, the
+G4 emission fixed point, a G3 dependency cycle, a G2 provision conflict, and
 those carry the derivation with them: the call chain, the cycle path, both
 providers, each with a source location. It renders under the hint, and rides
 in the structured diagnostic (and every MCP rejection) under `why`. See
@@ -465,6 +465,6 @@ The corpus is committed under `bench/results/`, and
 `python3 bench/rescore.py --run all` recompiles it against the current
 checker and prints a failure taxonomy. Read that taxonomy before writing:
 its largest bucket has been "a `provide` method emits, but the service
-declared the operation plain `fn`" — the rule at the top of *Rules that
+declared the operation plain `fn`", the rule at the top of *Rules that
 bite*.
 
