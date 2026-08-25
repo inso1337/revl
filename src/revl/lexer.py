@@ -325,10 +325,22 @@ def lex(source: str, filename: str) -> list[Token]:
 
 
 def _lex_string(source: str, i: int, line: int, filename: str):
-    """Plain double-quoted string; `$` is an ordinary literal character —
-    except that `$identifier` is rejected: it was interpolation in 1.x, and
-    letting it silently become a literal is exactly the uncanny-valley trap
-    syntax-2.0 warns about (§9).
+    """Plain double-quoted string.
+
+    The escape set is deliberately minimal: `\\"` yields a literal `"` and
+    `\\\\` a literal `\\`, so a string may contain either (item 183). Every
+    other backslash sequence is preserved verbatim — `\\n` is a literal
+    backslash and an `n`, not a newline — matching the no-escape semantics of
+    the triple-quoted form (docs/strings.md).
+
+    `$` is an ordinary literal character, except that the legacy 1.x forms
+    `$identifier` and `$$` are still rejected with a migrate hint: letting them
+    silently become a literal is the uncanny-valley trap syntax-2.0 warns about
+    (§9), and `revl fmt --migrate` relies on the rejection to admit a 1.x file
+    as newly admissible (see tests/test_fmt.py). Item 203 (making a bare `$`
+    fully literal so `"call $int_add"` lexes) is intentionally NOT done here:
+    it changes what `--migrate` compiles against, so it must land together with
+    that gate's policy fix rather than as a lexer-only change.
 
     Returns (index-after-closing-quote, text).
     """
@@ -338,6 +350,13 @@ def _lex_string(source: str, i: int, line: int, filename: str):
     n = len(source)
     while i < n:
         c = source[i]
+        if c == "\\" and i + 1 < n and source[i + 1] in ('"', "\\"):
+            # `\"` and `\\` are the only escapes: emit the escaped character
+            # and consume both. A `\` before anything else is a literal
+            # backslash (so `\n` stays two characters — no escape processing).
+            buf.append(source[i + 1])
+            i += 2
+            continue
         if c == '"':
             text = "".join(buf)
             # both legacy forms had a 1.x meaning that a 2.0 plain string
