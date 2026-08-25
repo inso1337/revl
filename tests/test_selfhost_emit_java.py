@@ -139,17 +139,10 @@ CORPUS = [
                          # `_emit_service_interfaces_v3`, the legacy `_emit_component`
                          # simple path (empty provider class + inline `return <lit>`),
                          # and the `<Comp>Plugin` `apply` provisioning
-    # NOTE (item 222): services_multi.rvl is held OUT of the byte-identity
-    # corpus for now. It centers on an empty void op (`fn reset() { }`), which
-    # the reference emitter now lowers to a real no-op (`public void reset() {
-    # }`) instead of the old `UnsupportedOperationException("effectful method
-    # body")` trap. The self-hosted port (selfhost/emit_java.rvl) still emits
-    # the trap, so the two implementations legitimately disagree on this one
-    # fixture until the port is taught the same distinction. Re-add it here once
-    # selfhost/emit_java.rvl mirrors the fix. (The reference side of the fix is
-    # covered without a JDK by tests/test_run_java.py::
-    # test_java_empty_void_op_emits_a_noop_not_a_trap, and end-to-end by the
-    # runtime boot test alongside it.)
+    "services_multi.rvl",# two services, one component providing both — multi-provision
+                         # classes, `return <name>`, the empty-void-body trap now a real
+                         # no-op (`public void reset() {  }`), and the scalar param/return
+                         # surface (long/boolean/String/void)
     # slice 3 addendum (item 225) — the MODERN component path (config/req/effectful)
     "comp_config_req.rvl",  # config fields (`_emit_plugin_ctors` param+default ctors,
                             # `_config_default_lit`/`_zero_java_value`) + a required

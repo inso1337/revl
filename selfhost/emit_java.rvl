@@ -1097,11 +1097,21 @@ fn v1_method_expr(node: Any) -> Str {
 
 // `_method_body` (SUBSET): a single `return <expr>` inlines to `return <expr>;`
 // (or `<expr>;` for a void op run for effect); a void op with a bare `return`
-// gives `return;`; ANY other shape (empty body, multi-step, effectful) gives the
-// reference's `throw new UnsupportedOperationException("effectful method body");`.
+// gives `return;`; a genuinely EMPTY body on a void op is a real no-op (the empty
+// method body ``); a multi-step or effectful body gives the reference's
+// `throw new UnsupportedOperationException("effectful method body");`.
 // A bare `return` in a value-returning op is a reference ERROR (deferred marker).
 fn method_body(method: Any, ret_is_void: Bool) -> Str {
   let steps = value_list(value_field(method, "body"))
+  if (steps.length() == 0) {
+    // A genuinely EMPTY body (`fn reset() { }`) is a real no-op, not an unported
+    // effect: a void op becomes an empty method body. An empty body on a
+    // value-returning op is ill-typed (it would return nothing), so it keeps the
+    // trap. Matches the reference discrimination (step count / whether the op
+    // returns a value).
+    if (ret_is_void) { return "" }
+    return `throw new UnsupportedOperationException("effectful method body");`
+  }
   if (steps.length() == 1) {
     let s0 = steps[0]
     if (value_str(value_field(s0, "step")) == "return") {
