@@ -725,11 +725,56 @@ class Parser:
     def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
         return RevlError(self.filename, line, message, hint)
 
+    # -- item 157: `;` as an optional statement separator/terminator
+
+    def _skip_semis(self) -> None:
+        """`;` is an *optional* statement separator/terminator (item 157). It
+        carries no meaning of its own: statements may be separated by a newline
+        (as always) OR by `;`, and a leading, trailing, or repeated `;` — a lone
+        `;` or `;;` being an empty statement — is a harmless no-op. Runs of them
+        are skipped wherever statements are listed, so a program written with no
+        `;` tokenises and parses to the exact same AST as before."""
+        while self.at(";"):
+            self.next()
+
+    # -- item 158: cordis-domain nouns as CONTEXTUAL keywords in name position
+
+    # `realm`, `intercept`, `isolate`, `in`, `with` are reserved where the
+    # grammar wants the keyword (a statement/clause head: `isolate k in r`,
+    # `intercept k with {…}`, `spawn C with {…}`, a `realm { … }` label). In a
+    # position where only a NAME is grammatically possible — a record/param
+    # field name, or a `.field` access — none of the five can head a clause, so
+    # all five relax to ordinary identifiers there without ambiguity. (`in` and
+    # `with` never *lead* anything: they are always the tail of an `isolate`/
+    # `intercept`/`spawn` form, so their keyword role is untouched here.)
+    _CONTEXTUAL_NOUNS = frozenset({"realm", "intercept", "isolate", "in", "with"})
+
+    def _is_name_tok(self, tok: Token) -> bool:
+        return tok.kind == "ident" or (
+            tok.kind == "kw" and tok.value in self._CONTEXTUAL_NOUNS)
+
+    def _name(self, what: str | None = None) -> str:
+        """A NAME in a position where no keyword is grammatically possible
+        (field name, parameter name, `.field` access). Accepts an ordinary
+        `ident`, or one of the contextual cordis-domain nouns (item 158). A
+        genuinely reserved keyword (`type`, `fn`, …) falls through to
+        `expect("ident", …)` unchanged, so its "expected ident/…"-plus-"reserved
+        keyword" diagnostic is byte-for-byte what it was before this broadening.
+        `what` is forwarded verbatim so each call site keeps its exact prior
+        wording (`None` → the default "expected ident")."""
+        tok = self.peek()
+        if self._is_name_tok(tok):
+            return self.next().value
+        return self.expect("ident", what=what).value
+
     # -- productions
 
     def parse(self) -> Program:
         program = Program(self.filename)
-        while not self.at("eof"):
+        while True:
+            self._skip_semis()
+            if self.at("eof"):
+                break
             if self.at("kw", "use"):
                 program.uses.append(self.use_decl())
             elif self.at("kw", "service"):
@@ -885,7 +930,7 @@ class Parser:
         params: list[FnParam] = []
         while not self.at(")"):
             pline = self.peek().line
-            pname = self.expect("ident").value
+            pname = self._name()
             self.expect(":")
             ptype = self.type_()
             params.append(FnParam(pname, ptype, pline))
@@ -989,7 +1034,7 @@ class Parser:
             self.expect("(")
             params: list[tuple[str, str]] = []
             while not self.at(")"):
-                pname = self.expect("ident").value
+                pname = self._name()
                 self.expect(":")
                 params.append((pname, self.type_()))
                 if self.at(","):
@@ -1113,7 +1158,10 @@ class Parser:
         self.expect("{")
         config: list[ConfigField] = []
         body: list = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             if self.at("kw", "config"):
                 if config:
                     raise self.err(self.peek().line, f"duplicate `config` block in component {name}")
@@ -1129,7 +1177,7 @@ class Parser:
         fields: list[ConfigField] = []
         while not self.at("}"):
             fline = self.peek().line
-            fname = self.expect("ident").value
+            fname = self._name()
             self.expect(":")
             ftype = self.type_()
             default = None
@@ -1349,7 +1397,10 @@ class Parser:
         if self.at("{"):
             self.next()
             stmts = []
-            while not self.at("}"):
+            while True:
+                self._skip_semis()
+                if self.at("}"):
+                    break
                 if self.at("kw", "fail"):
                     raise self.err(
                         self.peek().line,
@@ -1416,7 +1467,10 @@ class Parser:
         interval_ms = num.value * self._DURATION_UNITS[unit_tok.value]
         self.expect("{")
         body: list = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             inner = self.stmt(in_method=False)
             if not isinstance(inner, EmitStmt):
                 raise self.err(
@@ -1451,7 +1505,7 @@ class Parser:
             self.expect("{")
             while not self.at("}"):
                 fline = self.peek().line
-                field = self.expect("ident").value
+                field = self._name()
                 if field in config:
                     raise self.err(fline, f"duplicate config field `{field}` in spawn")
                 self.expect(":")
@@ -1490,7 +1544,10 @@ class Parser:
     def component_guard_block(self) -> list:
         self.expect("{")
         stmts = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             stmts.append(self.stmt(in_method=False))
         self.expect("}")
         return stmts
@@ -1522,7 +1579,7 @@ class Parser:
         record: dict = {}
         while not self.at("}"):
             fline = self.peek().line
-            field_name = self.expect("ident").value
+            field_name = self._name()
             if field_name in record:
                 raise self.err(fline, f"duplicate metadata field `{field_name}`")
             self.expect(":")
@@ -1561,7 +1618,7 @@ class Parser:
             fields: list[RecordField] = []
             while not self.at("}"):
                 fline = self.peek().line
-                fname = self.expect("ident").value
+                fname = self._name()
                 self.expect(":")
                 ftype = self.type_()
                 fields.append(RecordField(fname, ftype, fline))
@@ -1648,7 +1705,7 @@ class Parser:
         params: list[FnParam] = []
         while not self.at(")"):
             pline = self.peek().line
-            pname = self.expect("ident").value
+            pname = self._name()
             self.expect(":")
             ptype = self.type_()
             params.append(FnParam(pname, ptype, pline))
@@ -1661,7 +1718,10 @@ class Parser:
             returns = self.type_()
         self.expect("{")
         body = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             body.append(self.fn_stmt())
         self.expect("}")
         return FnDecl(name, params, returns, body, public, line, verified,
@@ -1675,7 +1735,10 @@ class Parser:
             raise self.err(tok.line, "a test name cannot be empty")
         self.expect("{")
         body = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             if lifecycle:
                 body.append(self.lifecycle_stmt())
             else:
@@ -1723,9 +1786,10 @@ class Parser:
                 self.next()
                 self.expect("{")
                 while not self.at("}"):
-                    field = self.expect("ident", what="a config field name")
+                    fline = self.peek().line
+                    field = self._name("a config field name")
                     self.expect(":")
-                    config.append((field.value, self.pure_expr(), field.line))
+                    config.append((field, self.pure_expr(), fline))
                     if self.at(","):
                         self.next()
                 self.expect("}")
@@ -1846,7 +1910,7 @@ class Parser:
             self.expect("{")
             while not self.at("}"):
                 fline = self.peek().line
-                key = self.expect("ident", what="a config field name").value
+                key = self._name("a config field name")
                 if key in config:
                     raise self.err(fline, f"duplicate config field `{key}` in fault test `{name}`")
                 self.expect(":")
@@ -1859,7 +1923,10 @@ class Parser:
         at_step: int | None = None
         at_effect: str | None = None
         asserts: list = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             tok = self.peek()
             if tok.kind == "kw" and tok.value == "fail":
                 if at_step is not None or at_effect is not None:
@@ -1966,7 +2033,7 @@ class Parser:
         seen: set[str] = set()
         while not self.at(")"):
             pline = self.peek().line
-            pname = self.expect("ident", what="a parameter name").value
+            pname = self._name("a parameter name")
             if pname in seen:
                 raise self.err(pline, f"duplicate parameter `{pname}` in prop test `{name}`")
             seen.add(pname)
@@ -1982,7 +2049,10 @@ class Parser:
                                 'write e.g. `prop test "commutes" (a: Int, b: Int) { … }`')
         self.expect("{")
         body = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             self._reject_lifecycle_stmt_here()
             body.append(self.fn_stmt())
         self.expect("}")
@@ -2057,7 +2127,7 @@ class Parser:
         line = self.expect("{").line
         fields: list[str] = []
         while not self.at("}"):
-            fields.append(self.expect("ident").value)
+            fields.append(self._name())
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -2123,7 +2193,10 @@ class Parser:
     def block(self) -> list:
         self.expect("{")
         stmts = []
-        while not self.at("}"):
+        while True:
+            self._skip_semis()
+            if self.at("}"):
+                break
             stmts.append(self.fn_stmt())
         self.expect("}")
         return stmts
@@ -2260,13 +2333,13 @@ class Parser:
                 if optional:
                     raise self._optional_chain_error()
                 self.next()
-                node = ExprField(node, self.expect("ident").value, node.line)
+                node = ExprField(node, self._name(), node.line)
             elif self.at("?."):
                 # `expr?.name` / `expr?.name(args)`: short-circuit on Opt-None.
                 # Modelled as an ExprOptField / ExprOptCall so lowering can
                 # emit a conditional and typing can flow Opt into inner types.
                 self.next()
-                name = self.expect("ident").value
+                name = self._name()
                 if self.at("("):
                     self.next()
                     args = []
@@ -2409,6 +2482,7 @@ class Parser:
         arm's value."""
         self.expect("{")
         stmts = []
+        self._skip_semis()
         while self.at("kw", "let") or self.at("kw", "var"):
             stmt = self.fn_stmt()
             if not isinstance(stmt, LetStmt):
@@ -2420,7 +2494,9 @@ class Parser:
                                "a match block arm may not declare `var` — arm blocks "
                                "are pure `let` sequences (docs/records.md §4)")
             stmts.append(stmt)
+            self._skip_semis()
         tail = self.pure_expr()
+        self._skip_semis()
         self.expect("}")
         return ExprBlockArm(stmts, tail, line)
 
@@ -2452,7 +2528,12 @@ class Parser:
         if tok.kind == "kw" and tok.value in ("true", "false", "null"):
             self.next()
             return ExprLit({"true": True, "false": False, "null": None}[tok.value], tok.line)
-        if tok.kind == "ident":
+        if self._is_name_tok(tok):
+            # item 158: a variable *reference* is a name position too — a param
+            # (or record field) named with a contextual noun must be usable, and
+            # none of the five nouns can lead an expression (their keyword roles
+            # are all dispatched or `expect`ed before `_primary` is ever reached
+            # for a leading token), so reading one here is unambiguous.
             self.next()
             if self.at("=>"):
                 self.next()
@@ -2472,7 +2553,7 @@ class Parser:
                 params = []
                 param_types: list = []
                 while not self.at(")"):
-                    params.append(self.expect("ident").value)
+                    params.append(self._name())
                     # `(v: Int) => ...` — an optional per-parameter annotation.
                     # It is what types an arrow that is *not* in checking
                     # position (docs/function-types.md).
@@ -2503,7 +2584,7 @@ class Parser:
                 self.expect("|")
                 updates = []
                 while not self.at("}"):
-                    fname = self.expect("ident").value
+                    fname = self._name()
                     self.expect("=")
                     updates.append((fname, self.pure_expr()))
                     if self.at(","):
@@ -2513,7 +2594,7 @@ class Parser:
             self.next()
             fields = []
             while not self.at("}"):
-                fname = self.expect("ident").value
+                fname = self._name()
                 self.expect(":")
                 fexpr = self.pure_expr()
                 fields.append((fname, fexpr))
@@ -2549,7 +2630,7 @@ class Parser:
             return False
         head = self.toks[i + 1]
         if head.kind != ")" and not (
-            head.kind == "ident" and self.toks[i + 2].kind in (",", ")", ":")
+            self._is_name_tok(head) and self.toks[i + 2].kind in (",", ")", ":")
         ):
             return False
         depth = 0
@@ -2593,7 +2674,7 @@ class Parser:
             params: list[str] = []
             param_types: list = []
             while not self.at(")"):
-                params.append(self.expect("ident").value)
+                params.append(self._name())
                 # optional `: Type` annotation — models write these on
                 # autopilot from the `fn` stratum; accept and (later) check
                 # them against the service signature (A6)
@@ -2617,7 +2698,10 @@ class Parser:
             else:
                 self.expect("{")
                 body = []
-                while not self.at("}"):
+                while True:
+                    self._skip_semis()
+                    if self.at("}"):
+                        break
                     body.append(self.stmt(in_method=True, in_async_method=async_))
                 self.expect("}")
             methods.append(ProvideMethod(mname, params, body, mline, async_=async_,
