@@ -831,3 +831,71 @@ note above) recurred verbatim: `service`/`component`/`provides` are all revl
 keywords, so the IR-walking locals had to be `srv`/`comp`/`provs` again — a second
 data point for the same guide note (`struct`/`case`/`comp` are FINE as locals;
 `service`/`component`/`provides` are NOT).
+
+---
+
+## emit_ts.rvl slice 4 (item 219) — async coloring across the component tail
+
+Landed byte-identical to `backends/typescript/emit.py`: async service operations
+(`Promise<T>` signatures), `async` provide methods, the item-141 await-seed on a
+req-keyed async-op `call`, and the async-generator activation body
+(`ctx.effect(async function* …)`) with the `await` step's iteration boundary.
+Cross-checked over two new fixtures — `services_async.rvl` (async op sigs + async
+methods + await-seed direct AND nested in a ternary arm) and `components_await.rvl`
+(activation-body `await` → `async function*`) — each `emit_src(ir) == emit(ir)` to
+the last byte; the 14 slice-1/2/3 fixtures stay green. DEFERRED: the MODULE-FN
+async path (async fns/externs via `async_names`/`async_locals`, async arrows,
+async match), `timer`, spawn/instances, realms, the v1/v2 dispatch, canonical.
+
+### Finding: the item-195 state-threading tax hit HARDEST here (HIGH, headline)
+Symptom: mirroring the reference's async coloring meant threading its doc-level
+`in_async`/`in_arrow`/`async_ops` state — which the reference carries for free on
+the mutable `_Ctx` it already passes to `_expr` — down the self-host expr tree.
+revl has no shared render context (the emitter already threads `$revl_match_N`
+EXPLICITLY as a returned counter), so a NEW piece of downward-only state forced a
+new `ACx` param onto **~20 functions and ~55 call sites** (`expr`/`expr_inner` and
+every render helper that recurses into `expr`: `render_bin`/`render_un`/`match_expr`
+/`render_record`/`render_list`/`render_arrow`/`render_interp`/`render_format`/
+`render_call`/`paren_target`/`commajoin`/`int_as_number`/`float_operand`/…), even
+though only ONE branch (the component-`call` await-seed) actually reads it. Repro:
+the seed lives in `render_call`, reachable only via `expr → expr_inner →
+render_call`, so every ancestor that calls `expr` must forward `ACx` or the
+context is lost at that node — a template arm, a ternary arm, a `let` value each
+need it independently. The reference edits ~6 lines for the same feature. Fix (not
+mine to make): this is the second emitter (after item-195's `var_types`/`Sout`) to
+pay the tax; a first-class threaded "render context" record — one `Ctx { counter,
+acx, … }` returned-and-passed like the counter already is, or better, a lightweight
+reader-monad/`with`-style sugar — would collapse both taxes. Until then EACH new
+bit of emitter state is an O(call-sites) edit. Worth escalating on item 195.
+
+### Friction: no `null` literal + no empty-map literal shaped the ACx design (MEDIUM)
+Symptom: the reference resolves the seed as `(scope.requires[name], method) in
+async_ops` — needing the requires map AND services map at the call site. Modeling
+that in `ACx` would want nullable/absent map fields for the sync (`sync_acx()`)
+and function-pass contexts, but revl **refuses a `null` literal** (checker:
+"`null` has no type in revl — absence is Opt[T]") and offers no obvious empty-map
+literal (`{}` reads as an empty record; `Map.new()` is a host builtin, not a
+compile-time literal). Repro: `let a = { …, services: null }` → refused; `services:
+{}` → wrong shape. Fix (design workaround, not a defect): PRE-RESOLVE the check
+into `ops: List[Str]` (`"<reqKey>#<method>"` keys, built once per component via
+`async_ops_of`), so `ACx` holds only `Bool`s + a `List[Str]`, and the sync
+sentinel is the always-legal empty list `[]`. Cleaner than the reference's runtime
+tuple-set membership, but the driver was a language gap, not taste. A blessed
+empty-map/`Opt`-field idiom for record fields would remove the nudge.
+
+### Friction (recurs, 3rd time): IR-vocabulary keyword collision — `requires` (LOW)
+`fn async_ops_of(requires: Any, …)` → parse error `expected ident, found
+'requires'`. Same family as the prior `service`/`component`/`provides` note; add
+`requires` to the running list of IR keys whose natural local name is reserved
+(rename → `req_map`). A parser hint that names the collision already fires
+("`requires` is a reserved keyword …") — the remaining gap is only that the
+obvious name is the RIGHT one and the emitter author must invent an oblique alias.
+
+### Ergonomics (positive, item 189): `value_bool(null) == false` made async gating guard-free
+Every async decision is a single falsy-on-absent read: `value_bool(value_field(spec,
+"async"))` for the op signature/method prefix, `value_bool(value_field(node,
+"async"))` for the arrow — no presence check, matching the reference's `if
+method.get("async")` idiom exactly. `list_contains` (already in the file for the
+context-augmentation dedup) covered the seed's membership test with no new kit. And
+`body_has_await` over the top-level steps is a three-line total fold — the
+async-generator gate needed no helper beyond it.

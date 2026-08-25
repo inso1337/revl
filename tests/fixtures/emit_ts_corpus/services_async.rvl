@@ -1,0 +1,20 @@
+// Async coloring (item 219) — the component-tail async surface, WITHOUT the
+// module-fn async path (no async externs / colored fns): async service
+// operations (`Promise<…>` signatures), `async` provide methods, and the
+// item-141 await-seed on a req-keyed async-op call — direct (`fetch`) and
+// NESTED inside a ternary arm (`pick`), so no Promise leaks un-awaited.
+service Store {
+  async fn get(k: Str) -> Str
+}
+
+service Cache {
+  async fn fetch(k: Str) -> Str
+  async fn pick(k: Str, flag: Bool) -> Str
+}
+
+component Facade requires store: Store provides cache: Cache {
+  provide cache {
+    async fn fetch(k) = store.get(k)
+    async fn pick(k, flag) = flag ? store.get(k) : k
+  }
+}
