@@ -129,9 +129,14 @@ refuses to build one that lacks either, naming the missing half:
   against a wedged remote provider would block its consumer forever;
 - an identity that is **not a declared operator** when an `operator_profile` is
   configured;
-- a network seam placed on a **non-py backend** — the TCP+mTLS transport ships
-  on the py runner in this cut; rust/go/ts/java runners read only the local
-  `socket` form, so a network seam must sit on a py process.
+- a network **provider** on a **non-py backend** — the TCP+mTLS *listener*
+  (`asyncio.start_server` + mTLS) ships on the py runner in this cut, so the
+  process that declares an `address` and serves its keys must be py;
+- a network **consumer** on a **rust/go/java backend** — the TCP+mTLS *client*
+  ships only on the py and node/ts runners (the node client was added in item
+  149, `docs/network-path.md`); rust/go/java runners read only the local
+  `socket` form, so a network consumer on those tiers is refused. A **node/ts**
+  consumer of a py network provider is allowed.
 
 The refusals are config-time diagnostics: nothing is spawned, and the local UDS
 path is entirely unaffected by any of them.

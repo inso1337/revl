@@ -808,15 +808,33 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 f"process {pname!r} takes part in a network seam but its "
                 "seam_deadline is null — a network round-trip needs a deadline "
                 "(item 54); set seam_deadline or leave it at the default")
-        # this cut ships the TCP+mTLS transport on the py runner; the rust/go/ts/
-        # java runners read only the local `socket` form. Refuse a network seam
-        # on those tiers rather than hand them an `endpoint` they cannot dial.
+        # The two sides of a network seam ship on different runners, so the
+        # backend rule is per-role, not blanket (item 149):
+        #   * the *provider* (the process that declares an `address` and serves
+        #     its keys over the mTLS listener) runs `asyncio.start_server` +
+        #     mutual TLS — that serve side is py-only in this cut, so a network
+        #     provider must be py;
+        #   * the *consumer* only dials that listener. The py runner and the
+        #     node/ts runner both speak the TCP+mTLS *client* now
+        #     (backends/typescript/bridge.ts::makeProxy grew a network endpoint),
+        #     so a node/ts consumer is allowed over the network path. The
+        #     rust/go/java runners still read only the local `socket` form, so a
+        #     network consumer on those tiers is still refused.
         pbackend = _canonical_backend(processes[pname].get("backend", "py"))
-        if pbackend != "py":
+        is_network_provider = pname in addresses
+        if is_network_provider and pbackend != "py":
             return abort(
-                f"process {pname!r} is on the {pbackend} backend but takes part in "
-                "a network seam — the TCP+mTLS transport (item 56) is py-only in "
-                "this cut; place network seams on py processes")
+                f"process {pname!r} serves a network seam (it declares an "
+                f"`address`) but is on the {pbackend} backend — the TCP+mTLS "
+                "listener (item 56) is py-only in this cut; a network *provider* "
+                "must be a py process")
+        if not is_network_provider and pbackend not in ("py", "node"):
+            return abort(
+                f"process {pname!r} consumes a network seam but is on the "
+                f"{pbackend} backend — the TCP+mTLS client ships on the py and "
+                "node/ts runners (item 149); the rust/go/java runners read only "
+                "the local `socket` form, so put the consumer on py or node/ts, "
+                "or give it a local UDS seam")
 
     # certificate material for every network identity: minted loopback *test*
     # certs when `generate_test_certs`, else the explicit paths each [tls] gave.
