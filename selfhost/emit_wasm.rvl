@@ -65,7 +65,8 @@
 // genuine U+000A line separator).
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field,
-  value_list, value_str, value_int, value_bool
+  value_list, value_str, value_int, value_bool,
+  value_keys, value_children
 }
 use "../stdlib/list.rvl" { list_sort, list_dedup }
 
@@ -192,17 +193,244 @@ type E = { wat: Str, ty: Str }
 // literal's value mapped to its `(i32.const <offset>)` pointer (`_str_ptr`).
 // The pool is constant for the whole module, so it rides in the scope that is
 // already threaded to every expression rather than a separate parameter.
-type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str] }
+// `rectypes` is the document type table (`ir["types"]`, an erased `Value`):
+// typename -> its spec, from which `_record_fields` reads the DECLARED field
+// order/types. It is document-global and constant like the string pool, so it
+// rides in the scope too rather than a separate parameter threaded everywhere.
+type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any }
 // A statement-emission result: the emitted lines, the threaded scope, and the
 // accumulated local-width map (the reference's function-global `_local_types`).
 type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str] }
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
-  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs }
+  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes }
+}
+
+// ==================================================== the value/memory ABI (slice 3)
+// Records, lists and (later) tagged cells live in linear memory: `$alloc` bump-
+// allocates their bytes, an `i32` base pointer is the value, and every field/
+// element is one 8-byte SLOT written as an i64 (`_slot_store`). This block mirrors
+// the reference's `_record_expr` / `_list_expr` / `_slot_store` / `_acquire_tmp`
+// byte-for-byte for the SCALAR-and-ASCII-Str element subset (nested records/lists
+// included; non-ASCII Str content, Float, and tagged/Map values stay out).
+
+// `_SLOT` = 8. One 8-byte value slot; an `Int` sits there natively, a Bool or a
+// pointer is zero-extended in (`_slot_store`) so the eight bytes read back whole.
+fn slot_store(addr: Str, value: Str, ty: Str) -> Str {
+  if (ty == "Int") { return `(i64.store ${addr} ${value})` }
+  return `(i64.store ${addr} (i64.extend_i32_u ${value}))`
+}
+
+// `_acquire_tmp` hands a record/list its base-pointer scratch by NESTING DEPTH:
+// depth 0 keeps the historical `__revl_tmp` (so non-nested output is unchanged),
+// a nested allocation gets `__revl_tmp_n<depth>`. Depth is the count of enclosing
+// allocations under construction — purely the lexical allocation nesting, so it
+// is threaded as an argument rather than a mutable stack.
+fn tmp_name(depth: Int) -> Str {
+  if (depth == 0) { return "__revl_tmp" }
+  return "__revl_tmp_n".concat(num_str(depth))
+}
+
+// `_is_list_type` / `_list_elem`: a list type is spelled `List[<elem>]`.
+fn is_list_type(ty: Str) -> Bool { return ty.slice(0, 5) == "List[" }
+fn list_elem(ty: Str) -> Str { return ty.slice(5, ty.length() - 1) }
+
+// A declared record type? (`_record_fields is not None` — the type table has a
+// `kind:"record"` spec under `tyname`.)
+fn is_record_type(rectypes: Any, tyname: Str) -> Bool {
+  let spec = value_field(rectypes, tyname)
+  if (value_is_null(spec)) { return false }
+  return value_str(value_field(spec, "kind")) == "record"
+}
+
+// The literal's own field names, in source order (used only for the field-SET
+// match that `_record_type` does when no expected type flowed in).
+fn rec_lit_names(node: Any) -> List[Str] {
+  var out = []
+  for (pair of value_list(value_field(node, "fields"))) {
+    out = out.push(value_str(value_list(pair)[0]))
+  }
+  return out
+}
+
+// The value node the literal supplies for `fname` (a linear scan of its source-
+// order fields; every in-subset record literal is complete, so this always hits).
+fn rec_lit_value(node: Any, fname: Str) -> Any {
+  for (pair of value_list(value_field(node, "fields"))) {
+    let pl = value_list(pair)
+    if (value_str(pl[0]) == fname) { return pl[1] }
+  }
+  return value_field(node, "")
+}
+
+// Set equality for two field-name lists (names are unique, so equal length plus
+// subset is set equality).
+fn names_eq(a: List[Str], b: List[Str]) -> Bool {
+  if (a.length() != b.length()) { return false }
+  for (x of a) {
+    var found = false
+    for (y of b) { if (x == y) { found = true } }
+    if (!found) { return false }
+  }
+  return true
+}
+
+// `_record_type`: the declared record type of a record literal. An expected type
+// that is itself a record wins (the reference's first branch — return/field/
+// element positions flow it); otherwise match by the literal's field-name SET
+// against the declared records, in table order (first match). "" = an anonymous
+// record, deliberately out of this slice.
+fn record_type_of(node: Any, s: Scope, expected: Str) -> Str {
+  if (expected != "" && is_record_type(s.rectypes, expected)) { return expected }
+  let litNames = rec_lit_names(node)
+  for (tn of value_keys(s.rectypes)) {
+    if (is_record_type(s.rectypes, tn)) {
+      let declNames = value_keys(value_field(value_field(s.rectypes, tn), "fields"))
+      if (names_eq(litNames, declNames)) { return tn }
+    }
+  }
+  return ""
+}
+
+// `_list_type`: an expected `List[T]` wins; otherwise infer `List[<first item>]`
+// (the empty positional literal needs an expected type — out of subset).
+fn list_type_of(node: Any, s: Scope, expected: Str) -> Str {
+  if (expected != "" && is_list_type(expected)) { return expected }
+  let items = value_list(value_field(node, "items"))
+  if (items.length() == 0) { return "" }
+  return "List[".concat(infer_val_ty(items[0], s)).concat("]")
+}
+
+// `_infer_type` extended to the memory ABI: a list is `List[<elem>]`, a record is
+// its matched declared type; everything else falls to the scalar `infer_ty`. Used
+// where a value's own type must be found (a `let` with no annotation) — its
+// result is both the local's width and the `expected` handed to the renderer.
+fn infer_val_ty(node: Any, s: Scope) -> Str {
+  let k = node_kind(node)
+  if (k == "list") { return list_type_of(node, s, "") }
+  if (k == "record") { return record_type_of(node, s, "") }
+  return infer_ty(node, s.types)
+}
+
+// `_list_expr`: `[u32 count][pad][slot0]…`. Acquire this list's base scratch at
+// `depth`, lower each element one nesting level deeper (so a nested allocation
+// cannot clobber this base pointer), store the count then one 8-byte slot each.
+fn render_list(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+  let ty = list_type_of(node, s, expected)
+  let elem = list_elem(ty)
+  let items = value_list(value_field(node, "items"))
+  let tmp = tmp_name(depth)
+  let n = items.length()
+  var lines = [
+    `(call $alloc (i32.const ${num_str(8 * (n + 1))}))`,
+    `(local.set $${tmp})`,
+    `(i32.store (local.get $${tmp}) (i32.const ${num_str(n)}))`
+  ]
+  var i = 0
+  for (it of items) {
+    let ev = render_expr(it, s, elem, depth + 1)
+    let addr = `(i32.add (local.get $${tmp}) (i32.const ${num_str(8 + 8 * i)}))`
+    lines = lines.push(slot_store(addr, ev.wat, ev.ty))
+    i = i + 1
+  }
+  lines = lines.push(`(local.get $${tmp})`)
+  return { wat: lines.join(newline().concat("      ")), ty: ty }
+}
+
+// `_record_expr`: one 8-byte slot per field, in DECLARED order (not literal
+// order). Acquire the base scratch first — a field that is itself an allocation
+// must land on a deeper scratch — then store each field's value at `8*position`.
+fn render_record(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+  let ty = record_type_of(node, s, expected)
+  let fieldsMap = value_field(value_field(s.rectypes, ty), "fields")
+  let order = value_keys(fieldsMap)
+  let tmp = tmp_name(depth)
+  var lines = [
+    `(call $alloc (i32.const ${num_str(8 * order.length())}))`,
+    `(local.set $${tmp})`
+  ]
+  var i = 0
+  for (fname of order) {
+    let ftype = value_str(value_field(fieldsMap, fname))
+    let ev = render_expr(rec_lit_value(node, fname), s, ftype, depth + 1)
+    var addr = `(local.get $${tmp})`
+    if (i > 0) { addr = `(i32.add (local.get $${tmp}) (i32.const ${num_str(8 * i)}))` }
+    lines = lines.push(slot_store(addr, ev.wat, ev.ty))
+    i = i + 1
+  }
+  lines = lines.push(`(local.get $${tmp})`)
+  return { wat: lines.join(newline().concat("      ")), ty: ty }
+}
+
+// The max allocation-nesting depth reached anywhere under `node`, or -1 for a
+// subtree with no allocation. A record/list acquires at `base` and lowers its
+// children at `base+1`; the reference mints `__revl_tmp_n1..nD` (`_tmp_extra`)
+// for D = this maximum, and nesting is contiguous so every intermediate name
+// appears — the header pass below reconstructs the exact set from D.
+fn expr_max_depth(node: Any, base: Int) -> Int {
+  let k = node_kind(node)
+  if (k == "record") {
+    var m = base
+    for (pair of value_list(value_field(node, "fields"))) {
+      let cm = expr_max_depth(value_list(pair)[1], base + 1)
+      if (cm > m) { m = cm }
+    }
+    return m
+  }
+  if (k == "list") {
+    var m = base
+    for (it of value_list(value_field(node, "items"))) {
+      let cm = expr_max_depth(it, base + 1)
+      if (cm > m) { m = cm }
+    }
+    return m
+  }
+  if (k == "bin") {
+    let l = expr_max_depth(value_field(node, "left"), base)
+    let r = expr_max_depth(value_field(node, "right"), base)
+    if (l > r) { return l }
+    return r
+  }
+  if (k == "un") { return expr_max_depth(value_field(node, "operand"), base) }
+  return -1
+}
+
+fn max_i(a: Int, b: Int) -> Int { if (a > b) { return a } return b }
+
+// The max allocation depth over a statement's expressions (control-flow blocks
+// recurse in `body_max_depth`).
+fn stmt_max_depth(node: Any) -> Int {
+  let step = value_str(value_field(node, "step"))
+  if (step == "let" || step == "assign") { return expr_max_depth(value_field(node, "value"), 0) }
+  if (step == "return") {
+    let e = value_field(node, "expr")
+    if (value_is_null(e)) { return -1 }
+    return expr_max_depth(e, 0)
+  }
+  if (step == "expr" || step == "assert") { return expr_max_depth(value_field(node, "expr"), 0) }
+  if (step == "if") {
+    var m = expr_max_depth(value_field(node, "cond"), 0)
+    m = max_i(m, body_max_depth(value_list(value_field(node, "then"))))
+    m = max_i(m, body_max_depth(value_list(value_field(node, "else"))))
+    return m
+  }
+  if (step == "while") {
+    let m = expr_max_depth(value_field(node, "cond"), 0)
+    return max_i(m, body_max_depth(value_list(value_field(node, "body"))))
+  }
+  return -1
+}
+
+fn body_max_depth(nodes: List[Any]) -> Int {
+  var m = -1
+  for (n of nodes) { m = max_i(m, stmt_max_depth(n)) }
+  return m
 }
 
 // -------------------------------------------------------------- expressions
-fn render_bin(node: Any, s: Scope) -> E {
+// `depth` is the allocation-nesting level (for the scratch-pointer name); scalar
+// operands never allocate, so they are lowered at the same depth with no expected.
+fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let op = node_op(node)
   let ln = value_field(node, "left")
   let rn = value_field(node, "right")
@@ -217,8 +445,8 @@ fn render_bin(node: Any, s: Scope) -> E {
       if (lty == "Int32" && rty == "Int32") { opnd = "Int32" }
     }
   }
-  let left = render_expr(ln, s)
-  let right = render_expr(rn, s)
+  let left = render_expr(ln, s, "", depth)
+  let right = render_expr(rn, s, "", depth)
   let instr = bin_instr(op, opnd)
   var result_ty = opnd
   if (is_comparison(op)) { result_ty = "Bool" }
@@ -228,9 +456,9 @@ fn render_bin(node: Any, s: Scope) -> E {
   return { wat: wat, ty: result_ty }
 }
 
-fn render_un(node: Any, s: Scope) -> E {
+fn render_un(node: Any, s: Scope, depth: Int) -> E {
   let op = node_op(node)
-  let operand = render_expr(value_field(node, "operand"), s)
+  let operand = render_expr(value_field(node, "operand"), s, "", depth)
   if (op == "!") {
     return { wat: `${operand.wat}
       (i32.eqz)`, ty: "Bool" }
@@ -246,7 +474,7 @@ fn render_un(node: Any, s: Scope) -> E {
       (call $int_sub)`, ty: "Int" }
 }
 
-fn render_inner(node: Any, s: Scope) -> E {
+fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   let k = node_kind(node)
   if (k == "lit") {
     let v = value_field(node, "value")
@@ -266,8 +494,10 @@ fn render_inner(node: Any, s: Scope) -> E {
     let name = value_str(value_field(node, "name"))
     return { wat: map_get(s.slots, name), ty: map_get(s.types, name) }
   }
-  if (k == "bin") { return render_bin(node, s) }
-  if (k == "un") { return render_un(node, s) }
+  if (k == "bin") { return render_bin(node, s, depth) }
+  if (k == "un") { return render_un(node, s, depth) }
+  if (k == "list") { return render_list(node, s, expected, depth) }
+  if (k == "record") { return render_record(node, s, expected, depth) }
   return { wat: `<<UNSUPPORTED-EXPR:${k}>>`, ty: "" }
 }
 
@@ -275,12 +505,12 @@ fn render_inner(node: Any, s: Scope) -> E {
 // so the lossless widening is a sign-extend, wrapped around the un-widened node
 // (`render_inner` ignores the widen field, so re-dispatching on the same node is
 // exactly the reference's strip-then-recurse).
-fn render_expr(node: Any, s: Scope) -> E {
+fn render_expr(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   if (value_str(value_field(node, "widen")) == "Int") {
-    let inner = render_inner(node, s)
+    let inner = render_inner(node, s, expected, depth)
     return { wat: `(i64.extend_i32_s ${inner.wat})`, ty: "Int" }
   }
-  return render_inner(node, s)
+  return render_inner(node, s, expected, depth)
 }
 
 // -------------------------------------------------------------- statements
@@ -308,9 +538,11 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
     let name = value_str(value_field(node, "name"))
     let valnode = value_field(node, "value")
     var value_ty = ""
-    if (step == "let") { value_ty = infer_ty(valnode, s.types) }
+    if (step == "let") { value_ty = infer_val_ty(valnode, s) }
     else { value_ty = map_get(s.types, name) }
-    let value = render_expr(valnode, s)
+    // The inferred/declared type is the `expected` the renderer needs to pin a
+    // list/record literal (the reference passes `value_ty` as `expected`).
+    let value = render_expr(valnode, s, value_ty, 0)
     let nw = widths.set(`l_${name}`, wty(value_ty))
     var out = [value.wat, `(local.set $l_${name})`]
     let ns = scope_bind(s, name, `(local.get $l_${name})`, value_ty)
@@ -319,11 +551,11 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
   if (step == "return") {
     let e = value_field(node, "expr")
     if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths } }
-    let value = render_expr(e, s)
+    let value = render_expr(e, s, rty, 0)
     return { lines: [value.wat, "return"], scope: s, widths: widths }
   }
   if (step == "if") {
-    let cond = render_expr(value_field(node, "cond"), s)
+    let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
     let thenNodes = value_list(value_field(node, "then"))
     let elseNodes = value_list(value_field(node, "else"))
     let thenR = emit_stmts(thenNodes, s, widths, rty)
@@ -346,7 +578,7 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
     return { lines: out, scope: s, widths: w2 }
   }
   if (step == "while") {
-    let cond = render_expr(value_field(node, "cond"), s)
+    let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
     let bodyR = emit_stmts(value_list(value_field(node, "body")), s, widths, rty)
     var out = ["(block", "  (loop", `    ${cond.wat}`, "    (i32.eqz)", "    (br_if 1)"]
     for (l of bodyR.lines) { out = out.push(`    ${l}`) }
@@ -356,13 +588,13 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
     return { lines: out, scope: s, widths: bodyR.widths }
   }
   if (step == "expr") {
-    let value = render_expr(value_field(node, "expr"), s)
+    let value = render_expr(value_field(node, "expr"), s, "", 0)
     var out = [value.wat]
     if (value.ty != "" && value.ty != "Unit") { out = out.push("(drop)") }
     return { lines: out, scope: s, widths: widths }
   }
   if (step == "assert") {
-    let value = render_expr(value_field(node, "expr"), s)
+    let value = render_expr(value_field(node, "expr"), s, "Bool", 0)
     return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths }
   }
   return { lines: [`<<UNSUPPORTED-STEP:${step}>>`], scope: s, widths: widths }
@@ -405,7 +637,7 @@ fn diverges(nodes: List[Any]) -> Bool {
 }
 
 // `_emit_function`: one v3 function -> its `(func $name (export "name") ..)` block.
-fn emit_function(fnode: Any, strs: Map[Str, Str]) -> Str {
+fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
   let name = value_str(value_field(fnode, "name"))
   let params = value_list(value_field(fnode, "params"))
   var sig = []
@@ -426,15 +658,25 @@ fn emit_function(fnode: Any, strs: Map[Str, Str]) -> Str {
   raw = collect_locals(body, raw)
   let names = list_sort(list_dedup(raw))
   var localOrder = []
-  var scope: Scope = { slots: slots, types: types, strs: strs }
+  var scope: Scope = { slots: slots, types: types, strs: strs, rectypes: rectypes }
   for (nm of names) {
     if (!scope.types.has(nm)) {
       localOrder = localOrder.push(`l_${nm}`)
       scope = scope_bind(scope, nm, `(local.get $l_${nm})`, "")
     }
   }
-  // the single scratch pointer; base name never collides in the scalar subset.
+  // the depth-0 scratch pointer, always declared; base name never collides.
   localOrder = localOrder.push("__revl_tmp")
+  // deeper scratch pointers a nested allocation minted (`_tmp_extra`): the
+  // reference declares `__revl_tmp_n1..nD` for D = the max allocation nesting
+  // depth, and nesting is contiguous so the whole run appears. Numeric order is
+  // `sorted()` order for D < 10 (nesting never approaches that here).
+  let maxd = body_max_depth(body)
+  var d = 1
+  while (d <= maxd) {
+    localOrder = localOrder.push(tmp_name(d))
+    d = d + 1
+  }
 
   var wempty: Map[Str, Str] = Map.empty()
   let r = emit_stmts(body, scope, wempty, return_ty)
@@ -971,13 +1213,41 @@ fn collect_lits(node: Any, acc: List[Str]) -> List[Str] {
   return a
 }
 
-// The document assembly for a FUNCTION-ONLY, scalar-only v3 document
-// (`emit` -> `_emit_v3` -> `_V3Emitter.emit`, subset): banner, `(module`, the
-// exported memory, the hp global at 0 (no data segments — no strings), the
-// helper preamble, then each function block blank-line separated, then `)`;
-// joined with newlines and closed with one trailing newline. There are no data
-// segments, no type/unsupported comments, and no extern/test blocks in-subset,
-// so the reference's corresponding sections all contribute nothing here.
+// `_type_comments`: the documented record/variant layouts, emitted after the
+// helper preamble when the document declares any type (empty for the scalar/
+// string corpus). Records list `field:type` pairs in DECLARED order; variants
+// (out of the value subset, but reproduced for faithfulness) name each case.
+fn type_comments(rectypes: Any) -> List[Str] {
+  let names = value_keys(rectypes)
+  if (names.length() == 0) { return [] }
+  var out = ["  ;; --- record/variant layouts (docs/syntax-2.0.md §2) ---"]
+  for (tn of names) {
+    let spec = value_field(rectypes, tn)
+    if (value_str(value_field(spec, "kind")) == "record") {
+      let fmap = value_field(spec, "fields")
+      var parts = []
+      for (fname of value_keys(fmap)) {
+        parts = parts.push(`${fname}:${value_str(value_field(fmap, fname))}`)
+      }
+      out = out.push(`  ;; @record ${tn} { ${parts.join(" ")} }`)
+    } else {
+      out = out.push(`  ;; @variant ${tn} (tagged union layout)`)
+      for (c of value_list(value_field(spec, "cases"))) {
+        var payload = value_str(value_field(c, "payload"))
+        if (payload == "") { payload = "unit" }
+        out = out.push(`  ;;   case ${value_str(value_field(c, "name"))}: ${payload}`)
+      }
+    }
+  }
+  return out
+}
+
+// The document assembly for a FUNCTION-ONLY v3 document (`emit` -> `_emit_v3` ->
+// `_V3Emitter.emit`, subset): banner, `(module`, the exported memory, the pooled
+// string `data` segments, the hp global at the 8-aligned heap start, the helper
+// preamble, the record/variant layout comments, then each function block blank-
+// line separated, then `)`; joined with newlines and closed with one trailing
+// newline. No extern/test blocks in-subset, so those reference sections are empty.
 pub fn emit_src(ir: Any) -> Str {
   let functions = value_list(value_field(ir, "functions"))
   // Pool the string literals first (`_collect_string_literals`): the walk order
@@ -999,6 +1269,10 @@ pub fn emit_src(ir: Any) -> Str {
   }
   let heap = align8(offset)
 
+  // The document type table (`ir["types"]`), read by `_record_expr`/`_record_type`
+  // for declared field order and types; threaded to every function through Scope.
+  let rectypes = value_field(ir, "types")
+
   var lines = []
   lines = lines.push(";; Generated by the revl cordis-wasm backend (ir_version 3) — do not edit.")
   lines = lines.push(";; pure functions + documented type layouts; Int is i64 (values), addresses")
@@ -1009,9 +1283,10 @@ pub fn emit_src(ir: Any) -> Str {
   for (d of dataLines) { lines = lines.push(d) }
   lines = lines.push(`  (global $__hp (mut i32) (i32.const ${num_str(heap)}))`)
   lines = lines.push(helper_preamble())
+  for (c of type_comments(rectypes)) { lines = lines.push(c) }
   if (functions.length() > 0) { lines = lines.push("") }
   for (f of functions) {
-    lines = lines.push(emit_function(f, strs))
+    lines = lines.push(emit_function(f, strs, rectypes))
     lines = lines.push("")
   }
   lines = lines.push(")")
@@ -1044,6 +1319,20 @@ test "bin_instr picks the width and the checked helpers" {
   assert bin_instr("/", "Int") == "i64.div_s"
   assert bin_instr("&&", "Bool") == "i32.and"
   assert bin_instr("||", "Bool") == "i32.or"
+}
+
+test "the value-ABI scratch names and slot widths (slice 3)" {
+  // `_acquire_tmp`: depth 0 keeps the historical name, deeper nestings index.
+  assert tmp_name(0) == "__revl_tmp"
+  assert tmp_name(1) == "__revl_tmp_n1"
+  assert tmp_name(2) == "__revl_tmp_n2"
+  // `_slot_store`: an Int is stored natively, a Bool/pointer is widened in.
+  assert slot_store(`(local.get $p)`, "(i64.const 1)", "Int") == `(i64.store (local.get $p) (i64.const 1))`
+  assert slot_store(`(local.get $p)`, "(i32.const 0)", "Bool") == `(i64.store (local.get $p) (i64.extend_i32_u (i32.const 0)))`
+  // `_is_list_type` / `_list_elem`.
+  assert is_list_type("List[Int]")
+  assert !is_list_type("Point")
+  assert list_elem("List[List[Str]]") == "List[Str]"
 }
 
 // --------------------------------------------------------------- component wrap

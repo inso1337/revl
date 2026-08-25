@@ -63,18 +63,27 @@ Covered subset (what emits byte-identical):
     +``undo``/``emit`` +``compensate`` as ``fx.track(Disposables.of(() -> ..))``);
     and the ``apply`` that opens ``ctx.effect()`` and registers every provision
     under the A8 self-revert ``try/catch`` returning ``fx``. Routed to only when a
-    component ``needs_modern`` AND falls in the supported subset (no isolate/
-    intercept, every body step a ``provide``, every method step
-    ``return``/``effect``/``emit``); anything else stays a loud
-    ``<<DEFER-component-nonsimple>>``.
+    component ``needs_modern`` AND falls in the supported subset (every body step a
+    ``provide``, every method step ``return``/``effect``/``emit``); anything else
+    stays a loud ``<<DEFER-component-nonsimple>>``.
 
-Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 4+):
-  * the rest of the MODERN component path — isolate/intercept realms, ``let-effect``
-    host binds and body-level ``effect``/``emit``/``if``/``fail``/``setup``
-    activation steps, method-body ``let``/``assign``/arrow bindings,
-    async/spawn/timers/routers, and the ``await``->AsyncPlugin /
-    ``fail``->CordisException import widening (a component outside the supported
-    subset surfaces a loud ``<<DEFER-component-nonsimple>>``);
+  * slice 4 (item 235) — REALM placements on the modern path: an ``isolate <key>
+    in realm("..")`` opens the ``apply()`` body with ``ctx = ctx.isolate(<Svc>.class,
+    "..")`` (the service resolved through ``provides`` else ``requires``); an
+    ``intercept <key> with <meta>`` emits ``ctx.intercept(ServiceKey.of(<Svc>.class),
+    <meta>)`` (service through ``requires``) with ``_metadata_lit`` rendering nested
+    map/list/int/float/bool/string metadata byte-for-byte. Both make the component
+    ``needs_modern`` and are admitted so long as the body/method shapes stay inside
+    the slice-3 subset; async/await/spawn placements are NOT (see below).
+
+Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 5+):
+  * the rest of the MODERN component path — ``let-effect`` host binds and body-level
+    ``effect``/``emit``/``if``/``fail``/``setup`` activation steps, method-body
+    ``let``/``assign``/arrow bindings, async/spawn/timers/routers, and the
+    ``await``->AsyncPlugin / ``fail``->CordisException import widening (a component
+    outside the supported subset surfaces a loud ``<<DEFER-component-nonsimple>>``;
+    isolate/intercept realm PLACEMENT is now covered, but a component that ALSO
+    needs any of these still defers);
   * the HOST Map/generics surface (``_emit_host_stubs``' ``HashMap<String,V>`` with
     ``_map_value_expr_type`` per-site inference — a component with a host-``Map``
     ``let-effect`` bind DEFERS; the plain ``maplit`` and ``Map[K,V]`` type lowering
@@ -138,6 +147,15 @@ CORPUS = [
                             # only `<Comp>Plugin` ctor, two provider classes routed in one
                             # `apply`, an `emit ... compensate` pair (two `fx.track`s), and
                             # an `effect`/`undo` body in a void observation method
+    # slice 4 (item 235) — REALM placements (isolate/intercept) on the modern path
+    "comp_realm_isolate.rvl",  # `isolate <provided-key> in realm("..")`: the modern path
+                               # now admits a realm placement (a pure-`return` provider),
+                               # emitting the `ctx = ctx.isolate(<Svc>.class, "..")` header
+                               # line (service resolved through `provides`)
+    "comp_realm_intercept.rvl",# `isolate <provided>` + `intercept <required> with <meta>`:
+                               # the `ctx.intercept(ServiceKey.of(<Svc>.class), <meta>)` line
+                               # with `_metadata_lit` rendering a nested map/list/int/bool/
+                               # string literal byte-for-byte (service through `requires`)
 ]
 
 
