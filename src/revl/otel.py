@@ -154,6 +154,11 @@ def _cause_event(cause: dict) -> SpanEvent:
     kind = cause.get("kind", "unknown")
     attrs: dict = {"revl.cause.kind": kind,
                    "revl.cause.note": wr._cause_note(cause)}
+    # v2: a FAILED settle attaches its diagnostic code to the cause (trigger or
+    # provider-withdrawn). Surface it when present; absent on v1 and on an
+    # unclassifiable failure, so no span ever carries a fabricated code.
+    if cause.get("code") is not None:
+        attrs["revl.cause.code"] = cause.get("code")
     if kind == wr.TRIGGER:
         attrs["revl.cause.detail"] = cause.get("detail") or ""
     elif kind == wr.PROVIDER_WITHDRAWN:
@@ -239,6 +244,26 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
         src, dst = _transition_ends(transition)
         links, parent = _links_and_parent(cause, gen, index)
 
+        attributes = {
+            "revl.seq": ev.get("seq"),
+            "revl.gen": gen,
+            "revl.event": event_kind,
+            "revl.component": component,
+            "revl.transition": transition,
+            "revl.transition.from": src,
+            "revl.transition.to": dst,
+            "revl.cause.kind": cause.get("kind", "unknown"),
+        }
+        # v2 additions, surfaced when present so a v2 trace loses nothing and a
+        # v1 trace (no ts, no emit, no code) is unaffected. An `emit` event has
+        # no transition and carries a capability + key instead; it maps to a
+        # plain span (unset status) so the mapping never regresses on it.
+        if ev.get("ts") is not None:
+            attributes["revl.ts"] = ev.get("ts")
+        if event_kind == wr.EMIT:
+            attributes["revl.capability"] = ev.get("capability") or ""
+            attributes["revl.emission.key"] = ev.get("key") or ""
+
         spans.append(SpanModel(
             span_id=_span_id(ev.get("seq")),
             name=f"{component} {event_kind}",
@@ -246,16 +271,7 @@ def build_spans(events: list[dict], *, run_name: str = "revl run") -> list[SpanM
             parent_id=parent,
             component=component,
             status=_status_for(event_kind, dst),
-            attributes={
-                "revl.seq": ev.get("seq"),
-                "revl.gen": gen,
-                "revl.event": event_kind,
-                "revl.component": component,
-                "revl.transition": transition,
-                "revl.transition.from": src,
-                "revl.transition.to": dst,
-                "revl.cause.kind": cause.get("kind", "unknown"),
-            },
+            attributes=attributes,
             events=[_cause_event(cause)],
             links=links,
         ))

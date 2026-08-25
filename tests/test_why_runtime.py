@@ -254,7 +254,170 @@ def test_why_cli_check_exits_nonzero_on_a_defect(tmp_path):
     assert "missing-teardown" in result.stdout
 
 
+# ---- schema v2: timestamps, failure codes, emit events (additive) -------
+
+def _v1_trace() -> list[dict]:
+    """A literal v1 trace: ``v:1``, no ``ts``, no ``code``, no ``emit`` — the
+    exact shape a pre-v2 run wrote. It must parse and drive every consumer
+    unchanged (backward compatibility is a hard requirement)."""
+    return [
+        {"v": 1, "seq": 0, "event": "load", "component": "PgDatabase",
+         "transition": "PENDING -> ACTIVE", "cause": {"kind": "boot"}},
+        {"v": 1, "seq": 1, "event": "load", "component": "UserCache",
+         "transition": "PENDING -> ACTIVE",
+         "cause": {"kind": "requirements",
+                   "providers": [{"component": "PgDatabase", "key": "db"}]}},
+        {"v": 1, "seq": 2, "event": "withdraw", "component": "UserCache",
+         "transition": "ACTIVE -> PENDING",
+         "cause": {"kind": "provider-withdrawn", "component": "PgDatabase",
+                   "key": "db"}},
+        {"v": 1, "seq": 3, "event": "withdraw", "component": "PgDatabase",
+         "transition": "ACTIVE -> DISPOSED",
+         "cause": {"kind": "trigger", "detail": "withdrawn by operator"}},
+    ]
+
+
+def test_make_event_stamps_ts_additively():
+    with_ts = wr.make_event(0, 1, wr.LOAD, "A", "PENDING -> ACTIVE",
+                            wr.cause_boot(), ts=12.5)
+    assert with_ts["v"] == 2 and with_ts["ts"] == 12.5
+    # omitting ts yields a v1-shaped record: the field is simply absent
+    without = wr.make_event(0, 1, wr.LOAD, "A", "PENDING -> ACTIVE",
+                            wr.cause_boot())
+    assert "ts" not in without
+
+
+def test_failure_code_rides_on_the_cause_when_present_and_never_fabricated():
+    failed = wr.cause_trigger("withdrawn by operator", code="G7")
+    assert failed["kind"] == wr.TRIGGER and failed["code"] == "G7"
+    dep = wr.cause_provider_withdrawn("Pg", "db", code="A8")
+    assert dep["kind"] == wr.PROVIDER_WITHDRAWN and dep["code"] == "A8"
+    # no code passed -> no `code` key at all (unclassified, not fabricated)
+    assert "code" not in wr.cause_trigger("withdrawn by operator")
+    assert "code" not in wr.cause_provider_withdrawn("Pg", "db")
+
+
+def test_driver_failure_code_classifies_a_revl_error_or_omits():
+    from revl import run  # importable without cordis (runtime imports are lazy)
+    from revl.errors import RevlError
+    # a RevlError whose message classifies -> its diagnostic code
+    assert run._Driver._failure_code(
+        RevlError("a.rvl", 3, "verified fn f is not total")) == "G7"
+    assert run._Driver._failure_code(
+        RevlError("a", 1, "x", code="A8")) == "A8"
+    # a bare crash (no RevlError) has no classifiable code -> omitted (None)
+    assert run._Driver._failure_code(ValueError("boom")) is None
+
+
+def test_driver_withdraw_cause_attaches_code_only_on_a_failed_settle():
+    from revl import run
+    from revl.errors import RevlError
+    err = RevlError("a.rvl", 3, "verified fn f is not total")  # classifies G7
+    casc = {"UserCache": wr.cause_provider_withdrawn("PgDatabase", "db")}
+
+    # the withdrawn component failing: trigger cause gains the code
+    trig = run._Driver._withdraw_cause("PgDatabase", "PgDatabase", "FAILED",
+                                       err, casc)
+    assert trig["kind"] == wr.TRIGGER and trig["code"] == "G7"
+    # a dependent failing: keeps the provider-withdrawn edge, gains the code
+    dep = run._Driver._withdraw_cause("UserCache", "PgDatabase", "FAILED",
+                                      err, casc)
+    assert dep["kind"] == wr.PROVIDER_WITHDRAWN and dep["code"] == "G7"
+    # a clean (non-FAILED) settle never carries a code
+    clean = run._Driver._withdraw_cause("UserCache", "PgDatabase", "PENDING",
+                                        err, casc)
+    assert "code" not in clean
+    # a FAILED settle with no classifiable error omits the code
+    bare = run._Driver._withdraw_cause("PgDatabase", "PgDatabase", "FAILED",
+                                       RuntimeError("crashed"), casc)
+    assert "code" not in bare
+
+
+def test_emit_event_shape():
+    ev = wr.make_emit_event(5, 1, "Ledger", "Audit", "audit.write",
+                            wr.cause_trigger("crossed by step-back to 2"),
+                            ts=9.0)
+    assert ev["event"] == wr.EMIT and ev["v"] == 2
+    assert ev["capability"] == "Audit" and ev["key"] == "audit.write"
+    assert ev["ts"] == 9.0
+    assert "transition" not in ev  # an emit settles nothing
+
+
+def test_cause_chain_and_render_tolerate_an_emit_event():
+    # an emit interleaved into a withdrawal trace must not perturb the walk
+    trace = wr.Trace(_conforming_trace() + [
+        wr.make_emit_event(4, 1, "UserCache", "Audit", "audit.write",
+                           wr.cause_trigger("crossed by step-back to 2")),
+    ])
+    frames = trace.cause_chain("UserCache")  # prefers WITHDRAW; emit ignored
+    assert [f.component for f in frames] == ["UserCache", "PgDatabase"]
+    # and a component whose only record is an emit renders without crashing
+    only_emit = wr.Trace([
+        wr.make_emit_event(0, 1, "Solo", "Audit", "audit.write",
+                           wr.cause_trigger("crossed")),
+    ])
+    rendered = wr.render_chain("Solo", only_emit.cause_chain("Solo"))
+    assert "Solo" in rendered and "emission boundary" in rendered
+
+
+def test_oracle_ignores_emit_events_in_a_v2_cascade():
+    """An emit event in the trace must not confuse the withdrawal oracle —
+    it is neither a load nor a withdraw, so the cascade set/order is unchanged
+    and conformance still holds."""
+    ir = compile_files([USER_CACHE])
+    trace = wr.Trace(_conforming_trace() + [
+        wr.make_emit_event(4, 1, "UserCache", "Audit", "audit.write",
+                           wr.cause_trigger("crossed")),
+    ])
+    report = wr.oracle(ir, "PgDatabase", trace)
+    assert report["conforms"] is True
+
+
+def test_v1_fixture_still_parses_and_conforms(tmp_path):
+    """A genuine v1 record (no ts/code/emit) parses and drives the pure
+    consumers identically."""
+    ir = compile_files([USER_CACHE])
+    path = tmp_path / "v1.jsonl"
+    wr.write_trace(_v1_trace(), str(path))
+    events = wr.read_trace(str(path))
+    assert all("ts" not in e for e in events)      # a real v1 record
+    assert all(e["v"] == 1 for e in events)
+    frames = wr.Trace(events).cause_chain("UserCache")
+    assert [f.component for f in frames] == ["UserCache", "PgDatabase"]
+    report = wr.oracle(ir, "PgDatabase", wr.Trace(events))
+    assert report["conforms"] is True
+
+
+def test_v1_fixture_drives_the_revl_why_cli(tmp_path):
+    path = tmp_path / "v1.jsonl"
+    wr.write_trace(_v1_trace(), str(path))
+    result = _cli(["why", "UserCache", "--trace", str(path)])
+    assert result.returncode == 0, result.stderr
+    assert "why UserCache was withdrawn" in result.stdout
+    assert "provided by PgDatabase" in result.stdout
+
+
 # ---- end to end: the runtime actually produces a conforming trace -------
+
+@needs_cordis
+def test_run_withdraw_stamps_ts_on_every_recorded_event(tmp_path):
+    cfg = tmp_path / "cfg.toml"
+    cfg.write_text("[PgDatabase]\nurl = \"postgres://e2e:5432/app\"\n",
+                   encoding="utf-8")
+    trace_path = tmp_path / "run.jsonl"
+    result = _cli(["run", USER_CACHE, "--backend", "py",
+                   "--config", str(cfg), "--withdraw", "PgDatabase",
+                   "--trace", str(trace_path)])
+    assert result.returncode == 0, result.stderr + result.stdout
+    events = wr.read_trace(str(trace_path))
+    assert events and all(e["v"] == 2 for e in events)
+    # every recorded load/withdraw carries a monotonic ts (v2, item 122)
+    for e in events:
+        assert isinstance(e.get("ts"), (int, float))
+    # ts is monotonic non-decreasing over the run
+    tss = [e["ts"] for e in events]
+    assert tss == sorted(tss)
+
 
 @needs_cordis
 def test_run_withdraw_records_a_conforming_causal_trace(tmp_path):

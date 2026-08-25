@@ -39,20 +39,21 @@ Each line is one settled lifecycle transition, and it carries the cause behind
 it:
 
 ```json
-{"v":1,"seq":0,"event":"load","component":"PgDatabase",
- "transition":"PENDING -> ACTIVE","cause":{"kind":"boot"}}
-{"v":1,"seq":1,"event":"load","component":"UserCache",
+{"v":2,"seq":0,"gen":1,"event":"load","component":"PgDatabase",
+ "transition":"PENDING -> ACTIVE","cause":{"kind":"boot"},"ts":1234.5}
+{"v":2,"seq":1,"gen":1,"event":"load","component":"UserCache",
  "transition":"PENDING -> ACTIVE",
- "cause":{"kind":"requirements","providers":[{"component":"PgDatabase","key":"db"}]}}
-{"v":1,"seq":2,"event":"withdraw","component":"UserCache",
+ "cause":{"kind":"requirements","providers":[{"component":"PgDatabase","key":"db"}]},"ts":1234.6}
+{"v":2,"seq":2,"gen":1,"event":"withdraw","component":"UserCache",
  "transition":"ACTIVE -> PENDING",
- "cause":{"kind":"provider-withdrawn","component":"PgDatabase","key":"db"}}
-{"v":1,"seq":3,"event":"withdraw","component":"PgDatabase",
+ "cause":{"kind":"provider-withdrawn","component":"PgDatabase","key":"db"},"ts":1235.0}
+{"v":2,"seq":3,"gen":1,"event":"withdraw","component":"PgDatabase",
  "transition":"ACTIVE -> DISPOSED",
- "cause":{"kind":"trigger","detail":"withdrawn by operator (revl run --withdraw PgDatabase)"}}
+ "cause":{"kind":"trigger","detail":"withdrawn by operator (revl run --withdraw PgDatabase)"},"ts":1235.1}
 ```
 
-Two `event` kinds (`load`, `withdraw`) and four `cause` kinds:
+Three `event` kinds (`load`, `withdraw`, and the v2 `emit`) and four `cause`
+kinds:
 
 | cause kind | on | means |
 | --- | --- | --- |
@@ -60,6 +61,53 @@ Two `event` kinds (`load`, `withdraw`) and four `cause` kinds:
 | `requirements` | load | came up because its listed providers were already up (load order is providers-first) |
 | `trigger` | withdraw | root: an external cause withdrew it (`detail` says which) |
 | `provider-withdrawn` | withdraw | went down because the provider of the named injected `key` withdrew |
+
+### Schema v2 (additive; a v1 event still parses and behaves identically)
+
+`SCHEMA_VERSION` is **2**. Every field v1 defined is unchanged; v2 only *adds*.
+A reader treats each new field as optional — a v1 event (no `ts`, no `code`, no
+`emit` kind) is still a valid, fully-handled record, and the cause-chain walk,
+`revl why`, the oracle and the OTel export all behave identically on it.
+
+* **`ts`** (on `load`/`withdraw`/`emit`) — a monotonic-clock reading in
+  fractional seconds (`time.monotonic()`), stamped when the transition is
+  recorded. It is meaningful **only for durations within one run** (the
+  difference between two events), never as a wall-clock time. Absent on a v1
+  event → a consumer treats duration as unavailable, not zero. (This is what
+  unblocks `revl metrics`, roadmap item 122.)
+
+* **`code`** (on a `trigger` or `provider-withdrawn` cause) — the failure's
+  diagnostic code (`diagnostics.classify`, e.g. `G7`, `A8`, `T1`) when the
+  transition settled into **`FAILED`**. The causal *edge* is unchanged; `code`
+  is extra detail on *how* it went down. A failure that carries no classifiable
+  `RevlError` (a bare crash) **omits** `code` — never a fabricated one — and the
+  consumer buckets it as unclassified:
+
+  ```json
+  {"v":2,"seq":4,"gen":1,"event":"withdraw","component":"Ledger",
+   "transition":"ACTIVE -> FAILED",
+   "cause":{"kind":"trigger","detail":"withdrawn by operator (...)","code":"A8"},"ts":1236.0}
+  ```
+
+* **`emit`** (a third `event` kind) — recorded when an emission crosses an
+  irreversible boundary at runtime (the driver's `emissionsCrossed` site, a
+  backwards `:back` step that steps over an uncompensated emission). One `emit`
+  event per crossing. It carries **no `transition`** (nothing settled to a new
+  fiber state — a one-way boundary was crossed) and instead names the
+  `capability` it is scoped to (the target service) and the `key` — the emission
+  label `"<key>.<method>"`:
+
+  ```json
+  {"v":2,"seq":5,"gen":1,"event":"emit","component":"Ledger",
+   "capability":"Audit","key":"audit.write",
+   "cause":{"kind":"trigger","detail":"crossed by step-back to 2 (an emission has no inverse)"},"ts":1236.2}
+  ```
+
+  A reader that does not model emissions (the withdrawal oracle, a v1-era
+  consumer) simply ignores an `emit` event — it is neither a `load` nor a
+  `withdraw`, so the causal-cascade walk skips over it and `revl why`'s walk is
+  unaffected. The OTel export maps it to a plain span (unset status) carrying
+  the capability/key as attributes.
 
 Only **settled** transitions are recorded — a fiber coming to rest in `ACTIVE`,
 `DISPOSED`, `PENDING`, or `FAILED`. An in-flight `LOADING`/`UNLOADING` waypoint

@@ -33,6 +33,7 @@ import builtins
 import json
 import signal
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from ._paths import backends_root
 from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
+from . import diagnostics
 from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
@@ -294,15 +296,65 @@ class _Driver:
         # into the single ACTIVE -> DISPOSED/PENDING move the trace records.
         if self._observing is not None and new in _SETTLED_DOWN:
             frm = self._observing.get(fiber.name, self.FiberState(old).name)
-            self._settled.append((fiber.name, frm, new))
+            # capture the fiber's error only for a FAILED settle — it is what
+            # the failure-code classification (v2) reads. `_error` is cordis's
+            # own attribute (fiber.py); a non-FAILED settle carries none.
+            err = getattr(fiber, "_error", None) if new == "FAILED" else None
+            self._settled.append((fiber.name, frm, new, err))
 
     # -- causal trace ------------------------------------------------------
 
     def _record(self, event: str, component: str, transition: str,
                 cause: dict) -> None:
+        # ts (v2): a monotonic reading, meaningful for durations within the run.
         self._events.append(why_runtime.make_event(
-            self._seq, self.generation, event, component, transition, cause))
+            self._seq, self.generation, event, component, transition, cause,
+            ts=time.monotonic()))
         self._seq += 1
+
+    def _record_emit(self, component: str, capability: str, key: str,
+                     cause: dict) -> None:
+        """Record one ``emit`` event (v2): an emission crossed an irreversible
+        boundary at runtime (the ``emissionsCrossed`` site in a step-back)."""
+        self._events.append(why_runtime.make_emit_event(
+            self._seq, self.generation, component, capability, key, cause,
+            ts=time.monotonic()))
+        self._seq += 1
+
+    @staticmethod
+    def _failure_code(err) -> str | None:
+        """The diagnostic code for a FAILED settle's error, or ``None`` when it
+        carries no classifiable :class:`RevlError` (a bare crash) — in which
+        case the code is *omitted*, never fabricated, and the consumer buckets
+        the failure as unclassified. Uses ``diagnostics.classify`` read-only."""
+        if not isinstance(err, RevlError):
+            return None
+        return diagnostics.classify(err).get("code")
+
+    @classmethod
+    def _withdraw_cause(cls, name: str, component: str, to: str, err,
+                        cascade_causes: dict) -> dict:
+        """The cause a settled withdrawal carries (v2-aware, pure).
+
+        The withdrawn `component` roots at the operator `trigger`; every
+        dependent keeps its `provider-withdrawn` edge (read from the static
+        prediction, so the oracle can never disagree with it). When the settle
+        is into ``FAILED`` and its error classifies, the diagnostic `code` is
+        attached to that cause *without changing its kind* — the causal edge is
+        unchanged, the code is extra detail on how it went down. A FAILED with
+        no classifiable error omits `code` (never fabricated)."""
+        code = cls._failure_code(err) if to == "FAILED" else None
+        if name == component:
+            return why_runtime.cause_trigger(
+                f"withdrawn by operator (revl run --withdraw {component})",
+                code=code)
+        base = cascade_causes.get(name)
+        if base is not None:
+            cause = dict(base)  # keep the provider-withdrawn edge intact
+            if code is not None:
+                cause["code"] = code
+            return cause
+        return why_runtime.cause_provider_withdrawn(component, "?", code=code)
 
     def _hooks(self) -> dict:
         return {name: len(cbs) for name, cbs in self.root.events._hooks.items() if cbs}
@@ -402,12 +454,8 @@ class _Driver:
         await self._flush()
         self._observing = None
 
-        trigger = why_runtime.cause_trigger(
-            f"withdrawn by operator (revl run --withdraw {component})")
-        for name, frm, to in self._settled:
-            cause = (trigger if name == component
-                     else cascade_causes.get(name)
-                     or why_runtime.cause_provider_withdrawn(component, "?"))
+        for name, frm, to, err in self._settled:
+            cause = self._withdraw_cause(name, component, to, err, cascade_causes)
             self._record(why_runtime.WITHDRAW, name, f"{frm} -> {to}", cause)
 
         report = why_runtime.oracle(self.ir, component, why_runtime.Trace(self._events))
@@ -507,6 +555,16 @@ class _Driver:
                     self._log("undo", step["kind"], step["label"])
                 for step in report["emissionsCrossed"]:
                     self._log("CROSSED", step["kind"], f"{step['label']} — irreversible")
+                    # v2 emit event: one per crossing. The emission is scoped to
+                    # a capability (the target service) and labelled `key.method`.
+                    detail = step.get("detail") or {}
+                    self._record_emit(
+                        timeline.component,
+                        detail.get("service") or "",
+                        step.get("label") or "",
+                        why_runtime.cause_trigger(
+                            f"crossed by step-back to {at} "
+                            f"(an emission has no inverse)"))
                 for step in report["failed"]:
                     self._log("FAIL", step["label"], step["error"] or "")
                 await self._flush()
