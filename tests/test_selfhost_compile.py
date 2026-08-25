@@ -27,16 +27,17 @@ used SOLELY to compute the EXPECTED value, never to produce the native output. S
 byte-for-byte match is a proof that the whole lex→parse→check→lower→emit chain ran
 in revl.
 
-The boundary (honest scope):
-  * FULLY NATIVE, byte-exact: the module-function + type surface — the emitter-ready
+The boundary (roadmap item 262 closes the last seam):
+  * FULLY NATIVE, byte-exact, module-function + type surface — the emitter-ready
     documents item 232 proved ``lower_to_ir`` byte-exact on (py corpus), and the
     pure-function/type/variant slice of the rust corpus the rust emitter covers.
-  * STILL NEEDS THE REFERENCE: the typed COMPONENT/method expression BODY. The
-    native IR producer covers only the simple-component slice (item 227); the
-    general component body is the item-242 gap. For those documents the native gate
-    is still exercised (the refusal is native), but the component-body BYTES are not
-    yet held byte-exact — verified here only that the gate admits them, parity with
-    the reference.
+  * FULLY NATIVE, byte-exact, COMPONENT + extern surface (item 262) — items 242 +
+    241 made ``lower_to_ir`` COMPLETE for the typed component/method body (effects,
+    sagas, timers, config) and the verbatim ``@backend`` extern bodies, and each
+    tier's native emitter is proven byte-exact on its component corpus. Their
+    composition compiles a component program end to end natively, byte-for-byte
+    against the reference, for BOTH tiers, with NO reference in the chain. The
+    typed component BODY is no longer a reference-only remainder.
 
 Ground truth is the reference; on the covered surface any divergence is a defect in
 a stage.
@@ -149,6 +150,32 @@ NATIVE_CORPUS = (
     + [("rust", "emit_rust_corpus", n) for n in RUST_FUNCTION_DOCS]
 )
 
+# The FULLY-NATIVE, byte-exact COMPONENT + extern surface (roadmap item 262, the
+# capstone of the self-hosting arc). Items 242 + 241 made lower_to_ir COMPLETE and
+# emitter-ready for component/extern programs; these are the documents each tier's
+# native emitter is separately proven byte-exact on (tests/test_selfhost_emit_py.py
+# and tests/test_selfhost_emit_rust.py). Their intersection with the now-complete
+# native IR is a fully-native component compile with NO reference in the chain.
+#
+#   py:   the six component/service documents plus the externs document, all in the
+#         emit_py corpus (item-242 emitter-ready + emit_py's covered component surface).
+#   rust: the seven component/service documents the rust native emitter covers
+#         (slice 3 + slice 4: the bridge, required services, effectful methods, config).
+PY_COMPONENT_DOCS = [
+    "services_basic.rvl", "services_config.rvl", "services_body.rvl",
+    "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
+    "externs.rvl",
+]
+RUST_COMPONENT_DOCS = [
+    "service.rvl", "services_multi.rvl", "requires.rvl", "effect_emit.rvl",
+    "effect_undo.rvl", "config.rvl", "config_effect.rvl",
+]
+
+COMPONENT_CORPUS = (
+    [("py", "emit_py_corpus", n) for n in PY_COMPONENT_DOCS]
+    + [("rust", "emit_rust_corpus", n) for n in RUST_COMPONENT_DOCS]
+)
+
 
 def _fixture_path(subdir: str, name: str) -> Path:
     return ROOT / "tests" / "fixtures" / subdir / name
@@ -186,6 +213,37 @@ def test_native_compile_is_byte_identical_with_no_reference(
         f"--- lengths ref={len(want)} got={len(got)} ---")
 
 
+@pytest.mark.parametrize(
+    "tier,subdir,name", COMPONENT_CORPUS,
+    ids=[f"{t}:{n}" for t, _, n in COMPONENT_CORPUS])
+def test_native_compile_of_component_program_is_byte_identical(
+        compile_to, reference_emit, tier, subdir, name):
+    """THE CAPSTONE (roadmap item 262). The whole chain, end to end, on a COMPONENT
+    or extern document: ``compile_to(source, tier)`` — lower_to_ir + emit_<tier>_src,
+    both native, one co-compiled artifact — produces the target source BYTE-FOR-BYTE
+    equal to the reference compile.
+
+    Items 242 + 241 made the native IR producer COMPLETE for component/extern
+    programs (the full typed component/method body, sagas, timers, config, and the
+    verbatim ``@backend`` extern bodies); this proves that completeness carries all
+    the way through the composed pipeline — the services/types/externs/functions
+    sections survive json_parse and drive the native emitter for BOTH tiers, with NO
+    reference anywhere in the chain. ``got`` is produced from the raw source alone;
+    the reference computes only the expected ``want``."""
+    path = _fixture_path(subdir, name)
+    source = path.read_text(encoding="utf-8")
+
+    got = compile_to(source, tier)
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
+        f"native driver did not emit for {tier}:{name}: {got[:80]!r}")
+
+    want = reference_emit[tier](compile_files([str(path)]))
+
+    assert got == want, (
+        f"native component compile diverged from the reference on {tier}:{name}\n"
+        f"--- lengths ref={len(want)} got={len(got)} ---")
+
+
 def test_three_way_composition_co_compiles(compile_rvl):
     """SEAM 2 is closed: lower.rvl + emit_py.rvl + emit_rust.rvl ``use``d together
     in compile.rvl compile into ONE artifact whose namespace exposes the driver.
@@ -198,9 +256,9 @@ def test_three_way_composition_co_compiles(compile_rvl):
 def test_native_gate_admits_the_whole_emit_surface(admit):
     """The native frontend's admission verdict covers the ENTIRE emitter surface —
     every corpus document (functions AND components, both tiers) the reference
-    admits, the native gate admits (``""``). This includes the component documents
-    whose BODIES still need the reference (item 242): the gate is native for them
-    even though their emitted bytes are not yet byte-exact."""
+    admits, the native gate admits (``""``). The component documents are now also
+    compiled byte-exact end to end (item 262); this checks the gate itself over the
+    full admitted surface, including documents outside the byte-exact emit slice."""
     for subdir in ("emit_py_corpus", "emit_rust_corpus"):
         for path in sorted((ROOT / "tests" / "fixtures" / subdir).glob("*.rvl")):
             compile_files([str(path)])  # the reference admits it
