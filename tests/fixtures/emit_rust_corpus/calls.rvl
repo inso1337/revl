@@ -1,0 +1,5 @@
+fn add(a: Int, b: Int) -> Int { return a + b }
+fn use_add(x: Int) -> Int { let y = add(x, x); return y - x }
+fn tag(s: Str) -> Str { return s }
+fn use_tag(s: Str) -> Str { let a = tag(s); return s }
+fn wrap(o: Opt[Int]) -> Opt[Int] { return o }

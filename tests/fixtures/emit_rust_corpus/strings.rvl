@@ -1,0 +1,4 @@
+fn cat(a: Str, b: Str) -> Str { return a + b }
+fn greet(name: Str, n: Int) -> Str { return `hi ${name} x${n}!` }
+fn lit() -> Str { return "plain ascii string" }
+fn label(a: Str) -> Str { return a + " suffix" }
