@@ -1,0 +1,22 @@
+fn loops(n: Int) -> Int {
+  var t = 0
+  for (i of [1, 2, 3]) { t = t + i }
+  while (t < n) { t = t + 1 }
+  if (t > n) { return t } else { return n }
+}
+fn nested(a: Int) -> Int {
+  var s = 0
+  if (a > 0) {
+    let b = a + 1
+    s = b
+  } else {
+    s = 0 - a
+  }
+  return s
+}
+fn checks(a: Int, b: Int) -> Int {
+  assert a < b
+  let z = a
+  z
+  return z
+}
