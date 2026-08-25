@@ -1,0 +1,32 @@
+# The CONSUMER placement (roadmap item 151, two-composition shape) — the
+# consumer half. Compiled from examples/placement/gate_consumer.rvl, which
+# declares ONLY `service Gate` (the interface) and the ts `GateUser`; its IR
+# carries no compiler extern at all. This placement reaches the gate by
+# **address alone** through a `[remotes.gate]` seam — it names no provider
+# component, shares no IR with the gate composition, and needs no local process
+# to own the key.
+#
+#   revl run examples/placement/gate_consumer.rvl \
+#       --placement examples/placement/gate_consumer_network.toml
+#
+# The gate composition (gate_provider_network.toml) must already be running at
+# the address below, on a shared CA (see that file). The consumer presents its
+# own `user` identity and verifies the gate against the same CA `ca`.
+
+[remotes.gate]
+service = "Gate"                       # the interface this consumer holds
+host = "127.0.0.1"
+port = 39471                           # must match the gate placement's address
+rtt_ms = 0.3
+server_hostname = "localhost"          # SNI: a SAN on the gate's leaf (a raw IP
+                                       # is not a legal TLS servername)
+
+[processes.user]
+backend = "node"                       # ts tier — dials the gate over TCP+mTLS
+components = ["GateUser"]
+probe = ["gate.admit_case('collide')", "gate.admit_case('clean')"]
+[processes.user.tls]
+identity = "user"
+cert = "certs/seam_user.crt"
+key = "certs/seam_user.key"
+ca = "certs/seam_ca.crt"

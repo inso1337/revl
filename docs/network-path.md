@@ -105,15 +105,87 @@ the node `GateUser` reaches it over TCP+mTLS. The full cross-tier boot
 (`test_full_conductor_boot_over_the_network_placement`) runs it end to end when
 both cordis runtimes are installed, and skips cleanly otherwise.
 
-## What this does and does not settle
+## The two-composition shape (item 151) — the decoupling made real
 
-This wires the *network client* onto the node/ts tier and proves the seam. It
-does **not** yet split the gate into two fully independent compositions: the
-example still compiles one composition and hands the node side the `ts_safe_ir`
-slice (`docs/gate-as-a-service.md`), because provider and consumer share one
-`.rvl` here. The transport is now ready for the two-composition shape — a
-consumer whose IR never contains the compiler extern, reaching a separately
-deployed gate by address — which is the remaining Path-A step. rust/go/java
-network *consumers* are still unwired (their runners read only the local
-`socket` form); the client generalizes the same way the py and node clients did,
-when a tier needs it.
+Item 149 above wired the *network client* onto the node/ts tier and proved the
+seam, but it still compiled provider and consumer as **one** composition — a
+shared `.rvl` — and handed the node side the `ts_safe_ir` slice
+(`docs/gate-as-a-service.md`): the `@py` compiler extern was *filtered* out of
+the node module. Item 151 finishes Path A by splitting that one composition into
+**two fully independent** ones that share only `service Gate`.
+
+### Two compositions, compiled independently
+
+- **The gate composition** (`examples/placement/gate_provider.rvl`): `service
+  Gate`, the `@py` `host_gate_admit*` / `compile_files` externs, and
+  `GateProvider`. It is deployed on its own placement
+  (`examples/placement/gate_provider_network.toml`), booting the gate behind the
+  TCP+mTLS listener at an `address`. No consumer lives here.
+- **The consumer composition** (`examples/placement/gate_consumer.rvl`): `service
+  Gate` (the interface) and the ts `GateUser`, and **nothing else** — no
+  externs at all. Compiled on its own, its IR never contained the compiler
+  extern, so `ts_safe_ir` has *nothing to filter* (it returns the consumer IR
+  byte-identical). The decoupling is real, not masked: the two IRs never
+  overlapped on the compiler extern in the first place.
+
+### Reaching the gate by address alone — `[remotes]`
+
+The consumer placement (`gate_consumer_network.toml`) declares the seam whose
+provider lives in the *other* composition through a **`[remotes.<key>]`** block —
+item 56's stated non-goal ("the provider runs its own placement on its own
+machine"; `docs/network-placement.md`, "Non-goals") made reachable:
+
+```toml
+[remotes.gate]
+service = "Gate"          # the interface this composition holds
+host = "127.0.0.1"
+port = 39471              # the gate placement's address
+server_hostname = "localhost"   # SNI: a SAN on the gate's leaf (a raw IP is not
+                                # a legal TLS servername)
+
+[processes.user]
+backend = "node"
+components = ["GateUser"]
+[processes.user.tls]
+identity = "user"
+cert = "certs/seam_user.crt"     # a **shared** CA both placements agree on out of
+key  = "certs/seam_user.key"     # band — `generate_test_certs` is a single-
+ca   = "certs/seam_ca.crt"       # placement convenience and cannot span the split
+```
+
+`placement.py` treats a `[remotes]` key as a network seam with **no local
+owner**: it is required by a local process but provided by a machine, not a
+process in this placement. The consumer's proxy is pointed straight at the
+declared address over the same TCP+mTLS client (item 149), presenting the
+consumer's own mTLS identity and verifying the gate against the shared CA. A
+`[remotes]` naming a service this composition does not declare, a key no process
+requires, or a key that is *also* provided locally, is refused with one
+diagnostic before anything spawns.
+
+### Proof
+
+`tests/test_two_composition_gate.py`:
+
+1. **the decoupling itself** (no runtime): the consumer composition, compiled
+   independently, has an empty `externs` and its IR mentions none of
+   `host_gate_admit` / `compile_files` anywhere; the provider composition owns
+   exactly those externs; both independently declare the same `Gate` interface;
+   and `ts_safe_ir` is a no-op on the consumer. The ts module the conductor
+   actually emits for the consumer contains no compiler symbol either — because
+   the IR handed to the emitter never had one.
+2. **by address alone** (reuses 149's real-node-process harness): an
+   independently compiled consumer admits the `clean` candidate against a
+   **separately-booted** py gate and the `collide` one is refused by **G2**,
+   verdict + why-trace crossing the two-composition boundary; a **wedged** gate
+   breaches the seam deadline and the consumer **reactively withdraws**.
+3. **the full conductor form**: `revl run` on the *consumer* placement, whose
+   `[remotes.gate]` reaches a separately-booted gate by address — the node
+   `GateUser` probes `gate.admit_case(...)` across the seam, G2 refusal and clean
+   admit both crossing TCP+mTLS. The gate placement is itself a valid standalone
+   deployment (`test_provider_placement_boots_standalone`).
+
+This is the remaining Path-A step, now settled: a consumer whose IR never
+contains the compiler extern, reaching a separately deployed gate by address.
+rust/go/java network *consumers* are still unwired (their runners read only the
+local `socket` form); the client generalizes the same way the py and node
+clients did, when a tier needs it.
