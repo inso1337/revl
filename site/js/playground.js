@@ -898,8 +898,10 @@ function renderSystem(snap) {
 function liveFailure(r, what) {
   if (r.diagnostics) {
     render({ ok: false, diagnostics: r.diagnostics });
-    traceLine(`<span class="tr-err">✗ ${esc(what)} REFUSED — ` +
-      `${esc((r.diagnostics[0] || {}).code || "")} (running system untouched; see Diagnostics)</span>`);
+    const d = r.diagnostics[0] || {};
+    const loc = d.line ? `:${d.line}` : "";
+    traceLine(`<span class="tr-err">✗ ${esc(what)} REFUSED${loc} — ${esc(d.message || d.code || "")}` +
+      `</span> <span class="tr-dim">(running system untouched; details in Diagnostics)</span>`);
   } else {
     traceLine(`<span class="tr-err">✗ ${esc(what)}: ${esc(r.error || "failed")}</span>`);
   }
@@ -946,7 +948,15 @@ window.__metaHost = {
     updateDock();
   },
   editorSource() { return editor.value; },
-  theme(name) { document.body.dataset.ui = name; },
+  theme(name) {
+    const worn = document.body.dataset.ui;
+    if (worn && worn !== name) {
+      throw new Error(`the page already wears theme "${worn}" — the data-ui slot ` +
+        `is one exclusive host resource, so mount one Style component at a time ` +
+        `(withdraw the current one first)`);
+    }
+    document.body.dataset.ui = name;
+  },
   themeReset() { delete document.body.dataset.ui; },
 };
 
