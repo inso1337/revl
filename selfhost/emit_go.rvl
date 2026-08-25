@@ -35,6 +35,16 @@
 //     `var name T = …` pin and the `_ = name` keep-alive), assign, return,
 //     if/else, while, for (the `for _, x := range …` form with its `_ = x`),
 //     the bare-expr `_ = …`, and assert (`if !(…) { t.Fatalf(…) }`).
+//   * the v3 TYPED-CORE (item 209) — user `type` decls (`_emit_v3_go_types`): a
+//     record as a Go `struct` (pure tier: unexported source-spelled fields, no
+//     json tags), a variant as a sealed interface (`isX()` seal) plus one struct
+//     per case; record literals (`Struct{f: v, ..}`) and field access (`r.f`);
+//     ADT construction (nullary `<Variant><Case>{}` / payload `{Value: arg}`);
+//     `match` over user variants as a Go type switch IIFE; user record/variant
+//     names in `go_type` (`List`/`Opt`/`Map`/`Result` of a user type); and the
+//     `_V3GoCtx` record/variant inference (`ca`/`cp`/`rbf`/`rf`) that seeds
+//     `var_types`, picks a record literal's nominal struct, and types a `let`
+//     bound to a field access. Functional record-update stays deferred (below).
 //   * `_go_v3_expr` for the base expression algebra — lit, name/var, bin (the
 //     trapping Int/Int32 `+ - *`, `/` as `revlDiv(float64(..), float64(..))`,
 //     `%`, comparisons, `&&`/`||`, native scalar `==`/`!=`, and string `+` as
@@ -52,10 +62,13 @@
 //     pure typed-core path this slice mirrors. Components / services / the
 //     effect-undo world / `provide`/`req`/`config` / timers / spawn / realms /
 //     the interop bridge (`_emit_go_bridge`) / placement — all deferred.
-//   * the v3 TYPED-CORE — user `type` decls (`_emit_v3_go_types`), record
-//     literals and functional record-update (the go tier refuses the latter),
-//     ADT construction and `match` over user variants, and the record/variant
-//     inference in `_V3GoCtx`.
+//   * functional record-update (`{r | f = e}`, `record_update`) — the go
+//     reference itself RAISES on it (only python/typescript emit it today; see
+//     docs/records.md §6, "lift it into a helper fn instead"), so it is a
+//     structural deferral, not an approximation. (The rest of the v3 TYPED-CORE
+//     — user `type` decls, record literals, ADT construction and `match` over
+//     user variants, and the record/variant inference in `_V3GoCtx` — is now
+//     COVERED, item 209; see the typed-core bullet under WHAT IT COVERS.)
 //   * the built-in Opt / Result / Map surface — the `??` coalesce, the
 //     `Some`/`None`/`Ok`/`Err` constructors, `Map.empty()` (`maplit`), optional
 //     chaining (`optfield`/`optcall`), and the `_V3_OPT_PREAMBLE` /
@@ -88,9 +101,13 @@
 // reference `_go_string` Go-literal escaper, kin to py's `py_repr`).
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field,
-  value_list, value_at, value_str, value_int, value_bool
+  value_list, value_at, value_str, value_int, value_bool, value_keys
 }
 use "../stdlib/str.rvl" { split_top, rstrip }
+// The list kit (item 194): `list_sort` is the codepoint-lexicographic `sorted(..)`
+// the reference uses to canonicalise a record's field set into a `record_by_fields`
+// key — no re-hand-roll (byte-fuzz-pinned against Python `sorted()`).
+use "../stdlib/list.rvl" { list_sort }
 
 // ------------------------------------------------- host formatting (kept @py)
 // A single tab / newline byte — the one genuine U+0009 / U+000A. Go indents with
@@ -202,9 +219,28 @@ fn is_scalar(t: Str) -> Bool {
 // `let`/`for`) types a `let`'s `var T =` pin, the scalar-`==` split, and the
 // Str `+` / Float-interp routing; a free function's declared return type types a
 // `let` bound to its call, and `rt` is the enclosing fn's return (the `expected`
-// pin a `return` threads onto a list literal). The user-type tables are empty
-// in this slice.
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str], rt: Str }
+// pin a `return` threads onto a list literal). The user-type tables mirror the
+// reference's `_V3GoCtx`:
+//   * `ca` (`case_adt`)     — variant case name -> its sealed-interface type name
+//     (the `<<AMBIG>>` sentinel marks a case shared by two variants, where the
+//     reference stores `None` and refuses at use);
+//   * `cp` (`case_payload`) — case name -> its payload SURFACE type ("" for a
+//     nullary case, where the reference stores `None`), so a construction picks
+//     `TreeLeaf{}` vs `TreeNode{Value: ..}` and a bound match arm types `_m.Value`;
+//   * `rbf` (`record_by_fields`) — the sorted-field KEY of a record -> its struct
+//     type name (`<<AMBIG>>` when two records share the exact field set), so a
+//     record literal `{ a: .., b: .. }` infers its nominal Go struct;
+//   * `rf` (record fields) — `"<Type>.<field>"` -> the field's surface type, so a
+//     field access `r.f` infers its type (the `var z int64 =` let pin).
+type Ctx = {
+  vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str],
+  ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str],
+  rt: Str
+}
+// The user-type tables, built once from the document's `types` and shared by
+// every function's ctx (the reference builds one `_V3GoCtx` for the function list,
+// reusing the same type tables).
+type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rf: Map[Str, Str] }
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx`).
@@ -214,7 +250,59 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er, rt: ctx.rt }
+  return {
+    vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er,
+    ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rf: ctx.rf, rt: ctx.rt
+  }
+}
+// Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
+// sentinel and a missing key both mean "not a byte-exact target here".
+fn resolved(name: Str) -> Bool { return name != "" && name != "<<AMBIG>>" }
+
+// `record_by_fields`' key: the field NAMES sorted (Python `tuple(sorted(..))`),
+// joined with a `,`. Both the type-decl side (`fields.keys()`) and the record
+// literal side (`[k for k, _ in fields]`) reduce to the same key.
+fn sorted_key(names: List[Str]) -> Str { return list_sort(names).join(",") }
+
+// `_V3GoCtx`'s type-table construction: fold the document `types` into the case /
+// record lookups. Ambiguity (a case name / field set shared by two decls) is
+// marked `<<AMBIG>>`, exactly where the reference stores `None`.
+fn build_type_tables(types: Any) -> TypeTables {
+  var ca: Map[Str, Str] = Map.empty()
+  var cp: Map[Str, Str] = Map.empty()
+  var rbf: Map[Str, Str] = Map.empty()
+  var rf: Map[Str, Str] = Map.empty()
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    if (kind == "record") {
+      let fields = value_field(spec, "fields")
+      let names = value_keys(fields)
+      let key = sorted_key(names)
+      if (rbf.has(key)) { rbf = rbf.set(key, "<<AMBIG>>") } else { rbf = rbf.set(key, name) }
+      for (field of names) {
+        rf = rf.set(`${name}.${field}`, value_str(value_field(fields, field)))
+      }
+    }
+    if (kind == "variant") {
+      for (case of value_list(value_field(spec, "cases"))) {
+        let cn = value_str(value_field(case, "name"))
+        let payload = value_field(case, "payload")
+        if (value_is_null(payload)) { cp = cp.set(cn, "") } else { cp = cp.set(cn, value_str(payload)) }
+        if (ca.has(cn)) { ca = ca.set(cn, "<<AMBIG>>") } else { ca = ca.set(cn, name) }
+      }
+    }
+  }
+  return { ca: ca, cp: cp, rbf: rbf, rf: rf }
+}
+
+// `_V3GoCtx.record_type_for_fields`: a record literal's nominal struct type, from
+// its (sorted) field set. Reference RAISES on no-unique-match; here the marker
+// keeps the emitter total (no in-corpus literal is ambiguous or unknown).
+fn record_type_for_fields(ctx: Ctx, names: List[Str]) -> Str {
+  let name = map_get(ctx.rbf, sorted_key(names))
+  if (!resolved(name)) { return "<<DEFER-record>>" }
+  return v3_ident(name)
 }
 
 // -------------------------------------------------------------------- types
@@ -394,6 +482,25 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
     if (t != "") { return t }
     return infer_type(value_field(node, "else"), ctx)
   }
+  if (k == "field") {
+    // A record field access `r.f`: infer the receiver's record type, then read
+    // the field's declared surface type from the `rf` table (a non-record
+    // receiver, or an unknown field, misses and yields "").
+    let tt = infer_type(value_field(node, "target"), ctx)
+    return map_get(ctx.rf, `${tt}.${value_str(value_field(node, "name"))}`)
+  }
+  if (k == "record") {
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let tn = record_type_for_fields(ctx, names)
+    if (tn == "<<DEFER-record>>") { return "" }
+    return tn
+  }
+  if (k == "adt") {
+    let a = map_get(ctx.ca, value_str(value_field(node, "case")))
+    if (resolved(a)) { return a }
+    return ""
+  }
   return ""
 }
 
@@ -483,8 +590,12 @@ fn render_call(node: Any, ctx: Ctx) -> Str {
   if (value_is_null(callee)) { return "<<DEFER-component-call>>" }
   var args = []
   for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
-  if (node_kind(callee) == "var" && is_builtin_ctor(value_str(value_field(callee, "name")))) {
-    return "<<DEFER-ctor>>"
+  if (node_kind(callee) == "var") {
+    let cn = value_str(value_field(callee, "name"))
+    // A constructor arriving as `call(callee=var Case, ..)`: a user variant is
+    // constructed here; a built-in Opt/Result ctor is DEFERRED (its preambles).
+    if (resolved(map_get(ctx.ca, cn))) { return render_construct(ctx, cn, args) }
+    if (is_builtin_ctor(cn)) { return "<<DEFER-ctor>>" }
   }
   let csrc = render_expr(callee, ctx, "")
   return `${csrc}(${args.join(", ")})`
@@ -583,15 +694,130 @@ fn double_pct(s: Str) -> Str {
   return out
 }
 
+// `_go_v3_construct` (user-variant subset): an ADT construction from a case name
+// and rendered args. A user variant is `<Variant><Case>{}` (nullary) or
+// `<Variant><Case>{Value: arg}` (payload) — the variant name is `_v3_ident`ed and
+// the case name is used RAW, exactly as the reference. The built-in Opt/Result
+// constructors (`Some`/`None`/`Ok`/`Err`) pull the Opt/Result preambles this
+// slice omits, so they are DEFERRED.
+fn render_construct(ctx: Ctx, case: Str, args: List[Str]) -> Str {
+  let adt = map_get(ctx.ca, case)
+  if (resolved(adt)) {
+    let struct = `${v3_ident(adt)}${case}`
+    if (map_get(ctx.cp, case) == "") { return `${struct}{}` }
+    return `${struct}{Value: ${args[0]}}`
+  }
+  return `<<DEFER-ctor:${case}>>`
+}
+
+// `_go_v3_expr` field branch: a record field access. A non-atomic receiver is
+// parenthesised so the `.field` selector binds correctly; the field name is the
+// source spelling on the pure tier (`_v3_field_ident` with `_V3_TYPED_COMPONENTS`
+// off = `_v3_ident`, no camel/json).
+fn render_field(node: Any, ctx: Ctx) -> Str {
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx, "")
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  return `${target}.${v3_ident(value_str(value_field(node, "name")))}`
+}
+
+// `_go_v3_expr` record branch: a nominal `Struct{f: v, ..}` literal. Go copies by
+// value, so there is no clone (unlike the rust tier); the struct name is inferred
+// from the (sorted) field set. Field values render with no `expected` pin, as the
+// reference does.
+fn render_record(node: Any, ctx: Ctx) -> Str {
+  let fields = value_list(value_field(node, "fields"))
+  var names = []
+  for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
+  let tn = record_type_for_fields(ctx, names)
+  var body = []
+  for (f of fields) {
+    let k = value_str(value_at(f, 0))
+    let vnode = value_at(f, 1)
+    body = body.push(`${v3_ident(k)}: ${render_expr(vnode, ctx, "")}`)
+  }
+  return `${tn}{${body.join(", ")}}`
+}
+
+// `_go_v3_match`: a `match` over a user variant as a Go type switch wrapped in an
+// IIFE (`func() T { switch _m := scrut.(type) { .. } }()`). The switch/case/body
+// lines carry a LITERAL one/two-tab indent (the reference builds them with a
+// fixed `\t` prefix; the enclosing `_go_v3_stmt` pads only the first `func()`
+// line). A bound arm reads `_m.Value` and types the bind from its case payload; an
+// unmatched `_` gets the non-exhaustive panic unless an arm already wilds. The
+// built-in Opt/Result match surface pulls the deferred preambles, so it is
+// DEFERRED (an `Opt[`/`Result[` scrutinee is out of corpus).
+fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let scrut_node = value_field(node, "scrutinee")
+  let scrutinee = render_expr(scrut_node, ctx, "")
+  let st = infer_type(scrut_node, ctx)
+  let arms = value_list(value_field(node, "arms"))
+  if ((st.startsWith("Opt[") && st.endsWith("]")) || (st.startsWith("Result[") && st.endsWith("]"))) {
+    return "<<DEFER-match-builtin>>"
+  }
+  var exp_t = ""
+  if (expected != "") { exp_t = go_type(expected) }
+  if (exp_t == "") {
+    var i = 0
+    while (i < arms.length() && exp_t == "") {
+      exp_t = go_type(infer_type(value_field(arms[i], "body"), ctx))
+      i = i + 1
+    }
+  }
+  if (exp_t == "") { exp_t = "any" }
+  var lines = [`func() ${exp_t} {`]
+  lines = lines.push(line(1, `switch _m := ${scrutinee}.(type) {`))
+  var hasWild = false
+  for (arm of arms) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    if (pattern == "_") {
+      hasWild = true
+      lines = lines.push(line(1, "default:"))
+      lines = lines.push(line(2, "_ = _m"))
+      lines = lines.push(line(2, `return ${render_expr(value_field(arm, "body"), ctx, expected)}`))
+    } else {
+      var adt = st
+      if (!resolved(adt)) { adt = map_get(ctx.ca, pattern) }
+      lines = lines.push(line(1, `case ${v3_ident(adt)}${pattern}:`))
+      let bindn = value_field(arm, "bind")
+      var armctx = ctx
+      if (!value_is_null(bindn) && value_str(bindn) != "") {
+        let bind = value_str(bindn)
+        armctx = set_vt(ctx, bind, map_get(ctx.cp, pattern))
+        lines = lines.push(line(2, `${v3_ident(bind)} := _m.Value`))
+      } else {
+        lines = lines.push(line(2, "_ = _m"))
+      }
+      lines = lines.push(line(2, `return ${render_expr(value_field(arm, "body"), armctx, expected)}`))
+    }
+  }
+  if (!hasWild) {
+    lines = lines.push(line(1, "default:"))
+    lines = lines.push(line(2, "_ = _m"))
+    lines = lines.push(line(2, `panic("unreachable: non-exhaustive match")`))
+  }
+  lines = lines.push(line(1, "}"))
+  lines = lines.push("}()")
+  return lines.join(newline())
+}
+
 // The kind dispatch, mirroring `_go_v3_expr`'s branch order (post-widen).
 fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   let kind = node_kind(node)
   if (kind == "lit") { return go_v3_lit(node) }
   if (kind == "var" || kind == "name") { return v3_ident(ref_name(node)) }
+  if (kind == "adt") {
+    var aa = []
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx, "")) }
+    return render_construct(ctx, value_str(value_field(node, "case")), aa)
+  }
   if (kind == "bin") { return render_bin(node, ctx) }
   if (kind == "un") { return render_un(node, ctx) }
   if (kind == "call") { return render_call(node, ctx) }
+  if (kind == "field") { return render_field(node, ctx) }
   if (kind == "index") { return render_index(node, ctx) }
+  if (kind == "record") { return render_record(node, ctx) }
+  if (kind == "match") { return render_match(node, ctx, expected) }
   if (kind == "list") { return render_list(node, ctx, expected) }
   if (kind == "arrow") { return render_arrow(node, ctx) }
   if (kind == "if") {
@@ -715,8 +941,49 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
 }
 
+// `_emit_v3_go_types`: user `type` decls as Go items. A record is a `struct`
+// (pure tier: unexported source-spelled fields, no json tags — `_V3_TYPED_COMPONENTS`
+// is off); a variant is a sealed interface (`isX()` seal) plus one struct per case
+// (nullary `struct{}`, payload `struct { Value T }`) with the seal method. Each
+// decl is followed by a blank line, exactly as the reference does.
+fn emit_v3_types(types: Any) -> List[Str] {
+  var out = []
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    let gname = v3_ident(name)
+    if (kind == "record") {
+      out = out.push(`type ${gname} struct {`)
+      let fields = value_field(spec, "fields")
+      for (field of value_keys(fields)) {
+        out = out.push(line(1, `${v3_ident(field)} ${go_type(value_field(fields, field))}`))
+      }
+      out = out.push("}")
+      out = out.push("")
+    } else {
+      if (kind == "variant") {
+        let marker = `is${gname}`
+        out = out.push(`// ${gname} is a sealed sum type (revl ADT); ${marker}() seals it.`)
+        out = out.push(`type ${gname} interface { ${marker}() }`)
+        for (case of value_list(value_field(spec, "cases"))) {
+          let cname = value_str(value_field(case, "name"))
+          let cstruct = `${gname}${cname}`
+          let payload = value_field(case, "payload")
+          if (value_is_null(payload)) { out = out.push(`type ${cstruct} struct{}`) }
+          else { out = out.push(`type ${cstruct} struct { Value ${go_type(payload)} }`) }
+          out = out.push(`func (${cstruct}) ${marker}() {}`)
+        }
+        out = out.push("")
+      } else {
+        out = out.push(`<<UNSUPPORTED-TYPE:${kind}>>`)
+      }
+    }
+  }
+  return out
+}
+
 // `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
-fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str]) -> List[Str] {
+fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTables) -> List[Str] {
   var out = []
   for (fnode of functions) {
     let name = v3_ident(value_str(value_field(fnode, "name")))
@@ -724,7 +991,7 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str]) ->
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
     let rt = value_str(value_field(fnode, "returns"))
-    let ctx = { vt: vt, fr: fr, er: er, rt: rt }
+    let ctx = { vt: vt, fr: fr, er: er, ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, rt: rt }
     var ps = []
     for (p of params) {
       ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
@@ -839,6 +1106,8 @@ fn overflow32_preamble() -> List[Str] {
 // the reference's fixed order (revlDiv, then the overflow trio, then the Int32
 // block), then the free functions — joined, right-stripped, one trailing `\n`.
 pub fn emit_src(ir: Any) -> Str {
+  let types = value_field(ir, "types")
+  let tables = build_type_tables(types)
   let functions = value_list(value_field(ir, "functions"))
   var fr: Map[Str, Str] = Map.empty()
   var er: Map[Str, Str] = Map.empty()
@@ -867,7 +1136,10 @@ pub fn emit_src(ir: Any) -> Str {
   if (flags.ovf) { out = out.concat(overflow_preamble()) }
   if (flags.ovf32) { out = out.concat(overflow32_preamble()) }
 
-  out = out.concat(emit_functions(functions, fr, er))
+  // The reference's section order: user `type` items precede the free functions
+  // (both after the header + feature preambles).
+  if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types)) }
+  out = out.concat(emit_functions(functions, fr, er, tables))
   return rstrip(out.join(newline())).concat(newline())
 }
 
@@ -896,6 +1168,48 @@ test "indentation is one tab per level" {
   assert line(0, "x") == "x"
   assert is_go_reserved("type")
   assert v3_ident("type") == "type_"
+}
+
+test "sorted_key canonicalises a record's field set by code point" {
+  assert sorted_key(["y", "x"]) == "x,y"
+  assert sorted_key(["label", "at"]) == "at,label"
+  assert sorted_key(["x"]) == "x"
+}
+
+fn typed_ctx() -> Ctx {
+  var ca: Map[Str, Str] = Map.empty()
+  var cp: Map[Str, Str] = Map.empty()
+  var rbf: Map[Str, Str] = Map.empty()
+  ca = ca.set("Leaf", "Tree")
+  cp = cp.set("Leaf", "")
+  ca = ca.set("Node", "Tree")
+  cp = cp.set("Node", "Int")
+  rbf = rbf.set("x,y", "Point")
+  return {
+    vt: Map.empty(), fr: Map.empty(), er: Map.empty(),
+    ca: ca, cp: cp, rbf: rbf, rf: Map.empty(), rt: ""
+  }
+}
+
+test "render_construct lowers user variants (nullary + payload)" {
+  let ctx = typed_ctx()
+  assert render_construct(ctx, "Leaf", []) == "TreeLeaf{}"
+  assert render_construct(ctx, "Node", ["v"]) == "TreeNode{Value: v}"
+  // a built-in Opt/Result ctor is deferred (pulls the omitted preambles)
+  assert render_construct(ctx, "Some", ["v"]) == "<<DEFER-ctor:Some>>"
+}
+
+test "record_type_for_fields infers a nominal struct from its field set" {
+  let ctx = typed_ctx()
+  assert record_type_for_fields(ctx, ["x", "y"]) == "Point"
+  assert record_type_for_fields(ctx, ["y", "x"]) == "Point"
+  assert record_type_for_fields(ctx, ["q"]) == "<<DEFER-record>>"
+}
+
+test "go_type passes user record/variant names through" {
+  assert go_type("Point") == "Point"
+  assert go_type("List[Point]") == "[]Point"
+  assert go_type("Opt[Point]") == "RevlOpt[Point]"
 }
 
 // --------------------------------------------------------------- component wrap
