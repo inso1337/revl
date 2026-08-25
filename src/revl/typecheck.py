@@ -1028,6 +1028,20 @@ def _reject_int_literal_range(filename: str | None, line: int, v: int) -> None:
     )
 
 
+def _extend_arm_tenv(stmt, tenv: dict, types: dict, filename: str | None) -> None:
+    """Extend a block-arm's tail scope with one of its statements.
+
+    Only a `let`/`var` binding contributes a name the tail can read; the
+    imperative statements (`while`, `if`, assignments) declare nothing at the
+    block's own level, and their full check happens at lowering. A declared
+    type is authoritative; otherwise the initialiser is inferred."""
+    from .parser import LetStmt
+    if isinstance(stmt, LetStmt):
+        declared = getattr(stmt, "type", None)
+        tenv[stmt.name] = (declared if declared is not None
+                           else infer_ast(stmt.value, tenv, types, filename))
+
+
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
     """Best-effort type of a parser-AST expression. With `filename`, definite
     operator/branch/argument mismatches raise; without it, never raises."""
@@ -1287,8 +1301,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     if isinstance(expr, ExprBlockArm):
         inner = dict(tenv)
         for stmt in expr.stmts:
-            t = infer_ast(stmt.value, inner, types, filename)
-            inner[stmt.name] = t
+            _extend_arm_tenv(stmt, inner, types, filename)
         return infer_ast(expr.tail, inner, types, filename)
     if isinstance(expr, ExprCall):
         arg_types = [infer_ast(a, tenv, types, filename) for a in expr.args]
@@ -1686,12 +1699,14 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                            render_type(base_t) or base_t)
         return
     if isinstance(expr, ExprBlockArm):
-        # Each `let` in the arm block extends the arm's scope; the tail is
-        # checked against the expectation like any other arm body.
+        # A `let`/`var` in the arm block extends the arm's scope for the tail;
+        # the imperative statements (`while`, `if`, assignments) add no
+        # tail-visible name and are validated in full at lowering, where the
+        # ordinary fn-body machinery runs. The tail is checked against the
+        # expectation like any other arm body.
         inner = dict(tenv)
         for stmt in expr.stmts:
-            t = infer_ast(stmt.value, inner, types, filename)
-            inner[stmt.name] = t
+            _extend_arm_tenv(stmt, inner, types, filename)
         check_ast(expr.tail, expected, inner, types, filename, where)
         return
     actual = infer_ast(expr, tenv, types, filename)

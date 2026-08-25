@@ -13,6 +13,7 @@ Guarantee enforcement map (DESIGN.md §4):
 
 from __future__ import annotations
 
+import dataclasses
 import keyword
 from dataclasses import dataclass
 
@@ -876,6 +877,16 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     )
     fns: list[dict] = []
     seen: set[str] = set()
+    # Install the block-arm lift sink for the duration of fn-body lowering: a
+    # statement-block match arm is lambda-lifted into a synthetic helper fn
+    # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
+    # seeds the fresh-name search so a helper never shadows a user fn/extern.
+    sink = types.setdefault(LIFT_SINK, {
+        "fns": [],
+        "n": 0,
+        "taken": ({fn.name for fn in program.fn_decls}
+                  | {ext.name for ext in program.externs}),
+    })
     for decl in program.fn_decls:
         if decl.name in seen:
             raise RevlError(filename, decl.line, f"duplicate function `{decl.name}`")
@@ -921,6 +932,11 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         if decl.source:
             _retarget_holes(entry["body"], decl.source)
         fns.append(entry)
+    # Drain the lift sink: synthetic arm helpers join the functions list, so the
+    # async-coloring and emission fixed points that run over `fns` see them.
+    lifted = types.pop(LIFT_SINK, None)
+    if lifted and lifted["fns"]:
+        fns.extend(lifted["fns"])
     return fns
 
 
@@ -1147,15 +1163,149 @@ def _mutable_free_vars(expr, scope: dict, bound: set[str] | None = None) -> set[
 
 
 def _block_arm_unimplemented(filename: str, line: int) -> RevlError:
-    """Block-bodied match arms are specified and parsed (docs/records.md §4)
-    but no backend lowers them yet — refuse loudly rather than half-emit."""
+    """Block-bodied match arms lower by lambda-lifting into a synthetic helper
+    fn (`_lift_block_arm`), which needs a lift sink in scope. A position without
+    one (e.g. an extern undo expression) cannot lift, so it refuses loudly
+    rather than half-emit."""
     return RevlError(
         filename, line,
-        "block-bodied match arms (`=> { let … ; expr }`) parse and typecheck "
-        "but no backend emits them yet",
-        hint="lift the block into a named helper `fn` for now; implemented "
-             "tiers for this form: none yet (docs/records.md §6 tracks status)",
+        "a block-bodied match arm (`=> { … ; expr }`) is not lowerable here",
+        hint="block arms lower inside a module `fn` body; lift the block into a "
+             "named helper `fn` for this position (docs/records.md §6)",
     )
+
+
+# The lift sink threads a synthetic-fn accumulator through fn-body lowering
+# under a private (`__`-prefixed, so never serialised) key on the shared
+# `types` dict. `_lower_fns` installs it and drains it into the functions list.
+LIFT_SINK = "__arm_lift__"
+
+
+def _pattern_binds(pattern) -> list[str]:
+    """The names a `let`-pattern binds (record fields, list binds, list rest)."""
+    names = list(getattr(pattern, "fields", None) or [])
+    names += list(getattr(pattern, "binds", None) or [])
+    rest = getattr(pattern, "rest", None)
+    if rest:
+        names.append(rest)
+    return names
+
+
+def _collect_arm_names(node, referenced: set[str], bound: set[str]) -> None:
+    """Collect the names a block-arm subtree *reads* into ``referenced`` and the
+    names it *declares* into ``bound``, so `_lift_block_arm` can capture exactly
+    the enclosing bindings the arm uses.
+
+    A generic AST walk: only the name-reading node (`ExprVar`, and the target of
+    an assignment) and the name-binding nodes (`let`/`var`, `let`-pattern, `for`)
+    are special-cased; every other node recurses over its dataclass fields."""
+    if isinstance(node, list):
+        for item in node:
+            _collect_arm_names(item, referenced, bound)
+        return
+    if isinstance(node, ExprVar):
+        referenced.add(node.name)
+        return
+    if isinstance(node, LetStmt):
+        _collect_arm_names(node.value, referenced, bound)
+        bound.add(node.name)
+        return
+    if isinstance(node, LetPatternStmt):
+        _collect_arm_names(node.value, referenced, bound)
+        for name in _pattern_binds(node.pattern):
+            bound.add(name)
+        return
+    if isinstance(node, ForStmt):
+        _collect_arm_names(node.iterable, referenced, bound)
+        bound.add(node.bind)
+        _collect_arm_names(node.body, referenced, bound)
+        return
+    if isinstance(node, AssignStmt):
+        # the target names an existing binding the block writes into
+        referenced.add(node.name)
+        _collect_arm_names(node.value, referenced, bound)
+        return
+    if dataclasses.is_dataclass(node):
+        for field in dataclasses.fields(node):
+            _collect_arm_names(getattr(node, field.name), referenced, bound)
+        return
+    # scalars (str/int/None) carry no names
+
+
+def _lift_block_arm(expr, scope: dict, callables: set, alias_fns: dict,
+                    filename: str, type_env: dict, types: dict) -> dict:
+    """Lower a statement-block match arm by lambda-lifting it into a synthetic
+    helper fn (docs/records.md §6).
+
+    The arm's statements become the helper's body, its final expression becomes
+    the helper's `return`, and every enclosing name the block reads becomes a
+    parameter. The arm's value is then a *call* to that helper — an expression,
+    so the IR arm-body-as-expression invariant holds and every backend that
+    emits a fn call emits the arm without new emit support.
+
+    The body is lowered with the ordinary fn-body machinery (`_lower_pure_stmt`),
+    so the arm obeys exactly the purity/effect rules of any pure value block: an
+    effect statement, or an assignment to a captured (now immutable) name, is
+    refused just as it would be in a normal block that produces a value."""
+    sink = types.get(LIFT_SINK)
+    if sink is None:
+        raise _block_arm_unimplemented(filename, expr.line)
+
+    referenced: set[str] = set()
+    bound: set[str] = set()
+    for stmt in expr.stmts:
+        _collect_arm_names(stmt, referenced, bound)
+    _collect_arm_names(expr.tail, referenced, bound)
+    captures = sorted(n for n in referenced if n in scope and n not in bound)
+
+    params: list[dict] = []
+    arm_scope: dict = {}
+    arm_type_env: dict = {}
+    for cap in captures:
+        ctype = type_env.get(cap)
+        if ctype is None:
+            raise RevlError(
+                filename, expr.line,
+                f"a match block arm reads `{cap}`, whose type is not known here",
+                hint="annotate the binding this arm reads so the lifted arm "
+                     "helper can type its parameter (docs/records.md §4)")
+        params.append({"name": cap, "type": ctype})
+        # a captured `var` enters the helper as an immutable parameter: reading
+        # it is fine, assigning to it is refused, which is exactly the purity a
+        # value-producing block owes its enclosing scope.
+        arm_scope[cap] = "host" if scope.get(cap) == "host" else False
+        arm_type_env[cap] = ctype
+
+    arm_body: list = []
+    for stmt in expr.stmts:
+        _lower_pure_stmt(stmt, arm_scope, callables, alias_fns, arm_body,
+                         filename, arm_type_env, types)
+    ret_type = infer_ast(expr.tail, arm_type_env, types, filename)
+    arm_body.append({
+        "step": "return",
+        "expr": _lower_pure_expr(expr.tail, arm_scope, callables, alias_fns,
+                                 filename, arm_type_env, types),
+    })
+
+    # A fresh, backend-safe helper name: no leading underscore (emitters reserve
+    # that for scaffolding) and never a user fn/extern name.
+    taken = sink["taken"]
+    name = f"match_arm_{sink['n']}"
+    while name in taken:
+        sink["n"] += 1
+        name = f"match_arm_{sink['n']}"
+    sink["n"] += 1
+    taken.add(name)
+    sink["fns"].append({
+        "name": name,
+        "params": params,
+        "returns": ret_type,
+        "public": False,
+        "body": arm_body,
+    })
+    return {"kind": "call",
+            "callee": {"kind": "var", "name": name},
+            "args": [{"kind": "var", "name": cap} for cap in captures]}
 
 
 class _LaxScope(dict):
@@ -2434,7 +2584,8 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 "updates": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                             for name, e in expr.updates]}
     if isinstance(expr, ExprBlockArm):
-        raise _block_arm_unimplemented(filename, expr.line)
+        return _lift_block_arm(expr, scope, callables, alias_fns, filename,
+                               type_env, types)
     if isinstance(expr, ExprList):
         return {"kind": "list",
                 "items": [_lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types) for e in expr.items]}
