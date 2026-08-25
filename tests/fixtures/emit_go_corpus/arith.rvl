@@ -1,0 +1,8 @@
+fn i64ops(a: Int, b: Int) -> Int { return a + b - a * b }
+fn i32ops(a: Int32, b: Int32) -> Int32 { return a + b - a * b }
+fn negs(a: Int) -> Int { let x = 0 - a; return 0 - x }
+fn realdiv(a: Int, b: Int) -> Float { return a / b }
+fn modu(a: Int, b: Int) -> Int { return a % b }
+fn cmps(a: Int, b: Int) -> Bool { return a < b && a <= b || a > b && a >= b }
+fn eqs(a: Int, b: Int) -> Bool { return a == b && a != b }
+fn boolnot(a: Bool) -> Bool { return !a }
