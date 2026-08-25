@@ -466,13 +466,20 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
     Rules, in order:
 
     * `candidate == original`  -> admitted, nothing changed.
-    * original compiles:  the candidate MUST compile to byte-identical IR,
-      otherwise it is refused (this is the headline gate -- it catches any
-      rewrite that changed what the compiler sees).
+    * original compiles:  a token-preserving rewrite (the formatter) MUST
+      compile to byte-identical IR, otherwise it is refused (this is the
+      headline gate -- it catches any reformat that changed what the compiler
+      sees).  A token-changing rewrite (`--migrate`) is a DELIBERATE semantic
+      upgrade: since 2.0 makes a bare `$` literal (item 203), a legacy
+      `"$name"` now compiles as a literal and migrating it to a
+      `` `${name}` `` template legitimately changes the IR, so an IR delta is
+      ADMITTED as the intended migration -- the migrate gate that still bites
+      is that the rewritten source must still COMPILE (a rewrite that broke
+      compilation is refused, catching a corrupted mechanical pass).
     * original does NOT compile standalone but the candidate does (an
-      `import`-only file, or a 1.x source the 2.0 compiler rejects before
-      `--migrate` fixes it):  IR cannot be compared, so the candidate is
-      admitted as *newly admissible* -- it now compiles.
+      `import`-only file, or a pre-item-203 1.x source the 2.0 compiler still
+      rejects before `--migrate` fixes it):  IR cannot be compared, so the
+      candidate is admitted as *newly admissible* -- it now compiles.
     * neither side compiles:  there is no compilable baseline for the gate to
       violate.  A token-preserving rewrite (the formatter) still proves the
       sound weaker invariant it guarantees -- the significant token stream is
@@ -497,6 +504,23 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
                 reason=f"rewritten source no longer compiles: {err_cand}",
             )
         if _canonical_ir(ir_orig) != _canonical_ir(ir_cand):
+            if not token_preserving:
+                # `--migrate` is a DELIBERATE semantic upgrade, not an
+                # equivalence-preserving reformat: since 2.0 makes a bare `$`
+                # literal (item 203), a legacy `"$name"` now compiles as a
+                # literal string, and migrating it to a `` `${name}` `` template
+                # legitimately changes the IR. The migrate scanner (`revl.fmt`)
+                # only ever rewrites `$`-bearing strings and copies everything
+                # else through verbatim, so any IR delta is that intended
+                # rewrite. The gate that still bites migration is the
+                # `ir_cand is None` case above — a rewrite that broke
+                # compilation is refused. An equivalence-preserving formatter
+                # (token_preserving=True) never reaches here and still refuses.
+                return GateResult(
+                    True,
+                    "migration rewrite (IR intentionally changed: legacy `$` "
+                    "string → template)",
+                )
             return GateResult(
                 False,
                 "IR comparison",

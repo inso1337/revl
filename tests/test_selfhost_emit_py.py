@@ -166,7 +166,7 @@ def test_selfhosted_emitter_is_byte_identical(emitted, reference, rel):
     for every interchange-IR document in the covered subset."""
     ir = compile_files([str(CORPUS_DIR / rel)])
     want = reference.emit(ir)
-    got = emitted["emit_src"](ir)
+    got = emitted["emit_py_src"](ir)
     assert got == want, (
         f"self-hosted emitter diverged from the reference on {rel}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---"
@@ -177,7 +177,7 @@ def test_selfhosted_emitter_output_is_executable_python(emitted, reference):
     """A byte-identical output is trivially valid, but pin it: the emitted
     module for a corpus program compiles and its functions run."""
     ir = compile_files([str(CORPUS_DIR / "arith.rvl")])
-    src = emitted["emit_src"](ir)
+    src = emitted["emit_py_src"](ir)
     ns: dict = {}
     exec(compile(src, "arith_emitted.py", "exec"), ns)
     assert ns["i64ops"](3, 4) == 3 + 4 - 3 * 4
@@ -191,7 +191,7 @@ def test_selfhosted_emitter_lowers_components_and_services(emitted):
     slice-2 path — the emitted module populates SERVICES and COMPONENTS and its
     plugin dict / apply closure exec cleanly (with the runtime stubbed)."""
     ir = compile_files([str(CORPUS_DIR / "services_basic.rvl")])
-    src = emitted["emit_src"](ir)
+    src = emitted["emit_py_src"](ir)
     assert "def _backing_apply(_revl_ctx, _revl_config):" in src
     assert "yield _revl_ctx.provide('health')" in src
     stub = types.ModuleType("runtime")

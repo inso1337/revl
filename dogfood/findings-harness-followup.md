@@ -85,5 +85,5 @@ a design problem. The harness repo is `~/Projects/revl-harness`
 
 **Single change that would cut the most cost next:**
 (i) — bind arrow params in the ts emitter's component scope, mirroring
-FR-1's lower.py change. Then the loop-shaped harness (the product shape)
+FR-1's lower.py change. Then the loop-shaped harness (the lighthouse shape)
 runs on ts, the DSH target tier, and the roadmap's lighthouse claim closes.

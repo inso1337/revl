@@ -4,6 +4,15 @@ This is deliberately a small mechanical scanner, not a parser.  It rewrites
 1.x ``"$name"`` interpolation and ``"$$"`` literal-dollar escapes inside
 double-quoted strings, and leaves everything else — including already
 migrated backtick templates — untouched.
+
+Because it only ever rewrites ``$``-bearing strings and copies every other
+byte through verbatim, an IR delta between the original and the migrated
+source is, by construction, exactly that intended rewrite. Since item 203
+made a bare ``$`` a literal, a legacy ``"$name"`` now *compiles* (as a literal
+string), so the ``--migrate`` gate can no longer lean on the lexer rejecting
+it. Instead ``formatter.ir_equivalent`` is called with ``token_preserving=
+False`` for migration: it admits the deliberate literal→template meaning
+change and refuses only a rewrite that no longer compiles (a corrupted pass).
 """
 
 from __future__ import annotations
