@@ -52,6 +52,20 @@ tested pin), and `cordis.hmr`'s watchdog import gets an inert browser shim.
 Components whose `config` fields have no default are booted with typed
 placeholders, each one reported in the trace.
 
+### Meta mode — the playground's pane is a revl composition
+
+`site/playground_shell.rvl` (the ◐ example) is the result pane itself: each
+tab is owned by a *View component whose `effect ui_mount(…) undo ui_unmount(…)`
+pair mounts it, and tab clicks route through the composition's `tabs` service
+— the DOM changes only when the `ui_select` emission crosses the boundary, so
+every click lands in the trace and the G8 audit enumerates the UI's own host
+surface. Booting a source that imports `playground_host` puts the pane under
+revl ownership (the JS chrome strips its tabs first and takes them back after
+unload); swap an edited shell to change the UI in place, unload it to watch
+the pane unbuild itself backwards, residue-free. `playground_host` is the one
+bridge module the shell's externs may import — three DOM operations, forwarded
+to `window.__metaHost`.
+
 ## Regenerating the bundled assets
 
 ```
