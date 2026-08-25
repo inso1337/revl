@@ -106,14 +106,20 @@ const baseline = snapshotRuntime(ctx)
 
 const fibers: Array<[string, any]> = []
 
-// 1. proxies for keys provided by other processes
+// 1. proxies for keys provided by other processes. A seam is local (a UDS
+//    `socket`) or a network TCP+mTLS `endpoint` (item 56/149): the node client
+//    dials both. `deadline` (seconds; src/revl/placement.py) bounds each call —
+//    a wedged provider breaches a SeamDeadline rather than blocking the consumer.
 for (const [key, info] of Object.entries<any>(spec.proxies || {})) {
-  const { component, onPeerLost } = makeProxy(key, info.methods, info.socket)
+  const target = info.endpoint ?? info.socket
+  const deadlineMs = info.deadline != null ? info.deadline * 1000 : null
+  const { component, onPeerLost } = makeProxy(key, info.methods, target, deadlineMs)
   const fiber = ctx.plugin(component)
   await fiber
   fibers.push([`${key}-proxy`, fiber])
   onPeerLost(() => void fiber.dispose())
-  log('proxy', key, `-> ${info.socket}`)
+  const where = info.endpoint ? `tcp://${info.endpoint.host}:${info.endpoint.port}` : info.socket
+  log('proxy', key, `-> ${where}`)
 }
 
 // 2. this process's own components, in IR load order

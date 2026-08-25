@@ -529,6 +529,82 @@ def test_network_seam_on_a_nonpy_backend_is_refused(tmp_path, monkeypatch, capsy
     assert "py-only" in err and "rust" in err
 
 
+# --------------------------------------------------------------------------
+# 5. a ts consumer over the network path (roadmap item 149). The TCP+mTLS
+#    *listener* is still py-only (the provider must be py), but the *client*
+#    now ships on the node/ts runner too, so a node consumer of a py network
+#    provider is allowed — and gets a network `endpoint`, not a local `socket`.
+# --------------------------------------------------------------------------
+
+_NET_TS_CONSUMER = """
+generate_test_certs = true
+[processes.provider]
+components = ["MemCache"]
+[processes.provider.address]
+host = "127.0.0.1"
+port = 39560
+rtt_ms = 0.3
+[processes.provider.tls]
+identity = "provider"
+[processes.consumer]
+backend = "node"
+components = ["Consumer"]
+[processes.consumer.tls]
+identity = "consumer"
+"""
+
+
+def test_ts_consumer_of_a_py_network_provider_is_allowed(tmp_path, monkeypatch):
+    """Item 149: a node/ts consumer may cross onto a py provider's TCP+mTLS
+    seam. The conductor hands the node consumer a network `endpoint` (its own
+    mTLS identity, the provider's host/port, a deadline), exactly as it does a
+    py consumer — the node client dials it (backends/typescript/bridge.ts)."""
+    # bypass the node runtime preflight (cordis-ts need not be installed to
+    # generate + assert the spec); the ts emit itself still runs for real.
+    monkeypatch.setattr(_placement, "_preflight", lambda *a, **k: None)
+    rc, procs = _run_conductor_once(tmp_path, monkeypatch, _NET_TS_CONSUMER)
+    assert rc == 0, rc
+    assert procs["consumer"].spec["backend"] == "node"
+    proxy = procs["consumer"].spec["proxies"]["cache"]
+    assert "socket" not in proxy                     # a network seam, not a UDS
+    ep = proxy["endpoint"]
+    assert ep["host"] == "127.0.0.1" and ep["port"] == 39560
+    assert ep["tls"]["identity"] == "consumer"       # the node client's own cert
+    assert proxy["deadline"] == _placement.DEFAULT_SEAM_DEADLINE
+    # the py provider still serves the seam with its own identity over the network
+    serve = procs["provider"].spec["serve"]
+    assert serve["endpoint"]["port"] == 39560
+    assert serve["endpoint"]["tls"]["identity"] == "provider"
+
+
+_NET_RUST_CONSUMER = """
+generate_test_certs = true
+[processes.provider]
+components = ["MemCache"]
+[processes.provider.address]
+host = "127.0.0.1"
+port = 39561
+[processes.provider.tls]
+identity = "provider"
+[processes.consumer]
+backend = "rust"
+components = ["Consumer"]
+[processes.consumer.tls]
+identity = "consumer"
+"""
+
+
+def test_network_consumer_on_rust_is_still_refused(tmp_path, monkeypatch, capsys):
+    """The TCP+mTLS *client* ships only on the py and node/ts runners (item
+    149); a rust/go/java consumer of a network provider is still refused — those
+    runners read only the local `socket` form."""
+    monkeypatch.setattr(_placement, "_preflight", lambda *a, **k: None)
+    rc, _ = _run_conductor_once(tmp_path, monkeypatch, _NET_RUST_CONSUMER)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "item 149" in err and "rust" in err and "consumes a network seam" in err
+
+
 def test_network_identity_must_be_a_declared_operator(tmp_path, monkeypatch, capsys):
     """Identity per process is issued by the operator model (item 55): when a
     placement names an operator_profile, a network process whose identity is not

@@ -14,29 +14,114 @@
 
 import type { Context } from 'cordis'
 import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
 import net from 'node:net'
+import tls from 'node:tls'
 
-// One-shot client: connect, send one request line, print the reply line, exit.
-// Run as `node -e`, fed the socket path and request via the environment.
+// --- seam endpoints: a local UDS (default) or a network TCP + mTLS seam -------
+//
+// The node client mirrors backends/python/bridge.py's `Endpoint`/`TlsConfig`
+// (docs/network-placement.md): a bare socket-path string is a local UDS (full
+// back-compat), and a `{ host, port, tls }` object is a network seam reached
+// over TCP wrapped in mutual TLS. The provider (py, item 56) demands the
+// consumer's certificate (`CERT_REQUIRED`) and the consumer verifies the
+// provider's against the same CA — a network seam is "the two processes holding
+// CA-signed certs", not "whoever can reach the port". The canonical value
+// codec, the seam deadline (item 54) and reactive withdrawal on peer death all
+// apply unchanged over TCP; only the address family and the TLS wrap differ.
+
+export interface TlsPaths {
+  cert: string
+  key: string
+  ca: string
+  identity: string
+  server_hostname?: string
+}
+
+export interface NetworkEndpoint {
+  host: string
+  port: number
+  tls: TlsPaths
+}
+
+/** A seam target: a UDS path (legacy/local) or a network TCP+mTLS endpoint. */
+export type SeamTarget = string | NetworkEndpoint
+
+function isNetwork(target: SeamTarget): target is NetworkEndpoint {
+  return typeof target !== 'string' && target != null && typeof target.host === 'string'
+}
+
+/** A seam call that outlived its deadline: the provider is neither answering nor
+ *  gone — it hung. The node mirror of backends/python/bridge.py's `SeamDeadline`
+ *  (a distinguishable fault, disjoint from a peer death and from a remote
+ *  error), so a caller — or a test — can tell a hang apart by kind. */
+export class SeamDeadlineError extends Error {
+  readonly key: string
+  readonly method: string
+  readonly deadlineMs: number
+  constructor(key: string, method: string, deadlineMs: number) {
+    super(`revl: seam call ${key}.${method} exceeded its ${deadlineMs}ms deadline`)
+    this.name = 'SeamDeadlineError'
+    this.key = key
+    this.method = method
+    this.deadlineMs = deadlineMs
+  }
+}
+
+// One-shot client: connect (UDS or TCP+mTLS), send one request line, print the
+// reply line, exit. Run as `node -e`, fed the target/request/deadline via the
+// environment. A wedged provider trips the in-child deadline timer and the child
+// prints a `{ seamDeadline: true }` reply rather than hanging; a TCP refusal
+// (provider still coming up) is retried, so start order stays irrelevant.
 const CLIENT_SRC = `
 const net = require('node:net')
+const tls = require('node:tls')
+const fs = require('node:fs')
+const mode = process.env.BRIDGE_MODE
+const deadlineMs = process.env.BRIDGE_DEADLINE_MS ? Number(process.env.BRIDGE_DEADLINE_MS) : 0
 let attempts = 0
-function attempt() {
-  const s = net.connect(process.env.BRIDGE_SOCK)
+let timer = null
+let secured = false
+function done(obj) {
+  if (timer) clearTimeout(timer)
+  process.stdout.write(JSON.stringify(obj))
+  process.exit(0)
+}
+if (deadlineMs > 0) {
+  timer = setTimeout(() => done({ ok: false, seamDeadline: true, error: 'seam call exceeded ' + deadlineMs + 'ms deadline' }), deadlineMs)
+}
+function dial() {
+  let s
+  if (mode === 'tcp') {
+    s = tls.connect({
+      host: process.env.BRIDGE_HOST,
+      port: Number(process.env.BRIDGE_PORT),
+      ca: fs.readFileSync(process.env.BRIDGE_CA),
+      cert: fs.readFileSync(process.env.BRIDGE_CERT),
+      key: fs.readFileSync(process.env.BRIDGE_KEY),
+      servername: process.env.BRIDGE_SERVERNAME || process.env.BRIDGE_HOST,
+    })
+    s.on('secureConnect', () => { secured = true; s.write(process.env.BRIDGE_REQ + '\\n') })
+  } else {
+    s = net.connect(process.env.BRIDGE_SOCK)
+    s.on('connect', () => s.write(process.env.BRIDGE_REQ + '\\n'))
+  }
   let buf = ''
-  s.on('connect', () => s.write(process.env.BRIDGE_REQ + '\\n'))
   s.on('data', (d) => {
     buf += d
     const i = buf.indexOf('\\n')
-    if (i >= 0) { process.stdout.write(buf.slice(0, i)); s.end(); process.exit(0) }
+    if (i >= 0) { s.destroy(); done(JSON.parse(buf.slice(0, i))) }
   })
   s.on('error', () => {
     s.destroy()
-    if (++attempts > 100) { process.stdout.write(JSON.stringify({ ok: false, error: 'bridge connect failed' })); process.exit(0) }
-    setTimeout(attempt, 50)  // provider may still be coming up
+    // A TLS handshake failure (bad cert / wrong CA) is terminal — never retry it
+    // away as if the provider were merely still coming up.
+    if (mode === 'tcp' && secured) { done({ ok: false, error: 'bridge tls stream error' }) }
+    if (++attempts > 100) { done({ ok: false, error: 'bridge connect failed' }) }
+    else setTimeout(dial, 50) // provider may still be coming up
   })
 }
-attempt()
+dial()
 `
 
 // Canonical ADT/Result wire codec (docs/interop-bridge.md "Canonical value
@@ -115,43 +200,155 @@ export function decodeValue(v: unknown): unknown {
   return v
 }
 
-function syncCall(socketPath: string, key: string, method: string, args: unknown[]): unknown {
+/** Environment for the one-shot client, per seam target (UDS or TCP+mTLS). */
+function clientEnv(target: SeamTarget, request: string, deadlineMs: number | null): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = { ...process.env, BRIDGE_REQ: request }
+  if (deadlineMs != null) base.BRIDGE_DEADLINE_MS = String(Math.max(1, Math.round(deadlineMs)))
+  if (isNetwork(target)) {
+    return {
+      ...base,
+      BRIDGE_MODE: 'tcp',
+      BRIDGE_HOST: target.host,
+      BRIDGE_PORT: String(target.port),
+      BRIDGE_CERT: target.tls.cert,
+      BRIDGE_KEY: target.tls.key,
+      BRIDGE_CA: target.tls.ca,
+      BRIDGE_SERVERNAME: target.tls.server_hostname ?? target.host,
+    }
+  }
+  return { ...base, BRIDGE_MODE: 'uds', BRIDGE_SOCK: target }
+}
+
+/** One blocking seam round-trip to `target`. `deadlineMs` bounds the reply: a
+ *  wedged provider surfaces as a `SeamDeadlineError` (a hang), a dropped
+ *  connection as a plain `Error` (a death), a provider-side failure as the
+ *  marshalled error — the same three disjoint fault kinds as the py client. */
+function seamCall(
+  target: SeamTarget,
+  key: string,
+  method: string,
+  args: unknown[],
+  deadlineMs: number | null,
+): unknown {
   const request = JSON.stringify({ key, method, args: args.map(encodeBigInts) })
-  const out = execFileSync(process.execPath, ['-e', CLIENT_SRC], {
-    env: { ...process.env, BRIDGE_SOCK: socketPath, BRIDGE_REQ: request },
-    encoding: 'utf8',
-  })
+  let out: string
+  try {
+    out = execFileSync(process.execPath, ['-e', CLIENT_SRC], {
+      env: clientEnv(target, request, deadlineMs),
+      encoding: 'utf8',
+      // Backstop the in-child deadline timer: if the child itself wedges, kill
+      // it a little past the seam deadline and treat that as the same breach.
+      timeout: deadlineMs != null ? Math.round(deadlineMs) + 5000 : undefined,
+      maxBuffer: 64 * 1024 * 1024,
+    })
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ETIMEDOUT') {
+      throw new SeamDeadlineError(key, method, deadlineMs ?? 0)
+    }
+    throw error
+  }
   const reply = JSON.parse(out)
+  if (reply.seamDeadline) throw new SeamDeadlineError(key, method, deadlineMs ?? 0)
   if (!reply.ok) throw new Error(reply.error)
   return decodeValue(reply.value)
 }
 
-/** A cordis component that provides `key` via a proxy forwarding to `socketPath`,
- *  plus `onPeerLost` to observe the provider's death (monitor connection EOF). */
-export function makeProxy(key: string, methods: string[], socketPath: string) {
-  const lostCallbacks: Array<() => void> = []
+/** Watch a provider for death: connect an idle monitor to `target` (UDS or
+ *  TCP+mTLS) and call `onLost` once when the connection drops after having been
+ *  established (peer death — the mTLS monitor EOFs exactly as the UDS one does).
+ *  Returns a handle whose `close()` tears the monitor down without firing. */
+export function watchPeer(
+  target: SeamTarget,
+  onLost: () => void,
+): { close: () => void; ready: Promise<void> } {
   let fired = false
+  let closed = false
   let everConnected = false
-  let monitor: net.Socket
-  const connectMonitor = () => {
-    monitor = net.connect(socketPath)
-    monitor.on('connect', () => { everConnected = true })
+  let monitor: net.Socket | tls.TLSSocket
+  let markReady: () => void
+  const ready = new Promise<void>((resolve) => { markReady = resolve })
+  const established = () => {
+    everConnected = true
+    markReady()
+  }
+  const connect = () => {
+    if (closed) return
+    if (isNetwork(target)) {
+      monitor = tls.connect({
+        host: target.host,
+        port: target.port,
+        ca: fs.readFileSync(target.tls.ca),
+        cert: fs.readFileSync(target.tls.cert),
+        key: fs.readFileSync(target.tls.key),
+        servername: target.tls.server_hostname ?? target.host,
+      })
+      monitor.on('secureConnect', established)
+    } else {
+      monitor = net.connect(target)
+      monitor.on('connect', established)
+    }
     monitor.on('error', () => {}) // a 'close' event always follows
     monitor.on('close', () => {
+      if (closed) return
       if (!everConnected) {
-        setTimeout(connectMonitor, 50) // provider not up yet; keep trying
+        setTimeout(connect, 50) // provider not up yet; keep trying
         return
       }
       if (fired) return
       fired = true
-      for (const cb of lostCallbacks) cb()
+      onLost()
     })
   }
-  connectMonitor()
+  connect()
+  return {
+    ready,
+    close() {
+      closed = true
+      try {
+        monitor?.destroy()
+      } catch {
+        /* best-effort */
+      }
+    },
+  }
+}
+
+/** A cordis component that provides `key` via a proxy forwarding to `target`
+ *  (a UDS path, or a `{ host, port, tls }` network TCP+mTLS endpoint), plus
+ *  `onPeerLost` to observe the provider's death. `deadlineMs` bounds each seam
+ *  call; on a **network** seam a breached deadline is treated as a lost peer and
+ *  triggers reactive withdrawal (a wedged remote provider is, to a consumer,
+ *  indistinguishable from a dead one — the seam is unusable either way), while a
+ *  local UDS seam keeps the death-only withdrawal it always had. */
+export function makeProxy(
+  key: string,
+  methods: string[],
+  target: SeamTarget,
+  deadlineMs: number | null = null,
+) {
+  const lostCallbacks: Array<() => void> = []
+  let fired = false
+  const fireLost = () => {
+    if (fired) return
+    fired = true
+    for (const cb of lostCallbacks) cb()
+  }
+  const network = isNetwork(target)
+  const monitor = watchPeer(target, fireLost)
 
   const proxy: Record<string, (...args: unknown[]) => unknown> = {}
   for (const method of methods) {
-    proxy[method] = (...args: unknown[]) => syncCall(socketPath, key, method, args)
+    proxy[method] = (...args: unknown[]) => {
+      try {
+        return seamCall(target, key, method, args, deadlineMs)
+      } catch (error) {
+        // A network seam that breaches its deadline withdraws: the remote
+        // provider is unreachable-in-time, so the consumer stops depending on
+        // it rather than re-attempting against a wedged machine.
+        if (network && error instanceof SeamDeadlineError) fireLost()
+        throw error
+      }
+    }
   }
 
   const component = {
@@ -160,13 +357,19 @@ export function makeProxy(key: string, methods: string[], socketPath: string) {
     provide: [key],
     apply(ctx: Context) {
       ctx.effect(function* () {
-        yield () => monitor.destroy()
+        yield () => monitor.close()
         yield (ctx as any).provide(key, proxy)
       }, `${key}-proxy/body`)
     },
   }
 
-  return { component, onPeerLost: (cb: () => void) => lostCallbacks.push(cb) }
+  return {
+    component,
+    proxy,
+    onPeerLost: (cb: () => void) => lostCallbacks.push(cb),
+    monitorReady: monitor.ready,
+    close: () => monitor.close(),
+  }
 }
 
 /** Normalize `serve`'s exports to key -> allowed method names.

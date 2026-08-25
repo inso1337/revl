@@ -1,0 +1,33 @@
+# The revl gate/compiler as a cross-tier bridge service over the NETWORK path
+# (roadmap item 149, "fuller Path A"). Same shape as gate_pyts.toml, but the
+# seam crosses item 56's TCP + mutual-TLS transport instead of a local Unix
+# socket: the py `GateProvider` declares an `address` and serves its keys over
+# an mTLS listener, and the node/ts `GateUser` reaches it as a network proxy
+# (backends/typescript/bridge.ts::makeProxy dials TCP+mTLS — item 149).
+#
+# `generate_test_certs = true` mints throwaway loopback certs (one CA, a leaf
+# per identity) via openssl — a test/dogfood convenience, never real keys. For a
+# real deployment, drop it and give each [tls] explicit cert/key/ca paths
+# (docs/network-placement.md).
+#
+# The verdict crosses back over the wire exactly as over the UDS: `collide` is
+# refused by G2 (its why-trace rides in the verdict), `clean` is admitted — now
+# proving the guarantees survive a real TCP+mTLS round trip, not just a socket.
+
+generate_test_certs = true
+
+[processes.gate]
+components = ["GateProvider"]          # py tier — the @py extern calls compile_files
+[processes.gate.address]
+host = "127.0.0.1"
+port = 39470
+rtt_ms = 0.3
+[processes.gate.tls]
+identity = "gate"
+
+[processes.user]
+backend = "node"                       # ts tier — dials the gate over TCP+mTLS
+components = ["GateUser"]
+probe = ["gate.admit_case('collide')", "gate.admit_case('clean')"]
+[processes.user.tls]
+identity = "user"
