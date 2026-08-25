@@ -1124,3 +1124,48 @@ exercise otherwise. The port mirrors it verbatim (raw seed + raw var-callee
 compare; the `fn`-kind await path is deferred with the component dialect), so the
 differential oracle stays the arbiter rather than "fixing" a divergence the
 reference does not have.
+
+## `selfhost/emit_java.rvl` — slice 4: realm placements (isolate/intercept) (item 235)
+
+Extended the modern-component path to the `isolate`/`intercept` REALM-placement
+corner, byte-exact against `backends/java/emit.py`. Two new corpus fixtures
+(`comp_realm_isolate.rvl`, `comp_realm_intercept.rvl`) cross-check identical to the
+reference; all 15 prior corpus fixtures + the scaffold + in-file-test assertions
+stay green (17 java tests total, full `pytest tests/` = 3534 passed, 259 skipped).
+
+### Scope: the placement, not the async/host-Map that shares the deferral bucket
+The slice-3 comment lumped "isolate/intercept realms, async/await/spawn, host-Map"
+into one `slice 4+` deferral. They are NOT one unit: the realm PLACEMENT is a
+pure apply()-header addition (`ctx = ctx.isolate(<Svc>.class, "..")` before the
+effect scope; `ctx.intercept(ServiceKey.of(<Svc>.class), <meta>)`), independent of
+the body/method shapes. Splitting it out kept this a small byte-exact slice —
+async (AsyncPlugin / CordisException import widening) and the host `HashMap<String,V>`
+`_map_value_expr_type` surface are reported STILL deferred (slice 5+).
+
+### State-threading (item 195): zero new threading — realms are apply-local
+The realm lines read `comp`'s `isolate`/`intercept` maps and emit into the
+apply() `out` list with no new accumulator: no counter, no rename map, no Ctx
+field. Service resolution (`env.provides.get(key) or env.reqs[key]` for isolate,
+`env.reqs[key]` for intercept) is a two-line `isolate_service` helper over the
+already-bound `provs_m`/`reqs_m`. This is the cleanest modern-path extension so
+far — unlike the effectful-body slice (225), nothing threads through the
+provider-class loop. The gate change was two lines: drop the isolate/intercept
+early-`false` in `modern_supported`, add the isolate/intercept `needs_modern`
+trigger in `needs_modern_subset` (mirroring the reference `_component_needs_modern`
+returning True on either).
+
+### Ergonomics (item 189): `_metadata_lit` ported with no new kit
+`metadata_lit` (the `intercept ... with <meta>` object literal) is a direct
+`value_kind` dispatch reusing the in-file `json_dumps` (str + map keys), `num_str`
+(int/float), `value_list`/`value_keys`/`value_field` — plus the nested
+`java.util.List.of(..)`/`java.util.Map.of(..)` backtick joins. The one subtlety
+that "just worked": `value_kind` (stdlib/value.rvl) checks `bool` BEFORE `int`,
+exactly as the reference's `isinstance(value, bool)`-before-`int` order, so a
+`true`/`false` metadatum renders `true`/`false` and never `1L`/`0L`. No falsy-gate
+hazard — `map_nonempty`/`value_is_null` (already in-file) covered the absent-map
+case that the reference spells `component.get("isolate") or {}`.
+
+### NEW finding: none
+No emitter/kit/stdlib defect surfaced. The realm surface fell out of the existing
+value-model + host-format kit with only additive helpers; the differential oracle
+stayed the arbiter throughout.
