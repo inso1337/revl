@@ -1040,3 +1040,87 @@ ctors, `_config_default_lit`/`_zero_java_value`), and the `apply` effect-scope /
 (`demo/components/user_cache.rvl`) routes to the loud
 `<<DEFER-component-nonsimple:UserCache>>` marker instead of mis-emitting — the
 `_emit_host_stubs` `HashMap<String,V>` per-site inference stays slice 4+.
+
+---
+
+## emit_ts.rvl slice 5 (item 226) — the MODULE-FN async path
+
+Landed byte-identical to `backends/typescript/emit.py`: async externs
+(`export async function …: Promise<T>` carrying the verbatim, dedented `@ts`
+body) via a new `emit_externs`; phase-2 async-colored module `fn`s (same
+signature form, body rendered `in_async`); a `var`-callee `call` naming an async
+callable (`async_names` — async externs + colored fns) or an async-value
+parameter (`async_locals`, the item-92 `(…) -> Async[T]` slot) awaited; the async
+`match` shape (Opt IIFE + tagged switch, arm-arrows and inner calls awaited); and
+the async ARROW (`async (…) => …`). Cross-checked over five new fixtures
+(`async_module_{extern,local,match,switch,arrow}.rvl`), each `emit_src(ir) ==
+emit(ir)` to the last byte; the 18 slice-1..4 fixtures stay green (23 total).
+DEFERRED (byte-safe, reported): the COMPONENT-dialect async call surface — an
+async callable reached through the `fn` expr kind or from an async PROVIDE method
+(`provide_impl`/`method_body` thread `async_names` EMPTY; no covered component
+body names one, so byte-exact, but a follow-on slice must thread the doc set to
+make the component tail faithful to the reference's provide-method awaiting);
+variant type declarations (so async `match` is exercised over Opt/built-in
+`Result` only); `timer`, spawn/instances, realms, the v1/v2 dispatch, canonical.
+
+### NEW DEFECT (in the slice's own file): v3 `ts_type` mis-slices a SPACED fn-type return (MEDIUM, fixed)
+Symptom: the async-value-local param `step: (Str) -> Async[Str]` rendered
+`((a0: string) => > Async<unknown>)` instead of `((a0: string) => Promise<string>)`
+— and, downstream, the call `step(x)` was NOT awaited (its `async_locals`
+membership silently missed). Root cause: `ts_type` (the v3 renderer) extracted a
+function type's RETURN slot as `py_strip(name.slice(arrow + 3, n))`, a fixed `+3`
+that assumes the compact `)->T` spelling. The IR's surface form carries spaces
+(`) -> Async[Str]`), so `arrow + 3` lands mid-token and yields `> Async[Str]`;
+`ts_type("> Async[Str]")` then falls through to the `unknown`-args generic branch.
+The v1 twin `ts_type_v1` and the reference `_split_fn_type` BOTH strip the arrow
+correctly (`rest = s[i+1:].lstrip(); returns = rest[2:].strip()`) — only the v3
+`ts_type` carried the naive offset. Latent since slice 3 (composite sigs): no
+prior fixture rendered a v3 fn-type param whose surface form had spaces, so it
+never fired; slice 5's async-local is the first. Repro: `fn f(g: (Str) -> Str)`
+through `ts_type` → `((a0: string) => > Str)`. Fix (in-file, mine): replace the
+`+3` with the same strip-`->`-strip the v1 path uses; `is_async_fn_type` reuses
+that corrected extraction so the await-gate and the type render agree. Both the
+type and the await are now byte-exact. Worth a REGRESSION fixture in the
+non-async composite corpus too (a plain `(Str) -> Str` param) — the bug is
+independent of async.
+
+### Finding: the item-195 threading tax is now CHEAP to extend — but the record has no partial-update (MEDIUM, corroborates 219 + Go slice-2)
+Item 219 paid the headline tax standing up `ACx` across ~20 fns/~55 call sites.
+Slice 5's async-state addition (`async_names` + `async_locals`) rode that existing
+plumbing for FREE through the whole expr tree — the marginal cost of a 2nd/3rd bit
+of downward state, once the `ACx` seam exists, is near zero at the recursion
+sites. The residual friction is elsewhere: `ACx` is a STRUCTURAL record, and revl
+has no field-default nor a spread/`with` for a FRESH literal, so widening the type
+from 3 fields to 5 forced editing EVERY construction site by hand — `sync_acx()`,
+`render_arrow`'s `body_acx`, `provide_impl`'s async `body_acx`, and three in-file
+`test` literals — each re-typing `async_names: [], async_locals: []` even where
+they are inert. Same class as the Go slice-2 "8-field Ctx, no record-update to
+spread it" note. A record-update literal (`{ acx | in_async: true }`) or field
+defaults would have made this a one-line type edit. One genuinely new thread was
+needed: `v3_stmt` (fn-body STATEMENTS) had hard-coded `let a = sync_acx()`, so an
+async fn's `return`/`let`/branch would not await — it now takes `acx` and forwards
+it through the if/while/for recursion. That is the only expr-vs-stmt seam the
+prior slices had not already threaded.
+
+### Ergonomics (item 189): async gating stayed guard-free; extern verbatim body needed 3 host-format `@py` helpers
+`value_bool(value_field(fnode, "async"))` (falsy-on-absent) gated async fn/extern
+emission and the doc-level `async_names` build with no presence checks, matching
+the reference's `if fn.get("async")` exactly; `list_contains` (already in-file)
+covered both `async_names` and `async_locals` membership with no new kit. The one
+addition was on the HOST-FORMAT side (item-180 "NOT obsoleted"): an extern's
+verbatim `@ts` body is rendered `textwrap.dedent(body.strip("\n"))` then
+line-split, so three thin `@py` externs joined the existing `json_dumps`/
+`template_text`/`py_rstrip` set — `py_dedent`, `py_strip_nl` (`.strip("\n")`), and
+`py_splitlines`. These are pure host string-formatting (no emitter LOGIC), so they
+sit squarely in the kept-`@py` category; still, a stdlib `str`-level
+`dedent`/`splitlines` would let the emitter stay entirely off `@py` for this.
+
+### Reference-faithful quirk replicated, NOT corrected (LOW)
+The reference seeds `async_names` with RAW names (`fn.get("name")`) but `_fn_call`
+compares the `_ident`-MANGLED name against it, while the `var`-callee `_expr`
+branch compares the RAW callee name — an inconsistency that is invisible for any
+non-JS-reserved name (`_ident` is the identity there) and that no fixture can
+exercise otherwise. The port mirrors it verbatim (raw seed + raw var-callee
+compare; the `fn`-kind await path is deferred with the component dialect), so the
+differential oracle stays the arbiter rather than "fixing" a divergence the
+reference does not have.

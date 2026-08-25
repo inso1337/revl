@@ -47,14 +47,24 @@ the item-141 await-seed on a req-keyed async-op call (direct + nested-in-ternary
 and the async-generator activation body (``ctx.effect(async function* …)``) with
 the ``await`` step's iteration boundary.
 
-Deliberately OUT (deferred to a follow-on slice): the MODULE-FN async path (async
-fns / async externs and their ``async_names``/``async_locals`` await, async
-arrows, async match — the component-tail async surface IS in as of slice 4), the
-component-body ``timer`` step, the component-dialect expr kinds
-``spawn``/``instance-get``, VARIANT type declarations, externs, in-file
-``test``/``fault_test``/``lifecycle test`` emission, spawn/instances, realm
-placements (isolate/intercept/routes), the canonical ABI, and
-``assert``/``let_pattern`` statements — all kept out so the slice stays
+Slice 5 (item 226) adds the MODULE-FN async path, byte-identical: async externs
+(``export async function …: Promise<T>`` carrying the verbatim ``@ts`` body) and
+phase-2 async-colored module ``fn``s (same signature form), with a ``var``-callee
+call naming an async callable (``async_names``) or an async-value parameter
+(``async_locals``, the item-92 ``(…) -> Async[T]`` slot) awaited; the async
+``match`` shape (both the Opt IIFE and the tagged switch, arm-arrows and inner
+calls awaited); and the async ARROW (``async (…) => …``). The ``ACx`` async-state
+of slice 4 now threads to the module-fn level (and through ``v3_stmt``).
+
+Deliberately OUT (deferred to a follow-on slice): the component-dialect async
+call surface — an async callable reached through the ``fn`` expr kind or from an
+async PROVIDE method (its ``async_names`` are threaded empty, byte-safe because no
+covered component body names one); the component-body ``timer`` step, the
+component-dialect expr kinds ``spawn``/``instance-get``, VARIANT type declarations
+(so an async ``match`` is exercised over Opt/built-in ``Result`` only, never a
+declared variant), in-file ``test``/``fault_test``/``lifecycle test`` emission,
+spawn/instances, realm placements (isolate/intercept/routes), the canonical ABI,
+and ``assert``/``let_pattern`` statements — all kept out so the slice stays
 byte-VERIFIED rather than byte-guessed.
 """
 
@@ -92,6 +102,13 @@ CORPUS = [
     "services_async.rvl",       # async op `Promise<T>` sigs, `async` methods, the item-141
                                 # await-seed (direct `fetch` + nested ternary arm `pick`)
     "components_await.rvl",     # activation-body `await` -> `async function*` + iteration boundary
+    # slice 5 (item 226) — the MODULE-FN async path, byte-exact:
+    "async_module_extern.rvl",  # async extern (`export async function …: Promise<T>` + verbatim
+                                # @ts body) + a colored fn awaiting it (`var`-callee, let + return)
+    "async_module_local.rvl",   # item-92 async-value local: a `(Str) -> Async[Str]` param, awaited
+    "async_module_match.rvl",   # async `match` (Opt form): async IIFE + awaited binding arm-arrow
+    "async_module_switch.rvl",  # async `match` (tagged switch over built-in `Result`): case-bind await
+    "async_module_arrow.rvl",   # async ARROW (`async (y) => …`) + awaited call to a colored fn
 ]
 
 

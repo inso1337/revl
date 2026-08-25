@@ -84,11 +84,25 @@
 //   * the VARIANT half of `_emit_ts_types` (the `export type … =` union + its
 //     constructor functions) — only records are emitted; a variant type would
 //     emit a marker and diverge, so no fixture declares one;
-//   * externs (`_emit_ts_externs`), in-file `test`/`fault_test`/`lifecycle test`
-//     emission, the MODULE-FN async path (async fns / async externs and their
-//     `async_names`/`async_locals` await, async arrows, async match — the
-//     component-tail async surface above IS covered), spawn/instances, realm
-//     placements (isolate/intercept/routes + the router), and the canonical ABI;
+//   * in-file `test`/`fault_test`/`lifecycle test` emission, spawn/instances,
+//     realm placements (isolate/intercept/routes + the router), the canonical ABI;
+//   * the COMPONENT-dialect async call surface: an async callable reached through
+//     the `fn` expr kind, or from an async PROVIDE method (its `async_names` are
+//     threaded EMPTY — byte-safe, since no covered component body names an async
+//     callable, but a follow-on slice must thread the doc set through to make the
+//     component tail faithful to the reference's provide-method awaiting);
+//
+// ============================================================ SLICE 5 (item 226)
+// The MODULE-FN async path, byte-exact:
+//   * async externs -> `_emit_ts_externs` (`export async function …: Promise<T>`
+//     carrying the verbatim, dedented `@ts` body); sync externs too;
+//   * phase-2 async-colored module `fn`s -> `export async function …: Promise<T>`,
+//     the body rendered `in_async` (the `ACx` now threads through `v3_stmt`);
+//   * a `var`-callee `call` naming an async callable (`async_names` — async
+//     externs + colored fns) or an async-value parameter (`async_locals`, the
+//     item-92 `(…) -> Async[T]` slot) is awaited (`(await …)`);
+//   * the async `match` shape (Opt IIFE + tagged switch, arm-arrows + inner calls
+//     awaited) and the async ARROW (`async (…) => …`).
 //   * `assert` statements and `let_pattern` (destructuring): the reference names
 //     an assert temp `$revl_l`/`$revl_r` and renders via `revlShow` — implementable
 //     but not exercised by the function corpus, so deferred to keep the slice
@@ -133,6 +147,15 @@ extern pure fn newline() -> Str = @py { return chr(10) }
 // `"\n".join(out).rstrip()` — strip trailing whitespace/newlines before the
 // single final newline the reference appends.
 extern pure fn py_rstrip(s: Str) -> Str = @py { return s.rstrip() }
+// `_emit_ts_externs` renders a verbatim `@ts` extern body: `textwrap.dedent`
+// after stripping the surrounding blank lines (`.strip("\n")`), then re-indented
+// line-by-line. These three host-string helpers reproduce exactly those calls.
+extern pure fn py_dedent(s: Str) -> Str = @py {
+    import textwrap
+    return textwrap.dedent(s)
+}
+extern pure fn py_strip_nl(s: Str) -> Str = @py { return s.strip(chr(10)) }
+extern pure fn py_splitlines(s: Str) -> List[Str] = @py { return s.splitlines() }
 
 // ---------------------------------------------------------------- small utils
 fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
@@ -164,10 +187,19 @@ type StmtOut = { lines: List[Str], counter: Int }
 //     `async_ops`, pre-resolved through `scope.requires` so `render_call` needs
 //     only a membership test). A method name is a bare identifier, so `#` cannot
 //     collide.
-type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str] }
+//   * `async_names` — the doc-level set of async CALLABLE names: async externs
+//     and phase-2 async-colored module fns (both stamped `"async": true`). A
+//     `var`-callee `call` naming one, in an async body, is awaited (item 80 /
+//     docs/design/async-extern.md §5). Mirrors the reference `_Ctx.async_names`,
+//     which revl cannot hang off a shared context so it rides the ACx instead.
+//   * `async_locals` — the PARAMETERS of the body currently rendered whose
+//     declared type is an async function type `(…) -> Async[T]` (item 92): a
+//     call through one returns a `Promise` and is awaited like a named callable.
+//     Per-body (a local name), so it is re-derived at each module-fn boundary.
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str] }
 
 // The sync, non-component context: the pure fn/test pass and every sync body.
-fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [] } }
+fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [] } }
 
 // The `"<reqKey>#<method>"` await-seed key.
 fn async_op_key(req_key: Str, method: Str) -> Str {
@@ -302,6 +334,19 @@ fn fn_type_arrow_index(name: Str) -> Int {
   return -2
 }
 
+// `_is_async_fn_type`: true for a function type whose declared return is
+// `Async[…]` — the item-92 spelling that colors a first-class callback
+// parameter, making a call through it an awaited async local. Extracts the
+// return slot exactly as `ts_type` does (the same `arrow + 3` offset), so the
+// detection stays in lockstep with the type the parameter renders to.
+fn is_async_fn_type(name: Str) -> Bool {
+  let arrow = fn_type_arrow_index(name)
+  if (arrow < 0) { return false }
+  let rest = py_strip(name.slice(arrow + 1, name.length()))
+  let returns = py_strip(rest.slice(2, rest.length()))
+  return returns.slice(0, 6) == "Async["
+}
+
 fn ts_type(name: Str) -> Str {
   if (name == "") { return "unknown" }
   let mapped = ts_scalar_type(name)
@@ -310,7 +355,13 @@ fn ts_type(name: Str) -> Str {
   if (arrow >= 0) {
     let n = name.length()
     let inner = py_strip(name.slice(1, arrow))
-    let returns = py_strip(name.slice(arrow + 3, n))
+    // The return slot is everything past the `)`, stripped of the `->` and the
+    // whitespace the surface form (`(Str) -> Async[Str]`) carries around it —
+    // the same extraction `ts_type_v1` and the reference `_split_fn_type` do. A
+    // naive fixed `+3` offset assumes `)->` with no space and mis-slices the
+    // spaced form (`> Async[…]`), so it uses the strip-`->`-strip form instead.
+    let rest0 = py_strip(name.slice(arrow + 1, n))
+    let returns = py_strip(rest0.slice(2, rest0.length()))
     var params = []
     if (inner != "") { params = split_type_args(inner) }
     var rendered = []
@@ -525,8 +576,12 @@ fn optcall_result_is_int(method: Str) -> Bool {
 }
 
 // `_v3_match_expr`: the match lowering. Opt (Some/None) discriminates on
-// `undefined`; a tagged ADT switches on `.kind`. `in_async` is false in this
-// slice, so the async wrappers are omitted.
+// `undefined`; a tagged ADT switches on `.kind`. In an async body (item 219's
+// module-fn extension, slice 5) an arm may `await` an async callable, so the
+// IIFE and each binding arm-arrow go `async` and the whole invocation is
+// awaited — `pre`/`a`/`post_tail` mirror the reference's `(await (async (…) =>
+// {…})(<scrut>))` shape. In a sync body they collapse to `""`, leaving the
+// slice-1..4 output byte-identical.
 fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
   let c0 = counter + 1
   let tmp = `$revl_match_${c0}`
@@ -538,9 +593,17 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
     let p = value_str(value_field(arm, "pattern"))
     if (p == "Some" || p == "None") { is_opt = true }
   }
+  var a = ""
+  var pre = "("
+  var post_tail = ""
+  if (acx.in_async) {
+    a = "async "
+    pre = "(await ("
+    post_tail = ")"
+  }
   var lines = []
   if (is_opt) {
-    lines = lines.push(`(($revl_match_${c0}) => {`)
+    lines = lines.push(`${pre}${a}($revl_match_${c0}) => {`)
     var wildcard = ""
     var has_wild = false
     for (arm of arms) {
@@ -558,7 +621,11 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
           let bind = value_str(value_field(arm, "bind"))
           if (bind != "") {
             let b = ident(bind)
-            lines = lines.push(`  if (${tmp} !== undefined) return ((${b}) => (${body}))(${tmp})`)
+            if (acx.in_async) {
+              lines = lines.push(`  if (${tmp} !== undefined) return (await (${a}(${b}) => (${body}))(${tmp}))`)
+            } else {
+              lines = lines.push(`  if (${tmp} !== undefined) return ((${b}) => (${body}))(${tmp})`)
+            }
           } else {
             lines = lines.push(`  if (${tmp} !== undefined) return (${body})`)
           }
@@ -567,10 +634,10 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
     }
     if (has_wild) { lines = lines.push(wildcard) }
     else { lines = lines.push(`  throw new TypeError("non-exhaustive match")`) }
-    lines = lines.push(`})(${sr.text})`)
+    lines = lines.push(`})(${sr.text})${post_tail}`)
     return { text: lines.join(newline()), counter: c }
   }
-  lines = lines.push(`(($revl_match_${c0}) => {`)
+  lines = lines.push(`${pre}${a}($revl_match_${c0}) => {`)
   lines = lines.push(`  switch (${tmp}.kind) {`)
   var wildcard = ""
   var has_wild = false
@@ -588,7 +655,11 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
       let bind = value_str(value_field(arm, "bind"))
       if (bind != "") {
         let b = ident(bind)
-        lines = lines.push(`      return ((${b}) => (${body}))(${tmp}.value)`)
+        if (acx.in_async) {
+          lines = lines.push(`      return (await (${a}(${b}) => (${body}))(${tmp}.value))`)
+        } else {
+          lines = lines.push(`      return ((${b}) => (${body}))(${tmp}.value)`)
+        }
       } else {
         lines = lines.push(`      return (${body})`)
       }
@@ -602,7 +673,7 @@ fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
     lines = lines.push(`      throw new TypeError("non-exhaustive match")`)
   }
   lines = lines.push(`  }`)
-  lines = lines.push(`})(${sr.text})`)
+  lines = lines.push(`})(${sr.text})${post_tail}`)
   return { text: lines.join(newline()), counter: c }
 }
 
@@ -713,9 +784,10 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // An arrow body renders in its OWN async context: `in_async` = the arrow's
   // color (NOT the enclosing body's — inheriting it would let an `await` land in
   // a sync arrow, a tsc error), and `in_arrow` becomes true so the await-seed
-  // stays out of the arrow (its Promise flattens). Async arrows are deferred, so
-  // `is_async` is always false in the covered corpus.
-  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops }
+  // stays out of the arrow (its Promise flattens). `async_names`/`async_locals`
+  // are inherited (the reference's `with_scope` leaves them untouched), so an
+  // async callable invoked inside an async arrow is still awaited.
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals }
   let br = expr(value_field(node, "body"), counter, body_acx)
   let captures = value_list(value_field(node, "captures"))
   if (captures.length() > 0) {
@@ -855,10 +927,21 @@ fn render_call(node: Any, counter: Int, acx: ACx) -> Rendered {
   var callee = cr.text
   if (!is_v3_atomic(callee_node)) { callee = `(${callee})` }
   let ar = commajoin(value_list(value_field(node, "args")), cr.counter, acx)
-  // The 2.0 var-callee async path (async externs / phase-2 colored fns via
-  // `async_names`/`async_locals`) is DEFERRED with the module-fn async surface;
-  // a covered fixture never names one, so the un-awaited call is byte-exact.
-  return { text: `${callee}(${ar.text})`, counter: ar.counter }
+  let call = `${callee}(${ar.text})`
+  // The 2.0 var-callee async path (item 80 / docs/design/async-extern.md §5): a
+  // `var`-callee naming an async extern (`async_names`) or an async-value
+  // parameter (`async_locals`) returns a Promise, so it is awaited — parenthesized
+  // so it stays atomic in a larger expression (`f(x) + 1` -> `(await f(x)) + 1`).
+  // Keyed on the RAW callee name (the sets hold raw names), mirroring the
+  // reference. The frontend admits such a call only in an async body, so the
+  // await is gated on `in_async`; a sync body never renders one.
+  if (node_kind(callee_node) == "var" && acx.in_async) {
+    let cname = value_str(value_field(callee_node, "name"))
+    if (list_contains(acx.async_names, cname) || list_contains(acx.async_locals, cname)) {
+      return { text: `(await ${call})`, counter: ar.counter }
+    }
+  }
+  return { text: call, counter: ar.counter }
 }
 
 fn render_builtin_node(node: Any, counter: Int, acx: ACx) -> Rendered {
@@ -1011,11 +1094,13 @@ fn expr(node: Any, counter: Int, acx: ACx) -> Rendered {
 
 // -------------------------------------------------------------- statements
 // `_v3_stmt` (test_mode = false): one fn-body step -> its emitted lines.
-fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
+fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   let step = value_str(value_field(node, "step"))
   let pad = ind(indent)
-  // The pure fn/test pass never renders an async body, so the await-seed is off.
-  let a = sync_acx()
+  // The async-colouring context flows in from `emit_functions`: `sync_acx()` for
+  // a plain fn, or an `in_async` context for a phase-2 async-colored fn, so a
+  // call to an async callable inside the body (return / let / branch) is awaited.
+  let a = acx
   if (step == "let") {
     let r = expr(value_field(node, "value"), counter, a)
     var kw = "const"
@@ -1037,7 +1122,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(node, "then"))) {
-      let r = v3_stmt(s, indent + 1, c)
+      let r = v3_stmt(s, indent + 1, c, acx)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -1045,7 +1130,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = v3_stmt(s, indent + 1, c)
+        let r = v3_stmt(s, indent + 1, c, acx)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -1058,7 +1143,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     var out = [`${pad}while (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(node, "body"))) {
-      let r = v3_stmt(s, indent + 1, c)
+      let r = v3_stmt(s, indent + 1, c, acx)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -1071,7 +1156,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     var out = [`${pad}for (const ${bind} of ${ir.text}) {`]
     var c = ir.counter
     for (s of value_list(value_field(node, "body"))) {
-      let r = v3_stmt(s, indent + 1, c)
+      let r = v3_stmt(s, indent + 1, c, acx)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -1088,29 +1173,87 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
 // `_emit_ts_functions`: each module fn as an exported TS `function`,
 // blank-line separated. The `$revl_match_N` counter threads across the whole
 // document (one `_Ctx` counter in the reference).
-fn emit_functions(functions: List[Any]) -> List[Str] {
+fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
   var out = []
   var c = 0
   for (fnode of functions) {
     let name = ident(value_str(value_field(fnode, "name")))
     var parts = []
+    // A parameter typed `(…) -> Async[T]` is an async value local (item 92): a
+    // call through it returns a Promise and is awaited in the body. Collect
+    // those names as the body's `async_locals`, keyed RAW to match the
+    // var-callee comparison.
+    var locals = []
     for (p of value_list(value_field(fnode, "params"))) {
-      parts = parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type(value_str(value_field(p, "type")))}`)
+      let ptype = value_str(value_field(p, "type"))
+      parts = parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type(ptype)}`)
+      if (is_async_fn_type(ptype)) { locals = locals.push(value_str(value_field(p, "name"))) }
     }
     let params = parts.join(", ")
     let returns = ts_return_type(value_field(fnode, "returns"))
-    out = out.push(`export function ${name}(${params}): ${returns} {`)
+    // A phase-2 async-colored fn (docs/design/async-extern.md §3) emits as
+    // `export async function …: Promise<T>`, its body rendered in an async
+    // context so every call to an async callable is awaited. The color was
+    // decided by the frontend fixed point and stamped on the IR entry; the
+    // emitter only reads `.async`, mirroring the extern signature form.
+    var body_acx = sync_acx()
+    if (value_bool(value_field(fnode, "async"))) {
+      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals }
+      out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
+    } else {
+      out = out.push(`export function ${name}(${params}): ${returns} {`)
+    }
     let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) {
       out = out.push("  // (empty body)")
     } else {
       for (s of body) {
-        let r = v3_stmt(s, 2, c)
+        let r = v3_stmt(s, 2, c, body_acx)
         out = out.concat(r.lines)
         c = r.counter
       }
     }
     out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// `_emit_ts_externs`: each `extern fn` as an exported TS `function` carrying its
+// verbatim `@ts` body (dedented, each line re-indented two spaces). An `async`
+// extern (item 80) emits `export async function …: Promise<T>` — its body may
+// `await`, and every admitted call site awaits it (see `render_call`). A missing
+// `@ts` body is refused, matching the reference; VARIANT/non-ts externs are not
+// in the covered corpus.
+fn emit_externs(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (ext of externs) {
+    let name = ident(value_str(value_field(ext, "name")))
+    var parts = []
+    for (p of value_list(value_field(ext, "params"))) {
+      parts = parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type(value_str(value_field(p, "type")))}`)
+    }
+    let params = parts.join(", ")
+    let returns = ts_return_type(value_field(ext, "returns"))
+    let bodies = value_field(ext, "bodies")
+    if (!value_has(bodies, "ts")) {
+      out = out.push(`<<EXTERN-NO-TS-BODY:${name}>>`)
+    } else {
+      if (value_bool(value_field(ext, "async"))) {
+        out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
+      } else {
+        out = out.push(`export function ${name}(${params}): ${returns} {`)
+      }
+      let body = py_dedent(py_strip_nl(value_str(value_field(bodies, "ts"))))
+      if (body == "") {
+        out = out.push("  // (empty @ts body)")
+      } else {
+        for (line of py_splitlines(body)) {
+          out = out.push("  ".concat(line))
+        }
+      }
+      out = out.push("}")
+    }
     out = out.push("")
   }
   return out
@@ -1400,7 +1543,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
     var body_acx = sync_acx()
     if (is_async) {
       prefix = "async "
-      body_acx = { in_async: true, in_arrow: false, ops: ops }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [] }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx)
@@ -1936,8 +2079,23 @@ pub fn emit_src(ir: Any) -> Str {
   // name, so its `interface` must precede the interface that references it.
   let types = value_field(ir, "types")
   if (value_keys(types).length() > 0) { out = out.concat(emit_ts_types(types)) }
+  // The doc-level async-callable set (`_Ctx.async_names`): async externs and
+  // phase-2 async-colored module fns. Threaded into every fn body so a
+  // `var`-callee naming one is awaited (item 80). Built from RAW names (the
+  // var-callee comparison is on the raw callee name).
   let functions = value_list(value_field(ir, "functions"))
-  if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  let externs = value_list(value_field(ir, "externs"))
+  var async_names = []
+  for (ext of externs) {
+    if (value_bool(value_field(ext, "async"))) { async_names = async_names.push(value_str(value_field(ext, "name"))) }
+  }
+  for (fnode of functions) {
+    if (value_bool(value_field(fnode, "async"))) { async_names = async_names.push(value_str(value_field(fnode, "name"))) }
+  }
+  // Externs emit before functions (mirroring `_emit_v3`) so a colored fn's
+  // awaited callee is already declared above it.
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions, async_names)) }
   // Slice 2: the component-dialect tail (service interfaces, context
   // augmentation, components). Emits nothing for a function-only document, so
   // the slice-1 corpus stays byte-identical.
@@ -1994,12 +2152,12 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
   let call = { kind: "call", target: { kind: "req", name: "store" }, method: "get",
                args: [{ kind: "name", id: "k" }] }
   let ops = [async_op_key("store", "get")]
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [] }).text
     == "(await ctx.store.get(k))"
   assert expr(call, 0, sync_acx()).text == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops }).text
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [] }).text
     == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [] }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [] }).text
     == "ctx.store.get(k)"
 }
 

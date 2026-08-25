@@ -1,0 +1,14 @@
+// slice 5 (item 226) — async `match` (tagged-switch form) in a colored module
+// fn, over a built-in `Result` (no variant type declaration needed — those stay
+// deferred). The Ok arm awaits `lookup`, so the whole switch is async-shaped and
+// each case's binding arm-arrow (`(await (async (v) => …)($revl_match_1.value))`)
+// is awaited.
+extern emission async fn lookup(k: Str) -> Str
+  = @ts { return await Promise.resolve(k) }
+
+fn choose(r: Result[Str, Str]) -> Str {
+  return match r {
+    Ok(v) => lookup(v),
+    Err(e) => e,
+  }
+}
