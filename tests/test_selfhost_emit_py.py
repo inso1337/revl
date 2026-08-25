@@ -69,8 +69,9 @@ in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
 the canonical ABI. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
 only a ``spawn`` acquire there, whose ``cexpr`` lands in slice 5. ``let_pattern``
-(destructuring) is a permanent exclusion for a byte oracle: the reference names
-its temporary from ``id(node)``, which a second implementation cannot reproduce.
+(destructuring) is still unimplemented here but is no longer a *permanent*
+exclusion: item 179 made the reference's destructure temp deterministic (a
+per-``_Lines`` counter, not ``id(node)``), so a future slice can port it.
 """
 
 import importlib.util

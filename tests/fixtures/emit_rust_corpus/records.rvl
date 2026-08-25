@@ -1,0 +1,12 @@
+// v3 typed-core: user record `type` decls -> `PartialEq`-deriving `pub struct`s,
+// record literals (`Struct { .. }`) with the by-value field clone, field access,
+// a record-typed field (`at: Point`), and `List[Point]` -> `Vec<Point>`.
+type Point = { x: Int, y: Int }
+type Named = { label: Str, at: Point }
+
+fn origin() -> Point { return { x: 0, y: 0 } }
+fn shift(p: Point, dx: Int) -> Point { return { x: p.x + dx, y: p.y } }
+fn label_of(n: Named) -> Str { return n.label }
+fn wrap(s: Str, p: Point) -> Named { return { label: s, at: p } }
+fn first_x(ps: List[Point]) -> Int { return ps[0].x }
+fn relabel(n: Named, s: Str) -> Named { return { label: s, at: n.at } }

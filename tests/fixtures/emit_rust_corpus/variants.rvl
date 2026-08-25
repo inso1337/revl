@@ -1,0 +1,29 @@
+// v3 typed-core: user variant `type` decls -> serde-tagged `pub enum`s, ADT
+// construction (nullary `Enum::Case` and payload `Enum::Case(arg)`), `match` over
+// user variants (bound + nullary patterns, the `_` wildcard vs the appended
+// `unreachable!()`), and the built-in Some/Ok constructors coexisting.
+type Tree = Leaf | Node(Int)
+type Outcome = Success(Int) | Failure(Str)
+
+fn leaf() -> Tree { return Leaf }
+fn node(v: Int) -> Tree { return Node(v) }
+fn size(t: Tree) -> Int {
+  return match t {
+    Leaf => 0,
+    Node(v) => v,
+  }
+}
+fn describe(t: Tree) -> Str {
+  return match t {
+    Node(v) => "node",
+    _ => "leaf",
+  }
+}
+fn unpack(o: Outcome) -> Int {
+  return match o {
+    Success(v) => v,
+    Failure(m) => 0,
+  }
+}
+fn opt_wrap(v: Int) -> Opt[Int] { return Some(v) }
+fn res_wrap(v: Int) -> Result[Int, Str] { return Ok(v) }
