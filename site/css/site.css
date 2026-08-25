@@ -820,6 +820,20 @@ table.audit .comp { font-family: var(--mono); color: var(--text); }
 .sys-graph { overflow: auto; padding: 10px 14px; }
 .sys-canvas { position: relative; min-width: 100%; }
 .sys-canvas .wires { position: absolute; inset: 0; }
+.node .node-btn {
+  position: absolute; top: 6px; right: 6px;
+  width: 20px; height: 20px; border-radius: 6px;
+  border: 1px solid var(--line-strong); background: rgba(6, 8, 14, 0.6);
+  color: var(--muted); font-size: 10px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+.node:hover .node-btn { opacity: 1; }
+.node .node-btn:hover.node-x { color: var(--red); border-color: rgba(251, 113, 133, 0.5); }
+.node .node-btn:hover.node-play { color: var(--teal); border-color: rgba(45, 212, 191, 0.5); }
+.node.withdrawn { border-style: dashed; opacity: 0.45; }
+.node.withdrawn .node-btn { opacity: 1; color: var(--teal); }
+.node.withdrawn .npill { background: rgba(148, 163, 184, 0.12); color: var(--faint); }
 .sys-ops {
   border-top: 1px solid var(--line);
   padding: 8px 14px; display: flex; flex-direction: column; gap: 6px;

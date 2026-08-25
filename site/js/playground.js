@@ -234,6 +234,46 @@ def live_swap(source):
                             "handoff": swapped.get("handoff")})
 
 
+def live_withdraw(name):
+    """Withdraw ONE live component — dispose its fiber and let the reactive
+    graph settle (R2/R3): dependents come down with it, each replaying its own
+    accumulator, and the trace records the cascade the runtime actually
+    produced."""
+    s = _LIVE["s"]
+    if s is None or not s.loaded:
+        return json.dumps({"ok": False, "error": "nothing is live"})
+    driver = s._require()
+    fiber = driver.fibers.pop(name, None)
+    if fiber is None:
+        return json.dumps({"ok": False, "error": f"no live component named {name!r}"})
+    try:
+        s._run(fiber.dispose())
+        s._run(driver._flush())
+    except Exception as exc:
+        return _fail(exc)
+    return _snapshot(trace=driver.drain_events(), extra={"withdrew": name})
+
+
+def live_plug(name):
+    """Load ONE withdrawn component back from the composition's own emitted
+    module; a dependent left PENDING by a withdrawal reactivates when its
+    provision reappears."""
+    s = _LIVE["s"]
+    if s is None or not s.loaded:
+        return json.dumps({"ok": False, "error": "nothing is live"})
+    driver = s._require()
+    if name in driver.fibers:
+        return json.dumps({"ok": False, "error": f"{name!r} is already live"})
+    if not any(c["name"] == name for c in (s.ir or {}).get("components") or []):
+        return json.dumps({"ok": False, "error": f"the composition has no component {name!r}"})
+    try:
+        module = s._prepare_module(s.ir)
+        s._run(s._plug(name, module))
+    except Exception as exc:
+        return _fail(exc)
+    return _snapshot(trace=driver.drain_events(), extra={"plugged": name})
+
+
 def live_unload():
     s = _LIVE["s"]
     if s is None or not s.loaded:
@@ -722,11 +762,17 @@ function renderGraph(graph, states) {
 
   let nodes = "";
   graph.forEach((c) => {
-    const st = stateOf[c.name] || "…";
+    const present = stateOf[c.name] !== undefined;
+    const st = present ? stateOf[c.name] : "withdrawn";
     const live = st === "ACTIVE";
     const p = pos[c.name];
-    nodes += `<div class="node ${live ? "live" : "dimmed"}"
-      style="left:${p.x}px; top:${p.y}px; width:${NODEW}px">
+    const btn = present
+      ? `<button class="node-btn node-x" data-name="${esc(c.name)}"
+           title="withdraw ${esc(c.name)} — dispose it and watch the reactive cascade">✕</button>`
+      : `<button class="node-btn node-play" data-name="${esc(c.name)}"
+           title="load ${esc(c.name)} back into the running composition">▶</button>`;
+    nodes += `<div class="node ${live ? "live" : "dimmed"} ${present ? "" : "withdrawn"}"
+      style="left:${p.x}px; top:${p.y}px; width:${NODEW}px">${btn}
       <div class="nname">${esc(c.name)}</div>
       <div class="nrole">${
         c.requires.length ? "requires " + c.requires.map(esc).join(", ") : "no requires"
@@ -738,6 +784,25 @@ function renderGraph(graph, states) {
     `<div class="sys-canvas" style="width:${width + NODEW - COLW + PAD * 2}px; height:${height + PAD}px">
        <svg class="wires" width="100%" height="100%">${wires}</svg>${nodes}</div>`;
 }
+
+sysGraph.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".node-btn");
+  if (!btn) return;
+  const name = btn.dataset.name;
+  const withdrawing = btn.classList.contains("node-x");
+  btn.disabled = true;
+  try {
+    const r = await runLive(
+      withdrawing ? "live_withdraw(LIVE_NAME)" : "live_plug(LIVE_NAME)",
+      { LIVE_NAME: name });
+    if (!r.ok) { liveFailure(r, withdrawing ? `withdraw ${name}` : `load ${name}`); return; }
+    traceLine(withdrawing
+      ? `<span class="tr-err">✕ withdrew ${esc(name)}</span> <span class="tr-dim">— its accumulator replayed backwards; anything that required it reacted (R2/R3)</span>`
+      : `<span class="tr-ok">▶ loaded ${esc(name)}</span> <span class="tr-dim">— provision restored; pending dependents reactivate</span>`);
+    traceEvents(r.trace);
+    renderSystem(r);
+  } catch (err) { traceLine(`<span class="tr-err">${esc(String(err))}</span>`); }
+});
 
 function renderOps(ops) {
   let html = "";
