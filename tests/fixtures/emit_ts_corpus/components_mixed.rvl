@@ -1,0 +1,16 @@
+// A mixed document: a pure top-level fn alongside a component that provides a
+// service. Exercises the shared-nothing match counters (functions vs component
+// pass) and req/provide wiring in one module.
+fn double(n: Int) -> Int {
+  return n + n
+}
+
+service Calc {
+  fn add(a: Int, b: Int) -> Int
+}
+
+component Adder provides calc: Calc {
+  provide calc {
+    fn add(a, b) = a + b
+  }
+}
