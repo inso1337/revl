@@ -1,0 +1,69 @@
+// wasm Path B slice 4c — the `for (x of xs)` walk over a List value.
+//
+// A `for` claims the next loop id N (pre-order over the function's loops) and
+// three i32 cursor locals: `for_ptr_N` (the list base), `for_cnt_N` (its stored
+// count), `for_idx_N` (the slot index). The loop reads `count` once, then while
+// `idx < cnt` loads slot `idx` into `l_<bind>` (at the element width), runs the
+// body, and bumps `idx`. The cursor triple is declared in the header after the
+// `l_<name>` locals and before the base scratch, in loop-id order — exactly the
+// reference's `_for_temps` collection order. Empty/`??`/`match` bodies stay out.
+
+// A flat sum: one loop (id 1), the bind `l_v` an i64, the checked `$int_add` in
+// the body seeing two i64 operands.
+fn sum(xs: List[Int]) -> Int {
+  var s = 0
+  for (v of xs) { s = s + v }
+  return s
+}
+
+// A `List[Bool]` walk: the element bind is an i32 (0/1), narrowed out of its slot.
+fn countTrue(bs: List[Bool]) -> Int {
+  var n = 0
+  for (b of bs) { if (b) { n = n + 1 } }
+  return n
+}
+
+// Nested loops: the outer takes id 1 and the inner id 2 (pre-order), so the
+// header declares two cursor triples; each list walk uses its own scratch.
+fn sumRows(rows: List[List[Int]]) -> Int {
+  var total = 0
+  for (row of rows) {
+    for (v of row) { total = total + v }
+  }
+  return total
+}
+
+// Two sibling loops: ids 1 then 2, numbered by document order.
+fn sumBoth(xs: List[Int], ys: List[Int]) -> Int {
+  var s = 0
+  for (a of xs) { s = s + a }
+  for (b of ys) { s = s + b }
+  return s
+}
+
+// A loop in each arm of an `if`: the `then` loop is id 1, the `else` loop id 2 —
+// the pre-order counter threads through both arms of the branch.
+fn pick(xs: List[Int], hi: Bool) -> Int {
+  var s = 0
+  if (hi) {
+    for (a of xs) { s = s + a }
+  } else {
+    for (b of xs) { s = s + b }
+  }
+  return s
+}
+
+// A field read inside the body: iterate records, read a field of each.
+type Point = { x: Int, y: Int }
+fn sumX(ps: List[Point]) -> Int {
+  var s = 0
+  for (p of ps) { s = s + p.x }
+  return s
+}
+
+// A `Str` element with a `len`/property read in the body.
+fn totalLen(ss: List[Str]) -> Int {
+  var n = 0
+  for (s of ss) { n = n + s.length }
+  return n
+}

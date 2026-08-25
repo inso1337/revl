@@ -107,6 +107,19 @@ fn rstrip(s: Str) -> Str {
   return s.slice(0, i)
 }
 
+// Python `str.strip()`: drop leading and trailing ASCII whitespace. Used to
+// clean the comma-split type args in `split_types` (`Result[Int, Str]`).
+fn str_strip(s: Str) -> Str {
+  let r = rstrip(s)
+  var i = 0
+  var go = true
+  while (go && i < r.length()) {
+    let c = r.charCodeAt(i)
+    if (c == 32 || c == 10 || c == 9 || c == 13) { i = i + 1 } else { go = false }
+  }
+  return r.slice(i, r.length())
+}
+
 // ---------------------------------------------------------------- op tables
 // `_CMP_SUFFIX`: the shared comparison mnemonic (the width prefix is chosen by
 // the operand type at the call site), "" when `op` is not a comparison.
@@ -200,7 +213,12 @@ type E = { wat: Str, ty: Str }
 type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str], rectypes: Any }
 // A statement-emission result: the emitted lines, the threaded scope, and the
 // accumulated local-width map (the reference's function-global `_local_types`).
-type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str] }
+// `loop` is the running pre-order `for`-loop counter (the reference's
+// function-global `_loop_counter`): the Nth `for` reached in document order takes
+// id N, which names its `for_ptr_N`/`for_cnt_N`/`for_idx_N` scratch locals. It is
+// threaded in and out so the numbering continues across sibling and nested loops
+// exactly as the header's `_for_temps` collection does.
+type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str], loop: Int }
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
   return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs, rectypes: s.rectypes }
@@ -219,6 +237,15 @@ fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
 fn slot_store(addr: Str, value: Str, ty: Str) -> Str {
   if (ty == "Int") { return `(i64.store ${addr} ${value})` }
   return `(i64.store ${addr} (i64.extend_i32_u ${value}))`
+}
+
+// `_slot_load`: the read twin of `slot_store`. The eight bytes come back as an
+// i64; an `Int` is the value, everything narrower (Bool / a pointer) is wrapped
+// down to its i32 view — so a field/element/payload reads back exactly what was
+// stored (slice 4: field/index/for reads and tagged-payload reads).
+fn slot_load(addr: Str, ty: Str) -> Str {
+  if (ty == "Int") { return `(i64.load ${addr})` }
+  return `(i32.wrap_i64 (i64.load ${addr}))`
 }
 
 // `_acquire_tmp` hands a record/list its base-pointer scratch by NESTING DEPTH:
@@ -292,6 +319,89 @@ fn record_type_of(node: Any, s: Scope, expected: Str) -> Str {
   return ""
 }
 
+// ================================================= tagged unions (slice 4)
+// A tagged union (a user `variant`, or the built-in `Opt`/`Result`) lives in a
+// two-slot `[u32 tag][pad][slot payload]` cell: `$alloc` takes 16 bytes, the tag
+// is the case's index stored as an i32 discriminant, and the payload is one
+// 8-byte slot (0 for a nullary case). This block mirrors the reference's
+// `_tagged_layout` / `_tag_of` / `_make_tagged` byte-for-byte for construction
+// (`Some`/`None`, `Ok`/`Err`, and user-variant cases); READING a cell (`match`,
+// `??`) mints match/scrutinee locals with their own header ordering and stays
+// out of this slice.
+
+// One case of a tagged union: its name and payload type ("" = a nullary case).
+type TagCase = { name: Str, payload: Str }
+
+// `_split_types`: split top-level comma-separated type args, respecting `[]`
+// nesting (so `Result[Int, Str]` -> ["Int", "Str"] but `Map[Int, Str]` inside
+// one arg stays whole).
+fn split_types(inner: Str) -> List[Str] {
+  var parts = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < inner.length()) {
+    let c = inner.charCodeAt(i)
+    if (c == 91) { depth = depth + 1 }       // '['
+    if (c == 93) { depth = depth - 1 }       // ']'
+    if (c == 44 && depth == 0) {             // ',' at top level
+      parts = parts.push(str_strip(cur))
+      cur = ""
+    } else {
+      cur = cur.concat(inner.charAt(i))
+    }
+    i = i + 1
+  }
+  if (cur.length() > 0) { parts = parts.push(str_strip(cur)) }
+  return parts
+}
+
+// `_tagged_layout`: the cases of `ty` in tag order, or [] when `ty` is not a
+// tagged union. A user variant comes from the type table; `Opt[T]` and
+// `Result[T, E]` are built in.
+fn tagged_layout(rectypes: Any, ty: Str) -> List[TagCase] {
+  if (ty == "") { return [] }
+  let spec = value_field(rectypes, ty)
+  if (!value_is_null(spec) && value_str(value_field(spec, "kind")) == "variant") {
+    var out = []
+    for (c of value_list(value_field(spec, "cases"))) {
+      var pl = ""
+      if (!value_is_null(value_field(c, "payload"))) { pl = value_str(value_field(c, "payload")) }
+      out = out.push({ name: value_str(value_field(c, "name")), payload: pl })
+    }
+    return out
+  }
+  let lb = ty.indexOf("[")
+  if (lb < 0) { return [] }
+  let head = ty.slice(0, lb)
+  let args = split_types(ty.slice(lb + 1, ty.length() - 1))
+  if (head == "Opt" && args.length() == 1) {
+    return [{ name: "None", payload: "" }, { name: "Some", payload: args[0] }]
+  }
+  if (head == "Result" && args.length() == 2) {
+    return [{ name: "Ok", payload: args[0] }, { name: "Err", payload: args[1] }]
+  }
+  return []
+}
+
+fn is_tagged(rectypes: Any, ty: Str) -> Bool { return tagged_layout(rectypes, ty).length() > 0 }
+
+// `_tag_of`: the discriminant of `case` — its index in the tag-ordered layout.
+fn tag_of(layout: List[TagCase], case: Str) -> Int {
+  var i = 0
+  for (c of layout) {
+    if (c.name == case) { return i }
+    i = i + 1
+  }
+  return 0
+}
+
+// The payload type carried by `case` ("" for a nullary case).
+fn payload_ty_of(layout: List[TagCase], case: Str) -> Str {
+  for (c of layout) { if (c.name == case) { return c.payload } }
+  return ""
+}
+
 // `_list_type`: an expected `List[T]` wins; otherwise infer `List[<first item>]`
 // (the empty positional literal needs an expected type — out of subset).
 fn list_type_of(node: Any, s: Scope, expected: Str) -> Str {
@@ -301,14 +411,83 @@ fn list_type_of(node: Any, s: Scope, expected: Str) -> Str {
   return "List[".concat(infer_val_ty(items[0], s)).concat("]")
 }
 
+// `_builtin_type` (subset): the surface type of a `builtin` method result. Only
+// the methods whose helpers live in the always-emitted preamble are covered;
+// `indexOf`/`split`/`join` (demand-pulled helpers) and the Map methods are out.
+fn builtin_type(node: Any, s: Scope) -> Str {
+  let method = value_str(value_field(node, "method"))
+  let tty = infer_val_ty(value_field(node, "target"), s)
+  if (method == "length") { return "Int" }
+  if (method == "to_int" && tty == "Int32") { return "Int" }
+  if (method == "to_int32") { return "Int32" }
+  if (method == "push") { return tty }
+  if (method == "concat") { return tty }
+  if (method == "slice") { return tty }
+  if (method == "charAt") { return "Str" }
+  if (method == "charCodeAt") { return "Int" }
+  if (method == "to_str") { return "Str" }
+  if (method == "startsWith" || method == "endsWith") { return "Bool" }
+  if (method == "to_int" && tty == "Str") { return "Opt[Int]" }
+  if (method == "div_trunc" || method == "div_floor" || method == "div_euclid" || method == "mod") { return "Int" }
+  return ""
+}
+
+// Does `layout` have a case named `case`? (Set membership over the tag names.)
+fn payload_present(layout: List[TagCase], case: Str) -> Bool {
+  for (c of layout) { if (c.name == case) { return true } }
+  return false
+}
+
+// The declared cell type of an `adt`/`Some`/`None`/`Ok`/`Err` node given an
+// `expected` (`_infer_type` for `adt`): an expected tagged type that carries this
+// case wins; otherwise the node's own `type` (variant name, or the built-in
+// `Opt[..]`/`Result[..]` the frontend attached). "" when it is not tagged.
+fn adt_cell_ty(node: Any, s: Scope, expected: Str) -> Str {
+  let case = value_str(value_field(node, "case"))
+  if (expected != "" && is_tagged(s.rectypes, expected)) {
+    if (payload_present(tagged_layout(s.rectypes, expected), case)) { return expected }
+  }
+  return value_str(value_field(node, "type"))
+}
+
 // `_infer_type` extended to the memory ABI: a list is `List[<elem>]`, a record is
-// its matched declared type; everything else falls to the scalar `infer_ty`. Used
-// where a value's own type must be found (a `let` with no annotation) — its
-// result is both the local's width and the `expected` handed to the renderer.
+// its matched declared type; field/index/len/builtin read their result type; a
+// tagged constructor its cell type. Everything else falls to the scalar
+// `infer_ty`. Used where a value's own type must be found (a `let` with no
+// annotation) — its result is both the local's width and the `expected` handed
+// to the renderer.
 fn infer_val_ty(node: Any, s: Scope) -> Str {
   let k = node_kind(node)
   if (k == "list") { return list_type_of(node, s, "") }
   if (k == "record") { return record_type_of(node, s, "") }
+  if (k == "field") {
+    let tty = infer_val_ty(value_field(node, "target"), s)
+    let fields = value_field(value_field(s.rectypes, tty), "fields")
+    return value_str(value_field(fields, value_str(value_field(node, "name"))))
+  }
+  if (k == "index") {
+    let tty = infer_val_ty(value_field(node, "target"), s)
+    if (tty == "Str" || tty == "Bytes") { return "Str" }
+    if (is_list_type(tty)) { return list_elem(tty) }
+    return ""
+  }
+  if (k == "len") { return "Int" }
+  if (k == "builtin") { return builtin_type(node, s) }
+  if (k == "adt") { return adt_cell_ty(node, s, "") }
+  if (k == "var" && value_str(value_field(node, "name")) == "None") { return "Opt[Int]" }
+  if (k == "call") {
+    let callee = value_field(node, "callee")
+    if (value_str(value_field(callee, "name")) == "Some") {
+      let args = value_list(value_field(node, "args"))
+      var inner = "Int"
+      if (args.length() > 0) {
+        let it = infer_val_ty(args[0], s)
+        if (it != "") { inner = it }
+      }
+      return "Opt[".concat(inner).concat("]")
+    }
+    return ""
+  }
   return infer_ty(node, s.types)
 }
 
@@ -385,6 +564,25 @@ fn expr_max_depth(node: Any, base: Int) -> Int {
     }
     return m
   }
+  // a tagged constructor (`adt`, or the built-in `Some`/`None`) acquires a base
+  // scratch just like a record/list and lowers its payload one level deeper.
+  if (k == "adt") {
+    var m = base
+    for (a of value_list(value_field(node, "args"))) {
+      let cm = expr_max_depth(a, base + 1)
+      if (cm > m) { m = cm }
+    }
+    return m
+  }
+  if (k == "var" && value_str(value_field(node, "name")) == "None") { return base }
+  if (k == "call" && value_str(value_field(value_field(node, "callee"), "name")) == "Some") {
+    var m = base
+    for (a of value_list(value_field(node, "args"))) {
+      let cm = expr_max_depth(a, base + 1)
+      if (cm > m) { m = cm }
+    }
+    return m
+  }
   if (k == "bin") {
     let l = expr_max_depth(value_field(node, "left"), base)
     let r = expr_max_depth(value_field(node, "right"), base)
@@ -392,6 +590,18 @@ fn expr_max_depth(node: Any, base: Int) -> Int {
     return r
   }
   if (k == "un") { return expr_max_depth(value_field(node, "operand"), base) }
+  // reads don't acquire: their sub-expressions nest at the SAME depth.
+  if (k == "field" || k == "len") { return expr_max_depth(value_field(node, "target"), base) }
+  if (k == "index") {
+    let t = expr_max_depth(value_field(node, "target"), base)
+    let i = expr_max_depth(value_field(node, "index"), base)
+    return max_i(t, i)
+  }
+  if (k == "builtin") {
+    var m = expr_max_depth(value_field(node, "target"), base)
+    for (a of value_list(value_field(node, "args"))) { m = max_i(m, expr_max_depth(a, base)) }
+    return m
+  }
   return -1
 }
 
@@ -418,6 +628,10 @@ fn stmt_max_depth(node: Any) -> Int {
     let m = expr_max_depth(value_field(node, "cond"), 0)
     return max_i(m, body_max_depth(value_list(value_field(node, "body"))))
   }
+  if (step == "for") {
+    let m = expr_max_depth(value_field(node, "iterable"), 0)
+    return max_i(m, body_max_depth(value_list(value_field(node, "body"))))
+  }
   return -1
 }
 
@@ -434,8 +648,8 @@ fn render_bin(node: Any, s: Scope, depth: Int) -> E {
   let op = node_op(node)
   let ln = value_field(node, "left")
   let rn = value_field(node, "right")
-  let lty = infer_ty(ln, s.types)
-  let rty = infer_ty(rn, s.types)
+  let lty = infer_val_ty(ln, s)
+  let rty = infer_val_ty(rn, s)
   // `expected` is the OPERAND type, which also picks the instruction width.
   var opnd = "Int"
   if (is_bool_op(op)) { opnd = "Bool" }
@@ -474,6 +688,203 @@ fn render_un(node: Any, s: Scope, depth: Int) -> E {
       (call $int_sub)`, ty: "Int" }
 }
 
+// -------------------------------------------------- reads (slice 4)
+// `_field_expr`: a record field READ. The base pointer plus `8 * position` (the
+// field's DECLARED index) is the slot address; `slot_load` narrows a non-Int
+// field back to its i32 view.
+fn render_field(node: Any, s: Scope, depth: Int) -> E {
+  let tty = infer_val_ty(value_field(node, "target"), s)
+  let fields = value_field(value_field(s.rectypes, tty), "fields")
+  let fname = value_str(value_field(node, "name"))
+  let field_ty = value_str(value_field(fields, fname))
+  let target = render_expr(value_field(node, "target"), s, tty, depth)
+  var pos = 0
+  var i = 0
+  for (kn of value_keys(fields)) {
+    if (kn == fname) { pos = i }
+    i = i + 1
+  }
+  var addr = target.wat
+  if (pos > 0) { addr = `(i32.add ${target.wat} (i32.const ${num_str(8 * pos)}))` }
+  return { wat: slot_load(addr, field_ty), ty: field_ty }
+}
+
+// `_index_expr`: `xs[i]` over a List (`[u32 count][pad][slot…]`) or `s[i]` over a
+// Str. A constant index folds to a compile-time slot offset (`8 + 8*i`); a
+// variable index computes `8 + i*8` at runtime, the index narrowed i64->i32 once.
+fn render_index(node: Any, s: Scope, depth: Int) -> E {
+  let tty = infer_val_ty(value_field(node, "target"), s)
+  let idxNode = value_field(node, "index")
+  let index = render_expr(idxNode, s, "Int", depth)
+  if (tty == "Str" || tty == "Bytes") {
+    let target = render_expr(value_field(node, "target"), s, tty, depth)
+    return { wat: `${target.wat}
+      ${index.wat}
+      (call $str_char_at)`, ty: "Str" }
+  }
+  let elem = list_elem(tty)
+  let target = render_expr(value_field(node, "target"), s, tty, depth)
+  var addr = ""
+  if (node_kind(idxNode) == "lit" && value_kind(value_field(idxNode, "value")) == "int") {
+    let v = value_int(value_field(idxNode, "value"))
+    addr = `(i32.add ${target.wat} (i32.const ${num_str(8 + 8 * v)}))`
+  } else {
+    addr = `(i32.add ${target.wat}
+        (i32.add (i32.const 8) (i32.mul (i32.wrap_i64 ${index.wat}) (i32.const 8))))`
+  }
+  return { wat: slot_load(addr, elem), ty: elem }
+}
+
+// `_len_expr`: `x.length` (the property form, a `len` node). A `Str` counts code
+// points (decoding UTF-8 via `$str_cp_length`); `Bytes`/`List` count elements
+// from the u32 prefix.
+fn render_len(node: Any, s: Scope, depth: Int) -> E {
+  let tty = infer_val_ty(value_field(node, "target"), s)
+  let target = render_expr(value_field(node, "target"), s, tty, depth)
+  if (tty == "Str") { return { wat: `(i64.extend_i32_u (call $str_cp_length ${target.wat}))`, ty: "Int" } }
+  return { wat: `(i64.extend_i32_u (i32.load ${target.wat}))`, ty: "Int" }
+}
+
+// `_builtin_expr` (subset): the stdlib method surface whose runtime helpers are
+// all in the always-emitted preamble. `length` mirrors `len`; the width
+// conversions, the integer divisions, `to_str`/`to_int`, and the Str/List
+// `push`/`concat`/`slice`/`charAt`/`charCodeAt`/`startsWith`/`endsWith` probes
+// each lower to a single preamble call. `indexOf`/`split`/`join` (demand-pulled
+// helpers not in the preamble) and the Map methods stay out.
+fn render_builtin(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+  let method = value_str(value_field(node, "method"))
+  let tnode = value_field(node, "target")
+  let tty = infer_val_ty(tnode, s)
+  let args = value_list(value_field(node, "args"))
+  if (method == "length") {
+    let t = render_expr(tnode, s, tty, depth)
+    if (tty == "Str") { return { wat: `(i64.extend_i32_u (call $str_cp_length ${t.wat}))`, ty: "Int" } }
+    return { wat: `(i64.extend_i32_u (i32.load ${t.wat}))`, ty: "Int" }
+  }
+  if (method == "to_int" && tty == "Int32") {
+    let t = render_expr(tnode, s, "Int32", depth)
+    return { wat: `(i64.extend_i32_s ${t.wat})`, ty: "Int" }
+  }
+  if (method == "to_int32") {
+    let t = render_expr(tnode, s, "Int", depth)
+    return { wat: `(call $int32_narrow ${t.wat})`, ty: "Int32" }
+  }
+  if (method == "push") {
+    let t = render_expr(tnode, s, tty, depth)
+    let elemty = list_elem(tty)
+    let arg = render_expr(args[0], s, elemty, depth)
+    var el = arg.wat
+    if (elemty != "Int") { el = `(i64.extend_i32_u ${arg.wat})` }
+    return { wat: `${t.wat}
+      ${el}
+      (call $list_push)`, ty: tty }
+  }
+  if (method == "concat") {
+    let t = render_expr(tnode, s, tty, depth)
+    let arg = render_expr(args[0], s, tty, depth)
+    var helper = """$list_concat"""
+    if (tty == "Str" || tty == "Bytes") { helper = """$str_concat""" }
+    return { wat: `${t.wat}
+      ${arg.wat}
+      (call ${helper})`, ty: tty }
+  }
+  if (method == "slice") {
+    let t = render_expr(tnode, s, tty, depth)
+    let a = render_expr(args[0], s, "Int", depth)
+    let b = render_expr(args[1], s, "Int", depth)
+    var helper = """$list_slice"""
+    if (tty == "Str") { helper = """$str_cp_slice""" }
+    else { if (tty == "Bytes") { helper = """$str_slice""" } }
+    return { wat: `${t.wat}
+      ${a.wat}
+      ${b.wat}
+      (call ${helper})`, ty: tty }
+  }
+  if (method == "charAt") {
+    let t = render_expr(tnode, s, tty, depth)
+    let arg = render_expr(args[0], s, "Int", depth)
+    var helper = """$str_char_at"""
+    if (tty == "Str") { helper = """$str_cp_char_at""" }
+    return { wat: `${t.wat}
+      ${arg.wat}
+      (call ${helper})`, ty: "Str" }
+  }
+  if (method == "charCodeAt") {
+    let t = render_expr(tnode, s, tty, depth)
+    let arg = render_expr(args[0], s, "Int", depth)
+    var helper = """$str_char_code_at"""
+    if (tty == "Str") { helper = """$str_cp_char_code_at""" }
+    return { wat: `${t.wat}
+      ${arg.wat}
+      (call ${helper})`, ty: "Int" }
+  }
+  if (method == "div_trunc") {
+    let t = render_expr(tnode, s, "Int", depth)
+    let arg = render_expr(args[0], s, "Int", depth)
+    return { wat: `(i64.div_s ${t.wat} ${arg.wat})`, ty: "Int" }
+  }
+  if (method == "div_floor" || method == "div_euclid" || method == "mod") {
+    let t = render_expr(tnode, s, "Int", depth)
+    let arg = render_expr(args[0], s, "Int", depth)
+    var call = """$int_mod"""
+    if (method == "div_floor") { call = """$int_div_floor""" }
+    if (method == "div_euclid") { call = """$int_div_euclid""" }
+    return { wat: `(call ${call} ${t.wat} ${arg.wat})`, ty: "Int" }
+  }
+  if (method == "to_str") {
+    let t = render_expr(tnode, s, "Int", depth)
+    return { wat: `(call $int_to_str ${t.wat})`, ty: "Str" }
+  }
+  if (method == "to_int" && tty == "Str") {
+    let t = render_expr(tnode, s, "Str", depth)
+    return { wat: `(call $str_to_int ${t.wat})`, ty: "Opt[Int]" }
+  }
+  if (method == "startsWith" || method == "endsWith") {
+    let t = render_expr(tnode, s, tty, depth)
+    let arg = render_expr(args[0], s, "Str", depth)
+    var helper = """$str_ends_with"""
+    if (method == "startsWith") { helper = """$str_starts_with""" }
+    return { wat: `${t.wat}
+      ${arg.wat}
+      (call ${helper})`, ty: "Bool" }
+  }
+  return { wat: `<<UNSUPPORTED-BUILTIN:${method}>>`, ty: "" }
+}
+
+// `_make_tagged`: a two-slot `[u32 tag][pad][slot payload]` cell. Acquire the
+// base scratch first (an allocated payload must land one nesting level deeper),
+// store the tag discriminant, then the payload slot (0 for a nullary case).
+fn make_tagged(ty: Str, case: Str, payload: Any, s: Scope, depth: Int) -> E {
+  let layout = tagged_layout(s.rectypes, ty)
+  let tag = tag_of(layout, case)
+  let pty = payload_ty_of(layout, case)
+  let tmp = tmp_name(depth)
+  var lines = [
+    `(call $alloc (i32.const 16))`,
+    `(local.set $${tmp})`,
+    `(i32.store (local.get $${tmp}) (i32.const ${num_str(tag)}))`
+  ]
+  let addr = `(i32.add (local.get $${tmp}) (i32.const 8))`
+  if (!value_is_null(payload)) {
+    let ev = render_expr(payload, s, pty, depth + 1)
+    lines = lines.push(slot_store(addr, ev.wat, ev.ty))
+  } else {
+    lines = lines.push(`(i64.store ${addr} (i64.const 0))`)
+  }
+  lines = lines.push(`(local.get $${tmp})`)
+  return { wat: lines.join(newline().concat("      ")), ty: ty }
+}
+
+// `_adt_expr`: a user-variant / Ok / Err constructor. Its cell type comes from
+// `expected` when that pins a matching case, else the node's own `type`.
+fn render_adt(node: Any, s: Scope, expected: Str, depth: Int) -> E {
+  let ty = adt_cell_ty(node, s, expected)
+  let args = value_list(value_field(node, "args"))
+  var payload = value_field(node, "")
+  if (args.length() > 0) { payload = args[0] }
+  return make_tagged(ty, value_str(value_field(node, "case")), payload, s, depth)
+}
+
 fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   let k = node_kind(node)
   if (k == "lit") {
@@ -492,12 +903,39 @@ fn render_inner(node: Any, s: Scope, expected: Str, depth: Int) -> E {
   }
   if (k == "var") {
     let name = value_str(value_field(node, "name"))
+    // the built-in Opt `None`: a nullary tagged cell (tag 0, zeroed payload).
+    if (name == "None") {
+      var ty = "Opt[Int]"
+      if (is_tagged(s.rectypes, expected)) { ty = expected }
+      return make_tagged(ty, "None", value_field(node, ""), s, depth)
+    }
     return { wat: map_get(s.slots, name), ty: map_get(s.types, name) }
+  }
+  if (k == "call") {
+    // the built-in Opt `Some(x)`: a tag-1 cell whose payload slot holds `x`.
+    let callee = value_field(node, "callee")
+    if (value_str(value_field(callee, "name")) == "Some") {
+      let payload = value_list(value_field(node, "args"))[0]
+      var ty = ""
+      if (is_tagged(s.rectypes, expected)) { ty = expected }
+      else {
+        var inner = infer_val_ty(payload, s)
+        if (inner == "") { inner = "Int" }
+        ty = "Opt[".concat(inner).concat("]")
+      }
+      return make_tagged(ty, "Some", payload, s, depth)
+    }
+    return { wat: `<<UNSUPPORTED-EXPR:call>>`, ty: "" }
   }
   if (k == "bin") { return render_bin(node, s, depth) }
   if (k == "un") { return render_un(node, s, depth) }
   if (k == "list") { return render_list(node, s, expected, depth) }
   if (k == "record") { return render_record(node, s, expected, depth) }
+  if (k == "field") { return render_field(node, s, depth) }
+  if (k == "index") { return render_index(node, s, depth) }
+  if (k == "len") { return render_len(node, s, depth) }
+  if (k == "builtin") { return render_builtin(node, s, expected, depth) }
+  if (k == "adt") { return render_adt(node, s, expected, depth) }
   return { wat: `<<UNSUPPORTED-EXPR:${k}>>`, ty: "" }
 }
 
@@ -514,17 +952,19 @@ fn render_expr(node: Any, s: Scope, expected: Str, depth: Int) -> E {
 }
 
 // -------------------------------------------------------------- statements
-fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
+fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -> Sout {
   var lines = []
   var sc = s
   var w = widths
+  var lc = loopc
   for (n of nodes) {
-    let r = emit_stmt(n, sc, w, rty)
+    let r = emit_stmt(n, sc, w, rty, lc)
     lines = lines.concat(r.lines)
     sc = r.scope
     w = r.widths
+    lc = r.loop
   }
-  return { lines: lines, scope: sc, widths: w }
+  return { lines: lines, scope: sc, widths: w, loop: lc }
 }
 
 // `_emit_stmts` for one step -> its emitted lines, threaded scope, and the
@@ -532,7 +972,7 @@ fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str) -> So
 // records that local's width; if/else/while lower their sub-blocks in COPIES of
 // the scope (a binding inside a block does not leak past it) while the widths
 // thread through (the reference's `_local_types` is function-global).
-fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
+fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str, loopc: Int) -> Sout {
   let step = value_str(value_field(node, "step"))
   if (step == "let" || step == "assign") {
     let name = value_str(value_field(node, "name"))
@@ -546,25 +986,27 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
     let nw = widths.set(`l_${name}`, wty(value_ty))
     var out = [value.wat, `(local.set $l_${name})`]
     let ns = scope_bind(s, name, `(local.get $l_${name})`, value_ty)
-    return { lines: out, scope: ns, widths: nw }
+    return { lines: out, scope: ns, widths: nw, loop: loopc }
   }
   if (step == "return") {
     let e = value_field(node, "expr")
-    if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths } }
+    if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths, loop: loopc } }
     let value = render_expr(e, s, rty, 0)
-    return { lines: [value.wat, "return"], scope: s, widths: widths }
+    return { lines: [value.wat, "return"], scope: s, widths: widths, loop: loopc }
   }
   if (step == "if") {
     let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
     let thenNodes = value_list(value_field(node, "then"))
     let elseNodes = value_list(value_field(node, "else"))
-    let thenR = emit_stmts(thenNodes, s, widths, rty)
+    let thenR = emit_stmts(thenNodes, s, widths, rty, loopc)
     var w2 = thenR.widths
+    var lc = thenR.loop
     var elseLines = []
     if (elseNodes.length() > 0) {
-      let elseR = emit_stmts(elseNodes, s, w2, rty)
+      let elseR = emit_stmts(elseNodes, s, w2, rty, lc)
       elseLines = elseR.lines
       w2 = elseR.widths
+      lc = elseR.loop
     }
     var out = [cond.wat, "(if", "  (then"]
     for (l of thenR.lines) { out = out.push(`    ${l}`) }
@@ -575,29 +1017,64 @@ fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
       out = out.push("  )")
     }
     out = out.push(")")
-    return { lines: out, scope: s, widths: w2 }
+    return { lines: out, scope: s, widths: w2, loop: lc }
   }
   if (step == "while") {
     let cond = render_expr(value_field(node, "cond"), s, "Bool", 0)
-    let bodyR = emit_stmts(value_list(value_field(node, "body")), s, widths, rty)
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), s, widths, rty, loopc)
     var out = ["(block", "  (loop", `    ${cond.wat}`, "    (i32.eqz)", "    (br_if 1)"]
     for (l of bodyR.lines) { out = out.push(`    ${l}`) }
     out = out.push("    (br 0)")
     out = out.push("  )")
     out = out.push(")")
-    return { lines: out, scope: s, widths: bodyR.widths }
+    return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop }
+  }
+  if (step == "for") {
+    // `for (x of xs)` over a List `[u32 count][pad][slot…]`. This `for` claims the
+    // next loop id; the cursor locals (`for_ptr_N`/`for_cnt_N`/`for_idx_N`) stay
+    // i32 (an address and two counters), and the bind is `l_<x>` at the element
+    // width. Nested loops keep numbering from the returned counter.
+    let n = loopc + 1
+    let iter_ty = infer_val_ty(value_field(node, "iterable"), s)
+    let elem = list_elem(iter_ty)
+    let bind = value_str(value_field(node, "bind"))
+    let it = render_expr(value_field(node, "iterable"), s, iter_ty, 0)
+    let w1 = widths.set(`l_${bind}`, wty(elem))
+    let bscope = scope_bind(s, bind, `(local.get $l_${bind})`, elem)
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), bscope, w1, rty, n)
+    let ptr = `for_ptr_${num_str(n)}`
+    let cnt = `for_cnt_${num_str(n)}`
+    let idx = `for_idx_${num_str(n)}`
+    let element = slot_load(`(i32.add (local.get $${ptr}) (i32.add (i32.const 8) (i32.mul (local.get $${idx}) (i32.const 8))))`, elem)
+    var out = [
+      it.wat, `(local.set $${ptr})`,
+      `(i32.load (local.get $${ptr}))`, `(local.set $${cnt})`,
+      "(i32.const 0)", `(local.set $${idx})`,
+      "(block",
+      "  (loop",
+      `    (i32.ge_s (local.get $${idx}) (local.get $${cnt}))`,
+      "    (br_if 1)",
+      `    ${element}`,
+      `    (local.set $l_${bind})`
+    ]
+    for (l of bodyR.lines) { out = out.push(`    ${l}`) }
+    out = out.push(`    (local.set $${idx} (i32.add (local.get $${idx}) (i32.const 1)))`)
+    out = out.push("    (br 0)")
+    out = out.push("  )")
+    out = out.push(")")
+    return { lines: out, scope: s, widths: bodyR.widths, loop: bodyR.loop }
   }
   if (step == "expr") {
     let value = render_expr(value_field(node, "expr"), s, "", 0)
     var out = [value.wat]
     if (value.ty != "" && value.ty != "Unit") { out = out.push("(drop)") }
-    return { lines: out, scope: s, widths: widths }
+    return { lines: out, scope: s, widths: widths, loop: loopc }
   }
   if (step == "assert") {
     let value = render_expr(value_field(node, "expr"), s, "Bool", 0)
-    return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths }
+    return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths, loop: loopc }
   }
-  return { lines: [`<<UNSUPPORTED-STEP:${step}>>`], scope: s, widths: widths }
+  return { lines: [`<<UNSUPPORTED-STEP:${step}>>`], scope: s, widths: widths, loop: loopc }
 }
 
 // `_collect_locals` (subset): every `let`/`assign` name reachable through the
@@ -613,10 +1090,39 @@ fn collect_locals(nodes: List[Any], acc: List[Str]) -> List[Str] {
         a = collect_locals(value_list(value_field(n, "else")), a)
       } else {
         if (step == "while") { a = collect_locals(value_list(value_field(n, "body")), a) }
+        else {
+          // a `for` binds its loop variable as an `l_<bind>` local (its width is
+          // the element type), then its body contributes more locals.
+          if (step == "for") {
+            a = a.push(value_str(value_field(n, "bind")))
+            a = collect_locals(value_list(value_field(n, "body")), a)
+          }
+        }
       }
     }
   }
   return a
+}
+
+// The number of `for` loops in a body (pre-order), which fixes how many
+// `for_ptr_k`/`for_cnt_k`/`for_idx_k` scratch triples the header declares. Loop
+// ids are assigned 1..N in that same pre-order (`emit_stmt`), so the header's
+// numeric run `k = 1..N` is exactly the reference's collection-order `_for_temps`.
+fn count_fors(nodes: List[Any]) -> Int {
+  var c = 0
+  for (n of nodes) {
+    let step = value_str(value_field(n, "step"))
+    if (step == "for") { c = c + 1 + count_fors(value_list(value_field(n, "body"))) }
+    else {
+      if (step == "if") {
+        c = c + count_fors(value_list(value_field(n, "then")))
+        c = c + count_fors(value_list(value_field(n, "else")))
+      } else {
+        if (step == "while") { c = c + count_fors(value_list(value_field(n, "body"))) }
+      }
+    }
+  }
+  return c
 }
 
 // `_diverges`: does the list return/trap on EVERY path? Only the last statement
@@ -665,6 +1171,17 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
       scope = scope_bind(scope, nm, `(local.get $l_${nm})`, "")
     }
   }
+  // `for`-loop cursor triples, in loop-id order (`_for_temps`): the reference
+  // declares them after the `l_<name>` locals and before the base scratch. Ids
+  // run 1..N over the fors in pre-order, exactly the order `emit_stmt` assigns.
+  let nloops = count_fors(body)
+  var fk = 1
+  while (fk <= nloops) {
+    localOrder = localOrder.push(`for_ptr_${num_str(fk)}`)
+    localOrder = localOrder.push(`for_cnt_${num_str(fk)}`)
+    localOrder = localOrder.push(`for_idx_${num_str(fk)}`)
+    fk = fk + 1
+  }
   // the depth-0 scratch pointer, always declared; base name never collides.
   localOrder = localOrder.push("__revl_tmp")
   // deeper scratch pointers a nested allocation minted (`_tmp_extra`): the
@@ -679,7 +1196,7 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
   }
 
   var wempty: Map[Str, Str] = Map.empty()
-  let r = emit_stmts(body, scope, wempty, return_ty)
+  let r = emit_stmts(body, scope, wempty, return_ty, 0)
   var bodyLines = r.lines
   var lastStep = ""
   if (body.length() > 0) { lastStep = value_str(value_field(body[body.length() - 1], "step")) }
@@ -1333,6 +1850,40 @@ test "the value-ABI scratch names and slot widths (slice 3)" {
   assert is_list_type("List[Int]")
   assert !is_list_type("Point")
   assert list_elem("List[List[Str]]") == "List[Str]"
+}
+
+test "slot_load narrows everything but Int back out of its 8-byte slot (slice 4)" {
+  assert slot_load(`(local.get $p)`, "Int") == `(i64.load (local.get $p))`
+  assert slot_load(`(local.get $p)`, "Bool") == `(i32.wrap_i64 (i64.load (local.get $p)))`
+  assert slot_load(`(local.get $p)`, "Str") == `(i32.wrap_i64 (i64.load (local.get $p)))`
+}
+
+test "split_types respects bracket nesting (slice 4)" {
+  let r = split_types("Int, Str")
+  assert r.length() == 2
+  assert r[0] == "Int"
+  assert r[1] == "Str"
+  // a comma inside a nested `[...]` is not a top-level separator.
+  let n = split_types("List[Int], Map[Int, Str]")
+  assert n.length() == 2
+  assert n[0] == "List[Int]"
+  assert n[1] == "Map[Int, Str]"
+}
+
+test "the built-in Opt/Result tag layouts (slice 4)" {
+  // Opt/Result come from the parse path, so a null type table suffices.
+  let opt = tagged_layout(value_field(1, ""), "Opt[Int]")
+  assert opt.length() == 2
+  assert tag_of(opt, "None") == 0
+  assert tag_of(opt, "Some") == 1
+  assert payload_ty_of(opt, "None") == ""
+  assert payload_ty_of(opt, "Some") == "Int"
+  let res = tagged_layout(value_field(1, ""), "Result[Int, Str]")
+  assert tag_of(res, "Ok") == 0
+  assert tag_of(res, "Err") == 1
+  assert payload_ty_of(res, "Err") == "Str"
+  // a plain record type name is not a tagged union.
+  assert !is_tagged(value_field(1, ""), "Point")
 }
 
 // --------------------------------------------------------------- component wrap
