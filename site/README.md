@@ -61,7 +61,11 @@ by a *View component — every one mounted by an `effect ui_mount…(…) undo
 ui_unmount…(…)` pair — and tab clicks route through the composition's `tabs`
 service. Withdraw a node (✕ on the graph) and that part of the page leaves;
 withdrawing a provider cascades its dependents down with it (withdraw
-`TabRouter` and every tab goes). The fixed ◐ dock (bottom-right) is the JS
+`TabRouter` and every tab goes). The page's look is a **versioned
+component**: `StyleV1` mounts the teal build; change both `v1`s to `v2` and
+Swap to ship `StyleV2` — the graph shows the version replace, the page reskins
+violet in place, and withdrawing the style unwinds to the unthemed baseline.
+The fixed ◐ dock (bottom-right) is the JS
 chrome's one foothold: it appears only when part of the page is withdrawn and
 loads the absent components back
 — the DOM changes only when the `ui_select` emission crosses the boundary, so

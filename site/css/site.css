@@ -875,6 +875,19 @@ table.audit .comp { font-family: var(--mono); color: var(--text); }
 .tr-subject { color: var(--text); }
 .tr-config { color: var(--amber); }
 
+/* the shell's versioned skins: StyleV1 mounts data-ui="v1" (the baseline
+   teal build); swap it to StyleV2 / "v2" and the accent system re-derives
+   violet — every teal token in the chrome follows. */
+body[data-ui="v2"] {
+  --teal: #a78bfa;
+  --teal-weak: rgba(167, 139, 250, 0.14);
+  --blue: #c4b5fd;
+}
+body[data-ui="v2"] .editor { background: #0c0817; }
+body[data-ui="v2"] .sys-trace-wrap, body[data-ui="v2"] .op-args { background: #0c0817; }
+body[data-ui="v2"] .btn-primary { color: #1d1240; }
+body[data-ui="v2"] .gutter { border-right-color: rgba(167, 139, 250, 0.25); color: #4a3f6b; }
+
 .meta-dock {
   position: fixed; right: 18px; bottom: 18px; z-index: 90;
   display: flex; align-items: center; gap: 12px;

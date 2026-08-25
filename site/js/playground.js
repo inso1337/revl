@@ -117,7 +117,19 @@ _ph.unmount = _ph_unmount
 _ph.select = _ph_select
 _ph.mount_region = _ph_mount_region
 _ph.unmount_region = _ph_unmount_region
+def _ph_theme(name):
+    import js
+    js.window.__metaHost.theme(name)
+    return 1
+
+def _ph_theme_reset():
+    import js
+    js.window.__metaHost.themeReset()
+    return 0
+
 _ph.editor_source = _ph_editor_source
+_ph.theme = _ph_theme
+_ph.theme_reset = _ph_theme_reset
 sys.modules["playground_host"] = _ph
 
 from pyodide.ffi import can_run_sync, run_sync
@@ -934,6 +946,8 @@ window.__metaHost = {
     updateDock();
   },
   editorSource() { return editor.value; },
+  theme(name) { document.body.dataset.ui = name; },
+  themeReset() { delete document.body.dataset.ui; },
 };
 
 const REGIONS = {
@@ -988,6 +1002,7 @@ function metaRestore() {
     if (el && sel !== "#sys-panel") el.style.display = "";
   }
   dock.hidden = true;
+  delete document.body.dataset.ui;
   selectTab("diagnostics");
 }
 
