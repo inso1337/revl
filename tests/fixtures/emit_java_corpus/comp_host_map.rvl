@@ -1,0 +1,26 @@
+// A host-Map `let-effect` bind (item 238): `let cache = effect Map.new() undo
+// cache.drop()` acquires the generic `Map<V>` host object, its value type `V`
+// learned per-site from the `insert` calls (`value` is an Int param, so
+// `Map<java.lang.Long>`). Exercises `_emit_host_stubs`' Map runtime, the
+// per-site `_map_value_expr_type` inference, and the `Map<V>` field/ctor/local
+// declarations. The trivial `fn` forces ir_version 3.
+fn seed() -> Int {
+  return 0
+}
+
+service Store {
+  fn get(key: Str) -> Opt[Int]
+  emission fn put(key: Str, value: Int)
+}
+
+component Ledger provides store: Store {
+  let cache = effect Map.new() undo cache.drop()
+
+  provide store {
+    fn get(key) = cache.get(key)
+    fn put(key, value) {
+      effect cache.insert(key, value)
+      undo   cache.remove(key)
+    }
+  }
+}

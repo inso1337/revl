@@ -1283,3 +1283,49 @@ way the string pool already rides the scope — the same "structural record, no
 record-update literal" friction the async slice-5 note logged: adding one field to
 `Scope` meant editing every `{ slots:…, types:…, strs:… }` construction site
 (here only `scope_bind` and the `emit_function` seed) by hand.
+
+## java Path B slice 5 — async activation bodies + host Map/Job stubs (`emit_java.rvl`, item 238)
+
+Slices 3/4 emitted the modern component's config/req/effectful corner and realm
+placements, but every body step had to be a `provide`. Slice 5 opens the ACTIVATION
+BODY: a host `let-effect` bind (`let cache = effect Map.new() undo cache.drop()`),
+body-level `effect`/`emit`/`if`/`fail`/`await` steps, the `await`->`AsyncPlugin`
+async coloring (`apply(..) throws Exception`, `_await_join`'s explicit `.await()`)
+and the `fail`->`CordisException` throw — both widening `_core_imports`. It also
+ports `_emit_host_stubs` (the generic `Map<V>` and cancellable `Job` runtime
+classes) and the FR-4 per-site `_map_value_expr_type` value inference that pins
+`Map<java.lang.Long>` from an `insert` argument's surface type. Three corpus docs
+(`comp_await.rvl`, `comp_host_map.rvl`, `comp_fail.rvl`) each emit
+`== backends/java/emit.py`, byte-for-byte; the prior 15 stay green.
+
+### Finding: the async/host-Map surface is byte-REPRODUCIBLE — no item-179 hidden-state hazard
+The STOP-report worry for this slice was `_component_map_values` /
+`_map_value_surface_type`: whether the reference learns a Map's `V` through mutable
+walk state or host identity a second implementation cannot reproduce. It does not.
+`_map_value_expr_type` is a PURE function of the IR node (+ the param-type env the
+provide step builds from the service signature, + the document type table for
+`record`/`field` receivers), and `_map_value_surface_type` is "first concrete
+`insert` candidate in document order" — a deterministic left-to-right fold. The port
+threads `var_types` as a plain `Map[Str,Str]` argument (rebuilt per provide method)
+and reconstructs the surface type with no mutable accumulator. The one genuine
+host-identity construct in this neighbourhood — `_v3_spawn`'s per-spawn realm label
+and `let_pattern`'s `__revl_destructure_{id(node)}` — was avoided by SCOPE, not
+worked around (both deferred). `_await_join`'s awaitable test keys off `node["fn"]
+== "Job.run"` (`_HOST_AWAITABLE`), a value equality, not identity.
+
+### Ergonomics (item 189/195): extra PARAMS beat widening `Ctx`, and reserved DSL keywords cost local renames
+Two threading choices worth logging. (1) The Map inference needs the raw `ir.types`
+table and the function list, which the emitter's `Ctx` record does not carry.
+Rather than widen `Ctx` (the wasm slice-3 note's "edit every `{…}` construction
+site" tax), slice 5 passed `types`/`functions` as explicit params down
+`emit_component`->`emit_component_modern`->`component_map_values`->the inference
+chain — two call sites touched, zero `Ctx` literals disturbed, and the pure v3 path
+never sees them. For a lookup used by ONE feature, a downward param is cheaper than a
+context field. (2) The reference's local names collide with revl's component-DSL
+keywords: `fn`, `service`, and `acquire` are all reserved and CANNOT name a `let`
+binding or parameter, so the ported `let acquire = …` / `let service = …` / `let fn
+= …` each had to be renamed (`acq`/`svc`/`hfn`). The parser error is clear
+(`` `acquire` is a reserved keyword — pick another name ``), but a self-host port
+that mirrors reference identifier names hits it once per keyword-named local; it is
+the same family as the item-203 `$ident` papercut — a name the reference uses freely
+that the revl surface forbids. (Not a bug; logged as porting friction.)

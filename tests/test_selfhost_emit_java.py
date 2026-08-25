@@ -76,18 +76,25 @@ Covered subset (what emits byte-identical):
     ``needs_modern`` and are admitted so long as the body/method shapes stay inside
     the slice-3 subset; async/await/spawn placements are NOT (see below).
 
-Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 5+):
-  * the rest of the MODERN component path — ``let-effect`` host binds and body-level
-    ``effect``/``emit``/``if``/``fail``/``setup`` activation steps, method-body
-    ``let``/``assign``/arrow bindings, async/spawn/timers/routers, and the
-    ``await``->AsyncPlugin / ``fail``->CordisException import widening (a component
-    outside the supported subset surfaces a loud ``<<DEFER-component-nonsimple>>``;
-    isolate/intercept realm PLACEMENT is now covered, but a component that ALSO
-    needs any of these still defers);
-  * the HOST Map/generics surface (``_emit_host_stubs``' ``HashMap<String,V>`` with
-    ``_map_value_expr_type`` per-site inference — a component with a host-``Map``
-    ``let-effect`` bind DEFERS; the plain ``maplit`` and ``Map[K,V]`` type lowering
-    ARE covered);
+  * slice 5 (item 238) — the ASYNC activation body + host Map/Job stubs: a
+    body-level ``let-effect`` host bind (``_emit_host_stubs`` Map runtime, the
+    per-site ``_map_value_expr_type`` value inference pinning ``Map<V>``, and the
+    ``Map<V>`` provider field/ctor/apply-local), body-level
+    ``effect``/``emit``/``if``/``fail``/``await`` activation steps
+    (``_emit_component_stmts``), the ``await``->``AsyncPlugin`` async coloring
+    (``apply(..) throws Exception``, the ``_await_join`` ``.await()``, the ``Job``
+    runtime) and the ``fail``->``CordisException`` throw — both widening
+    ``_core_imports`` (``AsyncPlugin``/``CordisException``). Admitted when every
+    body step is ``provide``/host-``let-effect``/``effect``/``emit``/``await``/
+    ``fail``/``if`` and every provide-method step is ``return``/``effect``/``emit``.
+
+Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 6+):
+  * spawn/instances (``_v3_spawn``/``instance-get``/``RevlSpawnHandle``), timers,
+    routers, and the ``Pool`` host runtime (a ``Pool`` acquisition surfaces a loud
+    ``<<DEFER-host-stub:Pool>>``); ``setup`` blocks on effect steps, method-body
+    ``let``/``assign``/``await``/arrow bindings, and body-level ``while``/``for``/
+    ``let_pattern`` (a component outside the supported subset surfaces a loud
+    ``<<DEFER-component-nonsimple>>``);
   * the stdlib surface (every ``builtin``/``len`` node and
     ``_emit_stdlib_helpers``); the built-in Result surface (``Ok``/``Err`` ctor
     and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``);
@@ -156,6 +163,19 @@ CORPUS = [
                                # the `ctx.intercept(ServiceKey.of(<Svc>.class), <meta>)` line
                                # with `_metadata_lit` rendering a nested map/list/int/bool/
                                # string literal byte-for-byte (service through `requires`)
+    # slice 5 (item 238) — async activation bodies + host Map/Job stubs
+    "comp_await.rvl",       # an `await Job.run(..)` step between two effects: the async
+                            # coloring (`AsyncPlugin` interface, `apply(..) throws Exception`,
+                            # the `AsyncPlugin` import widening), the emitted `Job` runtime
+                            # (`_emit_host_stubs`), and the `_await_join` `.await()`
+    "comp_host_map.rvl",    # a host-Map `let-effect` bind (`Map.new()`/`Map.create()`): the
+                            # `Map<V>` runtime (`_emit_host_stubs`), per-site
+                            # `_map_value_expr_type` value inference (`Map<java.lang.Long>`),
+                            # and the `Map<V>` provider field/ctor/apply-local declarations
+    "comp_fail.rvl",        # an `if (..) { fail ".." }` activation guard: the `fail` ->
+                            # `throw new CordisException(String.valueOf(..))` lowering, the
+                            # `CordisException` import widening, a body-level `if`, and a
+                            # config field with no default (`null`)
 ]
 
 
