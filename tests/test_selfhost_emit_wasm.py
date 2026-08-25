@@ -46,7 +46,18 @@ end to end (``/`` yields Float, refused at a scalar return/binding by name; a
 ``for`` loop (a memory walk); components/services entirely; ``match``/``adt`` over
 tagged cells; arrow values; ``??``; field/index; ``@wasm`` externs; and in-file
 ``test``/lifecycle-test emission.
-"""
+
+Slice 2 (``strlit.rvl``) added the Str-literal ``data``-segment pool, and slice 3
+(``listmem.rvl`` / ``recmem.rvl``) the rest of the *allocation* surface: ``List``
+and record VALUES in linear memory — ``$alloc``, the ``[u32 count][slot…]`` /
+declared-order-field-slot layouts, ``_slot_store`` widening, the nesting-depth
+scratch pointer (``_acquire_tmp`` -> ``__revl_tmp`` / ``__revl_tmp_n1`` …, with
+``_tmp_extra`` reconstructed from the max allocation depth), and the
+``_type_comments`` layout block. Elements/fields are scalars or ASCII ``Str``
+literals; still OUT are non-ASCII ``Str`` content (needs item 221's
+``str_utf8_bytes``), tagged Opt/Result/variant cells (``_make_tagged``), the
+``for`` walk, field/index READS, ``builtin``/``len``, Map, and anonymous records
+reached with no expected type (the ``_anon`` counter path)."""
 
 import importlib.util
 import sys
@@ -66,6 +77,12 @@ CORPUS = [
     "control.rvl",  # if/else, while, let/var/assign, bare-expr drop, assert, divergence
     "strlit.rvl",   # the Str-literal memory ABI: data-segment pooling, _wat_bytes,
                     # first-encounter dedup, 4-byte stride, 8-aligned heap_start, _str_ptr
+    "listmem.rvl",  # slice 3a: the List value ABI — $alloc, [u32 count][slot…]
+                    # layout, _slot_store widening, the nesting-depth scratch
+                    # (_acquire_tmp / __revl_tmp_n*), flat + nested + let/return
+    "recmem.rvl",   # slice 3b: the record value ABI — declared-order 8-byte-slot
+                    # fields, nested record/list fields on deeper scratch, the
+                    # _type_comments layout block, field-set-match let inference
 ]
 
 
