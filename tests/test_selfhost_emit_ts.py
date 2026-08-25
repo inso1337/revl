@@ -31,14 +31,26 @@ Covered subset (what emits byte-identical) — the v3 FUNCTION-ONLY document:
     optional field/call; plus the ``Number(...)``/``BigInt(...)`` widen markers
     and the document-wide ``$revl_match_N`` temp counter.
 
-Deliberately OUT (deferred to a follow-on slice): components/services entirely
-(the ``_component``/``_provide_impl``/``_method_body`` path, service interfaces,
-context augmentation, config interfaces), v3 TYPE declarations
-(``_emit_ts_types``), externs, in-file ``test``/``fault_test``/``lifecycle test``
-emission, async coloring, spawn/instances, realm placements
-(isolate/intercept/routes), the canonical ABI, and ``assert``/``let_pattern``
-statements (implementable but not exercised by the function corpus, so deferred
-to keep the slice byte-VERIFIED rather than byte-guessed).
+Slice 2 (item 204) extends the covered subset to the component-dialect tail of
+``_emit_v3``, byte-identical: service interfaces (scalar signatures), the
+``_context_augmentation`` committed-view block, config interfaces (required +
+defaulted fields), and each component's plugin object — ``_component`` (inject/
+provide wiring, ``apply``/``applyConfigDefaults``, the ``ctx.effect(function* …)``
+body), ``_component_step`` (let-effect/effect/emit+compensate/provide/if/fail),
+and ``_provide_impl``/``_method_body`` (let/assign/return/effect/emit), reusing
+the single ``_expr`` (the component kinds ``req``/``config``/``name`` and the
+component-shaped ``call``).
+
+Deliberately OUT (deferred to a follow-on slice): async coloring across the
+component tail (async service ops/methods, awaited call sites, async-generator
+bodies), the component-body ``await``/``timer`` steps, the component-dialect expr
+kinds ``host``/``format``/``fn``/``adt``/``spawn``/``instance-get``, COMPOSITE
+service/config signature types (List/Opt/Map/Result/fn-type + declared records),
+the v1/v2 ``_emit_v1`` path, v3 TYPE declarations (``_emit_ts_types``), externs,
+in-file ``test``/``fault_test``/``lifecycle test`` emission, spawn/instances,
+realm placements (isolate/intercept/routes), the canonical ABI, and
+``assert``/``let_pattern`` statements — all kept out so the slice stays
+byte-VERIFIED rather than byte-guessed.
 """
 
 import importlib.util
@@ -61,6 +73,12 @@ CORPUS = [
     "records.rvl",     # record literal, functional record update, list literal
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
+    # slice 2 (item 204) — components/services, byte-exact:
+    "services_methods.rvl",       # provide methods (params, ternary, builtin), context aug
+    "services_body.rvl",          # let-effect (bound), if/fail guard, emit/compensate saga
+    "services_config.rvl",        # config interface (required + defaulted), applyConfigDefaults
+    "services_method_block.rvl",  # block-form provide method: let/return, req-as-ctx in method
+    "components_mixed.rvl",       # a pure fn alongside a provider (independent match counters)
 ]
 
 

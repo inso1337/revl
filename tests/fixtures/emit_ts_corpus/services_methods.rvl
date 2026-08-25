@@ -1,0 +1,16 @@
+// Provide-method bodies: multiple methods, params, a plain-`bin` return (no
+// `_revl_i64` in a component body — the i64 helper is still emitted, unused,
+// exactly as the reference gates it), a builtin, and a ternary.
+service Calc {
+  fn add(a: Int, b: Int) -> Int
+  fn name(n: Int) -> Str
+  fn pick(flag: Bool) -> Int
+}
+
+component Adder provides calc: Calc {
+  provide calc {
+    fn add(a, b) = a + b
+    fn name(n) = n.to_str()
+    fn pick(flag) = flag ? 1 : 0
+  }
+}

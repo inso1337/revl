@@ -1,0 +1,20 @@
+// A block-form provide method: a `let` binding a required-service read, a
+// second `let` over a stdlib builtin, and a `return` of a plain-`bin`. Exercises
+// the method-body `let`/`return` steps and req-as-ctx access inside a method.
+service Store {
+  fn get() -> Int
+}
+
+service Api {
+  fn bump(x: Int) -> Str
+}
+
+component Service requires store: Store provides api: Api {
+  provide api {
+    fn bump(x) {
+      let base = store.get()
+      let total = base + x
+      return total.to_str()
+    }
+  }
+}

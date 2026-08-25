@@ -282,3 +282,61 @@ Rust equals `backends/rust/emit.py`'s `emit(ir)` to the last byte — now over t
 vs `unreachable!()`, built-in Some/Ok coexisting). Excluded, by construction:
 every service/component fixture (would fire the deferred bridge), `record_update`
 (reference raises), float interpolation, stdlib builtins, and `let_pattern`.
+
+## emit_ts.rvl slice 2 (item 204): components/services
+
+### stdlib-kit validation (positive) — `value_keys` closes the item-185 gap
+The component tail keys three IR sections BY NAME (`services` = name->service,
+a component's `requires` = local->service, `provides` = key->service) and the
+service-interface loop, the `inject` array, and `_context_augmentation` all
+iterate those keys. `stdlib/value.rvl`'s `value_keys` (item 180) navigated every
+one in PURE revl with ZERO new bridges — the exact private `record_keys` `@py`
+that emit_py.rvl (item 185) had to hand-roll before `value_keys` existed. This
+is the positive datapoint item 189 wants: the kit is now adequate for the
+name-keyed IR sections; a Path B component emitter needs no private key bridge.
+
+### Near-miss: hand-rolled a `contains_str` the kit already had (`list_contains`)
+I wrote a 5-line `contains_str(xs, target)` for the first-occurrence dedup in
+`_context_augmentation` before noticing `stdlib/list.rvl::list_contains` (items
+189/193/194) does exactly it. Symptom: the kit's membership predicate is easy to
+miss because the emitter already imports only `value.rvl`, so nothing prompts a
+second `use`. Fix applied: deleted the local, imported `list_contains`. Informs
+item 189 — the kit is complete enough that the friction is DISCOVERY, not a gap;
+a one-line "reach for stdlib/list.rvl before hand-rolling List predicates" in the
+self-host emitter guide would have saved the near-miss. LOW.
+
+### Friction: no mutable emitter state -> manual counter threading tax (LOW)
+The reference (`backends/typescript/emit.py`) carries the document-wide match-temp
+counter as `ctx._counter` (a mutable one-cell list) and mutates it in place, so a
+body renderer returns only `list[str]`. revl has no method/closure state, so the
+counter must be THREADED: every body renderer here (`method_body`,
+`provide_impl`, `component_step`, `component_lines`) returns `{lines, counter}`
+and every call site rebinds `c = r.counter`. Repro: any recursive line-producing
+helper that may render a `match` — the counter has to ride the return value.
+Not a bug (it is the pure-functional cost the self-host pays for the reference's
+`ctx._counter`), but it is the single biggest source of mechanical plumbing in
+the component tail and the easiest place to drop a `c = r.counter` and desync
+silently. Worth a note in the emitter guide: "a body renderer returns StmtOut
+(lines + counter); thread the counter through every child call." (Not fixed —
+it is inherent; flagged for the guide only.)
+
+### ts-component-specific (positive): one `_expr`, no dialect fork needed
+The reference's single-renderer discipline (`_expr` covers both the 2.0 and the
+component dialects, dispatching the `call` kind on SHAPE not kind) ported cleanly:
+adding `req`/`config`/`name` as three scalar branches in `expr_inner` plus a
+`value_has(node, "target")` check in `render_call` was the WHOLE component-expr
+surface. The method-body plain-`bin` case (`a + b` -> `(a + b)`, NO `revlI64`,
+vs a top-level fn's `revlI64(n + n)`) needed no special-casing — it falls out of
+the IR omitting `operands` on component-body arithmetic, and the existing
+`render_bin` already keys on `operands`. `value_has` (value.rvl) was the one new
+accessor pulled in, and it read naturally.
+
+### How it is checked (slice 2)
+`tests/fixtures/emit_ts_corpus/`: `services_methods` (provide methods, params,
+ternary, builtin, context aug), `services_body` (bound let-effect, if/fail,
+emit/compensate, multi-require inject), `services_config` (config interface +
+`applyConfigDefaults`), `services_method_block` (block provide method: let/return,
+req-as-ctx), `components_mixed` (a pure fn beside a provider — independent match
+counters, i64-helper gating). Each `emit_src(ir) == backends/typescript/emit.py
+emit(ir)` byte-for-byte. Deferred features (async, timer/await, spawn, realms,
+v1/v2, composite signature types) are EXCLUDED from the corpus, not approximated.
