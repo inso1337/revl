@@ -1,0 +1,28 @@
+// A second, wider service/component fixture: two services and one component
+// providing both, exercising the bridge's i64/bool/void scalar marshalling and
+// the multi-service/multi-provision routing tables — all still inside the
+// covered subset (scalar params/returns, pure providers, no config/req/isolate).
+fn seed() -> Int {
+  return 1
+}
+
+service Counter {
+  fn bump(n: Int) -> Int
+  fn reset()
+  fn ready(flag: Bool) -> Bool
+}
+
+service Namer {
+  fn label(id: Int) -> Str
+}
+
+component Registry provides count: Counter, name: Namer {
+  provide count {
+    fn bump(n) = n
+    fn reset() { }
+    fn ready(flag) = flag
+  }
+  provide name {
+    fn label(id) = "n"
+  }
+}
