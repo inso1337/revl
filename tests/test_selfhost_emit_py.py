@@ -33,18 +33,25 @@ Covered subset (what emits byte-identical):
     with saga ``compensate``); timers (``every``/``after`` ->
     ``schedule_*``/``.cancel()``); ``provide`` classes with sync methods; and
     the component-body expression dispatcher ``cexpr`` (``req``/``name``/method
-    ``call`` and the un-specialized component arithmetic).
+    ``call`` and the un-specialized component arithmetic);
+  * the MODULE DECLARATION surface (item 192, slice 3): type declarations
+    (``_emit_types`` — record ``@dataclass`` + sealed-variant classes, the
+    forward-reference annotation quoting, and the ``_py_type`` surface->python
+    map incl function types -> ``Callable``); the built-in Result (``Ok``/``Err``)
+    classes with user-case shadowing; the canonical Float->Str (``_revl_ftoa``)
+    helper gated by a float ``${…}`` interpolation; and host roots
+    (``Map``/``Pool``/``Job``) in fn/test bodies pulled into the sorted
+    ``from runtime import``.
 
-Deliberately OUT (excluded from the corpus, deferred to Path B slice 3+):
-type declarations (``_emit_types``), externs, in-file ``test``/``fault_test`` and
-``lifecycle test`` emission, the built-in Result classes, the canonical
-Float->Str (``_revl_ftoa``) helper, host roots (``Map``/``Pool``/``Job``),
-component ``config`` (``ConfigSchema``), async coloring (async methods / ``await``
-bodies), method-body ``effect``/``let-effect``, realm placements
-(``isolate``/``intercept``/``routes``), spawn/instances, and the canonical ABI.
-``let_pattern`` (destructuring) is a permanent exclusion for a byte oracle: the
-reference names its temporary from ``id(node)``, which a second implementation
-cannot reproduce.
+Deliberately OUT (excluded from the corpus, deferred to Path B slice 4+):
+externs (``_emit_externs`` — a faithful ``textwrap.dedent``/``splitlines`` of the
+verbatim ``@py`` body, a host-string dependency), in-file ``test``/``fault_test``
+and ``lifecycle test`` emission, component ``config`` (``ConfigSchema``), async
+coloring (async methods / ``await`` bodies / the await-seed), method-body
+``effect``/``let-effect``, realm placements (``isolate``/``intercept``/``routes``),
+spawn/instances, and the canonical ABI. ``let_pattern`` (destructuring) is a
+permanent exclusion for a byte oracle: the reference names its temporary from
+``id(node)``, which a second implementation cannot reproduce.
 """
 
 import importlib.util
@@ -74,6 +81,11 @@ CORPUS = [
     "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses
     "services_methods.rvl",  # provide methods: params, un-specialized bin, builtin, ternary
     "services_body.rvl",     # let-effect, if-guard + fail, saga emit ... compensate
+    # module-level declaration surface (slice 3, item 192)
+    "types.rvl",       # `_emit_types`: record @dataclass + variant classes, forward-ref quoting, `_py_type` (incl fn types)
+    "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
+    "floats.rvl",      # `_revl_ftoa` canonical Float->Str, gated by a float `${…}` interpolation
+    "hostroots.rvl",   # host roots (Map/Pool/Job) in a fn body -> the sorted `from runtime import`
 ]
 
 

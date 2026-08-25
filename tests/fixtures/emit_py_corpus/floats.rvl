@@ -1,0 +1,7 @@
+// Canonical Float -> Str (slice 3, `_revl_ftoa`): a `${…}` template over a
+// provably-Float expression (a `/` division and a float literal) sets the
+// `_uses_float_interp` gate, so the ECMAScript-shortest-round-trip helper is
+// emitted and the interpolation renders each float through `_revl_ftoa`.
+fn fmt(a: Float, b: Float) -> Str {
+  return `ratio ${a / b} end ${2.5}`
+}

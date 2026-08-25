@@ -1,0 +1,13 @@
+// Type declarations (slice 3, `_emit_types`): a record with primitive fields; a
+// record whose fields exercise `List[..]`, a FORWARD reference (`Opt[Found]`, to
+// a type declared later -> the annotation is quoted), and `Map[..]` -> `dict`; a
+// record with a function-typed field (`(Int) -> Str` -> `Callable`); and a
+// variant with both a payload case (`Hit(Row)`) and a no-payload case
+// (`Missing`). `origin` keeps a trailing module fn so the section order holds.
+type Row = { id: Int, name: Str }
+type Nested = { items: List[Row], next: Opt[Found], cache: Map[Int, Row] }
+type Handler = { name: Str, run: (Int) -> Str }
+type Found = Hit(Row) | Missing
+fn origin() -> Row {
+  return { id: 0, name: "o" }
+}
