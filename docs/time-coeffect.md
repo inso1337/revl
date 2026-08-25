@@ -175,10 +175,55 @@ reference tiers by `tests/test_time_coeffect.py`.
 `advance` is a *lifecycle* statement only — legal inside a `lifecycle test`
 body, an ordinary identifier everywhere else, exactly like `load`/`unload`/`call`.
 
+## Async timer bodies — the in-flight window (item 170)
+
+Item 57's timer bodies could reach a required service only **synchronously**
+(G4): a firing had no async colour, so a scheduled automation that fires an
+`emission async fn` — the harness's `every 60s { emit agent.run_in("cron",
+brief) }` — was unexpressible. Item 170 gives a timer body the same `Async[T]`
+in-flight window (item 106) an async provide method gets.
+
+**Frontend (admission + colouring).** A timer body that reaches an async op —
+a req-target async service operation (`emit agent.run_in(...)`), an async
+extern, or a phase-2 colored fn — is **ADMITTED and coloured async** rather than
+refused. `_async_reached_outside_provide` now prunes `timer` steps exactly as it
+prunes `provide` steps (both get their own in-flight window), and
+`_lower_timer_step` stamps `"async": true` on the lowered `timer` step when
+`_timer_body_reaches_async` fires (the same req-async-op + async-callable reach
+`_arrow_reaches_async` uses). A sync timer body carries no `async` key and is
+byte-identical to before.
+
+**Runtime + py emit (await on tick, cancel in flight).** A firing is a
+deterministic timeline step driven by the clock coeffect, and — like an async
+provide method — its async work runs in an in-flight window the harness drains.
+The py emitter renders an async-coloured timer body so each async emission is
+**spawned as a tracked `asyncio` task** (`_revl_asyncio.ensure_future(...)`,
+added to a per-timer in-flight set) rather than run inline: the firing returns
+immediately, and the lifecycle harness's `_revl_settle` after a clock `advance`
+awaits the in-flight work to quiescence (`docs/time-coeffect.md §advance`
+already awaits it). The timer's derived inverse is widened accordingly — it
+cancels the schedule **and** every still-in-flight task — so unload cancels the
+pending timer plus any in-flight async work, leaving **no orphaned in-flight**
+(R4/A8): the sync path's residue-free teardown extended to the async case. The
+`asyncio` import appears only when an async timer (or a lifecycle test) needs it,
+so a sync-timer document is unchanged. `examples/async_timer.rvl` runs the
+every/after async timelines end-to-end on cordis-py.
+
+This slice lands the **py reference tier** (frontend admission + colouring, and
+the py emit + runtime contract). The **ts/rust/go** tiers already carry a timer
+scheduler and an effect-ledger cancel inverse, but their timer emit renders a
+*sync* firing closure; giving each an awaitable firing body + in-flight
+cancellation (mirroring this py contract on `backends/{typescript,rust,go}/
+emit.py` and each tier's runtime scheduler) is a documented follow-on. **wasm**
+still refuses timers honestly (below), so the async case is moot there until it
+lowers timers at all.
+
 ## Scope (first slice)
 
 The landed slice keeps a timer body to **`emit` statements**: the audited reach a
-timer needs is exactly its emissions, and this keeps the semantics crisp. Richer
+timer needs is exactly its emissions, and this keeps the semantics crisp. Those
+emissions may now be **async** (item 170, above) — a timer body reaching an async
+op is coloured async and awaited within its in-flight window. Richer
 firing bodies — pure `let` bindings, `if` guards, nested effect acquisitions,
 timers that arm timers, and `compensate` on a firing — are a documented
 follow-on. A timer is an acquisition, so like every acquisition it must precede
@@ -231,6 +276,8 @@ contract in this document is the specification it will implement.
 | syntax → `TimerStmt` | `src/revl/parser.py` |
 | syntax → `AdvanceStmt` (item 102) | `src/revl/parser.py` (`lifecycle_stmt`, `_advance_duration_ms`) |
 | lowering → `timer` step, v3 gate, G4 reach | `src/revl/lower.py` |
+| async colouring of a timer body (item 170) | `src/revl/lower.py` (`_lower_timer_step`, `_timer_body_reaches_async`, `_async_reached_outside_provide` prunes `timer`) |
+| py async timer emit (spawn + tracked in-flight cancel) | `backends/python/emit.py` (`_timer`, the `import asyncio` gate) |
 | lowering → `advance` step (item 102) | `src/revl/lower.py` (`_lower_lifecycle_body`) |
 | clock coeffect + timer scheduler | `backends/python/runtime.py`, `backends/typescript/runtime.ts` |
 | py/ts emitters (timer + `advance`) | `backends/python/emit.py`, `backends/typescript/emit.py` |
@@ -240,4 +287,4 @@ contract in this document is the specification it will implement.
 | rust `advance` step → `revl_clock_advance(ms)` (item 112 rust half; drives item 99's Clock, clock reset at test start) | `backends/rust/emit.py` (`_emit_v3_lifecycle_tests`) |
 | honest `advance`-step refusal on wasm (py/ts/go/rust drive it; wasm has no live-composition lifecycle machinery yet, so it refuses the whole lifecycle test) | `backends/wasm/emit.py` lifecycle dispatch |
 | exit tests | `tests/test_time_coeffect.py`, `backends/typescript/tests/time_coeffect.test.ts` |
-| examples | `examples/heartbeat.rvl` (timers), `examples/lifecycle_timer.rvl` (`advance`) |
+| examples | `examples/heartbeat.rvl` (timers), `examples/lifecycle_timer.rvl` (`advance`), `examples/async_timer.rvl` (async timer body, item 170) |

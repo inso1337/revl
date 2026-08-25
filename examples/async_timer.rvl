@@ -1,0 +1,84 @@
+// Async timer bodies under `revl test` (docs/time-coeffect.md, roadmap item 170).
+//
+// Items 57 + 102 made a timer a *revertible schedule* whose firing is a
+// deterministic, assertable timeline step — but a timer body could only reach a
+// REQUIRED service *synchronously* (G4). A scheduled automation that fires an
+// `emission async fn` — the harness's `every 60s { emit agent.run_in(...) }` —
+// was unexpressible, because a timer body had no async colour.
+//
+// Item 170 gives the timer body the same `Async[T]` in-flight window (item 106)
+// an async provide method gets: a timer body reaching an async op is ADMITTED
+// and coloured async, its firing is awaited within the window, and unload
+// CANCELS the pending timer plus any in-flight async work — residue-free
+// (R4/A8). `AsyncCounter.tick` below is an `emission async fn` (it awaits before
+// recording), reached from the two timer bodies exactly as the scheduled agent
+// run reaches `agent.run_in`.
+
+service Counter {
+  fn count() -> Int
+  emission async fn tick()
+}
+
+component AsyncCounter provides counter: Counter {
+  let store = effect Map.new() undo store.drop()
+
+  provide counter {
+    fn count() = store.size()
+    async fn tick() {
+      // an `async fn` provide method opens the in-flight window; record one
+      // distinct entry per firing so `count()` (== `store.size()`) reads back
+      // exactly how many times the async body ran and was awaited.
+      let key = `tick-${store.size()}`
+      effect store.insert(key, "fired")
+      undo   store.remove(key)
+    }
+  }
+}
+
+component AsyncHeartbeat requires counter: Counter {
+  // the scheduled-async-run shape: a timer body reaching an `emission async fn`
+  // through a required key. Refused before item 170; admitted + coloured async now.
+  every 10s { emit counter.tick() }
+}
+
+component AsyncWarmup requires counter: Counter {
+  after 50s { emit counter.tick() }
+}
+
+// `every`: the async body fires on each advanced tick and is awaited within the
+// in-flight window, and cancellation on unload is residue-free — a later advance
+// produces no orphaned firing and no orphaned in-flight async work.
+lifecycle test "an async every-timer fires and is awaited on each tick" {
+  load AsyncCounter
+  load AsyncHeartbeat
+  let before = call counter.count()
+  assert before == 0                 // the clock never moves on its own
+  advance 35s
+  let ticks = call counter.count()
+  assert ticks == 3                  // fired + awaited at 10s, 20s, 30s
+  unload AsyncHeartbeat              // cancellation is the schedule's inverse
+  advance 100s
+  let settled = call counter.count()
+  assert settled == 3                // no orphaned firing after teardown
+  unload AsyncCounter
+  assert no_residue
+}
+
+// `after`: a one-shot async body fires exactly once when its delay elapses,
+// awaited, then spent — advancing further never fires it again.
+lifecycle test "an async after-timer fires once when its delay elapses" {
+  load AsyncCounter
+  load AsyncWarmup
+  advance 30s
+  let early = call counter.count()
+  assert early == 0                  // 30s < 50s — not yet
+  advance 30s
+  let fired = call counter.count()
+  assert fired == 1                  // crossed 50s — fired once, awaited
+  advance 100s
+  let spent = call counter.count()
+  assert spent == 1                  // one-shot is spent — never fires again
+  unload AsyncWarmup
+  unload AsyncCounter
+  assert no_residue
+}

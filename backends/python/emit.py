@@ -935,25 +935,71 @@ class _ComponentEmitter:
         cancels the timer (no orphaned interval; residue-free teardown).  The
         clock does not advance on its own: `revl test`/replay drives it, which
         is what makes a firing a deterministic timeline step rather than a
-        wall-clock race (docs/time-coeffect.md)."""
+        wall-clock race (docs/time-coeffect.md).
+
+        item 170: a timer body the checker coloured `async` (it reaches an
+        async op — a req-target async service operation, an async extern, or a
+        colored fn) fires into an `Async[T]` in-flight window (item 106). Each
+        async emission is *spawned* as a tracked asyncio task on the running
+        loop rather than run inline: the firing returns immediately, and the
+        harness's `_revl_settle` after a clock advance drains the in-flight work
+        to quiescence (docs/time-coeffect.md §advance already awaits it). The
+        inverse cancels the schedule AND every still-in-flight task, so unload
+        leaves no orphaned in-flight async work — the sync path's residue-free
+        teardown extended to the async case (R4/A8). A sync timer body carries
+        no `async` key and emits byte-identically to before."""
         mode = step.get("mode")
         schedule = "schedule_every" if mode == "every" else "schedule_after"
         self.uses.add(schedule)
         self._counter += 1
         fn = f"_timer_{self._counter}"
         handle = f"{fn}_h"
-        out.add(indent, f"def {fn}():")
+        interval = int(step.get("interval_ms"))
         emissions = step.get("body") or []
-        if not emissions:  # pragma: no cover — the parser rejects an empty body
-            out.add(indent + 1, "pass")
         for emission in emissions:
             if emission.get("step") != "emit":  # pragma: no cover — lowerer invariant
                 raise EmitError(f"{where}: a timer body carries emissions only, "
                                 f"found {emission.get('step')!r}")
-            out.add(indent + 1, self._expr(emission.get("expr"), where))
-        interval = int(step.get("interval_ms"))
+
+        if not step.get("async"):
+            out.add(indent, f"def {fn}():")
+            if not emissions:  # pragma: no cover — the parser rejects an empty body
+                out.add(indent + 1, "pass")
+            for emission in emissions:
+                out.add(indent + 1, self._expr(emission.get("expr"), where))
+            out.add(indent, f"{handle} = {_runtime_ref(schedule)}({interval}, {fn})")
+            out.add(indent, f"yield lambda: {handle}.cancel()")
+            return
+
+        # async in-flight window (item 170): the firing spawns each async
+        # emission as a tracked task, and the inverse cancels the schedule plus
+        # any task still in flight — so a torn-down timer leaves no orphaned
+        # in-flight async work (R4/A8).
+        self.uses.add("__asyncio__")
+        inflight = f"{fn}_inflight"
+        out.add(indent, f"{inflight} = set()")
+        out.add(indent, f"def {fn}():")
+        if not emissions:  # pragma: no cover — the parser rejects an empty body
+            out.add(indent + 1, "pass")
+        for emission in emissions:
+            expr = emission.get("expr")
+            rendered = self._expr(expr, where)
+            if _py_reaches_coroutine(expr, self.requires):
+                # spawn the suspension into the in-flight window and track it so
+                # the inverse can cancel it; a done task drops itself from the set
+                out.add(indent + 1, f"_revl_task = _revl_asyncio.ensure_future({rendered})")
+                out.add(indent + 1, f"{inflight}.add(_revl_task)")
+                out.add(indent + 1, f"_revl_task.add_done_callback({inflight}.discard)")
+            else:
+                # a sync emission in a mixed body still runs inline
+                out.add(indent + 1, rendered)
         out.add(indent, f"{handle} = {_runtime_ref(schedule)}({interval}, {fn})")
-        out.add(indent, f"yield lambda: {handle}.cancel()")
+        cancel = f"{fn}_cancel"
+        out.add(indent, f"def {cancel}():")
+        out.add(indent + 1, f"{handle}.cancel()")
+        out.add(indent + 1, f"for _revl_task in list({inflight}):")
+        out.add(indent + 2, "_revl_task.cancel()")
+        out.add(indent, f"yield {cancel}")
 
     def _provide(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         name = _ident(step.get("name"), f"{where}: provide key")
@@ -2090,8 +2136,14 @@ def emit(ir: dict) -> str:
         raise EmitError("duplicate component names")
 
     lifecycle = [test for test in tests if test.get("lifecycle")]
+    # item 170: an async-coloured timer body spawns its firing into an asyncio
+    # in-flight window, so its emitter marks `__asyncio__`. That is a gate for
+    # the `import asyncio as _revl_asyncio` line, not a runtime import — strip it
+    # from the `from runtime import …` set. A document with no async timer and
+    # no lifecycle test is byte-identical to before (no asyncio import).
+    uses_async_timer = any("__asyncio__" in emitter.uses for emitter in emitters)
     uses = sorted(
-        set().union(*(emitter.uses for emitter in emitters))
+        (set().union(*(emitter.uses for emitter in emitters)) - {"__asyncio__"})
         | _find_host_roots(functions)
         | _find_host_roots(tests)
         # §7.1: the lifecycle driver loads components through the realm-aware
@@ -2133,8 +2185,14 @@ def emit(ir: dict) -> str:
         )
         out.add(0, f"from runtime import {imported}")
         out.add(0)
-    if lifecycle:
+    if lifecycle or uses_async_timer:
+        # the lifecycle driver runs under `asyncio.run`, and (item 170) an
+        # async-coloured timer body spawns its firing onto the running loop —
+        # either needs asyncio in scope.
         out.add(0, "import asyncio as _revl_asyncio")
+        if uses_async_timer and not lifecycle:
+            out.add(0)
+    if lifecycle:
         # delivery semantics (item 44): {key: {idempotent method names}} — the
         # checked retry-eligibility the `_revl_call` dispatch consults
         rendered_idem = "{" + ", ".join(
