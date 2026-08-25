@@ -1729,3 +1729,198 @@ fn host_map_roundtrips_int_and_list_values() {
     result = _cargo("test", tmp_path)
     assert result.returncode == 0, result.stderr + result.stdout
     assert "1 passed" in result.stdout
+
+
+# ===========================================================================
+# Rust-tier coverage gaps found by the item-266 self-host benchmark: the three
+# reasons the rust emitter raised on a self-host stage before cargo ever ran.
+# Items 267 (char-class builtins), 268 (anonymous-record struct inference for a
+# non-unique field-set), 269 (a record field colliding with an emitter-reserved
+# name). docs/v2.0-roadmap.md items 267/268/269.
+
+
+# --- 267: the item-233 char-class builtins on the rust tier ----------------
+
+def test_char_class_builtins_lower_to_native_ascii_tests():
+    """`is_digit`/`is_alpha`/`is_alnum`/`is_space` lower to the same native
+    forms the python backend uses (backends/python/emit.py): a `&str` view
+    bound once (`_rc`) and an ASCII code-point-order comparison. No revl-fn call
+    and no `raise EmitError('unknown builtin method ...')` fall-through."""
+    src = emit.emit(compile_source(
+        "pub fn d(c: Str) -> Bool { return c.is_digit() }\n"
+        "pub fn a(c: Str) -> Bool { return c.is_alpha() }\n"
+        "pub fn n(c: Str) -> Bool { return c.is_alnum() }\n"
+        "pub fn s(c: Str) -> Bool { return c.is_space() }\n"
+    ))
+    assert '{ let _rc: &str = &c; "0" <= _rc && _rc <= "9" }' in src
+    assert ('{ let _rc: &str = &c; ("a" <= _rc && _rc <= "z") '
+            '|| ("A" <= _rc && _rc <= "Z") }') in src
+    assert ('{ let _rc: &str = &c; ("0" <= _rc && _rc <= "9") '
+            '|| ("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") }') in src
+    # is_space keeps the tab/LF/CR forms a revl string literal cannot spell
+    # directly, so pin them here rather than at runtime.
+    assert ('{ let _rc: &str = &c; _rc == " " || _rc == "\\t" '
+            '|| _rc == "\\n" || _rc == "\\r" }') in src
+
+
+@needs_cargo
+def test_cargo_test_runs_char_class_semantics(tmp_path):
+    """Not just compiles: the emitted `#[test]` executes the char-class
+    semantics: the digit/alpha/alnum ranges, and that an empty receiver is
+    total (false, never a fault), matching the python lowering."""
+    ir = compile_source(
+        "pub fn d(c: Str) -> Bool { return c.is_digit() }\n"
+        "pub fn a(c: Str) -> Bool { return c.is_alpha() }\n"
+        "pub fn n(c: Str) -> Bool { return c.is_alnum() }\n"
+        "pub fn s(c: Str) -> Bool { return c.is_space() }\n"
+        "test \"char classes mirror python\" {\n"
+        "  assert d(\"5\") assert !d(\"x\") assert !d(\"\")\n"
+        "  assert a(\"q\") assert a(\"Z\") assert !a(\"5\") assert !a(\"\")\n"
+        "  assert n(\"5\") assert n(\"z\") assert n(\"A\") assert !n(\"-\")\n"
+        "  assert s(\" \") assert !s(\"x\") assert !s(\"\")\n"
+        "}\n"
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "1 passed" in result.stdout
+
+
+# --- 268: anonymous record literal -> named struct, non-unique field-set ----
+
+def test_ambiguous_record_literal_uses_return_type_context():
+    """Two structurally-identical records share the field-set `{e, i}`, so it
+    is not unique. A `return` of an anonymous `{i, e}` literal names the struct
+    the enclosing fn is declared to return, not the raise it used to hit."""
+    src = emit.emit(compile_source(
+        "type PR = { i: Int, e: Int }\n"
+        "type AtExpr = { i: Int, e: Int }\n"
+        "pub fn as_pr() -> PR { return { i: 0, e: 1 } }\n"
+        "pub fn as_at() -> AtExpr { return { i: 2, e: 3 } }\n"
+    ))
+    assert "return PR { i: 0i64, e: 1i64 };" in src
+    assert "return AtExpr { i: 2i64, e: 3i64 };" in src
+
+
+def test_ambiguous_record_literal_uses_assigned_var_type_context():
+    """An `assign` to a typed local is target-type context too: the record
+    literal names the local's declared struct."""
+    src = emit.emit(compile_source(
+        "type PR = { i: Int, e: Int }\n"
+        "type AtExpr = { i: Int, e: Int }\n"
+        "fn seed() -> AtExpr { return { i: 0, e: 0 } }\n"
+        "pub fn go() -> AtExpr { var acc = seed() acc = { i: 2, e: 3 } return acc }\n"
+    ))
+    assert "acc = AtExpr { i: 2i64, e: 3i64 };" in src
+
+
+def test_ambiguous_record_literal_uses_nested_field_type_context():
+    """A field VALUE that is itself an anonymous ambiguous record resolves to
+    the type the enclosing struct declares for that field."""
+    src = emit.emit(compile_source(
+        "type PR = { i: Int, e: Int }\n"
+        "type AtExpr = { i: Int, e: Int }\n"
+        "type Wrap = { inner: PR, tag: Int }\n"
+        "pub fn w() -> Wrap { return { inner: { i: 1, e: 2 }, tag: 9 } }\n"
+    ))
+    assert "inner: PR { i: 1i64, e: 2i64 }" in src
+
+
+def test_identical_shape_records_pick_deterministically_without_context():
+    """With no target-type context but structurally-identical candidates, the
+    literal still emits: a stable pick (lexicographically first) so the literal
+    and any destructuring name the same interchangeable struct."""
+    src = emit.emit(compile_source(
+        "type Beta = { i: Int, e: Int }\n"
+        "type Alpha = { i: Int, e: Int }\n"
+        "pub fn free() -> Int { let x = { i: 7, e: 8 } return x.i }\n"
+    ))
+    assert "Alpha { i: 7i64, e: 8i64 }" in src  # Alpha < Beta
+
+
+def test_differently_shaped_records_without_context_raise_clearly():
+    """The one case the emitter still refuses: a non-unique field-set whose
+    candidates differ in shape and no target type is in scope, where an
+    ill-typed struct would be the only alternative, so it names the ambiguity
+    instead."""
+    with pytest.raises(emit.EmitError, match="differ in shape"):
+        emit.emit(compile_source(
+            "type A = { xs: List[Int], ok: Bool }\n"
+            "type B = { xs: List[Str], ok: Bool }\n"
+            "pub fn free() -> Int { let x = { xs: [], ok: true } return 0 }\n"
+        ))
+
+
+# --- 269: a record field named `ctx` (an emitter-reserved name) -------------
+
+def test_reserved_name_is_escaped_not_refused():
+    """`_mangle` escapes an emitter-reserved name the A3 way (append `_`) and
+    `_ident` no longer raises on it. The reservation still holds because the
+    emitter's own scaffolding emits the bare `ctx` token, which `ctx_` clears."""
+    assert emit._mangle("ctx") == "ctx_"
+    assert emit._mangle("config") == "config_"
+    assert emit._ident("ctx", "record field") == "ctx_"
+
+
+def test_user_ctx_field_and_local_emit_consistently():
+    """selfhost/checker.rvl has both a record FIELD `ctx` and a local `ctx`;
+    both escape to `ctx_` at the declaration and every use site, so the emitted
+    crate is valid rust rather than a refused program. The CamelCase type name
+    `Ctx` is untouched (not a reserved token)."""
+    src = emit.emit(compile_source(
+        "type Ctx = { n: Int }\n"
+        "type Ck = { ctx: Ctx, msg: Str }\n"
+        "pub fn mk(x: Ctx) -> Ck { return { ctx: x, msg: \"\" } }\n"
+        "pub fn read(ck: Ck) -> Ctx { return ck.ctx }\n"
+        "pub fn build() -> Ck { let ctx = mk_ctx() return { ctx: ctx, msg: \"m\" } }\n"
+        "fn mk_ctx() -> Ctx { return { n: 0 } }\n"
+    ))
+    assert "    ctx_: Ctx," in src                       # struct field decl
+    assert "return Ck { ctx_: x.clone(), msg:" in src    # construction
+    assert "return ck.ctx_;" in src                      # field access
+    assert "let ctx_ = mk_ctx();" in src                 # local binding decl
+    assert "Ck { ctx_: ctx_.clone()" in src              # local used as field value
+    assert "pub struct Ctx {" in src                     # type name untouched
+
+
+@needs_cargo
+def test_cargo_check_compiles_267_268_269_together(tmp_path):
+    """All three constructs in one crate compile against real cordis-rs: the
+    char-class builtins, an ambiguous-field-set record resolved by context, and
+    a `ctx` record field/local. This is the emit-to-cargo proof for the new
+    lowerings (the full self-host stages additionally exercise an unrelated
+    by-value-clone gap and are covered at the emit level below)."""
+    src = emit.emit(compile_source(
+        "type PR = { i: Int, e: Int }\n"
+        "type AtExpr = { i: Int, e: Int }\n"
+        "type Ctx = { n: Int }\n"
+        "type Ck = { ctx: Ctx, msg: Str }\n"
+        "pub fn as_pr() -> PR { return { i: 0, e: 1 } }\n"
+        "pub fn as_at() -> AtExpr { return { i: 2, e: 3 } }\n"
+        "pub fn mk(x: Ctx) -> Ck { return { ctx: x, msg: \"\" } }\n"
+        "pub fn read(ck: Ck) -> Ctx { return ck.ctx }\n"
+        "pub fn d(c: Str) -> Bool { return c.is_digit() }\n"
+        "pub fn s(c: Str) -> Bool { return c.is_space() }\n"
+    ))
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode == 0, result.stderr
+
+
+# --- the item-266 proof: every self-host stage emits to rust (no EmitError) --
+
+def test_selfhost_stages_emit_to_rust_without_error():
+    """The item-266 blocker each of 267/268/269 removed: the lexer, parser,
+    checker and lower stages could not be emitted to rust AT ALL: each raised
+    an EmitError on the hot path before cargo ever ran. Now every stage emits,
+    and the constructs that used to raise are present in the output. (emit_py
+    stays out: its CPython-only `py_repr` extern is non-portable by design.)"""
+    lexer = emit.emit(compile_files([str(ROOT / "selfhost" / "lexer.rvl")]))
+    assert "{ let _rc: &str = &" in lexer             # 267 char-class lowering
+    # 268: the parser (`{e, i}`) and lower (`{i, ok, xs}`) non-unique field-sets
+    # used to raise; both now emit a complete crate.
+    assert emit.emit(compile_files([str(ROOT / "selfhost" / "parser.rvl")]))
+    assert emit.emit(compile_files([str(ROOT / "selfhost" / "lower.rvl")]))
+    checker = emit.emit(compile_files([str(ROOT / "selfhost" / "checker.rvl")]))
+    assert "ctx_:" in checker                          # 269 reserved-field escape

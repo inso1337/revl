@@ -334,10 +334,17 @@ def _mangle(name: str) -> str:
     until the name is free. It is a pure function of the name, so the
     declaration site and every use site agree without a table. A non-reserved
     name is returned unchanged, so no existing program — none of which can name
-    a Rust keyword, those crash today — changes its emitted output. This is
-    TARGET keywords only; the host roots take the `Pool::`/`Map::` path and the
-    emitter scaffolding stays rejected below."""
-    while name in _RUST_RESERVED:
+    a Rust keyword, those crash today — changes its emitted output.
+
+    The same rename also covers `_EMITTER_RESERVED` (`ctx`/`config`/`root`/
+    `plugin`, roadmap item 269): those names are reserved because the emitter's
+    OWN scaffolding emits them as bare tokens (`|ctx, config|`, `self.ctx`), but
+    a user record field or local of the same name is legitimate (selfhost/
+    checker.rvl has a `ctx` field and a `ctx` local). Escaping the user name to
+    `ctx_`, which the emitter never emits raw, moves it clear of the scaffolding
+    rather than refusing the program, and keeps the reservation: the emitter's
+    internal `ctx` still owns the bare `ctx` token."""
+    while name in _RUST_RESERVED or name in _EMITTER_RESERVED:
         name += "_"
     return name
 
@@ -345,8 +352,6 @@ def _mangle(name: str) -> str:
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    if name in _EMITTER_RESERVED:
-        raise EmitError(f"{role} identifier collides with Rust/reserved name: {name!r}")
     return _mangle(name)
 
 
@@ -2348,6 +2353,11 @@ class _V3Ctx:
         # on strings has ownership rules (`String + &str` only), so the
         # renderer must know when a `+` is a concatenation. See `_v3_is_str`.
         self.var_types: dict[str, str | None] = {}
+        # Declared return type of the fn currently being emitted, so a `return`
+        # of an anonymous record literal has the target-type context that
+        # disambiguates a non-unique field-set (item 268). Set per fn by
+        # `_emit_v3_functions`; None everywhere the context is unknown.
+        self.current_return: str | None = None
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
@@ -2366,28 +2376,89 @@ class _V3Ctx:
                     else:
                         self.case_adt[cname] = name
 
-    def record_type_for_fields(self, fields: list[str]) -> str:
-        key = tuple(sorted(fields))
-        name = self.record_by_fields.get(key)
-        if name is None:
-            raise EmitError(
-                f"cannot infer Rust struct type for record literal with fields "
-                f"{sorted(fields)!r} — no unique record has exactly those fields"
-            )
-        return _ident(name, "type name")
+    def _records_with_fields(self, key: tuple[str, ...]) -> list[str]:
+        """Every declared record whose field-set is EXACTLY `key`, sorted for a
+        stable, name-independent choice."""
+        return sorted(
+            name
+            for name, spec in self.types.items()
+            if spec.get("kind") == "record"
+            and tuple(sorted((spec.get("fields") or {}).keys())) == key
+        )
 
-    def record_type_for_names(self, names: list[str]) -> str:
+    def _same_shape(self, names: list[str]) -> bool:
+        """True when every named record in `names` declares the same field ->
+        type mapping, so they are interchangeable and picking any one emits a
+        correct struct for a literal that names none of them explicitly."""
+        shapes = {
+            tuple(sorted((self.types[n].get("fields") or {}).items()))
+            for n in names
+        }
+        return len(shapes) == 1
+
+    def _disambiguate_record(self, key: tuple[str, ...], expected: str | None,
+                             what: str) -> str:
+        """Resolve an anonymous record with field-set `key` to a named struct.
+
+        Preference order (item 268): a declared target type whose field-set
+        matches exactly (`return`/`let`/nested-field context); then a record
+        that uniquely owns the field-set; then, when several records share it,
+        a deterministic pick, but only when those records are structurally
+        identical, so the choice cannot emit an ill-typed struct."""
+        candidates = self._records_with_fields(key)
+        if expected is not None and expected in candidates:
+            return expected
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) >= 2 and self._same_shape(candidates):
+            return candidates[0]
+        if not candidates:
+            raise EmitError(
+                f"cannot infer Rust struct type for record {what} with fields "
+                f"{list(key)!r}: no record declares exactly those fields"
+            )
+        raise EmitError(
+            f"cannot infer Rust struct type for record {what} with fields "
+            f"{list(key)!r}: {candidates!r} share them and differ in shape; "
+            f"annotate the target type"
+        )
+
+    def record_type_for_fields(self, fields: list[str],
+                               expected: str | None = None) -> str:
+        key = tuple(sorted(fields))
+        return _ident(self._disambiguate_record(key, expected, "literal"),
+                      "type name")
+
+    def record_field_types(self, type_name: str) -> dict[str, str | None]:
+        """The declared field -> type map of an emitted record type, so a field
+        VALUE can be lowered with its target type as context. Empty for a
+        synthesized/unknown name."""
+        spec = self.types.get(type_name)
+        if spec is None or spec.get("kind") != "record":
+            return {}
+        return dict(spec.get("fields") or {})
+
+    def record_type_for_names(self, names: list[str],
+                              expected: str | None = None) -> str:
+        # Destructuring names a (possibly proper) subset of the record's fields,
+        # so this stays subset-based; but when several records admit the subset
+        # the same target-type context and structural-identity tie-breakers the
+        # literal side uses resolve it, so the two agree on one name (item 268).
         wanted = set(names)
-        candidates = [
+        candidates = sorted(
             name
             for name, spec in self.types.items()
             if spec.get("kind") == "record" and wanted <= set(spec.get("fields") or {})
-        ]
-        if len(candidates) != 1:
-            raise EmitError(
-                f"cannot infer Rust struct type for record destructuring {names!r}"
-            )
-        return _ident(candidates[0], "type name")
+        )
+        if expected is not None and expected in candidates:
+            return _ident(expected, "type name")
+        if len(candidates) == 1:
+            return _ident(candidates[0], "type name")
+        if len(candidates) >= 2 and self._same_shape(candidates):
+            return _ident(candidates[0], "type name")
+        raise EmitError(
+            f"cannot infer Rust struct type for record destructuring {names!r}"
+        )
 
     def constructor(self, name: str, args: list[str]) -> str:
         adt = self.case_adt.get(name)
@@ -2432,7 +2503,8 @@ class _V3Ctx:
 
 
 
-def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
+def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
+                 expected: str | None = None) -> str:
     """Lower one IR expression node to a Rust expression.
 
     This is the *single* expression renderer for the Rust tier. It covers both
@@ -2711,7 +2783,12 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
 
     if kind == "record":
         fields = node.get("fields") or []
-        type_name = ctx.record_type_for_fields([k for k, _ in fields])
+        type_name = ctx.record_type_for_fields([k for k, _ in fields], expected)
+        # The struct's declared field types, so a field VALUE that is itself an
+        # anonymous record with an ambiguous field-set resolves to the type this
+        # struct declares for it (`expected`), the same target-type context a
+        # `return`/`let` supplies at the top level (item 268).
+        field_types = ctx.record_field_types(type_name)
         # A record construction moves each field value into the struct. A
         # non-Copy bare variable used as a field value would therefore be
         # consumed here (E0382) if the caller still needs it afterward — e.g.
@@ -2722,7 +2799,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
         # escaping position the type layer already refuses (`_FN_TYPE_REFUSAL`).
         body = ", ".join(
             f"{_ident(k, 'record field')}: "
-            f"{_by_value_arg(v, _render_expr(v, ctx, rename), ctx)}"
+            f"{_by_value_arg(v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)}"
             for k, v in fields
         )
         return f"{type_name} {{ {body} }}"
@@ -2967,6 +3044,31 @@ def _v3_builtin(method: str, target: str, args: list[str],
     # this tier's Str.
     if method == "to_str":
         return f"({target}).to_string()"
+    # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+    # §Str.is_alnum), mirroring the python backend's native forms
+    # (backends/python/emit.py §is_digit/is_alpha/is_alnum/is_space). The
+    # receiver is a `String` on this tier, so a `&str` view bound once (`_rc`)
+    # drives ASCII code-point-order comparison: byte order on `str` IS
+    # code-point order for ASCII, matching python's chained string comparison.
+    # It stays total exactly as python's does: an empty receiver compares less
+    # than `"0"`, so it is `false` rather than a fault, and multi-character
+    # input (outside the per-character contract) never panics. Binding once is
+    # correct even when the receiver has side effects, with no closure overhead.
+    if method == "is_digit":
+        return f'{{ let _rc: &str = &{target}; "0" <= _rc && _rc <= "9" }}'
+    if method == "is_alpha":
+        return (f'{{ let _rc: &str = &{target}; '
+                f'("a" <= _rc && _rc <= "z") || ("A" <= _rc && _rc <= "Z") }}')
+    if method == "is_alnum":
+        return (f'{{ let _rc: &str = &{target}; '
+                f'("0" <= _rc && _rc <= "9") || ("a" <= _rc && _rc <= "z") '
+                f'|| ("A" <= _rc && _rc <= "Z") }}')
+    # is_space: space, tab, LF, CR, equality with each element (python uses
+    # tuple membership; a `str::contains` would wrongly match the empty
+    # receiver, which is a substring of every string).
+    if method == "is_space":
+        return (f'{{ let _rc: &str = &{target}; '
+                f'_rc == " " || _rc == "\\t" || _rc == "\\n" || _rc == "\\r" }}')
     raise EmitError(f"unknown builtin method {method!r}")
 
 
@@ -3097,7 +3199,10 @@ def _v3_let_pattern(node: dict, ctx: _V3Ctx, out: list[str], indent: int) -> Non
     names = [_ident(n, "binding") for n in node.get("names") or []]
     keyword = "let mut" if node.get("mutable") else "let"
     if pattern == "record":
-        type_name = ctx.record_type_for_names(node.get("names") or [])
+        # The destructured value's type, when known, is target-type context for
+        # a subset that several records admit (item 268).
+        expected = _v3_infer_type(node.get("value"), ctx)
+        type_name = ctx.record_type_for_names(node.get("names") or [], expected)
         fields = ", ".join(names)
         out.append(f"{pad}{keyword} {type_name} {{ {fields} }} = {value};")
     elif pattern == "list":
@@ -3119,7 +3224,11 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
     if step in ("let", "assign"):
         name = _ident(node.get("name"), "binding")
         inferred = _v3_infer_type(node.get("value"), ctx)
-        value = _render_expr(node.get("value"), ctx)
+        # A binding already carrying a declared type (a re-`assign`, or a `let`
+        # over a typed local) is target-type context for a record-literal RHS
+        # whose field-set is not unique (item 268).
+        expected = ctx.var_types.get(node.get("name"))
+        value = _render_expr(node.get("value"), ctx, expected=expected)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         if step == "let":
@@ -3131,7 +3240,8 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         if node.get("expr") is None:
             out.append(f"{pad}return;")
         else:
-            out.append(f"{pad}return {_render_expr(node['expr'], ctx)};")
+            out.append(f"{pad}return "
+                       f"{_render_expr(node['expr'], ctx, expected=ctx.current_return)};")
     elif step == "if":
         out.append(f"{pad}if {_render_expr(node['cond'], ctx)} {{")
         for child in node.get("then") or []:
@@ -3201,6 +3311,7 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
     for fn in functions:
         name = _ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
+        ctx.current_return = fn.get("returns")
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: "
             f"{_rust_type(p.get('type'), types, position='param')}"
