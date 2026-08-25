@@ -64,6 +64,55 @@ def _emit_svc():
         compile_source(_SVC_SRC), service=_SVC_SERVICE)
 
 
+def test_canonical_binds_wasm_emitter_even_when_bare_emit_is_poisoned():
+    """Regression guard for items 98/150.
+
+    Every backend ships an `emit.py`, and several `tests/` suites do a bare
+    `import emit` that binds the CANONICAL name `sys.modules['emit']` to a
+    *different* backend's module — the python emitter's `emit()` returns a
+    `str`, not the wasm dict-of-modules. When `canonical.py` bound its
+    `_emit_core` off that shared name, a combined `pytest tests/ backends/wasm/`
+    run made it call the wrong renderer and blow up with
+    `'str' object has no attribute 'get'`.
+
+    Simulate the poisoning explicitly (independent of collection order) and
+    assert a freshly loaded canonical module still binds the WASM emitter and
+    emits a real component without error."""
+    import types
+
+    poison = types.ModuleType("emit")
+
+    class _PoisonEmitError(Exception):
+        pass
+
+    poison.EmitError = _PoisonEmitError
+    poison.emit = lambda ir: "not a dict — the python/go emitters return a str"
+
+    saved = {
+        name: sys.modules.get(name)
+        for name in ("emit", "revl_wasm_emit", "revl_wasm_canonical")
+    }
+    try:
+        # Force the vulnerable first-bind path under the poisoned name.
+        for name in ("revl_wasm_emit", "revl_wasm_canonical"):
+            sys.modules.pop(name, None)
+        sys.modules["emit"] = poison
+
+        module = _canonical()  # re-execs canonical.py under the poison
+        # It must have loaded the real wasm emitter by path, not the poison.
+        assert module._emit_mod.__name__ == "revl_wasm_emit"
+        assert module._emit_core is not poison.emit
+        # And a real component still emits (this is the exact call that raised).
+        component = module.emit_component(compile_source(_SRC), service=_SERVICE)
+        assert isinstance(component, dict)
+    finally:
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+
+
 # --------------------------------------------------------------------------- #
 # Emit + golden — runs everywhere, no toolchain needed.
 # --------------------------------------------------------------------------- #
