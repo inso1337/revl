@@ -1,25 +1,55 @@
-// ◐ META — this composition IS the playground you are looking at.
+// ◐ THIS PAGE — the playground you are using IS this composition.
 //
-// In meta mode the result pane's tabs are not JavaScript: each *View
-// component below owns one tab, mounted by an `effect … undo …` pair — so
-// unloading a view removes its tab from the page, LIFO, and the no-residue
-// proof is visible in the DOM. Tab clicks route through the `tabs` service:
-// every click you make shows up in the trace as an audited host crossing.
+// It boots itself when the page loads: every region below owns its part of
+// the page through an `effect ui_mount…(…) undo ui_unmount…(…)` pair, so the
+// page exists because activations mounted it — and unbuilds, backwards, when
+// they unwind. The graph below the editor is this file, live.
 //
-// You are editing the UI you are using. Try it:
-//   · rename a label ("Diagnostics" → "Verdicts"), press ⇄ Swap — live
-//   · delete the IRView component, press ⇄ Swap — the IR tab is gone
-//   · press ■ Unload — the whole pane unbuilds itself, backwards, and the
-//     residue checks pass because every mount carried its unmount
+// Evolve the page while you stand on it:
+//   · hover a node, press ✕ — withdraw one component. Withdraw TabRouter and
+//     every view's tab reactively leaves the page (R2/R3); press ▶ to load it
+//     back and watch the pane rebuild
+//   · withdraw EditorPane — this editor disappears (the ◐ dock, bottom-right,
+//     is the way back)
+//   · rename a tab label, delete a view — press ⇄ Swap: your edit is
+//     re-admitted against the RUNNING page and hot-swapped in
+//   · press ■ Unload — the page tears itself down, LIFO, and the residue
+//     checks prove nothing was left behind
 //
-// The DOM is host territory, so it is reached only through the externs at
-// the bottom — open the G8 audit (while it still has a tab…) and the
-// playground will enumerate its own boundary surface.
+// The DOM is host territory: the externs at the bottom are the page's whole
+// boundary — open the G8 audit tab and this UI will enumerate itself.
 
 service Tabs {
   fn active() -> Str
   emission fn select(id: Str)
 }
+
+service Editor {
+  emission fn source() -> Str
+}
+
+// ---------- the page's regions
+
+component EditorPane provides ed: Editor {
+  let slot = effect ui_mount_region("editor") undo ui_unmount_region("editor")
+  provide ed {
+    fn source() = emit ui_editor_source()
+  }
+}
+
+component Toolbar requires ed: Editor {
+  let slot = effect ui_mount_region("toolbar") undo ui_unmount_region("toolbar")
+}
+
+component StatusBar {
+  let slot = effect ui_mount_region("status") undo ui_unmount_region("status")
+}
+
+component SystemPanel {
+  let slot = effect ui_mount_region("system") undo ui_unmount_region("system")
+}
+
+// ---------- the result tabs
 
 component TabRouter provides tabs: Tabs {
   let current = effect Map.new() undo current.drop()
@@ -54,7 +84,7 @@ component IRView requires tabs: Tabs {
              undo   ui_unmount("ir")
 }
 
-// ---------- the host boundary (G8) — the only way this UI touches the DOM
+// ---------- the host boundary (G8) — the only way this page touches the DOM
 
 extern pure fn ui_unmount(id: Str) -> Int
   = @py { import playground_host; return playground_host.unmount(id) }
@@ -62,5 +92,14 @@ extern pure fn ui_unmount(id: Str) -> Int
 extern acquire fn ui_mount(id: Str, label: Str) -> Int undo ui_unmount("")
   = @py { import playground_host; return playground_host.mount(id, label) }
 
+extern pure fn ui_unmount_region(id: Str) -> Int
+  = @py { import playground_host; return playground_host.unmount_region(id) }
+
+extern acquire fn ui_mount_region(id: Str) -> Int undo ui_unmount_region("")
+  = @py { import playground_host; return playground_host.mount_region(id) }
+
 extern emission fn ui_select(id: Str)
   = @py { import playground_host; playground_host.select(id) }
+
+extern emission fn ui_editor_source() -> Str
+  = @py { import playground_host; return playground_host.editor_source() }

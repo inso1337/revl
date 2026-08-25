@@ -52,11 +52,18 @@ tested pin), and `cordis.hmr`'s watchdog import gets an inert browser shim.
 Components whose `config` fields have no default are booted with typed
 placeholders, each one reported in the trace.
 
-### Meta mode — the playground's pane is a revl composition
+### Meta mode — the page is a revl composition (and boots itself)
 
-`site/playground_shell.rvl` (the ◐ example) is the result pane itself: each
-tab is owned by a *View component whose `effect ui_mount(…) undo ui_unmount(…)`
-pair mounts it, and tab clicks route through the composition's `tabs` service
+`site/playground_shell.rvl` (the ◐ example, first in the list) is the page
+itself, and on a JSPI browser it **boots automatically on load**: the editor,
+toolbar, status bar and system panel are region components, each tab is owned
+by a *View component — every one mounted by an `effect ui_mount…(…) undo
+ui_unmount…(…)` pair — and tab clicks route through the composition's `tabs`
+service. Withdraw a node (✕ on the graph) and that part of the page leaves;
+withdrawing a provider cascades its dependents down with it (withdraw
+`TabRouter` and every tab goes). The fixed ◐ dock (bottom-right) is the JS
+chrome's one foothold: it appears only when part of the page is withdrawn and
+loads the absent components back
 — the DOM changes only when the `ui_select` emission crosses the boundary, so
 every click lands in the trace and the G8 audit enumerates the UI's own host
 surface. Booting a source that imports `playground_host` puts the pane under

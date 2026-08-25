@@ -15,10 +15,10 @@ OUT = Path(__file__).resolve().parent / "js" / "examples.js"
 
 # (id, label, kind, path-relative-to-repo-root)
 EXAMPLES = [
+    ("playground_shell", "◐ this page — the playground, running itself", "accept",
+     "site/playground_shell.rvl"),
     ("live_counter", "★ live demo — boot it, call it, evolve it", "accept",
      "examples/live_counter.rvl"),
-    ("playground_shell", "◐ the playground itself — swap the UI you're using", "accept",
-     "site/playground_shell.rvl"),
     ("user_cache", "user_cache — effect/undo + a declared emission", "accept",
      "examples/user_cache.rvl"),
     ("outcome", "outcome — ADTs, Result and match (2.0)", "accept",
