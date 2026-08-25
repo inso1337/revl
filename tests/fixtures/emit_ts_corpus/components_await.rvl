@@ -1,0 +1,18 @@
+// Async coloring (item 219) — the ACTIVATION-body async surface: an `await`
+// step between two effects colors the whole body an async generator
+// (`ctx.effect(async function* () {`). The await lands (inertia), then the
+// `yield () => {}` closes the iteration so a divert during the await skips
+// every later step (v1/A1). The awaited value is a host op (`Job.run`);
+// no req async-op call in the body, so no await-seed here.
+service Kv {
+  fn get(k: Int) -> Int
+  fn set(k: Int, v: Int)
+}
+
+component Pulse requires kv: Kv {
+  effect kv.set(1, 11) undo kv.set(1, 0)
+
+  await Job.run("pulse")
+
+  effect kv.set(2, 22) undo kv.set(2, 0)
+}
