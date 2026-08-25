@@ -914,3 +914,167 @@ def test_py_async_timer_wrong_firing_count_is_caught(tmp_path):
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "FAIL an async every-timer fires and is awaited on each tick" in result.stdout
+
+
+# ============================================================================
+# item 223: async timer bodies on the other tiers (ts + rust/go)
+# ============================================================================
+#
+# Item 170 landed the async-timer contract on the py reference tier. The IR flag
+# (`"async": true` on the lowered `timer` step, stamped by the shared frontend)
+# is tier-independent, so ts/rust/go all receive it. This slice mirrors the py
+# in-flight/cancel contract where a tier can express it:
+#
+#   * ts — async service ops are REAL (an emission returns `Promise<void>`), so a
+#     sync firing closure would call one UN-AWAITED. The async-coloured `_timer`
+#     now spawns each async emission as a tracked in-flight `Promise` (a per-timer
+#     Set), the harness's `_revl_settle` after an advance drains it, and the
+#     inverse cancels the schedule + drops in-flight (the py contract, mirrored).
+#   * rust/go — these tiers have NO async-fn machinery: an `Async[T]`/async op
+#     ERASES to its synchronous form (`_erase_async`; the emitted trait method is
+#     `fn run_in(..) -> ()` / `RunIn(..)`, no future). A timer body reaching such
+#     an op therefore fires SYNCHRONOUSLY to completion inside the deterministic
+#     advance — there is no coroutine to spawn, no in-flight window to drain, and
+#     no in-flight work to cancel. The existing sync firing + schedule-cancel
+#     inverse is already the complete, residue-free contract, so the `async` flag
+#     is correctly a NO-OP there: spawning a goroutine/JoinHandle would only
+#     inject nondeterminism into a timeline step the clock coeffect exists to keep
+#     deterministic. No emit change is needed — and `examples/async_timer.rvl`
+#     still RUNS on both (the async firing collapses to a correct synchronous one,
+#     the every/after timelines land count==3/count==1, teardown is residue-free).
+#     The one dimension only py expresses — cancelling work *mid-flight* on unload
+#     — is vacuous where nothing suspends. These tests lock the no-op emit AND the
+#     end-to-end run in.
+
+
+# ---------------------------------------------------------------- ts emit
+
+def test_ts_emits_a_sync_timer_byte_identically():
+    """A sync timer body still emits the plain `() => {…}` firing closure + a
+    `() => handle.cancel()` inverse — no Set, no tracked Promise (item 223)."""
+    src = _emitter("typescript").emit(compile_source(_SYNC_TIMER, "<t>"))
+    assert "const $revl_timer_1 = () => {" in src
+    assert "host.scheduleEvery(30000, $revl_timer_1)" in src
+    assert "yield () => $revl_timer_1_h.cancel()" in src
+    assert "_inflight" not in src                 # no in-flight set for a sync timer
+    assert "Promise.resolve" not in src
+
+
+def test_ts_emits_an_async_timer_with_a_tracked_in_flight_window():
+    """An async-coloured timer spawns each async emission as a tracked in-flight
+    Promise and yields an inverse that cancels the schedule AND drops in-flight
+    (the py `_timer` in-flight/cancel contract, mirrored on ts)."""
+    src = _emitter("typescript").emit(compile_source(_ASYNC_AGENT, "<t>"))
+    assert "const $revl_timer_1_inflight = new Set<Promise<void>>()" in src
+    assert 'Promise.resolve(ctx.agent.run_in("cron", "brief"))' in src
+    assert "$revl_timer_1_inflight.add(_revl_task)" in src
+    assert "$revl_timer_1_inflight.delete(_revl_task)" in src
+    # the inverse cancels the schedule and drops the in-flight window
+    assert "yield () => { $revl_timer_1_h.cancel(); $revl_timer_1_inflight.clear() }" in src
+    # the async emission is NOT fired un-awaited/inline
+    assert "\n        ctx.agent.run_in(" not in src
+
+
+def test_ts_async_timer_scopes_to_the_req_async_op_reach():
+    """ts async-timer support covers the primary shape: a timer firing an
+    `emission async fn` through a REQUIRED key (`every 60s { emit
+    agent.run_in(...) }` — the scheduled-automation motivating case). The
+    async-EXTERN reach a timer body may also take remains unemittable on ts —
+    the pre-existing `_fn_call` guard refuses an async extern in a sync closure
+    (it predates item 223 and is unchanged) — so that reach is a documented
+    follow-on, not a regression."""
+    src = _emitter("typescript").emit(compile_source(_ASYNC_AGENT, "<t>"))
+    assert "Promise.resolve(ctx.agent.run_in(" in src   # req-async-op reach works
+
+
+# ---------------------------------------------------------------- ts execution
+
+def test_ts_async_timer_lifecycle_runs_end_to_end():
+    """The exit test for item 223 on the ts tier: `examples/async_timer.rvl`
+    (an async every-timer + after-timer reaching an `emission async fn`)
+    emits, and — where vitest is installed — RUNS: each firing is spawned +
+    settled on every advanced tick and unload is residue-free."""
+    from revl.test import run_ts  # noqa: PLC0415
+    ir = compile_source((EXAMPLES / "async_timer.rvl").read_text(encoding="utf-8"),
+                        "async_timer.rvl")
+    outcome, message = run_ts(ir)
+    if outcome == "skip":
+        pytest.skip(f"ts: {message}")
+    assert outcome == "pass", message
+
+
+def test_ts_async_timer_wrong_firing_count_is_caught():
+    """An assertion that can only pass is not an assertion: assert the wrong
+    awaited-firing count and the ts async-timer lifecycle must FAIL (where the
+    toolchain runs it)."""
+    from revl.test import run_ts  # noqa: PLC0415
+    src = (EXAMPLES / "async_timer.rvl").read_text(encoding="utf-8")
+    broken = src.replace("assert ticks == 3", "assert ticks == 99")
+    assert broken != src
+    outcome, message = run_ts(compile_source(broken, "broken_async_timer.rvl"))
+    if outcome == "skip":
+        pytest.skip(f"ts: {message}")
+    assert outcome == "fail", message
+
+
+# ------------------------------------------------- rust/go: async erases to sync
+
+@pytest.mark.parametrize("tier", ["rust", "go"])
+def test_rust_and_go_erase_an_async_timer_to_a_sync_firing(tier):
+    """rust/go have no async-fn machinery: an async op erases to its sync form
+    (`_erase_async`), so a timer reaching one fires synchronously to completion
+    inside the deterministic advance. The emitted timer is a plain schedule +
+    cancel with NO in-flight/spawn machinery — the `async` IR flag is a correct
+    no-op, and this is byte-identical to a sync timer body (item 223)."""
+    emit = _emitter(tier)
+    async_src = emit.emit(compile_source(_ASYNC_AGENT, "<t>"))
+    # no tracked-in-flight / async-executor machinery leaks in
+    for token in ("inflight", "in_flight", "JoinHandle", "tokio::spawn",
+                  "go func(", "goroutine", "ensure_future", "Promise"):
+        assert token not in async_src, f"{tier}: unexpected {token!r} in async-timer emit"
+    # the plain sync schedule + cancel inverse is what a sync timer emits, too
+    if tier == "rust":
+        assert "revl_schedule_every(60000, move ||" in async_src
+        assert "revl_cancel(_revl_timer_1)" in async_src
+    else:
+        assert "revlScheduleEvery(60000, func()" in async_src
+        assert "_revlTimer1.Cancel()" in async_src
+
+
+def test_go_async_timer_lifecycle_runs_end_to_end():
+    """`examples/async_timer.rvl` RUNS on go: the async firing collapses to a
+    correct synchronous one (RunIn is erased to a sync method), so the every/
+    after timelines land count==3 / count==1 and teardown is residue-free."""
+    from revl.test import run_go  # noqa: PLC0415
+    ir = compile_source((EXAMPLES / "async_timer.rvl").read_text(encoding="utf-8"),
+                        "async_timer.rvl")
+    outcome, message = run_go(ir)
+    if outcome == "skip":
+        pytest.skip(f"go: {message}")
+    assert outcome == "pass", message
+
+
+def test_go_async_timer_wrong_firing_count_is_caught():
+    """The go run is a real assertion: break the expected firing count and the
+    emitted lifecycle test must FAIL under `go test`."""
+    from revl.test import run_go  # noqa: PLC0415
+    broken = (EXAMPLES / "async_timer.rvl").read_text(encoding="utf-8").replace(
+        "assert ticks == 3", "assert ticks == 99")
+    outcome, message = run_go(compile_source(broken, "broken_async_timer.rvl"))
+    if outcome == "skip":
+        pytest.skip(f"go: {message}")
+    assert outcome == "fail", message
+
+
+@pytest.mark.skipif(not os.environ.get("REVL_CROSS_TIER_SLOW"),
+                    reason="set REVL_CROSS_TIER_SLOW=1 (cargo is slow / needs crates.io)")
+def test_rust_async_timer_lifecycle_runs_end_to_end():
+    """`examples/async_timer.rvl` RUNS on rust too (async erased to sync), gated
+    behind REVL_CROSS_TIER_SLOW like the other cargo-driven cross-tier probes."""
+    from revl.test import run_rust  # noqa: PLC0415
+    ir = compile_source((EXAMPLES / "async_timer.rvl").read_text(encoding="utf-8"),
+                        "async_timer.rvl")
+    outcome, message = run_rust(ir)
+    if outcome == "skip":
+        pytest.skip(f"rust: {message}")
+    assert outcome == "pass", message
