@@ -193,6 +193,21 @@ class IsolateStmt:
 
 
 @dataclass
+class RouteStmt:
+    """`isolate <key> in realms("w1","w2","w3") strategy(round_robin)` — the
+    multi-realm bind (roadmap item 162). The plural of `isolate <key> in
+    realm(<name>)`: one required key is bound across N named realms, and an
+    optional `strategy` names how the runtime router distributes across them.
+    This is the CONSUMPTION side of the load-balancer pattern (item 161's
+    Router consumes it); it records the binding + strategy for the runtime
+    router and does not itself route. `strategy` is `None` when omitted."""
+    key: str
+    realms: list[str]
+    strategy: str | None
+    line: int
+
+
+@dataclass
 class InterceptStmt:
     key: str
     metadata: dict
@@ -1348,6 +1363,15 @@ class Parser:
             self.next()
             key = self._provision_key()
             self.expect("kw", "in")
+            # `realms(...)` (plural, item 162) binds the key across N realms with
+            # an optional routing strategy; `realm(...)` (singular) is unchanged.
+            # `realms`/`strategy` are ordinary identifiers (NOT reserved words) —
+            # they head a clause only in this exact `isolate <key> in …` position,
+            # so a program using either as a name stays valid and the reference
+            # KEYWORDS set (and the selfhosted lexer that mirrors it) is untouched.
+            if self.at("ident", "realms"):
+                realms, strategy = self.realms_route()
+                return RouteStmt(key, realms, strategy, tok.line)
             return IsolateStmt(key, self.realm_label(), tok.line)
         if tok.kind == "kw" and tok.value == "intercept":
             if in_method:
@@ -1572,6 +1596,63 @@ class Parser:
             raise self.err(line, "a realm label cannot be empty")
         self.expect(")")
         return label
+
+    def realms_route(self) -> tuple[list[str], str | None]:
+        """`realms("w1", "w2", ...) [strategy(<ident>)]` — the multi-realm bind
+        (item 162), the plural of `realm("<label>")`. Same static-string-literal
+        rule as `realm_label` (a realm is not config-derived, else G2 would be
+        unsound). Returns the ordered realm list and the strategy name (or
+        `None`). The order is preserved as written — a router's rotation is
+        defined over the list in declaration order."""
+        line = self.expect("ident", "realms").line
+        self.expect("(")
+        if self.at(")"):
+            raise self.err(
+                line,
+                "`realms(...)` needs at least one realm label",
+                hint="the multi-realm bind names the realms to route across; for a single "
+                     "realm use `realm(\"<label>\")` (singular)",
+            )
+        realms: list[str] = []
+        while True:
+            tok = self.peek()
+            if tok.kind != "string":
+                raise self.err(
+                    line,
+                    "dynamic realm labels are not supported — a realm is a static string literal",
+                    hint="config is unknown at link and admission time, so the linker could "
+                         "neither prove nor refute a collision between config-derived realms "
+                         "(G2 would be unsound); dynamic realms await instance-parametric "
+                         "components (docs/design-v2-realms.md)",
+                )
+            self.next()
+            label = tok.value
+            if not label:
+                raise self.err(line, "a realm label cannot be empty")
+            if label in realms:
+                raise self.err(
+                    line,
+                    f"realm `{label}` is listed twice in `realms(...)` — routing a key to "
+                    f"the same realm twice is meaningless",
+                    hint="each realm in the list is a distinct routing target; remove the "
+                         "duplicate (G2 already keeps one provider per (key, realm))",
+                )
+            realms.append(label)
+            if self.at(","):
+                self.next()
+                # allow a trailing comma before `)`
+                if self.at(")"):
+                    break
+            else:
+                break
+        self.expect(")")
+        strategy: str | None = None
+        if self.at("ident", "strategy"):
+            self.next()
+            self.expect("(")
+            strategy = self.expect("ident", what="a strategy name").value
+            self.expect(")")
+        return realms, strategy
 
     def record_literal(self) -> dict:
         """`{ field: literal | [literal, ...], ... }` — static metadata (v2)."""
