@@ -26,28 +26,32 @@ fn code0(c: Str) -> Int {
   return c.charCodeAt(0)
 }
 
+// The per-character classification predicates. These ran on the hot path
+// (once per source byte in the identifier/number scan loops), and each
+// previously cost a revl-fn call plus a `code0`/`charCodeAt` round-trip and
+// a code-point range compare. They now defer to the native single-char ASCII
+// classification builtins (item 233, docs/stdlib-2.0.md §Str.is_alnum), which
+// the py tier lowers to an inline comparison — same tokens, less per-byte tax.
+// The builtins are letters/digits only, so the lexer's `_`-in-identifiers rule
+// stays explicit here, and `is_space` re-excludes newline (the main loop tracks
+// lines separately) while `is_ws` — newline included — is exactly the builtin.
 fn is_digit(c: Str) -> Bool {
-  let n = code0(c)
-  return n >= 48 && n <= 57
+  return c.is_digit()
 }
 
 fn is_alpha(c: Str) -> Bool {
   if (c == "_") { return true }
-  let n = code0(c)
-  if (n >= 65 && n <= 90) { return true }
-  return n >= 97 && n <= 122
+  return c.is_alpha()
 }
 
 fn is_alnum(c: Str) -> Bool {
-  if (is_alpha(c)) { return true }
-  return is_digit(c)
+  if (c == "_") { return true }
+  return c.is_alnum()
 }
 
 fn is_space(c: Str) -> Bool {
-  let n = code0(c)
-  if (n == 32) { return true }
-  if (n == 9) { return true }
-  return n == 13
+  if (code0(c) == 10) { return false }
+  return c.is_space()
 }
 
 fn keywords() -> List[Str] {
@@ -86,7 +90,10 @@ fn op_at(source: Str, i: Int) -> Str {
 fn scan_word(source: Str, i: Int) -> Scan {
   var j = i
   let n = source.length()
-  while (j < n && is_alnum(source.charAt(j))) { j += 1 }
+  // Hot loop: use the classification builtin directly (no is_alnum fn call
+  // per byte). `||` short-circuits, so the `_` charAt only runs on the run's
+  // terminating non-alnum char — one charAt per identifier byte in practice.
+  while (j < n && (source.charAt(j).is_alnum() || source.charAt(j) == "_")) { j += 1 }
   let jj = j
   return { j: jj, out: source.slice(i, jj), nl: 0 }
 }
@@ -94,7 +101,9 @@ fn scan_word(source: Str, i: Int) -> Scan {
 fn scan_digits(source: Str, i: Int) -> Scan {
   var j = i
   let n = source.length()
-  while (j < n && is_digit(source.charAt(j))) { j += 1 }
+  // Hot loop: the is_digit builtin is exactly the lexer's digit set, so the
+  // per-byte revl-fn call drops out.
+  while (j < n && source.charAt(j).is_digit()) { j += 1 }
   let jj = j
   return { j: jj, out: source.slice(i, jj), nl: 0 }
 }
@@ -183,9 +192,7 @@ fn esc(s: Str) -> Str {
 // the main loop tracks lines). Used to trim an interpolation body, which
 // the reference lexer does with str.strip().
 fn is_ws(c: Str) -> Bool {
-  let n = code0(c)
-  if (n == 10) { return true }
-  return is_space(c)
+  return c.is_space()
 }
 
 fn trim(s: Str) -> Str {
@@ -293,7 +300,9 @@ fn step(source: Str, i: Int, line: Int) -> Step {
   let c = source.charAt(i)
   let cc = code0(c)
   if (cc == 10) { return { i: i + 1, line: line + 1, tok: none } }
-  if (is_space(c)) { return { i: i + 1, line: line, tok: none } }
+  // c is not newline here (the cc == 10 case returned), so the classifier
+  // builtin is exactly is_space(c) — call it directly, skipping the fn call.
+  if (c.is_space()) { return { i: i + 1, line: line, tok: none } }
   if (source.slice(i, i + 2) == "//") {
     let sc = scan_comment(source, i)
     return { i: sc.j, line: line, tok: none }

@@ -517,6 +517,27 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         return f"{target}.startswith({args[0]})"
     if method == "endsWith":
         return f"{target}.endswith({args[0]})"
+    # Single-character ASCII classification (item 233, docs/stdlib-2.0.md
+    # §Str.is_alnum): a native inline test, no revl-fn call and no 1-char
+    # `ord` round-trip. Chained string comparison is ASCII code-point order
+    # AND empty-safe (`"a" <= "" <= "z"` is False, so an empty receiver is
+    # false rather than faulting; multi-character input is outside the
+    # per-character contract but stays total — it never raises). is_alpha/is_alnum
+    # reference the receiver more than once, so a walrus binds it a single
+    # time (`_rc`) — correct even when the receiver has side effects, with no
+    # lambda-call overhead (the whole point of the builtin is to be cheap).
+    if method == "is_digit":
+        return f'("0" <= {target} <= "9")'
+    if method == "is_alpha":
+        return (f'(("a" <= (_rc := {target}) <= "z") '
+                f'or ("A" <= _rc <= "Z"))')
+    if method == "is_alnum":
+        return (f'(("0" <= (_rc := {target}) <= "9") '
+                f'or ("a" <= _rc <= "z") or ("A" <= _rc <= "Z"))')
+    # is_space: space, tab, LF, CR — tuple membership (a bare `in " \t\n\r"`
+    # would wrongly match the empty string, which is a substring of every str).
+    if method == "is_space":
+        return f'({target} in (" ", "\\t", "\\n", "\\r"))'
     # The Map value type (docs/stdlib-2.0.md §Map): a python dict, copied
     # on write — `{**m, k: v}` IS the persistent set.
     if method == "set":
