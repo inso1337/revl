@@ -1,0 +1,913 @@
+// The revl backend-IR -> cordis-go EMITTER, in revl — Path B slice 1 for the
+// GO tier (roadmap item 198). Where selfhost/emit_py.rvl ports the tail of the
+// compiler to Python and selfhost/emit_rust.rvl to Rust, this file ports it to
+// Go: it reads the stable interchange IR (docs/backend-ir.md) and produces Go
+// source text, mirroring backends/go/emit.py's PURE typed-core path
+// (`_emit_v3_go`).
+//
+// It is one half of a differential BYTE oracle: this file and
+// backends/go/emit.py's `emit()` are two independent implementations of the
+// same lowering, forced to produce BYTE-IDENTICAL Go for every input in the
+// covered subset (tests/test_selfhost_emit_go.py). The reference is ground
+// truth; any divergence is a defect in this slice.
+//
+// ============================================================ WHAT IT COVERS
+// Every IR the frontend produces is ir_version 3, and a document with only
+// module functions and NO components routes through the reference's PURE
+// typed-core path (`emit()` -> `_emit_v3_go` -> `_emit_v3_go_functions` ->
+// `_go_v3_stmt` / `_go_v3_expr`) — ordinary Go, no stc-go runtime. The covered
+// corner is a FUNCTION-ONLY document with NO services, NO user types, NO
+// stdlib builtins:
+//
+//   * the module scaffold — the two `// Code generated …` banner lines, the
+//     `package emitted`, the conditional `import ( … )` block (only `"fmt"`
+//     reaches it in-slice, when interpolation is present), and the conditional
+//     runtime PREAMBLES the pure path prepends when a feature is used:
+//     `revlDiv` (true division), the `revlAdd`/`revlSub`/`revlMul` Int-overflow
+//     trap trio, and the `revlAddI32`/`revlSubI32`/`revlMulI32`/`revlToI32`
+//     Int32 trap block. Which preambles appear is a deterministic function of
+//     the IR, computed here by a structural pass (`collect_flags`) that mirrors
+//     the flags the reference sets while rendering.
+//   * `_emit_v3_go_functions` — each module fn as a Go `func`, with `go_type`
+//     for scalar / `List` / `Opt` / `Map` / `Result` / function parameter and
+//     return types, and an empty (Unit) return rendered as no result.
+//   * `_go_v3_stmt` for the base statement surface — let (with the int64/float64
+//     `var name T = …` pin and the `_ = name` keep-alive), assign, return,
+//     if/else, while, for (the `for _, x := range …` form with its `_ = x`),
+//     the bare-expr `_ = …`, and assert (`if !(…) { t.Fatalf(…) }`).
+//   * `_go_v3_expr` for the base expression algebra — lit, name/var, bin (the
+//     trapping Int/Int32 `+ - *`, `/` as `revlDiv(float64(..), float64(..))`,
+//     `%`, comparisons, `&&`/`||`, native scalar `==`/`!=`, and string `+` as
+//     Go `+`), un (`!`, and the `revlSub(0, x)` Int negate), the free-function
+//     call, index, list literal, the sync arrow (with untyped-param recovery),
+//     the `widen` Float/Int markers, and non-float `${..}` interpolation via
+//     `fmt.Sprintf`.
+//
+// ============================================================ WHAT IT DEFERS
+// Reported for follow-on go-emitter slices, deliberately OUT of this slice —
+// each is a real reference surface this slice does not reach (its fixtures
+// avoid it), NOT an approximation:
+//   * the go LIVE-COMPONENT world is v1/v2 (the stc-go runtime path in
+//     `emit()`); a component with no top-level decls routes there, NOT to the
+//     pure typed-core path this slice mirrors. Components / services / the
+//     effect-undo world / `provide`/`req`/`config` / timers / spawn / realms /
+//     the interop bridge (`_emit_go_bridge`) / placement — all deferred.
+//   * the v3 TYPED-CORE — user `type` decls (`_emit_v3_go_types`), record
+//     literals and functional record-update (the go tier refuses the latter),
+//     ADT construction and `match` over user variants, and the record/variant
+//     inference in `_V3GoCtx`.
+//   * the built-in Opt / Result / Map surface — the `??` coalesce, the
+//     `Some`/`None`/`Ok`/`Err` constructors, `Map.empty()` (`maplit`), optional
+//     chaining (`optfield`/`optcall`), and the `_V3_OPT_PREAMBLE` /
+//     `_V3_RESULT_PREAMBLE` / `_V3_MAP_PREAMBLE` blocks they pull in. Their TYPE
+//     lowering (`RevlOpt[..]` / `RevlResult[..]` / `map[..]..`) is implemented in
+//     `go_type` for completeness, but a fixture that spells `Opt[`/`Result[` or
+//     a map literal/method trips a preamble this slice does not emit, so those
+//     are excluded (a Map-typed passthru with no literal/method is in-corpus —
+//     it needs no preamble).
+//   * the STDLIB surface — every `builtin`/`len` node and the
+//     `_V3_STDLIB_PREAMBLE` it pulls in; the total division forms
+//     (`div_floor`/`div_euclid`/`mod` and the `checked_*` Result forms) and
+//     their `revlDivFloor`/… helpers; `Str.to_int` (`revlParseInt`).
+//   * structural equality over NON-scalars (`revlEq` / the `reflect` import) and
+//     the canonical Float->Str `revlFtoa` in interpolation (so a Float part is
+//     excluded — a Float part would pull the ftoa helper the scaffold omits).
+//   * externs (`_emit_v3_go_externs`, incl the `//revl:import` hoist), in-file
+//     `test` emission, async coloring / lifecycle, and the astral reaches of
+//     `_go_string` beyond the ASCII/BMP core (the escaper is bridged verbatim,
+//     but such literals are not in-corpus).
+//
+// ------------------------------------------------------ the erased-IR boundary
+// Navigation of the IR is PURE revl through stdlib/value.rvl's `value_*`
+// accessors (item 180/188) and stdlib/str.rvl's `split_top`/`rstrip`/`trim`
+// (item 193), exactly as selfhost/emit_py.rvl / emit_rust.rvl do: every byte of
+// emitter LOGIC (flag collection, dispatch, formatting, the var_types threading,
+// string building) is revl. Only genuine HOST FORMATTING stays `@py`: the
+// `tab`/`newline` char emitters (kin to rust's `newline()`), `num_str`
+// (`str(value)`), `float_lit` (the `float64({v!r})` body), and `go_string` (the
+// reference `_go_string` Go-literal escaper, kin to py's `py_repr`).
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field,
+  value_list, value_at, value_str, value_int, value_bool
+}
+use "../stdlib/str.rvl" { split_top, rstrip }
+
+// ------------------------------------------------- host formatting (kept @py)
+// A single tab / newline byte — the one genuine U+0009 / U+000A. Go indents with
+// tabs and the module is `"\n".join(out)`; both are char output, the item-180
+// "NOT obsoleted" category (rust's emitter bridges `newline()` the same way).
+extern pure fn tab() -> Str = @py { return chr(9) }
+extern pure fn newline() -> Str = @py { return chr(10) }
+// The literal-body host numerals: `_go_v3_lit` renders an int as `str(value)`.
+extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// A Float literal: `_go_v3_lit` renders it as `float64({value!r})` — Python's
+// repr of the float, so the numeral text is exactly the reference's.
+extern pure fn float_lit(v: Any) -> Str = @py { return "float64(%r)" % v }
+// `_go_string` verbatim: a Go double-quoted string literal escaped FROM code
+// points (docs/strings.md) — printable ASCII/BMP verbatim, a `\uXXXX` (4 hex)
+// for a BMP non-ASCII scalar and `\UXXXXXXXX` (8 hex) for an astral one. A
+// tuple-free body keeps the @py raw-brace balancer happy.
+extern pure fn go_string(v: Any) -> Str = @py {
+    s = str(v)
+    out = ['"']
+    for ch in s:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        elif cp <= 0xFFFF:
+            out.append("\\u%04x" % cp)
+        else:
+            out.append("\\U%08x" % cp)
+    out.append('"')
+    return "".join(out)
+}
+
+// ---------------------------------------------------------------- small utils
+fn ind(n: Int) -> Str { return tab().repeat(n) }
+fn line(indent: Int, text: Str) -> Str { return ind(indent).concat(text) }
+fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
+fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
+fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
+fn node_step(n: Any) -> Str { return value_str(value_field(n, "step")) }
+
+// `_v3_ident`: append `_` to a Go reserved word so a valid revl identifier that
+// is a Go keyword still emits (mirrors `_v3_ident`; the fixtures use `use_add`,
+// itself not reserved, so this is exercised only defensively).
+fn v3_ident(name: Str) -> Str {
+  if (is_go_reserved(name)) { return name.concat("_") }
+  return name
+}
+
+fn is_go_reserved(name: Str) -> Bool {
+  if (name == "break" || name == "case" || name == "chan" || name == "const") { return true }
+  if (name == "continue" || name == "default" || name == "defer" || name == "else") { return true }
+  if (name == "fallthrough" || name == "for" || name == "func" || name == "go") { return true }
+  if (name == "goto" || name == "if" || name == "import" || name == "interface") { return true }
+  if (name == "map" || name == "package" || name == "range" || name == "return") { return true }
+  if (name == "select" || name == "struct" || name == "switch" || name == "type") { return true }
+  if (name == "var" || name == "nil" || name == "true" || name == "false" || name == "iota") { return true }
+  return false
+}
+
+// `_V3_GO_ATOMIC`: a postfix-safe primary appends `.field`/`[i]`/`(…)` without a
+// wrapping paren.
+fn is_atomic(kind: Str) -> Bool {
+  if (kind == "var") { return true }
+  if (kind == "name") { return true }
+  if (kind == "lit") { return true }
+  if (kind == "call") { return true }
+  if (kind == "field") { return true }
+  if (kind == "index") { return true }
+  return kind == "builtin"
+}
+
+// `_V3_GO_BIN_OPS`: revl operator -> Go operator, "" when unmapped.
+fn go_bin_op(op: Str) -> Str {
+  if (op == "==") { return "==" }
+  if (op == "===") { return "==" }
+  if (op == "!=") { return "!=" }
+  if (op == "!==") { return "!=" }
+  if (op == "<") { return "<" }
+  if (op == ">") { return ">" }
+  if (op == "<=") { return "<=" }
+  if (op == ">=") { return ">=" }
+  if (op == "+") { return "+" }
+  if (op == "-") { return "-" }
+  if (op == "*") { return "*" }
+  if (op == "/") { return "/" }
+  if (op == "%") { return "%" }
+  if (op == "&&") { return "&&" }
+  if (op == "||") { return "||" }
+  return ""
+}
+
+fn is_eq_op(op: Str) -> Bool { return op == "==" || op == "===" || op == "!=" || op == "!==" }
+fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
+fn is_scalar(t: Str) -> Bool {
+  return t == "Int" || t == "Int32" || t == "Float" || t == "Str" || t == "Bool"
+}
+
+// ---------------------------------------------------------------- lowering ctx
+// `_V3GoCtx` (subset): a binding's surface type (seeded from params, updated on
+// `let`/`for`) types a `let`'s `var T =` pin, the scalar-`==` split, and the
+// Str `+` / Float-interp routing; a free function's declared return type types a
+// `let` bound to its call, and `rt` is the enclosing fn's return (the `expected`
+// pin a `return` threads onto a list literal). The user-type tables are empty
+// in this slice.
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], er: Map[Str, Str], rt: Str }
+// A statement-emission result: the lines produced AND the threaded ctx, since
+// revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
+// is visible to every later statement (the reference mutates one `ctx`).
+type Sout = { lines: List[Str], ctx: Ctx }
+
+fn map_get(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, er: ctx.er, rt: ctx.rt }
+}
+
+// -------------------------------------------------------------------- types
+fn split_fn_type(name: Str) -> List[Str] {
+  // `(A, B) -> C` -> ["A", "B", "C"] with the RETURN last (always non-empty for
+  // a function type); `[]` when `name` is not a function type. The top-level
+  // `->` splits params (a parenthesised list) from the return.
+  let arrow = top_arrow(name)
+  if (arrow < 0) { return [] }
+  let params_src = trim_str(name.slice(0, arrow))
+  let returns = trim_str(name.slice(arrow + 2, name.length()))
+  if (!(params_src.startsWith("(") && params_src.endsWith(")"))) { return [] }
+  let inner = trim_str(params_src.slice(1, params_src.length() - 1))
+  var parts = []
+  if (inner != "") { parts = split_top(inner, ",") }
+  parts = parts.push(returns)
+  return parts
+}
+
+fn trim_str(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  var go = true
+  while (go && a < b) { if (s.charCodeAt(a) == 32) { a = a + 1 } else { go = false } }
+  go = true
+  while (go && b > a) { if (s.charCodeAt(b - 1) == 32) { b = b - 1 } else { go = false } }
+  return s.slice(a, b)
+}
+
+// The index of the top-level `->` (depth 0 over `[]`/`()`), or -1.
+fn top_arrow(name: Str) -> Int {
+  var depth = 0
+  var i = 0
+  let n = name.length()
+  while (i < n - 1) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") { depth = depth - 1 }
+      else {
+        if (ch == "-" && name.charAt(i + 1) == ">" && depth == 0) { return i }
+      }
+    }
+    i = i + 1
+  }
+  return 0 - 1
+}
+
+fn erase_async(ret: Str) -> Str {
+  let r = trim_str(ret)
+  if (r.startsWith("Async[") && r.endsWith("]")) {
+    return trim_str(r.slice(6, r.length() - 1))
+  }
+  return ret
+}
+
+fn prim_go(t: Str) -> Str {
+  if (t == "Int") { return "int64" }
+  if (t == "Int32") { return "int32" }
+  if (t == "Str") { return "string" }
+  if (t == "Bool") { return "bool" }
+  if (t == "Float") { return "float64" }
+  if (t == "Bytes") { return "[]byte" }
+  return ""
+}
+
+// `_go_v3_type`: a surface type -> its Go spelling. "" for None/""/Unit.
+fn go_type(tv: Any) -> Str {
+  let raw = value_str(tv)
+  if (raw == "" || raw == "Unit") { return "" }
+  let t = trim_str(raw)
+  let pg = prim_go(t)
+  if (pg != "") { return pg }
+  if (t == "Any") { return "any" }
+  let ft = split_fn_type(t)
+  if (ft.length() > 0) {
+    let np = ft.length()
+    var ps = []
+    var i = 0
+    while (i < np - 1) { ps = ps.push(go_type(ft[i])); i = i + 1 }
+    let ret = go_type(erase_async(ft[np - 1]))
+    let head = "func(".concat(ps.join(", ")).concat(") ").concat(ret)
+    return rstrip(head)
+  }
+  if (t.endsWith("]") && contains_ch(t, "[")) {
+    let lb = t.indexOf("[")
+    let head = t.slice(0, lb)
+    let inner = t.slice(lb + 1, t.length() - 1)
+    if (head == "List") { return "[]".concat(go_type(inner)) }
+    if (head == "Opt") { return `RevlOpt[${go_type(inner)}]` }
+    if (head == "Result") {
+      let ps = split_top(inner, ",")
+      return `RevlResult[${go_type(ps[0])}, ${go_type(ps[1])}]`
+    }
+    if (head == "Map") {
+      let ps = split_top(inner, ",")
+      return `map[${go_type(ps[0])}]${go_type(ps[1])}`
+    }
+  }
+  return v3_ident(t)
+}
+
+fn contains_ch(s: Str, ch: Str) -> Bool { return s.indexOf(ch) >= 0 }
+
+// `_go_v3_lit`: a v3 literal.
+fn go_v3_lit(node: Any) -> Str {
+  let v = value_field(node, "value")
+  let k = value_kind(v)
+  if (k == "bool") { if (value_bool(v)) { return "true" } return "false" }
+  if (k == "null") { return "nil" }
+  if (k == "str") { return go_string(v) }
+  if (k == "int") { return num_str(v) }
+  if (k == "float") { return float_lit(v) }
+  return "<<UNSUPPORTED-LIT>>"
+}
+
+// --------------------------------------------------- type inference (subset)
+fn ref_name(node: Any) -> Str {
+  let nm = value_str(value_field(node, "name"))
+  if (nm != "") { return nm }
+  return value_str(value_field(node, "id"))
+}
+
+// `_go_v3_infer_type`: the surface type of an expression when knowable, else "".
+fn infer_type(node: Any, ctx: Ctx) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  let w = value_str(value_field(node, "widen"))
+  if (w == "Float") { return "Float" }
+  if (w == "Int") { return "Int" }
+  let k = node_kind(node)
+  if (k == "lit") {
+    let vk = value_kind(value_field(node, "value"))
+    if (vk == "bool") { return "Bool" }
+    if (vk == "int") { return "Int" }
+    if (vk == "float") { return "Float" }
+    if (vk == "str") { return "Str" }
+    return ""
+  }
+  if (k == "var" || k == "name") { return map_get(ctx.vt, ref_name(node)) }
+  if (k == "interp") { return "Str" }
+  if (k == "index") {
+    let tt = infer_type(value_field(node, "target"), ctx)
+    if (tt.startsWith("List[") && tt.endsWith("]")) { return tt.slice(5, tt.length() - 1) }
+    return ""
+  }
+  if (k == "call") {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") {
+      let nm = value_str(value_field(callee, "name"))
+      let fr = map_get(ctx.fr, nm)
+      if (fr != "") { return fr }
+      return map_get(ctx.er, nm)
+    }
+    return ""
+  }
+  if (k == "bin") {
+    let op = node_op(node)
+    if (is_eq_op(op) || op == "&&" || op == "||") { return "Bool" }
+    if (node_operands(node) == "Int32" && is_addsubmul(op)) { return "Int32" }
+    if (op == "+") {
+      let lt = infer_type(value_field(node, "left"), ctx)
+      let rt = infer_type(value_field(node, "right"), ctx)
+      if (lt == "Str" || rt == "Str") { return "Str" }
+      if (lt != "") { return lt }
+      return rt
+    }
+    if (op == "/") { return "Float" }
+    if (op == "-" || op == "*" || op == "%") { return "Int" }
+    return ""
+  }
+  if (k == "un") {
+    if (node_op(node) == "!") { return "Bool" }
+    return infer_type(value_field(node, "operand"), ctx)
+  }
+  if (k == "if") {
+    let t = infer_type(value_field(node, "then"), ctx)
+    if (t != "") { return t }
+    return infer_type(value_field(node, "else"), ctx)
+  }
+  return ""
+}
+
+// -------------------------------------------------------------- expressions
+// `_infer_arrow_param`: recover an untyped lambda parameter's type from its
+// first use as a binary operand in the body (pre-order DFS), or "".
+fn arrow_param_hint(node: Any, name: Str, ctx: Ctx) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  if (node_kind(node) == "bin") {
+    let l = value_field(node, "left")
+    let r = value_field(node, "right")
+    if (is_ref_named(l, name)) {
+      let o = infer_type(r, ctx)
+      if (o != "") { return o }
+    }
+    if (is_ref_named(r, name)) {
+      let o = infer_type(l, ctx)
+      if (o != "") { return o }
+    }
+  }
+  for (c of value_children(node)) {
+    let h = arrow_param_hint(c, name, ctx)
+    if (h != "") { return h }
+  }
+  return ""
+}
+
+fn is_ref_named(node: Any, name: Str) -> Bool {
+  let k = node_kind(node)
+  if (k != "var" && k != "name") { return false }
+  return ref_name(node) == name
+}
+
+fn is_builtin_ctor(name: Str) -> Bool {
+  return name == "Some" || name == "None" || name == "Ok" || name == "Err"
+}
+
+fn render_bin(node: Any, ctx: Ctx) -> Str {
+  let op = node_op(node)
+  if (op == "??") { return "<<DEFER-coalesce>>" }
+  let goop = go_bin_op(op)
+  if (goop == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
+  let left = render_expr(value_field(node, "left"), ctx, "")
+  let right = render_expr(value_field(node, "right"), ctx, "")
+  let opnd = node_operands(node)
+  if (is_eq_op(op)) {
+    let lt = infer_type(value_field(node, "left"), ctx)
+    let rt = infer_type(value_field(node, "right"), ctx)
+    if (!(is_scalar(lt) && is_scalar(rt))) { return "<<DEFER-reflect-eq>>" }
+  }
+  if (is_addsubmul(op) && opnd == "Int") {
+    var h = "revlMul"
+    if (op == "+") { h = "revlAdd" }
+    if (op == "-") { h = "revlSub" }
+    return `${h}(${left}, ${right})`
+  }
+  if (is_addsubmul(op) && opnd == "Int32") {
+    var h = "revlMulI32"
+    if (op == "+") { h = "revlAddI32" }
+    if (op == "-") { h = "revlSubI32" }
+    return `${h}(${left}, ${right})`
+  }
+  if (op == "/") {
+    if (opnd == "Int" || opnd == "Int32") {
+      return `revlDiv(float64(${left}), float64(${right}))`
+    }
+    return `revlDiv(${left}, ${right})`
+  }
+  return `(${left} ${goop} ${right})`
+}
+
+fn render_un(node: Any, ctx: Ctx) -> Str {
+  let op = node_op(node)
+  let operand = render_expr(value_field(node, "operand"), ctx, "")
+  if (op == "!") { return `(!${operand})` }
+  if (op == "-") {
+    let opnd = node_operands(node)
+    if (opnd == "Int") { return `revlSub(0, ${operand})` }
+    if (opnd == "Int32") { return `revlSubI32(0, ${operand})` }
+    return `(-${operand})`
+  }
+  return `<<UNSUPPORTED-UN:${op}>>`
+}
+
+fn render_call(node: Any, ctx: Ctx) -> Str {
+  let callee = value_field(node, "callee")
+  if (value_is_null(callee)) { return "<<DEFER-component-call>>" }
+  var args = []
+  for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx, "")) }
+  if (node_kind(callee) == "var" && is_builtin_ctor(value_str(value_field(callee, "name")))) {
+    return "<<DEFER-ctor>>"
+  }
+  let csrc = render_expr(callee, ctx, "")
+  return `${csrc}(${args.join(", ")})`
+}
+
+fn render_index(node: Any, ctx: Ctx) -> Str {
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx, "")
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  return `${target}[${render_expr(value_field(node, "index"), ctx, "")}]`
+}
+
+fn render_list(node: Any, ctx: Ctx, expected: Str) -> Str {
+  var elem = ""
+  if (expected.startsWith("List[") && expected.endsWith("]")) {
+    elem = expected.slice(5, expected.length() - 1)
+  }
+  let items = value_list(value_field(node, "items"))
+  if (elem == "" && items.length() > 0) { elem = infer_type(items[0], ctx) }
+  var goelem = "any"
+  if (elem != "") { goelem = go_type(elem) }
+  var parts = []
+  for (it of items) { parts = parts.push(render_expr(it, ctx, "")) }
+  return `[]${goelem}{${parts.join(", ")}}`
+}
+
+fn render_arrow(node: Any, ctx: Ctx) -> Str {
+  let names = value_list(value_field(node, "params"))
+  let ptypes = value_list(value_field(node, "param_types"))
+  var declared = []
+  var i = 0
+  while (i < names.length()) {
+    var d = ""
+    if (i < ptypes.length()) { d = value_str(ptypes[i]) }
+    if (d == "") { d = arrow_param_hint(value_field(node, "body"), value_str(names[i]), ctx) }
+    declared = declared.push(d)
+    i = i + 1
+  }
+  // Bind inferred param types so the body renders/infers against them.
+  var bodyctx = ctx
+  i = 0
+  while (i < names.length()) {
+    if (declared[i] != "") { bodyctx = set_vt(bodyctx, value_str(names[i]), declared[i]) }
+    i = i + 1
+  }
+  var ps = []
+  i = 0
+  while (i < names.length()) {
+    var gt = go_type(declared[i])
+    if (gt == "") { gt = "any" }
+    ps = ps.push(`${v3_ident(value_str(names[i]))} ${gt}`)
+    i = i + 1
+  }
+  let body = render_expr(value_field(node, "body"), ctx, "")
+  let bodyt = go_type(infer_type(value_field(node, "body"), bodyctx))
+  var ret = ""
+  if (bodyt != "") { ret = " ".concat(bodyt) }
+  return `func(${ps.join(", ")})${ret} { return ${body} }`
+}
+
+// `_go_v3_interp`: a `${..}` template as a Go `fmt.Sprintf`. A Float part routes
+// through the canonical `revlFtoa` (DEFERRED — such a part is excluded from the
+// corpus, since it pulls in the `revlFtoa` helper the scaffold omits).
+fn render_interp(node: Any, ctx: Ctx) -> Str {
+  var fmt = []
+  var args = []
+  for (part of value_list(value_field(node, "parts"))) {
+    let k = value_str(value_at(part, 0))
+    let v = value_at(part, 1)
+    if (k == "text") {
+      fmt = fmt.push(double_pct(value_str(v)))
+    } else {
+      if (infer_type(v, ctx) == "Float") {
+        fmt = fmt.push("%s")
+        args = args.push(`revlFtoa(${render_expr(v, ctx, "")})`)
+      } else {
+        fmt = fmt.push("%v")
+        args = args.push(render_expr(v, ctx, ""))
+      }
+    }
+  }
+  let joined = fmt.join("")
+  if (args.length() == 0) { return go_string(joined) }
+  return `fmt.Sprintf(${go_string(joined)}, ${args.join(", ")})`
+}
+
+// Double every `%` in interpolation text (Go verb escaping).
+fn double_pct(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.charAt(i)
+    if (ch == "%") { out = out.concat("%%") } else { out = out.concat(ch) }
+    i = i + 1
+  }
+  return out
+}
+
+// The kind dispatch, mirroring `_go_v3_expr`'s branch order (post-widen).
+fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let kind = node_kind(node)
+  if (kind == "lit") { return go_v3_lit(node) }
+  if (kind == "var" || kind == "name") { return v3_ident(ref_name(node)) }
+  if (kind == "bin") { return render_bin(node, ctx) }
+  if (kind == "un") { return render_un(node, ctx) }
+  if (kind == "call") { return render_call(node, ctx) }
+  if (kind == "index") { return render_index(node, ctx) }
+  if (kind == "list") { return render_list(node, ctx, expected) }
+  if (kind == "arrow") { return render_arrow(node, ctx) }
+  if (kind == "if") {
+    var expt = ""
+    if (expected != "") { expt = go_type(expected) }
+    else { expt = go_type(infer_type(value_field(node, "then"), ctx)) }
+    if (expt == "") { expt = "any" }
+    let cond = render_expr(value_field(node, "cond"), ctx, "")
+    let then = render_expr(value_field(node, "then"), ctx, expected)
+    let els = render_expr(value_field(node, "else"), ctx, expected)
+    return `func() ${expt} { if ${cond} { return ${then} }; return ${els} }()`
+  }
+  if (kind == "interp") { return render_interp(node, ctx) }
+  return `<<UNSUPPORTED-EXPR:${kind}>>`
+}
+
+// The `widen` coercion markers (docs/arithmetic.md): render the conversion the
+// reference makes visible, then dispatch the un-widened node.
+fn render_expr(node: Any, ctx: Ctx, expected: Str) -> Str {
+  let w = value_str(value_field(node, "widen"))
+  if (w == "Float") { return `float64(${render_inner(node, ctx, expected)})` }
+  if (w == "Int") { return `int64(${render_inner(node, ctx, expected)})` }
+  return render_inner(node, ctx, expected)
+}
+
+// -------------------------------------------------------------- statements
+fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
+  var lines = []
+  var c = ctx
+  for (n of nodes) {
+    let r = v3_stmt(n, c, indent)
+    lines = lines.concat(r.lines)
+    c = r.ctx
+  }
+  return { lines: lines, ctx: c }
+}
+
+// `_go_v3_stmt`: one fn-body step -> its emitted (indented) lines and threaded
+// ctx. `t` is the assert receiver — the reference uses "t" in a fn body (there
+// is no such binding in scope, but the byte-check holds it to the reference).
+fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
+  let step = node_step(node)
+  if (step == "let") {
+    let raw = value_str(value_field(node, "name"))
+    let nm = v3_ident(raw)
+    let valnode = value_field(node, "value")
+    let inferred = infer_type(valnode, ctx)
+    var nctx = ctx
+    if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
+    let value = render_expr(valnode, ctx, inferred)
+    var got = ""
+    if (inferred != "") { got = go_type(inferred) }
+    var out = []
+    if (got == "int64" || got == "float64") {
+      out = out.push(line(indent, `var ${nm} ${got} = ${value}`))
+    } else {
+      out = out.push(line(indent, `${nm} := ${value}`))
+    }
+    out = out.push(line(indent, `_ = ${nm}`))
+    return { lines: out, ctx: nctx }
+  }
+  if (step == "assign") {
+    let raw = value_str(value_field(node, "name"))
+    let nm = v3_ident(raw)
+    let value = render_expr(value_field(node, "value"), ctx, map_get(ctx.vt, raw))
+    return { lines: [line(indent, `${nm} = ${value}`)], ctx: ctx }
+  }
+  if (step == "return") {
+    let e = value_field(node, "expr")
+    if (value_is_null(e)) { return { lines: [line(indent, "return")], ctx: ctx } }
+    return { lines: [line(indent, `return ${render_expr(e, ctx, ctx.rt)}`)], ctx: ctx }
+  }
+  if (step == "if") {
+    var out = [line(indent, `if ${render_expr(value_field(node, "cond"), ctx, "")} {`)]
+    let thenR = emit_stmts(value_list(value_field(node, "then")), ctx, indent + 1)
+    out = out.concat(thenR.lines)
+    var c = thenR.ctx
+    let els = value_list(value_field(node, "else"))
+    if (els.length() > 0) {
+      out = out.push(line(indent, "} else {"))
+      let elseR = emit_stmts(els, c, indent + 1)
+      out = out.concat(elseR.lines)
+      c = elseR.ctx
+    }
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: c }
+  }
+  if (step == "while") {
+    var out = [line(indent, `for ${render_expr(value_field(node, "cond"), ctx, "")} {`)]
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    out = out.concat(bodyR.lines)
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: bodyR.ctx }
+  }
+  if (step == "for") {
+    let raw = value_str(value_field(node, "bind"))
+    let bind = v3_ident(raw)
+    let itnode = value_field(node, "iterable")
+    let itt = infer_type(itnode, ctx)
+    var fctx = ctx
+    if (itt.startsWith("List[") && itt.endsWith("]")) {
+      fctx = set_vt(ctx, raw, itt.slice(5, itt.length() - 1))
+    }
+    var out = [line(indent, `for _, ${bind} := range ${render_expr(itnode, ctx, "")} {`)]
+    out = out.push(line(indent + 1, `_ = ${bind}`))
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), fctx, indent + 1)
+    out = out.concat(bodyR.lines)
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: bodyR.ctx }
+  }
+  if (step == "expr") {
+    return { lines: [line(indent, `_ = ${render_expr(value_field(node, "expr"), ctx, "")}`)], ctx: ctx }
+  }
+  if (step == "assert") {
+    let expr = render_expr(value_field(node, "expr"), ctx, "")
+    var out = [line(indent, `if !(${expr}) {`)]
+    out = out.push(line(indent + 1, `t.Fatalf("assertion failed: %s", ${go_string(expr)})`))
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: ctx }
+  }
+  return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
+}
+
+// `_emit_v3_go_functions`: each module fn as a Go `func`, blank-line separated.
+fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str]) -> List[Str] {
+  var out = []
+  for (fnode of functions) {
+    let name = v3_ident(value_str(value_field(fnode, "name")))
+    let params = value_list(value_field(fnode, "params"))
+    var vt: Map[Str, Str] = Map.empty()
+    for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
+    let rt = value_str(value_field(fnode, "returns"))
+    let ctx = { vt: vt, fr: fr, er: er, rt: rt }
+    var ps = []
+    for (p of params) {
+      ps = ps.push(`${v3_ident(value_str(value_field(p, "name")))} ${go_type(value_field(p, "type"))}`)
+    }
+    let ret = go_type(value_field(fnode, "returns"))
+    var sigret = ""
+    if (ret != "") { sigret = " ".concat(ret) }
+    out = out.push(`func ${name}(${ps.join(", ")})${sigret} {`)
+    let r = emit_stmts(value_list(value_field(fnode, "body")), ctx, 1)
+    out = out.concat(r.lines)
+    out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// ------------------------------------------------------------- feature flags
+// Which runtime preambles the pure path prepends is a deterministic function of
+// the IR: the reference sets each flag while RENDERING a node, and every node in
+// a function body (arrow bodies included) is rendered, so a structural pass over
+// the IR sees exactly the same set. `_go_string`-escaping and type spellings set
+// no flag; only these do, in-slice.
+type Flags = { fmt: Bool, fdiv: Bool, ovf: Bool, ovf32: Bool }
+
+fn flags_or(a: Flags, b: Flags) -> Flags {
+  return { fmt: a.fmt || b.fmt, fdiv: a.fdiv || b.fdiv, ovf: a.ovf || b.ovf, ovf32: a.ovf32 || b.ovf32 }
+}
+
+fn flag_walk(node: Any, acc: Flags) -> Flags {
+  var f = acc
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "interp") { f = { fmt: true, fdiv: f.fdiv, ovf: f.ovf, ovf32: f.ovf32 } }
+    if (k == "bin") {
+      let op = node_op(node)
+      let opnd = node_operands(node)
+      if (op == "/") { f = { fmt: f.fmt, fdiv: true, ovf: f.ovf, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (is_addsubmul(op) && opnd == "Int32") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+    }
+    if (k == "un" && node_op(node) == "-") {
+      let opnd = node_operands(node)
+      if (opnd == "Int") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: true, ovf32: f.ovf32 } }
+      if (opnd == "Int32") { f = { fmt: f.fmt, fdiv: f.fdiv, ovf: f.ovf, ovf32: true } }
+    }
+  }
+  for (c of value_children(node)) { f = flag_walk(c, f) }
+  return f
+}
+
+fn collect_flags(functions: List[Any]) -> Flags {
+  var f = { fmt: false, fdiv: false, ovf: false, ovf32: false }
+  for (fnode of functions) { f = flag_walk(fnode, f) }
+  return f
+}
+
+// ------------------------------------------------------------- runtime preambles
+// The trapping Int arithmetic trio (docs/arithmetic.md): Go has no checked
+// arithmetic, so the helpers detect overflow. Built line-by-line to match the
+// reference's `out.append(...)` sequence byte-for-byte.
+fn overflow_preamble() -> List[Str] {
+  var o = []
+  o = o.push("func revlAdd(a, b int64) int64 {")
+  o = o.push(line(1, "s := a + b"))
+  o = o.push(line(1, "if (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return s"))
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("func revlSub(a, b int64) int64 {")
+  o = o.push(line(1, "d := a - b"))
+  o = o.push(line(1, "if (b < 0 && d < a) || (b > 0 && d > a) {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return d"))
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("func revlMul(a, b int64) int64 {")
+  o = o.push(line(1, "if a == 0 || b == 0 {"))
+  o = o.push(line(2, "return 0"))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "p := a * b"))
+  o = o.push(line(1, "if p/b != a {"))
+  o = o.push(line(2, `panic("revl: Int overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return p"))
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// The Int32 trap block: each op is computed in int64 and range-checked before
+// narrowing (Go's int32 wraps). Mirrors the reference append sequence.
+fn overflow32_preamble() -> List[Str] {
+  var o = []
+  o = o.push("func revlAddI32(a, b int32) int32 { return revlToI32(int64(a) + int64(b)) }")
+  o = o.push("func revlSubI32(a, b int32) int32 { return revlToI32(int64(a) - int64(b)) }")
+  o = o.push("func revlMulI32(a, b int32) int32 { return revlToI32(int64(a) * int64(b)) }")
+  o = o.push("func revlToI32(v int64) int32 {")
+  o = o.push(line(1, "if v < -2147483648 || v > 2147483647 {"))
+  o = o.push(line(2, `panic("revl: Int32 overflow")`))
+  o = o.push(line(1, "}"))
+  o = o.push(line(1, "return int32(v)"))
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// The document assembly for a FUNCTION-ONLY v3 document (`_emit_v3_go`, subset):
+// the banner + package, the conditional import block, the feature preambles in
+// the reference's fixed order (revlDiv, then the overflow trio, then the Int32
+// block), then the free functions — joined, right-stripped, one trailing `\n`.
+pub fn emit_src(ir: Any) -> Str {
+  let functions = value_list(value_field(ir, "functions"))
+  var fr: Map[Str, Str] = Map.empty()
+  var er: Map[Str, Str] = Map.empty()
+  for (fnode of functions) {
+    let r = value_field(fnode, "returns")
+    if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
+  }
+  let flags = collect_flags(functions)
+
+  var out = []
+  out = out.push("// Code generated by backends/go/emit.py — DO NOT EDIT.")
+  out = out.push("// revl -> cordis-go (ir_version 3, pure typed-core tier): ordinary Go.")
+  out = out.push("package emitted")
+  out = out.push("")
+
+  if (flags.fmt) {
+    out = out.push("import (")
+    out = out.push(line(1, `"fmt"`))
+    out = out.push(")")
+    out = out.push("")
+  }
+  if (flags.fdiv) {
+    out = out.push("func revlDiv(a, b float64) float64 { return a / b }")
+    out = out.push("")
+  }
+  if (flags.ovf) { out = out.concat(overflow_preamble()) }
+  if (flags.ovf32) { out = out.concat(overflow32_preamble()) }
+
+  out = out.concat(emit_functions(functions, fr, er))
+  return rstrip(out.join(newline())).concat(newline())
+}
+
+// ---------------------------------------------------------------- in-file tests
+test "go_type covers the scalar and generic surface" {
+  assert go_type("Int") == "int64"
+  assert go_type("Str") == "string"
+  assert go_type("Bool") == "bool"
+  assert go_type("List[Int]") == "[]int64"
+  assert go_type("Map[Str, Int]") == "map[string]int64"
+  assert go_type("Opt[Str]") == "RevlOpt[string]"
+}
+
+test "bin-op table maps the longest revl ops" {
+  assert go_bin_op("===") == "=="
+  assert go_bin_op("!==") == "!="
+  assert go_bin_op("&&") == "&&"
+  assert go_bin_op("||") == "||"
+  assert is_addsubmul("+")
+  assert is_scalar("Int")
+}
+
+test "indentation is one tab per level" {
+  assert ind(0) == ""
+  assert ind(2).length() == 2
+  assert line(0, "x") == "x"
+  assert is_go_reserved("type")
+  assert v3_ident("type") == "type_"
+}
+
+// --------------------------------------------------------------- component wrap
+// A trivial provider so the emitted module is a valid plugin (the pure
+// `emit_src` above is what the cross-check exercises); mirrors the wrapper the
+// other self-host stages carry. `render` avoids the `emit` keyword.
+service EmitStream {
+  fn render(ir: Any) -> Str
+}
+
+component EmitGo provides emitter: EmitStream {
+  provide emitter {
+    fn render(ir) = emit_src(ir)
+  }
+}

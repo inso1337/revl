@@ -1,0 +1,4 @@
+fn first(xs: List[Int]) -> Int { return xs[0] }
+fn build() -> List[Int] { return [1, 2, 3] }
+fn apply(n: Int) -> Int { let f = (x) => x + n; return f(n) }
+fn mapthru(m: Map[Str, Int]) -> Map[Str, Int] { return m }
