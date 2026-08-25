@@ -1,0 +1,16 @@
+fn build(s: Str, t: Str) -> Str {
+  let a = s.concat(t)
+  let b = s.slice(0, 2)
+  let c = s.charAt(0)
+  let d = s.charCodeAt(1)
+  let e = s.length()
+  let f = s.split(",")
+  let g = f.join("-")
+  let h = s.startsWith("x")
+  let i = s.endsWith("y")
+  let j = s.repeat(3)
+  let k = s.indexOf(t)
+  return a
+}
+fn interp(name: Str, n: Int) -> Str { return `hi ${name} count ${n} end` }
+fn nested(a: Int, b: Int) -> Str { return `${a} plus ${b}` }

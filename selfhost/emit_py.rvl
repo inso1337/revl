@@ -1,0 +1,667 @@
+// The revl backend-IR -> cordis-py EMITTER, in revl — Path B slice 1, the
+// first proof that revl can emit ITSELF (roadmap items 146 / 174). Where the
+// lexer/parser/checker/lower stages port the compiler FRONTEND, this file ports
+// the tail: it reads the stable interchange IR (docs/backend-ir.md — the JSON
+// document every backend consumes) and produces Python source text, mirroring
+// backends/python/emit.py.
+//
+// It is one half of a differential BYTE oracle: this file and
+// backends/python/emit.py's `emit()` are two independent implementations of the
+// same lowering, forced to produce BYTE-IDENTICAL Python for every input in the
+// covered subset (tests/test_selfhost_emit_py.py). The reference is ground
+// truth; any divergence is a defect in this slice.
+//
+// ============================================================ WHAT IT COVERS
+// The first coherent slice emits, byte-for-byte, the FUNCTION-ONLY document —
+// an IR with module `fn`s (a revl library) and no components/services:
+//
+//   * the module scaffold — the generated-header docstring, the always-emitted
+//     `_revl_field` helper, and the empty `SERVICES`/`COMPONENTS` trailers;
+//   * the conditional arithmetic preludes — the i64/i32 overflow-trap helpers
+//     and the IEEE true-division helper, each gated exactly as the reference
+//     gates them (`_uses_bounded_int` / `_uses_bounded_int32` /
+//     `_uses_true_division`, walked over the whole IR);
+//   * `_emit_functions` -> `_fn_stmt` -> `_expr` for the base surface —
+//     let/assign, return, if/while/for, expr, assert; and the expression algebra
+//     lit, var, bin (incl `??`, the bounded `+ - *`, `/`, truncated `%`), un,
+//     call, field, index, ternary-if, record, list, len, the stdlib builtins,
+//     maplit, sync arrow, match, record-update, string interpolation, and the
+//     optional field/call forms.
+//
+// ============================================================ WHAT IT DEFERS
+// Reported for follow-on py-emitter slices, deliberately OUT of this slice:
+//   * components/services entirely (the `_ComponentEmitter`: provide methods,
+//     effect accumulator, req/provide, timers, lifecycle) — Path B slice 2+;
+//   * the v3 typed-core surface, spawn/templates, the canonical ABI, and async
+//     coloring (colored fns / async externs / awaited call sites);
+//   * type declarations (`_emit_types`), externs, in-file `test`/`fault_test`
+//     block emission, the built-in Result classes, and the canonical
+//     Float->Str (`_revl_ftoa`) interpolation helper;
+//   * `let_pattern` (record/list destructuring): the reference names its
+//     temporary `__revl_destructure_{id(node)}` from the Python object id, which
+//     a second implementation can never reproduce byte-for-byte (see the
+//     findings note) — a structural non-determinism, not a porting gap.
+//
+// ------------------------------------------------------ the erased-IR boundary
+// revl has no dynamic `dict[str, Any]`, and the checker refuses stdlib methods
+// on an unpinned `Any` receiver (host-object results carry no type, G8). So the
+// IR is read through a SMALL set of `@py` primitive accessors below — the same
+// erased-Value boundary stdlib/json.rvl documents — while every byte of emitter
+// LOGIC (dispatch, formatting, indentation, string building) is pure revl. The
+// one host facility mirrored verbatim is `repr` (`py_repr`): the reference
+// `_expr` itself calls Python's `repr()` to render literals, so bridging it is
+// faithful, not a shortcut.
+
+// ---------------------------------------------------------------- IR accessors
+extern pure fn g(node: Any, key: Str) -> Any = @py {
+    return node.get(key) if isinstance(node, dict) else None
+}
+extern pure fn gs(node: Any, key: Str) -> Str = @py {
+    v = node.get(key) if isinstance(node, dict) else None
+    return "" if v is None else v
+}
+extern pure fn alist(v: Any) -> List[Any] = @py {
+    return list(v) if isinstance(v, (list, tuple)) else []
+}
+extern pure fn at(v: Any, i: Int) -> Any = @py { return v[i] }
+extern pure fn as_str(v: Any) -> Str = @py { return v }
+extern pure fn py_repr(v: Any) -> Str = @py { return repr(v) }
+extern pure fn is_none(v: Any) -> Bool = @py { return v is None }
+// A real newline. revl plain strings carry no escapes (`"\n"` is a literal
+// backslash-n, which is exactly what the emitted `assert` message wants), so the
+// line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
+extern pure fn newline() -> Str = @py { return chr(10) }
+extern pure fn is_py_float(v: Any) -> Bool = @py {
+    return isinstance(v, float) and not isinstance(v, bool)
+}
+extern pure fn child_nodes(v: Any) -> List[Any] = @py {
+    if isinstance(v, dict):
+        return list(v.values())
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    return []
+}
+extern pure fn ir_version(ir: Any) -> Int = @py {
+    return ir.get("ir_version", 1) if isinstance(ir, dict) else 1
+}
+// The A3 append-`_` rename (mirrors backends/python/emit.py::_mangle): a valid
+// revl identifier that is a Python keyword emits and RUNS instead of crashing.
+// A pure function of the name — declaration and use sites agree without a table.
+extern pure fn mangle(name: Str) -> Str = @py {
+    import keyword
+    while keyword.iskeyword(name) or keyword.issoftkeyword(name):
+        name = name + "_"
+    return name
+}
+
+// ---------------------------------------------------------------- small utils
+fn node_kind(n: Any) -> Str { return gs(n, "kind") }
+fn node_op(n: Any) -> Str { return gs(n, "op") }
+fn node_operands(n: Any) -> Str { return gs(n, "operands") }
+
+fn ind(n: Int) -> Str { return "    ".repeat(n) }
+
+fn line(indent: Int, text: Str) -> Str {
+  if (text == "") { return "" }
+  return ind(indent).concat(text)
+}
+
+fn is_addsubmul(op: Str) -> Bool {
+  return op == "+" || op == "-" || op == "*"
+}
+
+fn is_div_method(m: Str) -> Bool {
+  return m == "div_trunc" || m == "div_floor" || m == "div_euclid"
+}
+
+fn is_cmp_op(op: Str) -> Bool {
+  if (op == "==") { return true }
+  if (op == "===") { return true }
+  if (op == "!=") { return true }
+  if (op == "!==") { return true }
+  if (op == "<") { return true }
+  if (op == ">") { return true }
+  if (op == "<=") { return true }
+  return op == ">="
+}
+
+// The _PY_BIN_OPS table (backends/python/emit.py): revl operator -> Python
+// operator. "" for an operator with no plain mapping (handled specially).
+fn py_bin_op(op: Str) -> Str {
+  if (op == "==") { return "==" }
+  if (op == "===") { return "==" }
+  if (op == "!=") { return "!=" }
+  if (op == "!==") { return "!=" }
+  if (op == "<") { return "<" }
+  if (op == ">") { return ">" }
+  if (op == "<=") { return "<=" }
+  if (op == ">=") { return ">=" }
+  if (op == "+") { return "+" }
+  if (op == "-") { return "-" }
+  if (op == "*") { return "*" }
+  if (op == "/") { return "/" }
+  if (op == "%") { return "%" }
+  if (op == "&&") { return "and" }
+  if (op == "||") { return "or" }
+  return ""
+}
+
+// ---------------------------------------------------- IR-wide `_uses_*` gates
+// Recursively walk the whole IR (mirrors the reference predicates). child_nodes
+// yields a dict's values / a list's elements / nothing for a scalar, so the walk
+// terminates at leaves exactly as the Python `any(... .values())` recursion does.
+fn uses_bounded_int(n: Any) -> Bool {
+  let k = node_kind(n)
+  if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int") { return true }
+  if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int") { return true }
+  if (k == "builtin" && is_div_method(gs(n, "method"))) { return true }
+  for (c of child_nodes(n)) {
+    if (uses_bounded_int(c)) { return true }
+  }
+  return false
+}
+
+fn uses_bounded_int32(n: Any) -> Bool {
+  let k = node_kind(n)
+  if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int32") { return true }
+  if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int32") { return true }
+  if (k == "builtin" && gs(n, "method") == "to_int32") { return true }
+  for (c of child_nodes(n)) {
+    if (uses_bounded_int32(c)) { return true }
+  }
+  return false
+}
+
+fn uses_true_division(n: Any) -> Bool {
+  if (node_kind(n) == "bin" && node_op(n) == "/") { return true }
+  for (c of child_nodes(n)) {
+    if (uses_true_division(c)) { return true }
+  }
+  return false
+}
+
+// -------------------------------------------------------------- expressions
+// `_is_float_expr` (backends/python/emit.py): syntactically-certain Float.
+fn is_float_expr(node: Any) -> Bool {
+  let k = node_kind(node)
+  if (k == "lit") { return is_py_float(g(node, "value")) }
+  if (k == "bin") { return node_op(node) == "/" || node_operands(node) == "Float" }
+  if (k == "un") {
+    if (node_op(node) != "-") { return false }
+    return is_float_expr(g(node, "operand"))
+  }
+  return false
+}
+
+fn commajoin(nodes: List[Any]) -> Str {
+  var parts = []
+  for (e of nodes) { parts = parts.push(expr(e)) }
+  return parts.join(", ")
+}
+
+// `_render_builtin`: the stdlib surface rendered as portable Python.
+fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
+  if (method == "length") { return `len(${target})` }
+  if (method == "push") { return `(${target} + [${args[0]}])` }
+  if (method == "slice") { return `${target}[${args[0]}:${args[1]}]` }
+  if (method == "charAt") { return `${target}[${args[0]}]` }
+  if (method == "charCodeAt") { return `ord(${target}[${args[0]}])` }
+  if (method == "concat") { return `(${target} + ${args[0]})` }
+  if (method == "indexOf") {
+    return `(lambda _v, _n: _v.find(_n) if isinstance(_v, str) else (_v.index(_n) if _n in _v else -1))(${target}, ${args[0]})`
+  }
+  if (method == "split") {
+    return `(lambda _v, _s: list(_v) if _s == "" else _v.split(_s))(${target}, ${args[0]})`
+  }
+  if (method == "join") { return `${args[0]}.join(${target})` }
+  if (method == "repeat") { return `(${target} * ${args[0]})` }
+  if (method == "startsWith") { return `${target}.startswith(${args[0]})` }
+  if (method == "endsWith") { return `${target}.endswith(${args[0]})` }
+  if (method == "set") { return `({**${target}, ${args[0]}: ${args[1]}})` }
+  if (method == "lookup") { return `${target}.get(${args[0]})` }
+  if (method == "has") { return `(${args[0]} in ${target})` }
+  if (method == "size") { return `len(${target})` }
+  if (method == "keys") { return `sorted(${target})` }
+  if (method == "remove") {
+    return `(dict((kk, vv) for kk, vv in ${target}.items() if kk != ${args[0]}))`
+  }
+  if (method == "div_trunc") {
+    return `_revl_i64((lambda _a, _b: abs(_a) // abs(_b) if (_a < 0) == (_b < 0) else -(abs(_a) // abs(_b)))(${target}, ${args[0]}))`
+  }
+  if (method == "div_floor") { return `_revl_i64(${target} // ${args[0]})` }
+  if (method == "div_euclid") {
+    return `_revl_i64((lambda _a, _b: _a // _b if _b > 0 else -(_a // -_b))(${target}, ${args[0]}))`
+  }
+  if (method == "mod") { return `(${target} % abs(${args[0]}))` }
+  if (method == "to_int") {
+    if (recv == "Str") {
+      return `(lambda _s: (None if (_s == "" or _s == "-" or not _s.isascii() or not (_s.isdigit() or (_s[0] == "-" and _s[1:].isdigit())) or not (-(2**63) <= (_n := int(_s)) <= 2**63 - 1)) else _n))(${target})`
+    }
+    return `(${target})`
+  }
+  if (method == "to_int32") { return `_revl_i32(${target})` }
+  if (method == "to_str") { return `str(${target})` }
+  return `<<UNSUPPORTED-BUILTIN:${method}>>`
+}
+
+// `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
+fn match_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
+  let pattern = gs(arm, "pattern")
+  var body = expr(g(arm, "body"))
+  if (pattern == "_") { return body }
+  let bind = gs(arm, "bind")
+  var cond = ""
+  if (pattern == "None") {
+    cond = "match is None"
+  } else {
+    if (pattern == "Some") {
+      cond = "match is not None"
+      if (bind != "") { body = `(lambda ${bind}: ${body})(match)` }
+    } else {
+      if (bind != "") { body = `(lambda ${bind}: ${body})(match.value)` }
+      cond = `isinstance(match, ${pattern})`
+    }
+  }
+  if (!has_rest) {
+    return `(${body} if ${cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))`
+  }
+  return `(${body} if ${cond} else ${rest})`
+}
+
+fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
+  var result = ""
+  var has = false
+  var i = arms.length() - 1
+  while (i >= 0) {
+    let arm = arms[i]
+    result = match_branch(arm, result, has)
+    has = true
+    i -= 1
+  }
+  if (!has) {
+    result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
+  }
+  return `(lambda match: ${result})(${scrutinee})`
+}
+
+// `_interp_fstring`: a `${…}` template as a Python string concatenation.
+fn interp_fstring(parts: List[Any]) -> Str {
+  var pieces = []
+  for (p of parts) {
+    let k = as_str(at(p, 0))
+    let v = at(p, 1)
+    if (k == "text") {
+      pieces = pieces.push(py_repr(v))
+    } else {
+      if (is_float_expr(v)) {
+        pieces = pieces.push(`_revl_ftoa(${expr(v)})`)
+      } else {
+        pieces = pieces.push(`str(${expr(v)})`)
+      }
+    }
+  }
+  if (pieces.length() == 0) { return "''" }
+  let inner = pieces.join(" + ")
+  return "(".concat(inner).concat(")")
+}
+
+fn render_record(fields: List[Any]) -> Str {
+  var parts = []
+  for (p of fields) {
+    parts = parts.push(`${py_repr(at(p, 0))}: ${expr(at(p, 1))}`)
+  }
+  let inner = parts.join(", ")
+  return "{".concat(inner).concat("}")
+}
+
+fn render_list(items: List[Any]) -> Str {
+  var parts = []
+  for (e of items) { parts = parts.push(expr(e)) }
+  let inner = parts.join(", ")
+  return "[".concat(inner).concat("]")
+}
+
+fn render_record_update(base: Str, updates: List[Any]) -> Str {
+  var parts = []
+  parts = parts.push(`**${base}`)
+  for (u of updates) {
+    parts = parts.push(`${py_repr(at(u, 0))}: ${expr(at(u, 1))}`)
+  }
+  let inner = parts.join(", ")
+  return "{".concat(inner).concat("}")
+}
+
+fn render_arrow(node: Any) -> Str {
+  var ps = []
+  for (p of alist(g(node, "params"))) { ps = ps.push(mangle(as_str(p))) }
+  for (c of alist(g(node, "captures"))) {
+    let cm = mangle(as_str(c))
+    ps = ps.push(`${cm}=${cm}`)
+  }
+  let lp = ps.join(", ")
+  return `lambda ${lp}: ${expr(g(node, "body"))}`
+}
+
+fn render_bin(node: Any) -> Str {
+  let op = node_op(node)
+  if (op == "??") {
+    let lhs = expr(g(node, "left"))
+    let rhs = expr(g(node, "right"))
+    return `(${rhs} if ${lhs} is None else ${lhs})`
+  }
+  let opnd = node_operands(node)
+  if (is_addsubmul(op) && opnd == "Int") {
+    return `_revl_i64(${expr(g(node, "left"))} ${op} ${expr(g(node, "right"))})`
+  }
+  if (is_addsubmul(op) && opnd == "Int32") {
+    return `_revl_i32(${expr(g(node, "left"))} ${op} ${expr(g(node, "right"))})`
+  }
+  if (op == "/") {
+    return `_revl_div(${expr(g(node, "left"))}, ${expr(g(node, "right"))})`
+  }
+  if (op == "%" && (opnd == "Int" || opnd == "Float")) {
+    let lhs = expr(g(node, "left"))
+    let rhs = expr(g(node, "right"))
+    return `(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 else -(abs(_a) % abs(_b)))(${lhs}, ${rhs})`
+  }
+  let pop = py_bin_op(op)
+  return `(${expr(g(node, "left"))} ${pop} ${expr(g(node, "right"))})`
+}
+
+fn render_un(node: Any) -> Str {
+  let op = node_op(node)
+  if (op == "!") { return `(not ${expr(g(node, "operand"))})` }
+  if (op == "-") {
+    let opnd = node_operands(node)
+    if (opnd == "Int") { return `_revl_i64(-${expr(g(node, "operand"))})` }
+    if (opnd == "Int32") { return `_revl_i32(-${expr(g(node, "operand"))})` }
+    return `(-${expr(g(node, "operand"))})`
+  }
+  return `<<UNSUPPORTED-UN:${op}>>`
+}
+
+// The kind dispatch (post-widen), mirroring `_expr`'s branch order.
+fn expr_inner(node: Any) -> Str {
+  let kind = node_kind(node)
+  if (kind == "lit") { return py_repr(g(node, "value")) }
+  if (kind == "var") {
+    let nm = gs(node, "name")
+    if (nm == "None") { return "None" }
+    if (nm == "Some") { return "(lambda _v: _v)" }
+    return mangle(nm)
+  }
+  if (kind == "bin") { return render_bin(node) }
+  if (kind == "un") { return render_un(node) }
+  if (kind == "call") {
+    let callee = expr(g(node, "callee"))
+    let args = commajoin(alist(g(node, "args")))
+    return `${callee}(${args})`
+  }
+  if (kind == "field") {
+    return `_revl_field(${expr(g(node, "target"))}, ${py_repr(g(node, "name"))})`
+  }
+  if (kind == "index") {
+    return `${expr(g(node, "target"))}[${expr(g(node, "index"))}]`
+  }
+  if (kind == "if") {
+    return `(${expr(g(node, "then"))} if ${expr(g(node, "cond"))} else ${expr(g(node, "else"))})`
+  }
+  if (kind == "record") { return render_record(alist(g(node, "fields"))) }
+  if (kind == "list") { return render_list(alist(g(node, "items"))) }
+  if (kind == "len") { return `len(${expr(g(node, "target"))})` }
+  if (kind == "builtin") {
+    var args = []
+    for (a of alist(g(node, "args"))) { args = args.push(expr(a)) }
+    return render_builtin(gs(node, "method"), expr(g(node, "target")), args, gs(node, "recv"))
+  }
+  if (kind == "maplit") { return "{}" }
+  if (kind == "arrow") { return render_arrow(node) }
+  if (kind == "match") {
+    return match_expr(expr(g(node, "scrutinee")), alist(g(node, "arms")))
+  }
+  if (kind == "record_update") {
+    return render_record_update(expr(g(node, "base")), alist(g(node, "updates")))
+  }
+  if (kind == "interp") { return interp_fstring(alist(g(node, "parts"))) }
+  if (kind == "optfield") {
+    let t = expr(g(node, "target"))
+    return `(None if (${t}) is None else _revl_field(${t}, ${py_repr(g(node, "name"))}))`
+  }
+  if (kind == "optcall") {
+    let t = expr(g(node, "target"))
+    let args = commajoin(alist(g(node, "args")))
+    return `(None if (${t}) is None else (${t}).${gs(node, "method")}(${args}))`
+  }
+  return `<<UNSUPPORTED-EXPR:${kind}>>`
+}
+
+// The implicit Int -> Float coercion marker (docs/arithmetic.md): render the
+// conversion the reference makes visible, then dispatch the un-widened node.
+fn expr(node: Any) -> Str {
+  if (gs(node, "widen") == "Float") {
+    return `float(${expr_inner(node)})`
+  }
+  return expr_inner(node)
+}
+
+// -------------------------------------------------------------- statements
+// `_emit_assert`: bind each side of a comparison once and report both values.
+fn emit_assert(e: Any, indent: Int) -> List[Str] {
+  var out = []
+  if (node_kind(e) == "bin" && is_cmp_op(node_op(e))) {
+    let pop = py_bin_op(node_op(e))
+    let left = expr(g(e, "left"))
+    let right = expr(g(e, "right"))
+    out = out.push(line(indent, `_revl_lhs = ${left}`))
+    out = out.push(line(indent, `_revl_rhs = ${right}`))
+    let shown = py_repr(`${left} ${pop} ${right}`)
+    out = out.push(line(indent, `assert _revl_lhs ${pop} _revl_rhs, ${shown} + '\n  left  = ' + repr(_revl_lhs) + '\n  right = ' + repr(_revl_rhs)`))
+    return out
+  }
+  out = out.push(line(indent, `assert ${expr(e)}`))
+  return out
+}
+
+// `_fn_stmt`: one fn-body step -> its emitted lines (already indented).
+fn fn_stmt(node: Any, indent: Int) -> List[Str] {
+  let step = gs(node, "step")
+  var out = []
+  if (step == "let" || step == "assign") {
+    out = out.push(line(indent, `${mangle(gs(node, "name"))} = ${expr(g(node, "value"))}`))
+    return out
+  }
+  if (step == "return") {
+    let e = g(node, "expr")
+    if (is_none(e)) {
+      out = out.push(line(indent, "return"))
+    } else {
+      out = out.push(line(indent, `return ${expr(e)}`))
+    }
+    return out
+  }
+  if (step == "if") {
+    out = out.push(line(indent, `if ${expr(g(node, "cond"))}:`))
+    for (s of alist(g(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1)) }
+    let els = alist(g(node, "else"))
+    if (els.length() > 0) {
+      out = out.push(line(indent, "else:"))
+      for (s of els) { out = out.concat(fn_stmt(s, indent + 1)) }
+    }
+    return out
+  }
+  if (step == "while") {
+    out = out.push(line(indent, `while ${expr(g(node, "cond"))}:`))
+    let body = alist(g(node, "body"))
+    if (body.length() == 0) {
+      out = out.push(line(indent + 1, "pass"))
+    } else {
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
+    }
+    return out
+  }
+  if (step == "for") {
+    out = out.push(line(indent, `for ${mangle(gs(node, "bind"))} in ${expr(g(node, "iterable"))}:`))
+    let body = alist(g(node, "body"))
+    if (body.length() == 0) {
+      out = out.push(line(indent + 1, "pass"))
+    } else {
+      for (s of body) { out = out.concat(fn_stmt(s, indent + 1)) }
+    }
+    return out
+  }
+  if (step == "expr") {
+    out = out.push(line(indent, expr(g(node, "expr"))))
+    return out
+  }
+  if (step == "assert") {
+    return emit_assert(g(node, "expr"), indent)
+  }
+  out = out.push(line(indent, `<<UNSUPPORTED-STEP:${step}>>`))
+  return out
+}
+
+fn fn_params(params: List[Any]) -> Str {
+  var ps = []
+  for (p of params) { ps = ps.push(mangle(gs(p, "name"))) }
+  return ps.join(", ")
+}
+
+// `_emit_functions`: each module fn as a Python `def`, blank-line separated.
+fn emit_functions(functions: List[Any]) -> List[Str] {
+  var out = []
+  for (fnode of functions) {
+    let name = mangle(gs(fnode, "name"))
+    let params = fn_params(alist(g(fnode, "params")))
+    out = out.push(`def ${name}(${params}):`)
+    let body = alist(g(fnode, "body"))
+    if (body.length() == 0) { out = out.push(line(1, "pass")) }
+    for (s of body) { out = out.concat(fn_stmt(s, 1)) }
+    out = out.push("")
+  }
+  return out
+}
+
+// --------------------------------------------------- conditional preludes
+fn i64_block() -> List[Str] {
+  var o = []
+  o = o.push("_REVL_I64_MIN = -(2 ** 63)")
+  o = o.push("_REVL_I64_MAX = 2 ** 63 - 1")
+  o = o.push("")
+  o = o.push("def _revl_i64(v):")
+  o = o.push(`    """Int is bounded 64-bit and overflow traps. python is arbitrary"""`)
+  o = o.push(`    """precision, so the bound is imposed here."""`)
+  o = o.push("    if v < _REVL_I64_MIN or v > _REVL_I64_MAX:")
+  o = o.push("        raise OverflowError('revl: Int overflow')")
+  o = o.push("    return v")
+  o = o.push("")
+  return o
+}
+
+fn i32_block() -> List[Str] {
+  var o = []
+  o = o.push("_REVL_I32_MIN = -(2 ** 31)")
+  o = o.push("_REVL_I32_MAX = 2 ** 31 - 1")
+  o = o.push("")
+  o = o.push("def _revl_i32(v):")
+  o = o.push(`    """Int32 is bounded 32-bit and overflow traps (docs/arithmetic.md)."""`)
+  o = o.push("    if v < _REVL_I32_MIN or v > _REVL_I32_MAX:")
+  o = o.push("        raise OverflowError('revl: Int32 overflow')")
+  o = o.push("    return v")
+  o = o.push("")
+  return o
+}
+
+fn div_block() -> List[Str] {
+  var o = []
+  o = o.push("import math as _revl_math")
+  o = o.push("")
+  o = o.push("def _revl_div(a, b):")
+  o = o.push(`    """IEEE 754 true division: python raises where every other tier follows IEEE."""`)
+  o = o.push("    if b:")
+  o = o.push("        return a / b")
+  o = o.push("    if a == 0:")
+  o = o.push("        return float('nan')")
+  o = o.push("    return (_revl_math.copysign(float('inf'), a)")
+  o = o.push("            * _revl_math.copysign(1.0, b))")
+  o = o.push("")
+  return o
+}
+
+fn field_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_field(v, name):")
+  o = o.push(`    """Record literals are dicts, ADT payloads are objects."""`)
+  o = o.push("    return v[name] if isinstance(v, dict) else getattr(v, name)")
+  o = o.push("")
+  return o
+}
+
+fn comp_names(ir: Any) -> Str {
+  var ns = []
+  for (c of alist(g(ir, "components"))) { ns = ns.push(gs(c, "name")) }
+  return ns.join(", ")
+}
+
+// The document assembly, mirroring `emit()` for the function-only subset.
+pub fn emit_src(ir: Any) -> Str {
+  var out = []
+  let ver = ir_version(ir)
+  out = out.push(`"""Generated by the revl cordis-py backend (ir_version ${ver}) — do not edit.`)
+  out = out.push("")
+  out = out.push(`Components: ${comp_names(ir)}`)
+  out = out.push(`"""`)
+  out = out.push("")
+  if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
+  if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
+  if (uses_true_division(ir)) { out = out.concat(div_block()) }
+  out = out.concat(field_block())
+  let functions = alist(g(ir, "functions"))
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  out = out.push("SERVICES = {")
+  out = out.push("}")
+  out = out.push("")
+  out = out.push("")
+  out = out.push("COMPONENTS = {}")
+  return out.join(newline()).concat(newline())
+}
+
+// ---------------------------------------------------------------- in-file tests
+test "operator table maps longest revl ops" {
+  assert py_bin_op("===") == "=="
+  assert py_bin_op("!==") == "!="
+  assert py_bin_op("&&") == "and"
+  assert py_bin_op("||") == "or"
+}
+
+test "indentation is four spaces per level" {
+  assert ind(0) == ""
+  assert ind(2) == "        "
+  assert line(1, "x") == "    x"
+  assert line(2, "") == ""
+}
+
+test "builtin surface renders portable python" {
+  assert render_builtin("length", "xs", ["ignored"], "") == "len(xs)"
+  assert render_builtin("concat", "a", ["b"], "") == "(a + b)"
+  assert render_builtin("push", "xs", ["e"], "") == "(xs + [e])"
+  assert render_builtin("to_str", "n", ["ignored"], "") == "str(n)"
+}
+
+test "empty match is the non-exhaustive throw" {
+  let empty = []
+  assert match_expr("o", empty) == "(lambda match: (_ for _ in ()).throw(TypeError('non-exhaustive match')))(o)"
+}
+
+// --------------------------------------------------------------- component wrap
+// A trivial provider so the emitted module is a valid plugin (the pure
+// `emit_src` above is what the cross-check exercises); mirrors the wrapper the
+// other self-host stages carry. `render` avoids the `emit` keyword.
+service EmitStream {
+  fn render(ir: Any) -> Str
+}
+
+component EmitPy provides emitter: EmitStream {
+  provide emitter {
+    fn render(ir) = emit_src(ir)
+  }
+}

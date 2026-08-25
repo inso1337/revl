@@ -1,0 +1,18 @@
+fn f(a: Int, b: Int, s: Str, xs: List[Int]) -> Int {
+  let r = { x: a, y: b }
+  let z = r.x + r.y
+  let w = xs[0]
+  let t = a > b ? a : b
+  let n = xs.length()
+  let j = s.concat("!")
+  let m = a % b
+  let d = a.div_trunc(b)
+  let neg = 0 - a
+  if (a > b) { return z } else { return w }
+}
+fn g(o: Opt[Int]) -> Int {
+  return match o { Some(v) => v, None => 0 }
+}
+fn h(name: Str) -> Str {
+  return `hi ${name}!`
+}

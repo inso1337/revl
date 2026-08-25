@@ -1,0 +1,17 @@
+fn i64ops(a: Int, b: Int) -> Int { return a + b - a * b }
+fn i32ops(a: Int32, b: Int32) -> Int32 { return a + b - a * b }
+fn negs(a: Int) -> Int { let x = 0 - a; return 0 - x }
+fn narrow(a: Int) -> Int32 { return a.to_int32() }
+fn widen(a: Int32) -> Int { return a.to_int() }
+fn divmod(a: Int, b: Int) -> Int {
+  let q = a.div_trunc(b)
+  let f = a.div_floor(b)
+  let e = a.div_euclid(b)
+  let m = a.mod(b)
+  let r = a % b
+  return q + f + e + m + r
+}
+fn realdiv(a: Float, b: Float) -> Float { return a / b }
+fn cmps(a: Int, b: Int) -> Bool { return a < b && a <= b || a > b }
+fn eqs(a: Int, b: Int) -> Bool { return a == b && a != b }
+fn boolnot(a: Bool) -> Bool { return !a }
