@@ -30,8 +30,31 @@ as when applied to the reference IR (services_basic) — the native IR is emitte
 ready end to end. `source`/`manifest` are environment/link artifacts the covered
 emitter surface does not read, so they are outside the projection.
 
-Deferred (reported for the full capstone): the `functions`/`externs`/`types`
-sections and the typed component/method expression body.
+Roadmap item 232 extends this to the whole typed-expression SPINE of module
+functions:
+  * the `functions` section — every module `fn` with its full lowered body
+    (statements + the typed-expression tree), byte-identical to the reference
+    over the entire covered corpus. This exercises the annotations the IR
+    carries and the checker's inference is projected to reproduce: the
+    `operands` tag on typed arithmetic (`+ - * / %` and unary `-`), the `recv`
+    tag on `to_int`, match-arm `payload_type` (Opt/Result), the arrow's
+    resolved `param_types`/`returns`, `builtin`-vs-`call` dispatch (including
+    host-root constructors and the stdlib method table), `len`/`index`/`field`/
+    `record`/`record_update`/`interp`/`optcall`, and `let`/`var`/`assign`/`if`/
+    `while`/`for`/`return` steps. Record-update (`{ r | .. }`) is read at the
+    token level because the shared parser's expression grammar does not carry
+    it;
+  * the `types` section — user record/variant declarations
+    (`{Name: {params, kind, fields|cases}}`), byte-identical.
+
+Emitter-readiness is proven end to end for the function corpus: the reference
+python emitter applied to the NATIVE IR produces the SAME bytes as applied to
+the reference IR, for every function document.
+
+Deferred (reported for the full capstone): the `externs` section (its verbatim
+`@py` body needs source offsets the token stream does not carry) and the typed
+COMPONENT/method expression body (the `ir_body` surface is still item 227's
+simple slice — effect/undo/provide over required-service calls + literals).
 """
 
 import importlib.util
@@ -57,6 +80,14 @@ CORPUS = sorted(p.name for p in CORPUS_DIR.glob("*.rvl"))
 # component/method body bumps the reference to v3 (`_has_builtin`); the native
 # producer under-approximates to 1. The only such corpus document.
 VERSION_BODY_DEPENDENT = {"services_methods.rvl"}
+
+# The function documents whose whole `functions` body is inside the covered
+# emitter surface, so the reference python emitter renders the native IR to the
+# same bytes as the reference IR (end-to-end emitter-readiness).
+FUNCTION_EMIT_READY_DOCS = [
+    "arith.rvl", "control.rvl", "strings.rvl", "records.rvl", "result.rvl",
+    "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
+]
 
 
 # ---------------------------------------------------------------- harness
@@ -157,6 +188,51 @@ def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
     if rel == "services_basic.rvl":
         # the capstone-intersection document: both its components carry a body
         assert covered == 2
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_native_ir_matches_reference_functions(lower_to_ir, rel):
+    """The `functions` section — every module `fn` with its full lowered body
+    (statements + the typed-expression tree) — is byte-identical to the
+    reference IR on every corpus document (absent together on the component-only
+    documents)."""
+    src = (CORPUS_DIR / rel).read_text()
+    native = json.loads(lower_to_ir(src))
+    reference = compile_source(src)
+    assert native.get("functions") == reference.get("functions")
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_native_ir_matches_reference_types(lower_to_ir, rel):
+    """The `types` section — user record/variant declarations — is byte-
+    identical to the reference IR on every corpus document."""
+    src = (CORPUS_DIR / rel).read_text()
+    native = json.loads(lower_to_ir(src))
+    reference = compile_source(src)
+    assert native.get("types") == reference.get("types")
+
+
+def test_native_function_ir_is_emitter_ready(lower_to_ir):
+    """End-to-end: the reference python emitter applied to the NATIVE IR
+    produces the SAME bytes as applied to the reference IR, for every function
+    document — the native `functions`/`types` IR is emitter-ready."""
+    refemit = _reference_emit()
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (lambda *a, **k: None)
+    had = "runtime" in sys.modules
+    previous = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        for rel in FUNCTION_EMIT_READY_DOCS:
+            src = (CORPUS_DIR / rel).read_text()
+            reference_ir = compile_source(src)
+            native_ir = json.loads(lower_to_ir(src))
+            assert refemit.emit(native_ir) == refemit.emit(reference_ir), rel
+    finally:
+        if had:
+            sys.modules["runtime"] = previous
+        else:
+            del sys.modules["runtime"]
 
 
 @pytest.mark.parametrize("rel", CORPUS)
