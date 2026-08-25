@@ -1,0 +1,16 @@
+// A configured component: a config block (one required field, one with a
+// default), a required service read as ctx.<key>, an effect/undo pair, and an
+// `if`/`fail` activation guard reading a config field.
+service Sink {
+  fn write(line: Str) -> Int
+}
+
+component Logger requires sink: Sink {
+  config { prefix: Str, level: Int = 1 }
+
+  effect sink.write(config.prefix) undo sink.write("bye")
+
+  if (config.level < 0) {
+    fail "bad level"
+  }
+}
