@@ -1,0 +1,132 @@
+// The revl stdlib VALUE module (roadmap item 180, docs/stdlib-value.md).
+//
+// `Value` is the erased-dynamic type: the runtime union of every
+// host-representable shape a revl program can hold — record, list, scalar
+// (Str/Int/Float/Bool), or null. It is the NAMED, reusable generalisation of
+// the `Any` boundary stdlib/json.rvl already documents: `json_parse` hands back
+// an `Any` whose static type only the runtime knows, and before this module the
+// only way to WALK that value in revl was to re-declare a private set of `@py`
+// primitive accessors (`g`/`gs`/`alist`/`at`/`child_nodes`/…, as
+// selfhost/emit_py.rvl did). Every IR-consuming self-host stage — each Path B
+// emitter — re-derived that same bridge. This module IS that bridge, once,
+// typed, and reusable: a self-hosted emitter that walks the backend-IR document
+// (docs/backend-ir.md) does it in PURE revl by `use`-ing these accessors, with
+// no `@py` block of its own.
+//
+// ------------------------------------------------------------------- totality
+// Every accessor is TOTAL: a shape mismatch never crashes. It returns a typed
+// default (`""`, `0`, `false`, `[]`, a null `Value`) or an `Opt` `None`, so a
+// walk over an untrusted / partially-shaped document cannot fault. This is the
+// property that makes the type safe to hand a checker-opaque value: the erased
+// value flowed in without proof of shape, and the accessors read it back
+// without assuming any.
+//
+// -------------------------------------------------------------- checker support
+// The checker (src/revl/typecheck.py) reserves `Value` as a builtin type and
+// makes it compatible with every type in BOTH directions at value-flow
+// positions: a concrete Str/Int/List/record flows INTO a `Value` argument
+// (boxed to the host's dynamic representation), and a `Value` result flows OUT
+// into any typed position. That is what lets `value_str(value_field(node,
+// "op"))` type-check without pinning the whole IR as an ADT and without the G8
+// "stdlib method on a value of unknown type" refusal.
+//
+// ----------------------------------------------------------------- tier status
+// Each accessor is a `pub extern pure fn` with per-tier `@<backend>` bodies,
+// exactly like stdlib/json.rvl. `Value` erases to each host's dynamic
+// representation:
+//   * py  — the native object graph (dict / list / bool / int / float / str /
+//            None); executed by the test suite (tests/test_value_stdlib.py).
+//   * ts / rs / go / java / wasm — DEFERRED to a follow-up. Each needs its
+//            `@<backend>` bodies added here against that tier's dynamic value
+//            (TS `any`/`unknown`; rust `cordis::Value` / `serde_json::Value` as
+//            json.rvl already boxes; go `any` with type switches; java a
+//            provider's JSON tree; wasm has no Float/Map/record substrate, so —
+//            as with json.rvl — a full `Value` has no representation there).
+//
+// Import with a named `use`:
+//
+//     use "stdlib/value.rvl" { value_kind, value_field, value_str, value_list }
+
+// ---------------------------------------------------------------- shape tag
+// The dynamic discriminant: "record" | "list" | "str" | "int" | "float" |
+// "bool" | "null". Total — every host value answers exactly one tag.
+pub extern pure fn value_kind(v: Value) -> Str = @py {
+    if isinstance(v, dict): return "record"
+    if isinstance(v, (list, tuple)): return "list"
+    if isinstance(v, bool): return "bool"
+    if isinstance(v, int): return "int"
+    if isinstance(v, float): return "float"
+    if isinstance(v, str): return "str"
+    return "null"
+}
+
+pub extern pure fn value_is_null(v: Value) -> Bool = @py { return v is None }
+
+// ---------------------------------------------------------------- record access
+// A record field as a `Value`. Total: a missing key or a non-record receiver
+// yields a null `Value`, so a chain `value_field(value_field(n, "a"), "b")`
+// never faults on a shape that lacks the path.
+pub extern pure fn value_field(v: Value, name: Str) -> Value = @py {
+    return v.get(name) if isinstance(v, dict) else None
+}
+
+// The same lookup as an `Opt`: `None` for a missing key, a null value, or a
+// non-record receiver; otherwise `Some(child)`. Use it where "absent" and
+// "present-but-null" must be told apart, or to supply a non-default fallback
+// with `??`.
+pub extern pure fn value_opt(v: Value, name: Str) -> Opt[Value] = @py {
+    if isinstance(v, dict):
+        return v.get(name)
+    return None
+}
+
+// Whether a record carries a key with a non-null value.
+pub extern pure fn value_has(v: Value, name: Str) -> Bool = @py {
+    return isinstance(v, dict) and v.get(name) is not None
+}
+
+// ---------------------------------------------------------------- list access
+// The elements of a list, each a `Value`. Total: a non-list receiver yields `[]`.
+pub extern pure fn value_list(v: Value) -> List[Value] = @py {
+    return list(v) if isinstance(v, (list, tuple)) else []
+}
+
+// One list element by index as a `Value`. Total: an out-of-range index or a
+// non-list receiver yields a null `Value`.
+pub extern pure fn value_at(v: Value, i: Int) -> Value = @py {
+    if isinstance(v, (list, tuple)) and 0 <= i < len(v):
+        return v[i]
+    return None
+}
+
+// The children of a container — a record's values or a list's elements, `[]`
+// for a scalar. The generic recursion driver: a whole-document walk that
+// terminates at leaves (this is `child_nodes` in selfhost/emit_py.rvl).
+pub extern pure fn value_children(v: Value) -> List[Value] = @py {
+    if isinstance(v, dict):
+        return list(v.values())
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    return []
+}
+
+// The number of elements (list), fields (record), or characters (str); `0` for
+// a scalar or null. Total.
+pub extern pure fn value_len(v: Value) -> Int = @py {
+    if isinstance(v, (list, tuple, dict, str)):
+        return len(v)
+    return 0
+}
+
+// ---------------------------------------------------------------- scalar exits
+// The checked exits back to concrete types. Each coerces its own shape and
+// returns a typed default on any mismatch — never a crash.
+pub extern pure fn value_str(v: Value) -> Str = @py {
+    return v if isinstance(v, str) else ""
+}
+pub extern pure fn value_int(v: Value) -> Int = @py {
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+}
+pub extern pure fn value_bool(v: Value) -> Bool = @py {
+    return v if isinstance(v, bool) else False
+}
