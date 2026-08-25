@@ -58,27 +58,23 @@
 // it), NOT an approximation. Where a covered fixture could plausibly reach one, a
 // loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
 //   * the MODERN component path (`_emit_component_modern`), REMAINING surface —
-//     `let-effect` host binds and any body-level `if`/`fail`/`await`/`setup`
-//     activation step, and method-body `let`/`assign`/arrow bindings. (config,
-//     required-service routing, effectful `return`/`effect`/`emit` method bodies
-//     landed in item 225; isolate/intercept realm PLACEMENT landed in item 235.) A
-//     component outside the supported subset routes to
+//     method-body `let`/`assign`/`await`/arrow bindings, `setup` blocks on effect
+//     steps, and body-level `while`/`for`/`let_pattern`. (config, required-service
+//     routing and effectful `return`/`effect`/`emit` method bodies landed in item
+//     225; isolate/intercept realm PLACEMENT in item 235; host `let-effect` binds
+//     and body-level `effect`/`emit`/`if`/`fail`/`await` in item 238 — see COVERS.)
+//     A component outside the supported subset routes to
 //     `<<DEFER-component-nonsimple:N>>`;
-//   * async/spawn/timers/routers; the `await`->AsyncPlugin / `fail`->CordisException
-//     import widening (`_core_imports`); and the host Map/generics surface
-//     (`_emit_host_stubs`' `HashMap<String,V>` per-site `_map_value_expr_type`);
-//   * the HOST Map/generics surface — `_emit_host_stubs`' `HashMap<String,V>` with
-//     per-site value inference (`_map_value_expr_type`) is component-bind territory
-//     (deferred with them). The plain v3 `maplit` (`new java.util.HashMap<>()`)
-//     and the `Map[K,V]` TYPE lowering ARE covered;
+//   * spawn/instances (`_v3_spawn`/`instance-get`/`RevlSpawnHandle`), timers and
+//     routers; and the `Pool` host runtime — `_emit_host_stubs` emits Map/Job, but
+//     a `Pool` acquisition surfaces a loud `<<DEFER-host-stub:Pool>>`;
 //   * the STDLIB surface — every `builtin`/`len` node and `_emit_stdlib_helpers`
 //     / `revlLength`;
 //   * the built-in Result surface — `Ok`/`Err` construction and `match`, the
 //     sealed `RevlResult` (`_emit_result_type`), and `_emit_checked_div_helpers`;
 //   * functional record-update `{r | f = e}` — the JAVA reference itself RAISES on
 //     `record_update` (only python/typescript emit it), a structural exclusion;
-//   * async coloring (await/join), spawn/instances (`_v3_spawn`/`instance-get`),
-//     externs (`_emit_v3_externs`), in-file `test`/lifecycle-test emission, and
+//   * externs (`_emit_v3_externs`), in-file `test`/lifecycle-test emission, and
 //     the canonical Float->Str `revlFtoa` (so `${aFloat}` interpolation is
 //     excluded, since it also pulls in the `_emit_ftoa_helper` block);
 //   * java-specific NUANCES — the `_reject_fn_type` refusal of a declared function
@@ -374,6 +370,28 @@ fn is_float_expr(node: Any) -> Bool {
 
 fn is_builtin_ctor(name: Str) -> Bool {
   return name == "Some" || name == "None" || name == "Ok" || name == "Err"
+}
+
+// `_host_method`: a host method name that is a Java reserved word is renamed at
+// both the call site and the runtime-class definition (`Map.new()` is a parse
+// error — `new` cannot be a method name), so `new` -> `create`.
+fn host_method(name: Str) -> Str {
+  if (name == "new") { return "create" }
+  return name
+}
+// `_HOST_ROOTS` / the `_HOST_STUBS` keys — the host objects with an emitted
+// runtime class. A `Map.new()`/`Job.run(..)` acquisition roots here.
+fn host_roots() -> List[Str] { return ["Job", "Map", "Pool"] }
+// `str.startswith(prefix)` — a small pure-revl helper (no host formatting).
+fn starts_with(s: Str, prefix: Str) -> Bool {
+  if (prefix.length() > s.length()) { return false }
+  return s.slice(0, prefix.length()) == prefix
+}
+// The host root of a dotted host fn (`"Map.new"` -> `"Map"`).
+fn host_root_of(hfn: Str) -> Str {
+  let dot = hfn.indexOf(".")
+  if (dot < 0) { return hfn }
+  return hfn.slice(0, dot)
 }
 
 // -------------------------------------------------------------- expressions
@@ -679,6 +697,22 @@ fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
     }
     return { text: render_adt(value_str(value_field(node, "case")), args, ctx), counter: c }
   }
+  // component dialect: a host builtin acquisition (`Map.new()`/`Job.run(..)`).
+  // The dotted `fn` splits into a host ROOT and a method, the method renamed
+  // through `host_method` (`new` -> `create`).
+  if (kind == "host") {
+    let hfn = value_str(value_field(node, "fn"))
+    let host = host_root_of(hfn)
+    let method = hfn.slice(host.length() + 1, hfn.length())
+    var hargs = []
+    var hc = counter
+    for (a of value_list(value_field(node, "args"))) {
+      let r = render_expr(a, ctx, hc)
+      hargs = hargs.push(r.text)
+      hc = r.counter
+    }
+    return { text: `${host}.${host_method(method)}(${hargs.join(", ")})`, counter: hc }
+  }
   if (kind == "call") { return render_call(node, ctx, counter) }
   if (kind == "fn") {
     var args = []
@@ -901,14 +935,45 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
   return lines
 }
 
-// `_core_imports` for a function/typed-core doc (no component await/fail step):
-// the five unconditional names, sorted.
-fn core_imports() -> List[Str] {
-  return ["import io.cordis4j.core.Context;",
-          "import io.cordis4j.core.Disposable;",
-          "import io.cordis4j.core.Disposables;",
-          "import io.cordis4j.core.Plugin;",
-          "import io.cordis4j.core.ServiceKey;"]
+// `_body_contains_step`: does any node in a component body use a `step` of the
+// given kind? The recursion driver (`value_children`) walks record values and
+// list elements to leaves.
+fn body_contains_step(node: Any, target: Str) -> Bool {
+  let k = value_kind(node)
+  if (k == "record") {
+    if (value_str(value_field(node, "step")) == target) { return true }
+    for (child of value_children(node)) {
+      if (body_contains_step(child, target)) { return true }
+    }
+    return false
+  }
+  if (k == "list") {
+    for (child of value_children(node)) {
+      if (body_contains_step(child, target)) { return true }
+    }
+    return false
+  }
+  return false
+}
+// `_ir_uses_component_step`: any component body contains the step kind.
+fn ir_uses_component_step(ir: Any, target: Str) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    if (body_contains_step(value_field(comp, "body"), target)) { return true }
+  }
+  return false
+}
+
+// `_core_imports(ir)`: the five unconditional names, WIDENED by the async
+// surface — an `await` component step pulls in `AsyncPlugin` (the async plugin
+// interface), a `fail` step pulls in `CordisException` (the thrown activation
+// failure) — then sorted and formatted.
+fn core_imports(ir: Any) -> List[Str] {
+  var names = ["Context", "Disposable", "Disposables", "Plugin", "ServiceKey"]
+  if (ir_uses_component_step(ir, "await")) { names = names.push("AsyncPlugin") }
+  if (ir_uses_component_step(ir, "fail")) { names = names.push("CordisException") }
+  var out = []
+  for (n of list_sort(names)) { out = out.push(`import io.cordis4j.core.${n};`) }
+  return out
 }
 
 // `_V3Ctx`'s type-table construction: fold the document `types` into the case /
@@ -1115,17 +1180,581 @@ fn component_simple_ok(comp: Any) -> Bool {
   return true
 }
 
-// ============================================== MODERN component (item 225 / 235)
-// The modern component path (`_emit_component_modern`) — SLICE 3+4 subset: the
-// config / required-service-routing / effectful-method-body corner (225) PLUS
-// isolate/intercept realm PLACEMENT (235), byte-exact. A component is emitted here
-// when it needs the modern path AND falls inside the supported subset
-// (`modern_supported` && `needs_modern_subset`); anything else routes to
-// `<<DEFER-component-nonsimple>>`. DEFERRED (slice 5+, each a loud marker or a
-// structural DEFER): async/await/spawn (AsyncPlugin / CordisException import
-// widening), timers, routers, `let-effect` host binds and their `_emit_host_stubs`
-// `HashMap<String,V>` per-site inference, body-level `effect`/`emit`/`if`/`fail`/
-// `setup` activation steps, and method-body `let`/`assign`/arrow bindings.
+// ============================================================ host object stubs
+// SLICE 5 (item 238) — the host Map/Job runtimes and the host-Map value-type
+// inference. `_emit_host_stubs`: walk the whole IR collecting the host ROOTS used
+// (a `host` acquisition node, or a `field` access on a `var` named after a host
+// root), then emit each used root's runtime class. Map/Job are ported; Pool stays
+// a loud `<<DEFER-host-stub:Pool>>` (no covered fixture reaches it).
+fn collect_hosts(node: Any, acc: List[Str]) -> List[Str] {
+  let k = value_kind(node)
+  if (k == "record") {
+    var a = acc
+    if (value_str(value_field(node, "kind")) == "host") {
+      a = a.push(host_root_of(value_str(value_field(node, "fn"))))
+    }
+    if (value_str(value_field(node, "kind")) == "field") {
+      let tgt = value_field(node, "target")
+      if (value_kind(tgt) == "record" && value_str(value_field(tgt, "kind")) == "var"
+          && list_contains(host_roots(), value_str(value_field(tgt, "name")))) {
+        a = a.push(value_str(value_field(tgt, "name")))
+      }
+    }
+    for (child of value_children(node)) { a = collect_hosts(child, a) }
+    return a
+  }
+  if (k == "list") {
+    var a = acc
+    for (child of value_children(node)) { a = collect_hosts(child, a) }
+    return a
+  }
+  return acc
+}
+fn emit_host_stubs(ir: Any) -> List[Str] {
+  let used = list_dedup(collect_hosts(ir, []))
+  var out = []
+  for (host of list_sort(used)) {
+    if (host == "Job") { out = out.concat(job_runtime()) }
+    if (host == "Map") { out = out.concat(map_runtime()) }
+    if (host == "Pool") { out = out.push("<<DEFER-host-stub:Pool>>") }
+  }
+  return out
+}
+
+// `_emit_map_runtime` — the generic `Map<V>` host object (`Map.create()` pins `V`
+// per site). A literal block; `\"` is the embedded Java quote (item 183).
+fn map_runtime() -> List[Str] {
+  var o = []
+  o = o.push("// host object runtime (Map) — minimal working Java implementation.")
+  o = o.push("// The value type is generic — each site's `Map.create()` pins `V`")
+  o = o.push("// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).")
+  o = o.push("public static final class Map<V> {")
+  o = o.push("    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();")
+  o = o.push("    private Map() {}")
+  o = o.push("    // revl `Map.new()` — renamed: `new` is a Java reserved word.")
+  o = o.push("    public static <V> Map<V> create() {")
+  o = o.push("        return new Map<>();")
+  o = o.push("    }")
+  o = o.push("    public void drop() {")
+  o = o.push("        values.clear();")
+  o = o.push("    }")
+  o = o.push("    public void insert(String key, V value) {")
+  o = o.push("        values.put(key, value);")
+  o = o.push("    }")
+  o = o.push("    public void remove(String key) {")
+  o = o.push("        values.remove(key);")
+  o = o.push("    }")
+  o = o.push("    public java.util.Optional<V> get(String key) {")
+  o = o.push("        return java.util.Optional.ofNullable(values.get(key));")
+  o = o.push("    }")
+  o = o.push("    // Iteration surface (docs/stdlib-2.0.md §Map): the checker promises")
+  o = o.push("    // `size()`/`keys()` on a host `Map.new()` receiver, and emit lowers")
+  o = o.push("    // both as method calls on this object. `size` is the entry count as a")
+  o = o.push("    // long (revl Int); `keys` yields the keys in ascending canonical Str")
+  o = o.push("    // (code-point) order — String.compareTo is UTF-16 code-unit order, so")
+  o = o.push("    // the inline comparator walks code points to stay canonical past")
+  o = o.push("    // U+FFFF. Read-only queries, no host trace.")
+  o = o.push("    public long size() {")
+  o = o.push("        return values.size();")
+  o = o.push("    }")
+  o = o.push("    public java.util.List<String> keys() {")
+  o = o.push("        java.util.List<String> ks = new java.util.ArrayList<>(values.keySet());")
+  o = o.push("        ks.sort((a, b) -> {")
+  o = o.push("            int i = 0, j = 0;")
+  o = o.push("            while (i < a.length() && j < b.length()) {")
+  o = o.push("                int ca = a.codePointAt(i), cb = b.codePointAt(j);")
+  o = o.push("                if (ca != cb) { return Integer.compare(ca, cb); }")
+  o = o.push("                i += Character.charCount(ca); j += Character.charCount(cb);")
+  o = o.push("            }")
+  o = o.push("            return Boolean.compare(i >= a.length(), j >= b.length());")
+  o = o.push("        });")
+  o = o.push("        return java.util.List.copyOf(ks);")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// `_emit_job_runtime` — the cancellable async `Job` handle (`Job.run(name)` ->
+// handle, `.await()` joins it). A literal block; `\"`/`\\\"` are the embedded Java
+// quote and the `\"`-in-a-Java-string escape (item 183).
+fn job_runtime() -> List[Str] {
+  var o = []
+  o = o.push("// host object runtime (Job) — a cancellable asynchronous unit of work.")
+  o = o.push("// Semantics are shared across tiers: backends/python/runtime.py,")
+  o = o.push("// section `.. _pool-job-semantics:`. `Job.run(name) -> handle`;")
+  o = o.push("// an `await` step joins it, so activation leaves nothing pending.")
+  o = o.push("public static final class Job {")
+  o = o.push("    /** scheduler turns of simulated work (same number on every tier) */")
+  o = o.push("    public static final int TICKS = 5;")
+  o = o.push("    private static final java.util.List<Job> HANDLES =")
+  o = o.push("        java.util.Collections.synchronizedList(new java.util.ArrayList<>());")
+  o = o.push("    private final String name;")
+  o = o.push("    private volatile String status = \"pending\";")
+  o = o.push("    private int remaining = TICKS;")
+  o = o.push("    private Job(String name) {")
+  o = o.push("        this.name = name;")
+  o = o.push("    }")
+  o = o.push("    public static Job run(String name) {")
+  o = o.push("        Job job = new Job(name);")
+  o = o.push("        HANDLES.add(job);")
+  o = o.push("        return job;")
+  o = o.push("    }")
+  o = o.push("    public String name() {")
+  o = o.push("        return name;")
+  o = o.push("    }")
+  o = o.push("    public String state() {")
+  o = o.push("        return status;")
+  o = o.push("    }")
+  o = o.push("    /** pending -> cancelled (true); a no-op returning false otherwise. */")
+  o = o.push("    public synchronized boolean cancel() {")
+  o = o.push("        if (!\"pending\".equals(status)) {")
+  o = o.push("            return false;")
+  o = o.push("        }")
+  o = o.push("        status = \"cancelled\";")
+  o = o.push("        return true;")
+  o = o.push("    }")
+  o = o.push("    /** Drive the job: TICKS cooperative turns, then done. */")
+  o = o.push("    public String await() {")
+  o = o.push("        if (\"done\".equals(status)) {")
+  o = o.push("            return name;")
+  o = o.push("        }")
+  o = o.push("        if (\"cancelled\".equals(status)) {")
+  o = o.push("            throw new IllegalStateException(\"job \\\"\" + name + \"\\\" cancelled\");")
+  o = o.push("        }")
+  o = o.push("        while (remaining > 0) {")
+  o = o.push("            Thread.yield();")
+  o = o.push("            if (\"cancelled\".equals(status)) {")
+  o = o.push("                throw new IllegalStateException(\"job \\\"\" + name + \"\\\" cancelled\");")
+  o = o.push("            }")
+  o = o.push("            remaining--;")
+  o = o.push("        }")
+  o = o.push("        status = \"done\";")
+  o = o.push("        return name;")
+  o = o.push("    }")
+  o = o.push("    /** The same job as a future, for a host that wants one. */")
+  o = o.push("    public java.util.concurrent.CompletableFuture<String> toFuture() {")
+  o = o.push("        return java.util.concurrent.CompletableFuture.supplyAsync(this::await);")
+  o = o.push("    }")
+  o = o.push("    /** Handles still in flight — teardown residue, made countable. */")
+  o = o.push("    public static long pending() {")
+  o = o.push("        synchronized (HANDLES) {")
+  o = o.push("            long n = 0L;")
+  o = o.push("            for (Job job : HANDLES) {")
+  o = o.push("                if (\"pending\".equals(job.state())) {")
+  o = o.push("                    n++;")
+  o = o.push("                }")
+  o = o.push("            }")
+  o = o.push("            return n;")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    public static void reset() {")
+  o = o.push("        HANDLES.clear();")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// -------------------------------------------- FR-4 host Map value-type inference
+// `_map_value_expr_type` and its `insert`-site collectors: learn a host Map's
+// revl surface value type from every `bind.insert(k, v)` in the component, so
+// `Map<V>` pins `V` (`Map[Str, List[Msg]]`, not just `Str`). "" is the reference's
+// `None`. `types` is the raw IR type table (the `field` case resolves through it).
+fn node_ref_name(n: Any) -> Str {
+  let id = value_str(value_field(n, "id"))
+  if (id != "") { return id }
+  return value_str(value_field(n, "name"))
+}
+fn map_value_expr_type(node: Any, var_types: Map[Str, Str], comp: Any, services: Any,
+                       functions: List[Any], ctx: Ctx, types: Any) -> Str {
+  if (value_kind(node) != "record") { return "" }
+  let kind = value_str(value_field(node, "kind"))
+  if (kind == "name" || kind == "var") { return map_get(var_types, node_ref_name(node)) }
+  if (kind == "lit") {
+    let v = value_field(node, "value")
+    let vk = value_kind(v)
+    if (vk == "bool") { return "Bool" }
+    if (vk == "int") { return "Int" }
+    if (vk == "float") { return "Float" }
+    if (vk == "str") { return "Str" }
+    return ""
+  }
+  if (kind == "format" || kind == "interp") { return "Str" }
+  if (kind == "list") {
+    let items = value_list(value_field(node, "items"))
+    if (items.length() == 0) { return "" }
+    let first = map_value_expr_type(items[0], var_types, comp, services, functions, ctx, types)
+    if (first == "") { return "" }
+    return `List[${first}]`
+  }
+  if (kind == "builtin") {
+    let method = value_str(value_field(node, "method"))
+    let args = value_list(value_field(node, "args"))
+    if (method == "push" && args.length() > 0) {
+      let elem = map_value_expr_type(args[0], var_types, comp, services, functions, ctx, types)
+      if (elem != "") { return `List[${elem}]` }
+    }
+    if (method == "length" || method == "charCodeAt" || method == "indexOf" || method == "to_int") { return "Int" }
+    if (method == "charAt" || method == "join" || method == "repeat" || method == "to_str" || method == "slice") { return "Str" }
+    if (method == "split") { return "List[Str]" }
+    if (method == "concat") { return map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx, types) }
+    return ""
+  }
+  if (kind == "fn") {
+    let name = value_str(value_field(node, "name"))
+    for (f of functions) {
+      if (value_str(value_field(f, "name")) == name) { return value_str(value_field(f, "returns")) }
+    }
+    return ""
+  }
+  if (kind == "call") {
+    let target = value_field(node, "target")
+    if (value_str(value_field(target, "kind")) == "req") {
+      let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(target, "name"))))
+      if (sname != "") {
+        let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(node, "method")))
+        return value_str(value_field(decl, "returns"))
+      }
+    }
+    let callee = value_field(node, "callee")
+    if (value_str(value_field(callee, "kind")) == "field") {
+      let ct = value_field(callee, "target")
+      if (value_str(value_field(ct, "kind")) == "req") {
+        let sname = value_str(value_field(value_field(comp, "requires"), value_str(value_field(ct, "name"))))
+        if (sname != "") {
+          let decl = value_field(value_field(value_field(services, sname), "methods"), value_str(value_field(callee, "name")))
+          return value_str(value_field(decl, "returns"))
+        }
+      }
+    }
+    return ""
+  }
+  if (kind == "record") {
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let t = record_type_for_fields(ctx, names)
+    if (resolved(t)) { return t }
+    return ""
+  }
+  if (kind == "adt") { return value_str(value_field(node, "type")) }
+  if (kind == "field") {
+    let receiver = map_value_expr_type(value_field(node, "target"), var_types, comp, services, functions, ctx, types)
+    if (receiver == "") { return "" }
+    let spec = value_field(types, receiver)
+    if (value_str(value_field(spec, "kind")) != "record") { return "" }
+    return value_str(value_field(value_field(spec, "fields"), value_str(value_field(node, "name"))))
+  }
+  if (kind == "config") {
+    let fname = value_str(value_field(node, "field"))
+    for (f of value_list(value_field(comp, "config"))) {
+      if (value_str(value_field(f, "name")) == fname) { return value_str(value_field(f, "type")) }
+    }
+    return ""
+  }
+  if (kind == "bin" && node_op(node) == "??") {
+    let right = map_value_expr_type(value_field(node, "right"), var_types, comp, services, functions, ctx, types)
+    if (right != "" && right.indexOf("Never") < 0) { return right }
+    return ""
+  }
+  return ""
+}
+// `_map_expr_inserts`: collect candidate value types from `bind.insert(k, v)`
+// anywhere in an expression (both call shapes), recursing into subexpressions.
+fn map_expr_inserts(node: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
+                    functions: List[Any], ctx: Ctx, types: Any, cands: List[Str]) -> List[Str] {
+  if (value_kind(node) != "record") { return cands }
+  var c = cands
+  if (value_str(value_field(node, "kind")) == "call") {
+    let target = value_field(node, "target")
+    let tk = value_str(value_field(target, "kind"))
+    if ((tk == "name" || tk == "var") && node_ref_name(target) == bind
+        && value_str(value_field(node, "method")) == "insert") {
+      let args = value_list(value_field(node, "args"))
+      if (args.length() >= 2) {
+        let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
+        if (t != "" && t.indexOf("Never") < 0) { c = c.push(t) }
+      }
+    }
+    let callee = value_field(node, "callee")
+    if (value_str(value_field(callee, "kind")) == "field") {
+      let ct = value_field(callee, "target")
+      let ctk = value_str(value_field(ct, "kind"))
+      if ((ctk == "name" || ctk == "var") && node_ref_name(ct) == bind
+          && value_str(value_field(callee, "name")) == "insert") {
+        let args = value_list(value_field(node, "args"))
+        if (args.length() >= 2) {
+          let t = map_value_expr_type(args[1], var_types, comp, services, functions, ctx, types)
+          if (t != "" && t.indexOf("Never") < 0) { c = c.push(t) }
+        }
+      }
+    }
+    for (arg of value_list(value_field(node, "args"))) {
+      c = map_expr_inserts(arg, bind, var_types, comp, services, functions, ctx, types, c)
+    }
+    c = map_expr_inserts(target, bind, var_types, comp, services, functions, ctx, types, c)
+    c = map_expr_inserts(callee, bind, var_types, comp, services, functions, ctx, types, c)
+    return c
+  }
+  for (child of value_children(node)) {
+    c = map_expr_inserts(child, bind, var_types, comp, services, functions, ctx, types, c)
+  }
+  return c
+}
+// `_map_insert_candidates`: walk one component-body (or provide-method) step.
+fn map_insert_candidates(step: Any, bind: Str, var_types: Map[Str, Str], comp: Any, services: Any,
+                         functions: List[Any], ctx: Ctx, types: Any, cands: List[Str]) -> List[Str] {
+  let kind = value_str(value_field(step, "step"))
+  var c = cands
+  if (kind == "effect" || kind == "let-effect") {
+    c = map_expr_inserts(value_field(step, "acquire"), bind, var_types, comp, services, functions, ctx, types, c)
+    c = map_expr_inserts(value_field(step, "undo"), bind, var_types, comp, services, functions, ctx, types, c)
+    for (nested of value_list(value_field(step, "setup"))) {
+      c = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, types, c)
+    }
+    return c
+  }
+  if (kind == "provide") {
+    let svc = value_field(services, value_str(value_field(step, "service")))
+    if (value_is_null(svc)) { return c }
+    for (method of value_list(value_field(step, "methods"))) {
+      let mdecl = value_field(value_field(svc, "methods"), value_str(value_field(method, "name")))
+      var mvar: Map[Str, Str] = Map.empty()
+      for (p of value_list(value_field(mdecl, "params"))) {
+        mvar = mvar.set(value_str(value_field(p, "name")), value_str(value_field(p, "type")))
+      }
+      for (body_step of value_list(value_field(method, "body"))) {
+        c = map_insert_candidates(body_step, bind, mvar, comp, services, functions, ctx, types, c)
+      }
+    }
+    return c
+  }
+  if (kind == "let" || kind == "assign") {
+    return map_expr_inserts(value_field(step, "value"), bind, var_types, comp, services, functions, ctx, types, c)
+  }
+  if (kind == "return") {
+    return map_expr_inserts(value_field(step, "expr"), bind, var_types, comp, services, functions, ctx, types, c)
+  }
+  if (kind == "emit") {
+    c = map_expr_inserts(value_field(step, "expr"), bind, var_types, comp, services, functions, ctx, types, c)
+    return map_expr_inserts(value_field(step, "compensate"), bind, var_types, comp, services, functions, ctx, types, c)
+  }
+  if (kind == "if") {
+    for (nested of value_list(value_field(step, "then"))) {
+      c = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, types, c)
+    }
+    for (nested of value_list(value_field(step, "else"))) {
+      c = map_insert_candidates(nested, bind, var_types, comp, services, functions, ctx, types, c)
+    }
+    return c
+  }
+  if (kind == "fail") {
+    return map_expr_inserts(value_field(step, "message"), bind, var_types, comp, services, functions, ctx, types, c)
+  }
+  return c
+}
+// `_map_value_surface_type`: the first concrete candidate across the whole
+// component (document order), or "" when nothing pins a type.
+fn map_value_surface_type(comp: Any, bind: Str, services: Any, functions: List[Any],
+                          ctx: Ctx, types: Any) -> Str {
+  var cands = []
+  for (step of value_list(value_field(comp, "body"))) {
+    cands = map_insert_candidates(step, bind, Map.empty(), comp, services, functions, ctx, types, cands)
+  }
+  if (cands.length() == 0) { return "" }
+  return cands[0]
+}
+// `_component_map_values`: bind -> revl surface value type for every host Map
+// binding, defaulted to `Str`.
+fn component_map_values(comp: Any, services: Any, functions: List[Any], ctx: Ctx, types: Any) -> Map[Str, Str] {
+  var out: Map[Str, Str] = Map.empty()
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect") {
+      let acq = value_field(s, "acquire")
+      if (value_str(value_field(acq, "kind")) == "host" && starts_with(value_str(value_field(acq, "fn")), "Map.")) {
+        let bind = value_str(value_field(s, "bind"))
+        let surface = map_value_surface_type(comp, bind, services, functions, ctx, types)
+        if (surface == "") { out = out.set(bind, "Str") } else { out = out.set(bind, surface) }
+      }
+    }
+  }
+  return out
+}
+
+// `_binds`: the `let-effect` bind names, document order.
+fn binds(comp: Any) -> List[Str] {
+  var out = []
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect") { out = out.push(value_str(value_field(s, "bind"))) }
+  }
+  return out
+}
+// `_host_of`: the host object class a bind acquires (`Map`/`Job`/`Pool`), a
+// `spawn` handle, or `Object`.
+fn host_of(comp: Any, bind: Str) -> Str {
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect" && value_str(value_field(s, "bind")) == bind) {
+      let acq = value_field(s, "acquire")
+      if (value_str(value_field(acq, "kind")) == "spawn") { return "RevlSpawnHandle" }
+      let root = host_root_of(value_str(value_field(acq, "fn")))
+      if (root == "") { return "Object" }
+      return root
+    }
+  }
+  return "Object"
+}
+// `_bind_type`: the Java type of a bind's provider field/ctor parameter. A host
+// Map is the generic `Map<V>` (value type from the IR); a non-Object host is its
+// class; an Object host infers from the acquire literal/record/list.
+fn bind_type(comp: Any, bind: Str, ctx: Ctx, map_values: Map[Str, Str]) -> Str {
+  let host = host_of(comp, bind)
+  if (host == "Map") {
+    var surface = map_get(map_values, bind)
+    if (surface == "") { surface = "Str" }
+    return `Map<${java_v3_type(surface, true)}>`
+  }
+  if (host != "Object") { return host }
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "let-effect" && value_str(value_field(step, "bind")) == bind) {
+      let acq = value_field(step, "acquire")
+      let kind = value_str(value_field(acq, "kind"))
+      if (kind == "record") {
+        var names = []
+        for (f of value_list(value_field(acq, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+        let t = record_type_for_fields(ctx, names)
+        if (resolved(t)) { return t }
+        return "Object"
+      }
+      if (kind == "list") { return "java.util.List<Object>" }
+      if (kind == "lit") {
+        let v = value_field(acq, "value")
+        let vk = value_kind(v)
+        if (vk == "bool") { return "boolean" }
+        if (vk == "int") { return "long" }
+        if (vk == "float") { return "double" }
+        if (vk == "str") { return "String" }
+      }
+    }
+  }
+  return "Object"
+}
+
+// `_await_join`: an A1 `await` step evaluates and JOINS the result (`.await()`)
+// when it is a host awaitable (`Job.run`), else it is a plain expression.
+fn await_join(node: Any, ctx: Ctx, counter: Int) -> Rendered {
+  let r = render_expr(node, ctx, counter)
+  if (value_kind(node) == "record" && value_str(value_field(node, "kind")) == "host"
+      && value_str(value_field(node, "fn")) == "Job.run") {
+    return { text: `${r.text}.await()`, counter: r.counter }
+  }
+  return r
+}
+
+// `_emit_setup_stmt` (DEFERRED subset): setup blocks (`let-effect ... { <setup> }`)
+// are not reached by the covered corpus (the gate rejects them); a loud marker
+// keeps a byte diff from silently passing if one ever arrives.
+fn emit_setup_stmt(step: Any, ctx: Ctx, pad: Str, counter: Int) -> Sout {
+  return { lines: [pad.concat(`<<DEFER-setup-step:${value_str(value_field(step, "step"))}>>`)], counter: counter }
+}
+
+// `_emit_component_stmts`: the modern `apply` activation body — `let-effect`
+// (host bind, `Map<V> b = Map.create();` + undo track), `effect` (`<acquire>;` +
+// undo track), `emit` (`<expr>;` + optional compensate track), `provide`
+// (`fx.track(ctx.provide(..))`), `if` (nested), `fail` (`throw new
+// CordisException(..)`), and `await` (join). Renders with the EMPTY rename (the
+// activation body names its req/bind LOCALS directly, unlike a provide method).
+fn emit_component_stmts(comp: Any, services: Any, cname: Str, steps: List[Any], pad: Str, ctx: Ctx,
+                        map_values: Map[Str, Str], req_locals: List[Str], bind_names: List[Str], counter: Int) -> Sout {
+  var lines = []
+  var c = counter
+  for (step of steps) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "let-effect" || kind == "effect") {
+      for (setup of value_list(value_field(step, "setup"))) {
+        let sr = emit_setup_stmt(setup, ctx, pad, c)
+        lines = lines.concat(sr.lines)
+        c = sr.counter
+      }
+      if (kind == "let-effect") {
+        let bind = mangle(value_str(value_field(step, "bind")))
+        let surface = map_get(map_values, bind)
+        var decl = "var"
+        if (surface != "") { decl = `Map<${java_v3_type(surface, true)}>` }
+        let ar = render_expr(value_field(step, "acquire"), ctx, c)
+        lines = lines.push(pad.concat(`${decl} ${bind} = ${ar.text};`))
+        c = ar.counter
+      } else {
+        let ar = render_expr(value_field(step, "acquire"), ctx, c)
+        lines = lines.push(pad.concat(`${ar.text};`))
+        c = ar.counter
+      }
+      let ur = render_expr(value_field(step, "undo"), ctx, c)
+      lines = lines.push(pad.concat(`fx.track(Disposables.of(() -> ${ur.text}));`))
+      c = ur.counter
+    }
+    if (kind == "emit") {
+      let er = render_expr(value_field(step, "expr"), ctx, c)
+      lines = lines.push(pad.concat(`${er.text};`))
+      c = er.counter
+      let cnode = value_field(step, "compensate")
+      if (!value_is_null(cnode)) {
+        let cr = render_expr(cnode, ctx, c)
+        lines = lines.push(pad.concat(`fx.track(Disposables.of(() -> ${cr.text}));`))
+        c = cr.counter
+      }
+    }
+    if (kind == "provide") {
+      let svc = value_str(value_field(step, "service"))
+      let struct = `${cname}${camel(value_str(value_field(step, "name")))}`
+      var cargs = ["ctx", "fx"]
+      for (l of req_locals) { cargs = cargs.push(l) }
+      for (b of bind_names) { cargs = cargs.push(b) }
+      lines = lines.push(pad.concat(`fx.track(ctx.provide(ServiceKey.of(${svc}.class), new ${struct}(${cargs.join(", ")})));`))
+    }
+    if (kind == "if") {
+      let cr = render_expr(value_field(step, "cond"), ctx, c)
+      lines = lines.push(pad.concat(`if (${cr.text}) {`))
+      c = cr.counter
+      let tr = emit_component_stmts(comp, services, cname, value_list(value_field(step, "then")), pad.concat("    "), ctx, map_values, req_locals, bind_names, c)
+      lines = lines.concat(tr.lines)
+      c = tr.counter
+      let els = value_list(value_field(step, "else"))
+      if (els.length() > 0) {
+        lines = lines.push(pad.concat("} else {"))
+        let er = emit_component_stmts(comp, services, cname, els, pad.concat("    "), ctx, map_values, req_locals, bind_names, c)
+        lines = lines.concat(er.lines)
+        c = er.counter
+      }
+      lines = lines.push(pad.concat("}"))
+    }
+    if (kind == "fail") {
+      let mr = render_expr(value_field(step, "message"), ctx, c)
+      lines = lines.push(pad.concat(`throw new CordisException(String.valueOf(${mr.text}));`))
+      c = mr.counter
+    }
+    if (kind == "await") {
+      let ar = await_join(value_field(step, "expr"), ctx, c)
+      lines = lines.push(pad.concat(`${ar.text};`))
+      c = ar.counter
+    }
+  }
+  return { lines: lines, counter: c }
+}
+
+// ============================================== MODERN component (item 225 / 235 / 238)
+// The modern component path (`_emit_component_modern`) — SLICE 3+4+5 subset: the
+// config / required-service-routing / effectful-method-body corner (225), PLUS
+// isolate/intercept realm PLACEMENT (235), PLUS the ASYNC activation body and host
+// `let-effect` binds (238), byte-exact. Slice 5 adds: host `let-effect` binds (the
+// `Map<V>` provider field/ctor/apply-local + the `_emit_component_stmts` activation
+// body), body-level `effect`/`emit`/`if`/`fail`/`await` steps, the `await`->
+// `AsyncPlugin` coloring (`apply(..) throws Exception`, `_await_join`) and the
+// `fail`->`CordisException` throw. A component is emitted here when it needs the
+// modern path AND falls inside the supported subset (`modern_supported` &&
+// `needs_modern_subset`); anything else routes to `<<DEFER-component-nonsimple>>`.
+// DEFERRED (slice 6+, each a loud marker or a structural DEFER): spawn/instances,
+// timers, routers, the `Pool` runtime, `setup` blocks, and method-body
+// `let`/`assign`/`await`/arrow bindings.
 
 // `_zero_java_value`: the default field value for a config field with no explicit
 // default (mirrors the reference's zero-value table).
@@ -1246,41 +1875,74 @@ fn contains_expr(node: Any) -> Bool {
   return false
 }
 
-// `modern_supported`: the SLICE-3/4 subset gate. A component is emitted modern
-// only when EVERY body step is a `provide` (no let-effect host binds, no
-// body-level effect/emit/if/fail/setup), and every provide-method step is a
-// `return`/`effect`/`emit` (no let/assign/provide/await). `isolate`/`intercept`
-// realm placements ARE admitted (slice 4, item 235) — they add only apply()-header
-// lines, not new body/method shapes. Everything else routes to a loud DEFER rather
-// than a wrong-shaped emission.
-fn modern_supported(comp: Any) -> Bool {
-  for (step of value_list(value_field(comp, "body"))) {
-    if (value_str(value_field(step, "step")) != "provide") { return false }
+// `modern_supported`: the SLICE-3/4/5 subset gate. Every body step must be one
+// this slice can emit: a `provide` (each method step `return`/`effect`/`emit`), a
+// host `let-effect` bind (item 238 — a `host` acquisition only, no spawn/record/
+// list Object bind), a body-level `effect`/`emit`/`await`/`fail`, or an `if` whose
+// arms are themselves supported. A `setup` block, a method-body `let`/`assign`/
+// `await`/`provide`, a non-host let-effect, or any other step routes to a loud
+// DEFER rather than a wrong-shaped emission. `isolate`/`intercept` realm placements
+// ARE admitted (item 235) — they add only apply()-header lines.
+fn body_step_supported(step: Any) -> Bool {
+  if (value_list(value_field(step, "setup")).length() > 0) { return false }
+  let s = value_str(value_field(step, "step"))
+  if (s == "provide") {
     for (method of value_list(value_field(step, "methods"))) {
       for (mstmt of value_list(value_field(method, "body"))) {
         let ms = value_str(value_field(mstmt, "step"))
         if (ms != "return" && ms != "effect" && ms != "emit") { return false }
       }
     }
+    return true
+  }
+  if (s == "let-effect") {
+    return value_str(value_field(value_field(step, "acquire"), "kind")) == "host"
+  }
+  if (s == "effect" || s == "emit" || s == "await" || s == "fail") { return true }
+  if (s == "if") {
+    for (nested of value_list(value_field(step, "then"))) { if (!body_step_supported(nested)) { return false } }
+    for (nested of value_list(value_field(step, "else"))) { if (!body_step_supported(nested)) { return false } }
+    return true
+  }
+  return false
+}
+fn modern_supported(comp: Any) -> Bool {
+  for (step of value_list(value_field(comp, "body"))) {
+    if (!body_step_supported(step)) { return false }
   }
   return true
 }
-// `_component_needs_modern` (reduced to the all-`provide` subset `modern_supported`
-// admits): an `isolate`/`intercept` placement (item 235), a provide-method with any
-// non-`return` step, or a `return` whose expr escapes the v1 surface, forces the
-// modern path. (A config-only / req-only component whose methods are all pure
-// `return <lit|name>` stays LEGACY — the reference emits it non-modern — so it is
-// NOT admitted here.)
-fn needs_modern_subset(comp: Any) -> Bool {
-  if (map_nonempty(value_field(comp, "isolate"))) { return true }
-  if (map_nonempty(value_field(comp, "intercept"))) { return true }
-  for (step of value_list(value_field(comp, "body"))) {
+// `_component_needs_modern` (faithful to the reference over the admitted subset):
+// an `isolate`/`intercept` placement (item 235), a `setup` block, a body-level
+// `if`/`fail`/`await`/`return` step, an `emit` carrying a `compensate`, a
+// provide-method with a non-`return` step or a `return` whose expr escapes the v1
+// surface, or a `contains_expr` on any expr-bearing step key forces the modern
+// path. (A component whose ONLY effectful body is `let-effect`/`effect`/`emit`
+// with pure `return` methods stays LEGACY in the reference; the port has no legacy
+// bind path, so `component_simple_ok` already sent it to DEFER.)
+fn step_forces_modern(step: Any) -> Bool {
+  if (value_list(value_field(step, "setup")).length() > 0) { return true }
+  let s = value_str(value_field(step, "step"))
+  if (s == "if" || s == "fail" || s == "await" || s == "return") { return true }
+  if (s == "emit" && !value_is_null(value_field(step, "compensate"))) { return true }
+  if (s == "provide") {
     for (method of value_list(value_field(step, "methods"))) {
       for (mstmt of value_list(value_field(method, "body"))) {
         if (value_str(value_field(mstmt, "step")) != "return") { return true }
         if (contains_expr(value_field(mstmt, "expr"))) { return true }
       }
     }
+  }
+  for (key of ["acquire", "undo", "expr", "compensate", "message", "cond", "value"]) {
+    if (contains_expr(value_field(step, key))) { return true }
+  }
+  return false
+}
+fn needs_modern_subset(comp: Any) -> Bool {
+  if (map_nonempty(value_field(comp, "isolate"))) { return true }
+  if (map_nonempty(value_field(comp, "intercept"))) { return true }
+  for (step of value_list(value_field(comp, "body"))) {
+    if (step_forces_modern(step)) { return true }
   }
   return false
 }
@@ -1342,7 +2004,7 @@ fn method_body_lines(method: Any, ret_is_void: Bool, ctx: Ctx, counter: Int) -> 
 // `<Comp>Plugin` (config fields + `_emit_plugin_ctors`, and the `apply` that opens
 // the `Context.EffectScope`, resolves each requirement via `ctx.get(..)`, and
 // registers every provision under the A8 self-revert try/catch, returning `fx`).
-fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
+fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx, types: Any, functions: List[Any]) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   let cname = mangle(name)
   let reqs_m = value_field(comp, "requires")
@@ -1351,10 +2013,22 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
   var req_locals = []
   if (!value_is_null(reqs_m)) { req_locals = value_keys(reqs_m) }
-  // The provide-method capture rename: each requirement is a `this.<local>` field.
+  let bind_names = binds(comp)
+  // FR-4 (item 238): bind -> revl surface value type for each host Map binding,
+  // so provider fields, ctor params and the apply() local all pin `Map<V>`.
+  let map_values = component_map_values(comp, services, functions, base_ctx, types)
+  // The provide-method capture rename: each requirement AND each host bind is a
+  // `this.<name>` field (item 238 adds the binds).
   var rn: Map[Str, Str] = Map.empty()
+  for (b of bind_names) { rn = rn.set(b, `this.${b}`) }
   for (local of req_locals) { rn = rn.set(local, `this.${local}`) }
   let mctx = set_rn(base_ctx, rn)
+  // `has_await` (a top-level `await` body step) colors the plugin async: the
+  // interface widens to `AsyncPlugin` and `apply` gains `throws Exception`.
+  var has_await = false
+  for (step of body) { if (value_str(value_field(step, "step")) == "await") { has_await = true } }
+  var plugin_interface = "Plugin"
+  if (has_await) { plugin_interface = "AsyncPlugin" }
   var out = []
   var counter = 0
   for (key of value_keys(provs_m)) {
@@ -1366,15 +2040,24 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
     for (local of req_locals) {
       out = out.push(`    private final ${value_str(value_field(reqs_m, local))} ${local};`)
     }
+    for (b of bind_names) {
+      out = out.push(`    private final ${bind_type(comp, b, base_ctx, map_values)} ${b};`)
+    }
     var cparams = ["Context ctx", "Context.EffectScope fx"]
     for (local of req_locals) {
       cparams = cparams.push(`${value_str(value_field(reqs_m, local))} ${local}`)
+    }
+    for (b of bind_names) {
+      cparams = cparams.push(`${bind_type(comp, b, base_ctx, map_values)} ${b}`)
     }
     out = out.push(`    ${struct}(${cparams.join(", ")}) {`)
     out = out.push("        this.ctx = ctx;")
     out = out.push("        this.fx = fx;")
     for (local of req_locals) {
       out = out.push(`        this.${local} = ${local};`)
+    }
+    for (b of bind_names) {
+      out = out.push(`        this.${b} = ${b};`)
     }
     out = out.push("    }")
     let svc_methods = value_field(value_field(services, srv), "methods")
@@ -1400,13 +2083,17 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
     out = out.push("}")
     out = out.push("")
   }
-  out = out.push(`public static final class ${cname}Plugin implements Plugin {`)
+  out = out.push(`public static final class ${cname}Plugin implements ${plugin_interface} {`)
   for (f of config_fields) {
     out = out.push(`    private final ${java_v3_type(value_field(f, "type"), false)} ${mangle(value_str(value_field(f, "name")))};`)
   }
   out = out.concat(emit_plugin_ctors(cname, config_fields))
   out = out.push("    @Override")
-  out = out.push("    public Disposable apply(Context ctx) {")
+  if (has_await) {
+    out = out.push("    public Disposable apply(Context ctx) throws Exception {")
+  } else {
+    out = out.push("    public Disposable apply(Context ctx) {")
+  }
   // Realm placements open the apply() body, BEFORE the effect scope: each
   // `isolate` rebinds `ctx` to a fresh local realm for the key's service, each
   // `intercept` installs metadata on a required service. (item 235)
@@ -1430,15 +2117,18 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
     out = out.push(`        ${srvn} ${local} = ctx.get(${srvn}.class);`)
   }
   out = out.push("        try {")
-  for (step of body) {
-    let key = value_str(value_field(step, "name"))
-    let srv = value_str(value_field(step, "service"))
-    let struct = `${cname}${camel(key)}`
-    var cargs = ["ctx", "fx"]
-    for (local of req_locals) { cargs = cargs.push(local) }
-    out = out.push(`            fx.track(ctx.provide(ServiceKey.of(${srv}.class), new ${struct}(${cargs.join(", ")})));`)
+  // The activation body (item 238): `let-effect`/`effect`/`emit`/`if`/`fail`/
+  // `await` steps as well as the `provide` registrations, rendered with the EMPTY
+  // rename (the body names its req/bind LOCALS directly).
+  let sb = emit_component_stmts(comp, services, cname, body, "            ", base_ctx, map_values, req_locals, bind_names, counter)
+  out = out.concat(sb.lines)
+  // An unconditional trailing `fail` lowers to a throw; a `return fx;` after it is
+  // an unreachable statement (a javac hard error), so it is suppressed.
+  var trailing_fail = false
+  if (body.length() > 0) {
+    if (value_str(value_field(body[body.length() - 1], "step")) == "fail") { trailing_fail = true }
   }
-  out = out.push("            return fx;")
+  if (!trailing_fail) { out = out.push("            return fx;") }
   out = out.push("        } catch (RuntimeException | Error failure) {")
   out = out.push("            fx.dispose();")
   out = out.push("            throw failure;")
@@ -1456,11 +2146,11 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
 // LIFO undo list (`_emit_plugin_ctors` no-config form + the A8 self-revert catch).
 // A non-simple component takes the modern path when supported (item 225), else a
 // loud DEFER marker.
-fn emit_component(comp: Any, services: Any, ctx: Ctx) -> List[Str] {
+fn emit_component(comp: Any, services: Any, ctx: Ctx, types: Any, functions: List[Any]) -> List[Str] {
   let name = value_str(value_field(comp, "name"))
   if (!component_simple_ok(comp)) {
     if (modern_supported(comp) && needs_modern_subset(comp)) {
-      return emit_component_modern(comp, services, ctx)
+      return emit_component_modern(comp, services, ctx, types, functions)
     }
     return [`<<DEFER-component-nonsimple:${name}>>`]
   }
@@ -1534,7 +2224,7 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("// Target: cordis4j (github.com/1na-ko/cordis4j).")
   out = out.push("package revl;")
   out = out.push("")
-  out = out.concat(core_imports())
+  out = out.concat(core_imports(ir))
   out = out.push("")
   out = out.push("public final class Components {")
   out = out.push("    private Components() {}")
@@ -1554,6 +2244,12 @@ pub fn emit_src(ir: Any) -> Str {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
     }
   }
+  // Host object runtimes (`_emit_host_stubs`) follow the service interfaces —
+  // a `Map.new()`/`Job.run(..)` acquisition brings in its runtime class. Stdlib,
+  // ftoa, checked-div, externs and spawn remain DEFERRED.
+  for (l of emit_host_stubs(ir)) {
+    if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+  }
   if (functions.length() > 0) {
     for (l of emit_v3_functions(functions, ctx)) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
@@ -1564,7 +2260,7 @@ pub fn emit_src(ir: Any) -> Str {
   let components = value_field(ir, "components")
   if (!value_is_null(components)) {
     for (comp of value_list(components)) {
-      for (l of emit_component(comp, services, ctx)) {
+      for (l of emit_component(comp, services, ctx, types, functions)) {
         if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
       }
     }
