@@ -61,17 +61,43 @@ module for intra-module calls, never mis-lowered.
 
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import shutil
 import subprocess
 import sys
 
-# emit.py lives next to this file; import it as a sibling regardless of how the
-# package is rooted (the wasm backend is loaded by path in several harnesses).
+# emit.py lives next to this file. Every backend ships its own `emit.py`, so a
+# bare `import emit` binds the CANONICAL name `emit` in `sys.modules` to
+# whichever backend won the race — in a combined pytest process a `tests/`
+# suite that does `import emit` for another backend (e.g. the python emitter,
+# whose `emit()` returns a *str*) poisons that name, and this module would then
+# bind `_emit_core` to the wrong renderer and blow up with `'str' object has no
+# attribute 'get'` (items 98/150). Load our sibling by PATH under a unique,
+# per-path-cached module name so the binding is order-independent regardless of
+# what `import emit` did elsewhere. This is the same discipline
+# `tests/_backend_import.py` uses; sharing the `revl_wasm_emit` name means a
+# combined run still executes the wasm emitter exactly once.
 _HERE = pathlib.Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-from emit import EmitError, emit as _emit_core  # noqa: E402
+
+
+def _load_wasm_emit():
+    name = "revl_wasm_emit"
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, _HERE / "emit.py")
+        assert spec is not None and spec.loader is not None, _HERE / "emit.py"
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+_emit_mod = _load_wasm_emit()
+EmitError = _emit_mod.EmitError
+_emit_core = _emit_mod.emit
 
 # export_wit (slice-1) is the single source of the WIT interface shape; reuse it
 # read-only so the component's exported interface is byte-identical to what
