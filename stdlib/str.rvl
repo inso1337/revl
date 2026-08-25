@@ -1,0 +1,284 @@
+// The revl stdlib STR module (roadmap item 193, docs/stdlib-str.md).
+//
+// The string-utility kit that every self-host stage otherwise re-derives.
+// `selfhost/checker.rvl` and `selfhost/emit_py.rvl` (item 192) BOTH hand-roll
+// the same toolkit — `trim`/`trim_ws`/`lstrip`/`last_index_of`/`ident_tokens`/
+// `split_type`/`split_types` — directly over the base `Str` stdlib surface
+// (item 11: `length`/`charAt`/`charCodeAt`/`slice`/`indexOf`/`startsWith`/
+// `concat`/`split`/`join`). Each next emitter stage (emit_ts / emit_rust /
+// emit_go / emit_java / emit_wasm) would re-derive it AGAIN. This module IS
+// that kit, once, so a self-hosted stage `use`s it instead of re-deriving.
+//
+// ----------------------------------------------------------------- tier status
+// Every function here is PURE revl — no `@py`, no `@<backend>` bodies. It is
+// built ENTIRELY on the base `Str` method surface, which lowers on every tier
+// (py / ts / rs / go / java / wasm). That is the whole point: unlike
+// stdlib/value.rvl (whose accessors are per-tier `@py` externs deferred on the
+// other five tiers), this kit works on EVERY tier the day it lands, because it
+// adds no new primitive — it only COMPOSES the ones item 11 already froze.
+// It deliberately avoids the two base methods that do NOT lower on wasm
+// (`Str.repeat`, `List.indexOf`); `contains`/`index_of` use `Str.indexOf`,
+// which does lower on wasm (docs/stdlib-2.0.md).
+//
+// Import with a named `use`:
+//
+//     use "stdlib/str.rvl" { trim, lstrip, rstrip, contains, index_of,
+//                            last_index_of, ident_tokens, split_top, dedent }
+
+// ------------------------------------------------------------ character classes
+// ASCII whitespace, matching Python `str.strip()`'s ASCII set: space (32),
+// tab (9), LF (10), VT (11), FF (12), CR (13). Total on the empty string
+// (answers `false`) so a caller may probe a zero-length slice without a fault.
+pub fn is_space(c: Str) -> Bool {
+  if (c.length() == 0) { return false }
+  let x = c.charCodeAt(0)
+  if (x == 32) { return true }
+  return x >= 9 && x <= 13
+}
+
+// A word char in the `re` sense: `[A-Za-z0-9_]`. Total on empty (false).
+fn is_word_ch(c: Str) -> Bool {
+  if (c.length() == 0) { return false }
+  let x = c.charCodeAt(0)
+  if (x >= 65 && x <= 90) { return true }   // A-Z
+  if (x >= 97 && x <= 122) { return true }  // a-z
+  if (x >= 48 && x <= 57) { return true }   // 0-9
+  return x == 95                            // _
+}
+
+// An identifier-start char: `[A-Za-z_]`. Total on empty (false).
+fn is_alpha_us(c: Str) -> Bool {
+  if (c.length() == 0) { return false }
+  let x = c.charCodeAt(0)
+  if (x >= 65 && x <= 90) { return true }
+  if (x >= 97 && x <= 122) { return true }
+  return x == 95
+}
+
+// Space or tab ONLY — the exact whitespace class Python's `textwrap.dedent`
+// counts as margin (`[ \t]`, NOT `\n\r\v\f`). Kept private to `dedent` so its
+// byte-exactness is not accidentally widened by `is_space`.
+fn is_sp_tab(c: Str) -> Bool {
+  if (c.length() == 0) { return false }
+  let x = c.charCodeAt(0)
+  return x == 32 || x == 9
+}
+
+// ------------------------------------------------------------------- trimming
+// Strip leading AND trailing ASCII whitespace. Drop-in for the hand-rolled
+// `trim` (selfhost/emit_py.rvl, space-only) and `trim_ws` (selfhost/checker.rvl,
+// space/tab/LF/CR): identical on their inputs (type spellings), and a strict
+// superset of both (also strips VT/FF), matching Python `str.strip()` for ASCII.
+pub fn trim(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while (a < b && is_space(s.slice(a, a + 1))) { a += 1 }
+  while (b > a && is_space(s.slice(b - 1, b))) { b -= 1 }
+  return s.slice(a, b)
+}
+
+// Strip leading ASCII whitespace only. Drop-in for `lstrip` (emit_py.rvl).
+pub fn lstrip(s: Str) -> Str {
+  var a = 0
+  let b = s.length()
+  while (a < b && is_space(s.slice(a, a + 1))) { a += 1 }
+  return s.slice(a, b)
+}
+
+// Strip trailing ASCII whitespace only.
+pub fn rstrip(s: Str) -> Str {
+  let a = 0
+  var b = s.length()
+  while (b > a && is_space(s.slice(b - 1, b))) { b -= 1 }
+  return s.slice(a, b)
+}
+
+// -------------------------------------------------------------------- search
+// Does `s` contain `sub`? An empty `sub` is contained in every string (matches
+// `Str.indexOf("")` == 0 and Python `"" in s`).
+pub fn contains(s: Str, sub: Str) -> Bool {
+  return s.indexOf(sub) >= 0
+}
+
+// First index of `sub` in `s`, or `-1` if absent. A thin, named alias of the
+// base `Str.indexOf` so a self-host stage can `use` it beside the rest of the
+// kit rather than mixing method- and free-function spellings.
+pub fn index_of(s: Str, sub: Str) -> Int {
+  return s.indexOf(sub)
+}
+
+// LAST index of `sub` in `s`, or `-1` if absent. Generalises the hand-rolled
+// `last_index_of(s, ch)` (emit_py.rvl), which searched for a single char, to an
+// arbitrary substring. An empty `sub` answers `s.length()` (Python `str.rfind`).
+pub fn last_index_of(s: Str, sub: Str) -> Int {
+  let n = s.length()
+  let m = sub.length()
+  if (m == 0) { return n }
+  var r = 0 - 1
+  var i = 0
+  while (i + m <= n) {
+    if (s.slice(i, i + m) == sub) { r = i }
+    i += 1
+  }
+  return r
+}
+
+// --------------------------------------------------------------- identifiers
+// The identifier tokens of `s`: each maximal run of word chars `[A-Za-z0-9_]`,
+// reported from its first identifier-start char (a digit-led run begins its
+// match at the first letter/underscore), i.e. Python `re.findall(r"[A-Za-z_]\w*",
+// s)`. Drop-in for the hand-rolled `ident_tokens` in selfhost/emit_py.rvl.
+pub fn ident_tokens(s: Str) -> List[Str] {
+  var toks: List[Str] = []
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    if (is_word_ch(s.slice(i, i + 1))) {
+      let start = i
+      while (i < n && is_word_ch(s.slice(i, i + 1))) { i += 1 }
+      let run = s.slice(start, i)
+      // a leading digit run has no `[A-Za-z_]\w*` match until its first
+      // start char; skip to it (or drop the run if it is all digits).
+      var j = 0
+      var found = 0 - 1
+      let rn = run.length()
+      while (j < rn) {
+        if (found < 0 && is_alpha_us(run.slice(j, j + 1))) { found = j }
+        j += 1
+      }
+      if (found >= 0) { toks = toks.push(run.slice(found, rn)) }
+    } else {
+      i += 1
+    }
+  }
+  return toks
+}
+
+// ------------------------------------------------------------- depth-0 split
+// Split `s` on the single-char separator `sep`, but ONLY where the separator
+// sits at BRACKET DEPTH ZERO — brackets counted are `[` `]` and `(` `)` — and
+// return each part trimmed. This is the shared primitive behind both
+// selfhost/emit_py.rvl's `split_types` (comma-split a bracket inner at depth 0,
+// each part stripped) and selfhost/checker.rvl's `split_type` argument split.
+// `"Row, Map[Str, Int]"` split on `","` -> `["Row", "Map[Str, Int]"]`; the
+// nested comma is protected. An empty `s` yields `[]`.
+pub fn split_top(s: Str, sep: Str) -> List[Str] {
+  var parts: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let ch = s.slice(i, i + 1)
+    if (ch == "[" || ch == "(") {
+      depth += 1
+    } else {
+      if (ch == "]" || ch == ")") { depth -= 1 }
+    }
+    if (ch == sep && depth == 0) {
+      parts = parts.push(trim(cur))
+      cur = ""
+    } else {
+      cur = cur.concat(ch)
+    }
+    i += 1
+  }
+  if (cur != "") { parts = parts.push(trim(cur)) }
+  return parts
+}
+
+// A real newline (U+000A) in PURE revl. revl plain double-quoted strings carry
+// NO escapes — `"\n"` is the two chars backslash-n (see selfhost/emit_py.rvl's
+// `newline()` note) — so a real newline cannot be written as `"\n"` and a
+// literal newline is not allowed inside `"..."`. A backtick template CAN hold a
+// literal newline byte, and with no interpolation it lowers as an ordinary
+// one-char string literal on every tier. This keeps `dedent` pure-revl (no
+// `@py` `chr(10)` extern) and tier-portable.
+fn nl() -> Str {
+  return `
+`
+}
+
+// ------------------------------------------------------------------- dedent
+// Byte-exact port of Python `textwrap.dedent`: remove the longest common
+// leading-whitespace prefix (`[ \t]` only) from every non-blank line, and
+// NORMALISE any line that is entirely `[ \t]+` to empty — exactly as
+// `textwrap.dedent` does. This is the specific blocker for the deferred
+// py-emitter externs form (item 192 slice 4), where the reference reaches for
+// `textwrap.dedent` on a multi-line extern body.
+//
+// The reference algorithm (CPython Lib/textwrap.py):
+//   1. `_whitespace_only_re = ^[ \t]+$` (MULTILINE) -> "" : blank-but-spaced
+//      lines are emptied BEFORE margins are computed.
+//   2. `_leading_whitespace_re = (^[ \t]*)(?:[^ \t\n])` findall : the indent of
+//      each CONTENT line (a line with a non-whitespace char). Blank lines are
+//      excluded from the margin entirely.
+//   3. margin = longest common prefix of those indents (char-by-char; tabs and
+//      spaces are distinct).
+//   4. strip margin from the start of every line.
+pub fn dedent(text: Str) -> Str {
+  let raw = text.split(nl())
+  // step 1 — normalise whitespace-only lines to empty.
+  var lines: List[Str] = []
+  for (ln of raw) {
+    if (line_is_ws_only(ln)) {
+      lines = lines.push("")
+    } else {
+      lines = lines.push(ln)
+    }
+  }
+  // steps 2+3 — margin = common [ \t] prefix over content (non-empty) lines.
+  var has_margin = false
+  var margin = ""
+  for (ln of lines) {
+    if (ln.length() > 0) {                     // blank lines excluded from margin
+      let indent = leading_sp_tab(ln)
+      if (!has_margin) {
+        margin = indent
+        has_margin = true
+      } else {
+        margin = common_prefix(margin, indent)
+      }
+    }
+  }
+  // step 4 — strip the margin prefix from every line.
+  var out: List[Str] = []
+  let mlen = margin.length()
+  for (ln of lines) {
+    if (mlen > 0 && ln.length() >= mlen && ln.slice(0, mlen) == margin) {
+      out = out.push(ln.slice(mlen, ln.length()))
+    } else {
+      out = out.push(ln)
+    }
+  }
+  return out.join(nl())
+}
+
+// A line is "whitespace-only" (in dedent's sense) iff it is non-empty and every
+// char is space or tab. An empty line is NOT whitespace-only (it is already "").
+fn line_is_ws_only(ln: Str) -> Bool {
+  let n = ln.length()
+  if (n == 0) { return false }
+  var i = 0
+  while (i < n) {
+    if (!is_sp_tab(ln.slice(i, i + 1))) { return false }
+    i += 1
+  }
+  return true
+}
+
+// The leading run of space/tab chars of a line (its dedent indent).
+fn leading_sp_tab(ln: Str) -> Str {
+  var i = 0
+  let n = ln.length()
+  while (i < n && is_sp_tab(ln.slice(i, i + 1))) { i += 1 }
+  return ln.slice(0, i)
+}
+
+// The longest common prefix of two strings, char (code point) by char.
+fn common_prefix(a: Str, b: Str) -> Str {
+  var i = 0
+  let n = a.length() < b.length() ? a.length() : b.length()
+  while (i < n && a.slice(i, i + 1) == b.slice(i, i + 1)) { i += 1 }
+  return a.slice(0, i)
+}
