@@ -39,13 +39,32 @@ Covered subset (what emits byte-identical):
     call with ``_by_value_arg`` cloning, the ``widen`` markers, index, list,
     maplit, the sync arrow, and non-float ``${..}`` interpolation.
 
-Deliberately OUT (excluded from the corpus, deferred to Rust Path B slice 3+):
-components/services entirely (``_emit_component*``, service traits, effect/undo,
-``provide``/``req``/``config``, timers, the component-dialect expression kinds) —
-these are ENTANGLED with the deferred erasure surface: a lone ``service``
-declaration fires ``_emit_bridge`` and any ``component`` additionally fires the
-host stubs and full impl machinery, so no service/component fixture is byte-exact
-without also porting the bridge; functional record-update ``{r | f = e}`` (the
+Covered subset (slice 3, item 207) — the components/services + bridge surface:
+  * ``_emit_service_traits`` — each ``service`` as a ``pub trait S: Send + Sync``
+    with one ``&self`` method per op (scalar/generic param + return lowering);
+  * ``_emit_component`` (the SIMPLE provider path only — no isolate/intercept and
+    no effectful methods) — the empty provider ``struct``, its trait ``impl`` with
+    a pure ``_pure_method_statements`` body, and the ``plugin_sync`` factory whose
+    closure provisions each key via the ``provide`` body step (``Inject::none()``,
+    no config application);
+  * ``_emit_bridge`` — the whole erasure block a lone ``service`` forces: the
+    ``_revl_rpc`` Unix-socket JSON-RPC preamble, a consumer ``S`Proxy`` + a
+    provider ``_revl_dispatch_s`` per service (the SCALAR marshalling —
+    ``String``/``i64``/``f64``/``bool``, the scalar-``Option`` return table, and
+    ``()`` — via ``_bridge_arg_ser``/``_arg_extract``/``_ret_deser``/``_ret_ser``),
+    and the fixed key/service/plugin/isolate/load routing tables over the provided
+    keys.
+
+Deliberately OUT (excluded from the corpus, deferred to Rust Path B slice 4+):
+the ENTANGLED-but-larger component surface — ``_emit_component_new`` (the
+effectful / isolate / intercept path: effect/undo, ``emit``, timers, routers,
+``await``/``spawn``), component ``config`` (the ``<Comp>Config`` struct +
+``Default`` + application + the ``_revl_load`` typed-config construction),
+required services (``req``/routes/the ``Inject`` gate), realm placements
+(``_revl_realm``/``_revl_isolate_ctx`` non-empty arms), the host-object stubs
+(``Map``/``Pool``/``Job``) and every preamble helper (timer/stdlib/float/realm/
+spawn), and the non-scalar bridge marshalling (Result/serde/``Vec<Value>``/
+opaque-``Value`` params and returns); functional record-update ``{r | f = e}`` (the
 Rust reference itself *raises* on ``record_update`` — a structural exclusion, not
 merely un-ported); the stdlib surface (every ``builtin``/``len`` node and the
 ``_stdlib_helper_traits`` it pulls in); the Value/serde erasure surface
@@ -84,6 +103,11 @@ CORPUS = [
     "variants.rvl",  # variant `type` -> serde-tagged `pub enum`, ADT construction
                      #   (nullary + payload), `match` (bind / nullary / `_` wildcard
                      #   vs `unreachable!()`), built-in Some/Ok coexisting
+    # slice 3 (item 207) — the components/services + bridge surface:
+    "service.rvl",       # one `service` trait + a simple-path provider component,
+                         #   forcing the full `_emit_bridge` erasure block
+    "services_multi.rvl",# two services, one component providing both — the bridge's
+                         #   i64/bool/void marshalling and multi-provision routing
 ]
 
 
@@ -176,6 +200,30 @@ def test_selfhosted_emitter_typed_core_scaffold(emitted):
     assert "return Tree::Leaf;" in var
     assert "Tree::Node(v) => v," in var
     assert "_ => unreachable!()," in var
+
+
+def test_selfhosted_emitter_component_bridge_scaffold(emitted):
+    """Pin the components/services surface (slice 3, item 207): a ``service``
+    lowers to a ``Send + Sync`` trait, the simple-path component to an empty
+    provider struct + trait impl + ``plugin_sync`` factory, and the erasure
+    surface a lone service forces — the ``_revl_rpc`` preamble, a ``S`Proxy``
+    consumer, a ``_revl_dispatch_s`` provider, and the routing tables — so a
+    regression in any of these surfaces here, not only in the byte diff."""
+    src = emitted["emit_src"](compile_files([str(CORPUS_DIR / "service.rvl")]))
+    assert "pub trait Greeter: Send + Sync {" in src
+    assert "    fn greet(&self, who: String) -> String;" in src
+    assert "struct HelloGreeting {\n}" in src
+    assert "impl Greeter for HelloGreeting {" in src
+    assert "pub fn hello() -> cordis::PluginHandle {" in src
+    assert 'let greeting_box: Box<dyn Greeter> = Box::new(HelloGreeting {  });' in src
+    # the bridge erasure block (a lone service is enough to fire it)
+    assert "// ---- interop bridge (generated; docs/interop-bridge.md) ----" in src
+    assert "pub struct GreeterProxy { pub socket: String, pub key: String }" in src
+    assert "fn _revl_dispatch_greeter(svc: &dyn Greeter, method: &str," in src
+    assert '"greeting" => Some("Greeter"),' in src
+    assert '"hello" => Some(hello()),' in src
+    # no deferred-feature marker leaked into a covered-subset output
+    assert "<<DEFER" not in src and "<<NONE>>" not in src
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):

@@ -468,3 +468,68 @@ fallthrough are byte-identical), so `emit_go.rvl`'s existing `go_type` fallback
 correctly — no `types`-table parameter had to be threaded into `go_type` at all,
 unlike the rust port's `rust_type_t(t, tnames)`. The go tier's decision to not
 special-case the known-vs-unknown named type paid off directly in the self-host.
+
+## selfhost/emit_rust.rvl — slice 3 (item 207): components/services + bridge
+
+Ported the Rust component surface as ONE unit (the item-205 finding: a lone
+`service` unconditionally fires `_emit_bridge`, and a `component` fires the host
+stubs + full impl machinery, so traits + provider + bridge cannot be a byte-exact
+sub-slice piecemeal). NOW byte-identical to `backends/rust/emit.py`:
+`_emit_service_traits`, `_emit_component` (the SIMPLE provider path — no
+isolate/intercept/effect), and the whole `_emit_bridge` erasure block (the
+`_revl_rpc` preamble, per-service consumer proxy + provider dispatch with the
+SCALAR marshalling, and the key/service/plugin/isolate/load routing tables).
+Cross-checked over two new fixtures — `service.rvl` (one service + one provider)
+and `services_multi.rvl` (two services, one component providing both:
+i64/bool/void marshalling, multi-provision routing) — each `emit_src(ir) ==
+emit(ir)` to the last byte, and the eight slice-1/2 fixtures stay green.
+
+### Finding: `ir_version` gate — a components-only doc lowers to v1, not v3 (MEDIUM)
+Repro: a `.rvl` with ONLY a `service` + `component` (no functions/types) compiles
+to `ir_version: 1`, whose `_module_header` banner and `#![allow(..)]` line DIFFER
+from v3's, so `emit_src` (a v3-only assembler) cannot be byte-exact for it. The
+self-host file itself is v3 (it carries the emitter functions), so this slice
+scopes to v3 documents-with-components: the fixtures add a trivial `fn` to pin
+`ir_version 3`, matching the real dogfood shape (emit_rust.rvl's own wrapper is
+emitted through the v3 path). NOT a defect — the version dispatch is correct — but
+a self-hosted `emit` that must accept ANY document needs an `ir_version`
+front-door (v1/v2 headers + `_emit_components` with no types/functions section),
+which this slice DEFERS. Symptom surfaced only because the first fixture happened
+to be components-only; worth a one-line caveat in the self-host emitter guide.
+
+### Friction: reserved-keyword collisions on IR-shaped local names (MEDIUM, recurs)
+The IR's own vocabulary — `service`, `component`, `provides`, `isolate`, `struct`
+— is exactly revl's reserved-keyword set, so the natural local names for walking
+that IR (`let service = …`, `for (component of …)`, `let provides = …`) are all
+rejected at parse (`expected ident, found 'service'`). Every component/bridge
+emitter has to pick oblique names (`srv`, `comp`, `provs`, `iso`). Repro: `let
+service = value_field(services, sname)` → parse error. This is the mirror of the
+TARGET-keyword `_mangle` the emitter already carries for Rust output, but here it
+bites the emitter's OWN source. Not a bug; a note in the guide ("name IR-walking
+locals `srv`/`comp`/`provs` — the obvious names are keywords") plus, ideally, a
+parser hint that suggests the exact rename would remove the trip-ups. LOW-to-fix.
+
+### Ergonomics (positive): total `value_*` accessors erased the null-guarding
+`value_keys(null)`/`value_list(null)` returning `[]` (value.rvl's totality
+contract, item 188) meant `_emit_components`' unconditional run needed NO guard:
+`emit_service_traits(<absent services>)` and the `components` loop and
+`emit_bridge` all no-op on a types+functions-only document, so the eight existing
+fixtures stayed byte-exact with zero special-casing. `value_bool(null) == false`
+similarly made the `emission`/`idempotent`/`mutable`/`public` flag reads
+one-liners with no presence check — a clean match for the reference's `if
+node.get("x")` falsy-on-absent idiom. The item-195 `var_types`/`Sout` threading
+tax did NOT recur here: the covered provider methods are pure single-`return`
+bodies, so `pure_method_statements` reuses the existing `render_expr(node, ctx)`
+with a per-method `Ctx` seeded from the service signature — no counter to thread.
+
+### Host-formatting kept `@py` (item-180 "NOT obsoleted" category)
+Two new bridged host helpers, kin to the existing `string_lit`/`mangle`:
+`snake` (`_snake` verbatim — needs `str.lower()`/`str.isupper()`, which the str
+kit does not expose as a code-point-free primitive) and `camel` (`_camel`
+verbatim — `str.capitalize()` per `_`-split part). Everything else — the trait
+assembly, the provider/plugin scaffold, the bridge preamble + routing tables, and
+the scalar marshalling dispatch — is PURE revl over `value_*`. The one escape-gap
+brush: the `_revl_rpc` preamble's `line.push('\n');` needs a literal backslash-n
+in the OUTPUT, written `"line.push('\\n');"` (item-183 `\\`/`\"` in a plain
+single-line string); the whole preamble stays a plain double-quoted block (braces
+are literal, no `${}` interpolation in `"…"`), so no `$`-fragment needed backticks.

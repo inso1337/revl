@@ -144,6 +144,28 @@ extern pure fn mangle(name: Str) -> Str = @py {
         name = name + "_"
     return name
 }
+// `_snake` verbatim: the component/service name -> the snake-case plugin-fn /
+// dispatch-fn name (`Hello` -> `hello`, `EmitRust` -> `emit_rust`). A word
+// boundary is an upper following a lower/digit; every char is lowercased. Host
+// `str.lower()`/`str.isupper()` is exactly Python's, so it is bridged rather than
+// re-derived from code points (the `mangle`/`string_lit` category).
+extern pure fn snake(name: Str) -> Str = @py {
+    out = []
+    for i, ch in enumerate(name):
+        if ch.isupper() and i > 0 and (name[i - 1].islower() or name[i - 1].isdigit()):
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out)
+}
+// `_camel` verbatim: a provision key -> its PascalCase struct suffix
+// (`greeting` -> `Greeting`), splitting on `_` and capitalising each part.
+extern pure fn camel(name: Str) -> Str = @py {
+    return "".join(part.capitalize() for part in name.split("_"))
+}
+
+// `_mname`: the one method rename this tier carries — `drop` collides with
+// Rust's `Drop::drop` destructor (`_METHOD_RENAMES = {"drop": "drop_"}`).
+fn mname(n: Str) -> Str { if (n == "drop") { return "drop_" } return n }
 
 // ---------------------------------------------------------------- small utils
 fn ind(n: Int) -> Str { return "    ".repeat(n) }
@@ -863,6 +885,450 @@ fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
   return out
 }
 
+// ============================================================ components/services
+// The COMPONENT/SERVICE surface (roadmap item 207): a `service` trait, the
+// `_emit_component` SIMPLE provider path (no isolate/intercept/effect), and the
+// `_emit_bridge` Value/serde ERASURE block. `_emit_components` fires this the
+// moment `ir["services"]`/`ir["components"]` is non-empty — a lone service alone
+// forces the whole bridge — so traits + provider + bridge port as ONE unit.
+//
+// DEFERRED here (each REPORTED, and each fires a `<<DEFER-*>>` marker that keeps
+// a byte diff loud rather than silently wrong): the host-object stubs
+// (`Map`/`Pool`/`Job`) and every preamble helper (timer/stdlib/float/realm/
+// spawn) — none appear in the covered subset, so `_emit_host_stubs` and the
+// preamble contribute nothing; the effectful/isolate/intercept component path
+// (`_emit_component_new`, effect/undo, config, timers, routers, await/spawn);
+// component `config`; required services (`req`/routes/Inject gate); realm
+// placements; and the non-scalar bridge marshalling (Result/serde/`Vec<Value>`/
+// opaque-`Value` params and returns) beyond the scalar + scalar-`Option` + `()`
+// core. A service method whose params/returns stay scalar is fully byte-exact.
+
+// `_emit_service_traits`: each `service` -> a `pub trait S: Send + Sync` with one
+// `&self` method per op. Param names are `_ident`ed (mangle); a param/return
+// type lowers through `rust_type_t`; a `()` return when the op declares none.
+fn emit_service_traits(services: Any, tnames: Map[Str, Str]) -> List[Str] {
+  var out = []
+  for (sname of value_keys(services)) {
+    let srv = value_field(services, sname)
+    out = out.push(`pub trait ${sname}: Send + Sync {`)
+    let methods = value_field(srv, "methods")
+    for (mn of value_keys(methods)) {
+      let method = value_field(methods, mn)
+      var ps = []
+      for (p of value_list(value_field(method, "params"))) {
+        ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tnames)}`)
+      }
+      var ret = "()"
+      let r = value_field(method, "returns")
+      if (!value_is_null(r)) { ret = rust_type_t(r, tnames) }
+      if (value_bool(value_field(method, "emission"))) {
+        out = out.push("    /// emission: crosses the system boundary (DESIGN.md §3.5)")
+      }
+      if (value_bool(value_field(method, "idempotent"))) {
+        out = out.push("    /// idempotent: safe to re-deliver — the runtime may auto-retry a transient failure (item 44)")
+      }
+      out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret};`)
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// `_emit_host_stubs`: DEFERRED. The reference emits `Map`/`Pool`/`Job` stubs and
+// an R1 live-resource counter only when the document USES a `host` object (or a
+// lifecycle test / timer). The covered subset declares none, so this is [] —
+// exactly what the reference returns for a host-object-free document.
+fn emit_host_stubs(ir: Any) -> List[Str] { return [] }
+
+// The provide-step methods for a provision `key` (`_provision_methods`): the
+// `provide` body step whose `name` matches, else `[]`.
+fn provide_methods(body: List[Any], key: Str) -> List[Any] {
+  for (s of body) {
+    if (value_str(value_field(s, "step")) == "provide" && value_str(value_field(s, "name")) == key) {
+      return value_list(value_field(s, "methods"))
+    }
+  }
+  return []
+}
+
+// A provision method's declared param type, looked up in the SERVICE signature
+// (the provide body carries only names): `_param_type`. Missing -> "Value".
+fn service_param_type(svc_method: Any, pname: Str) -> Any {
+  for (mp of value_list(value_field(svc_method, "params"))) {
+    if (value_str(value_field(mp, "name")) == pname) { return value_field(mp, "type") }
+  }
+  return "Value"
+}
+
+// `_pure_method_statements` (SUBSET): a pure provide-method body. A lone
+// `return <expr>` inlines to just the expression (the fn-body arm renders it);
+// otherwise let/assign/return statements join with a space. Effectful steps are
+// not admitted on the simple path — they route to `_emit_component_new`, deferred.
+fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
+  let steps = value_list(value_field(method, "body"))
+  if (steps.length() == 1) {
+    let s0 = steps[0]
+    if (value_str(value_field(s0, "step")) == "return" && !value_is_null(value_field(s0, "expr"))) {
+      return render_expr(value_field(s0, "expr"), ctx)
+    }
+  }
+  var parts = []
+  for (step of steps) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "let") {
+      var mut = ""
+      if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
+      parts = parts.push(`let ${mut}${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), ctx)};`)
+    } else {
+      if (kind == "assign") {
+        parts = parts.push(`${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), ctx)};`)
+      } else {
+        if (kind == "return") {
+          let e = value_field(step, "expr")
+          if (value_is_null(e)) { parts = parts.push("return;") }
+          else { parts = parts.push(`return ${render_expr(e, ctx)};`) }
+        } else {
+          parts = parts.push(`<<DEFER-method-step:${kind}>>`)
+        }
+      }
+    }
+  }
+  return parts.join(" ")
+}
+
+// `_emit_component` (SIMPLE path only): the provider struct(s) + trait impl(s),
+// then the `plugin_sync` factory whose closure provisions each key. The subset
+// carries no binds/reqs/config/routes, so the struct is empty, the gate is
+// `Inject::none()`, there is no config application, and the only body step is
+// `provide`. isolate/intercept/effectful components route to the deferred
+// `_emit_component_new`; here they would surface a `<<DEFER-*>>` marker.
+fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
+  let name = value_str(value_field(comp, "name"))
+  let cname = mangle(name)
+  let snk = snake(name)
+  let tables = build_type_tables(value_field(ir, "types"))
+  var fr: Map[Str, Str] = Map.empty()
+  for (fnode of value_list(value_field(ir, "functions"))) {
+    let r = value_field(fnode, "returns")
+    if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
+  }
+  let provs = value_field(comp, "provides")
+  let body = value_list(value_field(comp, "body"))
+  var out = []
+  for (key of value_keys(provs)) {
+    let srv = value_str(value_field(provs, key))
+    let sname = `${cname}${camel(key)}`
+    out = out.push(`struct ${sname} {`)
+    out = out.push("}")
+    out = out.push(`impl ${srv} for ${sname} {`)
+    let svc_methods = value_field(value_field(services, srv), "methods")
+    for (method of provide_methods(body, key)) {
+      let mn = value_str(value_field(method, "name"))
+      let svc_method = value_field(svc_methods, mn)
+      var ps = []
+      var vt: Map[Str, Str] = Map.empty()
+      for (pn of value_list(value_field(method, "params"))) {
+        let pname = value_str(pn)
+        let ptype = service_param_type(svc_method, pname)
+        ps = ps.push(`${pname}: ${rust_type_t(ptype, tables.tn)}`)
+        vt = vt.set(pname, value_str(ptype))
+      }
+      var ret = "()"
+      let r = value_field(svc_method, "returns")
+      if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
+      let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf }
+      out = out.push(`    fn ${mangle(mn)}(&self, ${ps.join(", ")}) -> ${ret} { ${pure_method_statements(method, ctx)} }`)
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
+  out = out.push("    cordis::plugin_sync::<(), _>(")
+  out = out.push(`        ${string_lit(name)},`)
+  out = out.push("        cordis::Inject::none(),")
+  out = out.push("        |ctx, config| {")
+  for (step of body) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "provide") {
+      let key = value_str(value_field(step, "name"))
+      let srv = value_str(value_field(step, "service"))
+      out = out.push(`            let ${key}_box: Box<dyn ${srv}> = Box::new(${name}${camel(key)} {  });`)
+      out = out.push(`            ctx.provide(${string_lit(key)}, ${key}_box)?;`)
+    } else {
+      out = out.push(`<<DEFER-comp-step:${kind}>>`)
+    }
+  }
+  out = out.push("            Ok(cordis::PluginOutput::none())")
+  out = out.push("        },")
+  out = out.push("    )")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
+// ---------------------------------------------------------------- the bridge
+// The scalar bridge marshalling helpers (`_bridge_arg_ser`/`_arg_extract`/
+// `_ret_deser`/`_ret_ser`), SUBSET: the `String`/`i64`/`f64`/`bool` scalars, the
+// scalar-`Option` return table, and `()`. Result/serde/`Vec<Value>`/opaque-Value
+// marshalling is DEFERRED — a `<<DEFER-*>>` / `<<NONE>>` marker keeps it loud.
+fn bridge_arg_ser(name: Str, rtype: Str) -> Str {
+  if (rtype == "String" || rtype == "i64" || rtype == "f64" || rtype == "bool") {
+    return `serde_json::json!(${name})`
+  }
+  return `<<DEFER-bridge-arg-ser:${rtype}>>`
+}
+fn bridge_arg_extract(index: Int, rtype: Str) -> Str {
+  let i = num_str(index)
+  if (rtype == "String") { return `args[${i}].as_str().unwrap_or("").to_string()` }
+  if (rtype == "i64") { return `args[${i}].as_i64().unwrap_or(0)` }
+  if (rtype == "f64") { return `args[${i}].as_f64().unwrap_or(0.0)` }
+  if (rtype == "bool") { return `args[${i}].as_bool().unwrap_or(false)` }
+  return "<<NONE>>"
+}
+fn bridge_ret_deser(value: Str, rtype: Str) -> Str {
+  if (rtype == "i64") { return `${value}.as_i64().unwrap_or(0)` }
+  if (rtype == "String") { return `${value}.as_str().unwrap_or("").to_string()` }
+  if (rtype == "bool") { return `${value}.as_bool().unwrap_or(false)` }
+  if (rtype == "f64") { return `${value}.as_f64().unwrap_or(0.0)` }
+  if (rtype == "()") { return `{ let _ = ${value}; }` }
+  if (rtype == "Option<String>") { return `${value}.as_str().map(|s| s.to_string())` }
+  if (rtype == "Option<i64>") { return `${value}.as_i64()` }
+  if (rtype == "Option<bool>") { return `${value}.as_bool()` }
+  return "<<NONE>>"
+}
+fn is_scalar_option(rtype: Str) -> Bool {
+  return rtype == "Option<String>" || rtype == "Option<i64>" || rtype == "Option<bool>" || rtype == "Option<f64>"
+}
+fn bridge_ret_ser(call: Str, rtype: Str) -> Str {
+  if (rtype == "i64" || rtype == "String" || rtype == "bool" || rtype == "f64" || is_scalar_option(rtype)) {
+    return `serde_json::json!(${call})`
+  }
+  if (rtype == "()") { return `{ ${call}; serde_json::Value::Null }` }
+  return `<<DEFER-bridge-ret-ser:${rtype}>>`
+}
+
+// The fixed `_revl_rpc` preamble — the Unix-socket JSON-RPC proxy the bridge
+// opens with. A literal block; `\"`/`\\` escape the embedded quotes and the
+// `'\n'` push (item 183 lets both work in a plain single-line string).
+fn bridge_rpc_preamble() -> List[Str] {
+  var o = []
+  o = o.push("// ---- interop bridge (generated; docs/interop-bridge.md) ----")
+  o = o.push("use std::io::{BufRead, Write};")
+  o = o.push("use std::os::unix::net::UnixStream;")
+  o = o.push("")
+  o = o.push("fn _revl_rpc(socket: &str, key: &str, method: &str, args: Vec<serde_json::Value>) -> serde_json::Value {")
+  o = o.push("    let request = serde_json::json!({ \"key\": key, \"method\": method, \"args\": args });")
+  o = o.push("    let mut stream = None;")
+  o = o.push("    for _ in 0..200 {")
+  o = o.push("        match UnixStream::connect(socket) {")
+  o = o.push("            Ok(s) => { stream = Some(s); break; }")
+  o = o.push("            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("    let stream = stream.expect(\"bridge connect (provider never came up)\");")
+  o = o.push("    let mut writer = stream.try_clone().expect(\"clone stream\");")
+  o = o.push("    let mut line = serde_json::to_string(&request).unwrap();")
+  o = o.push("    line.push('\\n');")
+  o = o.push("    writer.write_all(line.as_bytes()).expect(\"write request\");")
+  o = o.push("    let mut reader = std::io::BufReader::new(stream);")
+  o = o.push("    let mut response = String::new();")
+  o = o.push("    reader.read_line(&mut response).expect(\"read reply\");")
+  o = o.push("    let reply: serde_json::Value = serde_json::from_str(&response).expect(\"parse reply\");")
+  o = o.push("    if !reply[\"ok\"].as_bool().unwrap_or(false) {")
+  o = o.push("        panic!(\"bridge remote error: {}\", reply[\"error\"]);")
+  o = o.push("    }")
+  o = o.push("    reply[\"value\"].clone()")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// `_emit_bridge`: [] unless the document declares a `service` (a lone service is
+// enough — that entanglement is why traits+bridge port together). Emits the RPC
+// preamble, a consumer proxy + provider dispatch per service, and the fixed
+// key/service/plugin/isolate/load routing tables over the provided keys.
+fn emit_bridge(ir: Any) -> List[Str] {
+  let services = value_field(ir, "services")
+  if (value_keys(services).length() == 0) { return [] }
+  let components = value_list(value_field(ir, "components"))
+  let tables = build_type_tables(value_field(ir, "types"))
+  let tnames = tables.tn
+  // provided: key -> service, over every comp's provisions (subset: no
+  // duplicate keys across components — that dedup is deferred).
+  var pkeys = []
+  var psvcs = []
+  for (comp of components) {
+    let provs = value_field(comp, "provides")
+    for (key of value_keys(provs)) {
+      pkeys = pkeys.push(key)
+      psvcs = psvcs.push(value_str(value_field(provs, key)))
+    }
+  }
+  var out = bridge_rpc_preamble()
+
+  for (sname of value_keys(services)) {
+    let srv = value_field(services, sname)
+    let methods = value_field(srv, "methods")
+    // consumer-side proxy
+    out = out.push(`pub struct ${sname}Proxy { pub socket: String, pub key: String }`)
+    out = out.push(`impl ${sname} for ${sname}Proxy {`)
+    for (mn of value_keys(methods)) {
+      let method = value_field(methods, mn)
+      let params = value_list(value_field(method, "params"))
+      var plist = []
+      var argv = []
+      for (p of params) {
+        let pname = value_str(value_field(p, "name"))
+        let pty = rust_type_t(value_field(p, "type"), tnames)
+        plist = plist.push(`${pname}: ${pty}`)
+        argv = argv.push(bridge_arg_ser(pname, pty))
+      }
+      var ret = "()"
+      let r = value_field(method, "returns")
+      if (!value_is_null(r)) { ret = rust_type_t(r, tnames) }
+      let deser = bridge_ret_deser("_v", ret)
+      out = out.push(`    fn ${mname(mn)}(&self, ${plist.join(", ")}) -> ${ret} {`)
+      if (deser == "<<NONE>>") {
+        out = out.push(`        panic!("bridge proxy: unsupported return type for ${sname}.${mn}");`)
+      } else {
+        out = out.push(`        let _v = _revl_rpc(&self.socket, &self.key, "${mn}", vec![${argv.join(", ")}]);`)
+        out = out.push(`        ${deser}`)
+      }
+      out = out.push("    }")
+    }
+    out = out.push("}")
+    // provider-side dispatch
+    out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${sname}, method: &str, args: &[serde_json::Value]) -> serde_json::Value {`)
+    out = out.push("    match method {")
+    for (mn of value_keys(methods)) {
+      let method = value_field(methods, mn)
+      let params = value_list(value_field(method, "params"))
+      var ret = "()"
+      let r = value_field(method, "returns")
+      if (!value_is_null(r)) { ret = rust_type_t(r, tnames) }
+      var extracts = []
+      var idx = 0
+      var any_none = false
+      for (p of params) {
+        let e = bridge_arg_extract(idx, rust_type_t(value_field(p, "type"), tnames))
+        if (e == "<<NONE>>") { any_none = true }
+        extracts = extracts.push(e)
+        idx = idx + 1
+      }
+      if (any_none) {
+        out = out.push(`        "${mn}" => serde_json::Value::Null, // unmarshalled param type`)
+      } else {
+        out = out.push(`        "${mn}" => ${bridge_ret_ser(`svc.${mname(mn)}(${extracts.join(", ")})`, ret)},`)
+      }
+    }
+    out = out.push("        _ => serde_json::Value::Null,")
+    out = out.push("    }")
+    out = out.push("}")
+    out = out.push("")
+  }
+
+  // key -> service name (over provided keys)
+  out = out.push("pub fn _revl_service_of(key: &str) -> Option<&'static str> {")
+  out = out.push("    match key {")
+  var pi = 0
+  while (pi < pkeys.length()) {
+    out = out.push(`        "${pkeys[pi]}" => Some("${psvcs[pi]}"),`)
+    pi = pi + 1
+  }
+  out = out.push("        _ => None,")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+
+  // consumer: a plugin that provs `key` via the right proxy
+  out = out.push("pub fn _revl_proxy_plugin(key: &str, service: &str, socket: String) -> Option<cordis::PluginHandle> {")
+  out = out.push("    let key_string = key.to_string();")
+  out = out.push("    match service {")
+  for (sname of value_keys(services)) {
+    out = out.push(`        "${sname}" => Some(cordis::plugin_sync::<(), _>(`)
+    out = out.push(`            "${sname}Proxy",`)
+    out = out.push("            cordis::Inject::none(),")
+    out = out.push("            move |ctx, _config| {")
+    out = out.push(`                let proxy: Box<dyn ${sname}> = Box::new(${sname}Proxy { socket: socket.clone(), key: key_string.clone() });`)
+    out = out.push("                ctx.provide(key_string.as_str(), proxy)?;")
+    out = out.push("                Ok(cordis::PluginOutput::none())")
+    out = out.push("            },")
+    out = out.push("        )),")
+  }
+  out = out.push("        _ => None,")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+
+  // provider/probe: require a locally-provided key and dispatch to it
+  out = out.push("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> serde_json::Value {")
+  out = out.push("    match key {")
+  pi = 0
+  while (pi < pkeys.length()) {
+    let key = pkeys[pi]
+    let srv = psvcs[pi]
+    out = out.push(`        "${key}" => match ctx.require::<Box<dyn ${srv}>>("${key}") {`)
+    out = out.push(`            Ok(svc) => _revl_dispatch_${snake(srv)}(&**svc, method, args),`)
+    out = out.push("            Err(_) => serde_json::Value::Null,")
+    out = out.push("        },")
+    pi = pi + 1
+  }
+  out = out.push("        _ => serde_json::Value::Null,")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+
+  // comp name -> plugin handle
+  out = out.push("pub fn plugin_by_name(name: &str) -> Option<cordis::PluginHandle> {")
+  out = out.push("    match name {")
+  for (comp of components) {
+    let snk = snake(value_str(value_field(comp, "name")))
+    out = out.push(`        "${snk}" => Some(${snk}()),`)
+  }
+  out = out.push("        _ => None,")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+
+  // comp name -> realm-isolated context (subset: no comp isolates, so
+  // only the `_ => ctx.clone()` arm; isolate placements are DEFERRED).
+  out = out.push("pub fn _revl_isolate_ctx(ctx: &cordis::Context, name: &str) -> cordis::Context {")
+  out = out.push("    match name {")
+  for (comp of components) {
+    let iso = value_field(comp, "isolate")
+    if (value_keys(iso).length() > 0) {
+      out = out.push(`<<DEFER-isolate:${value_str(value_field(comp, "name"))}>>`)
+    }
+  }
+  out = out.push("        _ => ctx.clone(),")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+
+  // comp name -> loaded Fiber (subset: unit config only; typed `<Comp>Config`
+  // construction from the placement spec is DEFERRED).
+  out = out.push("pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value) -> Option<cordis::Fiber> {")
+  out = out.push("    match name {")
+  for (comp of components) {
+    let snk = snake(value_str(value_field(comp, "name")))
+    let fields = value_list(value_field(comp, "config"))
+    out = out.push(`        "${snk}" => {`)
+    out = out.push(`            let ctx = _revl_isolate_ctx(ctx, "${snk}");`)
+    if (fields.length() > 0) {
+      out = out.push(`<<DEFER-config:${value_str(value_field(comp, "name"))}>>`)
+    } else {
+      out = out.push(`            Some(ctx.plugin(${snk}(), ()))`)
+    }
+    out = out.push("        },")
+  }
+  out = out.push("        _ => None,")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
 // `_module_header(3)`: the banner, the lint allowances, and the crate uses.
 fn module_header() -> List[Str] {
   var o = []
@@ -894,6 +1360,19 @@ pub fn emit_src(ir: Any) -> Str {
   var out = module_header()
   if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types, tables.tn)) }
   if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr, tables)) }
+  // `_emit_components`, run unconditionally in `_emit_v3` (after types/functions,
+  // and after the DEFERRED externs/tests sections). Empty when the document
+  // declares no service/comp — so a types+functions-only document is
+  // unchanged — and byte-exact for the covered service/comp subset:
+  // service traits, host stubs (empty here), each comp (simple path), then
+  // the `_emit_bridge` erasure block.
+  let services = value_field(ir, "services")
+  out = out.concat(emit_service_traits(services, tables.tn))
+  out = out.concat(emit_host_stubs(ir))
+  for (comp of value_list(value_field(ir, "components"))) {
+    out = out.concat(emit_component(comp, services, ir))
+  }
+  out = out.concat(emit_bridge(ir))
   return rstrip(out.join(newline())).concat(newline())
 }
 

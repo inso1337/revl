@@ -1,0 +1,20 @@
+// A function + a service + a single pure-provider component: the smallest
+// byte-exact unit that forces the components/services surface INSIDE a v3
+// document (ir_version 3, as the self-host emitter file itself is). It exercises
+// a `service` trait, the `_emit_component` simple provider path (no
+// isolate/intercept/effect), and the `_emit_bridge` erasure block (a lone
+// service fires it). No host objects, timers, config, requires, realms, stdlib,
+// or floats — so host stubs and every preamble helper emit nothing.
+fn tag() -> Str {
+  return "hi"
+}
+
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) = "hi"
+  }
+}
