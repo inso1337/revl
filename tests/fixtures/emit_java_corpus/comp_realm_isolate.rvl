@@ -1,0 +1,22 @@
+// Realm placement — the `isolate` corner (java Path B slice 4, item 235). A
+// component that isolates its OWN provided key into a named local realm. The
+// isolate makes the component `needs_modern`, so it takes the modern path; the
+// provider methods stay pure `return <lit>` so the ONLY thing this fixture adds
+// over the slice-3 modern corner is the `ctx = ctx.isolate(<Svc>.class, "..")`
+// line the `apply()` header now emits (service resolved through `provides`). The
+// trivial `fn` forces ir_version 3 (a components-only doc lowers to v1/v2; item
+// 217 caveat).
+fn tag() -> Str {
+  return "hi"
+}
+
+service Clock {
+  fn tick() -> Int
+}
+
+component TenantClock provides clock: Clock {
+  isolate clock in realm("tenant_a")
+  provide clock {
+    fn tick() { return 0 }
+  }
+}
