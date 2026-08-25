@@ -1,0 +1,7 @@
+// Host roots in a fn body (slice 3, `_find_host_roots`): a `var` naming `Map`
+// and `Pool` pulls each into the sorted `from runtime import` line (`Map` before
+// `Pool`), proving host-root import collection for a component-free module.
+fn make() {
+  let m = Map.new()
+  let p = Pool.open("postgres://x", 4)
+}

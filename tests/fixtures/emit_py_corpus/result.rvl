@@ -1,0 +1,10 @@
+// Built-in Result classes (slice 3): a `match` on `Ok`/`Err` sets the
+// `_uses_builtin_result` gate, so the emitter emits the `Ok`/`Err` ADT classes.
+// No user variant shadows either name, so both are emitted; the scrutinee is a
+// plain Result-typed parameter, so no Result CONSTRUCTION (deferred) is needed.
+fn pick(r: Result[Int, Str]) -> Int {
+  return match r {
+    Ok(v) => v,
+    Err(e) => 0 - 1,
+  }
+}

@@ -28,15 +28,21 @@
 //     maplit, sync arrow, match, record-update, string interpolation, and the
 //     optional field/call forms.
 //
+// Slice 2 (item 185) added components/services (the `_ComponentEmitter`); slice
+// 3 (item 192) adds the MODULE DECLARATION surface — see the slice-3 banner
+// below `emit_services_table`: `_emit_types` (record + variant declarations, the
+// `_py_type` map, forward-ref quoting), the built-in Result classes, the
+// canonical Float->Str `_revl_ftoa` helper, and host roots in fn/test bodies.
+//
 // ============================================================ WHAT IT DEFERS
-// Reported for follow-on py-emitter slices, deliberately OUT of this slice:
-//   * components/services entirely (the `_ComponentEmitter`: provide methods,
-//     effect accumulator, req/provide, timers, lifecycle) — Path B slice 2+;
-//   * the v3 typed-core surface, spawn/templates, the canonical ABI, and async
-//     coloring (colored fns / async externs / awaited call sites);
-//   * type declarations (`_emit_types`), externs, in-file `test`/`fault_test`
-//     block emission, the built-in Result classes, and the canonical
-//     Float->Str (`_revl_ftoa`) interpolation helper;
+// Reported for a follow-on slice 4, deliberately OUT of this file:
+//   * externs (`_emit_externs`) — needs a faithful `textwrap.dedent` /
+//     `splitlines` of the verbatim `@py` body, a host-string dependency;
+//   * component `config`/`ConfigSchema`, and method-body `effect`/`let-effect`
+//     (the `_revl_frame.adopt`/`.acquire` accumulator + its `_label` counter);
+//   * async coloring (colored fns / async externs / awaited call sites), realm
+//     placements (`isolate`/`intercept`/`routes`/router), spawn/instances,
+//     in-file `test`/`fault_test`/`lifecycle test` emission, and the ABI;
 //   * `let_pattern` (record/list destructuring): the reference names its
 //     temporary `__revl_destructure_{id(node)}` from the Python object id, which
 //     a second implementation can never reproduce byte-for-byte (see the
@@ -63,23 +69,21 @@
 // (the one genuine U+000A), and `mangle` (the Python-keyword rename).
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt,
-  value_list, value_at, value_str, value_int, value_bool, value_children
+  value_list, value_at, value_str, value_int, value_bool, value_children,
+  value_keys
 }
 
-// ------------------------------------------------------- NAVIGATION GAP (@py)
-// The ONE navigation primitive stdlib/value.rvl (item 180) does not ship: an
-// enumerator of a record's KEYS in insertion order. Slice 1 was function-only —
-// `functions` is a LIST, walked by `value_list` — so it never needed this. But a
-// components-and-services document keys three of its sections BY NAME as records
-// (`services` = name -> service, a component's `requires` = local -> service,
-// `provides` = key -> service), and the SERVICES table + the `inject` list must
-// iterate those keys. `value_field`/`value_children` reach values, never keys, so
-// this section cannot be walked in pure revl with the item-180 surface. Bridged
-// locally, flagged for a value.rvl follow-up (a `value_keys` / `value_entries`
-// total accessor) — see the dogfood findings.
-extern pure fn record_keys(v: Any) -> List[Str] = @py {
-    return list(v.keys()) if isinstance(v, dict) else []
-}
+// ------------------------------------------- NAVIGATION GAP CLOSED (item 188)
+// The ONE navigation primitive slices 1-2 could not express in pure revl was an
+// enumerator of a record's KEYS in insertion order. A components-and-services
+// document keys three of its sections BY NAME as records (`services` = name ->
+// service, a component's `requires` = local -> service, `provides` = key ->
+// service), and the SERVICES table + the `inject` list must iterate those keys;
+// `value_field`/`value_children` reach values, never keys. Slice 2 bridged that
+// with a local `@py record_keys` and flagged it for a value.rvl follow-up. Item
+// 188 SHIPPED that follow-up — `value_keys` (stdlib/value.rvl), the total
+// key-enumeration companion — so slice 3 `use`s it and the last navigation `@py`
+// block is GONE: every byte of IR navigation is now pure revl through `value_*`.
 
 // ------------------------------------------------- host formatting (kept @py)
 // `py_repr` / `newline` / `mangle` are the item-180 "NOT obsoleted" set — host
@@ -1021,7 +1025,7 @@ fn component_body(comp: Any) -> List[Str] {
   out = out.push(`${name} = {`)
   out = out.push(line(1, `'name': ${py_repr(name)},`))
   var inject = []
-  for (k of record_keys(value_field(comp, "requires"))) { inject = inject.push(mangle(k)) }
+  for (k of value_keys(value_field(comp, "requires"))) { inject = inject.push(mangle(k)) }
   out = out.push(line(1, `'inject': ${py_repr(inject)},`))
   out = out.push(line(1, `'apply': _${sn}_apply,`))
   out = out.push("}")
@@ -1032,11 +1036,11 @@ fn component_body(comp: Any) -> List[Str] {
 fn emit_services_table(services: Any) -> List[Str] {
   var out = []
   out = out.push("SERVICES = {")
-  for (sname of record_keys(services)) {
+  for (sname of value_keys(services)) {
     let svc = value_field(services, sname)
     out = out.push(line(1, `${py_repr(sname)}: {`))
     let methods = value_field(svc, "methods")
-    for (mname of record_keys(methods)) {
+    for (mname of value_keys(methods)) {
       let spec = value_field(methods, mname)
       var pnames = []
       for (p of value_list(value_field(spec, "params"))) { pnames = pnames.push(value_str(value_field(p, "name"))) }
@@ -1051,6 +1055,390 @@ fn emit_services_table(services: Any) -> List[Str] {
   return out
 }
 
+// =====================================================================
+// Path B slice 3 — the module-level DECLARATION surface (byte-exact).
+// =====================================================================
+//
+// Slices 1-2 emit functions + components/services. Slice 3 adds the four
+// remaining NON-async, NON-spawn MODULE declarations, each a `emit()`-gated
+// section mirrored byte-for-byte:
+//
+//   * `_emit_types`  — record (`@dataclass`) and variant (sealed base + one
+//     subclass per case) type declarations, including the forward-reference
+//     annotation-quoting rule and the `_py_type` surface->python-type map
+//     (incl function types -> `Callable[...]`);
+//   * built-in Result classes  — `Ok`/`Err`, gated by `_uses_builtin_result`
+//     and suppressed per-name when a user variant case shadows it;
+//   * `_revl_ftoa`  — the canonical Float->Str interpolation helper, gated by
+//     `_uses_float_interp` (a `${…}` over a provably-Float expression);
+//   * host roots in fn/test bodies  — a `var` naming `Map`/`Pool`/`Job` pulls
+//     the name into the sorted `from runtime import` line (`_find_host_roots`).
+//
+// DEFERRED to a slice 4 (reported): externs (`_emit_externs` — needs a faithful
+// `textwrap.dedent`/`splitlines` of the verbatim `@py` body, a host-string
+// dependency), component `config`/`ConfigSchema`, method-body `effect`/
+// `let-effect` (the `_revl_frame.adopt`/`.acquire` accumulator + `_label`
+// counter), in-file `test`/`fault_test`/`lifecycle test` emission, async
+// coloring, realm placements, spawn/instances, and the canonical ABI.
+
+// -------------------------------------------------------------- string utils
+// The pure-revl string helpers `_emit_types` needs (the reference reaches for
+// `str.strip`/`in`/`rindex`/`re.findall`, all host string ops): mirror them
+// here in revl over `charAt`/`slice`, kin to selfhost/checker.rvl's `split_type`.
+fn str_in(xs: List[Str], s: Str) -> Bool {
+  for (x of xs) { if (x == s) { return true } }
+  return false
+}
+
+fn trim(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while (a < b && s.slice(a, a + 1) == " ") { a += 1 }
+  while (b > a && s.slice(b - 1, b) == " ") { b -= 1 }
+  return s.slice(a, b)
+}
+
+fn lstrip(s: Str) -> Str {
+  var a = 0
+  let b = s.length()
+  while (a < b && s.slice(a, a + 1) == " ") { a += 1 }
+  return s.slice(a, b)
+}
+
+fn last_index_of(s: Str, ch: Str) -> Int {
+  var r = 0 - 1
+  var i = 0
+  while (i < s.length()) {
+    if (s.slice(i, i + 1) == ch) { r = i }
+    i += 1
+  }
+  return r
+}
+
+fn is_alpha_us(c: Str) -> Bool {
+  let x = c.charCodeAt(0)
+  if (x >= 65 && x <= 90) { return true }
+  if (x >= 97 && x <= 122) { return true }
+  return x == 95
+}
+
+fn is_word_ch(c: Str) -> Bool {
+  if (is_alpha_us(c)) { return true }
+  let x = c.charCodeAt(0)
+  return x >= 48 && x <= 57
+}
+
+// The identifier tokens of a type spelling, mirroring the reference `_ann`'s
+// `re.findall(r"[A-Za-z_]\w*", ftype)`: each maximal run of word chars, from its
+// first alpha/underscore (a digit-led run starts its match at the first letter,
+// exactly as `findall` does).
+fn ident_tokens(s: Str) -> List[Str] {
+  var toks = []
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    if (is_word_ch(s.slice(i, i + 1))) {
+      let start = i
+      while (i < n && is_word_ch(s.slice(i, i + 1))) { i += 1 }
+      let run = s.slice(start, i)
+      var j = 0
+      var found = 0 - 1
+      while (j < run.length()) {
+        if (found < 0 && is_alpha_us(run.slice(j, j + 1))) { found = j }
+        j += 1
+      }
+      if (found >= 0) { toks = toks.push(run.slice(found, run.length())) }
+    } else {
+      i += 1
+    }
+  }
+  return toks
+}
+
+// `_split_types`: comma-split a bracket inner at depth zero, each part stripped.
+fn split_types(inner: Str) -> List[Str] {
+  var parts = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  let n = inner.length()
+  while (i < n) {
+    let ch = inner.slice(i, i + 1)
+    if (ch == "[" || ch == "(") { depth += 1 }
+    else {
+      if (ch == "]" || ch == ")") { depth -= 1 }
+    }
+    if (ch == "," && depth == 0) {
+      parts = parts.push(trim(cur))
+      cur = ""
+    } else {
+      cur = cur.concat(ch)
+    }
+    i += 1
+  }
+  if (cur != "") { parts = parts.push(trim(cur)) }
+  return parts
+}
+
+// `_split_fn_type`: `"(Int, Str) -> Bool"` -> params + return, else `ok=false`.
+type FnType = { ok: Bool, params: List[Str], ret: Str }
+fn split_fn_type(name: Str) -> FnType {
+  if (!name.startsWith("(")) { return { ok: false, params: [], ret: "" } }
+  var depth = 0
+  var i = 0
+  let n = name.length()
+  while (i < n) {
+    let ch = name.slice(i, i + 1)
+    if (ch == "[" || ch == "(") { depth += 1 }
+    else {
+      if (ch == "]" || ch == ")") {
+        depth -= 1
+        if (depth == 0) {
+          let rest = lstrip(name.slice(i + 1, n))
+          if (!rest.startsWith("->")) { return { ok: false, params: [], ret: "" } }
+          let inner = trim(name.slice(1, i))
+          var params: List[Str] = []
+          if (inner != "") { params = split_types(inner) }
+          let ret = trim(rest.slice(2, rest.length()))
+          return { ok: true, params: params, ret: ret }
+        }
+      }
+    }
+    i += 1
+  }
+  return { ok: false, params: [], ret: "" }
+}
+
+// `_py_type`: a revl surface type spelling -> its python annotation.
+fn py_type(raw: Str) -> Str {
+  let name = trim(raw)
+  let fnt = split_fn_type(name)
+  if (fnt.ok) {
+    var ps = []
+    for (p of fnt.params) { ps = ps.push(py_type(p)) }
+    return `Callable[[${ps.join(", ")}], ${py_type(fnt.ret)}]`
+  }
+  let bi = name.indexOf("[")
+  if (bi >= 0) {
+    let base = name.slice(0, bi)
+    let close = last_index_of(name, "]")
+    let inner = name.slice(bi + 1, close)
+    let args = split_types(inner)
+    if (base == "Opt") { return `Optional[${py_type(args[0])}]` }
+    if (base == "List") { return `list[${py_type(args[0])}]` }
+    if (base == "Map") { return `dict[${py_type(args[0])}, ${py_type(args[1])}]` }
+    if (base == "Result") { return "Any" }
+    var anys = []
+    for (a of args) { anys = anys.push("Any") }
+    return base.concat("[").concat(anys.join(", ")).concat("]")
+  }
+  if (name == "Int") { return "int" }
+  if (name == "Float") { return "float" }
+  if (name == "Bool") { return "bool" }
+  if (name == "Str") { return "str" }
+  if (name == "Bytes") { return "bytes" }
+  if (name == "Unit") { return "None" }
+  return name
+}
+
+// `_ann`: render a field/payload annotation, quoting a forward reference (a
+// mentioned type name not yet emitted) so Python's eager annotation eval holds.
+fn type_ann(ftype: Str, all_names: List[Str], emitted: List[Str]) -> Str {
+  let rendered = py_type(ftype)
+  for (tok of ident_tokens(ftype)) {
+    if (str_in(all_names, tok) && !str_in(emitted, tok)) { return py_repr(rendered) }
+  }
+  return rendered
+}
+
+// `_emit_types`: each record as an `@dataclass`, each variant as a sealed base
+// class plus one value-semantic subclass per case, in declaration order.
+fn emit_types(types: Any) -> List[Str] {
+  var all_names = []
+  for (nm of value_keys(types)) { all_names = all_names.push(mangle(nm)) }
+  var emitted = []
+  var out = []
+  for (nm of value_keys(types)) {
+    let name = mangle(nm)
+    let spec = value_field(types, nm)
+    if (value_str(value_field(spec, "kind")) == "record") {
+      out = out.push("@dataclass")
+      out = out.push(`class ${name}:`)
+      let fields = value_field(spec, "fields")
+      let fkeys = value_keys(fields)
+      if (fkeys.length() == 0) { out = out.push(line(1, "pass")) }
+      for (f of fkeys) {
+        let ftype = value_str(value_field(fields, f))
+        out = out.push(line(1, `${mangle(f)}: ${type_ann(ftype, all_names, emitted)}`))
+      }
+      emitted = emitted.push(name)
+    } else {
+      out = out.push(`class ${name}:`)
+      out = out.push(line(1, "__slots__ = ()"))
+      emitted = emitted.push(name)
+      out = out.push("")
+      for (c of value_list(value_field(spec, "cases"))) {
+        let cname = mangle(value_str(value_field(c, "name")))
+        if (value_is_null(value_field(c, "payload"))) {
+          out = out.push(`class ${cname}(${name}):`)
+          out = out.push(line(1, "__slots__ = ()"))
+          out = out.push(line(1, "def __eq__(self, other):"))
+          out = out.push(line(2, `return isinstance(other, ${cname})`))
+          out = out.push(line(1, "def __hash__(self):"))
+          out = out.push(line(2, `return hash(${py_repr(cname)})`))
+        } else {
+          out = out.push(`class ${cname}(${name}):`)
+          out = out.push(line(1, `__slots__ = ("value",)`))
+          out = out.push(line(1, "def __init__(self, value):"))
+          out = out.push(line(2, "self.value = value"))
+          out = out.push(line(1, "def __eq__(self, other):"))
+          out = out.push(line(2, `return isinstance(other, ${cname}) and other.value == self.value`))
+          out = out.push(line(1, "def __hash__(self):"))
+          out = out.push(line(2, `return hash((${py_repr(cname)}, self.value))`))
+        }
+        out = out.push("")
+      }
+    }
+    out = out.push("")
+  }
+  return out
+}
+
+// ---------------------------------------------- built-in Result (Ok/Err)
+// `_uses_builtin_result`: does the IR construct or match the built-in Result?
+// An `adt` typed `Result*`, a `match` arm on Ok/Err, or a checked-division
+// builtin (which produces a Result). Recurses over every node exactly as the
+// reference `any(walk(v) …)` does.
+fn is_checked_div(m: Str) -> Bool {
+  return m == "checked_div_trunc" || m == "checked_div_floor"
+      || m == "checked_div_euclid" || m == "checked_mod"
+}
+fn walk_result(n: Any) -> Bool {
+  let k = node_kind(n)
+  if (k == "adt" && value_str(value_field(n, "type")).startsWith("Result")) { return true }
+  if (k == "match") {
+    for (arm of value_list(value_field(n, "arms"))) {
+      let p = value_str(value_field(arm, "pattern"))
+      if (p == "Ok" || p == "Err") { return true }
+    }
+  }
+  if (is_checked_div(value_str(value_field(n, "method")))) { return true }
+  for (c of value_children(n)) { if (walk_result(c)) { return true } }
+  return false
+}
+fn uses_builtin_result(ir: Any) -> Bool {
+  if (walk_result(value_field(ir, "components"))) { return true }
+  if (walk_result(value_field(ir, "functions"))) { return true }
+  if (walk_result(value_field(ir, "tests"))) { return true }
+  return false
+}
+
+// The one Result class, for a builtin name not shadowed by a user variant case.
+fn result_class(builtin: Str) -> List[Str] {
+  var out = []
+  out = out.push(`class ${builtin}:`)
+  out = out.push(line(1, `__slots__ = ("value",)`))
+  out = out.push(line(1, "def __init__(self, value=None):"))
+  out = out.push(line(2, "self.value = value"))
+  out = out.push(line(1, "def __eq__(self, other):"))
+  out = out.push(line(2, `return isinstance(other, ${builtin}) and other.value == self.value`))
+  out = out.push(line(1, "def __hash__(self):"))
+  out = out.push(line(2, `return hash((${py_repr(builtin)}, self.value))`))
+  out = out.push("")
+  return out
+}
+
+// The user variant CASE names — the reference suppresses a built-in Result
+// class whose name a user ADT case shadows.
+fn user_case_names(types: Any) -> List[Str] {
+  var names = []
+  for (nm of value_keys(types)) {
+    let spec = value_field(types, nm)
+    if (value_str(value_field(spec, "kind")) == "variant") {
+      for (c of value_list(value_field(spec, "cases"))) {
+        names = names.push(value_str(value_field(c, "name")))
+      }
+    }
+  }
+  return names
+}
+
+// -------------------------------------------------- canonical Float -> Str
+// `_uses_float_interp`: does any `${…}` template interpolate a provably-Float
+// expression? Only then is `_revl_ftoa` emitted (docs/strings.md).
+fn uses_float_interp(n: Any) -> Bool {
+  if (node_kind(n) == "interp") {
+    for (p of value_list(value_field(n, "parts"))) {
+      if (value_str(value_at(p, 0)) == "expr" && is_float_expr(value_at(p, 1))) { return true }
+    }
+  }
+  for (c of value_children(n)) { if (uses_float_interp(c)) { return true } }
+  return false
+}
+
+// `_REVL_FTOA_SRC` verbatim: the ECMAScript Number::toString shortest-round-trip
+// form, so `${aFloat}` agrees with every other tier (python's own `str(float)`
+// would print `nan`/`0.0`, none of which match).
+fn ftoa_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_ftoa(x):")
+  o = o.push(`    """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md)."""`)
+  o = o.push("    if x != x:")
+  o = o.push(`        return "NaN"`)
+  o = o.push(`    if x == float("inf"):`)
+  o = o.push(`        return "Infinity"`)
+  o = o.push(`    if x == float("-inf"):`)
+  o = o.push(`        return "-Infinity"`)
+  o = o.push("    if x == 0:")
+  o = o.push(`        return "0"`)
+  o = o.push(`    sign = "-" if x < 0 else ""`)
+  o = o.push("    s = repr(abs(x))")
+  o = o.push(`    if "e" in s or "E" in s:`)
+  o = o.push(`        mant, _, exp_s = s.replace("E", "e").partition("e")`)
+  o = o.push("        exp = int(exp_s)")
+  o = o.push("    else:")
+  o = o.push("        mant, exp = s, 0")
+  o = o.push(`    intpart, _, frac = mant.partition(".")`)
+  o = o.push("    digits = intpart + frac")
+  o = o.push("    point = len(intpart) + exp")
+  o = o.push("    i = 0")
+  o = o.push(`    while i < len(digits) - 1 and digits[i] == "0":`)
+  o = o.push("        i += 1")
+  o = o.push("        point -= 1")
+  o = o.push(`    digits = digits[i:].rstrip("0") or "0"`)
+  o = o.push(`    if digits == "0":`)
+  o = o.push(`        return "0"`)
+  o = o.push("    k = len(digits)")
+  o = o.push("    n = point")
+  o = o.push("    if k <= n <= 21:")
+  o = o.push(`        body = digits + "0" * (n - k)`)
+  o = o.push("    elif 0 < n <= 21:")
+  o = o.push(`        body = digits[:n] + "." + digits[n:]`)
+  o = o.push("    elif -6 < n <= 0:")
+  o = o.push(`        body = "0." + "0" * (-n) + digits`)
+  o = o.push("    else:")
+  o = o.push("        e = n - 1")
+  o = o.push(`        mantissa = digits if k == 1 else digits[0] + "." + digits[1:]`)
+  o = o.push(`        body = mantissa + "e" + ("+" if e >= 0 else "-") + str(abs(e))`)
+  o = o.push("    return sign + body")
+  o = o.push("")
+  return o
+}
+
+// ------------------------------------------------------------- host roots
+// `_find_host_roots`: a `var` node naming `Map`/`Pool`/`Job` in a fn/test body
+// pulls that host builtin into the `from runtime import` line.
+fn uses_host_root(n: Any, root: Str) -> Bool {
+  if (node_kind(n) == "var" && value_str(value_field(n, "name")) == root) { return true }
+  for (c of value_children(n)) { if (uses_host_root(c, root)) { return true } }
+  return false
+}
+fn ir_uses_host_root(ir: Any, root: Str) -> Bool {
+  if (uses_host_root(value_field(ir, "functions"), root)) { return true }
+  if (uses_host_root(value_field(ir, "tests"), root)) { return true }
+  return false
+}
+
 // The document assembly, mirroring `emit()` for functions + components/services.
 pub fn emit_src(ir: Any) -> Str {
   var out = []
@@ -1060,10 +1448,14 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push(`Components: ${comp_names(ir)}`)
   out = out.push(`"""`)
   out = out.push("")
-  // The `from runtime import …` line (before the arithmetic preludes). The
-  // `uses` set for this slice: `Frame` iff there is any component, plus the
-  // `schedule_*` a timer needs — rendered in sorted order with the `_revl_`
-  // aliases. (ConfigSchema / host roots / lifecycle drivers are deferred.)
+  // The `from runtime import …` line (before the arithmetic preludes), rendered
+  // in `sorted(uses)` order with the `_revl_` aliases. The `uses` set for this
+  // slice: `Frame` iff there is any component; the `schedule_*` a timer needs;
+  // and (slice 3) the host roots `Map`/`Pool`/`Job` a fn/test body references.
+  // Python `sorted` puts the capitalised names before the lower-case
+  // `schedule_*`, so the canonical order is Frame, Job, Map, Pool,
+  // schedule_after, schedule_every — walked here as a fixed sequence over the
+  // finite import vocabulary. (ConfigSchema / lifecycle drivers are deferred.)
   let components = value_list(value_field(ir, "components"))
   var need_every = false
   var need_after = false
@@ -1073,6 +1465,9 @@ pub fn emit_src(ir: Any) -> Str {
   }
   var imports = []
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
+  if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
+  if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
+  if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
   if (imports.length() > 0) {
@@ -1082,7 +1477,23 @@ pub fn emit_src(ir: Any) -> Str {
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
   if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
   if (uses_true_division(ir)) { out = out.concat(div_block()) }
+  if (uses_float_interp(ir)) { out = out.concat(ftoa_block()) }
   out = out.concat(field_block())
+  // Built-in Result classes (gated), each suppressed if a user variant case
+  // shadows the name.
+  let types = value_field(ir, "types")
+  if (uses_builtin_result(ir)) {
+    let shadow = user_case_names(types)
+    if (!str_in(shadow, "Ok")) { out = out.concat(result_class("Ok")) }
+    if (!str_in(shadow, "Err")) { out = out.concat(result_class("Err")) }
+  }
+  // Type declarations (gated): the dataclass/typing imports, then the classes.
+  if (value_keys(types).length() > 0) {
+    out = out.push("from dataclasses import dataclass")
+    out = out.push("from typing import Any, Callable, Optional, Union")
+    out = out.push("")
+    out = out.concat(emit_types(types))
+  }
   let functions = value_list(value_field(ir, "functions"))
   if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
   out = out.concat(emit_services_table(value_field(ir, "services")))
@@ -1127,6 +1538,31 @@ test "builtin surface renders portable python" {
 test "empty match is the non-exhaustive throw" {
   let empty = []
   assert match_expr("o", empty) == "(lambda match: (_ for _ in ()).throw(TypeError('non-exhaustive match')))(o)"
+}
+
+test "py_type maps the surface types" {
+  assert py_type("Int") == "int"
+  assert py_type("List[Str]") == "list[str]"
+  assert py_type("Opt[Row]") == "Optional[Row]"
+  assert py_type("Map[Int, Row]") == "dict[int, Row]"
+  assert py_type("(Int, Str) -> Bool") == "Callable[[int, str], bool]"
+  assert py_type("Result[Row, Str]") == "Any"
+}
+
+test "ident_tokens finds the type-name mentions" {
+  let ts = ident_tokens("Opt[Found]")
+  assert ts.length() == 2
+  assert ts[0] == "Opt"
+  assert ts[1] == "Found"
+}
+
+test "split_fn_type recognises a function type" {
+  let f = split_fn_type("(Int) -> Str")
+  assert f.ok
+  assert f.params.length() == 1
+  assert f.params[0] == "Int"
+  assert f.ret == "Str"
+  assert !split_fn_type("List[Int]").ok
 }
 
 // --------------------------------------------------------------- component wrap
