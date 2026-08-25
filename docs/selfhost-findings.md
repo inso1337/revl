@@ -1178,3 +1178,161 @@ carry; everything else routes through `expr_at`.
   built here is the reusable core for it, but the component dialect adds the
   `req`/`config`/`host`/`spawn` node kinds and the emission-gated step lowering
   on top.
+## `selfhost/emit_java.rvl` — slice 4: realm placements (isolate/intercept) (item 235)
+
+Extended the modern-component path to the `isolate`/`intercept` REALM-placement
+corner, byte-exact against `backends/java/emit.py`. Two new corpus fixtures
+(`comp_realm_isolate.rvl`, `comp_realm_intercept.rvl`) cross-check identical to the
+reference; all 15 prior corpus fixtures + the scaffold + in-file-test assertions
+stay green (17 java tests total, full `pytest tests/` = 3534 passed, 259 skipped).
+
+### Scope: the placement, not the async/host-Map that shares the deferral bucket
+The slice-3 comment lumped "isolate/intercept realms, async/await/spawn, host-Map"
+into one `slice 4+` deferral. They are NOT one unit: the realm PLACEMENT is a
+pure apply()-header addition (`ctx = ctx.isolate(<Svc>.class, "..")` before the
+effect scope; `ctx.intercept(ServiceKey.of(<Svc>.class), <meta>)`), independent of
+the body/method shapes. Splitting it out kept this a small byte-exact slice —
+async (AsyncPlugin / CordisException import widening) and the host `HashMap<String,V>`
+`_map_value_expr_type` surface are reported STILL deferred (slice 5+).
+
+### State-threading (item 195): zero new threading — realms are apply-local
+The realm lines read `comp`'s `isolate`/`intercept` maps and emit into the
+apply() `out` list with no new accumulator: no counter, no rename map, no Ctx
+field. Service resolution (`env.provides.get(key) or env.reqs[key]` for isolate,
+`env.reqs[key]` for intercept) is a two-line `isolate_service` helper over the
+already-bound `provs_m`/`reqs_m`. This is the cleanest modern-path extension so
+far — unlike the effectful-body slice (225), nothing threads through the
+provider-class loop. The gate change was two lines: drop the isolate/intercept
+early-`false` in `modern_supported`, add the isolate/intercept `needs_modern`
+trigger in `needs_modern_subset` (mirroring the reference `_component_needs_modern`
+returning True on either).
+
+### Ergonomics (item 189): `_metadata_lit` ported with no new kit
+`metadata_lit` (the `intercept ... with <meta>` object literal) is a direct
+`value_kind` dispatch reusing the in-file `json_dumps` (str + map keys), `num_str`
+(int/float), `value_list`/`value_keys`/`value_field` — plus the nested
+`java.util.List.of(..)`/`java.util.Map.of(..)` backtick joins. The one subtlety
+that "just worked": `value_kind` (stdlib/value.rvl) checks `bool` BEFORE `int`,
+exactly as the reference's `isinstance(value, bool)`-before-`int` order, so a
+`true`/`false` metadatum renders `true`/`false` and never `1L`/`0L`. No falsy-gate
+hazard — `map_nonempty`/`value_is_null` (already in-file) covered the absent-map
+case that the reference spells `component.get("isolate") or {}`.
+
+### NEW finding: none
+No emitter/kit/stdlib defect surfaced. The realm surface fell out of the existing
+value-model + host-format kit with only additive helpers; the differential oracle
+stayed the arbiter throughout.
+
+## Slice 6 (item 234) — spawn/instances + realm placements (emit_ts)
+
+### The realm-metadata JSON stayed PURE revl — the `_json` dict is reconstructible byte-for-byte (LOW, good ergonomics)
+The reference renders `isolate`/`intercept` metadata with `_json(x) == json.dumps(x)`.
+For `isolate` the port passes the raw metadata dict straight to the existing
+`json_dumps` @py helper (byte-identical, one line). For `intercept`'s dict-form
+`inject` — the reference builds `{key: intercept.get(key) for key in inject_keys}`
+then `_json`s it — the port did NOT need to build a host dict (revl has no dict
+constructor to hand to `json_dumps`): `json.dumps` of `{k: v, …}` equals a
+piecewise build with `": "` after each key and `", "` between entries, so
+`` `${json_dumps(k)}: ${json_dumps(value_field(icept, k))}` `` joined with `, ` and
+wrapped in `{…}` reproduces it exactly, staying off `@py` for the LOGIC. This is
+the payoff of the item-180 erased-IR boundary: metadata that is already plain JSON
+in the IR needs only the host-format leaf, never a navigation `@py` block.
+
+### `value_field(...)` returning `null` for BOTH absent and present-null keys matched the reference for free (LOW)
+The reference's `intercept.get(key)` yields `None` for an absent key OR a
+present-but-null one, both rendering `null`. The port's `value_field(icept, k)`
+collapses the same two cases to a null `Value` → `json_dumps` → `"null"`, so no
+present-vs-absent distinction was needed (had it been, `value_opt` was the escape
+hatch). One fewer branch than the reference's dict comprehension implies.
+
+### `spawn`/`instance-get` are guard-free single-expression kinds — the state-threading tax (item 195) was ZERO here (LOW)
+Both new expr kinds are pure `expr_inner` branches that thread the existing
+`counter`/`acx` through their sub-exprs (spawn's config values, instance-get's
+target) with no new downward state — the `ACx` seam stood up in 219 carried them
+untouched. The `_uses_spawn` import gate is a plain `value_children` walk in the
+shape of every other `uses_*` gate; adding `spawn` to the import list reused the
+same `join(", ")` the header already builds. No kit gap, no new plumbing.
+
+### Ergonomics (item 189): reserved contextual nouns cannot be spelled as record-literal KEYS in an in-file test (MEDIUM — recurring)
+`component`, `config`, `intercept`, `isolate`, `realm`, `requires` are reserved
+keywords, so a `spawn` IR node — whose fields are literally `component:`/`config:`
+— CANNOT be written as a revl record literal in an in-file `test` block (the lexer
+rejects the key). The corpus differential oracle covers `spawn` byte-for-byte, but
+the focused in-file unit test had to be dropped for it (only `instance-get`, whose
+keys are `target:`/`key:`, is spellable). Same class bit the emitter code: three
+component-tail locals had to be renamed off `requires`/`intercept`/`isolate` to
+`req_keys`/`icept`/`iso`. A record literal keys a field by NAME, and a name that
+collides with a contextual-keyword should be allowed as a key (it is unambiguous
+after `{`/`,` and before `:`), the way many languages permit keywords as member
+names. Symptom: `expected ident, found 'component'` at the literal. Repro:
+`let n = { component: "W" }`. Fix: allow reserved contextual nouns as record-field
+keys (parser `_name()` in key position) — NOT fixed here (out of this slice's file
+scope; the parser lives in src/revl/).
+
+### Deferred, byte-honestly: routed requires + the v1/v2 path
+`routes` (item 167: `isolate <k> in realms("w1"…) strategy(...)`) is deferred whole
+— it pulls the `_TS_ROUTER_SRC` runtime literal, the `realmLabel` import, the
+`inject_keys = requires − routes` subtraction, the per-key `revlRouter` proxy
+before the body, AND the routed-`req` read path (`_revl_route_<k>`), none of which
+composes byte-exact without all parts landing together. Separately, a component
+that uses ONLY `isolate`/`intercept` (no spawn, no 2.0 types) compiles to
+ir_version 2 and the reference routes it through `_emit_v1`, which the port does
+NOT mirror (the v1/v2 path is deferred) — so both realm-placement fixtures carry a
+trivial top-level 2.0 `fn` to stay on the `_emit_v3` path the port is faithful to.
+A future slice covering `_emit_v1` (or routed requires) removes that scaffolding.
+
+## wasm Path B slice 3 — the List/record allocation ABI (`emit_wasm.rvl`, item 236)
+
+Slice 2 pooled Str literals (the `data` segment). Slice 3 mirrors the rest of the
+*allocation* surface — `List` and record VALUES in linear memory — byte-for-byte:
+`$alloc`, the `[u32 count][slot…]` / declared-order-field-slot layouts,
+`_slot_store` (an `Int` stored native i64, a Bool/pointer `i64.extend_i32_u`-widened
+in), the nesting-depth scratch pointer (`_acquire_tmp` -> `__revl_tmp` /
+`__revl_tmp_n1` …), and the `_type_comments` layout block. Two corpus docs
+(`listmem.rvl`, `recmem.rvl`) each emit `== backends/wasm/emit.py`, and stress
+fixtures beyond the corpus — triple-nested lists, list-of-records, record-with-list
+field, records built from params, allocation inside an `if` branch, let-bound
+records recovered by field-set match — all landed byte-identical.
+
+### Finding: `_acquire_tmp`'s nesting scratch is byte-REPRODUCIBLE (NOT the item-179 class) — reconstructed from a pure max-depth pass
+The STOP-report hazard this slice was scoped against was whether the reference's
+`self._tmp_stack` / `self._tmp_extra` — mutable instance state pushed/popped during
+the emit walk — hides an `id()`/traversal-order dependency a second implementation
+cannot reproduce (item 179). It does NOT. The scratch NAME is a pure function of
+lexical allocation-nesting depth (`__revl_tmp` at depth 0, `__revl_tmp_n<d>`
+deeper), and `_tmp_extra` is just `{n1..nD}` for D = the max nesting depth, which is
+CONTIGUOUS (you cannot reach depth d without an allocation at each of 0..d-1 in the
+same chain). So the port threads `depth` as a plain downward argument (no mutable
+stack) and reconstructs the header's extra-local set from a separate pure
+`body_max_depth` pass — sorted-set-identical to `sorted(self._tmp_extra)` for D<10
+(nesting never approaches that). A genuinely stateful allocator (an `id()`-keyed
+offset cache, say) would have been the blocker; the depth-indexed name is not one.
+
+### Finding (item 203, THIRD hit): `$ident`-in-a-plain-string blocks the natural way to build WAT
+Every WAT fragment names a `$local`/`$func`, so the item-203 papercut — a plain
+`"…$alloc…"` string is REJECTED as would-be 1.x interpolation — hit twice while
+writing this slice: first building the `(call $alloc …)` / `(local.get $__revl_tmp)`
+lines in `render_list`/`render_record`, then again in an in-file `test` asserting
+`slot_store`'s output literal (`(local.get $p)`). The fix each time is to switch the
+plain string to a backtick template (where a bare `$name` is literal and only
+`${…}` interpolates), so the emitter's most natural output — string-concatenated
+WAT — is exactly the form the lexer flags, and a WAT-heavy `.rvl` must write nearly
+every line as a backtick even when it interpolates nothing. Symptom: `RevlError:
+`$alloc` in a plain string — this was interpolation in 1.x`. Repro: any
+`"…$x…".concat(…)` in a `.rvl`. A `\$` plain-string escape, or exempting a string
+with no `${` from the 1.x-ambiguity check, would remove the tax. (Do NOT fix here.)
+
+### Ergonomics (item 189): the kits carried records for free; `value_keys` gave the byte-critical field ORDER
+The record ABI's one correctness-critical fact is field ORDER — the reference stores
+fields in DECLARED order (the type table), not the literal's source order. The
+stdlib-value kit already exposes this exactly: `value_keys(value_field(spec,
+"fields"))` returns declared order (`list(dict)` insertion order, item-180 contract),
+and `value_field(fmap, name)` the field type — so the whole `_record_fields` /
+declared-order walk is pure `use`d kit with no private `@py`. `record_type_of`'s
+field-SET match (for an unannotated `let`-bound record) was a 6-line `names_eq` over
+`value_keys`. The only threading tax was widening `Scope` with a `rectypes: Any`
+field (the `ir["types"]` table) so `_record_expr` can reach the type table the same
+way the string pool already rides the scope — the same "structural record, no
+record-update literal" friction the async slice-5 note logged: adding one field to
+`Scope` meant editing every `{ slots:…, types:…, strs:… }` construction site
+(here only `scope_bind` and the `emit_function` seed) by hand.

@@ -23,6 +23,10 @@ revl refuses.)
 | `repeat(n)` | 1 | Str | n copies concatenated | `x * n` | `x.repeat(n)` |
 | `startsWith(p)` | 1 | Str | prefix probe: `p` is the receiver's first `p.length()` code points (FR-6) | `x.startswith(p)` | `x.startsWith(p)` |
 | `endsWith(p)` | 1 | Str | suffix probe: `p` is the receiver's last `p.length()` code points (FR-6) | `x.endswith(p)` | `x.endsWith(p)` |
+| `is_digit()` | 0 | Str | single-char ASCII digit `0`-`9` (item 233) | `"0" <= x <= "9"` | deferred |
+| `is_alpha()` | 0 | Str | single-char ASCII letter `a`-`z`/`A`-`Z` (NOT `_`) | chained range compare | deferred |
+| `is_alnum()` | 0 | Str | single-char ASCII letter or digit | chained range compare | deferred |
+| `is_space()` | 0 | Str | single-char ASCII blank: space, tab, LF, CR | `x in (" ", "\t", "\n", "\r")` | deferred |
 | `div_trunc(b)` | 1 | Int | integer division rounding toward zero | built | `Math.trunc(a / b)` |
 | `div_floor(b)` | 1 | Int | integer division rounding toward −∞ | `a // b` | `Math.floor(a / b)` |
 | `div_euclid(b)` | 1 | Int | division whose remainder is ≥ 0 | built | built |
@@ -301,6 +305,39 @@ Lowering is native on every tier (`str.startswith`, `String.prototype.
 startsWith`, `str::starts_with`, `String.startsWith`, `strings.HasPrefix`,
 and a byte-comparison WAT helper on wasm — a code-point prefix of a valid
 UTF-8 string is exactly a byte prefix). All six tiers carry it.
+
+### `Str.is_digit()` / `is_alpha()` / `is_alnum()` / `is_space()`: single-char classification (item 233)
+
+Four **argument-less Str probes** that classify a single ASCII code point and
+return `Bool`:
+
+- `is_digit()` — the receiver is one ASCII digit `0`–`9`.
+- `is_alpha()` — one ASCII letter `a`–`z` or `A`–`Z`. **Letters only — `_` is
+  not a letter** (the lexer's "identifiers may contain `_`" rule stays explicit
+  at the call site, not baked into the classifier).
+- `is_alnum()` — the union of `is_alpha` and `is_digit`.
+- `is_space()` — one of space, tab, LF, CR.
+
+The receiver is a **one-character** string. The empty string classifies as
+`false` and nothing faults; multi-character input is outside the per-character
+contract (the classifiers answer about a single code point) but stays total —
+it never raises. All four are **Str-only**, declared on the Str family like
+`charAt`.
+
+They exist to cut the **self-host lexer's per-byte cost**. The lexer scans
+identifiers and numbers one source byte at a time; each byte previously paid a
+revl-fn call (`is_alnum(c)`) plus a `charCodeAt`/`ord` round-trip and a
+code-point range compare. Lowered native — a chained comparison (`"0" <= x <=
+"9"`) or tuple membership — the classification collapses to an inline test with
+no call and no intermediate `ord`. See `docs/bench-selfhost.md` for the lexer
+before→after.
+
+**Tier status.** The **py tier** (the bench tier this item targets) lowers all
+four native. Other tiers (rust/java/ts/wasm/go) are **deferred**: nothing
+outside `selfhost/lexer.rvl` — which is only ever emitted through the python
+backend — uses these builtins yet, so no other backend is exercised with them.
+A tier that later adopts them lowers to its own ASCII test (`char::is_ascii_*`
+on rust, a range compare elsewhere).
 
 ### `Str.to_int()`: the parsing builtin (FR-9)
 

@@ -705,6 +705,19 @@ _BUILTIN_SIG = {
     # of the other Str-builtins.
     "startsWith": ("Str", ["Str"], "Bool"),
     "endsWith": ("Str", ["Str"], "Bool"),
+    # Single-character ASCII classification (roadmap item 233, docs/stdlib-2.0.md
+    # §Str.is_alnum). Str-only, no argument, Bool result — the family of the
+    # other Str builtins. Recognized so the self-host lexer's per-byte hot path
+    # (`is_alnum(source.charAt(j))` etc.) lowers to a native inline test on the
+    # py tier instead of a revl-fn call. ASCII, single code point: is_digit is
+    # `0`-`9`; is_alpha is `a`-`z`/`A`-`Z` (letters only — NOT `_`); is_alnum is
+    # their union; is_space is space/tab/LF/CR. The receiver is a one-char Str
+    # (an empty receiver is false and no input faults; multi-character input is
+    # outside the per-character contract — the lexer only ever hands one char).
+    "is_alnum": ("Str", [], "Bool"),
+    "is_digit": ("Str", [], "Bool"),
+    "is_alpha": ("Str", [], "Bool"),
+    "is_space": ("Str", [], "Bool"),
     # Integer division and modulo, named rather than defaulted (§0 keeps `/`
     # and `%` meaning what TypeScript means by them; these say what they do).
     # docs/arithmetic.md gives the definitions and the divergence they close.

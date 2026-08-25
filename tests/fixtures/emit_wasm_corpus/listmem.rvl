@@ -1,0 +1,48 @@
+// wasm Path B slice 3a — the List corner of the linear-memory value ABI.
+//
+// A `List[T]` is `[u32 count][pad][slot0][slot1]…`: `$alloc` bump-allocates
+// `8 * (count + 1)` bytes, the count is an `i32.store` at the base, and every
+// element is one 8-byte slot written as an i64 (`_slot_store`: an `Int` sits
+// there natively, a Bool/pointer is `i64.extend_i32_u`-widened in). The list's
+// base pointer rides in a nesting-depth-indexed scratch local (`_acquire_tmp`):
+// a flat list uses the depth-0 `__revl_tmp`; a nested one gets `__revl_tmp_n1`,
+// `__revl_tmp_n2`, … each declared in the header (`_tmp_extra`). Every element
+// here is a scalar or an ASCII `Str` literal (pooled by slice 2), so no element
+// pulls in machinery beyond the allocation surface this slice adds.
+
+// A flat `List[Int]`: count 3, three i64 slots, the depth-0 scratch only.
+fn ints() -> List[Int] { return [1, 2, 3] }
+
+// `List[Bool]`: each element is an i32 (0/1) zero-extended into its i64 slot.
+fn bools() -> List[Bool] { return [true, false] }
+
+// `List[Str]`: each slot holds the pooled string's `(i32.const <offset>)`
+// pointer, widened in. The literals coexist with the allocation (data segments
+// + a non-zero heap start under the same list bytes).
+fn strs() -> List[Str] { return ["a", "bb", "a"] }
+
+// A nested `List[List[Int]]`: the outer list acquires `__revl_tmp` at depth 0,
+// each inner list is an element lowered one level deeper on `__revl_tmp_n1`, so
+// its construction cannot clobber the outer base pointer.
+fn nested() -> List[List[Int]] { return [[1, 2], [3, 4]] }
+
+// Three levels deep: `__revl_tmp`, `__revl_tmp_n1`, `__revl_tmp_n2` — the full
+// contiguous scratch run the header has to declare.
+fn triple() -> List[List[List[Int]]] { return [[[1]], [[2, 3]]] }
+
+// Elements that are variable slots, not literals: the list slots take the
+// param locals / a checked add, exercising the element ABI over non-constants.
+fn fromVars(a: Int, b: Int) -> List[Int] { return [a, b, a + b] }
+
+// A let-bound list flows through an i32 (address) local, then out — the binding
+// type `List[Int]` is inferred from the first element and widths the local i32.
+fn viaLet() -> List[Int] {
+  let xs = [10, 20]
+  return xs
+}
+
+// An allocation inside an `if` branch: the depth accounting and scratch naming
+// are the same whichever arm runs, and the header still declares one scratch.
+fn branchy(c: Bool) -> List[Int] {
+  if (c) { return [1, 2] } else { return [3, 4, 5] }
+}

@@ -57,16 +57,16 @@
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation. Where a covered fixture could plausibly reach one, a
 // loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
-//   * the MODERN component path (`_emit_component_modern`) — isolate/intercept,
-//     effectful method bodies, and any `if`/`fail`/`await`/`return`/`setup` body
-//     step (the `Context.EffectScope fx` provider shape). A component outside the
-//     `component_simple_ok` predicate routes to `<<DEFER-component-nonsimple:N>>`;
-//   * component `config` (the parameterised `<Comp>Plugin` ctor +
-//     `_config_default_lit`) — a config-carrying component stays LEGACY but is
-//     deferred here; required-service routing (`req`/the `ctx.get` locals +
-//     provider fields); `let-effect`/`effect`/`emit` teardown steps; async/spawn/
-//     realms; and the `await`->AsyncPlugin / `fail`->CordisException import
-//     widening (`_core_imports`);
+//   * the MODERN component path (`_emit_component_modern`), REMAINING surface —
+//     `let-effect` host binds and any body-level `if`/`fail`/`await`/`setup`
+//     activation step, and method-body `let`/`assign`/arrow bindings. (config,
+//     required-service routing, effectful `return`/`effect`/`emit` method bodies
+//     landed in item 225; isolate/intercept realm PLACEMENT landed in item 235.) A
+//     component outside the supported subset routes to
+//     `<<DEFER-component-nonsimple:N>>`;
+//   * async/spawn/timers/routers; the `await`->AsyncPlugin / `fail`->CordisException
+//     import widening (`_core_imports`); and the host Map/generics surface
+//     (`_emit_host_stubs`' `HashMap<String,V>` per-site `_map_value_expr_type`);
 //   * the HOST Map/generics surface — `_emit_host_stubs`' `HashMap<String,V>` with
 //     per-site value inference (`_map_value_expr_type`) is component-bind territory
 //     (deferred with them). The plain v3 `maplit` (`new java.util.HashMap<>()`)
@@ -1115,17 +1115,17 @@ fn component_simple_ok(comp: Any) -> Bool {
   return true
 }
 
-// ==================================================== MODERN component (item 225)
-// The modern component path (`_emit_component_modern`) — SLICE 3 subset: the
-// config / required-service-routing / effectful-method-body corner, byte-exact.
-// A component is emitted here when it needs the modern path AND falls inside the
-// supported subset (`modern_supported` && `needs_modern_subset`); anything else
-// routes to `<<DEFER-component-nonsimple>>`. DEFERRED (slice 4+, each a loud
-// marker or a structural DEFER): isolate/intercept realms, async/await/spawn
-// (AsyncPlugin / CordisException import widening), timers, routers, `let-effect`
-// host binds and their `_emit_host_stubs` `HashMap<String,V>` per-site inference,
-// body-level `effect`/`emit`/`if`/`fail`/`setup` activation steps, and method-body
-// `let`/`assign`/arrow bindings.
+// ============================================== MODERN component (item 225 / 235)
+// The modern component path (`_emit_component_modern`) — SLICE 3+4 subset: the
+// config / required-service-routing / effectful-method-body corner (225) PLUS
+// isolate/intercept realm PLACEMENT (235), byte-exact. A component is emitted here
+// when it needs the modern path AND falls inside the supported subset
+// (`modern_supported` && `needs_modern_subset`); anything else routes to
+// `<<DEFER-component-nonsimple>>`. DEFERRED (slice 5+, each a loud marker or a
+// structural DEFER): async/await/spawn (AsyncPlugin / CordisException import
+// widening), timers, routers, `let-effect` host binds and their `_emit_host_stubs`
+// `HashMap<String,V>` per-site inference, body-level `effect`/`emit`/`if`/`fail`/
+// `setup` activation steps, and method-body `let`/`assign`/arrow bindings.
 
 // `_zero_java_value`: the default field value for a config field with no explicit
 // default (mirrors the reference's zero-value table).
@@ -1155,6 +1155,43 @@ fn config_default_lit(field: Any) -> Str {
   let d = value_field(field, "default")
   if (!value_is_null(d)) { return lit_value(d) }
   return zero_java_value(java_v3_type(value_field(field, "type"), false))
+}
+
+// `_metadata_lit`: an `intercept ... with <meta>` value -> a Java object literal
+// (v2). Scalars mirror `_lit` (str via `json.dumps`, int `<n>L`, float `<n>d`,
+// bool/null keyword); a list -> `java.util.List.of(..)` and a record (map) ->
+// `java.util.Map.of(<key>, <val>, ..)`, each key a `json.dumps` string, recursing
+// on the value. `value_kind` orders bool before int (as Python's isinstance does),
+// so a `true`/`false` metadatum never renders `1L`/`0L`.
+fn metadata_lit(v: Any) -> Str {
+  let k = value_kind(v)
+  if (k == "null") { return "null" }
+  if (k == "bool") { if (value_bool(v)) { return "true" } return "false" }
+  if (k == "str") { return json_dumps(v) }
+  if (k == "int") { return num_str(v).concat("L") }
+  if (k == "float") { return num_str(v).concat("d") }
+  if (k == "list") {
+    var parts = []
+    for (item of value_list(v)) { parts = parts.push(metadata_lit(item)) }
+    return `java.util.List.of(${parts.join(", ")})`
+  }
+  if (k == "record") {
+    var entries = []
+    for (mk of value_keys(v)) {
+      entries = entries.push(`${json_dumps(mk)}, ${metadata_lit(value_field(v, mk))}`)
+    }
+    return `java.util.Map.of(${entries.join(", ")})`
+  }
+  return "<<UNSUPPORTED-METADATA>>"
+}
+
+// The service name an `isolate <key> in realm(..)` placement resolves to: a
+// provided key (`env.provides.get(key)`) else a required key (`env.reqs[key]`).
+// An `intercept` placement always resolves through `requires` at its call site.
+fn isolate_service(provs_m: Any, reqs_m: Any, key: Str) -> Str {
+  let p = value_field(provs_m, key)
+  if (!value_is_null(p)) { return value_str(p) }
+  return value_str(value_field(reqs_m, key))
 }
 
 // `_emit_plugin_ctors`: a parameterised ctor (only when there are config fields,
@@ -1209,14 +1246,14 @@ fn contains_expr(node: Any) -> Bool {
   return false
 }
 
-// `modern_supported`: the SLICE-3 subset gate. A component is emitted modern only
-// when it has NO isolate/intercept, EVERY body step is a `provide` (no let-effect
-// host binds, no body-level effect/emit/if/fail/setup), and every provide-method
-// step is a `return`/`effect`/`emit` (no let/assign/provide/await). Everything
-// else routes to a loud DEFER rather than a wrong-shaped emission.
+// `modern_supported`: the SLICE-3/4 subset gate. A component is emitted modern
+// only when EVERY body step is a `provide` (no let-effect host binds, no
+// body-level effect/emit/if/fail/setup), and every provide-method step is a
+// `return`/`effect`/`emit` (no let/assign/provide/await). `isolate`/`intercept`
+// realm placements ARE admitted (slice 4, item 235) — they add only apply()-header
+// lines, not new body/method shapes. Everything else routes to a loud DEFER rather
+// than a wrong-shaped emission.
 fn modern_supported(comp: Any) -> Bool {
-  if (map_nonempty(value_field(comp, "isolate"))) { return false }
-  if (map_nonempty(value_field(comp, "intercept"))) { return false }
   for (step of value_list(value_field(comp, "body"))) {
     if (value_str(value_field(step, "step")) != "provide") { return false }
     for (method of value_list(value_field(step, "methods"))) {
@@ -1229,11 +1266,14 @@ fn modern_supported(comp: Any) -> Bool {
   return true
 }
 // `_component_needs_modern` (reduced to the all-`provide` subset `modern_supported`
-// admits): a provide-method with any non-`return` step, or a `return` whose expr
-// escapes the v1 surface, forces the modern path. (A config-only / req-only
-// component whose methods are all pure `return <lit|name>` stays LEGACY — the
-// reference emits it non-modern — so it is NOT admitted here.)
+// admits): an `isolate`/`intercept` placement (item 235), a provide-method with any
+// non-`return` step, or a `return` whose expr escapes the v1 surface, forces the
+// modern path. (A config-only / req-only component whose methods are all pure
+// `return <lit|name>` stays LEGACY — the reference emits it non-modern — so it is
+// NOT admitted here.)
 fn needs_modern_subset(comp: Any) -> Bool {
+  if (map_nonempty(value_field(comp, "isolate"))) { return true }
+  if (map_nonempty(value_field(comp, "intercept"))) { return true }
   for (step of value_list(value_field(comp, "body"))) {
     for (method of value_list(value_field(step, "methods"))) {
       for (mstmt of value_list(value_field(method, "body"))) {
@@ -1367,6 +1407,23 @@ fn emit_component_modern(comp: Any, services: Any, base_ctx: Ctx) -> List[Str] {
   out = out.concat(emit_plugin_ctors(cname, config_fields))
   out = out.push("    @Override")
   out = out.push("    public Disposable apply(Context ctx) {")
+  // Realm placements open the apply() body, BEFORE the effect scope: each
+  // `isolate` rebinds `ctx` to a fresh local realm for the key's service, each
+  // `intercept` installs metadata on a required service. (item 235)
+  let isolate_m = value_field(comp, "isolate")
+  if (!value_is_null(isolate_m)) {
+    for (key of value_keys(isolate_m)) {
+      let srvn = isolate_service(provs_m, reqs_m, key)
+      out = out.push(`        ctx = ctx.isolate(${srvn}.class, ${json_dumps(value_field(isolate_m, key))});`)
+    }
+  }
+  let intercept_m = value_field(comp, "intercept")
+  if (!value_is_null(intercept_m)) {
+    for (key of value_keys(intercept_m)) {
+      let srvn = value_str(value_field(reqs_m, key))
+      out = out.push(`        ctx.intercept(ServiceKey.of(${srvn}.class), ${metadata_lit(value_field(intercept_m, key))});`)
+    }
+  }
   out = out.push("        Context.EffectScope fx = ctx.effect();")
   for (local of req_locals) {
     let srvn = value_str(value_field(reqs_m, local))

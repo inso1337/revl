@@ -56,14 +56,24 @@ call naming an async callable (``async_names``) or an async-value parameter
 calls awaited); and the async ARROW (``async (…) => …``). The ``ACx`` async-state
 of slice 4 now threads to the module-fn level (and through ``v3_stmt``).
 
+Slice 6 (item 234) adds SPAWN/INSTANCES + REALM PLACEMENTS, byte-identical: the
+``spawn`` expr kind (``spawn(ctx, Worker, {config}, [realms])`` with the
+``_uses_spawn`` runtime-import gate adding ``spawn``), the ``instance-get`` expr
+kind (``w.counter`` -> ``w.get("counter")``), the ``isolate`` placement
+(``isolate: {…},`` after the apply method), and the ``intercept`` metadata (the
+dict-form ``inject: {key: metadata},`` replacing the array form). All four
+fixtures are on the v3 emit path (the isolate/intercept ones carry a trivial
+top-level 2.0 ``fn`` to keep them off the deferred v1/v2 path).
+
 Deliberately OUT (deferred to a follow-on slice): the component-dialect async
 call surface — an async callable reached through the ``fn`` expr kind or from an
 async PROVIDE method (its ``async_names`` are threaded empty, byte-safe because no
-covered component body names one); the component-body ``timer`` step, the
-component-dialect expr kinds ``spawn``/``instance-get``, VARIANT type declarations
-(so an async ``match`` is exercised over Opt/built-in ``Result`` only, never a
-declared variant), in-file ``test``/``fault_test``/``lifecycle test`` emission,
-spawn/instances, realm placements (isolate/intercept/routes), the canonical ABI,
+covered component body names one); the component-body ``timer`` step, VARIANT
+type declarations (so an async ``match`` is exercised over Opt/built-in
+``Result`` only, never a declared variant), in-file
+``test``/``fault_test``/``lifecycle test`` emission, ROUTED requires
+(``realms(...)`` + the ``revlRouter`` helper and its ``realmLabel`` import and the
+routed-``req`` proxy), the ``_emit_v1`` (ir_version 1/2) path, the canonical ABI,
 and ``assert``/``let_pattern`` statements — all kept out so the slice stays
 byte-VERIFIED rather than byte-guessed.
 """
@@ -109,6 +119,12 @@ CORPUS = [
     "async_module_match.rvl",   # async `match` (Opt form): async IIFE + awaited binding arm-arrow
     "async_module_switch.rvl",  # async `match` (tagged switch over built-in `Result`): case-bind await
     "async_module_arrow.rvl",   # async ARROW (`async (y) => …`) + awaited call to a colored fn
+    # slice 6 (item 234) — spawn/instances + realm placements, byte-exact:
+    "spawn.rvl",            # a supervisor spawning a Worker template: the `spawn` expr node
+                            # (`spawn(ctx, Worker, {cfg}, [realms])`) + the `_uses_spawn` import gate
+    "instance_get.rvl",     # reading a provision off a handle: `w.counter` -> `w.get("counter")`
+    "realm_isolate.rvl",    # `isolate db in realm("primary")` -> `isolate: {…},` after apply
+    "realm_intercept.rvl",  # `intercept db with {…}` -> the dict-form `inject: {"db": {…}},`
 ]
 
 

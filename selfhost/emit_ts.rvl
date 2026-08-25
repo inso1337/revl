@@ -1073,6 +1073,37 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   // `$N` placeholders and `$$` escapes over a template — lowered to a JS
   // template literal, the v1 twin of the 2.0 `interp`.
   if (kind == "format") { return render_format(node, counter, acx) }
+  // `spawn` (docs/design-v2-instances.md): an acquisition that plugs the target
+  // component as a child fiber, each provided key isolated into its own fresh
+  // LOCAL realm — `spawn(ctx, Worker, {config}, [realms])` returns a disposable
+  // handle whose `undo` tears the child fiber down. `component` is emitted
+  // VERBATIM (a module-level plugin binding, not a mangled ident); `config` is a
+  // key->expr map; `realms` a static string list.
+  if (kind == "spawn") {
+    let target = value_str(value_field(node, "component"))
+    let cfg = value_field(node, "config")
+    var cfg_parts = []
+    var c = counter
+    for (k of value_keys(cfg)) {
+      let r = expr(value_field(cfg, k), c, acx)
+      cfg_parts = cfg_parts.push(`${json_dumps(k)}: ${r.text}`)
+      c = r.counter
+    }
+    var realm_parts = []
+    for (rl of value_list(value_field(node, "realms"))) {
+      realm_parts = realm_parts.push(json_dumps(value_str(rl)))
+    }
+    return { text: `spawn(ctx, ${target}, {${cfg_parts.join(", ")}}, [${realm_parts.join(", ")}])`, counter: c }
+  }
+  // `instance-get` (docs/design-v2-instances.md): `s.<key>` reads a provision
+  // back off a spawn handle — `<target>.get("<key>")`, resolving the key through
+  // the instance's own private local realm. `service` is frozen inline on the
+  // node but needs no emission (cordis exposes the provision by key).
+  if (kind == "instance-get") {
+    let r = expr(value_field(node, "target"), counter, acx)
+    let key = value_str(value_field(node, "key"))
+    return { text: `${r.text}.get(${json_dumps(key)})`, counter: r.counter }
+  }
   return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
 }
 
@@ -1666,13 +1697,27 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
   var out = config_interface(comp)
   out = out.push(`export const ${name} = {`)
   out = out.push(`  name: ${json_dumps(name)},`)
-  // inject: the requirement keys (routed keys are deferred, so all of them);
-  // the array form (the dict/intercept form is deferred).
-  var inject_parts = []
-  for (k of value_keys(value_field(comp, "requires"))) {
-    inject_parts = inject_parts.push(json_dumps(k))
+  // inject: the requirement keys (routed keys are deferred, so all of them).
+  // With any `intercept` present the plugin switches from the array form to the
+  // dict form — `{key: intercept.get(key) …}` — the non-null values copied into
+  // the fiber context's intercept chain, `null` marking a required-but-not-
+  // intercepted key. json.dumps of that dict equals a piecewise build (`, `
+  // between entries, `": "` after each key), so the JSON stays pure revl.
+  let req_keys = value_keys(value_field(comp, "requires"))
+  let icept = value_field(comp, "intercept")
+  if (value_keys(icept).length() > 0) {
+    var inj_parts = []
+    for (k of req_keys) {
+      inj_parts = inj_parts.push(`${json_dumps(k)}: ${json_dumps(value_field(icept, k))}`)
+    }
+    out = out.push(`  inject: {${inj_parts.join(", ")}},`)
+  } else {
+    var inject_parts = []
+    for (k of req_keys) {
+      inject_parts = inject_parts.push(json_dumps(k))
+    }
+    out = out.push(`  inject: [${inject_parts.join(", ")}],`)
   }
-  out = out.push(`  inject: [${inject_parts.join(", ")}],`)
   let provide_keys = value_keys(value_field(comp, "provides"))
   if (provide_keys.length() > 0) {
     var pk = []
@@ -1712,6 +1757,13 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
   }
   out = out.push(`    }, ${json_dumps(name.concat(".body"))})`)
   out = out.push("  },")
+  // v2: realm placements — `isolate: {key: realm, …},` applied by runtime.plug()
+  // BEFORE ctx.plugin (the fiber's context chain is fixed at plugin time). The
+  // metadata is plain JSON (static string labels), so json.dumps renders it.
+  let iso = value_field(comp, "isolate")
+  if (value_keys(iso).length() > 0) {
+    out = out.push(`  isolate: ${json_dumps(iso)},`)
+  }
   out = out.push("}")
   return { lines: out, counter: c }
 }
@@ -1977,6 +2029,28 @@ fn revl_parse_int_helper() -> Str {
 }
 
 // ---------------------------------------------------- IR-wide `_uses_*` gates
+// `_uses_spawn`: true iff any COMPONENT body carries a `spawn` acquisition node,
+// so the module imports the `spawn` runtime helper (docs/design-v2-instances.md
+// phase 2). Walks only `ir.components` (mirroring the reference), so a
+// non-spawning document skips the import and stays byte-identical.
+fn uses_spawn(n: Any) -> Bool {
+  if (node_kind(n) == "spawn") { return true }
+  for (c of value_children(n)) {
+    if (uses_spawn(c)) { return true }
+  }
+  return false
+}
+
+// `_runtime_imports`: the `import { … } from '../runtime.ts'` line. `spawn` is
+// added only when a spawn node is present. (routed-require `realmLabel` and the
+// lifecycle-test drivers are deferred — no covered document exercises them, so
+// the list is byte-identical for the spawn/realm-placement subset.)
+fn runtime_imports(ir: Any) -> Str {
+  var names = ["host"]
+  if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
+  return `import { ${names.join(", ")} } from '../runtime.ts'`
+}
+
 fn uses_equality(n: Any) -> Bool {
   if (node_kind(n) == "bin" && is_equality_op(node_op(n))) { return true }
   for (c of value_children(n)) {
@@ -2071,7 +2145,7 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("// Generated by revl backends/typescript/emit.py — do not edit.")
   out = out.push("// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).")
   out = out.push("import type { Context } from 'cordis'")
-  out = out.push("import { host } from '../runtime.ts'")
+  out = out.push(runtime_imports(ir))
   out = out.push("")
   out = out.concat(revl_helpers(ir))
   // Slice 3: v3 TYPE declarations (records) come right after the helpers, before
@@ -2160,6 +2234,17 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
   assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [] }).text
     == "ctx.store.get(k)"
 }
+
+test "the slice-6 instance-get expr kind reads a provision off a handle" {
+  // `w.counter` -> `w.get("counter")` (docs/design-v2-instances.md). `spawn`'s
+  // own byte-check lives in the corpus: its node carries `component`/`config`
+  // keys the lexer reserves, so it cannot be spelled as an in-file record.
+  assert expr({ kind: "instance-get", target: { kind: "name", id: "w" }, key: "counter" },
+              0, sync_acx()).text
+    == expected_instance_get()
+}
+
+fn expected_instance_get() -> Str { return `w.get("counter")` }
 
 fn expected_ok_adt() -> Str { return `{ kind: "Ok", value: 1n }` }
 fn expected_missing_adt() -> Str { return `{ kind: "Missing" }` }

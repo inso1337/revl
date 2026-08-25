@@ -85,12 +85,44 @@ One-time revl→py compile cost per stage (setup only, excluded from the timed
 run): lexer ≈ 24 ms, parser ≈ 82 ms, checker ≈ 200 ms, lower ≈ 268 ms,
 emit_py ≈ 118 ms.
 
+## Lexer before→after — native char-classification builtins (item 233)
+
+The lexer is the heaviest-overhead stage because it does the most work *per
+input byte*. Item 233 added single-character ASCII classification builtins
+(`is_digit`/`is_alpha`/`is_alnum`/`is_space`, docs/stdlib-2.0.md §Str.is_alnum)
+and adopted them in `selfhost/lexer.rvl`'s hot per-byte path. Each classified
+byte previously paid a revl-fn call (`is_alnum(c)`) plus a `code0`/`charCodeAt`
+round-trip and a code-point range compare; the builtins lower to an inline
+native test (a chained comparison / tuple membership), so the call and the
+`ord` round-trip drop out. The scan loops (`scan_word`, `scan_digits`) and the
+`step` whitespace check now use the builtins directly, and the classification
+helpers' bodies defer to them too.
+
+Measured on the same machine (`Darwin-25.2.0-arm64`, CPython 3.14.6), same
+corpus, median whole-corpus pass — the correctness gate confirms the self-host
+lexer stays **token-for-token identical** to the reference across the change
+(it produces the same tokens, only faster):
+
+| lexer stage                     | ref ms | self-host ms | overhead |
+|---------------------------------|-------:|-------------:|---------:|
+| **before** (item 229 baseline)  |  4.99  |    24.58     | **4.9x** |
+| **after** (item 233)            |  4.67  |    20.55     | **4.4x** |
+
+The self-host lexer run drops **~24.6 ms → ~20.5 ms (≈ 17 % faster)** and the
+overhead factor falls **4.9x → 4.4x**. Char classification is only a fraction of
+the per-byte work (the functional lexer still allocates a 1-char string per
+`charAt`, copies records, and slices), so this is the share the native builtins
+reclaim; the rest is the value-layer tax that a native tier is what erases.
+
 ## Reading the numbers
 
-- **Heaviest overhead: the LEXER, ~4.9x — not the emit stage.** The lexer does
-  the most accessor indirection *per input byte* (character-by-character
-  scanning through the functional value layer), so the CPython tax compounds
-  hardest there. This is the stage a native tier will help most.
+- **Heaviest overhead: the LEXER — not the emit stage.** The lexer does the
+  most accessor indirection *per input byte* (character-by-character scanning
+  through the functional value layer), so the CPython tax compounds hardest
+  there. This is the stage a native tier will help most. Item 233's native
+  char-classification builtins already trimmed it from **4.9x to 4.4x** (see
+  the before→after section above); the residue is the per-byte value-layer tax
+  (1-char `charAt` allocation, record copies) a native tier erases.
 - **emit_py is the LIGHTEST overhead, ~1.7x.** IR→Python is comparatively
   coarse-grained per unit of output, so the per-access tax is proportionally
   smaller. **This 1.7x is the pre-195 baseline** — item 195's render-context
