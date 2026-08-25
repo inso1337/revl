@@ -126,3 +126,79 @@ and shape are.
 `?` sugar, the parenthesised group and function form). Anything outside
 that is a parse failure rather than a wrong tree, so a divergence would
 surface as a rejection disagreement, not a silent one.
+
+---
+
+# Path B, the wasm emitter (item 200, slice 1): what a byte oracle for WAT costs
+
+`selfhost/emit_wasm.rvl` mirrors `backends/wasm/emit.py` byte-for-byte over the
+same interchange IR — the wasm instance of the Path B emit oracle. wasm is the
+hardest tier and the slice is deliberately the *smallest byte-reproducible
+corner*: a function-only v3 document over the SCALAR value ABI (Int = i64,
+Int32/Bool = i32) with arithmetic, comparisons, `&&`/`||`, unary `!`/`-`,
+let/var/assign, if/else, while, bare-expr `(drop)` and assert. That corner is
+the one where `heap_start` stays 0, no `data` segment is emitted, and none of
+the demand-driven helpers (`$f64_to_str`/`$str_index_of`/`$str_split`/
+`$str_join`) are pulled in — so the output is a pure function of the IR.
+
+## The blocker that shapes the slice: everything past a scalar is linear memory
+
+Unlike py/ts/rust, a wasm function does not get *incrementally* harder as you add
+a type — it falls off a cliff. The moment a value is a `Str`, `List`, record or
+tagged cell, the reference pools string literals into `data` (moving
+`heap_start`), threads `$alloc`/`_str_ptr`/`_slot_load`/`_slot_store`, and hands
+out a *nesting-depth-indexed scratch pointer* (`_acquire_tmp`). That is a whole
+allocation-shaped surface, not a new leaf case, so it is one clean cut: the
+scalar corner is in, anything touching memory is a follow-on slice. `.to_int()`
+widening looks scalar but is a `builtin` node (not a bare `widen` marker), so it
+lands on the builtin surface and is out too. A byte oracle is still the right
+check here — the covered corner is fully deterministic — but only for that
+corner; the memory surface will want the same treatment slice by slice.
+
+## The ~430-line constant preamble is a second implementation, embedded verbatim
+
+Every function-bearing module emits the full `_helper_funcs()` preamble (checked
+`$int_add`/`$int32_*`, the str/list runtime), whether or not a body uses it. To
+stay byte-identical the port embeds that block as one `"""…"""` verbatim literal
+— a fixed second implementation of the exact bytes, kin to `emit_rust.rvl`'s
+`_module_header`. It carries no `"` or `\`, so the triple-quoted form reproduces
+it exactly.
+
+## New friction (wasm-specific): `$ident` in a plain string is a hard error
+
+WAT is written with `$`-sigil identifiers *everywhere* — `$p_a`, `$l_x`,
+`call $int_add`, `(global $__hp …)`, `(func $name (export "name") …)`. Every
+such plain-string literal trips the lexer's dead-1.x interpolation guard
+(`_lex_string`, `src/revl/lexer.py`): `"call $int_add"` hard-errors with
+```
+`$int_add` in a plain string — this was interpolation in 1.x and would
+silently change meaning
+```
+This is DISTINCT from item 183 (the `\"`/`\\` escape-table gap) — it is the
+`$[A-Za-z_]…` / `$$` staleness check, not an escape. Repro: any `.rvl` line
+`return "call $int_add"`. Workaround used throughout the emitter: author every
+WAT fragment as a backtick template (a bare `$` not followed by `{` is literal
+there) or a `"""triple"""`. It bites wasm far harder than any prior tier because
+py/ts/rust/go/java identifiers carry no sigil, so this is the first emitter where
+the *natural* string form is unusable for nearly every output line. Not a bug —
+a documented papercut worth one line in the self-host emitter guide ("WAT
+literals must be backtick or triple-quoted"). LOW. (Not fixed here.)
+
+## stdlib-kit validation (positive)
+
+The kit held with zero new bridges. `list_sort(list_dedup(names))`
+(items 189/193/194) reproduced Python `sorted(set(local_names))` byte-for-byte
+for the header local ordering, and `stdlib/value.rvl`'s accessors navigated the
+interchange IR with only the two genuine host-formatting primitives kept `@py`
+(`num_str` = `str(v)` for the numeral, `newline` = `chr(10)`) — the item-180
+"NOT obsoleted" category, nothing more.
+
+## How it is checked
+
+`tests/test_selfhost_emit_wasm.py`: compile `selfhost/emit_wasm.rvl` through the
+py backend, exec it, run `emit_src` on the interchange-IR corpus
+(`tests/fixtures/emit_wasm_corpus/`), and assert the WAT equals
+`backends/wasm/emit.py`'s `emit(ir)["functions"]` to the last byte, over
+`arith.rvl` (checked int/int32 `+ - *`, `%`, i64/i32 comparisons, `&&`/`||`,
+`!`, unary `-`) and `control.rvl` (if/else, while, let/var/assign, bare-expr
+drop, assert, the trailing-`unreachable` divergence rule).

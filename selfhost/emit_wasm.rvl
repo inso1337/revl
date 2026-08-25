@@ -1,0 +1,959 @@
+// The revl backend-IR -> cordis-wasm EMITTER, in revl — Path B slice 1 for the
+// WASM tier (roadmap item 200). Mirrors selfhost/emit_{py,ts,rust}.rvl: it reads
+// the stable interchange IR (docs/backend-ir.md) and produces WAT (WebAssembly
+// text) source, mirroring backends/wasm/emit.py's `emit()`.
+//
+// It is one half of a differential BYTE oracle: this file and
+// backends/wasm/emit.py's `emit()` are two independent implementations of the
+// same lowering, forced to produce BYTE-IDENTICAL WAT for every input in the
+// covered subset (tests/test_selfhost_emit_wasm.py). The reference is ground
+// truth; any divergence is a defect in this slice.
+//
+// ============================================================ WHAT IT COVERS
+// wasm is the HARDEST tier: WAT is S-expressions, `Int` is i64 and every
+// address is i32, and even a one-line function drags in the full ~430-line
+// linear-memory + checked-arithmetic helper preamble (`_helper_funcs`). The
+// byte-reproducible corner is a FUNCTION-ONLY v3 document (no components, no
+// user types, no externs, no tests, NO STRINGS/LISTS/RECORDS) over the SCALAR
+// value ABI — Int (i64) / Int32 (i32) / Bool (i32) — which is the corner of the
+// reference's `_V3Emitter.emit` -> `_emit_function` -> `_emit_stmts` / `_expr`
+// that needs NO data segments (heap_start stays 0) and NONE of the demand-driven
+// helpers (f64_to_str / str_index_of / str_split / str_join). Covered:
+//
+//   * the module scaffold — the 4-line banner, `(module`, the exported memory,
+//     the hp bump-pointer global at 0 (no data segments — no strings), the
+//     constant helper preamble (embedded verbatim — it is a fixed second
+//     implementation of the same bytes, kin to emit_rust.rvl's `_module_header`),
+//     and the fn-block layout;
+//   * `_emit_function` — params as p_<name>, the result, the sorted l_<name>
+//     locals with per-binding wasm widths, the always-present revl_tmp scratch,
+//     and the trailing stack-polymorphic `unreachable` a diverging body needs;
+//   * `_emit_stmts` — let/var/assign (with the width tracking that types each
+//     local), return, if/else, while, the bare-expr `(drop)`, and assert;
+//   * `_expr` — lit (Int i64.const / Bool i32.const), var (param/local slot),
+//     bin (the checked int_add/int_sub/int_mul and their int32_* twins, `%` as
+//     i64.rem_s, `/` as i64.div_s, the i64/i32 comparisons, `&&`/`||` as
+//     i32.and/i32.or), un (`!` as i32.eqz, `-` as a checked subtract-from-zero),
+//     and the Int32->Int `widen` marker as i64.extend_i32_s.
+//
+// ============================================================ WHAT IT DEFERS
+// Reported for follow-on wasm-emitter slices, deliberately OUT of this slice —
+// each is a real reference surface this slice does not reach (its fixtures avoid
+// it), NOT an approximation:
+//   * ANY value that touches linear memory — Str, List, records, tagged unions
+//     (Opt/Result/user variants), and the whole canonical-ABI layout: string
+//     literals pool into `data` segments and move heap_start, and every such
+//     value threads the alloc / str_ptr / slot machinery and the nested
+//     scratch-pointer stack (`_acquire_tmp`) — a much larger, allocation-shaped
+//     surface than the scalar corner;
+//   * Float end to end — `/` yields Float (refused at a scalar return/binding by
+//     name), and interpolating a Float pulls in the f64_to_str Grisu/Ryu helper;
+//     the stdlib builtins (str_split/str_join/str_index_of and every `builtin`/
+//     `len` node); the `for` loop (its list iteration is a memory walk);
+//   * COMPONENTS / SERVICES entirely (`_ComponentEmitter` — realms, `provide`/
+//     `req`/`config`, spawn/instances, the component-dialect expression kinds),
+//     `match`/`adt` over tagged cells, arrow values (no closures on this tier),
+//     `??` (needs an Opt cell), field/index (memory reads), wasm externs and
+//     in-file `test`/lifecycle-test emission.
+//
+// ------------------------------------------------------ the erased-IR boundary
+// Navigation of the IR is PURE revl through stdlib/value.rvl's accessors, exactly
+// as the other self-host stages do: every byte of emitter LOGIC (dispatch, the
+// scope/width threading, the S-expression string building) is revl. Only two
+// genuine HOST-FORMATTING primitives stay `@py` (item-180 "NOT obsoleted"):
+// `num_str` (the Int-literal numeral, i.e. `str(value)`) and `newline` (the one
+// genuine U+000A line separator).
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field,
+  value_list, value_str, value_int, value_bool
+}
+use "../stdlib/list.rvl" { list_sort, list_dedup }
+
+// ------------------------------------------------- host formatting (kept @py)
+// The literal-body host numeral: `_expr` renders an Int literal's numeral as
+// `str(value)`. Sourced here so the text is exactly Python's.
+extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// A real newline — the line SEPARATOR (`"\n".join(lines)` in the reference).
+extern pure fn newline() -> Str = @py { return chr(10) }
+
+// ---------------------------------------------------------------- small utils
+fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
+fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
+fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
+
+// `_wasm_ty`: Int is the only 64-bit revl type here; Bool/Int32/addresses are i32.
+fn wty(ty: Str) -> Str { if (ty == "Int") { return "i64" } return "i32" }
+
+fn map_get(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+
+// A local's declared wasm width, defaulting to i32 (`_local_types.get(n, 'i32')`):
+// the revl_tmp scratch and any pointer local are never recorded, so i32.
+fn wd_of(widths: Map[Str, Str], n: Str) -> Str {
+  let w = map_get(widths, n)
+  if (w == "") { return "i32" }
+  return w
+}
+
+fn rstrip(s: Str) -> Str {
+  var i = s.length()
+  var go = true
+  while (go && i > 0) {
+    let c = s.charCodeAt(i - 1)
+    if (c == 32 || c == 10 || c == 9 || c == 13) { i = i - 1 } else { go = false }
+  }
+  return s.slice(0, i)
+}
+
+// ---------------------------------------------------------------- op tables
+// `_CMP_SUFFIX`: the shared comparison mnemonic (the width prefix is chosen by
+// the operand type at the call site), "" when `op` is not a comparison.
+fn cmp_suffix(op: Str) -> Str {
+  if (op == "==") { return "eq" }
+  if (op == "===") { return "eq" }
+  if (op == "!=") { return "ne" }
+  if (op == "!==") { return "ne" }
+  if (op == "<") { return "lt_s" }
+  if (op == ">") { return "gt_s" }
+  if (op == "<=") { return "le_s" }
+  if (op == ">=") { return "ge_s" }
+  return ""
+}
+
+fn is_cmp(op: Str) -> Bool { return cmp_suffix(op) != "" }
+fn is_bool_op(op: Str) -> Bool { return op == "&&" || op == "||" }
+// `_COMPARISON_OPS` = comparisons + the boolean connectives: everything whose
+// result is a Bool.
+fn is_comparison(op: Str) -> Bool { return is_cmp(op) || is_bool_op(op) }
+
+// `_bin_instr`: the single wasm instruction for `op` over `operand_ty` operands.
+// In the scalar subset `&&`/`||` always see Bool operands and the checked
+// arithmetic always sees Int/Int32, so the reference's None-returning guards
+// (Str/List/`??`) are unreachable here.
+fn bin_instr(op: Str, opnd: Str) -> Str {
+  if (op == "&&") { return "i32.and" }
+  if (op == "||") { return "i32.or" }
+  let suf = cmp_suffix(op)
+  if (suf != "") {
+    if (opnd == "Int") { return "i64.".concat(suf) }
+    return "i32.".concat(suf)
+  }
+  if (opnd == "Int32") {
+    if (op == "+") { return `call $int32_add` }
+    if (op == "-") { return `call $int32_sub` }
+    if (op == "*") { return `call $int32_mul` }
+    return ""
+  }
+  if (op == "+") { return `call $int_add` }
+  if (op == "-") { return `call $int_sub` }
+  if (op == "*") { return `call $int_mul` }
+  if (op == "/") { return "i64.div_s" }
+  if (op == "%") { return "i64.rem_s" }
+  return ""
+}
+
+// --------------------------------------------------- type inference (subset)
+// `_infer_type` (scalar corner): the surface type of an expression, "" when it
+// is None/unknown (never reached for an in-subset operand).
+fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
+  if (value_str(value_field(node, "widen")) == "Int") { return "Int" }
+  let k = node_kind(node)
+  if (k == "lit") {
+    let vk = value_kind(value_field(node, "value"))
+    if (vk == "bool") { return "Bool" }
+    if (vk == "int") { return "Int" }
+    return ""
+  }
+  if (k == "var") { return map_get(sty, value_str(value_field(node, "name"))) }
+  if (k == "bin") {
+    let op = node_op(node)
+    if (is_comparison(op)) { return "Bool" }
+    if (node_operands(node) == "Float") { return "Float" }
+    if (node_operands(node) == "Int32") { return "Int32" }
+    return "Int"
+  }
+  if (k == "un") {
+    let op = node_op(node)
+    if (op == "!") { return "Bool" }
+    if (op == "-") { if (node_operands(node) == "Int32") { return "Int32" } return "Int" }
+    return ""
+  }
+  return ""
+}
+
+// ---------------------------------------------------------- expr result / scope
+// An emitted expression: its WAT text and its revl surface type (the type picks
+// the width of a later instruction, so it is threaded like the reference's `_E`).
+type E = { wat: Str, ty: Str }
+// The names visible to the body emitter: a slot expression and a surface type
+// per binding (`_Scope`).
+type Scope = { slots: Map[Str, Str], types: Map[Str, Str] }
+// A statement-emission result: the emitted lines, the threaded scope, and the
+// accumulated local-width map (the reference's function-global `_local_types`).
+type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str] }
+
+fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
+  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty) }
+}
+
+// -------------------------------------------------------------- expressions
+fn render_bin(node: Any, s: Scope) -> E {
+  let op = node_op(node)
+  let ln = value_field(node, "left")
+  let rn = value_field(node, "right")
+  let lty = infer_ty(ln, s.types)
+  let rty = infer_ty(rn, s.types)
+  // `expected` is the OPERAND type, which also picks the instruction width.
+  var opnd = "Int"
+  if (is_bool_op(op)) { opnd = "Bool" }
+  else {
+    if (is_cmp(op) && lty == "Bool" && rty == "Bool") { opnd = "Bool" }
+    else {
+      if (lty == "Int32" && rty == "Int32") { opnd = "Int32" }
+    }
+  }
+  let left = render_expr(ln, s)
+  let right = render_expr(rn, s)
+  let instr = bin_instr(op, opnd)
+  var result_ty = opnd
+  if (is_comparison(op)) { result_ty = "Bool" }
+  let wat = `${left.wat}
+      ${right.wat}
+      (${instr})`
+  return { wat: wat, ty: result_ty }
+}
+
+fn render_un(node: Any, s: Scope) -> E {
+  let op = node_op(node)
+  let operand = render_expr(value_field(node, "operand"), s)
+  if (op == "!") {
+    return { wat: `${operand.wat}
+      (i32.eqz)`, ty: "Bool" }
+  }
+  // `-`: a checked subtract-from-zero at the operand's width (`0 - MIN` traps).
+  if (operand.ty == "Int32") {
+    return { wat: `(i32.const 0)
+      ${operand.wat}
+      (call $int32_sub)`, ty: "Int32" }
+  }
+  return { wat: `(i64.const 0)
+      ${operand.wat}
+      (call $int_sub)`, ty: "Int" }
+}
+
+fn render_inner(node: Any, s: Scope) -> E {
+  let k = node_kind(node)
+  if (k == "lit") {
+    let v = value_field(node, "value")
+    let vk = value_kind(v)
+    if (vk == "bool") {
+      if (value_bool(v)) { return { wat: "(i32.const 1)", ty: "Bool" } }
+      return { wat: "(i32.const 0)", ty: "Bool" }
+    }
+    if (vk == "int") { return { wat: `(i64.const ${num_str(v)})`, ty: "Int" } }
+    return { wat: "<<UNSUPPORTED-LIT>>", ty: "" }
+  }
+  if (k == "var") {
+    let name = value_str(value_field(node, "name"))
+    return { wat: map_get(s.slots, name), ty: map_get(s.types, name) }
+  }
+  if (k == "bin") { return render_bin(node, s) }
+  if (k == "un") { return render_un(node, s) }
+  return { wat: `<<UNSUPPORTED-EXPR:${k}>>`, ty: "" }
+}
+
+// The `widen` coercion marker (docs/arithmetic.md): Int32 is i32 and Int is i64,
+// so the lossless widening is a sign-extend, wrapped around the un-widened node
+// (`render_inner` ignores the widen field, so re-dispatching on the same node is
+// exactly the reference's strip-then-recurse).
+fn render_expr(node: Any, s: Scope) -> E {
+  if (value_str(value_field(node, "widen")) == "Int") {
+    let inner = render_inner(node, s)
+    return { wat: `(i64.extend_i32_s ${inner.wat})`, ty: "Int" }
+  }
+  return render_inner(node, s)
+}
+
+// -------------------------------------------------------------- statements
+fn emit_stmts(nodes: List[Any], s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
+  var lines = []
+  var sc = s
+  var w = widths
+  for (n of nodes) {
+    let r = emit_stmt(n, sc, w, rty)
+    lines = lines.concat(r.lines)
+    sc = r.scope
+    w = r.widths
+  }
+  return { lines: lines, scope: sc, widths: w }
+}
+
+// `_emit_stmts` for one step -> its emitted lines, threaded scope, and the
+// accumulated local widths. A `let`/`assign` binds a value into l_<name> and
+// records that local's width; if/else/while lower their sub-blocks in COPIES of
+// the scope (a binding inside a block does not leak past it) while the widths
+// thread through (the reference's `_local_types` is function-global).
+fn emit_stmt(node: Any, s: Scope, widths: Map[Str, Str], rty: Str) -> Sout {
+  let step = value_str(value_field(node, "step"))
+  if (step == "let" || step == "assign") {
+    let name = value_str(value_field(node, "name"))
+    let valnode = value_field(node, "value")
+    var value_ty = ""
+    if (step == "let") { value_ty = infer_ty(valnode, s.types) }
+    else { value_ty = map_get(s.types, name) }
+    let value = render_expr(valnode, s)
+    let nw = widths.set(`l_${name}`, wty(value_ty))
+    var out = [value.wat, `(local.set $l_${name})`]
+    let ns = scope_bind(s, name, `(local.get $l_${name})`, value_ty)
+    return { lines: out, scope: ns, widths: nw }
+  }
+  if (step == "return") {
+    let e = value_field(node, "expr")
+    if (value_is_null(e)) { return { lines: ["return"], scope: s, widths: widths } }
+    let value = render_expr(e, s)
+    return { lines: [value.wat, "return"], scope: s, widths: widths }
+  }
+  if (step == "if") {
+    let cond = render_expr(value_field(node, "cond"), s)
+    let thenNodes = value_list(value_field(node, "then"))
+    let elseNodes = value_list(value_field(node, "else"))
+    let thenR = emit_stmts(thenNodes, s, widths, rty)
+    var w2 = thenR.widths
+    var elseLines = []
+    if (elseNodes.length() > 0) {
+      let elseR = emit_stmts(elseNodes, s, w2, rty)
+      elseLines = elseR.lines
+      w2 = elseR.widths
+    }
+    var out = [cond.wat, "(if", "  (then"]
+    for (l of thenR.lines) { out = out.push(`    ${l}`) }
+    out = out.push("  )")
+    if (elseNodes.length() > 0) {
+      out = out.push("  (else")
+      for (l of elseLines) { out = out.push(`    ${l}`) }
+      out = out.push("  )")
+    }
+    out = out.push(")")
+    return { lines: out, scope: s, widths: w2 }
+  }
+  if (step == "while") {
+    let cond = render_expr(value_field(node, "cond"), s)
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), s, widths, rty)
+    var out = ["(block", "  (loop", `    ${cond.wat}`, "    (i32.eqz)", "    (br_if 1)"]
+    for (l of bodyR.lines) { out = out.push(`    ${l}`) }
+    out = out.push("    (br 0)")
+    out = out.push("  )")
+    out = out.push(")")
+    return { lines: out, scope: s, widths: bodyR.widths }
+  }
+  if (step == "expr") {
+    let value = render_expr(value_field(node, "expr"), s)
+    var out = [value.wat]
+    if (value.ty != "" && value.ty != "Unit") { out = out.push("(drop)") }
+    return { lines: out, scope: s, widths: widths }
+  }
+  if (step == "assert") {
+    let value = render_expr(value_field(node, "expr"), s)
+    return { lines: [value.wat, "(i32.eqz)", "(if (then unreachable))"], scope: s, widths: widths }
+  }
+  return { lines: [`<<UNSUPPORTED-STEP:${step}>>`], scope: s, widths: widths }
+}
+
+// `_collect_locals` (subset): every `let`/`assign` name reachable through the
+// nested if/while blocks. The header declares one l_<name> per distinct name.
+fn collect_locals(nodes: List[Any], acc: List[Str]) -> List[Str] {
+  var a = acc
+  for (n of nodes) {
+    let step = value_str(value_field(n, "step"))
+    if (step == "let" || step == "assign") { a = a.push(value_str(value_field(n, "name"))) }
+    else {
+      if (step == "if") {
+        a = collect_locals(value_list(value_field(n, "then")), a)
+        a = collect_locals(value_list(value_field(n, "else")), a)
+      } else {
+        if (step == "while") { a = collect_locals(value_list(value_field(n, "body")), a) }
+      }
+    }
+  }
+  return a
+}
+
+// `_diverges`: does the list return/trap on EVERY path? Only the last statement
+// decides — a `return`, or an if/else whose both arms diverge. A non-unit body
+// ending that way needs a trailing stack-polymorphic `unreachable` (wasm's
+// validator does no flow analysis).
+fn diverges(nodes: List[Any]) -> Bool {
+  if (nodes.length() == 0) { return false }
+  let last = nodes[nodes.length() - 1]
+  let step = value_str(value_field(last, "step"))
+  if (step == "return") { return true }
+  if (step == "if") {
+    let els = value_list(value_field(last, "else"))
+    if (els.length() == 0) { return false }
+    return diverges(value_list(value_field(last, "then"))) && diverges(els)
+  }
+  return false
+}
+
+// `_emit_function`: one v3 function -> its `(func $name (export "name") ..)` block.
+fn emit_function(fnode: Any) -> Str {
+  let name = value_str(value_field(fnode, "name"))
+  let params = value_list(value_field(fnode, "params"))
+  var sig = []
+  var slots: Map[Str, Str] = Map.empty()
+  var types: Map[Str, Str] = Map.empty()
+  for (p of params) {
+    let pname = value_str(value_field(p, "name"))
+    let ptype = value_str(value_field(p, "type"))
+    if (ptype != "Unit") { sig = sig.push(`(param $p_${pname} ${wty(ptype)})`) }
+    slots = slots.set(pname, `(local.get $p_${pname})`)
+    types = types.set(pname, ptype)
+  }
+  let return_ty = value_str(value_field(fnode, "returns"))
+  if (return_ty != "Unit" && return_ty != "") { sig = sig.push(`(result ${wty(return_ty)})`) }
+
+  let body = value_list(value_field(fnode, "body"))
+  var raw = []
+  raw = collect_locals(body, raw)
+  let names = list_sort(list_dedup(raw))
+  var localOrder = []
+  var scope: Scope = { slots: slots, types: types }
+  for (nm of names) {
+    if (!scope.types.has(nm)) {
+      localOrder = localOrder.push(`l_${nm}`)
+      scope = scope_bind(scope, nm, `(local.get $l_${nm})`, "")
+    }
+  }
+  // the single scratch pointer; base name never collides in the scalar subset.
+  localOrder = localOrder.push("__revl_tmp")
+
+  var wempty: Map[Str, Str] = Map.empty()
+  let r = emit_stmts(body, scope, wempty, return_ty)
+  var bodyLines = r.lines
+  var lastStep = ""
+  if (body.length() > 0) { lastStep = value_str(value_field(body[body.length() - 1], "step")) }
+  if (bodyLines.length() > 0 && return_ty != "Unit" && return_ty != "" && lastStep != "return" && diverges(body)) {
+    bodyLines = bodyLines.push("unreachable")
+  }
+
+  var decls = sig
+  for (n of localOrder) { decls = decls.push(`(local $${n} ${wd_of(r.widths, n)})`) }
+  let header = rstrip(`(func $${name} (export "${name}") ${decls.join(" ")}`)
+  var bodystr = "nop"
+  if (bodyLines.length() > 0) { bodystr = bodyLines.join(`${newline()}    `) }
+  else { if (return_ty != "Unit" && return_ty != "") { bodystr = "unreachable" } }
+  return `  ${header}
+    ${bodystr})`
+}
+
+// The always-emitted linear-memory + checked-arithmetic helper preamble
+// (`_helper_funcs`), embedded verbatim: a fixed second implementation of the
+// exact same bytes. The scalar corner references only int_add/int_sub/int_mul
+// and their int32_* twins, but the reference emits the WHOLE block for any
+// function-bearing module, so byte-exactness requires all of it. It carries no
+// double-quote or backslash, so a triple-quoted verbatim literal reproduces it
+// exactly (docs/strings.md; item-183 escape gap).
+fn helper_preamble() -> Str {
+  return """  (func $alloc (param $n i32) (result i32)
+    (local $p i32)
+    (local.set $p (global.get $__hp))
+    (global.set $__hp
+      (i32.add
+        (global.get $__hp)
+        (i32.and
+          (i32.add (local.get $n) (i32.const 7))
+          (i32.const -8))))
+    (local.get $p))
+  (func $alloc_str (param $len i32) (result i32)
+    (local $p i32)
+    (local.set $p (call $alloc (i32.add (local.get $len) (i32.const 4))))
+    (i32.store (local.get $p) (local.get $len))
+    (local.get $p))
+  (func $int_to_str (param $n i64) (result i32)
+    (local $neg i32)
+    (local $x i64)
+    (local $d i64)
+    (local $len i32)
+    (local $p i32)
+    (local $i i32)
+    (if (i64.eqz (local.get $n))
+      (then
+        (local.set $p (call $alloc_str (i32.const 1)))
+        (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 48))
+        (return (local.get $p))))
+    (local.set $neg (i64.lt_s (local.get $n) (i64.const 0)))
+    (local.set $x (select
+      (i64.sub (i64.const 0) (local.get $n))
+      (local.get $n)
+      (local.get $neg)))
+    (local.set $len (i32.const 0))
+    (local.set $d (local.get $x))
+    (block (loop
+      (br_if 1 (i64.eqz (local.get $d)))
+      (local.set $len (i32.add (local.get $len) (i32.const 1)))
+      (local.set $d (i64.div_u (local.get $d) (i64.const 10)))
+      (br 0)))
+    (local.set $p (call $alloc_str (i32.add (local.get $len) (local.get $neg))))
+    (if (local.get $neg)
+      (then (i32.store8 (i32.add (local.get $p) (i32.const 4)) (i32.const 45))))
+    (local.set $i (i32.add (local.get $len) (local.get $neg)))
+    (block (loop
+      (br_if 1 (i64.eqz (local.get $x)))
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (i32.store8
+        (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $i))
+        (i32.wrap_i64
+          (i64.add (i64.rem_u (local.get $x) (i64.const 10)) (i64.const 48))))
+      (local.set $x (i64.div_u (local.get $x) (i64.const 10)))
+      (br 0)))
+    (local.get $p))
+  (func $str_concat (param $a i32) (param $b i32) (result i32)
+    (local $la i32)
+    (local $lb i32)
+    (local $p i32)
+    (local.set $la (i32.load (local.get $a)))
+    (local.set $lb (i32.load (local.get $b)))
+    (local.set $p (call $alloc_str (i32.add (local.get $la) (local.get $lb))))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (local.get $a) (i32.const 4))
+      (local.get $la))
+    (memory.copy
+      (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $la))
+      (i32.add (local.get $b) (i32.const 4))
+      (local.get $lb))
+    (local.get $p))
+  (func $str_eq (param $a i32) (param $b i32) (result i32)
+    (local $n i32)
+    (local $i i32)
+    (local.set $n (i32.load (local.get $a)))
+    (if (i32.ne (local.get $n) (i32.load (local.get $b)))
+      (then (return (i32.const 0))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+        (if (i32.ne
+              (i32.load8_u (i32.add (i32.add (local.get $a) (i32.const 4)) (local.get $i)))
+              (i32.load8_u (i32.add (i32.add (local.get $b) (i32.const 4)) (local.get $i))))
+          (then (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (i32.const 1))
+  (func $str_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $from i32)
+    (local $len i32)
+    (local $p i32)
+    (local.set $from (i32.wrap_i64 (local.get $start)))
+    (local.set $len (i32.sub (i32.wrap_i64 (local.get $end)) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))
+  (func $str_char_at (param $s i32) (param $idx i64) (result i32)
+    (local $p i32)
+    (local.set $p (call $alloc_str (i32.const 1)))
+    (i32.store8
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.load8_u
+        (i32.add (i32.add (local.get $s) (i32.const 4))
+                 (i32.wrap_i64 (local.get $idx)))))
+    (local.get $p))
+  (func $str_char_code_at (param $s i32) (param $idx i64) (result i64)
+    (i64.extend_i32_u
+      (i32.load8_u
+        (i32.add (i32.add (local.get $s) (i32.const 4))
+                 (i32.wrap_i64 (local.get $idx))))))
+  (func $str_cp_length (param $s i32) (result i32)
+    (local $len i32) (local $i i32) (local $count i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+        (if (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80))
+          (then (local.set $count (i32.add (local.get $count) (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    (local.get $count))
+  (func $str_cp_offset (param $s i32) (param $cp i32) (result i32)
+    (local $len i32) (local $i i32) (local $seen i32) (local $b i32)
+    (local.set $len (i32.load (local.get $s)))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+        (br_if $done (i32.ge_s (local.get $seen) (local.get $cp)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (block $cont_done
+          (loop $cont
+            (br_if $cont_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (br_if $cont_done (i32.ne (i32.and (local.get $b) (i32.const 0xC0)) (i32.const 0x80)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $cont)))
+        (local.set $seen (i32.add (local.get $seen) (i32.const 1)))
+        (br $loop)))
+    (local.get $i))
+  (func $str_cp_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $cplen i32) (local $a i32) (local $b i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $cplen (call $str_cp_length (local.get $s)))
+    (local.set $a (i32.wrap_i64 (local.get $start)))
+    (local.set $b (i32.wrap_i64 (local.get $end)))
+    (if (i32.lt_s (local.get $a) (i32.const 0)) (then (local.set $a (i32.const 0))))
+    (if (i32.gt_s (local.get $a) (local.get $cplen)) (then (local.set $a (local.get $cplen))))
+    (if (i32.lt_s (local.get $b) (local.get $a)) (then (local.set $b (local.get $a))))
+    (if (i32.gt_s (local.get $b) (local.get $cplen)) (then (local.set $b (local.get $cplen))))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $a)))
+    (local.set $to (call $str_cp_offset (local.get $s) (local.get $b)))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))
+  (func $str_cp_char_at (param $s i32) (param $idx i64) (result i32)
+    (local $i i32) (local $from i32) (local $to i32) (local $len i32) (local $p i32)
+    (local.set $i (i32.wrap_i64 (local.get $idx)))
+    (local.set $from (call $str_cp_offset (local.get $s) (local.get $i)))
+    (local.set $to (call $str_cp_offset (local.get $s) (i32.add (local.get $i) (i32.const 1))))
+    (local.set $len (i32.sub (local.get $to) (local.get $from)))
+    (local.set $p (call $alloc_str (local.get $len)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 4))
+      (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $from))
+      (local.get $len))
+    (local.get $p))
+  (func $str_cp_char_code_at (param $s i32) (param $idx i64) (result i64)
+    (local $off i32) (local $base i32) (local $b0 i32)
+    (local.set $off (call $str_cp_offset (local.get $s) (i32.wrap_i64 (local.get $idx))))
+    (local.set $base (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $off)))
+    (local.set $b0 (i32.load8_u (local.get $base)))
+    (i64.extend_i32_u
+      (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0x80))
+        (then (local.get $b0))
+        (else
+          (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xE0))
+            (then
+              (i32.or
+                (i32.shl (i32.and (local.get $b0) (i32.const 0x1F)) (i32.const 6))
+                (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F))))
+            (else
+              (if (result i32) (i32.lt_u (local.get $b0) (i32.const 0xF0))
+                (then
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x0F)) (i32.const 12))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 6)))
+                    (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F))))
+                (else
+                  (i32.or
+                    (i32.or
+                      (i32.shl (i32.and (local.get $b0) (i32.const 0x07)) (i32.const 18))
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 1))) (i32.const 0x3F)) (i32.const 12)))
+                    (i32.or
+                      (i32.shl (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 2))) (i32.const 0x3F)) (i32.const 6))
+                      (i32.and (i32.load8_u (i32.add (local.get $base) (i32.const 3))) (i32.const 0x3F))))))))))))
+  (func $str_starts_with (param $s i32) (param $p i32) (result i32)
+    (local $ls i32)
+    (local $lp i32)
+    (local $i i32)
+    (local $ok i32)
+    (local.set $ls (i32.load (local.get $s)))
+    (local.set $lp (i32.load (local.get $p)))
+    (if (i32.gt_u (local.get $lp) (local.get $ls))
+      (then (return (i32.const 0))))
+    (local.set $ok (i32.const 1))
+    (block $done
+      (loop $cmp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $lp)))
+        (if (i32.ne
+              (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i)))
+              (i32.load8_u (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $i))))
+          (then (local.set $ok (i32.const 0)) (br $done)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cmp)))
+    (local.get $ok))
+  (func $str_ends_with (param $s i32) (param $p i32) (result i32)
+    (local $ls i32)
+    (local $lp i32)
+    (local $i i32)
+    (local $j i32)
+    (local $ok i32)
+    (local.set $ls (i32.load (local.get $s)))
+    (local.set $lp (i32.load (local.get $p)))
+    (if (i32.gt_u (local.get $lp) (local.get $ls))
+      (then (return (i32.const 0))))
+    (local.set $ok (i32.const 1))
+    (local.set $i (i32.sub (local.get $ls) (local.get $lp)))
+    (block $done
+      (loop $cmp
+        (br_if $done (i32.ge_u (local.get $i) (local.get $ls)))
+        (local.set $j (i32.sub (local.get $i) (i32.sub (local.get $ls) (local.get $lp))))
+        (if (i32.ne
+              (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i)))
+              (i32.load8_u (i32.add (i32.add (local.get $p) (i32.const 4)) (local.get $j))))
+          (then (local.set $ok (i32.const 0)) (br $done)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $cmp)))
+    (local.get $ok))
+  (func $str_to_int (param $s i32) (result i32)
+    (local $len i32)
+    (local $i i32)
+    (local $neg i32)
+    (local $b i32)
+    (local $n i64)
+    (local $d i64)
+    (local $lim i64)
+    (local $cell i32)
+    (local.set $len (i32.load (local.get $s)))
+    (local.set $i (i32.const 0))
+    (local.set $neg (i32.const 0))
+    (if (i32.and (i32.gt_u (local.get $len) (i32.const 0))
+                 (i32.eq (i32.load8_u (i32.add (local.get $s) (i32.const 4))) (i32.const 45)))
+      (then
+        (local.set $neg (i32.const 1))
+        (local.set $i (i32.const 1))))
+    (local.set $n (i64.const 0))
+    (local.set $lim (select
+      (i64.const 0x8000000000000000)
+      (i64.const 0x7fffffffffffffff)
+      (local.get $neg)))
+    (block $result
+      (block $fail
+        (if (i32.eq (local.get $i) (local.get $len))
+          (then (br $fail)))
+        (block $digits_done
+          (loop $digits
+            ;; normal exit: every byte consumed
+            (br_if $digits_done (i32.ge_u (local.get $i) (local.get $len)))
+            (local.set $b (i32.load8_u (i32.add (i32.add (local.get $s) (i32.const 4)) (local.get $i))))
+            (if (i32.or (i32.lt_u (local.get $b) (i32.const 48))
+                        (i32.gt_u (local.get $b) (i32.const 57)))
+              (then (br $fail)))
+            (local.set $d (i64.extend_i32_u (i32.sub (local.get $b) (i32.const 48))))
+            (if (i64.gt_u (local.get $n)
+                          (i64.div_u (i64.sub (local.get $lim) (local.get $d)) (i64.const 10)))
+              (then (br $fail)))
+            (local.set $n (i64.add (i64.mul (local.get $n) (i64.const 10)) (local.get $d)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $digits)))
+        ;; Some: tag 1, payload = -n (n may be 2^63, i.e. Int.MIN) or n
+        (local.set $cell (call $alloc (i32.const 16)))
+        (i32.store (local.get $cell) (i32.const 1))
+        (if (local.get $neg)
+          (then
+            (if (i64.eq (local.get $n) (i64.const 0x8000000000000000))
+              (then (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.const 0x8000000000000000)))
+              (else (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.sub (i64.const 0) (local.get $n))))))
+          (else (i64.store (i32.add (local.get $cell) (i32.const 8)) (local.get $n))))
+        (br $result))
+      ;; None: tag 0, zeroed payload
+      (local.set $cell (call $alloc (i32.const 16)))
+      (i32.store (local.get $cell) (i32.const 0))
+      (i64.store (i32.add (local.get $cell) (i32.const 8)) (i64.const 0)))
+    (local.get $cell))
+  (func $int_add (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (local.set $r (i64.add (local.get $a) (local.get $b)))
+    (if (i64.lt_s
+          (i64.and (i64.xor (local.get $a) (local.get $r))
+                   (i64.xor (local.get $b) (local.get $r)))
+          (i64.const 0))
+      (then unreachable))
+    (local.get $r))
+  (func $int_sub (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (local.set $r (i64.sub (local.get $a) (local.get $b)))
+    (if (i64.lt_s
+          (i64.and (i64.xor (local.get $a) (local.get $b))
+                   (i64.xor (local.get $a) (local.get $r)))
+          (i64.const 0))
+      (then unreachable))
+    (local.get $r))
+  (func $int_mul (param $a i64) (param $b i64) (result i64)
+    (local $r i64)
+    (local.set $r (i64.mul (local.get $a) (local.get $b)))
+    (if (i64.ne (local.get $a) (i64.const 0))
+      (then
+        (if (i64.ne (i64.div_s (local.get $r) (local.get $a)) (local.get $b))
+          (then unreachable))))
+    (local.get $r))
+  (func $int_div_floor (param $a i64) (param $b i64) (result i64)
+    (local $q i64)
+    (local.set $q (i64.div_s (local.get $a) (local.get $b)))
+    (if (result i64)
+      (i32.and
+        (i64.ne (i64.rem_s (local.get $a) (local.get $b)) (i64.const 0))
+        (i32.ne (i64.lt_s (local.get $a) (i64.const 0))
+                (i64.lt_s (local.get $b) (i64.const 0))))
+      (then (i64.sub (local.get $q) (i64.const 1)))
+      (else (local.get $q))))
+  (func $int_div_euclid (param $a i64) (param $b i64) (result i64)
+    (if (result i64) (i64.gt_s (local.get $b) (i64.const 0))
+      (then (call $int_div_floor (local.get $a) (local.get $b)))
+      (else (i64.sub (i64.const 0)
+              (call $int_div_floor (local.get $a)
+                (i64.sub (i64.const 0) (local.get $b)))))))
+  (func $int_mod (param $a i64) (param $b i64) (result i64)
+    (local $ab i64)
+    (local $m i64)
+    (local.set $ab
+      (if (result i64) (i64.lt_s (local.get $b) (i64.const 0))
+        (then (i64.sub (i64.const 0) (local.get $b)))
+        (else (local.get $b))))
+    (local.set $m (i64.rem_s (local.get $a) (local.get $ab)))
+    (if (result i64) (i64.lt_s (local.get $m) (i64.const 0))
+      (then (i64.add (local.get $m) (local.get $ab)))
+      (else (local.get $m))))
+  (func $int32_add (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.add (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_sub (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.sub (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_mul (param $a i32) (param $b i32) (result i32)
+    (call $int32_narrow
+      (i64.mul (i64.extend_i32_s (local.get $a))
+               (i64.extend_i32_s (local.get $b)))))
+  (func $int32_narrow (param $v i64) (result i32)
+    (if (i32.or
+          (i64.lt_s (local.get $v) (i64.const -2147483648))
+          (i64.gt_s (local.get $v) (i64.const 2147483647)))
+      (then unreachable))
+    (i32.wrap_i64 (local.get $v)))
+  (func $list_push (param $list i32) (param $elem i64) (result i32)
+    (local $n i32)
+    (local $p i32)
+    (local.set $n (i32.load (local.get $list)))
+    (local.set $p
+      (call $alloc
+        (i32.add
+          (i32.mul (i32.add (local.get $n) (i32.const 1)) (i32.const 8))
+          (i32.const 8))))
+    (i32.store (local.get $p) (i32.add (local.get $n) (i32.const 1)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 8))
+      (i32.add (local.get $list) (i32.const 8))
+      (i32.mul (local.get $n) (i32.const 8)))
+    (i64.store
+      (i32.add
+        (i32.add (local.get $p) (i32.const 8))
+        (i32.mul (local.get $n) (i32.const 8)))
+      (local.get $elem))
+    (local.get $p))
+  (func $list_concat (param $a i32) (param $b i32) (result i32)
+    (local $na i32)
+    (local $nb i32)
+    (local $p i32)
+    (local.set $na (i32.load (local.get $a)))
+    (local.set $nb (i32.load (local.get $b)))
+    (local.set $p
+      (call $alloc
+        (i32.add
+          (i32.mul (i32.add (local.get $na) (local.get $nb)) (i32.const 8))
+          (i32.const 8))))
+    (i32.store (local.get $p) (i32.add (local.get $na) (local.get $nb)))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 8))
+      (i32.add (local.get $a) (i32.const 8))
+      (i32.mul (local.get $na) (i32.const 8)))
+    (memory.copy
+      (i32.add
+        (i32.add (local.get $p) (i32.const 8))
+        (i32.mul (local.get $na) (i32.const 8)))
+      (i32.add (local.get $b) (i32.const 8))
+      (i32.mul (local.get $nb) (i32.const 8)))
+    (local.get $p))
+  (func $list_slice (param $s i32) (param $start i64) (param $end i64) (result i32)
+    (local $from i32)
+    (local $len i32)
+    (local $p i32)
+    (local.set $from (i32.wrap_i64 (local.get $start)))
+    (local.set $len (i32.sub (i32.wrap_i64 (local.get $end)) (local.get $from)))
+    (local.set $p
+      (call $alloc
+        (i32.add (i32.mul (local.get $len) (i32.const 8)) (i32.const 8))))
+    (i32.store (local.get $p) (local.get $len))
+    (memory.copy
+      (i32.add (local.get $p) (i32.const 8))
+      (i32.add
+        (i32.add (local.get $s) (i32.const 8))
+        (i32.mul (local.get $from) (i32.const 8)))
+      (i32.mul (local.get $len) (i32.const 8)))
+    (local.get $p))"""
+}
+
+// The document assembly for a FUNCTION-ONLY, scalar-only v3 document
+// (`emit` -> `_emit_v3` -> `_V3Emitter.emit`, subset): banner, `(module`, the
+// exported memory, the hp global at 0 (no data segments — no strings), the
+// helper preamble, then each function block blank-line separated, then `)`;
+// joined with newlines and closed with one trailing newline. There are no data
+// segments, no type/unsupported comments, and no extern/test blocks in-subset,
+// so the reference's corresponding sections all contribute nothing here.
+pub fn emit_src(ir: Any) -> Str {
+  let functions = value_list(value_field(ir, "functions"))
+  var lines = []
+  lines = lines.push(";; Generated by the revl cordis-wasm backend (ir_version 3) — do not edit.")
+  lines = lines.push(";; pure functions + documented type layouts; Int is i64 (values), addresses")
+  lines = lines.push(";; are i32; Str/List/record values use canonical-ABI-shaped linear memory")
+  lines = lines.push(";; (u32 length/count prefix, then one 8-byte slot per field/element)")
+  lines = lines.push("(module")
+  lines = lines.push("""  (memory (export "memory") 1)""")
+  lines = lines.push(`  (global $__hp (mut i32) (i32.const 0))`)
+  lines = lines.push(helper_preamble())
+  if (functions.length() > 0) { lines = lines.push("") }
+  for (f of functions) {
+    lines = lines.push(emit_function(f))
+    lines = lines.push("")
+  }
+  lines = lines.push(")")
+  return lines.join(newline()).concat(newline())
+}
+
+// ---------------------------------------------------------------- in-file tests
+test "wasm widths: Int is i64, everything else i32" {
+  assert wty("Int") == "i64"
+  assert wty("Int32") == "i32"
+  assert wty("Bool") == "i32"
+  assert wty("Str") == "i32"
+}
+
+test "the comparison mnemonics collapse the aliased operators" {
+  assert cmp_suffix("===") == "eq"
+  assert cmp_suffix("!==") == "ne"
+  assert cmp_suffix("<=") == "le_s"
+  assert cmp_suffix(">") == "gt_s"
+  assert cmp_suffix("+") == ""
+}
+
+test "bin_instr picks the width and the checked helpers" {
+  assert bin_instr("<", "Int") == "i64.lt_s"
+  assert bin_instr("<", "Int32") == "i32.lt_s"
+  assert bin_instr("==", "Bool") == "i32.eq"
+  assert bin_instr("+", "Int") == `call $int_add`
+  assert bin_instr("*", "Int32") == `call $int32_mul`
+  assert bin_instr("%", "Int") == "i64.rem_s"
+  assert bin_instr("/", "Int") == "i64.div_s"
+  assert bin_instr("&&", "Bool") == "i32.and"
+  assert bin_instr("||", "Bool") == "i32.or"
+}
+
+// --------------------------------------------------------------- component wrap
+// A trivial provider so the emitted module is a valid plugin (the pure `emit_src`
+// is what the cross-check exercises); mirrors the wrapper the other self-host
+// stages carry. `render` avoids the `emit` keyword.
+service EmitStream {
+  fn render(ir: Any) -> Str
+}
+
+component EmitWasm provides emitter: EmitStream {
+  provide emitter {
+    fn render(ir) = emit_src(ir)
+  }
+}
