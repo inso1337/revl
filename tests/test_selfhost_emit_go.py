@@ -40,10 +40,16 @@ Covered subset (what emits byte-identical):
     ``widen`` Float/Int markers, and non-float ``${..}`` interpolation via
     ``fmt.Sprintf``.
 
-Deliberately OUT (excluded from the corpus, deferred to Go Path B slice 2+):
+Covered typed-core (item 209, byte-identical): user ``type`` decls
+(``_emit_v3_go_types`` — a record as a Go ``struct`` with unexported
+source-spelled fields, a variant as a sealed interface + case structs), record
+literals and field access, ADT construction (nullary + payload), and ``match``
+over user variants as a Go type-switch IIFE, plus user type names in ``go_type``.
+
+Deliberately OUT (excluded from the corpus, deferred to Go Path B slice 3+):
 the go LIVE-COMPONENT world (v1/v2 stc-go runtime — a component routes there,
-not here); the v3 typed-core (user ``type`` decls, record literals / functional
-update, ADT construction and ``match``); the built-in Opt / Result / Map surface
+not here); functional record-update (``{r | f = e}`` — the go reference itself
+RAISES on it, python/typescript-only today); the built-in Opt / Result / Map surface
 (``??``, ``Some``/``None``/``Ok``/``Err``, ``Map.empty()``, optional chaining,
 and the Opt/Result/Map preambles they pull in); the stdlib surface (every
 ``builtin``/``len`` node, the total division forms and their helpers,
@@ -72,6 +78,8 @@ CORPUS = [
     "calls.rvl",     # free-function calls + the call-return type pin on a `let`
     "strings.rvl",   # string `+` as Go `+`, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, the sync arrow, Map-typed passthru
+    "records.rvl",   # user record `type`s -> structs, record literals, field access
+    "variants.rvl",  # user variant `type`s -> sealed ifaces, ADT construction, match
 ]
 
 
