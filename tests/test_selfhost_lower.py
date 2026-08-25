@@ -360,6 +360,35 @@ component C provides cache: Cache {
   }
 }
 """),
+    # ---- slice 5a: the arrow-color LEAK trio + Async[T] coercion ----------
+    # The ADMITTED twin of the checked-in `a1_async_arrow_sync_type` rejection:
+    # the callback param is declared `(Str) -> Async[Str]`, so the arrow lands in
+    # an `Async[T]` slot and is coerced async (`_coerce_async_args`) — the caller
+    # awaits the suspension through the colored type, so it is NOT a leak. This
+    # is the whole point of the coercion model: the same arrow, sync slot vs
+    # async slot, refuses vs admits.
+    ("arrow coerced into an Async[T] parameter admits", """
+service Model { emission async fn complete(msgs: Str) -> Str }
+service Runner { emission async fn run(prompt: Str) -> Str }
+fn agent_loop(current: Str, complete: (Str) -> Async[Str]) -> Str {
+  let resp = complete(current)
+  return resp
+}
+component Agent requires model: Model provides runner: Runner {
+  provide runner {
+    async fn run(prompt) = agent_loop(prompt, msgs => emit model.complete(msgs))
+  }
+}
+"""),
+    # The module-fn twin of the coercion admit: an arrow passed into a pure fn's
+    # `Async[T]` parameter is coerced, so `_refuse_leaky_pure_arrow` skips it.
+    ("module-fn arrow into an Async[T] slot admits", """
+extern emission async fn tick() -> Int = @py { return 1 }
+fn apply_cb(cb: () -> Async[Int]) -> Int { return cb() }
+fn holder() -> Int { return apply_cb(() => tick()) }
+service S { fn go() -> Int }
+component C provides s: S { provide s { fn go() { return 0 } } }
+"""),
 ]
 
 
@@ -529,6 +558,38 @@ component C requires d: D provides s: S {
      'let store = effect Map.new() undo store.drop() '
      'isolate d in realm("r1") provide s { fn go() { return 0 } } }',
      "PRELUDE"),
+    # ---- slice 5a: the arrow-color LEAK trio -----------------------------
+    # `_refuse_leaky_arrow`: a sync-typed callback arrow that reaches an async
+    # service operation carries no async color — the caller would receive an
+    # unawaited suspension (the checked-in item-92 / finding-#21 fixture).
+    ("a1 leaky arrow (sync-typed callback)",
+     _fixture("a1_async_arrow_sync_type"), "A1"),
+    # The same arrow passed into a SYNC parameter slot leaks, while its Async[T]
+    # twin (in ACCEPTED_PROGRAMS) admits — the coercion model's two halves.
+    ("a1 leaky arrow in a sync fn-parameter slot",
+     """extern emission async fn tick(n: Str) -> Str = @py { return n }
+fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) }
+service S { emission async fn go() -> Str }
+component C provides s: S {
+  provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } }
+}
+""", "A1"),
+    # `_refuse_leaky_pure_arrow`: the module-fn twin — a sync arrow in a pure fn
+    # body reaching an async callable (named, since pure fns have no req keys).
+    ("a1 leaky arrow in a module fn (pure twin)",
+     """extern emission async fn tick() -> Int = @py { return 1 }
+fn holder(g: (Int) -> Int) -> Int { let h = x => tick()   return 0 }
+service S { fn go() -> Int }
+component C provides s: S { provide s { fn go() { return 0 } } }
+""", "A1"),
+    # module-fn first-class async value: an async callable referenced as a VALUE
+    # in a module fn body — an arrow type carries no async color.
+    ("a1 module fn uses an async callable as a value",
+     """extern emission async fn tick() -> Int = @py { return 1 }
+fn holder() -> Int { let f = tick   return 0 }
+service S { fn go() -> Int }
+component C provides s: S { provide s { fn go() { return 0 } } }
+""", "A1"),
 ]
 
 
@@ -725,4 +786,84 @@ def test_generated_bare_values_agree(admit, seed, oneline):
         # a lone bare-value read is admitted or refused by G1 only
         assert ref_tag in ("", "G1"), \
             f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
+
+
+# ------------------------------------------------------- leaky-arrow fuzz
+
+# The Async[T]-coercion differential (slice 5a): the finding-#21 `agent_loop`
+# shape, with the callback parameter's declared type flipped between a sync
+# `(Str) -> Str` and an async `(Str) -> Async[Str]`. The arrow argument reaches
+# an async service op either way; only the async-typed slot coerces it (admits),
+# the sync slot leaks (A1). The body of the callback is also varied to a pure
+# arrow (reaches nothing async) so the sync slot can also admit — the two gates
+# are each other's oracle on the coercion decision AND the leak wording.
+def _leaky_arrow(rng: random.Random) -> str:
+    async_slot = rng.random() < 0.5
+    reaches = rng.random() < 0.5
+    cb = "(Str) -> Async[Str]" if async_slot else "(Str) -> Str"
+    arrow = "msgs => emit model.complete(msgs)" if reaches else 'msgs => "x"'
+    return (
+        "service Model { emission async fn complete(msgs: Str) -> Str }\n"
+        "service Runner { emission async fn run(prompt: Str) -> Str }\n"
+        f"fn agent_loop(current: Str, complete: {cb}) -> Str {{\n"
+        "  let resp = complete(current)\n"
+        "  return resp\n"
+        "}\n"
+        "component Agent requires model: Model provides runner: Runner {\n"
+        f"  provide runner {{ async fn run(prompt) = agent_loop(prompt, {arrow}) }}\n"
+        "}\n")
+
+
+@pytest.mark.parametrize("oneline", [False, True])
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_leaky_arrows_agree(admit, seed, oneline):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _leaky_arrow(rng)
+        if oneline:
+            src = _oneline(src)
+        ref_tag, _ = _ref(src)
+        # the callback either coerces (admit) or leaks (A1) — nothing else
+        assert ref_tag in ("", "A1"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
+
+
+# --------------------------------------------------- in-file test audit
+
+# The 169 lesson, systematized: every program a `test` block in lower.rvl
+# hand-asserts is routed through the differential oracle here, so the .rvl's own
+# eyeballed literals cannot silently drift from the reference (the ground truth).
+# The programs are made reference-clean (real `@backend` bodies, returns, valid
+# stdlib) precisely so their ONLY reference verdict is the in-slice one the block
+# asserts.
+def _infile_programs() -> list[str]:
+    text = (ROOT / "selfhost" / "lower.rvl").read_text()
+    section = text.split("======= tests")[-1]
+    progs: list[str] = []
+    for head in ("admit_src(", "admit_tag("):
+        idx = 0
+        while True:
+            hit = section.find(head, idx)
+            if hit == -1:
+                break
+            j = hit + len(head)
+            if section[j:j + 3] == '"""':
+                end = section.index('"""', j + 3)
+                progs.append(section[j + 3:end])
+                idx = end + 3
+            elif section[j] == '"':
+                end = section.index('"', j + 1)
+                progs.append(section[j + 1:end])
+                idx = end + 1
+            else:
+                idx = j
+    return progs
+
+
+def test_in_file_test_programs_agree(admit):
+    progs = _infile_programs()
+    assert len(progs) >= 25, f"expected the in-file programs, found {len(progs)}"
+    for src in progs:
         _agree(admit, src)
