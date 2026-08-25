@@ -1,0 +1,60 @@
+// wasm Path B slice 4d — the stdlib `builtin`/`len` method surface whose runtime
+// helpers all live in the always-emitted preamble.
+//
+// Each method lowers to a single preamble call (or a bare instruction): the
+// width conversions (`to_int` widen / `to_int32` checked narrow), the integer
+// divisions (`div_trunc` -> `i64.div_s`; `div_floor`/`div_euclid`/`mod` ->
+// their helpers), the `to_str`/`Str.to_int` renderers, `.length()` (the method
+// twin of the `len` node), and the Str/List `push`/`concat`/`slice`/`charAt`/
+// `charCodeAt`/`startsWith`/`endsWith` probes. The demand-pulled helpers
+// (`$str_index_of`/`$str_split`/`$str_join`, `$f64_to_str`) are NOT in the
+// preamble, so `indexOf`/`split`/`join` and Float interpolation stay out; so do
+// the Map methods (a named refusal in the reference) and the checked-division
+// forms (their own per-node Int scratch locals).
+
+// `.length()` (the method form): same code points / u32-prefix rule as `len`.
+fn strLenM(s: Str) -> Int { return s.length() }
+fn listLenM(xs: List[Int]) -> Int { return xs.length() }
+
+// Int32 <-> Int width conversions (docs/arithmetic.md).
+fn widen(a: Int32) -> Int { return a.to_int() }
+fn narrow(a: Int) -> Int32 { return a.to_int32() }
+
+// The four integer divisions: `div_trunc` is a bare `i64.div_s`, the rest are
+// helper calls that every tier shares.
+fn dtrunc(a: Int, b: Int) -> Int { return a.div_trunc(b) }
+fn dfloor(a: Int, b: Int) -> Int { return a.div_floor(b) }
+fn deuclid(a: Int, b: Int) -> Int { return a.div_euclid(b) }
+fn modv(a: Int, b: Int) -> Int { return a.mod(b) }
+
+// The Int renderer and the Str parser (which answers the tier's `Opt[Int]` cell).
+fn render(n: Int) -> Str { return n.to_str() }
+fn parse(s: Str) -> Opt[Int] { return s.to_int() }
+
+// List `push`: the element is widened into the fresh 8-byte slot; a Bool element
+// is zero-extended, an Int element sits natively.
+fn pushInt(xs: List[Int], v: Int) -> List[Int] { return xs.push(v) }
+fn pushBool(bs: List[Bool], v: Bool) -> List[Bool] { return bs.push(v) }
+
+// `concat` over Str (byte copy) and over List (element copy) — two helpers, one
+// method name, picked by the receiver type.
+fn catStr(a: Str, b: Str) -> Str { return a.concat(b) }
+fn catList(a: List[Int], b: List[Int]) -> List[Int] { return a.concat(b) }
+
+// `slice`: a Str slices on code-point boundaries (`$str_cp_slice`), a List on
+// element offsets (`$list_slice`).
+fn sliceStr(s: Str, a: Int, b: Int) -> Str { return s.slice(a, b) }
+fn sliceList(xs: List[Int], a: Int, b: Int) -> List[Int] { return xs.slice(a, b) }
+
+// The single-code-point probes: `charAt` returns the whole scalar, `charCodeAt`
+// its decoded value.
+fn at(s: Str, i: Int) -> Str { return s.charAt(i) }
+fn code(s: Str, i: Int) -> Int { return s.charCodeAt(i) }
+
+// The prefix/suffix probes, over pooled string literals.
+fn starts(s: Str) -> Bool { return s.startsWith("ab") }
+fn ends(s: Str) -> Bool { return s.endsWith("z") }
+
+// A builtin whose result feeds arithmetic: `to_int()` widens Int32 to an i64
+// that the checked `$int_add` then consumes.
+fn widenAdd(a: Int32, b: Int) -> Int { return a.to_int() + b }

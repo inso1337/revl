@@ -1,0 +1,59 @@
+// wasm Path B slice 4a — field access and index READS over the linear-memory
+// value ABI (slices 2/3 built the write side).
+//
+// A record field READ is `slot_load(base + 8*declared_position)`: field 0 sits
+// at the bare base pointer, field `i` at `(i32.add base 8*i)`, and a non-Int
+// field is `i32.wrap_i64`-narrowed back out of its 8-byte slot. A `List` index
+// is `slot_load(base + 8 + 8*i)` — the `8` skips the `[u32 count][pad]` header;
+// a CONSTANT index folds to a compile-time offset, a variable index computes
+// `8 + i*8` at run time (the i64 index narrowed to an i32 address exactly once).
+// A `Str` index is a one-byte `$str_char_at`. `x.length` (the property form, a
+// `len` node) counts code points for a `Str` and the u32 prefix for a `List`.
+
+type Point = { x: Int, y: Int }
+type Named = { id: Int, tag: Str, on: Bool }
+
+// Field 0: the bare base pointer, no `i32.add`.
+fn getX(p: Point) -> Int { return p.x }
+
+// Field 1: `(i32.add base (i32.const 8))`.
+fn getY(p: Point) -> Int { return p.y }
+
+// A `Str` field: the slot holds the pooled pointer, `i32.wrap_i64`-narrowed out.
+fn getTag(n: Named) -> Str { return n.tag }
+
+// A `Bool` field (field 2): narrowed out of its slot the same way.
+fn getOn(n: Named) -> Bool { return n.on }
+
+// A constant list index folds to a compile-time slot offset (`8 + 8*0 = 8`).
+fn firstInt(xs: List[Int]) -> Int { return xs[0] }
+
+// A constant index further in (`8 + 8*2 = 24`).
+fn thirdInt(xs: List[Int]) -> Int { return xs[2] }
+
+// A variable index: the run-time `8 + i*8` address, index narrowed i64->i32.
+fn nthInt(xs: List[Int], i: Int) -> Int { return xs[i] }
+
+// `List[Bool]`: the element slot is narrowed back to its i32 (0/1) view.
+fn nthBool(bs: List[Bool], i: Int) -> Bool { return bs[i] }
+
+// `List[Str]`: the slot holds the pooled pointer, narrowed out.
+fn nthStr(ss: List[Str], i: Int) -> Str { return ss[i] }
+
+// `.length` (the property form) on a `List`: the u32 count prefix, zero-extended.
+fn listLen(xs: List[Int]) -> Int { return xs.length }
+
+// `.length` on a `Str`: the code-point count (decoding UTF-8), not the byte prefix.
+fn strLen(s: Str) -> Int { return s.length }
+
+// An index READ whose result feeds arithmetic: both element loads are Int, so
+// the checked `$int_add` sees two i64 operands.
+fn sumTwo(xs: List[Int]) -> Int { return xs[0] + xs[1] }
+
+// A field READ that indexes into a list-typed field: the field slot is a
+// pointer, and the index read walks it — a read composed on a read.
+type Row = { items: List[Int], n: Int }
+fn firstItem(r: Row) -> Int { return r.items[0] }
+
+// An index into a list of records, then a field read: `ps[0].x`.
+fn firstX(ps: List[Point]) -> Int { return ps[0].x }

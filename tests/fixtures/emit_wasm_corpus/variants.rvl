@@ -1,0 +1,58 @@
+// wasm Path B slice 4b — tagged-union CONSTRUCTION: the discriminated-cell
+// layout for the built-in `Opt`/`Result` and user `variant`s.
+//
+// A tagged value is a two-slot `[u32 tag][pad][slot payload]` cell: `$alloc`
+// takes 16 bytes, the tag is the case's index (its position in tag order) stored
+// as an i32 discriminant, and the payload is one 8-byte slot — an `Int` natively,
+// a Bool/pointer `i64.extend_i32_u`-widened in, and `(i64.const 0)` for a nullary
+// case. The cell rides in the same nesting-depth-indexed scratch (`__revl_tmp`,
+// `__revl_tmp_n1`, …) a record/list uses, so a payload that is itself a record,
+// list or nested cell lands one level deeper. Declaring a `variant` also emits
+// the `;; @variant …` layout-comment block after the helper preamble. READING a
+// cell (`match`, `??`) mints its own match/scrutinee locals and stays out of
+// this slice.
+
+type Color = Red | Green | Blue           // a nullary user variant
+type Box = Empty | Full(Int)              // a user variant with a payload case
+type Tag = Lo | Hi(Str)                   // a Str-payload case (pooled pointer)
+
+// The built-in Opt: `Some(x)` is tag 1 with the payload; `None` is tag 0, zeroed.
+fn wrap(n: Int) -> Opt[Int] { return Some(n) }
+fn nothing() -> Opt[Int] { return None }
+
+// The built-in Result: `Ok`/`Err` are tags 0/1; the `Str` Err payload widens in.
+fn ok(n: Int) -> Result[Int, Str] { return Ok(n) }
+fn err() -> Result[Int, Str] { return Err("bad") }
+
+// A nullary user-variant case: `expected` (the return type) pins `Color` so the
+// tag is looked up in the declared case order.
+fn red() -> Color { return Red }
+fn blue() -> Color { return Blue }
+
+// A payload user-variant case and its nullary sibling.
+fn full(n: Int) -> Box { return Full(n) }
+fn empty() -> Box { return Empty }
+
+// A Str-payload case: the pooled literal's pointer is widened into the slot.
+fn hi() -> Tag { return Hi("hey") }
+
+// A payload taken from a parameter, not a literal — the cell ABI over a
+// non-constant Int slot value.
+fn wrapVar(v: Int) -> Opt[Int] { return Some(v) }
+
+// A cell whose payload is itself a record: `Some` acquires `__revl_tmp` at
+// depth 0, the record is built one level down on `__revl_tmp_n1`, then its base
+// pointer is widened into the Opt's payload slot.
+type Point = { x: Int, y: Int }
+fn wrapRec() -> Opt[Point] { return Some({ x: 1, y: 2 }) }
+
+// Nested Opts: `Some(Some(5))` — the outer cell on `__revl_tmp`, the inner on
+// `__revl_tmp_n1`, the inner pointer widened into the outer payload slot.
+fn wrapWrap() -> Opt[Opt[Int]] { return Some(Some(5)) }
+
+// A list of tagged cells: the outer list is depth 0, each element cell is built
+// on `__revl_tmp_n1`; `expected` flows `List[Opt[Int]]` -> element `Opt[Int]`.
+fn optList() -> List[Opt[Int]] { return [Some(1), None] }
+
+// A list of user-variant cells, mixing a payload case and a nullary case.
+fn boxList() -> List[Box] { return [Full(7), Empty] }
