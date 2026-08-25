@@ -75,7 +75,46 @@ def test_plain_double_quoted_string_dollar_is_literal():
     assert tokens[0].value == "cost: $9.99"
 
 
-# --- §9 guard rail: legacy `$` forms in plain strings are rejected ----------
+# --- item 183: `\"` and `\\` are the plain string's only escapes -------------
+#
+# `"a\"b"` used to fail with `unterminated string literal` (the `\"` closed the
+# string) and a lone `\` surfaced as `unexpected character '\'`. Both now
+# escape a literal quote / backslash. No other backslash sequence is an escape:
+# `\n` stays a literal backslash-`n`, matching the no-escape triple-quoted form.
+
+def test_escaped_quote_is_a_literal_quote():
+    assert _one_string(r'"a\"b"') == 'a"b'
+
+
+def test_escaped_backslash_is_a_literal_backslash():
+    assert _one_string(r'"a\\b"') == "a\\b"
+
+
+def test_escaped_quote_does_not_terminate_the_string():
+    # the `\"` is content, so the *following* `"` closes the string
+    tokens = lex(r'"say \"hi\""', "<test>")
+    assert tokens[0].kind == "string" and tokens[1].kind == "eof"
+    assert tokens[0].value == 'say "hi"'
+
+
+def test_trailing_escaped_backslash_before_close():
+    # `\\` collapses to one backslash, then the next `"` closes the string
+    assert _one_string(r'"path\\"') == "path\\"
+
+
+def test_backslash_n_is_still_two_literal_characters():
+    # additive: existing no-escape behaviour for `\n` is unchanged
+    assert _one_string(r'"a\nb"') == "a\\nb"
+
+
+def test_lone_backslash_before_other_char_stays_literal():
+    assert _one_string(r'"a\tb"') == "a\\tb"
+
+
+# --- item 183 does not disturb the §9 guard rail: legacy `$` forms in plain
+# strings are still rejected (item 203 — making a bare `$` fully literal — is
+# held back because it changes what `revl fmt --migrate` compiles against; see
+# `_lex_string` and tests/test_fmt.py).
 
 def test_stale_interpolation_is_rejected_not_silently_literal():
     import pytest
