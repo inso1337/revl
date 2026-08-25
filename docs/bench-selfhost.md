@@ -270,6 +270,118 @@ correct O(1) `charAt` may not by itself make the native lexer competitive. The
 honest status is that the native lexer is measured, slow, and not yet explained
 by `charAt` alone.
 
+### item 283: where the 17x goes
+
+Item 277 closed with the native lexer measured, slow, and "not yet explained by
+`charAt` alone". Item 283 explains it, with data. The measurement tool is
+`tools/profile_selfhost_rust.py` (reproducible, no sudo): it re-emits the exact
+item-266 lexer crate and does three things, a build-profile sweep, an
+instrumented per-operation decomposition, and micro-benchmarks that price each
+hot operation at its observed frequency, then cross-checks the split with a
+macOS `sample` run of the release binary. Toolchain and corpus are the item-266
+ones: `Darwin-25.2.0-arm64`, cargo 1.85.1 / rustc 1.85.1, the same 8-file /
+27,832-char lexer corpus, in-process `Instant` median.
+
+**The headline: it is not the build profile, and it is not `charAt`. It is
+`revl_push` cloning the whole accumulator on every append, an O(tokens^2) deep
+copy that is ~85% of the run.**
+
+**1. Build profile (ruled out first, cheapest check).** The item-266 harness
+runs `cargo build --release` against a `Cargo.toml` (`backends/rust/emit.py`
+`cargo_toml()`) that declares NO `[profile.release]` block, so it inherits
+cargo's default release profile: opt-level 3, debug-assertions off,
+overflow-checks off, lto off, codegen-units 16. That is a genuine optimized
+build, confirmed by sweeping the knobs:
+
+| profile                                   | lexer run ms | note |
+|-------------------------------------------|-------------:|------|
+| release-default (what item 266 builds)    | 350.3        | opt-level 3, overflow-checks off |
+| release + `overflow-checks=false` explicit| 352.3        | no change (within noise) |
+| release + `lto="fat"` + `codegen-units=1` | 333.9        | ~5% faster, not the gap |
+| release + `opt-level=2`                    | 412.4        | worse |
+| dev (unoptimised, opt-level 0)            | 6820.8       | ~19x the release build |
+
+Two conclusions. The dev row proves the harness is NOT accidentally building
+debug (a debug build would be ~6.8s, not 0.35s). And overflow-checks are already
+off and make no difference here anyway, because the rust backend emits `Int`
+arithmetic as explicit `checked_add(...).expect("revl: Int overflow")`
+(`docs/arithmetic.md`, Int overflow traps by contract), so overflow trapping
+lives in the emitted code regardless of the profile flag. lto+codegen-units=1
+buys ~5%. The 17x is not a build-profile artifact.
+
+**2. Per-operation decomposition (instrumented build, one exact pass).** A
+counting global allocator plus atomic counters injected into the hot operations.
+One whole-corpus pass is deterministic, so these counts are exact:
+
+| operation (per whole-corpus pass)            | count | note |
+|----------------------------------------------|------:|------|
+| **`revl_push` elements copied (clone-append)** | **5,912,806** | **O(tokens^2); each Token clone = 2 String allocs = ~11.8M allocs = 98% of all allocations** |
+| `charAt` big-string `chars().nth` (O(i))     | 34,538 | summed index depth 206,713,954 chars walked, avg depth ~5,985 |
+| 1-char `String` allocs (`charAt.to_string`)  | 34,538 | the item-276 value-layer alloc |
+| `revl_slice` calls                           | 17,883 | only 43,046 chars collected, avg ~2 chars (cheap) |
+| full-source `.clone()` (threaded to helpers) | 17,397 | 221.7 MB memcpy / pass |
+| `revl_length` (`chars().count`, O(n))        | 2,724 | |
+| `revl_concat`                                | 1,245 | |
+| **total heap allocations / pass**            | **12,085,346** | |
+| **total heap bytes / pass**                  | **1,249.3 MB** | |
+
+12 million allocations per pass over a 27 KB corpus is ~434 allocations per
+source character. The counters attribute 98% of them to one operation:
+`revl_push`. The persistent-list append lowering in `backends/rust/emit.py` is
+
+```rust
+fn revl_push(&self, item: T) -> Vec<T> { let mut _v = self.clone(); _v.push(item); _v }
+```
+
+and the lexer's accumulator loop is `out = out.revl_push(s.tok)`, once per
+token. Each push deep-clones the entire growing `Vec<Token>`, and cloning a
+`Token { kind: String, text: String, line: i64 }` allocates both of its Strings.
+Appending token k therefore copies k Tokens = 2k String allocations, so the
+whole lex is O(tokens^2) allocation: 4,796 pushes copy 5.9M elements and allocate
+11.8M Strings. This is rust-specific: the CPython tier's list copy duplicates
+pointers under reference counting, not the string contents, so the same value
+semantics cost almost nothing there.
+
+**3. Micro-benchmarks (each op priced at its observed frequency).** Standalone
+rust, same corpus scale:
+
+| priced operation                                             | ms / pass | share |
+|--------------------------------------------------------------|----------:|------:|
+| **(E) `revl_push` clone-on-append, 5.9M Token clones**       | **~300.0** | **~85%** |
+| (A) `charAt` front-walk `chars().nth(i).to_string()` x34,538 | ~9.6      | ~2.7% |
+| (C) full-source `String::clone` x17,397                      | ~6.2      | ~1.8% |
+| (D) `revl_slice` x17,883 @ avg 2 chars                       | ~0.6      | ~0.2% |
+| (B) same char accesses vs a `Vec<char>` O(1) index           | ~0.02     | control |
+
+A/C/D/E sum to ~316 ms of the ~350 ms run; the rest is Token/Scan/Step struct
+construction, `String::from` literals in the comparison chains, and Vec buffer
+reallocations. A macOS `sample` of the release binary agrees at the leaf level:
+about 66% of samples are in `malloc`/`free` (`_xzm_xzone_malloc_tiny`, `_xzm_free`,
+`_malloc_zone_malloc`) and ~18% in `memmove`/`memcpy` (String clone and collect
+copies), with the whole lexer inlined into `lex_src` whose heaviest child frame
+is `revl_push`. The O(n^2) `charAt` walk (`Chars::advance_by`) is ~2.3% of leaf
+time, which is the same signal control (B) gives: replacing the front-walk with an
+O(1) `Vec<char>` index takes the char-access cost from ~9.6 ms to ~0.02 ms, a real
+but ~3% win.
+
+**The single highest-leverage target.** Eliminate the clone-on-append in
+`revl_push`. When the receiver is dead after the call, as in `out =
+out.revl_push(x)` where `out` is immediately reassigned, the value-semantics
+clone is provably unnecessary: a last-use / linear move that mutates the Vec in
+place (`Vec::push`) is O(1) amortized and preserves semantics. That single change
+targets the ~85% of the run the accumulator copy owns, and it is not specific to
+the lexer, it is every persistent-collection append the rust backend emits.
+
+This re-routes the earlier candidates. Item 276 (codepoint scan / per-char
+1-char alloc) addresses operation A, ~3%. Item 282 (interprocedural `&[char]`
+view) addresses A plus C, up to ~5% combined if the view also removes the
+by-value `String` passing. Both are real and worth doing, but neither is the
+dominant cost. The dominant cost, `revl_push` clone-on-append, is covered by
+neither and should be its own item: a move/last-use optimization for value-append
+on a dead receiver in `backends/rust/emit.py`. This is a data-driven finding
+only; item 283 ships no emitter change. Reproduce with
+`python3 tools/profile_selfhost_rust.py`.
+
 ### Reading for item 231a
 
 Item 231a asks whether the lexer's residual py-tier overhead (4.9x → 4.4x after
@@ -289,6 +401,7 @@ lexer is not yet a fair "after" for the py-tier 4.4x.
 ```
 python3 tools/bench_selfhost.py        # CPython py-tier baseline (item 229)
 python3 tools/bench_selfhost_rust.py   # native rust tier (item 266)
+python3 tools/profile_selfhost_rust.py # lexer profile: where the 17x goes (item 283)
 ```
 
 `bench_selfhost.py` prints the machine/CPython line, the correctness-gate
@@ -301,3 +414,13 @@ to rust, builds a cargo binary once, and times only the run; a stage that cannot
 be emitted, built, or run is reported "unable to measure" with the exact reason
 (never a fabricated number). It needs cargo and a resolvable cordis-rs; with
 neither it skips with the same reason `tests/test_run_rust.py` skips on.
+
+`profile_selfhost_rust.py` (item 283) re-emits the item-266 lexer crate and runs
+the build-profile sweep, the instrumented per-operation decomposition, and the
+per-operation micro-benchmarks tabulated in the item-283 section above. It reuses
+`bench_selfhost_rust`'s stage/corpus wiring and the same `backends/rust/emit.py`,
+needs the same cargo + cordis-rs gate, and runs without sudo. The
+allocation/operation counts come from a counting global allocator and atomic
+counters injected into the emitted lexer by the tool (it never edits the backend).
+The leaf-level `malloc`/`memmove`/`advance_by` split quoted above is from
+`/usr/bin/sample` on a longer-running build of the same binary.
