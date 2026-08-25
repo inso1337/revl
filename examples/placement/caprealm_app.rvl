@@ -1,0 +1,70 @@
+// Capability/realm-aware host placement (roadmap item 119). One composition
+// with two named realms and a component that reaches host code needing a
+// permit — enough to show all three placement rules the toml layer adds:
+//
+//   * a component that requires a *capability* rides only on a host that offers
+//     it (Vault reaches `host_seal`, a permit the host must grant);
+//   * a *realm*-isolated component stays on a host consistent with its realm
+//     (the tenant_a subsystem must not land on a tenant_b-pinned host);
+//   * neither rule touches a component that needs no capability and isolates
+//     into no named realm — those place exactly as before.
+//
+// The two realms use DISTINCT keys (akv/bkv), so each realm has its own
+// provider+consumer and a realm-consistent placement crosses no seam. See
+// examples/placement/caprealm_*.toml and docs/capability-realm-placement.md.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+service Sealer {
+  fn seal(plain: Str) -> Str
+}
+
+// A host permit: sealing needs a key the host holds, so a Vault process must be
+// placed on a host that OFFERS the "seal" capability. The extern is only the
+// motivating host reach; the capability requirement itself is declared in the
+// placement toml ([capabilities] Vault = ["seal"]), not in this source.
+extern pure fn host_seal(plain: Str) -> Str
+  = @py { return "sealed:" + plain }
+
+component Vault provides sealer: Sealer {
+  provide sealer {
+    fn seal(plain) = host_seal(plain)
+  }
+}
+
+component TenantAStore provides akv: Kv {
+  isolate akv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide akv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantAApp requires akv: Kv {
+  isolate akv in realm("tenant_a")
+  effect akv.set("who", "alice") undo akv.set("who", "")
+}
+
+component TenantBStore provides bkv: Kv {
+  isolate bkv in realm("tenant_b")
+  let store = effect Map.new() undo store.drop()
+  provide bkv {
+    fn get(k) = store.get(k)
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}
+
+component TenantBApp requires bkv: Kv {
+  isolate bkv in realm("tenant_b")
+  effect bkv.set("who", "bob") undo bkv.set("who", "")
+}

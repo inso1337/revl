@@ -384,6 +384,123 @@ def slice_partition(ir: dict, realm: str) -> dict:
 
 
 # --------------------------------------------------------------------------
+# capability/realm-aware host placement (roadmap item 119)
+# --------------------------------------------------------------------------
+#
+# Item 56/149/151 gave placement a *backend* (which tier) and a *network seam*
+# (which machine). This dimension is which HOST by capability and realm: a host
+# (process) may declare the capabilities it offers/permits and the realm it is
+# pinned to, and a component is refused on a host that lacks a capability it
+# needs or that is pinned to a realm the component does not belong to. Both are
+# read off the placement toml (no `.rvl` source change) and the realms already
+# in the IR (`isolate`, item 10/56). The whole dimension is opt-in: a component
+# that requires no capability and isolates into no named realm is never
+# constrained, so a placement that declares neither validates trivially and is
+# byte-identical to today (docs/capability-realm-placement.md).
+
+
+def _offered_capabilities(pconf: dict) -> set[str]:
+    """The capabilities a host (process) declares it offers/permits, from
+    `[processes.<p>] capabilities = ["net", "db"]`. A process with no
+    `capabilities` key offers none — a component that needs a capability must
+    land on a host that lists it."""
+    return {str(c) for c in (pconf.get("capabilities") or [])}
+
+
+def _required_capabilities(placement: dict) -> dict[str, set[str]]:
+    """`{component: {capability, ...}}` from the placement's `[capabilities]`
+    table (a flat map, `PgDatabase = ["db"]`). This is the placement-layer
+    spelling of "this component reaches host code that needs a permit"; it adds
+    no `.rvl` grammar."""
+    out: dict[str, set[str]] = {}
+    for cname, caps in (placement.get("capabilities") or {}).items():
+        out[cname] = {str(c) for c in (caps or [])}
+    return out
+
+
+def _component_realms(entry: dict) -> set[str]:
+    """The named (non-shared) realms a manifest component entry isolates any key
+    into — the realms the component *belongs to* (item 56's isolate dimension).
+    A component that isolates nothing (or only into the shared realm) belongs to
+    no named realm and is realm-unconstrained."""
+    from .lower import SHARED_REALM  # noqa: PLC0415 — avoid a top-level cycle
+    return {r for r in (entry.get("isolate") or {}).values() if r != SHARED_REALM}
+
+
+def capability_realm_diagnostic(processes: dict, ir: dict,
+                                required_caps: dict[str, set[str]]) -> str | None:
+    """Validate capability- and realm-consistent placement; return a diagnostic
+    for the first violation, or None when every component sits on a host that
+    offers the capabilities it requires and whose declared realm (if any) is
+    consistent with the realms the component belongs to.
+
+    Two rules, both pure reads off the toml + IR, checked before anything spawns:
+
+    * **capability** — a component that requires capability `c` (via the
+      `[capabilities]` table) may be placed only on a host whose
+      `capabilities` list includes `c`. A host that offers a strict superset is
+      fine; one missing any needed capability is refused.
+    * **realm** — a host may pin itself to a realm (`[processes.<p>] realm =
+      "tenant_a"`). A component placed on a pinned host must belong to no realm
+      other than that one: a component isolating a key into a *foreign* named
+      realm is refused. A shared/unisolated component belongs to no named realm
+      and rides on any host; an *unpinned* host constrains no component. This is
+      the placement-time form of G2's per-(key, realm) disjointness — it keeps a
+      realm-isolated component off a host that carries a different realm.
+    """
+    entries = {e["name"]: e for e in (ir.get("manifest") or {}).get("components") or []}
+    for pname, pconf in processes.items():
+        offered = _offered_capabilities(pconf)
+        host_realm = pconf.get("realm")
+        for cname in pconf.get("components") or []:
+            missing = sorted((required_caps.get(cname) or set()) - offered)
+            if missing:
+                have = ", ".join(sorted(offered)) or "no capabilities"
+                return (
+                    f"component {cname!r} requires capability "
+                    f"{', '.join(repr(m) for m in missing)} but is placed on host "
+                    f"{pname!r}, which offers {have} — a component may run only on a "
+                    f"host that offers every capability it needs (add it to "
+                    f"[processes.{pname}] capabilities, or move {cname!r} to a host "
+                    "that offers it)")
+            if host_realm is not None:
+                foreign = sorted(_component_realms(entries.get(cname) or {}) - {str(host_realm)})
+                if foreign:
+                    return (
+                        f"component {cname!r} isolates a key into realm "
+                        f"{foreign[0]!r} but is placed on host {pname!r}, which is "
+                        f"pinned to realm {str(host_realm)!r} — a realm-isolated "
+                        "component must stay on a host consistent with its realm "
+                        "(G2's per-(key, realm) disjointness at placement time)")
+    return None
+
+
+def colocation_advice(processes: dict, placed: dict, ir: dict) -> list[str]:
+    """Realm co-location opportunities: any named realm whose components are
+    split across more than one host carries at least one same-realm seam that
+    pinning the realm to a single host would remove (item 56's realm dimension).
+
+    Advisory only — returns human-readable lines and changes no placement. The
+    conductor prints them only when the placement sets `report_colocation =
+    true`, so default runs are byte-identical. Conservative by construction: it
+    never moves a component, it only names where a realm-affinity co-location
+    could drop a seam."""
+    entries = {e["name"]: e for e in (ir.get("manifest") or {}).get("components") or []}
+    realm_hosts: dict[str, set[str]] = {}
+    for cname, host in placed.items():
+        for realm in _component_realms(entries.get(cname) or {}):
+            realm_hosts.setdefault(realm, set()).add(host)
+    lines: list[str] = []
+    for realm in sorted(realm_hosts):
+        hosts = realm_hosts[realm]
+        if len(hosts) > 1:
+            lines.append(
+                f"realm {realm!r} spans hosts {', '.join(sorted(hosts))}; co-locating "
+                "its components on one host removes a same-realm seam")
+    return lines
+
+
+# --------------------------------------------------------------------------
 # preflight: fail with a diagnostic instead of spawning children that die
 # --------------------------------------------------------------------------
 
@@ -750,6 +867,25 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
         print(f"error: {message}", file=sys.stderr)
         shutil.rmtree(tmp, ignore_errors=True)
         return code
+
+    # --- capability/realm-aware host placement (item 119): a host may declare
+    # the capabilities it offers and the realm it is pinned to; a component is
+    # refused on a host that lacks a capability it needs or that is pinned to a
+    # foreign realm. Both come from the placement toml + the realms already in
+    # the IR — no `.rvl` source change. Purely additive: a placement that
+    # declares neither validates trivially and is byte-identical (below is a
+    # no-op then). docs/capability-realm-placement.md.
+    required_caps = _required_capabilities(placement)
+    unknown_caps = sorted(c for c in required_caps if c not in components)
+    if unknown_caps:
+        return abort(f"[capabilities] names unknown component(s): {', '.join(unknown_caps)} "
+                     f"(known: {', '.join(sorted(components))})")
+    cap_realm_problem = capability_realm_diagnostic(processes, ir, required_caps)
+    if cap_realm_problem:
+        return abort(cap_realm_problem)
+    if placement.get("report_colocation"):
+        for advice in colocation_advice(processes, placed, ir):
+            print(f"  co-location: {advice}", flush=True)
 
     # --- network placement (item 56): a seam whose provider process declares an
     # `address` crosses TCP + mutual TLS instead of a local UDS. Identity per
