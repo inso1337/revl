@@ -72,6 +72,62 @@ def test_user_cache_golden_byte_equality():
 # item 140 the module shipped no @rs body and the emitter refused it.
 
 _JSONWIRE_RVL = Path(__file__).parent / "scenarios" / "jsonwire.rvl"
+_ROUTER_RVL = Path(__file__).parent / "scenarios" / "router.rvl"
+
+# item 167: a `#[test]` appended to the emitted router crate that boots the
+# three worker realms + Router, then drives the routed `worker` provider through
+# a probe plugin (the runtime has no root-level require). It proves the EMITTED
+# Router body distributes round-robin and fails over when a worker withdraws.
+_ROUTER_TEST_MODULE = """
+#[cfg(test)]
+mod _revl_router_scenario {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn probe(sink: Arc<Mutex<Vec<String>>>, n: usize) -> cordis::PluginHandle {
+        cordis::plugin_sync::<(), _>("Probe", cordis::Inject::new(["worker"]), move |ctx, _cfg| {
+            let svc = ctx.require::<Box<dyn Worker>>("worker")?;
+            let mut out = sink.lock().unwrap();
+            for i in 0..n { out.push(svc.call(format!("{}", i))); }
+            Ok(cordis::PluginOutput::none())
+        })
+    }
+
+    fn load(root: &cordis::Context, name: &str) -> cordis::Fiber {
+        let f = _revl_load(root, name, &serde_json::Value::Null).unwrap();
+        f.wait().unwrap();
+        f
+    }
+
+    #[test]
+    fn round_robin_then_failover() {
+        let root = cordis::Context::new();
+        let _w1 = load(&root, "w1");
+        let w2 = load(&root, "w2");
+        let _w3 = load(&root, "w3");
+        let _router = load(&root, "router");
+
+        // the emitted Router body fans out round-robin across w1,w2,w3
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let p = root.plugin(probe(sink.clone(), 6), ());
+        p.wait().unwrap();
+        assert_eq!(*sink.lock().unwrap(),
+            vec!["w1:0","w2:1","w3:2","w1:3","w2:4","w3:5"]);
+        p.dispose().ok();
+
+        // withdraw w2 -> its realm resolves to a non-ACTIVE handle and drops
+        // out; the next calls go to the survivors (reactive failover)
+        w2.dispose().ok();
+        let sink2 = Arc::new(Mutex::new(Vec::new()));
+        let p2 = root.plugin(probe(sink2.clone(), 6), ());
+        p2.wait().unwrap();
+        let got = sink2.lock().unwrap().clone();
+        assert!(got.iter().all(|r| r.starts_with("w1:") || r.starts_with("w3:")), "{:?}", got);
+        assert!(!got.iter().any(|r| r.starts_with("w2:")), "{:?}", got);
+        p2.dispose().ok();
+    }
+}
+"""
 
 
 def test_jsonwire_scenario_emits_serde_backed_bodies():
@@ -402,6 +458,39 @@ def test_cargo_check_compiles_v2_realms(tmp_path):
     ir = compile_files([str(ROOT / "examples" / "tenants.rvl")])
     result = _cargo_check(tmp_path, emit.emit(ir))
     assert result.returncode == 0, result.stderr
+
+
+def test_router_emits_per_realm_routing_struct():
+    """item 167: a routed require lowers to a per-key router struct that
+    re-resolves the live per-realm handle off a strict, realm-scoped
+    committed-view read, and the routed key leaves the Inject gate."""
+    src = emit.emit(compile_files([str(_ROUTER_RVL)]))
+    # the router struct implements the required service and re-resolves per call
+    assert "struct RevlRouterRouterWorker" in src
+    assert "impl Worker for RevlRouterRouterWorker" in src
+    assert 'isolate_with(self.key.as_str(), _revl_realm(realm.as_str()))' in src
+    assert 'get::<Box<dyn Worker>>(self.key.as_str())' in src
+    # the routed key is bound as the router, not a single-realm require, and is
+    # not in the Router's Inject gate (it has no single-realm provider)
+    assert "RevlRouterRouterWorker::_revl_new(ctx.clone())" in src
+    router_fn = src.split("pub fn router()")[1]
+    assert "cordis::Inject::none()" in router_fn.split("|ctx")[0]
+
+
+@needs_cargo
+def test_cargo_test_runs_router_round_robin_and_failover(tmp_path):
+    """item 167 definition-of-done on this tier: the EMITTED Router body itself
+    routes. Boots three worker realms + the Router and drives the routed
+    `worker` provider through a probe — round-robin across live workers, then
+    failover to the survivors when one withdraws — under a real `cargo test`."""
+    src = emit.emit(compile_files([str(_ROUTER_RVL)])) + _ROUTER_TEST_MODULE
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_router"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test result: ok" in result.stdout, result.stdout
+    assert "1 passed" in result.stdout, result.stdout
 
 
 @needs_cargo

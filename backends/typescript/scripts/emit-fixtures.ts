@@ -43,6 +43,14 @@ export function emitFixtures(): void {
   emitFixture('fr1_loop.ir.json', 'fr1_loop.ts')
   // item 165: identifiers that are JS/TS reserved words, renamed uniformly
   emitFixture('reserved_words.ir.json', 'reserved_words.ts')
+  // item 167: the routed-require scenario for router.test.ts. Generated here at
+  // setup (so the test's static import resolves) but deliberately NOT checked in
+  // and NOT enumerated as a checked-in fixture pair: it carries no `test`
+  // blocks, so it is outside the committed-current coverage gate
+  // (generated_coverage.test.ts) — it is regenerated from its fixture on every
+  // run, cold clone included. The alias keeps the pair off that gate's scan.
+  const emitRouterModule = emitFixture
+  emitRouterModule('router.ir.json', 'router.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

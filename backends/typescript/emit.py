@@ -298,6 +298,10 @@ class _Scope:
         self.requires: dict = component.get("requires") or {}
         self.config_fields = {f["name"] for f in component.get("config") or []}
         self.locals: set[str] = set()
+        # item 167: routed requires (item 162's `routes` IR) — read through a
+        # per-key router proxy the apply() builds, not a single-realm committed
+        # view (see the `req` branch of `_expr`).
+        self.routes: dict = component.get("routes") or {}
 
     def child(self) -> "_Scope":
         child = _Scope.__new__(_Scope)
@@ -305,6 +309,7 @@ class _Scope:
         child.requires = self.requires
         child.config_fields = self.config_fields
         child.locals = set(self.locals)
+        child.routes = self.routes
         return child
 
     def bind(self, name: str) -> str:
@@ -579,6 +584,12 @@ def _expr(node: object, ctx: "_Ctx") -> str:
                     f"reference to undeclared requirement {name!r} in component "
                     f"{scope.component.get('name')!r} (G1)"
                 )
+            # item 167: a routed require reads through its router proxy, which
+            # re-resolves a live per-realm worker on every call (failover). The
+            # proxy is a local the apply() built; a provide-method's
+            # `<key>.<op>(…)` closes over it.
+            if name in scope.routes:
+                return f"_revl_route_{_ident(name, 'requirement')}"
             # Committed-view access: resolved through the fiber's snapshot, so
             # it stays readable during this component's own teardown (R3).
             return f"ctx.{_ident(name, 'requirement')}"
@@ -1115,6 +1126,8 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
+    # item 167: routed requires (item 162's `routes` IR).
+    routes = component.get("routes") or {}
 
     for local, service in requires.items():
         _ident(local, "requirement")
@@ -1130,18 +1143,25 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
     for key in intercept:
         if key not in requires:
             raise EmitError(f"{name}: intercept key {key!r} is not a requirement")
+    for key in routes:
+        if key not in requires:
+            raise EmitError(f"{name}: routed key {key!r} is not a requirement")
 
     lines = _config_interface(component)
     lines.append(f"export const {name} = {{")
     lines.append(f"  name: {_string(name)},")
+    # item 167: routed keys never enter the inject gate — they have no
+    # single-realm provider (the workers live in the named realms), so a fiber
+    # waiting on one would pend forever. The router proxy resolves them lazily.
+    inject_keys = [k for k in requires if k not in routes]
     if intercept:
         # v2: dict-form inject — non-null values are copied into the fiber
         # context's intercept chain (the consumer-declared d(k)); null marks a
         # required-but-not-intercepted key.
-        inject = {key: intercept.get(key) for key in requires}
+        inject = {key: intercept.get(key) for key in inject_keys}
         lines.append(f"  inject: {_json(inject)},")
     else:
-        inject = ", ".join(_string(k) for k in requires)
+        inject = ", ".join(_string(k) for k in inject_keys)
         lines.append(f"  inject: [{inject}],")
     if provides:
         keys = ", ".join(_string(k) for k in provides)
@@ -1165,6 +1185,18 @@ def _component(component: dict, services: dict, doc_ctx: "_Ctx") -> list[str]:
         )
     else:
         lines.append("  apply(ctx: Context) {")
+
+    # item 167: build one router proxy per routed key before the body, so a
+    # provide-method reading `<key>` fans each call out across its worker realms
+    # (round-robin/least_loaded, re-resolving liveness per call).
+    for key in routes:
+        route = routes[key]
+        realms = "[" + ", ".join(_string(r) for r in route.get("realms") or []) + "]"
+        strategy = _string(route["strategy"]) if route.get("strategy") else "undefined"
+        lines.append(
+            f"    const _revl_route_{_ident(key, 'requirement')} = "
+            f"revlRouter(ctx, {_string(key)}, {realms}, {strategy})"
+        )
 
     # One generator per body: cordis runs disposers of a single effect
     # strictly sequentially (LIFO); top-level fiber effects would be
@@ -1843,6 +1875,69 @@ _REVL_SHOW_HELPER = """function revlShow(v: unknown): string {
 }"""
 
 
+_TS_ROUTER_SRC = """// item 167: the emitted realization of a routed require (item 162's `routes`
+// IR), mirroring src/revl/run.py::_Router. A component that
+// `requires <k> in realms("w1"…"wN") strategy(...)` provides <k> once
+// downstream (G2) while fanning each call out across the worker realms. The
+// proxy holds no worker handle — it re-resolves the live per-realm handle on
+// every call (`ctx.root.isolate(k, realmLabel(w)).reflect.get(k)`, nullish for
+// a non-ACTIVE provider), so a withdrawn worker drops out and its calls go to
+// the survivors (reactive failover).
+function revlRouter(
+  ctx: Context,
+  key: string,
+  realms: string[],
+  strategy?: string,
+): any {
+  const root = ctx.root
+  const strat = strategy ?? 'round_robin'
+  let cursor = 0
+  const served: Record<string, number> = {}
+  for (const r of realms) served[r] = 0
+  const handle = (realm: string): any =>
+    (root as any).isolate(key, realmLabel(realm)).reflect.get(key)
+  const live = (): Array<[string, any]> =>
+    realms.map((r) => [r, handle(r)] as [string, any]).filter(([, h]) => h != null)
+  const select = (): any => {
+    const l = live()
+    if (l.length === 0) {
+      throw new Error(
+        `revl: router for ${JSON.stringify(key)} has no live worker: all ` +
+          `${realms.length} realm(s) (${realms.join(', ')}) have withdrawn`,
+      )
+    }
+    let chosen: [string, any] | undefined
+    if (strat === 'least_loaded') {
+      // route to the live realm served fewest; ties keep declaration order
+      chosen = l.reduce((a, b) => (served[b[0]] < served[a[0]] ? b : a))
+    } else {
+      // round_robin — next live realm in declaration order
+      const n = realms.length
+      for (let off = 0; off < n; off++) {
+        const cand = realms[(cursor + off) % n]
+        const m = l.find(([rlm]) => rlm === cand)
+        if (m) {
+          cursor = (cursor + off + 1) % n
+          chosen = m
+          break
+        }
+      }
+    }
+    served[chosen![0]]++
+    return chosen![1]
+  }
+  return new Proxy(
+    {},
+    {
+      get(_t, method) {
+        if (typeof method !== 'string') return undefined
+        return (...args: any[]) => (select() as any)[method](...args)
+      },
+    },
+  )
+}"""
+
+
 def _revl_helpers(ir: dict) -> list[str]:
     """The helper functions this document actually needs, in dependency order.
 
@@ -2341,6 +2436,13 @@ def _uses_spawn(ir: dict) -> bool:
     return found
 
 
+def _uses_routes(ir: dict) -> bool:
+    """True iff any component carries a routed require (item 162's `routes` IR),
+    so the module imports `realmLabel` and emits the router helper. A document
+    with no routed require stays byte-identical to the pre-feature output."""
+    return any(c.get("routes") for c in ir.get("components") or [])
+
+
 def _uses_lifecycle_tests(ir: dict) -> bool:
     """True iff the document carries any `lifecycle test` block (§7.1), so the
     module imports the runtime's plug + residue-introspection helpers and the
@@ -2353,6 +2455,9 @@ def _runtime_imports(ir: dict, runtime_import: str) -> str:
     spawn node is present (docs/design-v2-instances.md phase 2); the lifecycle
     drivers add `plug` + the no-residue introspection (FR-5, §7.1)."""
     names = ["host"]
+    if _uses_routes(ir):
+        # item 167: the router resolves its worker realms by label.
+        names.append("realmLabel")
     if _uses_spawn(ir):
         names.append("spawn")
     if _uses_lifecycle_tests(ir):
@@ -2388,6 +2493,13 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
     # 2.0 document does — without this a v1 module referencing `revlI64` or
     # `revlEq` would emit a call to a function that is not there.
     out.extend(_revl_helpers(ir))
+
+    # item 167: the emitted realization of a routed require (item 162's `routes`
+    # IR), mirroring src/revl/run.py::_Router. Emitted only for a routed-require
+    # program, so a document with no routed require is byte-identical.
+    if _uses_routes(ir):
+        out.append(_TS_ROUTER_SRC)
+        out.append("")
 
     # Service interfaces (coeffect interfaces, DESIGN.md §3.1).
     for sname, service in services.items():

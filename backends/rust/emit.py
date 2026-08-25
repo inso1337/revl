@@ -557,6 +557,10 @@ class _Env:
         self.name = component["name"]
         self.reqs: dict[str, str] = dict(component.get("requires") or {})
         self.provides: dict[str, str] = dict(component.get("provides") or {})
+        # item 167: routed requires (item 162's `routes` IR) — a required key
+        # bound across N named realms with a strategy. Its handle is a router
+        # struct (re-resolving live workers per call), not a single `ctx.require`.
+        self.routes: dict[str, dict] = dict(component.get("routes") or {})
         self.types: dict = types or {}
         self.functions: list = functions or []
         self.externs: list = externs or []
@@ -1728,7 +1732,11 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 inject_parts.append(f".require({_string(local)})")
         inject = "Inject::none()" + "".join(inject_parts)
     else:
-        inject = "Inject::none()" if not env.reqs else f"Inject::new({_string(list(env.reqs.keys()))})"
+        inject = _rust_inject(env)
+
+    # item 167: a per-(component, key) router struct for each routed require.
+    for key in env.routes:
+        out.extend(_emit_router_struct(env, cname, key, env.reqs[key], env.routes[key]))
 
     uses_await = _component_uses_await(component)
     plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
@@ -1748,8 +1756,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     # is instead applied at plug time via `_revl_isolate_ctx` below, mirroring
     # the python/typescript backends' `plug()` helper. `ctx` is therefore
     # already the isolated context here, so provides/requires resolve in-realm.
-    for local, service in env.reqs.items():
-        out.append(f"            let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
+    _emit_req_bindings(env, cname, out, indent=3)
     for step in component.get("body") or []:
         if step.get("step") == "provide":
             key = step.get("name")
@@ -1792,6 +1799,12 @@ def _collect_realm_labels(components: list) -> list[str]:
     for component in components:
         for realm in (component.get("isolate") or {}).values():
             labels.add(realm)
+        # item 167: a router resolves its worker realms by label too; every such
+        # realm has a provider (G2, verified at link time) so it is normally
+        # already collected, but register it explicitly to be robust.
+        for route in (component.get("routes") or {}).values():
+            for realm in route.get("realms") or []:
+                labels.add(realm)
     return sorted(labels)
 
 
@@ -1834,6 +1847,115 @@ def _revl_realm_helper(components: list) -> list[str]:
     )
     return lines
 
+
+
+def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
+                        route: dict) -> list[str]:
+    """item 167: the emitted realization of a routed require (item 162's
+    `routes` IR) on cordis-rs, mirroring src/revl/run.py::_Router.
+
+    A per-(component, key) struct implementing the required service trait. It
+    holds no worker handle — every trait call re-resolves the live per-realm
+    handle off the same strict, realm-scoped committed-view read a normal
+    require uses (`ctx.root().isolate_with(k, realm(w)).get::<Box<dyn S>>(k)`,
+    which cordis-rs returns `Ok(None)` for a non-ACTIVE provider). So a
+    withdrawn worker drops out of the live set and its calls go to the
+    survivors — reactive failover from the emitted body. The struct is wrapped
+    as the component's `Arc<Box<dyn S>>` handle, so a provide-method's
+    `<key>.<op>(…)` forwards straight through it (G2: one provider downstream).
+    """
+    struct = f"RevlRouter{cname}{_camel(key)}"
+    boxed = f"std::sync::Arc<Box<dyn {service}>>"
+    realms = list(route.get("realms") or [])
+    strategy = route.get("strategy") or "round_robin"
+    realm_lits = ", ".join(f"{_string(r)}.to_string()" for r in realms)
+    methods = (env.services.get(service) or {}).get("methods") or {}
+
+    out: list[str] = [
+        f"struct {struct} {{",
+        "    ctx: cordis::Context,",
+        "    key: String,",
+        "    realms: Vec<String>,",
+        "    strategy: String,",
+        "    cursor: std::sync::Mutex<usize>,",
+        "    served: std::sync::Mutex<std::collections::HashMap<String, u64>>,",
+        "}",
+        f"impl {struct} {{",
+        f"    fn _revl_new(ctx: cordis::Context) -> {boxed} {{",
+        "        std::sync::Arc::new(Box::new(Self {",
+        "            ctx: ctx.root(),",
+        f"            key: {_string(key)}.to_string(),",
+        f"            realms: vec![{realm_lits}],",
+        f"            strategy: {_string(strategy)}.to_string(),",
+        "            cursor: std::sync::Mutex::new(0),",
+        "            served: std::sync::Mutex::new(std::collections::HashMap::new()),",
+        "        }))",
+        "    }",
+        f"    fn _revl_live(&self) -> Vec<(String, {boxed})> {{",
+        "        let mut out = Vec::new();",
+        "        for realm in &self.realms {",
+        "            let scoped = self.ctx.isolate_with("
+        "self.key.as_str(), _revl_realm(realm.as_str()));",
+        f"            if let Ok(Some(handle)) = scoped.get::<Box<dyn {service}>>"
+        "(self.key.as_str()) {",
+        "                out.push((realm.clone(), handle));",
+        "            }",
+        "        }",
+        "        out",
+        "    }",
+        f"    fn _revl_select(&self) -> {boxed} {{",
+        "        let live = self._revl_live();",
+        "        if live.is_empty() {",
+        "            panic!(\"revl: router for {:?} has no live worker: all {} "
+        "realm(s) ({}) have withdrawn\", self.key, self.realms.len(), "
+        "self.realms.join(\", \"));",
+        "        }",
+        "        if self.strategy == \"least_loaded\" {",
+        "            let served = self.served.lock().unwrap();",
+        "            let mut best: usize = 0;",
+        "            for i in 1..live.len() {",
+        "                let ci = *served.get(&live[i].0).unwrap_or(&0);",
+        "                let cb = *served.get(&live[best].0).unwrap_or(&0);",
+        "                if ci < cb { best = i; }",
+        "            }",
+        "            drop(served);",
+        "            let realm = live[best].0.clone();",
+        "            *self.served.lock().unwrap().entry(realm).or_insert(0) += 1;",
+        "            live[best].1.clone()",
+        "        } else {",
+        "            let n = self.realms.len();",
+        "            let mut cursor = self.cursor.lock().unwrap();",
+        "            let start = *cursor;",
+        "            for off in 0..n {",
+        "                let cand = &self.realms[(start + off) % n];",
+        "                if let Some((realm, handle)) = live.iter().find(|(r, _)| r == cand) {",
+        "                    *cursor = (start + off + 1) % n;",
+        "                    drop(cursor);",
+        "                    *self.served.lock().unwrap().entry(realm.clone())"
+        ".or_insert(0) += 1;",
+        "                    return handle.clone();",
+        "                }",
+        "            }",
+        "            unreachable!()",
+        "        }",
+        "    }",
+        "}",
+        f"impl {service} for {struct} {{",
+    ]
+    for mname, method in methods.items():
+        rmname = _mname(mname)
+        params = ", ".join(
+            f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'), env.types)}"
+            for p in method.get("params") or []
+        )
+        args = ", ".join(_ident(p.get("name"), "parameter")
+                         for p in method.get("params") or [])
+        ret = _rust_type(method.get("returns"), env.types) if method.get("returns") else "()"
+        out.append(f"    fn {rmname}(&self, {params}) -> {ret} {{ "
+                   f"self._revl_select().{rmname}({args}) }}")
+    out.append("}")
+    out.append("")
+    return out
 
 
 def _emit_component(component: dict, services: dict, ir: dict | None = None) -> list[str]:
@@ -1896,7 +2018,11 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
         out.append("}")
         out.append("")
 
-    inject = "Inject::none()" if not env.reqs else f"Inject::new({_string(list(env.reqs.keys()))})"
+    # item 167: a per-(component, key) router struct for each routed require.
+    for key in env.routes:
+        out.extend(_emit_router_struct(env, cname, key, env.reqs[key], env.routes[key]))
+
+    inject = _rust_inject(env)
     uses_await = _component_uses_await(component)
     plugin_fn = "cordis::plugin_async::<{0}, _, _>" if uses_await else "cordis::plugin_sync::<{0}, _>"
     closure = "        |ctx, config| async move {" if uses_await else "        |ctx, config| {"
@@ -1907,8 +2033,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     out.append(closure)
     out.extend(_emit_config_application(component, config_ty, indent=3))
     out.extend(_emit_provide_config_local(component, indent=3))
-    for local, service in env.reqs.items():
-        out.append(f"            let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
+    _emit_req_bindings(env, cname, out, indent=3)
     for step in component.get("body") or []:
         _emit_step(step, env, out, indent=3)
     out.append("            Ok(cordis::PluginOutput::none())")
@@ -1917,6 +2042,28 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
     out.append("}")
     out.append("")
     return out
+
+
+def _rust_inject(env: "_Env") -> str:
+    """The `Inject` gate. item 167: routed keys never enter the gate — they have
+    no single-realm provider (the workers live in the named realms), so a fiber
+    waiting on one would hang Pending forever; the router resolves them per call."""
+    gated = [k for k in env.reqs if k not in env.routes]
+    return "Inject::none()" if not gated else f"Inject::new({_string(gated)})"
+
+
+def _emit_req_bindings(env: "_Env", cname: str, out: list[str], indent: int) -> None:
+    """Bind each required service in the plugin closure. A routed key (item 167)
+    binds a router struct that re-resolves live workers per call; a plain
+    require binds the single active provider through the Inject gate."""
+    pad = "    " * indent
+    for local, service in env.reqs.items():
+        if local in env.routes:
+            struct = f"RevlRouter{cname}{_camel(local)}"
+            out.append(f"{pad}let {local}: std::sync::Arc<Box<dyn {service}>> = "
+                       f"{struct}::_revl_new(ctx.clone());")
+        else:
+            out.append(f"{pad}let {local} = ctx.require::<Box<dyn {service}>>({_string(local)})?;")
 
 
 def _emit_setup_value(node: dict, env: _Env) -> str:
