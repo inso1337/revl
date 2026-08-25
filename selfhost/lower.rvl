@@ -147,30 +147,65 @@
 // All four carry `code="G4"` (the emission-capability machinery), so they
 // cross-check on tag AND message exactly like the other G4 surfaces.
 //
+// Slice 6 (this file, the FINAL Path C slice) closes the async-coloring rule-2
+// gap and mirrors the tractable code-less refusals — the ones the reference
+// raises with NO `e.code`, so the cross-check matches them on message text:
+//
+//   * async coloring rule 2 (item 92 §3 / `_async_callables`'s `async_params`):
+//     a fn that CALLS one of its own parameters whose declared type is an async
+//     function type is itself colored. `async_colored` now folds
+//     `callees ∩ asyncParams` into the fixed point, so a sync method reaching
+//     such a fn is A1-refused, naming both the colored fn and the callables it
+//     reaches — closing approximation (a).
+//
+//   * the bind-to-a-handle rule (decision 2) and the unknown-spawn-target check
+//     (`_lower_spawn`): an unbound `effect spawn`, or a `spawn` naming a
+//     component not in the composition. Code-less; tagged "SPAWN".
+//
+//   * `handoff` admission (item 53): the prelude ordering rule (reuses the
+//     PRELUDE wording), a target that is not a PROVIDED key, and the one-per-
+//     component uniqueness rule. Target/uniqueness are code-less; tagged
+//     "HANDOFF".
+//
+//   * `isolate` target validation (`IsolateStmt` branch): the single-realm pin
+//     form must name a key from the header (a requirement or a provision), and
+//     a key is pinned at most once. Code-less; tagged "G1" (the declared-wiring
+//     family, as `intercept` is).
+//
 // ============================================================ WHAT REMAINS
-// Deliberately out of this file, for follow-on lowerings (each a real part of
-// lower.py the gate does not yet mirror):
+// Path C is COMPLETE for the SINGLE-SOURCE admission surface — every guarantee
+// `admit_src(src)` can decide from one program text is mirrored and cross-checked
+// (G1-G4, A1, PRELUDE, the spawn dimension, handoff, isolate). The residue below
+// is either NOT a single-source verdict (so it has no `admit_src` cross-check) or
+// a soundness approximation invisible to every cross-checked input:
 //   * The type/arg-checking spine (checker.rvl already cross-checks typing).
-//   * Two async-coloring APPROXIMATIONS this slice still carries (both documented
-//     at their sites): (a) rule-2 param-coloring — a fn that CALLS an async-typed
-//     parameter is not itself colored in `async_colored`; (b) leak-reach descends
-//     into a nested COERCED arrow rather than stopping at it. Neither is reached
-//     by any cross-checked fixture; closing them soundly needs richer arrow-color
-//     tracking, so they are DEFERRED.
-//   * Spawn sub-checks that carry NO `code` (so they are outside the differential
-//     tag vocabulary): `spawn`-config field validation, unknown/ambient spawn
-//     target, the bind-to-a-handle rule, and nested (non-statement) spawn
-//     discovery — the gate parses these forms without validating them.
-//   * State hand-off admission (`handoff`), multi-realm routing (`isolate … in
-//     realms(...)`), service replacement admission, ambient (running-manifest)
-//     composition, fault/lifecycle/prop tests, ir_version computation, and — of
-//     course — every emitter-oriented lowering detail (the gate produces a
-//     verdict, not an IR document).
+//   * One async-coloring APPROXIMATION remains (documented at its site):
+//     leak-reach / callee-collection descends into a nested COERCED arrow rather
+//     than stopping at it (the reference's `stop_async_arrows`). Rule 2 masks it
+//     for every arrow whose callee actually calls its async-typed slot; the
+//     residual gap needs an async-typed-but-uncalled parameter and is reached by
+//     no cross-checked fixture. Closing it soundly needs per-nesting arrow-color
+//     state, so it stays DEFERRED.
+//   * Multi-realm routing (`isolate … in realms(...)`) — the routing FORM is
+//     parsed but left unvalidated: its component-level refusals plus the
+//     link-time per-realm provider check (item 162) are a self-contained follow-on.
+//   * Spawn `with { … }` config-field validation and nested (non-statement)
+//     spawn discovery — the gate skips the config block structurally.
+//   * AMBIENT-input admission (no single-source cross-check via `admit_src`):
+//     service replacement, `handoff` state replacement against a running
+//     manifest, ambient (running-manifest) composition — `check_and_lower`'s
+//     `ambient` parameter has no `admit_src` analogue.
+//   * `ir_version` computation, fault/lifecycle/prop test declarations, and every
+//     emitter-oriented lowering detail — the gate produces a verdict, not an IR
+//     document. The native `revl_compile` reachable on top of this gate pairs it
+//     with the py service's code generation (Path A) for exactly those.
 //
 // Verdict shape: `admit_src` returns "" to admit, else a two-part string
 // "<G>|<message>" where <G> is the guarantee tag ("G1" | "G2" | "G3" | "G4" |
-// "A1" | "PRELUDE") and <message> is the refusal spelled exactly as the
-// reference spells it. The cross-check compares both the tag and the message.
+// "A1" | "PRELUDE" | "SPAWN" | "HANDOFF") and <message> is the refusal spelled
+// exactly as the reference spells it. The cross-check compares both the tag and
+// the message; for the code-less refusals ("SPAWN"/"HANDOFF" and the code-less
+// "G1"/"PRELUDE" families) the message text is the ground truth.
 
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
@@ -195,8 +230,15 @@ use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
 // fn's statement body — the module-fn twin refusals
 // (`_refuse_leaky_pure_arrow` and the first-class async-value refusal) walk it;
 // an extern has none, so its body is [].
+//
+// `asyncParams` are the parameter NAMES whose declared type is an async function
+// type — rule 2 of the async coloring (item 92 §3 / `_async_callables`'s
+// `async_params`): a fn that CALLS such a parameter is itself colored (a
+// declaration-shaped seed), so `async_colored` unions `callees ∩ asyncParams`
+// into the fixed point exactly as the reference does.
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
-             callees: List[Str], asyncSlots: List[Int], body: List[Stmt] }
+             callees: List[Str], asyncSlots: List[Int], asyncParams: List[Str],
+             body: List[Stmt] }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -349,6 +391,19 @@ fn async_slots_of(ps: List[ParamN]) -> List[Int] {
   return out
 }
 
+// The parameter NAMES whose declared type is an async function type — rule 2's
+// seed (`_async_callables`'s `async_params`): a fn calling one of these is
+// colored.
+fn async_params_of(ps: List[ParamN]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ps.length()) {
+    if (is_async_fn_ty(ps[i].ty)) { out = out.push(ps[i].name) }
+    i += 1
+  }
+  return out
+}
+
 fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
   var out = xs
   var i = 0
@@ -453,9 +508,9 @@ fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
 // every construction from mutable state goes through one of these, exactly as
 // checker.rvl does.
 fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
-          bd: List[Stmt]) -> FnD {
+          aps: List[Str], bd: List[Stmt]) -> FnD {
   return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
-           asyncSlots: slots, body: bd }
+           asyncSlots: slots, asyncParams: aps, body: bd }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
@@ -492,6 +547,15 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target }
+}
+
+// An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
+// instance's own teardown, which needs a handle to name, so a bare spawn is
+// refused (lower.py decision 2 — the bind-to-a-handle rule). kind
+// "spawn_unbound" keeps it out of the template/handle tables (it never
+// composes); the post-parse `spawn_form_verdict` reports it.
+fn mkstmt_spawn_unbound(target: Str) -> Stmt {
+  return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -573,6 +637,24 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     let ra = expr_at(ts, lo + 1)
     if (is_bad(ra.e)) { return mk_srun([mkstmt("skip", ra.e)], hi) }
     return mk_srun([mkstmt("await", ra.e)], ra.i)
+  }
+  // a bare `effect spawn <Comp> …` with no `let` handle — parser.rvl has no
+  // spawn production, so `spawn` is read at the token level; unbound, it is the
+  // bind-to-a-handle refusal (decision 2). Skip the target/`with`/`undo` tail
+  // structurally so the reader makes forward progress.
+  if (t.kind == "kw" && t.text == "effect" && atw(ts, lo + 1, "spawn")) {
+    let tgt = tkc(ts, lo + 2).text
+    var sk = lo + 3
+    if (atw(ts, sk, "with") && atk(ts, sk + 1, "{")) {
+      let ce = close_brace(ts, sk + 1)
+      if (ce != 0 - 1) { sk = ce }
+    }
+    if (atw(ts, sk, "undo")) {
+      let su = expr_at(ts, sk + 1)
+      if (!is_bad(su.e)) { return mk_srun([mkstmt_spawn_unbound(tgt)], su.i) }
+      return mk_srun([mkstmt_spawn_unbound(tgt)], hi)
+    }
+    return mk_srun([mkstmt_spawn_unbound(tgt)], sk)
   }
   if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
     let rf = expr_at(ts, lo + 1)
@@ -714,7 +796,8 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
     } else { k += 1 }
   }
   return mk_step(push_fn(pg, mk_fnd(nm, isEm, isAsync, [],
-                                    async_slots_of(ps.ps), [])), k)
+                                    async_slots_of(ps.ps),
+                                    async_params_of(ps.ps), [])), k)
 }
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -733,6 +816,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
                               isAsyncExtern: false,
                               callees: body_callees(body, 0, []),
                               asyncSlots: async_slots_of(ps.ps),
+                              asyncParams: async_params_of(ps.ps),
                               body: body }), bend)
 }
 
@@ -899,10 +983,45 @@ fn intercept_twice_msg(key: Str, cname: Str) -> Str {
   return "key `".concat(key).concat("` is intercepted twice in ").concat(cname)
 }
 
+// `isolate` target validation (lower.py's `IsolateStmt` branch): the key must be
+// declared by the component header (a requirement OR a provision), and a key is
+// isolated at most once. Both are code-less refusals in the reference; the gate
+// tags them G1 (the declared-wiring family, as `intercept` does) so the oracle
+// classifies them alongside the other G1 head-resolution refusals.
+fn isolate_target_msg(key: Str, cname: Str) -> Str {
+  return "`".concat(key)
+    .concat("` is not a declared requirement or provision of ").concat(cname)
+}
+
+fn isolate_twice_msg(key: Str, cname: Str) -> Str {
+  return "key `".concat(key).concat("` is isolated twice in ").concat(cname)
+}
+
+fn iso_has(iso: List[ProvKey], key: Str, i: Int) -> Bool {
+  if (i >= iso.length()) { return false }
+  if (iso[i].key == key) { return true }
+  return iso_has(iso, key, i + 1)
+}
+
+// `handoff <key>: <Type>` (item 53, lower.py's `HandoffStmt` branch): the
+// verified state hand-off of a stateful provider. A prelude declaration (it
+// names the provider's live state before any effect creates it) that targets a
+// key this component PROVIDES, at most once. The prelude case reuses the
+// PRELUDE wording; the target and uniqueness cases are code-less refusals the
+// gate tags "HANDOFF" and the oracle classifies by message.
+fn handoff_target_msg(key: Str, cname: Str) -> Str {
+  return "`".concat(key).concat("` is not a declared provision of ").concat(cname)
+}
+
+fn handoff_twice_msg(cname: Str) -> Str {
+  return cname.concat(" declares more than one `handoff` — a component has one ")
+    .concat("activation frame, so it hands off one state shape")
+}
+
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                reqh: List[Bind], cname: Str, provs: List[Provide],
                setup: List[Stmt], iso: List[ProvKey], icept: List[Str],
-               action: Bool) -> ProvR {
+               hoff: Bool, action: Bool) -> ProvR {
   if (i >= end || atk(ts, i, "}")) {
     return mk_provr(provs, setup, iso, "", i, true)
   }
@@ -920,25 +1039,56 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        provs.push({ key: key,
                                     svcName: bind_lookup(provh, key, 0),
                                     methods: ms.xs }),
-                       setup, iso, icept, true)
+                       setup, iso, icept, hoff, true)
   }
-  // `isolate <key> in realm("<label>")` — the realm dimension G2/G3 read, and
-  // (this slice) the prelude ordering rule: after an action it is refused.
+  // `isolate <key> in realm("<label>")` — the realm dimension G2/G3 read, the
+  // prelude ordering rule (after an action it is refused), and (this slice) the
+  // isolate TARGET validation: the key must be declared by the header, isolated
+  // at most once. The `isolate ... in realms(...)` routing form is a separate,
+  // deferred surface — it is left to the fallthrough (unvalidated).
   if (atw(ts, i, "isolate")) {
     if (action) {
       return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("isolate")),
                       skip_line(ts, i), true)
     }
     let key = tkc(ts, i + 1).text
-    // kw `in`, kw `realm`, `(`, string label, `)`
+    // kw `in`, kw `realm`, `(`, string label, `)` — the single-realm pin form.
     if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
         && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")) {
+      if (!bind_has(reqh, key) && !bind_has(provh, key)) {
+        return mk_provr(provs, setup, iso,
+          tagged("G1", isolate_target_msg(key, cname)), skip_line(ts, i), true)
+      }
+      if (iso_has(iso, key, 0)) {
+        return mk_provr(provs, setup, iso,
+          tagged("G1", isolate_twice_msg(key, cname)), skip_line(ts, i), true)
+      }
       let rlm = tkc(ts, i + 5).text
       return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                         setup, iso.push(mk_provkey(key, rlm)), icept, action)
+                         setup, iso.push(mk_provkey(key, rlm)), icept, hoff, action)
     }
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                       setup, iso, icept, action)
+                       setup, iso, icept, hoff, action)
+  }
+  // `handoff <key>: <Type>` (item 53): a prelude declaration naming a PROVIDED
+  // key's live state, at most once per component. Prelude order first, then the
+  // target/uniqueness validation. It is not an action (the reference `continue`s).
+  if (atw(ts, i, "handoff")) {
+    if (action) {
+      return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("handoff")),
+                      skip_line(ts, i), true)
+    }
+    let key = tkc(ts, i + 1).text
+    if (!bind_has(provh, key)) {
+      return mk_provr(provs, setup, iso,
+        tagged("HANDOFF", handoff_target_msg(key, cname)), skip_line(ts, i), true)
+    }
+    if (hoff) {
+      return mk_provr(provs, setup, iso,
+        tagged("HANDOFF", handoff_twice_msg(cname)), skip_line(ts, i), true)
+    }
+    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                       setup, iso, icept, true, action)
   }
   // `intercept <key> with { ... }` supplies metadata, not a realm; the prelude
   // rule applies first, then the target/uniqueness validation. Its block is
@@ -965,11 +1115,11 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
       let ce = close_brace(ts, k)
       if (ce != 0 - 1) {
         return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
-                           icept.push(key), action)
+                           icept.push(key), hoff, action)
       }
     }
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
-                       setup, iso, icept.push(key), action)
+                       setup, iso, icept.push(key), hoff, action)
   }
   // `config { <field>: <Type> ... }` is a component-level declaration, not a
   // body action (the reference reads it off the component header, never the
@@ -979,7 +1129,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     let ce = close_brace(ts, i + 1)
     if (ce != 0 - 1) {
       return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
-                         icept, action)
+                         icept, hoff, action)
     }
   }
   // component setup: a statement run (item 168: ended at a structural boundary,
@@ -989,7 +1139,7 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   let r = p_stmt_run(ts, i, le)
   let nx = r.i > i ? r.i : le
   return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
-                     append_stmts(setup, r.ss), iso, icept, true)
+                     append_stmts(setup, r.ss), iso, icept, hoff, true)
 }
 
 // The realm a component resolves `key` in: its isolate binding, else shared.
@@ -1025,7 +1175,8 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
     return { pg: bad_prog(pg, "unbalanced braces in component"),
              i: ts.length() }
   }
-  let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [], false)
+  let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [],
+                         false, false)
   if (!body.ok) {
     return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
              i: end }
@@ -1132,8 +1283,12 @@ fn emit_caps(fs: List[FnD]) -> CapsT {
   return caps
 }
 
-// The async twin: a name is colored iff it is an `async` extern or its body
-// calls a colored callee. Monotone closure over the same finite name set.
+// The async twin: a name is colored iff it is an `async` extern, its body calls
+// a colored callee, or (rule 2, item 92 §3) its body CALLS one of its own
+// parameters whose declared type is an async function type (`asyncParams`) — a
+// declaration-shaped seed the fixed point folds in exactly as
+// `_async_callables`'s `calls_async_param` does. Monotone closure over the same
+// finite name set.
 fn async_colored(fs: List[FnD]) -> List[Str] {
   var colored: List[Str] = []
   var i = 0
@@ -1148,7 +1303,7 @@ fn async_colored(fs: List[FnD]) -> List[Str] {
     while (i < fs.length()) {
       let f = fs[i]
       if (!contains(colored, f.name)) {
-        if (any_in(f.callees, colored)) {
+        if (any_in(f.callees, colored) || any_in(f.callees, f.asyncParams)) {
           colored = colored.push(f.name)
           changed = true
         }
@@ -1720,7 +1875,8 @@ fn handles_of(comp: CompD) -> Map[Str, Str] {
 fn handles_in(ss: List[Stmt], i: Int, m: Map[Str, Str]) -> Map[Str, Str] {
   if (i >= ss.length()) { return m }
   let s = ss[i]
-  let m2 = s.spawnTarget != "" ? m.set(s.bind, s.spawnTarget) : m
+  let hit = s.spawnTarget != "" && s.kind == "effect"
+  let m2 = hit ? m.set(s.bind, s.spawnTarget) : m
   return handles_in(ss, i + 1, m2)
 }
 
@@ -2182,7 +2338,8 @@ type SpawnEdge = { parent: Str, child: Str }
 fn stmt_spawns(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
   if (i >= ss.length()) { return acc }
   let s = ss[i]
-  return stmt_spawns(ss, i + 1, s.spawnTarget != "" ? acc.push(s.spawnTarget) : acc)
+  let hit = s.spawnTarget != "" && s.kind == "effect"
+  return stmt_spawns(ss, i + 1, hit ? acc.push(s.spawnTarget) : acc)
 }
 
 fn comp_all_spawns(comp: CompD) -> List[Str] {
@@ -2456,6 +2613,59 @@ fn check_spawn_atten(comps: List[CompD], ci: Int, base: SurfMap, closed: SurfMap
   return check_spawn_atten(comps, ci + 1, base, closed)
 }
 
+// ---------------------------------------------------------------- spawn forms
+//
+// Two code-less spawn refusals decided as a spawn statement lowers (before the
+// composition-time bounds/attenuation): the bind-to-a-handle rule (decision 2 —
+// an unbound `effect spawn` has no handle to name its teardown) and the
+// unknown-spawn-target check (`_lower_spawn` — a spawn names a component of this
+// composition). Both carry no `code` in the reference, so the gate tags them
+// "SPAWN" and the oracle matches them by message text. bind-to-a-handle is
+// checked first (it fires at the statement, before `_lower_spawn` runs), so a
+// bare spawn of an unknown component is still the handle refusal.
+
+fn comp_names(comps: List[CompD], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= comps.length()) { return acc }
+  return comp_names(comps, i + 1, acc.push(comps[i].name))
+}
+
+fn spawn_form_stmt(s: Stmt, names: List[Str]) -> Str {
+  if (s.kind == "spawn_unbound") {
+    return tagged("SPAWN",
+      "`spawn` must be bound to a handle: `let s = effect spawn "
+        .concat(s.spawnTarget).concat(" … undo s.dispose()`"))
+  }
+  if (s.spawnTarget != "" && s.kind == "effect" && !contains(names, s.spawnTarget)) {
+    return tagged("SPAWN",
+      "`spawn ".concat(s.spawnTarget).concat("` names an unknown component"))
+  }
+  return ""
+}
+
+fn spawn_form_stmts(ss: List[Stmt], i: Int, names: List[Str]) -> Str {
+  if (i >= ss.length()) { return "" }
+  let r = spawn_form_stmt(ss[i], names)
+  if (r != "") { return r }
+  return spawn_form_stmts(ss, i + 1, names)
+}
+
+fn spawn_form_comp(comp: CompD, names: List[Str]) -> Str {
+  let sv = spawn_form_stmts(comp.setup, 0, names)
+  if (sv != "") { return sv }
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      let r = spawn_form_stmts(pv.methods[mi].body, 0, names)
+      if (r != "") { return r }
+      mi += 1
+    }
+    pi += 1
+  }
+  return ""
+}
+
 // The spawn-boundary gate: bounds then attenuation, both `code="G4"`, run only
 // when the program spawns (empty edge list -> no obligation, as in the reference).
 fn check_spawn(pg: Prog, cx: Ctx) -> Str {
@@ -2663,13 +2873,20 @@ pub fn admit_src(src: Str) -> Str {
   // component loop).
   let fnv = check_module_fns(pg.fns, 0, base)
   if (fnv != "") { return fnv }
+  let cnames = comp_names(pg.comps, 0, [])
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
-    // a body-scan refusal (the PRELUDE rule or `intercept` metadata validation)
-    // is decided before the provide methods are gated, so it is surfaced first,
-    // in composition order. `comp.refuse` is already the full "<TAG>|<message>".
+    // a body-scan refusal (the PRELUDE rule, `intercept`/`isolate`/`handoff`
+    // metadata validation) is decided before the provide methods are gated, so
+    // it is surfaced first, in composition order. `comp.refuse` is already the
+    // full "<TAG>|<message>".
     if (comp.refuse != "") { return comp.refuse }
+    // the code-less spawn-form refusals (bind-to-a-handle, unknown target) fire
+    // as a spawn statement lowers — before the component's G4/A1 provider
+    // verdicts and before the composition-time spawn bounds.
+    let sf = spawn_form_comp(comp, cnames)
+    if (sf != "") { return sf }
     let cx = ctx_for(base, comp)
     let v = check_component(comp, cx)
     if (v != "") { return v }
@@ -2928,4 +3145,101 @@ component Router requires kv_a: Store requires kv_b: StoreB {
   let a = effect spawn TenantAWorker with { } undo a.dispose()
   let b = effect spawn TenantBWorker with { } undo b.dispose()
 }""") == ""
+}
+
+// ---- slice 6 (final): coloring rule 2, code-less spawn forms, handoff, isolate
+
+// async coloring rule 2 (item 92 §3): `caller` CALLS its async-typed parameter,
+// so it is colored; a sync method reaching it is refused, naming both the
+// colored fn and the async extern the arrow reaches, sorted.
+test "rule-2 param-colored fn in a sync method is refused (A1)" {
+  let v = admit_src("""extern emission async fn tick() -> Int = @py { return 1 }
+fn caller(cb: () -> Async[Int]) -> Int { return cb() }
+service S { emission fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let r = caller(() => tick())   return 0 } }
+}""")
+  assert v == "A1|`S.go` is declared sync, but this implementation reaches async function `caller`, `tick` — a sync method has no in-flight window (A1)"
+}
+
+// the same rule-2-colored fn reached from an ASYNC method admits (it has an
+// in-flight window) — the coercion/coloring half that stays clean.
+test "async method reaching a rule-2-colored fn admits" {
+  assert admit_src("""extern emission async fn tick() -> Int = @py { return 1 }
+fn caller(cb: () -> Async[Int]) -> Int { return cb() }
+service S { emission async fn go() -> Int }
+component C provides s: S {
+  provide s { async fn go() { let r = caller(() => tick())   return 0 } }
+}""") == ""
+}
+
+// a spawn naming a component not in this composition (`_lower_spawn`).
+test "spawn of an unknown component is refused (SPAWN)" {
+  let v = admit_src("""service Sup { fn run() -> Int }
+component Supervisor provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Nope with { } undo w.dispose()  return 0 } }
+}""")
+  assert v == "SPAWN|`spawn Nope` names an unknown component"
+}
+
+// an UNBOUND `effect spawn` — a spawn's teardown needs a handle to name it.
+test "an unbound spawn is refused (bind-to-a-handle)" {
+  let v = admit_src("""service Task { fn go() -> Int }
+component Worker provides task: Task { provide task { fn go() { return 0 } } }
+component Supervisor requires t: Task {
+  effect spawn Worker with { } undo dispose()
+}""")
+  assert v == "SPAWN|`spawn` must be bound to a handle: `let s = effect spawn Worker … undo s.dispose()`"
+}
+
+// item 53: a `handoff` targets a key the component PROVIDES; a required key has
+// no state to hand off.
+test "handoff on a non-provided key is refused (HANDOFF)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+component C requires kv: Kv {
+  handoff kv: Str
+  let v = effect kv.get("x") undo kv.get("x")
+}""")
+  assert v == "HANDOFF|`kv` is not a declared provision of C"
+}
+
+// item 53: at most one `handoff` per component.
+test "two handoffs in one component are refused (HANDOFF)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+component C provides kv: Kv {
+  handoff kv: Str
+  handoff kv: Int
+  provide kv { fn get(k) { return k } }
+}""")
+  assert v == "HANDOFF|C declares more than one `handoff` — a component has one activation frame, so it hands off one state shape"
+}
+
+// a `handoff` on a provided key composes.
+test "handoff on a provided key composes" {
+  assert admit_src("""service Kv { fn get(k: Str) -> Str }
+component C provides kv: Kv {
+  handoff kv: Str
+  provide kv { fn get(k) { return k } }
+}""") == ""
+}
+
+// isolate target validation: an undeclared key is the declared-wiring refusal.
+test "isolate on an undeclared key is refused (G1)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+component C requires kv: Kv {
+  isolate nope in realm("r1")
+  let v = effect kv.get("x") undo kv.get("x")
+}""")
+  assert v == "G1|`nope` is not a declared requirement or provision of C"
+}
+
+// isolate uniqueness: a key is pinned at most once.
+test "a key isolated twice is refused (G1)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str }
+component C requires kv: Kv {
+  isolate kv in realm("r1")
+  isolate kv in realm("r2")
+  let v = effect kv.get("x") undo kv.get("x")
+}""")
+  assert v == "G1|key `kv` is isolated twice in C"
 }
