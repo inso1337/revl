@@ -41,9 +41,10 @@ STDLIB = ROOT / "stdlib" / "str.rvl"
 CONSUMER = """\
 use "stdlib/str.rvl" {
   is_space, trim, lstrip, rstrip, contains, index_of, last_index_of,
-  ident_tokens, split_top, dedent
+  ident_tokens, split_top, dedent, str_utf8_bytes
 }
 
+fn t_str_utf8_bytes(s: Str) -> List[Int] { return str_utf8_bytes(s) }
 fn t_is_space(c: Str) -> Bool { return is_space(c) }
 fn t_trim(s: Str) -> Str { return trim(s) }
 fn t_lstrip(s: Str) -> Str { return lstrip(s) }
@@ -116,7 +117,8 @@ def test_module_imports_and_is_pure_revl(consumer_ir):
     assert consumer_ir.get("externs", []) == []
     names = {f["name"] for f in consumer_ir["functions"]}
     for pub in ("is_space", "trim", "lstrip", "rstrip", "contains", "index_of",
-                "last_index_of", "ident_tokens", "split_top", "dedent"):
+                "last_index_of", "ident_tokens", "split_top", "dedent",
+                "str_utf8_bytes"):
         assert pub in names, pub
     assert consumer_ir["ir_version"] == 3
 
@@ -134,6 +136,7 @@ def test_module_file_is_the_documented_surface():
         "pub fn ident_tokens(s: Str) -> List[Str]",
         "pub fn split_top(s: Str, sep: Str) -> List[Str]",
         "pub fn dedent(text: Str) -> Str",
+        "pub fn str_utf8_bytes(s: Str) -> List[Int]",
     ):
         assert sig in text, sig
     # no @py / per-tier extern bodies in CODE — the pure-revl guarantee. (The
@@ -287,6 +290,52 @@ def test_dedent_fuzz_matches_textwrap(ns):
         if rng.random() < 0.5:
             text += "\n"
         assert ns["t_dedent"](text) == textwrap.dedent(text), repr(text)
+
+
+# ---------------------------------------------------------------- utf-8 bytes
+
+#: (string, expected UTF-8 bytes) pinned against the known encodings — one per
+#: byte-length tier plus the empty string and a mixed string spanning all four.
+UTF8_CASES = [
+    ("A", [0x41]),                              # 1 byte, ASCII
+    ("é", [0xC3, 0xA9]),                   # 2 bytes, e-acute U+00E9
+    ("€", [0xE2, 0x82, 0xAC]),             # 3 bytes, euro sign U+20AC
+    ("\U0001F600", [0xF0, 0x9F, 0x98, 0x80]),   # 4 bytes, astral U+1F600
+    ("", []),                                   # empty
+    ("aé€\U0001F600z",                # mixed: 1+2+3+4+1 bytes
+     [0x61, 0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80, 0x7A]),
+]
+
+
+@pytest.mark.parametrize("s,exp", UTF8_CASES)
+def test_str_utf8_bytes_known_encodings(ns, s, exp):
+    # byte-exact against the hand-written reference AND Python's own encoder.
+    got = ns["t_str_utf8_bytes"](s)
+    assert got == exp
+    assert got == list(s.encode("utf-8"))
+    assert all(0 <= b <= 255 for b in got)
+
+
+def test_str_utf8_bytes_boundary_scalars(ns):
+    # the exact code points at each tier boundary (last of one, first of next).
+    for cp in (0x00, 0x7F, 0x80, 0x7FF, 0x800, 0xFFFF, 0x10000, 0x10FFFF):
+        s = chr(cp)
+        assert ns["t_str_utf8_bytes"](s) == list(s.encode("utf-8")), hex(cp)
+
+
+def test_str_utf8_bytes_fuzz_matches_python(ns):
+    # randomized scalars across the whole range (surrogates excluded, since a
+    # Str is a sequence of scalar values) compared byte-for-byte with utf-8.
+    rng = random.Random(2026)
+    for _ in range(500):
+        cps = []
+        for _ in range(rng.randint(0, 5)):
+            cp = rng.randint(0, 0x10FFFF)
+            while 0xD800 <= cp <= 0xDFFF:
+                cp = rng.randint(0, 0x10FFFF)
+            cps.append(cp)
+        s = "".join(chr(c) for c in cps)
+        assert ns["t_str_utf8_bytes"](s) == list(s.encode("utf-8")), repr(s)
 
 
 # ---------------------------------------------------------------- e2e py run

@@ -123,6 +123,62 @@ pub fn last_index_of(s: Str, sub: Str) -> Int {
   return r
 }
 
+// ------------------------------------------------------------------ utf-8
+// The UTF-8 byte sequence of `s`, each byte an Int in 0..255 (roadmap item 221).
+// revl's str kit is code-point-based — `length()` counts code points and
+// `charCodeAt(i)` answers the FULL Unicode scalar at code-point index `i`, never
+// a surrogate half (a JS-UTF-16 string would split an astral char into two
+// units; a revl Str does not). So `str_utf8_bytes` never has to recombine a
+// high+low surrogate: it walks scalars directly and encodes each. That is what
+// keeps it PURE revl — no `@py`, no per-tier deferral — like the rest of this
+// kit. The wasm memory ABI stores a Str literal as these very bytes
+// (`backends/wasm/emit.py` `_wat_bytes`), so a self-hosted wasm emitter uses
+// this to make a non-ASCII literal (any scalar above 0x7f) byte-reproducible.
+//
+// revl has NO bitwise operators (no `>>`/`&`/`|` on Int), so the standard
+// shift/mask encoding is spelled with integer division and modulo: `cp >> 6` is
+// `cp.div_floor(64)`, `cp & 0x3F` is `cp.mod(64)`. Both lower on every tier
+// (including wasm: `$int_div_floor`/`$int_mod`). Code points are non-negative,
+// so `div_floor` equals truncation here.
+pub fn str_utf8_bytes(s: Str) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    for (b of utf8_encode_scalar(s.charCodeAt(i))) {
+      out = out.push(b)
+    }
+    i += 1
+  }
+  return out
+}
+
+// The 1-4 UTF-8 bytes of a single Unicode scalar `cp`, standard encoding:
+//   U+0000..U+007F -> 1 byte  0xxxxxxx
+//   U+0080..U+07FF -> 2 bytes 110xxxxx 10xxxxxx
+//   U+0800..U+FFFF -> 3 bytes 1110xxxx 10xxxxxx 10xxxxxx
+//   U+10000..U+10FFFF -> 4 bytes 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+// A continuation byte is `128 + (six low bits)`; each higher 6-bit group is
+// peeled by dividing the scalar down before taking `mod(64)`.
+fn utf8_encode_scalar(cp: Int) -> List[Int] {
+  if (cp < 128) {                                 // 1 byte
+    return [cp]
+  }
+  if (cp < 2048) {                                // 2 bytes
+    return [192 + cp.div_floor(64),
+            128 + cp.mod(64)]
+  }
+  if (cp < 65536) {                               // 3 bytes
+    return [224 + cp.div_floor(4096),
+            128 + cp.div_floor(64).mod(64),
+            128 + cp.mod(64)]
+  }
+  return [240 + cp.div_floor(262144),             // 4 bytes
+          128 + cp.div_floor(4096).mod(64),
+          128 + cp.div_floor(64).mod(64),
+          128 + cp.mod(64)]
+}
+
 // --------------------------------------------------------------- identifiers
 // The identifier tokens of `s`: each maximal run of word chars `[A-Za-z0-9_]`,
 // reported from its first identifier-start char (a digit-led run begins its
