@@ -1,0 +1,53 @@
+// wasm Path B slice 3b — the record corner of the linear-memory value ABI.
+//
+// A record is one 8-byte slot per field, laid out in the type's DECLARED field
+// order (not the literal's source order): `$alloc` takes `8 * field_count`
+// bytes, field `i` is stored at offset `8 * i` (field 0 at the bare base
+// pointer, the rest at `(i32.add base 8*i)`), each value widened into its i64
+// slot by `_slot_store`. The base pointer uses the same depth-indexed scratch as
+// a list (`__revl_tmp`, `__revl_tmp_n1`, …), so a field that is itself a record
+// or list lands on a deeper scratch. Declaring any type also emits the
+// `;; @record …` layout-comment block after the helper preamble
+// (`_type_comments`). Every field here is a scalar or ASCII `Str` — the ABI
+// surface this slice adds, nothing more.
+
+type Point = { x: Int, y: Int }
+type Named = { id: Int, tag: Str }
+type Row = { items: List[Int], n: Int }
+type Deep = { a: Point, b: Point }
+
+// Fields written in the OPPOSITE order to the declaration: the emitter must
+// still store `x` (slot 0) then `y` (slot 8) — declared order wins.
+fn mk() -> Point { return { y: 2, x: 1 } }
+
+// A `Str` field: its slot holds the pooled literal's pointer, widened in; the
+// `Int` field sits in its slot natively.
+fn named() -> Named { return { id: 7, tag: "hi" } }
+
+// Fields taken from parameters, not literals — the record ABI over non-constant
+// slot values.
+fn fromVars(a: Int, b: Int) -> Point { return { x: a, y: b } }
+
+// A record whose first field is itself a record (`Deep.a: Point`): the nested
+// record is built on `__revl_tmp_n1`, then its base pointer is widened into the
+// outer slot — the record analogue of a nested list.
+fn deep() -> Deep { return { a: { x: 1, y: 2 }, b: { x: 3, y: 4 } } }
+
+// A record with a `List` field: the list is constructed one nesting level down
+// and its pointer stored in the field slot; the scalar field follows.
+fn withList() -> Row { return { items: [7, 8, 9], n: 3 } }
+
+// A list of records: the outer list is depth 0, each record element is built on
+// `__revl_tmp_n1`. `expected` flows `List[Named]` -> element `Named` so each
+// literal pins its declared type without a field-set search.
+fn people() -> List[Named] {
+  return [{ id: 1, tag: "a" }, { id: 2, tag: "bb" }]
+}
+
+// A let-bound record with no annotation on the literal: its type is recovered by
+// matching the literal's field-name set against the declared records (`Point`),
+// then that type flows as `expected` into the record lowering.
+fn viaLet() -> Point {
+  let q = { x: 3, y: 4 }
+  return q
+}

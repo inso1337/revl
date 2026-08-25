@@ -1227,3 +1227,59 @@ ir_version 2 and the reference routes it through `_emit_v1`, which the port does
 NOT mirror (the v1/v2 path is deferred) — so both realm-placement fixtures carry a
 trivial top-level 2.0 `fn` to stay on the `_emit_v3` path the port is faithful to.
 A future slice covering `_emit_v1` (or routed requires) removes that scaffolding.
+
+## wasm Path B slice 3 — the List/record allocation ABI (`emit_wasm.rvl`, item 236)
+
+Slice 2 pooled Str literals (the `data` segment). Slice 3 mirrors the rest of the
+*allocation* surface — `List` and record VALUES in linear memory — byte-for-byte:
+`$alloc`, the `[u32 count][slot…]` / declared-order-field-slot layouts,
+`_slot_store` (an `Int` stored native i64, a Bool/pointer `i64.extend_i32_u`-widened
+in), the nesting-depth scratch pointer (`_acquire_tmp` -> `__revl_tmp` /
+`__revl_tmp_n1` …), and the `_type_comments` layout block. Two corpus docs
+(`listmem.rvl`, `recmem.rvl`) each emit `== backends/wasm/emit.py`, and stress
+fixtures beyond the corpus — triple-nested lists, list-of-records, record-with-list
+field, records built from params, allocation inside an `if` branch, let-bound
+records recovered by field-set match — all landed byte-identical.
+
+### Finding: `_acquire_tmp`'s nesting scratch is byte-REPRODUCIBLE (NOT the item-179 class) — reconstructed from a pure max-depth pass
+The STOP-report hazard this slice was scoped against was whether the reference's
+`self._tmp_stack` / `self._tmp_extra` — mutable instance state pushed/popped during
+the emit walk — hides an `id()`/traversal-order dependency a second implementation
+cannot reproduce (item 179). It does NOT. The scratch NAME is a pure function of
+lexical allocation-nesting depth (`__revl_tmp` at depth 0, `__revl_tmp_n<d>`
+deeper), and `_tmp_extra` is just `{n1..nD}` for D = the max nesting depth, which is
+CONTIGUOUS (you cannot reach depth d without an allocation at each of 0..d-1 in the
+same chain). So the port threads `depth` as a plain downward argument (no mutable
+stack) and reconstructs the header's extra-local set from a separate pure
+`body_max_depth` pass — sorted-set-identical to `sorted(self._tmp_extra)` for D<10
+(nesting never approaches that). A genuinely stateful allocator (an `id()`-keyed
+offset cache, say) would have been the blocker; the depth-indexed name is not one.
+
+### Finding (item 203, THIRD hit): `$ident`-in-a-plain-string blocks the natural way to build WAT
+Every WAT fragment names a `$local`/`$func`, so the item-203 papercut — a plain
+`"…$alloc…"` string is REJECTED as would-be 1.x interpolation — hit twice while
+writing this slice: first building the `(call $alloc …)` / `(local.get $__revl_tmp)`
+lines in `render_list`/`render_record`, then again in an in-file `test` asserting
+`slot_store`'s output literal (`(local.get $p)`). The fix each time is to switch the
+plain string to a backtick template (where a bare `$name` is literal and only
+`${…}` interpolates), so the emitter's most natural output — string-concatenated
+WAT — is exactly the form the lexer flags, and a WAT-heavy `.rvl` must write nearly
+every line as a backtick even when it interpolates nothing. Symptom: `RevlError:
+`$alloc` in a plain string — this was interpolation in 1.x`. Repro: any
+`"…$x…".concat(…)` in a `.rvl`. A `\$` plain-string escape, or exempting a string
+with no `${` from the 1.x-ambiguity check, would remove the tax. (Do NOT fix here.)
+
+### Ergonomics (item 189): the kits carried records for free; `value_keys` gave the byte-critical field ORDER
+The record ABI's one correctness-critical fact is field ORDER — the reference stores
+fields in DECLARED order (the type table), not the literal's source order. The
+stdlib-value kit already exposes this exactly: `value_keys(value_field(spec,
+"fields"))` returns declared order (`list(dict)` insertion order, item-180 contract),
+and `value_field(fmap, name)` the field type — so the whole `_record_fields` /
+declared-order walk is pure `use`d kit with no private `@py`. `record_type_of`'s
+field-SET match (for an unannotated `let`-bound record) was a 6-line `names_eq` over
+`value_keys`. The only threading tax was widening `Scope` with a `rectypes: Any`
+field (the `ir["types"]` table) so `_record_expr` can reach the type table the same
+way the string pool already rides the scope — the same "structural record, no
+record-update literal" friction the async slice-5 note logged: adding one field to
+`Scope` meant editing every `{ slots:…, types:…, strs:… }` construction site
+(here only `scope_bind` and the `emit_function` seed) by hand.
