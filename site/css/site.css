@@ -875,6 +875,16 @@ table.audit .comp { font-family: var(--mono); color: var(--text); }
 .tr-subject { color: var(--text); }
 .tr-config { color: var(--amber); }
 
+.meta-dock {
+  position: fixed; right: 18px; bottom: 18px; z-index: 90;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-radius: 12px;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  background: rgba(6, 8, 14, 0.92); backdrop-filter: blur(8px);
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  box-shadow: 0 12px 44px rgba(0, 0, 0, 0.55);
+}
+
 .pg-overlay {
   position: fixed; inset: 0; z-index: 100;
   background: rgba(6, 8, 14, 0.94); backdrop-filter: blur(6px);

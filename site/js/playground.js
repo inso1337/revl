@@ -98,9 +98,26 @@ def _ph_select(tab_id):
     import js
     js.window.__metaHost.select(tab_id)
 
+def _ph_mount_region(region_id):
+    import js
+    js.window.__metaHost.mountRegion(region_id)
+    return 1
+
+def _ph_unmount_region(region_id):
+    import js
+    js.window.__metaHost.unmountRegion(region_id)
+    return 0
+
+def _ph_editor_source():
+    import js
+    return js.window.__metaHost.editorSource()
+
 _ph.mount = _ph_mount
 _ph.unmount = _ph_unmount
 _ph.select = _ph_select
+_ph.mount_region = _ph_mount_region
+_ph.unmount_region = _ph_unmount_region
+_ph.editor_source = _ph_editor_source
 sys.modules["playground_host"] = _ph
 
 from pyodide.ffi import can_run_sync, run_sync
@@ -381,6 +398,9 @@ async function boot() {
     return;
   }
   runCurrent();
+  // ◐ the page boots itself: when live mode is available and the loaded
+  // example is the playground's own composition, bring it up unprompted
+  if (liveOk && isMetaSource(editor.value)) $("boot").click();
 }
 
 /* ---------- examples ------------------------------------------------------ */
@@ -847,8 +867,11 @@ async function callOp(row) {
 }
 
 function renderSystem(snap) {
+  lastSnap = snap;
   const st = snap.state || {};
-  sysPanel.hidden = false;
+  const names = new Set((st.components || []).map((c) => c.name));
+  const hasSystemPanel = (snap.graph || []).some((c) => c.name === "SystemPanel");
+  if (!hasSystemPanel || names.has("SystemPanel")) sysPanel.hidden = false;
   sysLabel.textContent = `${metaActive ? "◐ playground shell" : "live"} · generation ${st.generation ?? "?"}`;
   renderGraph(snap.graph || [], st.components || []);
   renderOps(snap.ops || []);
@@ -857,6 +880,7 @@ function renderSystem(snap) {
     `<span class="verdict good">LIVE</span>` +
     `<span>generation ${st.generation} — ${active} component${active === 1 ? "" : "s"} active, ` +
     `running in this tab on cordis-py</span>`;
+  updateDock();
 }
 
 function liveFailure(r, what) {
@@ -899,13 +923,71 @@ window.__metaHost = {
     }
   },
   select(id) { selectTab(id); },
+  mountRegion(id) {
+    const el = document.querySelector(REGIONS[id]);
+    if (el) { el.style.display = ""; el.hidden = false; }
+    updateDock();
+  },
+  unmountRegion(id) {
+    const el = document.querySelector(REGIONS[id]);
+    if (el) el.style.display = "none";
+    updateDock();
+  },
+  editorSource() { return editor.value; },
 };
+
+const REGIONS = {
+  editor: ".editor",
+  toolbar: ".pg-toolbar",
+  status: "#status",
+  system: "#sys-panel",
+};
+
+/* the ◐ dock — the JS chrome's one fixed foothold. It appears only when the
+   composition has withdrawn part of the page, and offers the way back. */
+let lastSnap = null;
+const dock = document.createElement("div");
+dock.className = "meta-dock";
+dock.hidden = true;
+dock.innerHTML = `<span>◐ part of this page is withdrawn</span>
+  <button class="btn btn-primary btn-sm" id="dock-restore">▶ load it back</button>`;
+document.body.appendChild(dock);
+
+function updateDock() {
+  const anyHidden = Object.values(REGIONS).some((sel) => {
+    const el = document.querySelector(sel);
+    return el && el.style.display === "none";
+  });
+  dock.hidden = !(metaActive && anyHidden);
+}
+
+dock.querySelector("#dock-restore").addEventListener("click", async () => {
+  if (!lastSnap) { metaRestore(); return; }
+  const present = new Set((lastSnap.state?.components || []).map((c) => c.name));
+  const absent = (lastSnap.graph || []).map((c) => c.name).filter((n) => !present.has(n));
+  for (const name of absent) {
+    try {
+      const r = await runLive("live_plug(LIVE_NAME)", { LIVE_NAME: name });
+      if (r.ok) {
+        traceLine(`<span class="tr-ok">▶ loaded ${esc(name)}</span> <span class="tr-dim">— restored from the dock</span>`);
+        traceEvents(r.trace);
+        renderSystem(r);
+      }
+    } catch { /* keep going */ }
+  }
+  updateDock();
+});
 
 function metaRestore() {
   metaActive = false;
   for (const id of TAB_IDS) {
     window.__metaHost.mount(id, DEFAULT_LABELS[id]);
   }
+  for (const sel of Object.values(REGIONS)) {
+    const el = document.querySelector(sel);
+    if (el && sel !== "#sys-panel") el.style.display = "";
+  }
+  dock.hidden = true;
   selectTab("diagnostics");
 }
 
@@ -917,11 +999,16 @@ $("boot").addEventListener("click", async () => {
   try {
     const meta = isMetaSource(editor.value);
     if (meta) {
-      // the revl composition takes ownership of the pane: strip the JS-owned
-      // tabs so the activation below rebuilds them, one mount at a time
+      // the revl composition takes ownership of the page: strip the JS-owned
+      // tabs and regions so the activation below rebuilds them, mount by mount
       for (const id of TAB_IDS) {
         const t = tabEl(id);
         if (t) t.style.display = "none";
+      }
+      for (const [rid, sel] of Object.entries(REGIONS)) {
+        if (rid === "system") continue; // shown by renderSystem on success
+        const el = document.querySelector(sel);
+        if (el) el.style.display = "none";
       }
     }
     const r = await runLive("live_boot(LIVE_SRC)", { LIVE_SRC: editor.value });
