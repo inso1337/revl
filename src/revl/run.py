@@ -217,6 +217,115 @@ def _replay_command(line: str):
 
 
 # --------------------------------------------------------------------------
+# runtime routing — the load-balancer pattern (docs/distribution-model.md)
+# --------------------------------------------------------------------------
+
+
+class NoLiveWorker(RuntimeError):
+    """Every realm a router fans out to has withdrawn — the route has no live
+    leg left to serve. A *runtime* exhaustion of a pool that verified cleanly
+    (G2 held at link time; the workers have since all gone down), not a
+    compile-time diagnostic — hence a plain ``RuntimeError``, surfaced through
+    the REPL's error channel like any other live-call failure."""
+
+
+class _Router:
+    """The runtime realization of a multi-realm bind (item 162's ``routes`` IR)
+    for one routed key — the ``Router`` component of docs/distribution-model.md,
+    py-tier reference.
+
+    A component that ``requires <key> in realms("w1"…"wN") strategy(...)`` and
+    ``provides <key>`` fans one required key out across N worker realms while
+    still presenting **one** provider downstream (G2 holds: consumers resolve
+    exactly this proxy). The proxy holds no worker handle of its own — it
+    **re-resolves the live per-realm handle on every call** off the same
+    committed-view lookup a normal ``requires`` uses
+    (``ctx.isolate(key, realm(w)).reflect.get(key)``), which returns ``None`` for
+    any realm whose provider is not ACTIVE. So a withdrawn worker (peer-death →
+    provider-withdrawal → the R2/R3 reactive coeffect the runtime already runs)
+    simply drops out of the live set and its calls go to the survivors — reactive
+    failover with no extra machinery, exactly the resolution model in
+    docs/distribution-model.md §3. A replacement that re-provides the key in that
+    realm re-enters the rotation on its next turn, for free.
+
+    Strategies (a closed set, ``lower.KNOWN_STRATEGIES``):
+
+    * ``round_robin`` (the default when ``strategy`` is omitted) — rotate across
+      the realms in declaration order, skipping any that are not currently live;
+    * ``least_loaded`` — route to the live realm this proxy has served the fewest
+      calls (a local served-count proxy for load; a real load signal off a worker
+      coeffect is a follow-up — see the docs note).
+
+    The proxy is duck-typed against the routed service: ``proxy.get(k)`` picks a
+    worker and forwards ``get(k)`` to it. ``__getattr__`` refuses ``_``-prefixed
+    names so cordis's traceable probe (``__cordis_tracker__``) sees no tracker and
+    passes the proxy through unwrapped."""
+
+    def __init__(self, root, runtime_mod, key, realms, strategy, log=None):
+        self._root = root
+        self._runtime = runtime_mod
+        self._key = key
+        self._realms = list(realms)
+        self._strategy = strategy or "round_robin"
+        self._cursor = 0
+        self._served = {realm: 0 for realm in self._realms}
+        self._log = log
+
+    def _handle(self, realm):
+        """The live provider handle for ``key`` in ``realm``, or ``None`` when
+        that realm has no ACTIVE provider (cordis's strict ``reflect.get``)."""
+        scoped = self._root.isolate(self._key, self._runtime.realm_label(realm))
+        return scoped.reflect.get(self._key)
+
+    def _live(self):
+        """(realm, handle) for every realm with a live provider, declaration
+        order preserved."""
+        out = []
+        for realm in self._realms:
+            handle = self._handle(realm)
+            if handle is not None:
+                out.append((realm, handle))
+        return out
+
+    def _select(self):
+        live = self._live()
+        if not live:
+            raise NoLiveWorker(
+                f"router for `{self._key}` has no live worker: all "
+                f"{len(self._realms)} realm(s) "
+                f"({', '.join(self._realms)}) have withdrawn")
+        if self._strategy == "least_loaded":
+            realm, handle = min(live, key=lambda rh: self._served[rh[0]])
+        else:  # round_robin — next live realm in declaration order
+            n = len(self._realms)
+            realm = handle = None
+            for offset in range(n):
+                cand = self._realms[(self._cursor + offset) % n]
+                match = next((rh for rh in live if rh[0] == cand), None)
+                if match is not None:
+                    self._cursor = (self._cursor + offset + 1) % n
+                    realm, handle = match
+                    break
+        self._served[realm] += 1
+        return realm, handle
+
+    def __getattr__(self, method):
+        # `_`-prefixed lookups (notably cordis's `__cordis_tracker__` probe) are
+        # never routed service ops — refuse them so the proxy is passed through
+        # raw rather than wrapped as a traceable service.
+        if method.startswith("_"):
+            raise AttributeError(method)
+
+        def call(*args):
+            realm, handle = self._select()
+            if self._log is not None:
+                self._log(realm, method)
+            return getattr(handle, method)(*args)
+
+        return call
+
+
+# --------------------------------------------------------------------------
 # the runtime driver (py tier)
 # --------------------------------------------------------------------------
 
@@ -236,6 +345,14 @@ class _Driver:
         self.FiberState = FiberState
         self.root = Context()
         self.fibers: dict[str, object] = {}
+        # runtime routing (docs/distribution-model.md): a component carrying the
+        # `routes` IR (item 162's multi-realm bind) is realized here, not as a
+        # plugged fiber — the driver resolves its N per-realm handles and
+        # installs a `_Router` provision. Its provide-effect disposers are kept
+        # per component so teardown withdraws them at the component's own LIFO
+        # position (keeping the no-residue proof intact).
+        self.routers: dict[tuple, _Router] = {}
+        self._route_disposers: dict[str, list] = {}
         self.generation = 0
         self.emitted: tuple = ("", "")  # (filename, source) of the last emit
         # crash-recovery WAL (roadmap item 47): --wal implies recording, since
@@ -398,7 +515,26 @@ class _Driver:
             requires = ", ".join(comp.get("requires") or {}) or "-"
             provides = ", ".join(comp.get("provides") or {}) or "-"
             self._log("load", name, f"requires {requires} · provides {provides}")
-            fiber = self.root.plugin(getattr(module, name), self.config.get(name, {}))
+            if comp.get("routes"):
+                # a router (item 162 multi-realm bind) is realized by the driver,
+                # not plugged as a fiber: its routed require has no single-realm
+                # provider (the workers live in the named realms), so an emitted
+                # body would sit PENDING forever. Install the `_Router` provision
+                # instead — it provides the key downstream (G2) and fans calls out
+                # across the worker realms (docs/distribution-model.md).
+                self._install_router(name, comp)
+                if self.tracing:
+                    self._record(why_runtime.LOAD, name, "PENDING -> ACTIVE",
+                                 load_causes.get(name, why_runtime.cause_boot()))
+                await self._flush()
+                continue
+            # realm-aware plug: apply each `isolate <key> in realm(...)` placement
+            # before ctx.plugin (runtime.plug), so a worker's provision lands in
+            # its named realm — the routes above resolve against exactly those
+            # realms. For a component with no placements this is byte-identical to
+            # a bare ctx.plugin.
+            fiber = self.runtime.plug(
+                self.root, getattr(module, name), self.config.get(name, {}))
             self.fibers[name] = fiber
             await self._flush()
             if fiber.state == self.FiberState.LOADING:  # an async (`await`) body in flight
@@ -419,8 +555,47 @@ class _Driver:
                              load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
 
+    def _install_router(self, name: str, comp: dict) -> None:
+        """Realize a router component's ``routes`` IR: for each routed key, build
+        a :class:`_Router` over its worker realms and provide it in the router's
+        realm. The provision is a real cordis effect (its disposer withdraws the
+        key on teardown), so the router keeps the no-residue guarantee — and,
+        being the sole provider of the key in the parent realm, keeps G2."""
+        disposers = self._route_disposers.setdefault(name, [])
+        for key, route in (comp.get("routes") or {}).items():
+            realms = route["realms"]
+            strategy = route.get("strategy")
+
+            def _leg(realm, method, _key=key):
+                self._log("route", _key, f"-> realm({realm}).{method}")
+
+            router = _Router(self.root, self.runtime, key, realms, strategy,
+                             log=_leg)
+            self.routers[(name, key)] = router
+            # provide the routing proxy under `key` in the router's realm; a
+            # consumer requiring `key` resolves exactly this one provider (G2).
+            disposer = self.root.reflect.provide(key, router)
+            disposers.append(disposer)
+            self._log("route", name,
+                      f"provides {key} — routing across realms("
+                      f"{', '.join(realms)}) strategy({strategy or 'round_robin'})")
+
     async def _dispose_all(self, ir: dict) -> None:
         for name in reversed(_load_order(ir)):  # consumers before providers
+            disposers = self._route_disposers.pop(name, None)
+            if disposers is not None:
+                # a router: withdraw its routing provision(s) at its own LIFO
+                # position (after the consumers above it, before the workers
+                # below) — the no-residue proof needs the provide-effect gone.
+                self._log("swap", name, "withdraw route provisions (LIFO)")
+                for disposer in reversed(disposers):
+                    result = disposer()
+                    if hasattr(result, "__await__") or asyncio.iscoroutine(result):
+                        await result
+                self.routers = {k: v for k, v in self.routers.items()
+                                if k[0] != name}
+                await self._flush()
+                continue
             fiber = self.fibers.pop(name, None)
             if fiber is None:
                 continue
