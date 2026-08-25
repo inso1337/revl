@@ -273,6 +273,14 @@ def _pascal(name: str) -> str:
 class _Lines:
     def __init__(self) -> None:
         self._lines: list[str] = []
+        # Monotonic index handed to destructure temporaries so their names are
+        # a deterministic property of emission order, not object identity
+        # (`id(node)` was nondeterministic across re-parses — item 179).
+        self._destructure_seq = 0
+
+    def next_destructure_seq(self) -> int:
+        self._destructure_seq += 1
+        return self._destructure_seq
 
     def add(self, indent: int, text: str = "") -> None:
         self._lines.append(("    " * indent + text) if text else "")
@@ -1556,8 +1564,14 @@ class _RenderedBody(dict):
 
 
 def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
-    """Emit a ``let_pattern`` step by evaluating the RHS once into a temp."""
-    tmp = f"__revl_destructure_{id(node)}"
+    """Emit a ``let_pattern`` step by evaluating the RHS once into a temp.
+
+    The temp is named from a per-``_Lines`` monotonic counter incremented in
+    deterministic emission order, so re-parsing the same IR yields identical
+    bytes (item 179). The ``__revl_`` reserved prefix keeps it clear of user
+    identifiers, and the counter keeps sibling destructures distinct.
+    """
+    tmp = f"__revl_destructure_{out.next_destructure_seq()}"
     out.add(indent, f"{tmp} = {_expr(node['value'])}")
     if node["pattern"] == "record":
         for name in node["names"]:
