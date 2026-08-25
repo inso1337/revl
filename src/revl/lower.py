@@ -93,6 +93,7 @@ from .parser import (
     RecordPattern,
     ResidueStmt,
     ReturnStmt,
+    RouteStmt,
     ServiceDecl,
     SpawnExpr,
     TestDecl,
@@ -252,6 +253,19 @@ EXPR_KINDS: frozenset[str] = EXPR_KINDS_FN | EXPR_KINDS_COMPONENT
 # the default shared realm (paper Def. 28: an unisolated key resolves to
 # its own realm); rendered as "shared" in diagnostics
 SHARED_REALM = ""
+
+# multi-realm require routing strategies (roadmap item 162). The name is an
+# annotation the runtime router (item 161) consumes to pick a distribution
+# policy across the bound realms; the frontend validates it against this
+# closed set so a typo (`strategy(round_robbin)`) is a compile-time refusal,
+# not a silent runtime fallback. `None` (strategy omitted) records "router's
+# default" and is always accepted.
+KNOWN_STRATEGIES: frozenset[str] = frozenset({
+    "round_robin",   # rotate across the realms in declaration order
+    "least_loaded",  # route to the realm whose provider reports least load
+    "random",        # uniform random pick
+    "sticky",        # pin a caller-derived key to one realm (session affinity)
+})
 
 # key namespacing (docs/namespacing.md): a provision key may be written
 # `ns::local`. The *full* string is the key's wiring identity — G2
@@ -2703,7 +2717,9 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
         for comp in program.components
         for stmt in comp.body
     )
-    uses_v2 = any(comp.get("isolate") or comp.get("intercept") for comp in components)
+    uses_v2 = any(
+        comp.get("isolate") or comp.get("intercept") or comp.get("routes")
+        for comp in components)
     uses_v3 = any(not name.startswith("__") for name in types) or bool(fns) or bool(externs) or bool(tests)
     uses_v3 = uses_v3 or any(
         svc.commutative or any(m.async_ or m.commutative or m.idempotent
@@ -3577,6 +3593,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
     provide_seen_line: int | None = None
     isolate: dict[str, str] = {}
     intercept: dict[str, dict] = {}
+    routes: dict[str, dict] = {}
     handoff: dict | None = None
     action_seen = False
     for stmt in comp.body:
@@ -3611,6 +3628,67 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                          "(a record or Map), docs/state-handoff.md",
                 )
             handoff = {"key": stmt.key, "type": stmt.state_type}
+            continue
+        if isinstance(stmt, RouteStmt):
+            # multi-realm bind (item 162): `isolate <key> in realms(...) [strategy(...)]`.
+            # A prelude declaration, exactly like `isolate`/`intercept` — it derives
+            # the resolution context (the router's realm set) before any dependency
+            # access, so it must precede every action.
+            if action_seen:
+                raise RevlError(
+                    filename, stmt.line,
+                    "`isolate ... in realms(...)` must precede every effect, emit, await, "
+                    "and provide statement",
+                    hint="realm bindings derive the resolution context before any dependency "
+                         "access (prelude rule, docs/design-v2-realms.md)",
+                )
+            required_keys = set(env.require_keys.values())
+            # routing distributes a *consumer's* dependency across N backend
+            # realms — it targets a REQUIRED key. A provision has one installed
+            # instance in one realm (G2), so routing a provision is meaningless.
+            if stmt.key not in required_keys:
+                if stmt.key in provides:
+                    raise RevlError(
+                        filename, stmt.line,
+                        f"`isolate ... in realms(...)` routes a *required* key — `{stmt.key}` "
+                        f"is a provision of {comp.name}",
+                        hint="a multi-realm bind distributes a consumer's dependency across "
+                             "backend realms (item 162); a provision has one installed "
+                             "instance in one realm (G2). Route the key you require, not the "
+                             "one you provide",
+                    )
+                raise RevlError(
+                    filename, stmt.line,
+                    f"`{stmt.key}` is not a declared requirement of {comp.name}",
+                    hint="`isolate ... in realms(...)` targets a key from the `requires` "
+                         "clause (G1)",
+                )
+            # one binding per key: a key is pinned to one realm *or* routed across
+            # a realm set, never both, and never two conflicting route sets.
+            if stmt.key in isolate:
+                raise RevlError(
+                    filename, stmt.line,
+                    f"key `{stmt.key}` is already isolated to a single realm in {comp.name} — "
+                    f"it cannot also be routed across `realms(...)`",
+                    hint="use either `isolate <key> in realm(<name>)` (pin) or "
+                         "`isolate <key> in realms(...)` (route), not both",
+                )
+            if stmt.key in routes:
+                raise RevlError(
+                    filename, stmt.line,
+                    f"key `{stmt.key}` is routed twice in {comp.name}",
+                )
+            if stmt.strategy is not None and stmt.strategy not in KNOWN_STRATEGIES:
+                known = ", ".join(sorted(KNOWN_STRATEGIES))
+                raise RevlError(
+                    filename, stmt.line,
+                    f"unknown routing strategy `{stmt.strategy}` for `{stmt.key}` in "
+                    f"{comp.name}",
+                    hint=f"a strategy is validated at compile time so a typo is not a silent "
+                         f"runtime fallback; known strategies are: {known} (or omit "
+                         f"`strategy(...)` for the router's default)",
+                )
+            routes[stmt.key] = {"realms": list(stmt.realms), "strategy": stmt.strategy}
             continue
         if isinstance(stmt, (IsolateStmt, InterceptStmt)):
             # prelude rule: realm/metadata declarations derive the resolution
@@ -3776,6 +3854,10 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
         lowered["isolate"] = isolate
     if intercept:
         lowered["intercept"] = intercept
+    # multi-realm bind (item 162), additive — a component with no `realms(...)`
+    # route carries no `routes` key, so its IR is byte-identical to before.
+    if routes:
+        lowered["routes"] = routes
     # item 53: the state hand-off contract, additive — a stateless component
     # (the overwhelming majority) carries no `handoff` key, so its IR is
     # byte-identical to before. `ir_version` stays 3.
@@ -4614,6 +4696,8 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             entry["isolate"] = dict(amb["isolate"])
         if amb.get("intercept"):
             entry["intercept"] = dict(amb["intercept"])
+        if amb.get("routes"):
+            entry["routes"] = {k: dict(v) for k, v in amb["routes"].items()}
         entries.append(entry)
     for comp in components:
         if comp["name"] in templates:
@@ -4631,6 +4715,8 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
             entry["isolate"] = dict(comp["isolate"])
         if comp.get("intercept"):
             entry["intercept"] = dict(comp["intercept"])
+        if comp.get("routes"):
+            entry["routes"] = {k: dict(v) for k, v in comp["routes"].items()}
         entries.append(entry)
 
     def _line(name: str) -> int:
@@ -4678,6 +4764,42 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
                 )
             provider_of[(key, realm)] = entry["name"]
 
+    def _routes(entry: dict) -> dict:
+        return entry.get("routes") or {}
+
+    # multi-realm bind verification (item 162): a `realms(...)` route binds the
+    # key across N named realms, and the consumer routes across them at runtime.
+    # The compiler verifies EACH named realm has a provider of the key — a route
+    # that names a realm with no provider would dangle at that leg. This does NOT
+    # relax G2 (one provider per (key, realm) is still enforced above); it is the
+    # dual existence check on the consumption side. Providers of a routed key may
+    # sit in the shared realm too (`realm` unnamed) — a route target is matched
+    # against the same per-(key, realm) table, so the named realm must have its
+    # own provider.
+    for entry in entries:
+        for key, route in _routes(entry).items():
+            for realm in route["realms"]:
+                if (key, realm) not in provider_of:
+                    strat = route.get("strategy")
+                    strat_where = f" strategy(`{strat}`)" if strat else ""
+                    why = WhyTrace(
+                        kind="unmet-requirement", subject=key, shape=CHAIN,
+                        steps=[TraceStep(entry["name"], "consumer",
+                                         *_where(entry["name"]),
+                                         f"routes `{key}` across "
+                                         f"{len(route['realms'])} realms{strat_where}")])
+                    raise RevlError(
+                        program.filename, _line(entry["name"]),
+                        f"multi-realm bind of `{key}` in {entry['name']} names realm "
+                        f"`{realm}`, but no component provides `{key}` in realm `{realm}` "
+                        f"(item 162: every routed realm needs a provider)",
+                        hint="a `realms(...)` route distributes across backend realms; each "
+                             "named realm must have its own provider of the key (G2 keeps it "
+                             "to exactly one). Add a provider isolated into realm "
+                             f"`{realm}`, or drop `{realm}` from the route",
+                        why=why,
+                    )
+
     # edges: provider -> consumer where the consumer's realm for a key
     # matches the provider's — realm separation legitimately breaks cycles
     graph: dict[str, list[str]] = {entry["name"]: [] for entry in entries}
@@ -4686,7 +4808,26 @@ def _link(program: Program, components: list[dict], ambient_components: list[dic
     # *what* is being waited on at every hop and not just who waits
     edge_key: dict[tuple[str, str], str] = {}
     for entry in entries:
+        # a routed key is resolved per-realm below, not through the single-realm
+        # table — skip it here so a stray shared-realm provider does not shadow
+        # the route's own targets.
+        routed = _routes(entry)
         for key in entry["inject"]:
+            if key in routed:
+                # one edge per routed realm: every backend provider must be
+                # ACTIVE before the consumer that routes to it (loadOrder), and
+                # each leg can still surface in a cycle trace by its key.
+                for realm in routed[key]["realms"]:
+                    provider = provider_of.get((key, realm))
+                    if provider == entry["name"]:  # pragma: no cover — a route
+                        # targets a *required* key; a self-provision in a routed
+                        # realm cannot arise (the key is not this comp's provision)
+                        continue
+                    if provider is not None:
+                        graph[provider].append(entry["name"])
+                        edge_key.setdefault((provider, entry["name"]), key)
+                        indegree[entry["name"]] += 1
+                continue
             provider = provider_of.get((key, _realm(entry, key)))
             if provider == entry["name"]:
                 name = entry["name"]
