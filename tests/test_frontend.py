@@ -104,7 +104,6 @@ REJECTIONS = {
     "v2_match_nonexhaustive.rvl": "non-exhaustive match: missing case `Invalid`",
     "v2_map_set_value_mismatch.rvl": "builtin `set` argument expects `Int`, got `Str`",
     "v2_provide_emission_fn.rvl": "provider methods are plain `fn` — emission-ness is inherited from the service declaration",
-    "v2_semicolon_separator.rvl": "`;` is not a statement separator in revl",
     "v2_map_value_unknown_method.rvl": "no builtin method `fetch`",
     "v2_undeclared_fn_var.rvl": "`missing` is not declared in this function",
     "v2_use_cycle.rvl": "import cycle:",
