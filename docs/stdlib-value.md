@@ -56,6 +56,7 @@ untrusted or partially-shaped document cannot fault.
 | `value_field(v, name)` | `(Value, Str) -> Value` | record field; missing/non-record → null `Value` |
 | `value_opt(v, name)` | `(Value, Str) -> Opt[Value]` | field as `Opt`; missing/null/non-record → `None` |
 | `value_has(v, name)` | `(Value, Str) -> Bool` | record carries a non-null key |
+| `value_keys(v)` | `Value -> List[Str]` | record field names in insertion order (item 188); non-record → `[]` |
 | `value_list(v)` | `Value -> List[Value]` | list elements; non-list → `[]` |
 | `value_at(v, i)` | `(Value, Int) -> Value` | list element by index; OOB/non-list → null `Value` |
 | `value_children(v)` | `Value -> List[Value]` | record values or list elements; scalar → `[]` (the walk driver) |
@@ -87,6 +88,40 @@ fn render(node: Value) -> Str {
 }
 ```
 
+## Key enumeration — `value_keys` (item 188)
+
+The value-side accessors above reach a record's **values** (`value_field`,
+`value_children`, `value_at`) but never its **keys**. Yet the backend-IR records
+`services` / `requires` / `provides` are keyed *by name*, and an emitter has to
+walk those names — in order — to build the SERVICES table and the `inject` list.
+The `emit_py` component slice (item 185) had to bridge that gap with a local
+`@py` `record_keys(v) -> List[Str]` of its own; every future Path B emitter would
+re-derive the same one. `value_keys` is that bridge, promoted into the module:
+
+```revl fragment
+// walk a keyed record in PURE revl — no @py of the caller's own
+for (k of value_keys(comp)) {
+  let svc = value_field(comp, k)   // value_keys + value_field = the entry
+  // …
+}
+```
+
+**Ordering contract.** `value_keys` returns exactly `list(d.keys())` on the
+erased host dict — **insertion order**, the order the document was built or
+parsed in. It does **not** sort; a caller that needs a canonical order sorts the
+result itself (`selfhost/emit_py.rvl` already sorts where it wants determinism,
+e.g. the checker's `sort_strs(tbl.keys())`). Python dicts preserve insertion
+order, so this is stable and matches item 185's `record_keys` byte-for-byte.
+**Total:** a non-record receiver (list, scalar, null) yields `[]`.
+
+**Why no `value_entries`.** A `List[(Str, Value)]` entries accessor was
+considered and **not** shipped: revl has no tuple/pair type in its surface
+(`_BUILTIN_TYPE_NAMES` has no `Tuple`/`Pair`; the only pairs in the compiler are
+Python-internal), so a `(Str, Value)` return has no clean revl type to name. The
+proven pattern — and the exact shape item 185's bridge is used in — is to pair
+`value_keys` with `value_field` for each key, which needs no new type. If a pair
+type later lands, `value_entries` is a purely additive follow-up.
+
 ## Which `emit_py.rvl` `@py` accessors this obsoletes
 
 The module replaces the IR-**navigation** half of `selfhost/emit_py.rvl`'s
@@ -101,6 +136,7 @@ private `@py` bridge:
 | `as_str(v)` | `value_str(v)` |
 | `is_none(v)` | `value_is_null(v)` |
 | `child_nodes(v)` | `value_children(v)` |
+| `record_keys(v)` (item 185's local bridge) | `value_keys(v)` |
 | `ir_version(ir)` | `value_int(value_opt(ir, "ir_version") ?? 1)` (caller supplies the `1` default) |
 | `is_py_float(v)` | `value_kind(v) == "float"` |
 
