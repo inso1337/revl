@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 640" width="1400" height="640">
-  <title>revl — the agent-first programming language</title>
+  <title>revl: the agent-first programming language</title>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0d1117"/>
@@ -43,32 +43,32 @@
   <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">
     <text x="524" y="345">
       <tspan font-weight="700" fill="#2dd4bf">Dynamic</tspan>
-      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#3d4450"> · </tspan>
       <tspan fill="#8b949e">hot-load, unload &amp; swap components in a running system</tspan>
     </text>
     <text x="524" y="387">
       <tspan font-weight="700" fill="#2dd4bf">Polyglot</tspan>
-      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#3d4450"> · </tspan>
       <tspan fill="#8b949e">Python · TypeScript · Rust · Java · Go components interoperate live</tspan>
     </text>
     <text x="524" y="429">
       <tspan font-weight="700" fill="#2dd4bf">Multiplatform</tspan>
-      <tspan fill="#3d4450"> — </tspan>
-      <tspan fill="#8b949e">one source, six targets — including WASM</tspan>
+      <tspan fill="#3d4450"> · </tspan>
+      <tspan fill="#8b949e">one source, six targets, including WASM</tspan>
     </text>
     <text x="524" y="471">
       <tspan font-weight="700" fill="#2dd4bf">Self-mutating</tspan>
-      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#3d4450"> · </tspan>
       <tspan fill="#8b949e">a component proposes new components; the compiler decides</tspan>
     </text>
     <text x="524" y="513">
       <tspan font-weight="700" fill="#2dd4bf">Type-safe &amp; null-safe</tspan>
-      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#3d4450"> · </tspan>
       <tspan fill="#8b949e">strict interfaces → fewer iterations to a reusable component</tspan>
     </text>
     <text x="524" y="555">
       <tspan font-weight="700" fill="#2dd4bf">Revertible</tspan>
-      <tspan fill="#3d4450"> — </tspan>
+      <tspan fill="#3d4450"> · </tspan>
       <tspan fill="#8b949e">every effect has a compiler-derived undo; teardown leaves no residue</tspan>
     </text>
   </g>

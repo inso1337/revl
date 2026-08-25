@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>revl — the language where unloading leaves no residue</title>
+  <title>revl: the language where unloading leaves no residue</title>
   <meta name="description" content="revl is a research language for spatiotemporal composability: components load, hot-swap and unload in a running system, and 'no residue' is a compile-time guarantee." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -43,7 +43,7 @@
       <p class="eyebrow">A research language for spatiotemporal composability</p>
       <h1>Software you can <span class="grad">unload.</span></h1>
       <p class="lede">
-        revl components load, hot-swap and unload <b>inside a running system</b> —
+        revl components load, hot-swap and unload <b>inside a running system</b>,
         and <b>“unloading leaves no residue”</b> is a compile-time guarantee, not
         runtime discipline. Cordis made revertible effects a discipline;
         revl makes them a <b>type system</b>.
@@ -93,17 +93,17 @@
           </div>
         </div>
         <div class="acc">
-          <h5><span>accumulator — UserCache v1</span><span id="acc-verdict"></span></h5>
+          <h5><span>accumulator, UserCache v1</span><span id="acc-verdict"></span></h5>
           <div class="acc-rows" id="acc-rows">
             <div class="acc-row"><span class="eff">store = Map.new()</span><span class="arrow">⟲</span><span class="und">store.drop()</span></div>
             <div class="acc-row"><span class="eff">store.insert("u1", …)</span><span class="arrow">⟲</span><span class="und">store.remove("u1")</span></div>
             <div class="acc-row"><span class="eff">store.insert("u2", …)</span><span class="arrow">⟲</span><span class="und">store.remove("u2")</span></div>
-            <div class="acc-empty" id="acc-empty"><span class="ok">✓ no residue</span> — every effect reverted, LIFO (G7)</div>
+            <div class="acc-empty" id="acc-empty"><span class="ok">✓ no residue</span>, every effect reverted, LIFO (G7)</div>
           </div>
         </div>
       </div>
       <div class="swap-caption" id="swap-caption">
-        <span class="k">▸</span><span>composition running — every mutation on the stack carries its inverse</span>
+        <span class="k">▸</span><span>composition running, every mutation on the stack carries its inverse</span>
       </div>
     </div>
   </div>
@@ -141,13 +141,13 @@
           <div class="step-n">01 · EFFECT / UNDO</div>
           <h3>Declare the inverse, or it doesn’t compile</h3>
           <p>Every mutation is written as an <code>effect … undo …</code> pair. The
-          runtime pushes each pair onto the component’s <b>accumulator</b> as it runs —
+          runtime pushes each pair onto the component’s <b>accumulator</b> as it runs,
           state and its rollback, recorded together, checked at compile time (G4).</p>
         </div>
         <div class="step" data-step="2">
           <div class="step-n">02 · EMIT</div>
           <h3>Irreversible? Then say so, out loud</h3>
-          <p>Writing to a real database, sending an email — some things cannot be
+          <p>Writing to a real database, sending an email: some things cannot be
           undone. revl doesn’t pretend otherwise: they must be marked
           <code>emit</code>, the service interface must declare
           <code>emission</code>, and every crossing lands on the audited G8
@@ -157,7 +157,7 @@
           <div class="step-n">03 · UNLOAD = REWIND</div>
           <h3>Teardown is derived, not written</h3>
           <p>You never write cleanup code. Unloading replays the accumulator
-          <b>backwards</b> — LIFO-complete over everything the component did (G7) —
+          <b>backwards</b>, LIFO-complete over everything the component did (G7),
           and teardown itself cannot register new effects, by construction (G5).
           Hot-swap is just unload + re-admit, and both halves are checked.</p>
         </div>
@@ -191,7 +191,7 @@
             <div class="iv-boundary">
               <div class="iv-fence"></div>
               <div class="iv-label">system boundary (G8)</div>
-              <div class="iv-emit-row" id="iv-emit1"><span class="e">emit</span> db.execute(…) — declared, audited</div>
+              <div class="iv-emit-row" id="iv-emit1"><span class="e">emit</span> db.execute(…), declared, audited</div>
               <div class="iv-note" id="iv-boundary-note">nothing crosses silently</div>
             </div>
           </div>
@@ -210,22 +210,22 @@
   <div class="wrap">
     <div class="block-head reveal">
       <p class="eyebrow">The gate</p>
-      <h2>The compiler is an admission gate — and refusal is a feature.</h2>
+      <h2>The compiler is an admission gate, and refusal is a feature.</h2>
       <p>A rejected program doesn’t get an error code, it gets a <b>verdict</b>:
-      which guarantee it broke, and the <b>why-trace</b> — the actual derivation the
+      which guarantee it broke, and the <b>why-trace</b>, the actual derivation the
       checker found. Dependency cycles, provision conflicts, silent mutations:
       refused before any code exists.</p>
     </div>
     <div class="fanout-cols">
       <div class="term reveal">
-        <div class="term-head"><i></i><i></i><i></i><span>zsh — revl</span></div>
+        <div class="term-head"><i></i><i></i><i></i><span>zsh, revl</span></div>
         <pre id="gate-term"><span class="t-prompt">$ </span><span class="t-caret"></span></pre>
       </div>
       <div class="fan-facts reveal d1">
         <div class="fact">
           <div>
             <b>Rejections name the guarantee.</b>
-            <p>Not “type error”: <span style="font-family:var(--mono); color:var(--amber)">G3</span> —
+            <p>Not “type error”: <span style="font-family:var(--mono); color:var(--amber)">G3</span>,
             dependency cycles are rejected at link time, and the trace shows the cycle
             itself, file and line for every hop.</p>
           </div>
@@ -233,7 +233,7 @@
         <div class="fact">
           <div>
             <b>Every rejection ships its fix.</b>
-            <p>Diagnostics are structured — code, guarantee, expected/actual, hint —
+            <p>Diagnostics are structured (code, guarantee, expected/actual, hint),
             the same document over the CLI, JSON, and MCP. <code style="font-size:12px">revl explain G4</code>
             prints what the guarantee means and how to satisfy it.</p>
           </div>
@@ -242,7 +242,7 @@
           <div>
             <b>The rejection suite is the spec.</b>
             <p>80+ refused programs in <code style="font-size:12px">examples/rejections/</code> are the
-            checker’s executable specification — every guarantee has a program that
+            checker’s executable specification, every guarantee has a program that
             proves it’s enforced.</p>
           </div>
         </div>
@@ -264,21 +264,21 @@
     </div>
     <div class="g-grid">
       <div class="g-card reveal"><div class="g-id">G1 <span class="g-when">compile</span></div>
-        <p>Every requirement is declared — <b>undeclared access cannot be written</b>. A component only sees what it <code>requires</code>.</p></div>
+        <p>Every requirement is declared, <b>undeclared access cannot be written</b>. A component only sees what it <code>requires</code>.</p></div>
       <div class="g-card reveal d1"><div class="g-id">G2 <span class="g-when">link</span></div>
-        <p><b>Provision disjointness.</b> Two providers for one key refuse to link — per realm, so multi-tenant compositions stay coherent.</p></div>
+        <p><b>Provision disjointness.</b> Two providers for one key refuse to link, per realm, so multi-tenant compositions stay coherent.</p></div>
       <div class="g-card reveal d2"><div class="g-id">G3 <span class="g-when">link</span></div>
-        <p><b>Dependency cycles rejected</b> — with the cycle itself as the why-trace, even though loading is dynamic.</p></div>
+        <p><b>Dependency cycles rejected</b>, with the cycle itself as the why-trace, even though loading is dynamic.</p></div>
       <div class="g-card reveal d3"><div class="g-id">G4 <span class="g-when">compile</span></div>
         <p>Every mutation carries an <b>inverse</b> (<code>undo</code>) or admits irreversibility (<code>emit</code>). No silent third option.</p></div>
       <div class="g-card reveal"><div class="g-id">G5 <span class="g-when">by construction</span></div>
         <p><b>Teardown cannot register effects.</b> Cleanup can’t dig new holes while filling old ones.</p></div>
       <div class="g-card reveal d1"><div class="g-id">G6 <span class="g-when">compile</span></div>
-        <p>Code outside effect forms is <b>pure</b> — confinement is a type-level fact, not an escape analysis.</p></div>
+        <p>Code outside effect forms is <b>pure</b>, confinement is a type-level fact, not an escape analysis.</p></div>
       <div class="g-card reveal d2"><div class="g-id">G7 <span class="g-when">by lowering</span></div>
         <p>Derived teardown is <b>LIFO-complete</b> over accumulated effects. Unload order is a theorem, not a convention.</p></div>
       <div class="g-card reveal d3"><div class="g-id">G8 <span class="g-when">compile</span></div>
-        <p>The boundary surface — externs, emissions — is <b>enumerable</b>. <code>revl audit</code> prints everything that can touch the outside world.</p></div>
+        <p>The boundary surface, externs, emissions, is <b>enumerable</b>. <code>revl audit</code> prints everything that can touch the outside world.</p></div>
     </div>
   </div>
 </section>
@@ -288,21 +288,21 @@
   <div class="wrap">
     <div class="block-head reveal">
       <p class="eyebrow">New on the frozen core</p>
-      <h2>Time, state, async, instances — still revertible.</h2>
+      <h2>Time, state, async, instances: still revertible.</h2>
       <p>The core is frozen; the language keeps growing on top of it. Every
       addition keeps the same deal: <b>declare the inverse, or admit the
-      crossing</b>. All four are checkable in the playground — and the playground
+      crossing</b>. All four are checkable in the playground, and the playground
       can now <a href="playground.html?example=live_counter">boot them live</a>.</p>
     </div>
     <div class="lang-grid">
       <div class="lang-card reveal">
-        <div class="lc-head"><span>timers — <b>every / after</b></span>
+        <div class="lc-head"><span>timers, <b>every / after</b></span>
           <a href="playground.html?example=heartbeat">try it →</a></div>
         <pre data-lang="revl"><code>component Heartbeat requires log: Log {
   every 30s { emit log.write("tick") }
   after 5m  { emit log.write("warmup done") }
 }</code></pre>
-        <p>A timer is a <b>revertible schedule</b> — its inverse is cancellation,
+        <p>A timer is a <b>revertible schedule</b>, its inverse is cancellation,
         derived like any teardown. Unload provably cancels; no orphaned interval
         outlives its component. Under test the clock is a coeffect:
         <code>advance 35s</code> makes the third tick an
@@ -310,7 +310,7 @@
         never a wall-clock race.</p>
       </div>
       <div class="lang-card reveal d1">
-        <div class="lc-head"><span>state handoff — <b>handoff</b></span>
+        <div class="lc-head"><span>state handoff, <b>handoff</b></span>
           <a href="playground.html?example=handoff_cache">try it →</a></div>
         <pre data-lang="revl"><code>component Cache provides cache: Store {
   handoff cache: Map[Str, Str]   // the state contract
@@ -318,11 +318,11 @@
 }</code></pre>
         <p>A hot-swap of a stateful provider used to mean a cold successor. Now
         the predecessor <b>exports</b> its declared shape and the successor
-        <b>accepts</b> it — checked at admission, with shape drift refused as a
+        <b>accepts</b> it, checked at admission, with shape drift refused as a
         why-trace. The cache stays warm across the swap.</p>
       </div>
       <div class="lang-card reveal">
-        <div class="lc-head"><span>async — <b>Async[T]</b>, colored &amp; checked</span>
+        <div class="lc-head"><span>async, <b>Async[T]</b>, colored &amp; checked</span>
           <a href="playground.html?example=a1_async">see it refused →</a></div>
         <pre data-lang="revl"><code>extern emission async fn http_post(url: Str, body: Str) -> Str
   = @ts { return await fetch(url, body) }
@@ -330,17 +330,16 @@
 service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
         <p>Asynchrony is a <b>declared property</b>, like emission-ness: async
         function values, async host externs, awaited on py/ts and erased on
-        go/rust. A sync method reaching an async extern has no in-flight window
-        — so the gate refuses it (A1).</p>
+        go/rust. A sync method reaching an async extern has no in-flight window, so the gate refuses it (A1).</p>
       </div>
       <div class="lang-card reveal d1">
-        <div class="lc-head"><span>instances — <b>spawn</b>, attenuated</span>
+        <div class="lc-head"><span>instances, <b>spawn</b>, attenuated</span>
           <a href="playground.html?example=tenant_attenuation">try it →</a></div>
         <pre data-lang="revl"><code>component Router requires kv_a: Store requires kv_b: StoreB {
   let a = effect spawn TenantAWorker with { tag: "a" } undo a.dispose()
   let b = effect spawn TenantBWorker with { tag: "b" } undo b.dispose()
 }</code></pre>
-        <p>A spawn may <b>narrow</b> a child's capabilities — never widen them.
+        <p>A spawn may <b>narrow</b> a child's capabilities, never widen them.
         Each tenant worker provably reaches only its own store, even though the
         router holds both: least authority per instance,
         <a href="playground.html?example=g4_spawn">enforced by G4</a>.</p>
@@ -354,9 +353,9 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
   <div class="wrap">
     <div class="block-head reveal">
       <p class="eyebrow">Six runtimes</p>
-      <h2>Write it once. Run it as Python, TypeScript, Rust, Java, Go — or sandboxed Wasm.</h2>
+      <h2>Write it once. Run it as Python, TypeScript, Rust, Java, Go, or sandboxed Wasm.</h2>
       <p>One front-end enforces G1–G8 and lowers to a single IR. Six emitters
-      target six Cordis runtimes — and conformance is <b>measured, not asserted</b>:
+      target six Cordis runtimes, and conformance is <b>measured, not asserted</b>:
       each tier’s output goes to that tier’s real compiler.</p>
     </div>
     <div class="fanout-cols">
@@ -401,17 +400,17 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
       </div>
       <div class="fan-facts reveal d1">
         <div class="fact"><div><b>Components compose across languages, live.</b>
-          <p>A Python component can require a service a Rust component provides —
+          <p>A Python component can require a service a Rust component provides,
           different processes, no shared address space. <code style="font-size:12px">revl run --placement</code>
           wires each seam with a generated proxy/stub pair, and a provider’s death
           becomes a reactive withdrawal, not an exception.</p></div></div>
         <div class="fact"><div><b>Migrate a live component between tiers.</b>
-          <p><code style="font-size:12px">swap UserCache --to rust</code> — the running composition
+          <p><code style="font-size:12px">swap UserCache --to rust</code>: the running composition
           unwinds the component’s effects, re-admits it on another runtime, and the
           system never stops.</p></div></div>
         <div class="fact"><div><b>Turing-complete, demonstrated by execution.</b>
           <p>Emitted Wasm runs <span style="font-family:var(--mono)">fib(20) = 6765</span> on real
-          wasmtime — the claim is checked by running the code, not by argument.</p></div></div>
+          wasmtime. The claim is checked by running the code, not by argument.</p></div></div>
       </div>
     </div>
   </div>
@@ -422,22 +421,22 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
   <div class="wrap">
     <div class="block-head reveal">
       <p class="eyebrow">The component manager</p>
-      <h2>truc — assemble, don’t install.</h2>
-      <p>Components are <b>petits bouts</b> — little pieces — and a composition
+      <h2>truc: assemble, don’t install.</h2>
+      <p>Components are <b>petits bouts</b>, little pieces, and a composition
       is what you get when you assemble them. Every other package manager
       fetches first and finds out later. truc <b>admits every component through
       revl’s own gate</b> before it joins the assembly: a piece that would break
-      your composition is refused at assemble time, with a why-trace — not
+      your composition is refused at assemble time, with a why-trace, not
       discovered at runtime, in production, by you.</p>
     </div>
     <div class="fanout-cols">
       <div class="term reveal">
-        <div class="term-head"><i></i><i></i><i></i><span>zsh — truc</span></div>
+        <div class="term-head"><i></i><i></i><i></i><span>zsh, truc</span></div>
         <pre><span class="t-prompt">$ </span><span class="t-cmd">truc add audited_database</span>
 <span class="t-dim">  fetched · pinned in truc.lock · vendored under trucs/</span>
 
 <span class="t-prompt">$ </span><span class="t-cmd">truc assemble --check</span>
-<span class="t-dim">  dry run — resolve + admit, nothing touched</span>
+<span class="t-dim">  dry run, resolve + admit, nothing touched</span>
 
 <span class="t-prompt">$ </span><span class="t-cmd">truc assemble</span>
 <span class="t-dim">  resolve → admit (</span><span class="t-g">G2</span><span class="t-dim">: no provider races, </span><span class="t-g">G4</span><span class="t-dim">: no</span>
@@ -451,11 +450,11 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
       <div class="fan-facts reveal d1">
         <div class="fact"><div><b>Fetched is not admitted.</b>
           <p><code style="font-size:12px">truc add</code> only fetches and pins. Whether the
-          composition still <i>holds</i> is <code style="font-size:12px">assemble</code>’s job — a
+          composition still <i>holds</i> is <code style="font-size:12px">assemble</code>’s job, a
           separate, honest step, with <code style="font-size:12px">--check</code> as its dry run
           and <code style="font-size:12px">truc rm</code> refusing to strand a dependent.</p></div></div>
         <div class="fact"><div><b>Written in revl.</b>
-          <p>truc is itself a revl composition — its components pass through the
+          <p>truc is itself a revl composition, its components pass through the
           same admission gate they run for you, in-process. The manager dogfoods
           the paradigm it manages.</p></div></div>
         <div class="fact"><div><b>One namespace with the compiler.</b>
@@ -475,23 +474,23 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
       <h2>Built for authors that are machines.</h2>
       <p><code style="color:var(--violet)">revl mcp serve</code> runs the whole compiler as an
       MCP server. An agent proposing a component talks to the <b>admission gate</b>,
-      not the filesystem — and a rejection comes back as a structured document the
+      not the filesystem, and a rejection comes back as a structured document the
       agent can act on, not a stack trace it has to parse.</p>
     </div>
     <div class="agent-cols">
       <div class="reveal">
         <div class="fact"><div><b>Structured verdicts, machine-first.</b>
-          <p>Code, guarantee, expected/actual, fix hint — every diagnostic is a
+          <p>Code, guarantee, expected/actual, fix hint, every diagnostic is a
           document. Measured on a 30-spec benchmark against real models, iterating
           against the real checker.</p></div></div>
         <div class="fact" style="margin-top:16px"><div><b>Safety hints derived from bodies.</b>
           <p><code style="font-size:12px">revl mcp schema</code> projects services to MCP tools whose
           <code style="font-size:12px">readOnlyHint</code> / <code style="font-size:12px">destructiveHint</code>
-          come <b>from the compiler</b> — a tool cannot describe itself as harmless
+          come <b>from the compiler</b>; a tool cannot describe itself as harmless
           when its body emits.</p></div></div>
         <div class="fact" style="margin-top:16px"><div><b>Admission, not access.</b>
           <p>Agent code enters a running system through <code style="font-size:12px">revl_admit</code>
-          — checked against the live manifest — or through
+          (checked against the live manifest), or through
           <code style="font-size:12px">revl_gauntlet</code>, which grades a candidate in isolation
           and returns a verdict dossier.</p></div></div>
         <div class="fact" style="margin-top:16px"><div><b>G4 for the management plane.</b>
@@ -538,7 +537,7 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
           <pre><code>{ <span class="j-k">"admissible"</span>: <span class="j-ok">true</span>,
   <span class="j-k">"provisions_gained"</span>: [<span class="j-s">"pool: Pool"</span>],
   <span class="j-k">"emission_surface"</span>: <span class="j-s">"unchanged"</span>,
-  <span class="j-k">"teardown"</span>: <span class="j-s">"derived — LIFO, no residue"</span> }</code></pre>
+  <span class="j-k">"teardown"</span>: <span class="j-s">"derived, LIFO, no residue"</span> }</code></pre>
         </div>
       </div>
     </div>
@@ -557,21 +556,21 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
     <div class="tool-grid">
       <div class="tool-card reveal"><h4><span class="tc-cmd">revl plan</span></h4>
         <p>A dry run for a hot-swap: which provisions appear or withdraw, who gets
-        diverted, teardown order, how the emission surface changes — before anything moves.</p></div>
+        diverted, teardown order, how the emission surface changes, before anything moves.</p></div>
       <div class="tool-card reveal d1"><h4><span class="tc-cmd">revl query</span></h4>
         <p>Who emits to <i>X</i>? What breaks if I withdraw <i>C</i>? Each answer says
         whether it’s exact or a conservative over-approximation.</p></div>
-      <div class="tool-card reveal d2"><h4><span class="tc-cmd">hole[T]</span> — typed holes</h4>
+      <div class="tool-card reveal d2"><h4><span class="tc-cmd">hole[T]</span>, typed holes</h4>
         <p>An unfinished draft still type-checks; the hole becomes a reported
-        obligation with an expected-type fill spec — and can never be admitted.</p></div>
-      <div class="tool-card reveal"><h4><span class="tc-cmd">revl run --record</span> — backwards replay</h4>
+        obligation with an expected-type fill spec, and can never be admitted.</p></div>
+      <div class="tool-card reveal"><h4><span class="tc-cmd">revl run --record</span>, backwards replay</h4>
         <p>Step an activation <i>back</i> over its own accumulator: <span style="font-family:var(--mono); font-size:12px">:back · :bisect · :inspect</span>.
         Only revertible effects make time travel cheap.</p></div>
       <div class="tool-card reveal d1"><h4><span class="tc-cmd">why-traces</span></h4>
-        <p>A G2/G3/G4 rejection ships the derivation, not just the verdict —
+        <p>A G2/G3/G4 rejection ships the derivation, not just the verdict:
         <span style="font-family:var(--mono); font-size:12px">put → writeThrough → audit.log</span>.</p></div>
       <div class="tool-card reveal d2"><h4><span class="tc-cmd">fault test</span></h4>
-        <p><span style="font-family:var(--mono); font-size:12px">fail at step 2; assert no residue</span> —
+        <p><span style="font-family:var(--mono); font-size:12px">fail at step 2; assert no residue</span>:
         crash-safety as a declarable, runnable assertion in the language itself.</p></div>
       <div class="tool-card reveal"><h4><span class="tc-cmd">verified effect</span></h4>
         <p>An <i>undo</i> that’s wrong is worse than none. <b>verified</b> round-trips
@@ -580,18 +579,18 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
         <p>Right-to-erasure evidence as a compiler artifact: proof one realm unwinds
         to nothing while every other realm stays untouched.</p></div>
       <div class="tool-card reveal d2"><h4><span class="tc-cmd">revl import</span> · wit / openapi / mcp</h4>
-        <p>An external contract becomes a typed service — and any revl service
+        <p>An external contract becomes a typed service, and any revl service
         exports back to WIT. The boundary is typed in both directions.</p></div>
       <div class="tool-card reveal"><h4><span class="tc-cmd">revl quarantine</span></h4>
         <p>The gauntlet proves a candidate <i>runs correctly</i>; quarantine proves
-        it <b>cannot escape while doing so</b> — physically, in the wasm sandbox,
+        it <b>cannot escape while doing so</b>, physically, in the wasm sandbox,
         trap-on-escape, before it touches a hosted tier.</p></div>
       <div class="tool-card reveal d1"><h4><span class="tc-cmd">revl canary</span></h4>
         <p>Progressive delivery: run both generations at once, give the successor
-        one realm slice, promote or revert on evidence — the rollback is derived,
+        one realm slice, promote or revert on evidence: the rollback is derived,
         not written.</p></div>
       <div class="tool-card reveal d2"><h4><span class="tc-cmd">revl repair</span></h4>
-        <p>A component faults and the system repairs itself — inside declared
+        <p>A component faults and the system repairs itself, inside declared
         bounds, stopping for a human exactly when it would step outside them.</p></div>
     </div>
   </div>
@@ -601,11 +600,11 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
 <section class="cta-band">
   <div class="wrap">
     <h2>Break a component.<br /><span class="grad">Watch the gate refuse it.</span></h2>
-    <p>The full compiler runs in your browser — and so does the runtime.
+    <p>The full compiler runs in your browser, and so does the runtime.
     <b>Boot</b> a composition on cordis-py, call its operations, <b>hot-swap</b> your
     own edit into the running system (state crosses via handoff), then unload and
     watch the no-residue proof. The playground page is itself a revl
-    composition — it boots itself on load, and you can withdraw, reload and
+    composition: it boots itself on load, and you can withdraw, reload and
     hot-swap the parts of the page you're standing on. Nothing you type
     leaves the page.</p>
     <div class="hero-ctas">
@@ -625,7 +624,7 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
 <footer>
   <div class="wrap foot-inner">
     <div>
-      <span style="font-family:var(--mono); color:var(--text)">revl</span> —
+      <span style="font-family:var(--mono); color:var(--text)">revl</span>:
       a research language for spatiotemporal composability · MIT license
     </div>
     <div class="foot-links">

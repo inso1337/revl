@@ -3,12 +3,12 @@
 A practical guide to writing revl 2.0.
 
 **revl** is a language for *spatiotemporal composability*: writing components
-that can be loaded, unloaded, and hot-swapped in a running system — where
+that can be loaded, unloaded, and hot-swapped in a running system, where
 "unloading leaves no residue" and "dependencies stay coherent" are
 **compile-time guarantees**, not runtime discipline.
 
 The one-line pitch: *Cordis has revertible effects as a discipline; revl makes
-them a type system* — the jump C++ RAII made to become Rust's ownership. Rust's
+them a type system*, the jump C++ RAII made to become Rust's ownership. Rust's
 borrow checker governs *lexical* resource scope; revl's checker governs
 *dynamic component* scope.
 
@@ -16,13 +16,13 @@ borrow checker governs *lexical* resource scope; revl's checker governs
 
 A revl program is a set of **components**. A component:
 
-- **requires** services (its inputs — what it reads),
-- **provides** services (its outputs — what it publishes),
+- **requires** services (its inputs, what it reads),
+- **provides** services (its outputs, what it publishes),
 - and has an **activation body**: a sequence of *revertible effects*
   (`effect E undo U`) that runs when its requirements are satisfied.
 
 When a component deactivates (its provider leaves, or it's hot-swapped out),
-every effect it acquired is undone — in derived, LIFO order. You never write
+every effect it acquired is undone, in derived, LIFO order. You never write
 `activate()`/`deactivate()`. You write what to do and the inverse of each thing
 you did; the runtime derives the teardown.
 
@@ -55,21 +55,21 @@ component UserCache requires db: Database provides cache: Cache {
 
 Reading it:
 
-- `service Database { ... }` — the interface behind a coeffect key.
+- `service Database { ... }`, the interface behind a coeffect key.
   `emission fn` marks an operation that *cannot be reverted* (bytes left the
   system), so it must be called with `emit` and appears on the audit surface.
-- `requires db: Database provides cache: Cache` — the component's whole
+- `requires db: Database provides cache: Cache`, the component's whole
   interface to the world. Nothing else is reachable; `db` is in scope, typed
   `Database`, and stays readable throughout the component's own teardown.
-- `let store = effect Map.new() undo store.drop()` — acquire a map, remember
+- `let store = effect Map.new() undo store.drop()`, acquire a map, remember
   how to drop it. On teardown, `store.drop()` runs.
-- `provide cache { ... }` — publish the `cache` key. `put` mutates the store
+- `provide cache { ... }`, publish the `cache` key. `put` mutates the store
   (effect + undo) and *emits* a log write. Because its body reaches an
   emission, the *service* declares it `emission fn`: a declaration is an upper
   bound on its providers, so a plain `fn` may never be implemented by a body
   that emits.
 - `` `...${key}` `` is the 2.0 template-string interpolation (1.x `"$key"` is
-  gone — `revl fmt --migrate` rewrites old sources).
+  gone, `revl fmt --migrate` rewrites old sources).
 
 ## The four strata
 
@@ -104,8 +104,8 @@ type Outcome = Ok(Row) | NotFound | Invalid(Str)      // ADT (payloads)
 
 - Records are structural; ADTs are nominal (defined by their case names).
 - **There is no `null`.** Absence is `Opt[T]`: `Some(value)` or `None`. `T`
-  flows into `Opt[T]` automatically; `Opt[T]` does **not** flow back into `T`
-  — you unwrap with `match` (or `??`).
+  flows into `Opt[T]` automatically; `Opt[T]` does **not** flow back into `T`;
+  you unwrap with `match` (or `??`).
 
 ### Functions & expressions (§3)
 
@@ -128,10 +128,10 @@ fn describe(outcome: Outcome) -> Str {
 ```
 
 - `fn` is a pure function; `pub fn` exports it. `let` is single-assignment;
-  `var` is local mutable (and never escapes — a lambda captures its *current
+  `var` is local mutable (and never escapes, a lambda captures its *current
   value*, not the cell).
 - Loops, `if`, arrow lambdas (`x => x + 1`), records, lists, indexing, calls,
-  `==`/`===` (identical), `!=`/`!==`, `&&`/`||`, the ternary — TypeScript's
+  `==`/`===` (identical), `!=`/`!==`, `&&`/`||`, the ternary, TypeScript's
   syntax, verbatim.
 - `match` is the ADT eliminator. The checker requires every case (or a `_`
   wildcard); a missing case is a compile error naming the case you forgot.
@@ -147,21 +147,21 @@ pub fn lex(source: Str) -> List[Token] { ... }   // importable
 fn helper() -> Int { ... }                        // module-private by default
 ```
 
-Components are *never* imported — they are *composed*, over a manifest.
+Components are *never* imported, they are *composed*, over a manifest.
 Import cycles between modules are a compile error.
 
 ### Components & effects (§4)
 
 The core from [DESIGN.md](../DESIGN.md) §3, plus 2.0's two additions:
 
-- **Block effect form** — acquisitions with several pure setup steps:
+- **Block effect form**, acquisitions with several pure setup steps:
 ```revl fragment
 let pool = effect {
   let url = normalize(config.url)
   Pool.open(url, config.pool_size)          // last expression = the acquisition
 } undo pool.close()
 ```
-- **`fail`** — deliberate L-Raise from an activation body (reverts what's
+- **`fail`**, deliberate L-Raise from an activation body (reverts what's
   accumulated, lands FAILED):
 ```revl fragment
 if (config.replicas < 1) fail "at least one replica required"
@@ -208,13 +208,13 @@ tier (structural recursion / bounded loops only).
 
 ### The stdlib surface
 
-A method call on a value must name a known builtin — anything else is a
+A method call on a value must name a known builtin, anything else is a
 compile error, never a host pass-through ([docs/stdlib-2.0.md](stdlib-2.0.md)):
 
 | method | on | note |
 |---|---|---|
 | `length` / `length()` | Str, List | element count |
-| `push(v)` | List | **persistent** — returns a new list (`out = out.push(v)`) |
+| `push(v)` | List | **persistent**, returns a new list (`out = out.push(v)`) |
 | `slice(a, b)` | Str, List | half-open sub-range |
 | `charAt(i)` / `charCodeAt(i)` | Str | 1-char string / code point |
 | `indexOf(v)` | Str, List | first index, `-1` if absent |
@@ -225,7 +225,7 @@ compile error, never a host pass-through ([docs/stdlib-2.0.md](stdlib-2.0.md)):
 
 ## What won't compile
 
-This is the point of the language — each rejection names the guarantee and
+This is the point of the language, each rejection names the guarantee and
 the fix ([DESIGN.md](../DESIGN.md) §4):
 
 | # | Guarantee |
@@ -245,7 +245,7 @@ the fix ([DESIGN.md](../DESIGN.md) §4):
 
 ## Tooling
 
-The complete subcommand index — every command wired in `src/revl/__main__.py`,
+The complete subcommand index, every command wired in `src/revl/__main__.py`,
 one line each with the doc that details it. The flags and worked examples follow
 below.
 
@@ -262,7 +262,7 @@ below.
 | `revl query touched COMPONENT` | everything a component touched (`--trace` lifecycle JSONL, `--timeline` replay recording) | [queries.md](queries.md) |
 | `revl fmt FILES` | canonical formatting (IR-equivalence gated); `--migrate` rewrites 1.x `$`, `--check` for CI | [fmt.md](fmt.md) |
 | `revl test FILES` | run `test`/`prop test`/`fault test`/`lifecycle test` blocks; `--backend {py,ts,rust,java,wasm,go,all}`, `--sweep` fault sweep | [prop-test.md](prop-test.md) · [fault-tests.md](fault-tests.md) |
-| `revl run FILES` | boot on a Cordis runtime — see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
+| `revl run FILES` | boot on a Cordis runtime, see the tier table below and the flag list | [replay.md](replay.md) · [crash-recovery.md](crash-recovery.md) |
 | `revl recover --wal FILE` | crash recovery: roll a WAL forward/back to a checked verdict + residue proof (`--restore`, `--json`) | [crash-recovery.md](crash-recovery.md) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check FILES` runs the withdraw oracle | [why-runtime.md](why-runtime.md) |
 | `revl serve --mcp FILES` | serve a booted composition's own provided operations as MCP tools (`--config`, `--composition`) | [mcp-bridge.md](mcp-bridge.md) |
@@ -275,7 +275,7 @@ below.
 `revl run` flags: `--backend {py,rust,java,wasm}` (ts accepted but **not
 runnable**), `--once` (boot → LIFO teardown → no-residue proof → exit),
 `--watch` (recompile on edit; a rejected edit keeps the run alive), `--record`
-(record the accumulator for the replay REPL — `:timeline`, `:back`, `:forward`,
+(record the accumulator for the replay REPL, `:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`, see [replay.md](replay.md)), `--wal FILE` (durable
 write-ahead log; recover with `revl recover`, see
 [crash-recovery.md](crash-recovery.md)), `--trace FILE` (causal lifecycle
@@ -316,12 +316,12 @@ config a composition declares (a component with a missing required field refuses
 the run before any runtime loads); `--backend` selects the tier, and `revl test
 --all` is gated by `tests/test_cross_tier.py`.
 
-The **rust tier is runnable** too — `--backend rust` boots the composition as a
+The **rust tier is runnable** too: `--backend rust` boots the composition as a
 separate **cordis-rs process** over the same driver contract py uses, only in a
 different address space: the language-agnostic Unix-socket bridge seam the
 cross-tier work already speaks ([interop-bridge.md](interop-bridge.md)). What is
 wired and **gated live** by `tests/test_run_rust.py` (wherever a cordis-rs
-toolchain resolves — else a skip with the reason, never a green run that booted
+toolchain resolves, else a skip with the reason, never a green run that booted
 nothing) is the **`--once` round-trip**: emit rust → `cargo build` → boot every
 component on a real `cordis::Context` → tear down LIFO (consumers before
 providers) → prove no residue (`registry().len() == 0` and
@@ -332,19 +332,19 @@ the runner's stub for the session); without `--once` on a TTY the rust driver
 says so and completes the same once round-trip rather than pretending to hold a
 REPL.
 
-The **java and wasm tiers are runnable on the same contract** — each boots the
+The **java and wasm tiers are runnable on the same contract**, each boots the
 composition as its own process and runs the identical `--once` round-trip (boot
 → LIFO teardown → no-residue proof → exit), behind its own runtime gate:
 
 - **`--backend java`** emits `revl.Components` → `javac` → boots the composition
   on a JVM running the once-runner (`backends/java/placement/RunOnce.java`) on
-  the in-repo cordis4j runtime, and proves no residue the tier-neutral way —
+  the in-repo cordis4j runtime, and proves no residue the tier-neutral way,
   after teardown no provided service still resolves through `ctx.get`. Gated
   live by `tests/test_run_java.py`; a machine with no working JDK skips with the
   reason (macOS ships a `javac` shim that errors until a JDK is installed, so the
   gate checks that `javac`/`java` actually respond). The reactive real-cordis4j
   runtime (JDK 21 + `REVL_CORDIS4J_CLASSES`) with peer-death-as-withdrawal stays
-  the domain of `--placement` and the java scenarios — a single-process `run
+  the domain of `--placement` and the java scenarios; a single-process `run
   --once` has no peer to withdraw, so the stub runtime carries its full contract.
 - **`--backend wasm`** emits WAT → boots the composition on the **cordis-wasm**
   runtime (backed by **wasmtime**) via the once-harness
@@ -371,11 +371,11 @@ easiest place to overclaim:
 
 - **`--placement`** is designed to compose py / node / rust / java in one
   lifecycle ([interop-bridge.md](interop-bridge.md)). What is *tested* is the
-  static half — `tests/test_distribute.py` asserts the transport-safety
+  static half: `tests/test_distribute.py` asserts the transport-safety
   verdict `revl audit` reports for each service. A four-language composition
   actually running is exercised by the `demo/bridge_py*.py` scripts, which no
   test and no CI job runs. Treat it as demonstrated, not gated. A live
-  placement can also **migrate a component across tiers while it runs** —
+  placement can also **migrate a component across tiers while it runs** via
   `swap <component> --to <backend>` at the interactive `swap>` prompt: boot the
   candidate, admit it against the running manifest, re-point the consumers, and
   drain + tear the old provider down with a no-residue proof
@@ -387,24 +387,24 @@ easiest place to overclaim:
   call, swap and prove no-residue without touching the filesystem
   ([mcp-bridge.md](mcp-bridge.md)). The tool surface, its annotations and its
   structured rejections are gated by `tests/test_mcp.py` (33 tests). The live
-  session — actually booting a composition through those tools — is
+  session, actually booting a composition through those tools, is
   `tests/test_mcp_session.py`, which needs the cordis-py runtime and
   therefore **skips in CI**.
 
 ## Backends
 
-- **cordis-py** (Python) — the reference backend, on a hardened lifecycle
+- **cordis-py** (Python), the reference backend, on a hardened lifecycle
   runtime. The tier every construct is checked against first.
-- **cordis** (TypeScript) — v4.
-- **cordis-rs** (Rust) and **cordis4j** (Java) — spikes. Each tier's emitted
+- **cordis** (TypeScript), v4.
+- **cordis-rs** (Rust) and **cordis4j** (Java), spikes. Each tier's emitted
   code is run against its real runtime
   (`backends/rust/test_emit_rust.py::test_runtime_scenarios_on_real_cordis_rs`,
   `backends/java/test_emit_java.py::test_runtime_scenarios_on_real_cordis4j`),
   and both skip without their toolchain. Consuming *and* serving across a
   process seam, with peer death becoming withdrawal, is the design
   ([interop-bridge.md](interop-bridge.md)) and is demonstrated by the
-  `demo/bridge_*` scripts — it is not covered by a test.
-- **cordis-wasm** — the sandboxed substrate, where confinement becomes
+  `demo/bridge_*` scripts; it is not covered by a test.
+- **cordis-wasm**, the sandboxed substrate, where confinement becomes
   physical. Deliberately i32-only at the service boundary.
 
 What each tier can and cannot express is measured, not asserted:
@@ -414,14 +414,14 @@ deliberate limit from a gap.
 
 ## Further reading
 
-- [DESIGN.md](../DESIGN.md) — the design, the guarantees table, the tiering rationale.
-- [docs/syntax-2.0.md](syntax-2.0.md) — the full-language spec.
-- [docs/stdlib-2.0.md](stdlib-2.0.md) — the stdlib surface.
-- [docs/v2.0-roadmap.md](v2.0-roadmap.md) — status and remaining frontier.
-- [docs/conformance.md](conformance.md) — what each backend can express.
-- [docs/mcp-bridge.md](mcp-bridge.md) — the agent boundary and the live session.
-- [docs/interop-bridge.md](interop-bridge.md) — splitting a composition across
+- [DESIGN.md](../DESIGN.md), the design, the guarantees table, the tiering rationale.
+- [docs/syntax-2.0.md](syntax-2.0.md), the full-language spec.
+- [docs/stdlib-2.0.md](stdlib-2.0.md), the stdlib surface.
+- [docs/v2.0-roadmap.md](v2.0-roadmap.md), status and remaining frontier.
+- [docs/conformance.md](conformance.md), what each backend can express.
+- [docs/mcp-bridge.md](mcp-bridge.md), the agent boundary and the live session.
+- [docs/interop-bridge.md](interop-bridge.md), splitting a composition across
   languages and processes.
-- [docs/backend-ir-v3.md](backend-ir-v3.md) — the contract, if you are writing
+- [docs/backend-ir-v3.md](backend-ir-v3.md), the contract, if you are writing
   a backend.
 
