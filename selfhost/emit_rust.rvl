@@ -12,16 +12,26 @@
 //
 // ============================================================ WHAT IT COVERS
 // Every IR the frontend produces is ir_version 3, so the covered slice mirrors
-// the reference's v3 path (`_emit_v3` -> `_emit_v3_functions` -> `_render_expr`
-// / `_v3_stmt`) for a FUNCTION-ONLY document with NO services, NO user types,
-// NO stdlib builtins — the corner of the v3 surface that emits, byte-for-byte,
-// with only the module scaffold and the free-function bodies:
+// the reference's v3 path (`_emit_v3` -> `_emit_v3_types` / `_emit_v3_functions`
+// -> `_render_expr` / `_v3_stmt`) for a TYPES + FUNCTIONS document with NO
+// services, NO components, NO stdlib builtins — the corner of the v3 surface
+// that emits, byte-for-byte, with only the module scaffold, the user type items,
+// and the free-function bodies:
 //
 //   * the module scaffold — `_module_header(3)` (the two `//!` banner lines, the
 //     `#![allow(..)]`, and the `use std::sync::Arc;` / `use cordis::Value;`);
+//   * the v3 TYPED-CORE (slice 2) — `_emit_v3_types` (a record as a
+//     `PartialEq`-deriving `pub struct`, a variant as a serde-tagged `pub enum`);
+//     record literals (`Struct { f: v, .. }`, with the by-value field clone);
+//     ADT construction (`Enum::Case` / `Enum::Case(arg)`, and the built-in
+//     Result/Option constructors); `match` over user variants (with the
+//     `unreachable!()` fallthrough); user record/variant names in `_rust_type`
+//     (`List[Person]` -> `Vec<Person>`); field access (`p.name`); and the
+//     `_V3Ctx` type-name inference (`case_adt`/`case_payload`/`record_by_fields`)
+//     that seeds `var_types` and picks a record literal's nominal struct;
 //   * `_emit_v3_functions` — each module fn as a Rust `fn`, with `_rust_type`
-//     for scalar/`List`/`Opt`/`Map`/`Result` parameter and return types,
-//     `pub` visibility, and `todo!()` for an empty body;
+//     for scalar/`List`/`Opt`/`Map`/`Result`/user-type parameter and return
+//     types, `pub` visibility, and `todo!()` for an empty body;
 //   * `_v3_stmt` for the base statement surface — let/assign (with the
 //     `var_types` seeding that drives by-value clone decisions), return,
 //     if/while/for, the bare-expr `let _ = ..;`, and assert;
@@ -40,10 +50,15 @@
 //   * COMPONENTS / SERVICES entirely — `_emit_component*`, the service traits,
 //     the effect/undo accumulator, `provide`/`req`/`config`, timers, the
 //     component-dialect expression kinds (`req`/`config`/`host`/`format`/`fn`
-//     and the `target`/`method` call form) — Path B slice 2+;
-//   * the v3 TYPED-CORE — user `type` decls (`_emit_v3_types`), record literals
-//     and functional record-update, ADT construction and `match` over user
-//     variants, and the record/variant type-name inference in `_V3Ctx`;
+//     and the `target`/`method` call form). They are ENTANGLED with the deferred
+//     erasure surface below: a `service` declaration alone fires `_emit_bridge`,
+//     and a `component` additionally fires the host stubs and the full
+//     component-impl machinery — so no service/component fixture can be
+//     byte-exact without also porting the bridge. Path B slice 3+;
+//   * functional record-update `{r | f = e}` — the RUST reference itself RAISES
+//     on `record_update` (only python/typescript emit it today), so it is a
+//     structural exclusion, not merely un-ported;
+//   * `let_pattern` (record/list destructuring) — see the structural note below;
 //   * the STDLIB surface — every `builtin`/`len` node and the `_stdlib_helper_traits`
 //     / `revl_length` it pulls in (a fixture with any builtin trips `_uses_stdlib`
 //     and grows the whole helper-trait block);
@@ -72,8 +87,13 @@
 // genuine U+000A), and `mangle` (the Rust-keyword rename `_mangle`).
 use "../stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt,
-  value_list, value_at, value_str, value_int, value_bool
+  value_list, value_at, value_str, value_int, value_bool, value_keys
 }
+// The list kit (item 194): `list_sort` is the codepoint-lexicographic
+// `sorted(...)` the reference uses to canonicalise a record's field set into a
+// `record_by_fields` key; `str_lt` is its comparator, reused by the in-file
+// tests. Both are byte-fuzz-pinned against Python `sorted()` — no re-hand-roll.
+use "../stdlib/list.rvl" { list_sort, str_lt }
 
 // ------------------------------------------------- host formatting (kept @py)
 // `string_lit` is backends/rust/emit.py::_string for a `str` input, verbatim: a
@@ -206,8 +226,20 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // binding's surface type (seeded from params and `let` right-hand sides) drives
 // the by-value clone decision and string-`+` detection; a free function's
 // declared return type types a `let` bound to its call. The user-type tables
-// (`case_adt`, `record_by_fields`) are empty in this slice.
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str] }
+// mirror the reference's `_V3Ctx`:
+//   * `ca` (`case_adt`)      — variant case name -> its enum type name; the
+//     sentinel `<<AMBIG>>` marks a case name shared by two enums (the reference
+//     stores `None` and refuses at use);
+//   * `cp` (`case_payload`)  — case name -> `"y"`/`"n"`, whether the case
+//     carries a payload (nullary vs one-argument construction);
+//   * `rbf` (`record_by_fields`) — the sorted-field KEY of a record -> its
+//     struct type name (`<<AMBIG>>` when two records share the exact field set),
+//     so a record literal `{ a: .., b: .. }` infers its nominal Rust struct.
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str] }
+// The user-type tables, built once from the document's `types` and shared by
+// every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
+// the same type tables); paired with the type-NAME set for `rust_type`.
+type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str] }
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx` in place).
@@ -216,7 +248,56 @@ type Sout = { lines: List[Str], ctx: Ctx }
 fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
-fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx { return { vt: ctx.vt.set(k, v), fr: ctx.fr } }
+fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf }
+}
+// Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
+// sentinel and a missing key both mean "not a byte-exact target here".
+fn resolved(name: Str) -> Bool { return name != "" && name != "<<AMBIG>>" }
+
+// `record_by_fields`' key: the field NAMES sorted (Python `tuple(sorted(..))`),
+// joined with a `,`. Both the type-decl side (`fields.keys()`) and the record
+// literal side (`[k for k, _ in fields]`) reduce to the same key. `list_sort`
+// (the list kit) is exactly the codepoint `sorted(..)` the reference uses.
+fn sorted_key(names: List[Str]) -> Str { return list_sort(names).join(",") }
+
+// `_V3Ctx`'s type-table construction: fold the document `types` into the case /
+// record lookups. Ambiguity (a case name / field set shared by two decls) is
+// marked `<<AMBIG>>`, exactly where the reference stores `None`.
+fn build_type_tables(types: Any) -> TypeTables {
+  var ca: Map[Str, Str] = Map.empty()
+  var cp: Map[Str, Str] = Map.empty()
+  var rbf: Map[Str, Str] = Map.empty()
+  var tn: Map[Str, Str] = Map.empty()
+  for (name of value_keys(types)) {
+    tn = tn.set(name, "1")
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    if (kind == "record") {
+      let key = sorted_key(value_keys(value_field(spec, "fields")))
+      if (rbf.has(key)) { rbf = rbf.set(key, "<<AMBIG>>") } else { rbf = rbf.set(key, name) }
+    }
+    if (kind == "variant") {
+      for (case of value_list(value_field(spec, "cases"))) {
+        let cn = value_str(value_field(case, "name"))
+        var pres = "n"
+        if (!value_is_null(value_field(case, "payload"))) { pres = "y" }
+        cp = cp.set(cn, pres)
+        if (ca.has(cn)) { ca = ca.set(cn, "<<AMBIG>>") } else { ca = ca.set(cn, name) }
+      }
+    }
+  }
+  return { ca: ca, cp: cp, rbf: rbf, tn: tn }
+}
+
+// `_V3Ctx.record_type_for_fields`: a record literal's nominal struct type, from
+// its (sorted) field set. Reference RAISES on no-unique-match; here the marker
+// keeps the emitter total (no in-corpus literal is ambiguous or unknown).
+fn record_type_for_fields(ctx: Ctx, names: List[Str]) -> Str {
+  let name = map_get(ctx.rbf, sorted_key(names))
+  if (!resolved(name)) { return `<<DEFER-record>>` }
+  return mangle(name)
+}
 
 // -------------------------------------------------------------------- types
 fn is_fn_type(name: Str) -> Bool {
@@ -262,33 +343,40 @@ fn split_generic(inner: Str) -> List[Str] {
   return parts
 }
 
-// `_rust_type` (subset): scalars, the `List`/`Opt`/`Map`/`Result` generics, and
-// the opaque `Value` fallback for an unknown/empty/function type.
-fn rust_type(tv: Any) -> Str {
+// `_rust_type`: scalars, the `List`/`Opt`/`Map`/`Result` generics, a user
+// record/variant NAME mapped to its emitted struct/enum name (when in `tnames`,
+// exactly the reference's `name in types` branch), and the opaque `Value`
+// fallback for an unknown/empty/function type. Branch order matches the
+// reference: fn-type, scalar, user type, generic, fallback.
+fn rust_type_t(tv: Any, tnames: Map[Str, Str]) -> Str {
   let name = value_str(tv)
   if (name == "") { return "Value" }
   if (is_fn_type(name)) { return "<<DEFER-fn-type>>" }
   let tm = type_map(name)
   if (tm != "") { return tm }
+  if (tnames.has(name)) { return mangle(name) }
   if (name.endsWith("]")) {
     let lb = name.indexOf("[")
     if (lb > 0) {
       let head = name.slice(0, lb)
       let inner = name.slice(lb + 1, name.length() - 1)
-      if (head == "List") { return `Vec<${rust_type(inner)}>` }
-      if (head == "Opt") { return `Option<${rust_type(inner)}>` }
+      if (head == "List") { return `Vec<${rust_type_t(inner, tnames)}>` }
+      if (head == "Opt") { return `Option<${rust_type_t(inner, tnames)}>` }
       if (head == "Map") {
         let ps = split_generic(inner)
-        return `std::collections::HashMap<${rust_type(ps[0])}, ${rust_type(ps[1])}>`
+        return `std::collections::HashMap<${rust_type_t(ps[0], tnames)}, ${rust_type_t(ps[1], tnames)}>`
       }
       if (head == "Result") {
         let ps = split_generic(inner)
-        return `Result<${rust_type(ps[0])}, ${rust_type(ps[1])}>`
+        return `Result<${rust_type_t(ps[0], tnames)}, ${rust_type_t(ps[1], tnames)}>`
       }
     }
   }
   return "Value"
 }
+// The type-name-free spelling, for the scalar/generic surface with no user
+// types in scope (the in-file tests and any function-only document).
+fn rust_type(tv: Any) -> Str { return rust_type_t(tv, Map.empty()) }
 
 // `_rust_v3_lit`: a v3 literal. Strings are owned `String` (revl `Str`).
 fn rust_v3_lit(node: Any) -> Str {
@@ -343,12 +431,13 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
 fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
   let k = node_kind(node)
   if (k == "name" || k == "var" || k == "req") { return map_get(ctx.vt, ref_name(node)) }
-  if (k == "adt") { return "" }
+  if (k == "adt") { return map_get(ctx.ca, value_str(value_field(node, "case"))) }
   if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
     let callee = value_field(node, "callee")
     if (node_kind(callee) == "var") {
       let cn = value_str(value_field(callee, "name"))
+      if (ctx.ca.has(cn)) { return map_get(ctx.ca, cn) }
       if (ctx.fr.has(cn)) { return map_get(ctx.fr, cn) }
     }
   }
@@ -374,8 +463,16 @@ fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
 }
 
 // -------------------------------------------------------------- expressions
-// `_V3Ctx.constructor` (subset): the built-in Result/Option constructors.
-fn constructor(name: Str, args: List[Str]) -> Str {
+// `_V3Ctx.constructor`: a user variant case -> `Enum::Case` / `Enum::Case(arg)`
+// (the case name is used RAW, as the reference does — not mangled), else the
+// built-in Result/Option constructors. Reuses the same logic the call/adt/var
+// paths funnel through.
+fn constructor(ctx: Ctx, name: Str, args: List[Str]) -> Str {
+  let adt = map_get(ctx.ca, name)
+  if (resolved(adt)) {
+    if (map_get(ctx.cp, name) == "n") { return `${adt}::${name}` }
+    return `${adt}::${name}(${args[0]})`
+  }
   if (name == "None") { return "None" }
   if (name == "Some" || name == "Ok" || name == "Err") {
     return `${name}(${args[0]})`
@@ -383,10 +480,31 @@ fn constructor(name: Str, args: List[Str]) -> Str {
   return `<<DEFER-ctor:${name}>>`
 }
 
+// `_V3Ctx.match_pattern`: a match arm's pattern. `_` is the wildcard; a user
+// case is `Enum::Case` (raw case), optionally binding `Enum::Case(bind)`; a
+// built-in constructor stands alone.
+fn match_pattern(ctx: Ctx, arm: Any) -> Str {
+  let pattern = value_str(value_field(arm, "pattern"))
+  if (pattern == "_") { return "_" }
+  let bind = value_str(value_field(arm, "bind"))
+  let adt = map_get(ctx.ca, pattern)
+  var prefix = ""
+  if (resolved(adt)) { prefix = `${adt}::${pattern}` }
+  else {
+    if (is_builtin_ctor(pattern)) { prefix = pattern }
+    else { return `<<DEFER-match:${pattern}>>` }
+  }
+  if (bind != "") { return `${prefix}(${mangle(bind)})` }
+  return prefix
+}
+
 fn render_var(node: Any, ctx: Ctx) -> Str {
   let name = value_str(value_field(node, "name"))
+  let mangled = mangle(name)
+  let adt = map_get(ctx.ca, name)
+  if (resolved(adt)) { return `${adt}::${mangled}` }
   if (is_builtin_ctor(name)) { return name }
-  return mangle(name)
+  return mangled
 }
 
 fn render_bin(node: Any, ctx: Ctx) -> Str {
@@ -439,8 +557,8 @@ fn render_call(node: Any, ctx: Ctx) -> Str {
   if (ckind == "field") { return "<<DEFER-method-call>>" }
   var callee_name = ""
   if (ckind == "var") { callee_name = value_str(value_field(callee_node, "name")) }
-  if (callee_name != "" && is_builtin_ctor(callee_name)) {
-    return constructor(callee_name, arg_exprs)
+  if (callee_name != "" && (is_builtin_ctor(callee_name) || ctx.ca.has(callee_name))) {
+    return constructor(ctx, callee_name, arg_exprs)
   }
   var callee = render_expr(callee_node, ctx)
   if (!is_atomic(ckind)) { callee = `(${callee})` }
@@ -470,6 +588,53 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
   var ps = []
   for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
   return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), ctx)} }`
+}
+
+// `field`: `target.field`, the target parenthesized only when non-atomic.
+fn render_field(node: Any, ctx: Ctx) -> Str {
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx)
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  return `${target}.${mangle(value_str(value_field(node, "name")))}`
+}
+
+// `record`: a nominal `Struct { f: v, .. }` literal. Each field value moves into
+// the struct, so a reused non-Copy bare variable is `.clone()`d (`_by_value_arg`),
+// matching the reference — `{ name: n, .. }` becomes `Person { name: n.clone(), .. }`
+// when `n: Str`. The struct name is inferred from the (sorted) field set.
+fn render_record(node: Any, ctx: Ctx) -> Str {
+  let fields = value_list(value_field(node, "fields"))
+  var names = []
+  for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
+  let tn = record_type_for_fields(ctx, names)
+  var body = []
+  for (f of fields) {
+    let k = value_str(value_at(f, 0))
+    let vnode = value_at(f, 1)
+    let r = by_value_arg(vnode, render_expr(vnode, ctx), ctx)
+    body = body.push(`${mangle(k)}: ${r}`)
+  }
+  return `${tn} { ${body.join(", ")} }`
+}
+
+// `_v3_match_expr`: a `match` as Rust. Arms carry a literal FOUR-space indent
+// (not the surrounding statement's pad — the reference builds the arm lines with
+// a fixed `    ` prefix and the enclosing `_v3_stmt` only pads the first line);
+// an unmatched `_` gets `unreachable!()` unless an arm already wilds.
+fn render_match(node: Any, ctx: Ctx) -> Str {
+  let scrut = render_expr(value_field(node, "scrutinee"), ctx)
+  let arms = value_list(value_field(node, "arms"))
+  var lines = [`match ${scrut} {`]
+  var hasWild = false
+  for (arm of arms) {
+    let pat = match_pattern(ctx, arm)
+    if (value_str(value_field(arm, "pattern")) == "_") { hasWild = true }
+    let body = render_expr(value_field(arm, "body"), ctx)
+    lines = lines.push(`    ${pat} => ${body},`)
+  }
+  if (!hasWild) { lines = lines.push("    _ => unreachable!(),") }
+  lines = lines.push("}")
+  return lines.join(newline())
 }
 
 fn escape_braces(s: Str) -> Str {
@@ -517,9 +682,17 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "lit") { return rust_v3_lit(node) }
   if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
   if (kind == "var") { return render_var(node, ctx) }
+  if (kind == "adt") {
+    var aa = []
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx)) }
+    return constructor(ctx, value_str(value_field(node, "case")), aa)
+  }
   if (kind == "bin") { return render_bin(node, ctx) }
   if (kind == "un") { return render_un(node, ctx) }
   if (kind == "call") { return render_call(node, ctx) }
+  if (kind == "field") { return render_field(node, ctx) }
+  if (kind == "record") { return render_record(node, ctx) }
+  if (kind == "match") { return render_match(node, ctx) }
   if (kind == "index") { return render_index(node, ctx) }
   if (kind == "if") {
     return `if ${render_expr(value_field(node, "cond"), ctx)} { ${render_expr(value_field(node, "then"), ctx)} } else { ${render_expr(value_field(node, "else"), ctx)} }`
@@ -622,19 +795,19 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
 // `_emit_v3_functions`: each module fn as a Rust `fn`, blank-line separated. The
 // per-fn `var_types` is seeded from the parameter signatures (the reference's
 // `ctx.var_types = {p.name: p.type ..}`).
-fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str]) -> List[Str] {
+fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables) -> List[Str] {
   var out = []
   for (fnode of functions) {
     let name = mangle(value_str(value_field(fnode, "name")))
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
-    let ctx = { vt: vt, fr: fr }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf }
     var ps = []
     for (p of params) {
-      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type(value_field(p, "type"))}`)
+      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tables.tn)}`)
     }
-    let returns = rust_type(value_field(fnode, "returns"))
+    let returns = rust_type_t(value_field(fnode, "returns"), tables.tn)
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
     out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
@@ -646,6 +819,45 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str]) -> List[Str] {
       out = out.concat(r.lines)
     }
     out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// `_emit_v3_types`: user `type` decls as Rust items. A record is a `pub struct`
+// (nominal, so `{a:1} == {a:1}` compiles — the `PartialEq` derive is load-bearing,
+// not decoration); a variant is a serde-tagged `pub enum`. Each item is followed
+// by a blank line, exactly as the reference does.
+fn emit_v3_types(types: Any, tnames: Map[Str, Str]) -> List[Str] {
+  var out = []
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    let nm = mangle(name)
+    if (kind == "record") {
+      out = out.push("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
+      out = out.push(`pub struct ${nm} {`)
+      let fields = value_field(spec, "fields")
+      for (field of value_keys(fields)) {
+        out = out.push(`    ${mangle(field)}: ${rust_type_t(value_field(fields, field), tnames)},`)
+      }
+      out = out.push("}")
+    } else {
+      if (kind == "variant") {
+        out = out.push("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
+        out = out.push(`#[serde(tag = "$kind", content = "$value")]`)
+        out = out.push(`pub enum ${nm} {`)
+        for (case of value_list(value_field(spec, "cases"))) {
+          let cname = mangle(value_str(value_field(case, "name")))
+          let payload = value_field(case, "payload")
+          if (value_is_null(payload)) { out = out.push(`    ${cname},`) }
+          else { out = out.push(`    ${cname}(${rust_type_t(payload, tnames)}),`) }
+        }
+        out = out.push("}")
+      } else {
+        out = out.push(`<<UNSUPPORTED-TYPE:${kind}>>`)
+      }
+    }
     out = out.push("")
   }
   return out
@@ -664,12 +876,15 @@ fn module_header() -> List[Str] {
   return o
 }
 
-// The document assembly for a FUNCTION-ONLY v3 document (`_emit_v3`, subset): the
-// module header then the free functions, joined with newlines, right-stripped,
-// and closed with a single trailing newline. Components/services/types/externs/
-// tests are DEFERRED — the covered corpus declares none, so the reference's
-// `_emit_components`/`_emit_v3_types`/… all contribute nothing there.
+// The document assembly for a TYPES + FUNCTIONS v3 document (`_emit_v3`, subset):
+// the module header, then the user `type` items, then the free functions —
+// joined with newlines, right-stripped, and closed with a single trailing
+// newline, in the reference's section order (types precede functions). Components,
+// services, externs, and tests are DEFERRED — the covered corpus declares none,
+// so the reference's `_emit_components`/`_emit_v3_externs`/… contribute nothing.
 pub fn emit_src(ir: Any) -> Str {
+  let types = value_field(ir, "types")
+  let tables = build_type_tables(types)
   let functions = value_list(value_field(ir, "functions"))
   var fr: Map[Str, Str] = Map.empty()
   for (fnode of functions) {
@@ -677,7 +892,8 @@ pub fn emit_src(ir: Any) -> Str {
     if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
   }
   var out = module_header()
-  if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr)) }
+  if (value_keys(types).length() > 0) { out = out.concat(emit_v3_types(types, tables.tn)) }
+  if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr, tables)) }
   return rstrip(out.join(newline())).concat(newline())
 }
 
@@ -704,6 +920,38 @@ test "indentation is four spaces per level" {
   assert ind(0) == ""
   assert ind(2) == "        "
   assert line(1, "x") == "    x"
+}
+
+test "sorted_key sorts field names by code point" {
+  assert sorted_key(["b", "a", "c"]) == "a,b,c"
+  assert sorted_key(["name", "age"]) == "age,name"
+  assert sorted_key(["x"]) == "x"
+  assert str_lt("age", "name")
+  assert !str_lt("name", "name")
+}
+
+test "rust_type maps user type names and their generics" {
+  var tn: Map[Str, Str] = Map.empty()
+  tn = tn.set("Person", "1")
+  assert rust_type_t("Person", tn) == "Person"
+  assert rust_type_t("List[Person]", tn) == "Vec<Person>"
+  assert rust_type_t("Opt[Person]", tn) == "Option<Person>"
+  assert rust_type_t("Unknown", tn) == "Value"
+  assert rust_type_t("Int", tn) == "i64"
+}
+
+test "constructor lowers user variants and built-ins" {
+  var ca: Map[Str, Str] = Map.empty()
+  var cp: Map[Str, Str] = Map.empty()
+  ca = ca.set("Node", "Tree")
+  cp = cp.set("Node", "y")
+  ca = ca.set("Leaf", "Tree")
+  cp = cp.set("Leaf", "n")
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty() }
+  assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
+  assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
+  assert constructor(ctx, "Some", ["v"]) == "Some(v)"
+  assert constructor(ctx, "None", []) == "None"
 }
 
 // --------------------------------------------------------------- component wrap
