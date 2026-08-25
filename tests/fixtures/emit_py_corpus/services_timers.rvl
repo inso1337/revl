@@ -1,0 +1,8 @@
+// Timers as revertible schedules: `every`/`after` -> schedule_every/after with
+// the conditional `from runtime import` line, firing bodies, cancel inverses.
+service Log { emission fn write(msg: Str) }
+
+component Pulse requires log: Log {
+  every 15s { emit log.write("beat") }
+  after 2m { emit log.write("late") }
+}

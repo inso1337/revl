@@ -1,6 +1,6 @@
 """The self-hosted cordis-py EMITTER (selfhost/emit_py.rvl, roadmap items
-146/174 — Path B slice 1): compiled by revl, emitted through the python backend,
-executed, and cross-checked BYTE-FOR-BYTE against the reference emitter
+146/174/185 — Path B slices 1+2): compiled by revl, emitted through the python
+backend, executed, and cross-checked BYTE-FOR-BYTE against the reference emitter
 (backends/python/emit.py's ``emit``) over a corpus of interchange-IR documents.
 
 This is the first proof that revl can emit ITSELF. It has the exact shape of
@@ -10,25 +10,41 @@ forced to agree. Here the agreement is the strongest kind an emitter can be held
 to: the emitted Python source must be identical to the last byte. The reference
 is ground truth; any divergence is a defect in the slice.
 
-Covered subset (what emits byte-identical) — the FUNCTION-ONLY document:
-  * the module scaffold (generated header, the always-emitted ``_revl_field``
-    helper, empty ``SERVICES``/``COMPONENTS`` trailers);
-  * the gated arithmetic preludes (i64/i32 overflow traps, IEEE ``_revl_div``);
-  * ``_emit_functions`` -> ``_fn_stmt`` -> ``_expr`` for the base surface:
-    let/assign, return, if/while/for, expr, assert; and the expression algebra
-    lit, var, bin (incl ``??``, bounded ``+ - *``, ``/``, truncated ``%``), un,
-    call, field, index, ternary-if, record, list, len, the stdlib builtins,
-    maplit, sync arrow, match, record-update, string interpolation, opt
-    field/call.
+Slice 2 (item 185) also rewrote the IR-navigation bridge: where slice 1 read the
+IR through a bespoke ``@py`` accessor set (``g``/``gs``/``alist``/``at``/…),
+navigation is now PURE revl through stdlib/value.rvl's ``value_*`` (item 180) —
+a refactor of HOW the IR is read, proven by the function corpus staying
+byte-identical. Only host formatting stays ``@py`` (``py_repr``/``newline``/
+``mangle``/``snake``/``pascal``), plus one flagged gap: value.rvl ships no
+record-key enumerator, so ``record_keys`` is bridged locally (see the file).
 
-Deliberately OUT of this slice (excluded from the corpus, deferred to Path B
-slice 2+): components/services (the ``_ComponentEmitter``), type declarations
-(``_emit_types``), externs, in-file ``test``/``fault_test`` emission, the
-built-in Result classes, the canonical Float->Str (``_revl_ftoa``) interpolation
-helper, host roots (``Map``/``Pool``/``Job``) and the ``from runtime import``
-line, async coloring, spawn/templates, and the canonical ABI. ``let_pattern``
-(destructuring) is a permanent exclusion for a byte oracle: the reference names
-its temporary from ``id(node)``, which a second implementation cannot reproduce.
+Covered subset (what emits byte-identical):
+  * the FUNCTION-ONLY document — module scaffold, gated arithmetic preludes
+    (i64/i32 traps, IEEE ``_revl_div``), and ``_emit_functions`` ->
+    ``_fn_stmt`` -> ``_expr`` for the base surface: let/assign, return,
+    if/while/for, expr, assert; lit, var, bin (incl ``??``, bounded ``+ - *``,
+    ``/``, truncated ``%``), un, call, field, index, ternary-if, record, list,
+    len, stdlib builtins, maplit, sync arrow, match, record-update, string
+    interpolation, opt field/call;
+  * COMPONENTS/SERVICES (item 185, the ``_ComponentEmitter``) — the populated
+    SERVICES table; the conditional ``from runtime import`` line; per component
+    the ``_<snake>_apply`` closure + plugin dict with the ``inject`` list; the
+    effect accumulator (``effect``/``let-effect``/``fail``/``if``-guard/``emit``
+    with saga ``compensate``); timers (``every``/``after`` ->
+    ``schedule_*``/``.cancel()``); ``provide`` classes with sync methods; and
+    the component-body expression dispatcher ``cexpr`` (``req``/``name``/method
+    ``call`` and the un-specialized component arithmetic).
+
+Deliberately OUT (excluded from the corpus, deferred to Path B slice 3+):
+type declarations (``_emit_types``), externs, in-file ``test``/``fault_test`` and
+``lifecycle test`` emission, the built-in Result classes, the canonical
+Float->Str (``_revl_ftoa``) helper, host roots (``Map``/``Pool``/``Job``),
+component ``config`` (``ConfigSchema``), async coloring (async methods / ``await``
+bodies), method-body ``effect``/``let-effect``, realm placements
+(``isolate``/``intercept``/``routes``), spawn/instances, and the canonical ABI.
+``let_pattern`` (destructuring) is a permanent exclusion for a byte oracle: the
+reference names its temporary from ``id(node)``, which a second implementation
+cannot reproduce.
 """
 
 import importlib.util
@@ -45,12 +61,19 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_py_corpus"
 CORPUS = [
+    # function-only documents (slice 1); still byte-exact after the value_*
+    # navigation rewrite (slice 2, item 185) — the refactor's own proof
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
     "control.rvl",     # while/for/if, match (Some/None/wildcard), sync arrow
     "records.rvl",     # record literal, functional record update, list literal
     "optionals.rvl",   # optional-call chaining (opt receiver)
     "mixed.rvl",       # a cross-section of the above in three functions
+    # component/service documents (slice 2, item 185)
+    "services_basic.rvl",    # SERVICES table, req/provide, effect accumulator, a provide method
+    "services_timers.rvl",   # every/after timers -> schedule_* import + cancel inverses
+    "services_methods.rvl",  # provide methods: params, un-specialized bin, builtin, ternary
+    "services_body.rvl",     # let-effect, if-guard + fail, saga emit ... compensate
 ]
 
 
@@ -125,6 +148,33 @@ def test_selfhosted_emitter_output_is_executable_python(emitted, reference):
     assert ns["divmod"](7, 2) == (
         7 // 2 + 7 // 2 + 7 // 2 + 7 % 2 + 7 % 2  # all same sign here
     )
+
+
+def test_selfhosted_emitter_lowers_components_and_services(emitted):
+    """Beyond byte-identity: a component/service document actually drives the
+    slice-2 path — the emitted module populates SERVICES and COMPONENTS and its
+    plugin dict / apply closure exec cleanly (with the runtime stubbed)."""
+    ir = compile_files([str(CORPUS_DIR / "services_basic.rvl")])
+    src = emitted["emit_src"](ir)
+    assert "def _backing_apply(_revl_ctx, _revl_config):" in src
+    assert "yield _revl_ctx.provide('health')" in src
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (lambda *a, **k: None)  # PEP 562
+    had = "runtime" in sys.modules
+    prev = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        ns: dict = {}
+        exec(compile(src, "services_basic_emitted.py", "exec"), ns)
+    finally:
+        if had:
+            sys.modules["runtime"] = prev
+        else:
+            del sys.modules["runtime"]
+    assert set(ns["SERVICES"]) == {"Store", "Health"}
+    assert set(ns["COMPONENTS"]) == {"Backing", "Reader"}
+    assert ns["Backing"]["inject"] == ["store"]
+    assert ns["Reader"]["inject"] == ["store"]
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):

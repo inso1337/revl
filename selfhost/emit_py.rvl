@@ -44,46 +44,53 @@
 //
 // ------------------------------------------------------ the erased-IR boundary
 // revl has no dynamic `dict[str, Any]`, and the checker refuses stdlib methods
-// on an unpinned `Any` receiver (host-object results carry no type, G8). So the
-// IR is read through a SMALL set of `@py` primitive accessors below — the same
-// erased-Value boundary stdlib/json.rvl documents — while every byte of emitter
-// LOGIC (dispatch, formatting, indentation, string building) is pure revl. The
-// one host facility mirrored verbatim is `repr` (`py_repr`): the reference
-// `_expr` itself calls Python's `repr()` to render literals, so bridging it is
-// faithful, not a shortcut.
+// on an unpinned `Any` receiver (host-object results carry no type, G8). Slice 1
+// bridged that with a bespoke set of `@py` primitive accessors
+// (`g`/`gs`/`alist`/`at`/`child_nodes`/…). Item 180 shipped stdlib/value.rvl —
+// the NAMED, reusable `Value` bridge that generalises exactly those accessors —
+// so this slice reads the IR in PURE revl by `use`-ing them, with NO navigation
+// `@py` block of its own (the item-180 obsolescence mapping): `g` ->
+// `value_field`, `gs` -> `value_str∘value_field`, `alist` -> `value_list`, `at`
+// -> `value_at`, `as_str` -> `value_str`, `is_none` -> `value_is_null`,
+// `child_nodes` -> `value_children`, the old `ir_version` ->
+// `value_int(value_opt(…) ?? 1)`, and the old `is_py_float` shape test ->
+// `value_kind(…) == "float"`. Every byte of emitter LOGIC (dispatch, formatting,
+// indentation, string building) stays pure revl.
+//
+// What is NOT obsoleted, and stays `@py` below, is HOST FORMATTING / char
+// output — not IR navigation: `py_repr` (the reference `_expr` itself calls
+// Python's `repr()` to render literals, so bridging it is faithful), `newline`
+// (the one genuine U+000A), and `mangle` (the Python-keyword rename).
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field, value_opt,
+  value_list, value_at, value_str, value_int, value_bool, value_children
+}
 
-// ---------------------------------------------------------------- IR accessors
-extern pure fn g(node: Any, key: Str) -> Any = @py {
-    return node.get(key) if isinstance(node, dict) else None
+// ------------------------------------------------------- NAVIGATION GAP (@py)
+// The ONE navigation primitive stdlib/value.rvl (item 180) does not ship: an
+// enumerator of a record's KEYS in insertion order. Slice 1 was function-only —
+// `functions` is a LIST, walked by `value_list` — so it never needed this. But a
+// components-and-services document keys three of its sections BY NAME as records
+// (`services` = name -> service, a component's `requires` = local -> service,
+// `provides` = key -> service), and the SERVICES table + the `inject` list must
+// iterate those keys. `value_field`/`value_children` reach values, never keys, so
+// this section cannot be walked in pure revl with the item-180 surface. Bridged
+// locally, flagged for a value.rvl follow-up (a `value_keys` / `value_entries`
+// total accessor) — see the dogfood findings.
+extern pure fn record_keys(v: Any) -> List[Str] = @py {
+    return list(v.keys()) if isinstance(v, dict) else []
 }
-extern pure fn gs(node: Any, key: Str) -> Str = @py {
-    v = node.get(key) if isinstance(node, dict) else None
-    return "" if v is None else v
-}
-extern pure fn alist(v: Any) -> List[Any] = @py {
-    return list(v) if isinstance(v, (list, tuple)) else []
-}
-extern pure fn at(v: Any, i: Int) -> Any = @py { return v[i] }
-extern pure fn as_str(v: Any) -> Str = @py { return v }
+
+// ------------------------------------------------- host formatting (kept @py)
+// `py_repr` / `newline` / `mangle` are the item-180 "NOT obsoleted" set — host
+// char output and Python-keyword renaming, not IR navigation. `snake` / `pascal`
+// join them: identifier CASING is the same category (they mirror the reference's
+// pure string helpers `_snake` / `_pascal`, kin to `_mangle`).
 extern pure fn py_repr(v: Any) -> Str = @py { return repr(v) }
-extern pure fn is_none(v: Any) -> Bool = @py { return v is None }
 // A real newline. revl plain strings carry no escapes (`"\n"` is a literal
 // backslash-n, which is exactly what the emitted `assert` message wants), so the
 // line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
 extern pure fn newline() -> Str = @py { return chr(10) }
-extern pure fn is_py_float(v: Any) -> Bool = @py {
-    return isinstance(v, float) and not isinstance(v, bool)
-}
-extern pure fn child_nodes(v: Any) -> List[Any] = @py {
-    if isinstance(v, dict):
-        return list(v.values())
-    if isinstance(v, (list, tuple)):
-        return list(v)
-    return []
-}
-extern pure fn ir_version(ir: Any) -> Int = @py {
-    return ir.get("ir_version", 1) if isinstance(ir, dict) else 1
-}
 // The A3 append-`_` rename (mirrors backends/python/emit.py::_mangle): a valid
 // revl identifier that is a Python keyword emits and RUNS instead of crashing.
 // A pure function of the name — declaration and use sites agree without a table.
@@ -93,11 +100,20 @@ extern pure fn mangle(name: Str) -> Str = @py {
         name = name + "_"
     return name
 }
+// `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
+// fn name is `_<snake>_apply`, a provision class is `_<Pascal>`.
+extern pure fn snake(name: Str) -> Str = @py {
+    import re
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+}
+extern pure fn pascal(name: Str) -> Str = @py {
+    return "".join(part[:1].upper() + part[1:] for part in name.split("_") if part)
+}
 
 // ---------------------------------------------------------------- small utils
-fn node_kind(n: Any) -> Str { return gs(n, "kind") }
-fn node_op(n: Any) -> Str { return gs(n, "op") }
-fn node_operands(n: Any) -> Str { return gs(n, "operands") }
+fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
+fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
+fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
 
 fn ind(n: Int) -> Str { return "    ".repeat(n) }
 
@@ -154,8 +170,8 @@ fn uses_bounded_int(n: Any) -> Bool {
   let k = node_kind(n)
   if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int") { return true }
   if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int") { return true }
-  if (k == "builtin" && is_div_method(gs(n, "method"))) { return true }
-  for (c of child_nodes(n)) {
+  if (k == "builtin" && is_div_method(value_str(value_field(n, "method")))) { return true }
+  for (c of value_children(n)) {
     if (uses_bounded_int(c)) { return true }
   }
   return false
@@ -165,8 +181,8 @@ fn uses_bounded_int32(n: Any) -> Bool {
   let k = node_kind(n)
   if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int32") { return true }
   if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int32") { return true }
-  if (k == "builtin" && gs(n, "method") == "to_int32") { return true }
-  for (c of child_nodes(n)) {
+  if (k == "builtin" && value_str(value_field(n, "method")) == "to_int32") { return true }
+  for (c of value_children(n)) {
     if (uses_bounded_int32(c)) { return true }
   }
   return false
@@ -174,7 +190,7 @@ fn uses_bounded_int32(n: Any) -> Bool {
 
 fn uses_true_division(n: Any) -> Bool {
   if (node_kind(n) == "bin" && node_op(n) == "/") { return true }
-  for (c of child_nodes(n)) {
+  for (c of value_children(n)) {
     if (uses_true_division(c)) { return true }
   }
   return false
@@ -184,11 +200,11 @@ fn uses_true_division(n: Any) -> Bool {
 // `_is_float_expr` (backends/python/emit.py): syntactically-certain Float.
 fn is_float_expr(node: Any) -> Bool {
   let k = node_kind(node)
-  if (k == "lit") { return is_py_float(g(node, "value")) }
+  if (k == "lit") { return value_kind(value_field(node, "value")) == "float" }
   if (k == "bin") { return node_op(node) == "/" || node_operands(node) == "Float" }
   if (k == "un") {
     if (node_op(node) != "-") { return false }
-    return is_float_expr(g(node, "operand"))
+    return is_float_expr(value_field(node, "operand"))
   }
   return false
 }
@@ -246,10 +262,10 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
 fn match_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
-  let pattern = gs(arm, "pattern")
-  var body = expr(g(arm, "body"))
+  let pattern = value_str(value_field(arm, "pattern"))
+  var body = expr(value_field(arm, "body"))
   if (pattern == "_") { return body }
-  let bind = gs(arm, "bind")
+  let bind = value_str(value_field(arm, "bind"))
   var cond = ""
   if (pattern == "None") {
     cond = "match is None"
@@ -288,8 +304,8 @@ fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
 fn interp_fstring(parts: List[Any]) -> Str {
   var pieces = []
   for (p of parts) {
-    let k = as_str(at(p, 0))
-    let v = at(p, 1)
+    let k = value_str(value_at(p, 0))
+    let v = value_at(p, 1)
     if (k == "text") {
       pieces = pieces.push(py_repr(v))
     } else {
@@ -308,7 +324,7 @@ fn interp_fstring(parts: List[Any]) -> Str {
 fn render_record(fields: List[Any]) -> Str {
   var parts = []
   for (p of fields) {
-    parts = parts.push(`${py_repr(at(p, 0))}: ${expr(at(p, 1))}`)
+    parts = parts.push(`${py_repr(value_at(p, 0))}: ${expr(value_at(p, 1))}`)
   }
   let inner = parts.join(", ")
   return "{".concat(inner).concat("}")
@@ -325,7 +341,7 @@ fn render_record_update(base: Str, updates: List[Any]) -> Str {
   var parts = []
   parts = parts.push(`**${base}`)
   for (u of updates) {
-    parts = parts.push(`${py_repr(at(u, 0))}: ${expr(at(u, 1))}`)
+    parts = parts.push(`${py_repr(value_at(u, 0))}: ${expr(value_at(u, 1))}`)
   }
   let inner = parts.join(", ")
   return "{".concat(inner).concat("}")
@@ -333,49 +349,49 @@ fn render_record_update(base: Str, updates: List[Any]) -> Str {
 
 fn render_arrow(node: Any) -> Str {
   var ps = []
-  for (p of alist(g(node, "params"))) { ps = ps.push(mangle(as_str(p))) }
-  for (c of alist(g(node, "captures"))) {
-    let cm = mangle(as_str(c))
+  for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
+  for (c of value_list(value_field(node, "captures"))) {
+    let cm = mangle(value_str(c))
     ps = ps.push(`${cm}=${cm}`)
   }
   let lp = ps.join(", ")
-  return `lambda ${lp}: ${expr(g(node, "body"))}`
+  return `lambda ${lp}: ${expr(value_field(node, "body"))}`
 }
 
 fn render_bin(node: Any) -> Str {
   let op = node_op(node)
   if (op == "??") {
-    let lhs = expr(g(node, "left"))
-    let rhs = expr(g(node, "right"))
+    let lhs = expr(value_field(node, "left"))
+    let rhs = expr(value_field(node, "right"))
     return `(${rhs} if ${lhs} is None else ${lhs})`
   }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && opnd == "Int") {
-    return `_revl_i64(${expr(g(node, "left"))} ${op} ${expr(g(node, "right"))})`
+    return `_revl_i64(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
   }
   if (is_addsubmul(op) && opnd == "Int32") {
-    return `_revl_i32(${expr(g(node, "left"))} ${op} ${expr(g(node, "right"))})`
+    return `_revl_i32(${expr(value_field(node, "left"))} ${op} ${expr(value_field(node, "right"))})`
   }
   if (op == "/") {
-    return `_revl_div(${expr(g(node, "left"))}, ${expr(g(node, "right"))})`
+    return `_revl_div(${expr(value_field(node, "left"))}, ${expr(value_field(node, "right"))})`
   }
   if (op == "%" && (opnd == "Int" || opnd == "Float")) {
-    let lhs = expr(g(node, "left"))
-    let rhs = expr(g(node, "right"))
+    let lhs = expr(value_field(node, "left"))
+    let rhs = expr(value_field(node, "right"))
     return `(lambda _a, _b: abs(_a) % abs(_b) if _a >= 0 else -(abs(_a) % abs(_b)))(${lhs}, ${rhs})`
   }
   let pop = py_bin_op(op)
-  return `(${expr(g(node, "left"))} ${pop} ${expr(g(node, "right"))})`
+  return `(${expr(value_field(node, "left"))} ${pop} ${expr(value_field(node, "right"))})`
 }
 
 fn render_un(node: Any) -> Str {
   let op = node_op(node)
-  if (op == "!") { return `(not ${expr(g(node, "operand"))})` }
+  if (op == "!") { return `(not ${expr(value_field(node, "operand"))})` }
   if (op == "-") {
     let opnd = node_operands(node)
-    if (opnd == "Int") { return `_revl_i64(-${expr(g(node, "operand"))})` }
-    if (opnd == "Int32") { return `_revl_i32(-${expr(g(node, "operand"))})` }
-    return `(-${expr(g(node, "operand"))})`
+    if (opnd == "Int") { return `_revl_i64(-${expr(value_field(node, "operand"))})` }
+    if (opnd == "Int32") { return `_revl_i32(-${expr(value_field(node, "operand"))})` }
+    return `(-${expr(value_field(node, "operand"))})`
   }
   return `<<UNSUPPORTED-UN:${op}>>`
 }
@@ -383,9 +399,9 @@ fn render_un(node: Any) -> Str {
 // The kind dispatch (post-widen), mirroring `_expr`'s branch order.
 fn expr_inner(node: Any) -> Str {
   let kind = node_kind(node)
-  if (kind == "lit") { return py_repr(g(node, "value")) }
+  if (kind == "lit") { return py_repr(value_field(node, "value")) }
   if (kind == "var") {
-    let nm = gs(node, "name")
+    let nm = value_str(value_field(node, "name"))
     if (nm == "None") { return "None" }
     if (nm == "Some") { return "(lambda _v: _v)" }
     return mangle(nm)
@@ -393,44 +409,44 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "bin") { return render_bin(node) }
   if (kind == "un") { return render_un(node) }
   if (kind == "call") {
-    let callee = expr(g(node, "callee"))
-    let args = commajoin(alist(g(node, "args")))
+    let callee = expr(value_field(node, "callee"))
+    let args = commajoin(value_list(value_field(node, "args")))
     return `${callee}(${args})`
   }
   if (kind == "field") {
-    return `_revl_field(${expr(g(node, "target"))}, ${py_repr(g(node, "name"))})`
+    return `_revl_field(${expr(value_field(node, "target"))}, ${py_repr(value_field(node, "name"))})`
   }
   if (kind == "index") {
-    return `${expr(g(node, "target"))}[${expr(g(node, "index"))}]`
+    return `${expr(value_field(node, "target"))}[${expr(value_field(node, "index"))}]`
   }
   if (kind == "if") {
-    return `(${expr(g(node, "then"))} if ${expr(g(node, "cond"))} else ${expr(g(node, "else"))})`
+    return `(${expr(value_field(node, "then"))} if ${expr(value_field(node, "cond"))} else ${expr(value_field(node, "else"))})`
   }
-  if (kind == "record") { return render_record(alist(g(node, "fields"))) }
-  if (kind == "list") { return render_list(alist(g(node, "items"))) }
-  if (kind == "len") { return `len(${expr(g(node, "target"))})` }
+  if (kind == "record") { return render_record(value_list(value_field(node, "fields"))) }
+  if (kind == "list") { return render_list(value_list(value_field(node, "items"))) }
+  if (kind == "len") { return `len(${expr(value_field(node, "target"))})` }
   if (kind == "builtin") {
     var args = []
-    for (a of alist(g(node, "args"))) { args = args.push(expr(a)) }
-    return render_builtin(gs(node, "method"), expr(g(node, "target")), args, gs(node, "recv"))
+    for (a of value_list(value_field(node, "args"))) { args = args.push(expr(a)) }
+    return render_builtin(value_str(value_field(node, "method")), expr(value_field(node, "target")), args, value_str(value_field(node, "recv")))
   }
   if (kind == "maplit") { return "{}" }
   if (kind == "arrow") { return render_arrow(node) }
   if (kind == "match") {
-    return match_expr(expr(g(node, "scrutinee")), alist(g(node, "arms")))
+    return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
   }
   if (kind == "record_update") {
-    return render_record_update(expr(g(node, "base")), alist(g(node, "updates")))
+    return render_record_update(expr(value_field(node, "base")), value_list(value_field(node, "updates")))
   }
-  if (kind == "interp") { return interp_fstring(alist(g(node, "parts"))) }
+  if (kind == "interp") { return interp_fstring(value_list(value_field(node, "parts"))) }
   if (kind == "optfield") {
-    let t = expr(g(node, "target"))
-    return `(None if (${t}) is None else _revl_field(${t}, ${py_repr(g(node, "name"))}))`
+    let t = expr(value_field(node, "target"))
+    return `(None if (${t}) is None else _revl_field(${t}, ${py_repr(value_field(node, "name"))}))`
   }
   if (kind == "optcall") {
-    let t = expr(g(node, "target"))
-    let args = commajoin(alist(g(node, "args")))
-    return `(None if (${t}) is None else (${t}).${gs(node, "method")}(${args}))`
+    let t = expr(value_field(node, "target"))
+    let args = commajoin(value_list(value_field(node, "args")))
+    return `(None if (${t}) is None else (${t}).${value_str(value_field(node, "method"))}(${args}))`
   }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
 }
@@ -438,7 +454,7 @@ fn expr_inner(node: Any) -> Str {
 // The implicit Int -> Float coercion marker (docs/arithmetic.md): render the
 // conversion the reference makes visible, then dispatch the un-widened node.
 fn expr(node: Any) -> Str {
-  if (gs(node, "widen") == "Float") {
+  if (value_str(value_field(node, "widen")) == "Float") {
     return `float(${expr_inner(node)})`
   }
   return expr_inner(node)
@@ -450,8 +466,8 @@ fn emit_assert(e: Any, indent: Int) -> List[Str] {
   var out = []
   if (node_kind(e) == "bin" && is_cmp_op(node_op(e))) {
     let pop = py_bin_op(node_op(e))
-    let left = expr(g(e, "left"))
-    let right = expr(g(e, "right"))
+    let left = expr(value_field(e, "left"))
+    let right = expr(value_field(e, "right"))
     out = out.push(line(indent, `_revl_lhs = ${left}`))
     out = out.push(line(indent, `_revl_rhs = ${right}`))
     let shown = py_repr(`${left} ${pop} ${right}`)
@@ -464,15 +480,15 @@ fn emit_assert(e: Any, indent: Int) -> List[Str] {
 
 // `_fn_stmt`: one fn-body step -> its emitted lines (already indented).
 fn fn_stmt(node: Any, indent: Int) -> List[Str] {
-  let step = gs(node, "step")
+  let step = value_str(value_field(node, "step"))
   var out = []
   if (step == "let" || step == "assign") {
-    out = out.push(line(indent, `${mangle(gs(node, "name"))} = ${expr(g(node, "value"))}`))
+    out = out.push(line(indent, `${mangle(value_str(value_field(node, "name")))} = ${expr(value_field(node, "value"))}`))
     return out
   }
   if (step == "return") {
-    let e = g(node, "expr")
-    if (is_none(e)) {
+    let e = value_field(node, "expr")
+    if (value_is_null(e)) {
       out = out.push(line(indent, "return"))
     } else {
       out = out.push(line(indent, `return ${expr(e)}`))
@@ -480,9 +496,9 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     return out
   }
   if (step == "if") {
-    out = out.push(line(indent, `if ${expr(g(node, "cond"))}:`))
-    for (s of alist(g(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1)) }
-    let els = alist(g(node, "else"))
+    out = out.push(line(indent, `if ${expr(value_field(node, "cond"))}:`))
+    for (s of value_list(value_field(node, "then"))) { out = out.concat(fn_stmt(s, indent + 1)) }
+    let els = value_list(value_field(node, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
       for (s of els) { out = out.concat(fn_stmt(s, indent + 1)) }
@@ -490,8 +506,8 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     return out
   }
   if (step == "while") {
-    out = out.push(line(indent, `while ${expr(g(node, "cond"))}:`))
-    let body = alist(g(node, "body"))
+    out = out.push(line(indent, `while ${expr(value_field(node, "cond"))}:`))
+    let body = value_list(value_field(node, "body"))
     if (body.length() == 0) {
       out = out.push(line(indent + 1, "pass"))
     } else {
@@ -500,8 +516,8 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     return out
   }
   if (step == "for") {
-    out = out.push(line(indent, `for ${mangle(gs(node, "bind"))} in ${expr(g(node, "iterable"))}:`))
-    let body = alist(g(node, "body"))
+    out = out.push(line(indent, `for ${mangle(value_str(value_field(node, "bind")))} in ${expr(value_field(node, "iterable"))}:`))
+    let body = value_list(value_field(node, "body"))
     if (body.length() == 0) {
       out = out.push(line(indent + 1, "pass"))
     } else {
@@ -510,11 +526,11 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
     return out
   }
   if (step == "expr") {
-    out = out.push(line(indent, expr(g(node, "expr"))))
+    out = out.push(line(indent, expr(value_field(node, "expr"))))
     return out
   }
   if (step == "assert") {
-    return emit_assert(g(node, "expr"), indent)
+    return emit_assert(value_field(node, "expr"), indent)
   }
   out = out.push(line(indent, `<<UNSUPPORTED-STEP:${step}>>`))
   return out
@@ -522,7 +538,7 @@ fn fn_stmt(node: Any, indent: Int) -> List[Str] {
 
 fn fn_params(params: List[Any]) -> Str {
   var ps = []
-  for (p of params) { ps = ps.push(mangle(gs(p, "name"))) }
+  for (p of params) { ps = ps.push(mangle(value_str(value_field(p, "name")))) }
   return ps.join(", ")
 }
 
@@ -530,10 +546,10 @@ fn fn_params(params: List[Any]) -> Str {
 fn emit_functions(functions: List[Any]) -> List[Str] {
   var out = []
   for (fnode of functions) {
-    let name = mangle(gs(fnode, "name"))
-    let params = fn_params(alist(g(fnode, "params")))
+    let name = mangle(value_str(value_field(fnode, "name")))
+    let params = fn_params(value_list(value_field(fnode, "params")))
     out = out.push(`def ${name}(${params}):`)
-    let body = alist(g(fnode, "body"))
+    let body = value_list(value_field(fnode, "body"))
     if (body.length() == 0) { out = out.push(line(1, "pass")) }
     for (s of body) { out = out.concat(fn_stmt(s, 1)) }
     out = out.push("")
@@ -598,30 +614,491 @@ fn field_block() -> List[Str] {
 
 fn comp_names(ir: Any) -> Str {
   var ns = []
-  for (c of alist(g(ir, "components"))) { ns = ns.push(gs(c, "name")) }
+  for (c of value_list(value_field(ir, "components"))) { ns = ns.push(value_str(value_field(c, "name"))) }
   return ns.join(", ")
 }
 
-// The document assembly, mirroring `emit()` for the function-only subset.
+// =====================================================================
+// Path B slice 2 — components & services (mirrors `_ComponentEmitter`).
+// =====================================================================
+//
+// A component/service document adds, over the function-only scaffold: a
+// populated SERVICES table, and one `_<snake>_apply` closure + plugin dict per
+// component. The component/method body surface is a SECOND expression dispatcher
+// (`cexpr`), distinct from the fn-body `expr` above exactly as the reference
+// keeps `_ComponentEmitter._expr` distinct from the module `_expr`: it renders
+// `req`/`name`/method-`call` and — the load-bearing difference — does NOT
+// specialize arithmetic (no `_revl_i64`/`_revl_div`/widen wrapper; a component
+// `+` is a plain `(a + b)`). The two therefore cannot be shared.
+//
+// DEFERRED to slice 3 (a divergence, not a bug, if fed one): config
+// (`ConfigSchema`), async coloring (async methods / await bodies / the
+// await-seed), method-body `effect`/`let-effect` (the `_revl_frame.adopt` /
+// `.acquire` accumulator + its `_label`/`_effect_N` counter), a compensated
+// method `emit`, host roots (`Pool`/`Map`/`Job` in bodies -> the extra imports),
+// realm placements (`isolate`/`intercept`/`routes`/the router), spawn/instances,
+// lifecycle TESTS (the `plug`/`set_trace`/`Clock`/`asyncio` driver), and the
+// `adt`/`config`/`format`/`host`/`spawn`/`instance-get` cexpr kinds.
+
+// A body-emission result: the lines produced AND the running timer counter (the
+// reference's `self._counter`, threaded here since revl has no method state).
+type Emit = { lines: List[Str], counter: Int }
+
+// `_runtime_ref` / `_IMPORT_ALIAS` (the subset): the in-module name a runtime
+// import is referenced by.
+fn runtime_ref(name: Str) -> Str {
+  if (name == "Frame") { return "_revl_Frame" }
+  if (name == "ConfigSchema") { return "_revl_ConfigSchema" }
+  if (name == "schedule_every") { return "_revl_schedule_every" }
+  if (name == "schedule_after") { return "_revl_schedule_after" }
+  return name
+}
+
+// -------------------------------------------- component-body expressions (cexpr)
+fn ccommajoin(nodes: List[Any]) -> Str {
+  var parts = []
+  for (e of nodes) { parts = parts.push(cexpr(e)) }
+  return parts.join(", ")
+}
+
+fn crecord(fields: List[Any]) -> Str {
+  var parts = []
+  for (p of fields) { parts = parts.push(`${py_repr(value_at(p, 0))}: ${cexpr(value_at(p, 1))}`) }
+  return "{".concat(parts.join(", ")).concat("}")
+}
+
+fn clist(items: List[Any]) -> Str {
+  var parts = []
+  for (e of items) { parts = parts.push(cexpr(e)) }
+  return "[".concat(parts.join(", ")).concat("]")
+}
+
+fn crecord_update(base: Str, updates: List[Any]) -> Str {
+  var parts = []
+  parts = parts.push(`**${base}`)
+  for (u of updates) { parts = parts.push(`${py_repr(value_at(u, 0))}: ${cexpr(value_at(u, 1))}`) }
+  return "{".concat(parts.join(", ")).concat("}")
+}
+
+fn carrow(node: Any) -> Str {
+  // NOTE: unlike the fn-body arrow, the component arrow appends NO `=capture`
+  // params (the reference `_ComponentEmitter._expr` arrow branch omits them).
+  var ps = []
+  for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
+  let lp = ps.join(", ")
+  return `lambda ${lp}: ${cexpr(value_field(node, "body"))}`
+}
+
+// component `bin`: NO arithmetic specialization (the reference difference).
+fn cbin(node: Any) -> Str {
+  let op = node_op(node)
+  if (op == "??") {
+    let lhs = cexpr(value_field(node, "left"))
+    let rhs = cexpr(value_field(node, "right"))
+    return `(${rhs} if ${lhs} is None else ${lhs})`
+  }
+  let pop = py_bin_op(op)
+  return `(${cexpr(value_field(node, "left"))} ${pop} ${cexpr(value_field(node, "right"))})`
+}
+
+fn cun(node: Any) -> Str {
+  let op = node_op(node)
+  if (op == "!") { return `(not ${cexpr(value_field(node, "operand"))})` }
+  if (op == "-") { return `(-${cexpr(value_field(node, "operand"))})` }
+  return `<<UNSUPPORTED-UN:${op}>>`
+}
+
+fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool) -> Str {
+  let pattern = value_str(value_field(arm, "pattern"))
+  var body = cexpr(value_field(arm, "body"))
+  if (pattern == "_") { return body }
+  let bind = value_str(value_field(arm, "bind"))
+  var cond = ""
+  if (pattern == "None") {
+    cond = "match is None"
+  } else {
+    if (pattern == "Some") {
+      cond = "match is not None"
+      if (bind != "") { body = `(lambda ${bind}: ${body})(match)` }
+    } else {
+      if (bind != "") { body = `(lambda ${bind}: ${body})(match.value)` }
+      cond = `isinstance(match, ${pattern})`
+    }
+  }
+  if (!has_rest) {
+    return `(${body} if ${cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))`
+  }
+  return `(${body} if ${cond} else ${rest})`
+}
+
+fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
+  var result = ""
+  var has = false
+  var i = arms.length() - 1
+  while (i >= 0) {
+    result = cmatch_branch(arms[i], result, has)
+    has = true
+    i -= 1
+  }
+  if (!has) {
+    result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
+  }
+  return `(lambda match: ${result})(${scrutinee})`
+}
+
+// The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
+fn cexpr(node: Any) -> Str {
+  let kind = node_kind(node)
+  if (kind == "lit") { return py_repr(value_field(node, "value")) }
+  if (kind == "var") {
+    let nm = value_str(value_field(node, "name"))
+    if (nm == "None") { return "None" }
+    if (nm == "Some") { return "(lambda _v: _v)" }
+    return mangle(nm)
+  }
+  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (kind == "req") { return "_revl_ctx.".concat(value_str(value_field(node, "name"))) }
+  if (kind == "call") {
+    if (!value_is_null(value_field(node, "target"))) {
+      let t = cexpr(value_field(node, "target"))
+      let m = value_str(value_field(node, "method"))
+      return `${t}.${m}(${ccommajoin(value_list(value_field(node, "args")))})`
+    }
+    let callee = cexpr(value_field(node, "callee"))
+    return `${callee}(${ccommajoin(value_list(value_field(node, "args")))})`
+  }
+  if (kind == "field") {
+    return `_revl_field(${cexpr(value_field(node, "target"))}, ${py_repr(value_field(node, "name"))})`
+  }
+  if (kind == "index") {
+    return `${cexpr(value_field(node, "target"))}[${cexpr(value_field(node, "index"))}]`
+  }
+  if (kind == "bin") { return cbin(node) }
+  if (kind == "un") { return cun(node) }
+  if (kind == "if") {
+    return `(${cexpr(value_field(node, "then"))} if ${cexpr(value_field(node, "cond"))} else ${cexpr(value_field(node, "else"))})`
+  }
+  if (kind == "record") { return crecord(value_list(value_field(node, "fields"))) }
+  if (kind == "record_update") {
+    return crecord_update(cexpr(value_field(node, "base")), value_list(value_field(node, "updates")))
+  }
+  if (kind == "list") { return clist(value_list(value_field(node, "items"))) }
+  if (kind == "arrow") { return carrow(node) }
+  if (kind == "match") {
+    return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
+  }
+  if (kind == "builtin") {
+    var args = []
+    for (a of value_list(value_field(node, "args"))) { args = args.push(cexpr(a)) }
+    return render_builtin(value_str(value_field(node, "method")), cexpr(value_field(node, "target")), args, value_str(value_field(node, "recv")))
+  }
+  if (kind == "maplit") { return "{}" }
+  if (kind == "optfield") {
+    let t = cexpr(value_field(node, "target"))
+    return `(None if (${t}) is None else _revl_field(${t}, ${py_repr(value_field(node, "name"))}))`
+  }
+  if (kind == "optcall") {
+    let t = cexpr(value_field(node, "target"))
+    return `(None if (${t}) is None else (${t}).${value_str(value_field(node, "method"))}(${ccommajoin(value_list(value_field(node, "args")))}))`
+  }
+  if (kind == "fn") {
+    return `${mangle(value_str(value_field(node, "name")))}(${ccommajoin(value_list(value_field(node, "args")))})`
+  }
+  return `<<UNSUPPORTED-CEXPR:${kind}>>`
+}
+
+// -------------------------------------------------- component-body statements
+// `_setup_step`: a pure setup step inside a block-effect acquisition.
+fn setup_step(step: Any, indent: Int) -> List[Str] {
+  let kind = value_str(value_field(step, "step"))
+  var out = []
+  if (kind == "let" || kind == "assign") {
+    out = out.push(line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`))
+    return out
+  }
+  if (kind == "expr") { out = out.push(line(indent, cexpr(value_field(step, "expr")))); return out }
+  if (kind == "if") {
+    out = out.push(line(indent, `if ${cexpr(value_field(step, "cond"))}:`))
+    for (n of value_list(value_field(step, "then"))) { out = out.concat(setup_step(n, indent + 1)) }
+    let els = value_list(value_field(step, "else"))
+    if (els.length() > 0) {
+      out = out.push(line(indent, "else:"))
+      for (n of els) { out = out.concat(setup_step(n, indent + 1)) }
+    }
+    return out
+  }
+  if (kind == "assert") { out = out.push(line(indent, `assert ${cexpr(value_field(step, "expr"))}`)); return out }
+  out = out.push(line(indent, `<<UNSUPPORTED-SETUP:${kind}>>`))
+  return out
+}
+
+// `_method_step` (subset: value bindings, plain `emit`, `return`).
+fn method_step(step: Any, indent: Int) -> List[Str] {
+  let kind = value_str(value_field(step, "step"))
+  var out = []
+  if (kind == "let" || kind == "assign") {
+    out = out.push(line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`))
+    return out
+  }
+  if (kind == "emit") {
+    if (!value_is_null(value_field(step, "compensate"))) {
+      out = out.push(line(indent, `<<UNSUPPORTED-METHOD-COMPENSATE>>`))
+      return out
+    }
+    out = out.push(line(indent, cexpr(value_field(step, "expr"))))
+    return out
+  }
+  if (kind == "return") {
+    if (value_is_null(value_field(step, "expr"))) { out = out.push(line(indent, "return")) }
+    else { out = out.push(line(indent, `return ${cexpr(value_field(step, "expr"))}`)) }
+    return out
+  }
+  out = out.push(line(indent, `<<UNSUPPORTED-METHODSTEP:${kind}>>`))
+  return out
+}
+
+// `_method`: one provide-method as a Python `def` (sync only in this slice).
+fn method_lines(m: Any, indent: Int) -> List[Str] {
+  let name = mangle(value_str(value_field(m, "name")))
+  var head = `def ${name}(self`
+  for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
+  head = head.concat("):")
+  var out = []
+  out = out.push(line(indent, head))
+  let body = value_list(value_field(m, "body"))
+  if (body.length() == 0) { out = out.push(line(indent + 1, "pass")); return out }
+  for (s of body) { out = out.concat(method_step(s, indent + 1)) }
+  return out
+}
+
+// `_provide`: the provision class, its methods, and the runtime-derived
+// revertible provision (yield the disposer, then populate).
+fn provide_lines(step: Any, indent: Int) -> List[Str] {
+  let name = mangle(value_str(value_field(step, "name")))
+  let svc = value_str(value_field(step, "service"))
+  let cls = "_".concat(pascal(name))
+  var out = []
+  out = out.push(line(indent, `class ${cls}:`))
+  out = out.push(line(indent + 1, `"""service ${svc}, provided at key "${name}"."""`))
+  let methods = value_list(value_field(step, "methods"))
+  if (methods.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+  for (m of methods) {
+    out = out.push("")
+    out = out.concat(method_lines(m, indent + 1))
+  }
+  out = out.push("")
+  out = out.push(line(indent, `yield _revl_ctx.provide(${py_repr(name)})`))
+  out = out.push(line(indent, `_revl_ctx.set(${py_repr(name)}, ${cls}())`))
+  return out
+}
+
+// `_timer`: a revertible schedule — the firing closure, its handle, and the
+// yielded `.cancel()` inverse.
+fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
+  let mode = value_str(value_field(step, "mode"))
+  var sched = "schedule_after"
+  if (mode == "every") { sched = "schedule_every" }
+  let c = counter + 1
+  let fname = `_timer_${c}`
+  let handle = fname.concat("_h")
+  var out = []
+  out = out.push(line(indent, `def ${fname}():`))
+  let emissions = value_list(value_field(step, "body"))
+  if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+  for (em of emissions) { out = out.push(line(indent + 1, cexpr(value_field(em, "expr")))) }
+  let interval = value_int(value_field(step, "interval_ms"))
+  out = out.push(line(indent, `${handle} = ${runtime_ref(sched)}(${interval}, ${fname})`))
+  out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
+  return { lines: out, counter: c }
+}
+
+// `_body_step`: one activation-body step -> its lines (with the reference's
+// trailing blank), threading the timer counter.
+fn body_step(step: Any, indent: Int, counter: Int) -> Emit {
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "let-effect") {
+    var out = []
+    for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
+    out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${cexpr(value_field(step, "acquire"))}`))
+    out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  if (kind == "effect") {
+    var out = []
+    for (su of value_list(value_field(step, "setup"))) { out = out.concat(setup_step(su, indent)) }
+    out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
+    out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  if (kind == "fail") {
+    var out = [line(indent, `raise RuntimeError(${cexpr(value_field(step, "message"))})`)]
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  if (kind == "emit") {
+    var out = [line(indent, cexpr(value_field(step, "expr")))]
+    if (!value_is_null(value_field(step, "compensate"))) {
+      out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "compensate"))}`))
+    }
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  if (kind == "if") {
+    var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
+    var c = counter
+    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, c)
+    out = out.concat(te.lines)
+    c = te.counter
+    let els = value_list(value_field(step, "else"))
+    if (els.length() > 0) {
+      out = out.push(line(indent, "else:"))
+      let ee = emit_body_steps(els, indent + 1, c)
+      out = out.concat(ee.lines)
+      c = ee.counter
+    }
+    out = out.push("")
+    return { lines: out, counter: c }
+  }
+  if (kind == "timer") {
+    let e = timer_emit(step, indent, counter)
+    var out = e.lines
+    out = out.push("")
+    return { lines: out, counter: e.counter }
+  }
+  if (kind == "provide") {
+    var out = provide_lines(step, indent)
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  var out = [line(indent, `<<UNSUPPORTED-BODYSTEP:${kind}>>`)]
+  out = out.push("")
+  return { lines: out, counter: counter }
+}
+
+fn emit_body_steps(steps: List[Any], indent: Int, counter: Int) -> Emit {
+  var out = []
+  var c = counter
+  for (s of steps) {
+    let e = body_step(s, indent, c)
+    out = out.concat(e.lines)
+    c = e.counter
+  }
+  return { lines: out, counter: c }
+}
+
+// Does any timer of `mode` appear in these body steps (walking `if` branches)?
+// Drives the conditional `schedule_*` import.
+fn body_has_timer(steps: List[Any], mode: Str) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "timer" && value_str(value_field(s, "mode")) == mode) { return true }
+    if (k == "if") {
+      if (body_has_timer(value_list(value_field(s, "then")), mode)) { return true }
+      if (body_has_timer(value_list(value_field(s, "else")), mode)) { return true }
+    }
+  }
+  return false
+}
+
+// One component: the `_<snake>_apply` closure and its plugin dict.
+fn component_body(comp: Any) -> List[Str] {
+  let name = mangle(value_str(value_field(comp, "name")))
+  let sn = snake(name)
+  var out = []
+  out = out.push(`def _${sn}_apply(_revl_ctx, _revl_config):`)
+  out = out.push(line(1, `_revl_frame = _revl_Frame(_revl_ctx, ${py_repr(name)})`))
+  out = out.push("")
+  out = out.push(line(1, "def _body():"))
+  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, 0)
+  out = out.concat(e.lines)
+  out = out.push(line(2, "yield _revl_frame.drain"))
+  out = out.push("")
+  out = out.push(line(1, "_revl_frame.install(_body)"))
+  out = out.push("")
+  out = out.push("")
+  out = out.push(`${name} = {`)
+  out = out.push(line(1, `'name': ${py_repr(name)},`))
+  var inject = []
+  for (k of record_keys(value_field(comp, "requires"))) { inject = inject.push(mangle(k)) }
+  out = out.push(line(1, `'inject': ${py_repr(inject)},`))
+  out = out.push(line(1, `'apply': _${sn}_apply,`))
+  out = out.push("}")
+  return out
+}
+
+// The SERVICES table, populated (mirrors the `emit()` service-table loop).
+fn emit_services_table(services: Any) -> List[Str] {
+  var out = []
+  out = out.push("SERVICES = {")
+  for (sname of record_keys(services)) {
+    let svc = value_field(services, sname)
+    out = out.push(line(1, `${py_repr(sname)}: {`))
+    let methods = value_field(svc, "methods")
+    for (mname of record_keys(methods)) {
+      let spec = value_field(methods, mname)
+      var pnames = []
+      for (p of value_list(value_field(spec, "params"))) { pnames = pnames.push(value_str(value_field(p, "name"))) }
+      var meta = []
+      meta = meta.push(`'params': ${py_repr(pnames)}`)
+      meta = meta.push(`'emission': ${py_repr(value_bool(value_field(spec, "emission")))}`)
+      out = out.push(line(2, `${py_repr(mname)}: {${meta.join(", ")}},`))
+    }
+    out = out.push(line(1, "},"))
+  }
+  out = out.push("}")
+  return out
+}
+
+// The document assembly, mirroring `emit()` for functions + components/services.
 pub fn emit_src(ir: Any) -> Str {
   var out = []
-  let ver = ir_version(ir)
+  let ver = value_int(value_opt(ir, "ir_version") ?? 1)
   out = out.push(`"""Generated by the revl cordis-py backend (ir_version ${ver}) — do not edit.`)
   out = out.push("")
   out = out.push(`Components: ${comp_names(ir)}`)
   out = out.push(`"""`)
   out = out.push("")
+  // The `from runtime import …` line (before the arithmetic preludes). The
+  // `uses` set for this slice: `Frame` iff there is any component, plus the
+  // `schedule_*` a timer needs — rendered in sorted order with the `_revl_`
+  // aliases. (ConfigSchema / host roots / lifecycle drivers are deferred.)
+  let components = value_list(value_field(ir, "components"))
+  var need_every = false
+  var need_after = false
+  for (c of components) {
+    if (body_has_timer(value_list(value_field(c, "body")), "every")) { need_every = true }
+    if (body_has_timer(value_list(value_field(c, "body")), "after")) { need_after = true }
+  }
+  var imports = []
+  if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
+  if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
+  if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
+  if (imports.length() > 0) {
+    out = out.push("from runtime import ".concat(imports.join(", ")))
+    out = out.push("")
+  }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
   if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
   if (uses_true_division(ir)) { out = out.concat(div_block()) }
   out = out.concat(field_block())
-  let functions = alist(g(ir, "functions"))
+  let functions = value_list(value_field(ir, "functions"))
   if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
-  out = out.push("SERVICES = {")
-  out = out.push("}")
+  out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")
-  out = out.push("COMPONENTS = {}")
+  for (c of components) {
+    out = out.concat(component_body(c))
+    out = out.push("")
+    out = out.push("")
+  }
+  var pairs = []
+  for (c of components) {
+    let nm = mangle(value_str(value_field(c, "name")))
+    pairs = pairs.push(`${py_repr(nm)}: ${nm}`)
+  }
+  out = out.push("COMPONENTS = {".concat(pairs.join(", ")).concat("}"))
   return out.join(newline()).concat(newline())
 }
 

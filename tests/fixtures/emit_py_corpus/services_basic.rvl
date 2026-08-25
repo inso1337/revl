@@ -1,0 +1,23 @@
+// Components + services, function-free: a populated SERVICES table, req/provide
+// wiring, the effect accumulator (effect ... undo ...), and a provide method.
+service Store {
+  fn get(k: Int) -> Int
+  fn put(k: Int, v: Int)
+}
+
+service Health {
+  fn status() -> Str
+}
+
+component Backing requires store: Store provides health: Health {
+  effect store.put(1, 10) undo store.put(1, 0)
+  effect store.put(2, 20) undo store.put(2, 0)
+
+  provide health {
+    fn status() = "ok"
+  }
+}
+
+component Reader requires store: Store {
+  effect store.put(3, store.get(1)) undo store.put(3, 0)
+}
