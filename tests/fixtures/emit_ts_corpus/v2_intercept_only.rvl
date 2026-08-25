@@ -1,0 +1,14 @@
+// The v2 DISPATCH path (item 240): a component using ONLY intercept metadata —
+// `intercept <key> with { … }` — and no v3 feature lowers to ir_version 2, so
+// `emit()` routes it through `_emit_v1`. With any intercept present the plugin's
+// `inject` switches from the array form to the dict form (`inject: {"db": {…}},`).
+// Like v2_isolate_only, this fixture omits the trivial top-level `fn` item 234
+// used to force v3, so the dict-form inject is verified against the v1 emitter.
+// The self-hosted `emit_src` must stay byte-identical to the reference v2 output.
+service Db { fn q() -> Int }
+service Api { fn run() -> Int }
+
+component App requires db: Db provides api: Api {
+  intercept db with { tag: "primary", tier: 2 }
+  provide api { fn run() = 0 }
+}

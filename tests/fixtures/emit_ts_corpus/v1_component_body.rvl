@@ -1,0 +1,29 @@
+// The v1 DISPATCH path (item 240): a component-only document with no v3 feature
+// (no declared type/fn/extern/test, no `if`/`fail`/setup-effect body step, no
+// builtin/adt/spawn/async-op) lowers to ir_version 1, so `emit()` routes it
+// through `_emit_v1` (not `_emit_v3`). The self-hosted `emit_src` is
+// version-agnostic — it assembles the same shape `_emit_v1` does for a
+// component-only doc — so its output must be byte-identical to the reference's
+// v1 emission: the runtime import, service interfaces, the committed-view
+// `_context_augmentation`, and each component's plugin object (config interface,
+// inject/provide arrays, apply → `ctx.effect(function* …)` with a plain
+// effect/undo and an `emit … compensate …` saga, plus a `provide` method whose
+// value is a ternary over a config field and a required-service call).
+service Bus {
+  fn open() -> Int
+  fn close(h: Int) -> Int
+  emission fn send(msg: Str) -> Int
+}
+service Api { fn ping(n: Int) -> Int }
+
+component Worker requires bus: Bus provides api: Api {
+  config { limit: Int = 3, name: Str }
+
+  effect bus.open() undo bus.close(0)
+
+  emit bus.send("go") compensate bus.send("undo-go")
+
+  provide api {
+    fn ping(n: Int) = n < config.limit ? n : bus.close(n)
+  }
+}
