@@ -1,0 +1,1138 @@
+// The revl ADMISSION GATE, in revl — stage four of the self-hosting effort
+// (roadmap item 145, Path C). Where lexer.rvl / parser.rvl / checker.rvl port
+// the compiler *frontend*, this file ports the *lowering-time admission gate*:
+// it lowers a checked program to enough of the cordis IR that the admission
+// guarantees can be decided, then enforces them. It emits NO code — code
+// generation is deferred to the py service (Path A). This is exactly the gate
+// `evolve` needs to admit a candidate natively on any tier: lexer -> parser ->
+// checker -> lower, with lower answering one question — admit, or refuse and
+// name the guarantee.
+//
+// It is the second half of a differential oracle: this file and
+// src/revl/lower.py's `check_and_lower` / `_link` are two independent
+// implementations of the same admission algebra, forced to agree on every
+// input (tests/test_selfhost_lower.py). Neither is the spec; a disagreement is
+// a real defect in one of them.
+//
+// ============================================================ WHAT IT COVERS
+// The first coherent slice mirrors three guarantees, in the reference's own
+// checking order (per-component G4/A1 during lowering, then G2 at link):
+//
+//   * G4 (capability containment) — a service declaration is the upper bound
+//     on its providers' effects. A plain-declared provision method whose body
+//     reaches an emission (a required-service `emission` op, or an `emission`
+//     extern, directly or through a named fn-call chain) is refused; an
+//     `emission[caps]`-scoped method that emits through a boundary outside its
+//     declared set is refused; an unmarked call to a required-service emission
+//     op is refused. Ported from lower.py's `_method_emissions` + provider
+//     checks and the `_emitting_capabilities` fixed point. (This is the same
+//     algebra checker.rvl's slice two already cross-checks; it is re-affirmed
+//     here at the IR level because that is where lower.py enforces it.)
+//
+//   * A1 (sync-reaching-async refusal, item 117) — an `async` extern is an
+//     emission whose host op may suspend the caller. A sync-declared provide
+//     method that reaches an async callable (an async extern, or a fn colored
+//     async by the transitive `_async_callables` fixed point) — or an async
+//     *service operation* through a required key — has no in-flight window to
+//     await it, so it is refused. A method whose service op is declared
+//     `async fn` admits the same body.
+//
+//   * G2 (provision disjointness) — across the composed components, a key has
+//     at most one provider per realm. Two components providing the same key in
+//     the shared realm is a conflict. Ported from lower.py's `_link`.
+//
+// ============================================================ WHAT REMAINS
+// Deliberately out of this slice, for follow-on lowerings (each a real part of
+// lower.py the gate does not yet mirror):
+//   * G1 (undeclared access) and the whole type/arg-checking spine — the
+//     corpus excludes programs whose only refusal would be out of slice, so
+//     the gate need not re-derive it (checker.rvl already cross-checks typing).
+//   * G3 (dependency cycles) in `_link` — the topological sort and the cycle
+//     why-trace.
+//   * Per-realm G2 with `isolate` (multi-tenancy): only the SHARED realm is
+//     mirrored here; `isolate`/`intercept` parsing is skipped.
+//   * A1's remaining surfaces: the pure-fn async-value refusal, the component
+//     setup/activation async-reach refusal, `await` outside a component body,
+//     and the sync-typed-arrow leak (`_refuse_leaky_arrow`).
+//   * The spawn/instance dimension entirely: templates, G4/G6 spawn-boundary
+//     bounds, capability attenuation (`_check_spawn_*`).
+//   * State hand-off admission, service replacement admission, ambient
+//     (running-manifest) composition, fault/lifecycle/prop tests, ir_version
+//     computation, and — of course — every emitter-oriented lowering detail
+//     (the gate produces a verdict, not an IR document).
+//
+// Verdict shape: `admit_src` returns "" to admit, else a two-part string
+// "<G>|<message>" where <G> is the guarantee tag ("G2" | "G4" | "A1") and
+// <message> is the refusal spelled exactly as the reference spells it. The
+// cross-check compares both the tag and the message.
+
+use "./lexer.rvl" { Token, lex_src }
+use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
+                    is_bad, expr_at, params_at, type_at }
+
+// ================================================================ IR model
+//
+// The slice of the cordis IR the admission checks read. A program lowers to:
+// externs and fns (the call graph the two fixed points run over), services
+// (the upper-bound declarations G4/A1 check against), and components (the
+// providers whose bodies are gated, plus the provision keys G2 links).
+
+// An extern OR a plain fn. An extern carries its flags and no body-calls; a
+// plain fn carries the callee NAMES its body reaches (all the two fixed points
+// need) and no flags. Unifying them lets one fixed point walk both.
+type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
+             callees: List[Str] }
+
+// A service method signature: enough to be an upper bound. `caps` is the
+// `emission[a, b]` scope list ([] when the method is plain or uncapped-
+// emission); `isEm`/`isAsync` are the declared emission/async properties.
+type MSig = { name: Str, isEm: Bool, caps: List[Str], isAsync: Bool }
+type SvcD = { name: Str, methods: List[MSig] }
+
+// A body statement. kind: emit | effect | undo | return | expr | skip. The
+// `emit` kind (statement-level `emit ...`, or `let x = emit ...`) marks the
+// expression's calls as crossing the boundary intentionally.
+type Stmt = { kind: Str, e: Expr }
+
+type ProvM   = { name: Str, body: List[Stmt] }
+type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
+// A declared provision key and the realm it lives in ("" = the shared realm).
+type ProvKey = { key: Str, rlm: Str }
+type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
+                 reqMap: List[Bind], setup: List[Stmt] }
+
+type Bind = { name: Str, ty: Str }
+
+type Prog = { fns: List[FnD], svcs: List[SvcD], comps: List[CompD], bad: Str }
+
+// ================================================================ tokens
+//
+// A small structural reader over the frontend's token stream, in the shape
+// checker.rvl established: declarations are brace-structural, statements are
+// line-based (the lexer's tokens carry line numbers).
+
+fn tkc(ts: List[Token], i: Int) -> Token {
+  if (i < ts.length()) { return ts[i] }
+  return { kind: "eof", text: "", line: 0 }
+}
+
+fn atk(ts: List[Token], i: Int, k: Str) -> Bool { return tkc(ts, i).kind == k }
+
+fn atw(ts: List[Token], i: Int, w: Str) -> Bool {
+  let t = tkc(ts, i)
+  return t.kind == "kw" && t.text == w
+}
+
+fn skip_line(ts: List[Token], i: Int) -> Int {
+  if (i >= ts.length()) { return i }
+  let ln = tkc(ts, i).line
+  var j = i
+  while (j < ts.length() && tkc(ts, j).line == ln) { j += 1 }
+  return j
+}
+
+fn line_end(ts: List[Token], i: Int, hi: Int) -> Int {
+  let ln = tkc(ts, i).line
+  var j = i
+  while (j < hi && tkc(ts, j).line == ln) { j += 1 }
+  return j
+}
+
+// Index just past the `}` matching the `{` at i; -1 when unbalanced.
+fn close_brace(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (j < ts.length()) {
+    if (atk(ts, j, "{")) { depth += 1 }
+    else {
+      if (atk(ts, j, "}")) {
+        depth -= 1
+        if (depth == 0) { return j + 1 }
+      }
+    }
+    j += 1
+  }
+  return 0 - 1
+}
+
+// ================================================================ list utils
+
+fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
+
+fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out = xs
+  var i = 0
+  while (i < ys.length()) {
+    if (!contains(out, ys[i])) { out = out.push(ys[i]) }
+    i += 1
+  }
+  return out
+}
+
+fn subset_of(a: List[Str], b: List[Str]) -> Bool {
+  var i = 0
+  while (i < a.length()) {
+    if (!contains(b, a[i])) { return false }
+    i += 1
+  }
+  return true
+}
+
+fn minus_list(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    if (!contains(ys, xs[i])) { out = out.push(xs[i]) }
+    i += 1
+  }
+  return out
+}
+
+// Insertion sort ascending; diagnostics sort their extras alphabetically,
+// exactly as lower.py's `sorted(...)` does.
+fn sort_strs(xs: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    let v = xs[i]
+    var k = 0
+    var placed = false
+    var res: List[Str] = []
+    while (k < out.length()) {
+      if (!placed && out[k] > v) {
+        res = res.push(v)
+        placed = true
+      }
+      res = res.push(out[k])
+      k += 1
+    }
+    if (!placed) { res = res.push(v) }
+    out = res
+    i += 1
+  }
+  return out
+}
+
+fn quote_join(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(", ") }
+    out = out.concat("`").concat(xs[i]).concat("`")
+    i += 1
+  }
+  return out
+}
+
+fn comma_join(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(", ") }
+    out = out.concat(xs[i])
+    i += 1
+  }
+  return out
+}
+
+// ================================================================ prog build
+
+fn bad_prog(pg: Prog, msg: Str) -> Prog {
+  if (pg.bad != "") { return pg }
+  return { fns: pg.fns, svcs: pg.svcs, comps: pg.comps, bad: msg }
+}
+
+fn push_fn(pg: Prog, f: FnD) -> Prog {
+  return { fns: pg.fns.push(f), svcs: pg.svcs, comps: pg.comps, bad: pg.bad }
+}
+
+fn push_svc(pg: Prog, s: SvcD) -> Prog {
+  return { fns: pg.fns, svcs: pg.svcs.push(s), comps: pg.comps, bad: pg.bad }
+}
+
+fn push_comp(pg: Prog, c: CompD) -> Prog {
+  return { fns: pg.fns, svcs: pg.svcs, comps: pg.comps.push(c), bad: pg.bad }
+}
+
+type PStep = { pg: Prog, i: Int }
+
+fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
+
+// Value-taking record constructors: a `var`'s fields cannot appear directly in
+// a record literal (a `var` never escapes its function, syntax-2.0 §3.5), so
+// every construction from mutable state goes through one of these, exactly as
+// checker.rvl does.
+fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str]) -> FnD {
+  return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs }
+}
+
+fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
+  return { name: nm, isEm: em, caps: cs, isAsync: asy }
+}
+
+fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
+            rq: List[Bind], su: List[Stmt]) -> CompD {
+  return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su }
+}
+
+fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
+
+// ---------------------------------------------------------------- statements
+//
+// One line's worth of tokens as statement(s), the reach-only subset of
+// checker.rvl's p_stmt_run: kinds are collapsed to whether they mark an
+// emission (`emit`) and the expression carried. `effect X undo Y` on one line
+// yields two statements.
+
+fn mkstmt(kind: Str, e: Expr) -> Stmt { return { kind: kind, e: e } }
+
+fn int_lit0() -> Expr { return IntLit("0") }
+
+fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+  let t = tkc(ts, lo)
+  if (t.kind == "kw" && t.text == "let") {
+    if (!atk(ts, lo + 2, "=")) { return [mkstmt("skip", int_lit0())] }
+    var j = lo + 3
+    var kd = "expr"
+    if (atw(ts, j, "emit")) {
+      kd = "emit"
+      j += 1
+    } else {
+      if (atw(ts, j, "effect")) {
+        kd = "effect"
+        j += 1
+      }
+    }
+    let r = expr_at(ts, j)
+    if (is_bad(r.e)) { return [mkstmt("skip", r.e)] }
+    var out: List[Stmt] = [mkstmt(kd, r.e)]
+    if (atw(ts, r.i, "undo")) {
+      let u = expr_at(ts, r.i + 1)
+      if (!is_bad(u.e)) { out = out.push(mkstmt("undo", u.e)) }
+    }
+    return out
+  }
+  if (t.kind == "kw" && t.text == "return") {
+    let rr = expr_at(ts, lo + 1)
+    if (is_bad(rr.e)) { return [mkstmt("skip", rr.e)] }
+    return [mkstmt("return", rr.e)]
+  }
+  if (t.kind == "kw" && t.text == "emit") {
+    let re1 = expr_at(ts, lo + 1)
+    if (is_bad(re1.e)) { return [mkstmt("skip", re1.e)] }
+    return [mkstmt("emit", re1.e)]
+  }
+  if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
+    let rf = expr_at(ts, lo + 1)
+    if (is_bad(rf.e)) { return [mkstmt("skip", rf.e)] }
+    var out2: List[Stmt] = [mkstmt(t.text, rf.e)]
+    if (atw(ts, rf.i, "undo")) {
+      let u2 = expr_at(ts, rf.i + 1)
+      if (!is_bad(u2.e)) { out2 = out2.push(mkstmt("undo", u2.e)) }
+    }
+    return out2
+  }
+  let r2 = expr_at(ts, lo)
+  if (is_bad(r2.e)) { return [mkstmt("skip", r2.e)] }
+  return [mkstmt("expr", r2.e)]
+}
+
+fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
+  var out = a
+  var i = 0
+  while (i < bs.length()) {
+    out = out.push(bs[i])
+    i += 1
+  }
+  return out
+}
+
+fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
+  if (lo >= hi || atk(ts, lo, "}")) { return acc }
+  let re = line_end(ts, lo, hi)
+  return p_stmts(ts, re, hi, append_stmts(acc, p_stmt_run(ts, lo, re)))
+}
+
+// ---------------------------------------------------------------- fn callees
+//
+// A plain fn contributes to the two fixed points only through the callee NAMES
+// its body reaches (`_calls_in`, name-call subset). We collect them at parse
+// time so a FnD needs no stored body.
+
+fn callee_name(tg: Expr) -> Str { return match tg { Var(n) => n, _ => "" } }
+
+fn exprs_calls(xs: List[Expr], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return exprs_calls(xs, i + 1, calls_in(xs[i], acc))
+}
+
+fn inits_calls(xs: List[InitN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return inits_calls(xs, i + 1, calls_in(xs[i].value, acc))
+}
+
+fn arms_calls(xs: List[ArmN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return arms_calls(xs, i + 1, calls_in(xs[i].body, acc))
+}
+
+fn parts_calls(xs: List[PartN], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return parts_calls(xs, i + 1, calls_in(xs[i].e, acc))
+}
+
+fn call_calls(tg: Expr, args: List[Expr], acc: List[Str]) -> List[Str] {
+  let cn = callee_name(tg)
+  var a = calls_in(tg, acc)
+  if (cn != "") { a = a.push(cn) }
+  return exprs_calls(args, 0, a)
+}
+
+fn calls_in(e: Expr, acc: List[Str]) -> List[Str] {
+  return match e {
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
+    BoolLit(_) => acc,
+    NullLit    => acc,
+    Var(_)     => acc,
+    Hole(_)    => acc,
+    Bad(_)     => acc,
+    Bin(b)     => calls_in(b.r, calls_in(b.l, acc)),
+    Un(u)      => calls_in(u.e, acc),
+    Emit(u)    => calls_in(u.e, acc),
+    Call(c)    => call_calls(c.target, c.args, acc),
+    Field(f)   => calls_in(f.target, acc),
+    OptField(f) => calls_in(f.target, acc),
+    OptCall(c) => exprs_calls(c.args, 0, calls_in(c.target, acc)),
+    Index(x)   => calls_in(x.idx, calls_in(x.target, acc)),
+    If(x)      => calls_in(x.els, calls_in(x.then_, calls_in(x.cond, acc))),
+    Rec(r)     => inits_calls(r.fields, 0, acc),
+    Lst(l)     => exprs_calls(l.items, 0, acc),
+    Arrow(a)   => calls_in(a.body, acc),
+    Match(m)   => arms_calls(m.arms, 0, calls_in(m.scrut, acc)),
+    Templ(t)   => parts_calls(t.parts, 0, acc),
+  }
+}
+
+fn body_callees(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  return body_callees(ss, i + 1, calls_in(ss[i].e, acc))
+}
+
+// ================================================================ parsing
+//
+// The declaration layer. Modelled on checker.rvl's parser, extended to capture
+// the `async` modifier (externs and service methods) that admission needs and
+// checker's slice does not, and the component's provision keys/realm for G2.
+
+fn ret_at(ts: List[Token], i: Int) -> Int {
+  if (atk(ts, i, "arrow")) { return type_at(ts, i + 1).i }
+  return i
+}
+
+// `extern [emission|acquire|pure] [async] fn name(params) -> T [= @host {..}]*`
+// Flags are consumed in any order until `fn`, so `extern emission async fn` and
+// `extern async emission fn` both parse (docs spell the former).
+fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  var j = i + 1
+  var isEm = false
+  var isAsync = false
+  while (atw(ts, j, "emission") || atw(ts, j, "acquire") || atw(ts, j, "pure")
+         || atw(ts, j, "async")) {
+    if (atw(ts, j, "emission")) { isEm = true }
+    if (atw(ts, j, "async")) { isAsync = true }
+    j += 1
+  }
+  if (!atw(ts, j, "fn")) {
+    return { pg: bad_prog(pg, "expected fn after extern"), i: skip_line(ts, j) }
+  }
+  let nm = tkc(ts, j + 1).text
+  let ps = params_at(ts, j + 3)
+  var k = ret_at(ts, ps.i)
+  // skip any `= @host { ... }` bodies without letting a brace end the decl early
+  while (k < ts.length() && !atw(ts, k, "service") && !atw(ts, k, "component")
+         && !atw(ts, k, "extern") && !atw(ts, k, "fn") && !atk(ts, k, "eof")) {
+    if (atk(ts, k, "{")) {
+      let e = close_brace(ts, k)
+      if (e == 0 - 1) { k = ts.length() } else { k = e }
+    } else { k += 1 }
+  }
+  return mk_step(push_fn(pg, mk_fnd(nm, isEm, isAsync, [])), k)
+}
+
+fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  let ps = params_at(ts, i + 3)
+  let rti = ret_at(ts, ps.i)
+  if (!atk(ts, rti, "{")) {
+    return mk_step(bad_prog(pg, "expected { after fn signature"), rti)
+  }
+  let bend = close_brace(ts, rti)
+  if (bend == 0 - 1) {
+    return { pg: bad_prog(pg, "unbalanced braces in fn body"), i: ts.length() }
+  }
+  let body = p_stmts(ts, rti + 1, bend - 1, [])
+  return mk_step(push_fn(pg, { name: nm, isEmExtern: false,
+                              isAsyncExtern: false,
+                              callees: body_callees(body, 0, []) }), bend)
+}
+
+type MethsR = { xs: List[MSig], i: Int, ok: Bool }
+
+fn mk_meths(xs: List[MSig], i: Int, ok: Bool) -> MethsR {
+  return { xs: xs, i: i, ok: ok }
+}
+
+fn p_methods(ts: List[Token], i: Int, end: Int, acc: List[MSig]) -> MethsR {
+  if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
+  var j = i
+  var em = false
+  var isAsync = false
+  var caps: List[Str] = []
+  // `[emission[caps]] [async] fn` — flags in any order before `fn`.
+  while (atw(ts, j, "emission") || atw(ts, j, "async")) {
+    if (atw(ts, j, "emission")) {
+      em = true
+      j += 1
+      if (atk(ts, j, "[")) {
+        var k = j + 1
+        while (k < end && !atk(ts, k, "]")) {
+          if (atk(ts, k, "ident")) { caps = caps.push(tkc(ts, k).text) }
+          k += 1
+        }
+        j = k + 1
+      }
+    } else {
+      isAsync = true
+      j += 1
+    }
+  }
+  if (!atw(ts, j, "fn")) { return mk_meths(acc, j, false) }
+  let nm = tkc(ts, j + 1).text
+  let ps = params_at(ts, j + 3)
+  let rti = ret_at(ts, ps.i)
+  return p_methods(ts, rti, end, acc.push(mk_msig(nm, em, caps, isAsync)))
+}
+
+fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  if (!atk(ts, i + 2, "{")) {
+    return { pg: bad_prog(pg, "expected { after service name"), i: i + 2 }
+  }
+  let end = close_brace(ts, i + 2)
+  if (end == 0 - 1) {
+    return { pg: bad_prog(pg, "unbalanced braces in service"), i: ts.length() }
+  }
+  let ms = p_methods(ts, i + 3, end - 1, [])
+  if (!ms.ok) {
+    return { pg: bad_prog(pg, "bad method signature in service ".concat(nm)),
+             i: end }
+  }
+  return { pg: push_svc(pg, { name: nm, methods: ms.xs }), i: end }
+}
+
+// ---------------------------------------------------------------- provide
+
+type ProvMR = { xs: List[ProvM], i: Int, ok: Bool }
+
+// A provide method body is either a brace block `fn m(p) { ... }` or the arrow
+// shorthand `fn m(p) = expr` (one expression, unmarked). The shorthand is what
+// the A1 fixtures use, so it must parse.
+fn p_prov_methods(ts: List[Token], i: Int, end: Int,
+                  acc: List[ProvM]) -> ProvMR {
+  if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
+  // a provide method may be declared `async fn` (matching an async service op);
+  // admission reads asyncness off the service declaration, so the modifier is
+  // skipped structurally here — only the body walk matters at this position.
+  let h = atw(ts, i, "async") ? i + 1 : i
+  if (!atw(ts, h, "fn")) { return { xs: acc, i: h, ok: false } }
+  let nm = tkc(ts, h + 1).text
+  let ps = params_at(ts, h + 3)
+  if (atk(ts, ps.i, "=")) {
+    let re = line_end(ts, ps.i + 1, end)
+    let ebody = p_stmt_run(ts, ps.i + 1, re)
+    return p_prov_methods(ts, re, end, acc.push({ name: nm, body: ebody }))
+  }
+  if (!atk(ts, ps.i, "{")) { return { xs: acc, i: ps.i, ok: false } }
+  let bend = close_brace(ts, ps.i)
+  if (bend == 0 - 1) { return { xs: acc, i: ts.length(), ok: false } }
+  let bbody = p_stmts(ts, ps.i + 1, bend - 1, [])
+  return p_prov_methods(ts, bend, end, acc.push({ name: nm, body: bbody }))
+}
+
+fn bind_lookup(env: List[Bind], n: Str, i: Int) -> Str {
+  if (i >= env.length()) { return "" }
+  if (env[i].name == n) { return env[i].ty }
+  return bind_lookup(env, n, i + 1)
+}
+
+type ProvR = { provs: List[Provide], setup: List[Stmt], i: Int, ok: Bool }
+
+fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
+               provs: List[Provide], setup: List[Stmt]) -> ProvR {
+  if (i >= end || atk(ts, i, "}")) {
+    return { provs: provs, setup: setup, i: i, ok: true }
+  }
+  if (atw(ts, i, "provide")) {
+    let key = tkc(ts, i + 1).text
+    if (!atk(ts, i + 2, "{")) {
+      return { provs: provs, setup: setup, i: i + 2, ok: false }
+    }
+    let pend = close_brace(ts, i + 2)
+    if (pend == 0 - 1) {
+      return { provs: provs, setup: setup, i: ts.length(), ok: false }
+    }
+    let ms = p_prov_methods(ts, i + 3, pend - 1, [])
+    if (!ms.ok) {
+      return { provs: provs, setup: setup, i: pend, ok: false }
+    }
+    return p_comp_body(ts, pend, end, provh,
+                       provs.push({ key: key,
+                                    svcName: bind_lookup(provh, key, 0),
+                                    methods: ms.xs }),
+                       setup)
+  }
+  // component setup: one statement run per line — G4/A1 gate setup too.
+  let re = line_end(ts, i, end)
+  let ss = p_stmt_run(ts, i, re)
+  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss))
+}
+
+fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  var reqs: List[Bind] = []
+  var provh: List[Bind] = []
+  while (atw(ts, j, "requires") || atw(ts, j, "provides")) {
+    let isReq = atw(ts, j, "requires")
+    var k = j + 1
+    while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
+           && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
+      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
+        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+        if (isReq) { reqs = reqs.push(pair) } else { provh = provh.push(pair) }
+        k += 3
+      } else { k += 1 }
+    }
+    j = k
+  }
+  if (!atk(ts, j, "{")) {
+    return mk_step(bad_prog(pg, "expected { after component header"), j)
+  }
+  let end = close_brace(ts, j)
+  if (end == 0 - 1) {
+    return { pg: bad_prog(pg, "unbalanced braces in component"),
+             i: ts.length() }
+  }
+  let body = p_comp_body(ts, j + 1, end - 1, provh, [], [])
+  if (!body.ok) {
+    return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
+             i: end }
+  }
+  // the shared realm for every declared key (isolate is out of this slice)
+  var pks: List[ProvKey] = []
+  var pi = 0
+  while (pi < provh.length()) {
+    pks = pks.push(mk_provkey(provh[pi].name, ""))
+    pi += 1
+  }
+  return mk_step(push_comp(pg, mk_compd(nm, pks, body.provs, reqs, body.setup)),
+                 end)
+}
+
+fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return pg }
+  let t = tkc(ts, i)
+  if (t.kind != "kw") {
+    return p_top(ts, skip_line(ts, i),
+                 bad_prog(pg, "unexpected token at top level"))
+  }
+  if (t.text == "use" || t.text == "test" || t.text == "type") {
+    // frontend `use`, `test` blocks and type decls are checker-stage concerns;
+    // admission reads none of them. Skip structurally (brace blocks included).
+    if (t.text == "test" && atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return p_top(ts, e, pg) }
+    }
+    return p_top(ts, skip_line(ts, i), pg)
+  }
+  if (t.text == "extern") {
+    let se = p_extern(ts, i, pg)
+    return p_top(ts, se.i, se.pg)
+  }
+  if (t.text == "fn") {
+    let sf = p_fn(ts, i, pg)
+    return p_top(ts, sf.i, sf.pg)
+  }
+  if (t.text == "service") {
+    let sv = p_service(ts, i, pg)
+    return p_top(ts, sv.i, sv.pg)
+  }
+  if (t.text == "component") {
+    let sc = p_component(ts, i, pg)
+    return p_top(ts, sc.i, sc.pg)
+  }
+  return p_top(ts, skip_line(ts, i), bad_prog(pg, "unexpected declaration"))
+}
+
+pub fn parse_prog(src: Str) -> Prog {
+  return p_top(lex_src(src), 0, { fns: [], svcs: [], comps: [], bad: "" })
+}
+
+// ================================================================ fixed points
+//
+// The two least-fixed-points admission runs over the fn call graph, both the
+// name-call subset (first-class dispatch is out of this slice). `emit_caps`
+// seeds the `emission` externs and yields, per name, the capability set its
+// call reaches (docs/capabilities.md). `async_colored` seeds the `async`
+// externs and yields the set of names an `await` must be inserted for
+// (docs/design/async-extern.md §3) — deliberately no `*`/first-class widening.
+
+type CapsT = Map[Str, List[Str]]
+
+fn caps_of(caps: CapsT, n: Str) -> List[Str] {
+  return match caps.lookup(n) { Some(v) => v, None => [] }
+}
+
+fn reached_caps(called: List[Str], caps: CapsT, i: Int,
+                acc: List[Str]) -> List[Str] {
+  if (i >= called.length()) { return acc }
+  return reached_caps(called, caps, i + 1,
+                      union_into(acc, caps_of(caps, called[i])))
+}
+
+fn emit_caps(fs: List[FnD]) -> CapsT {
+  var caps: CapsT = Map.empty()
+  var i = 0
+  while (i < fs.length()) {
+    if (fs[i].isEmExtern) { caps = caps.set(fs[i].name, [fs[i].name]) }
+    i += 1
+  }
+  var changed = true
+  while (changed) {
+    changed = false
+    i = 0
+    while (i < fs.length()) {
+      let f = fs[i]
+      let reached = reached_caps(f.callees, caps, 0, [])
+      let cur = caps_of(caps, f.name)
+      if (reached.length() > 0 && !subset_of(reached, cur)) {
+        caps = caps.set(f.name, union_into(cur, reached))
+        changed = true
+      }
+      i += 1
+    }
+  }
+  return caps
+}
+
+// The async twin: a name is colored iff it is an `async` extern or its body
+// calls a colored callee. Monotone closure over the same finite name set.
+fn async_colored(fs: List[FnD]) -> List[Str] {
+  var colored: List[Str] = []
+  var i = 0
+  while (i < fs.length()) {
+    if (fs[i].isAsyncExtern) { colored = colored.push(fs[i].name) }
+    i += 1
+  }
+  var changed = true
+  while (changed) {
+    changed = false
+    i = 0
+    while (i < fs.length()) {
+      let f = fs[i]
+      if (!contains(colored, f.name)) {
+        if (any_in(f.callees, colored)) {
+          colored = colored.push(f.name)
+          changed = true
+        }
+      }
+      i += 1
+    }
+  }
+  return colored
+}
+
+fn any_in(xs: List[Str], set: List[Str]) -> Bool {
+  var i = 0
+  while (i < xs.length()) {
+    if (contains(set, xs[i])) { return true }
+    i += 1
+  }
+  return false
+}
+
+// ================================================================ body walk
+//
+// One walk over a provide-method (or setup) body collects, in the reference's
+// order: an inline G4 emit-marker refusal, the G4 emission evidence (labels +
+// capability set), and the A1 async reach (async callables called by name, and
+// async service ops reached through a required key). Modelled on
+// `_method_emissions` + `_component_req_call`.
+
+// svcs: name -> SvcD ; reqMap: local key -> service name ; caps: the emit
+// fixed point ; colored: async-colored names.
+type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
+             colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str] }
+
+// The accumulator threaded through the walk. `msg` (non-"") is a definite
+// inline refusal (the G4 emit-marker rule). `labels`/`ecaps` are the G4
+// evidence; `areach` the async callables reached by name; `aops` the async
+// service ops "req.op" reached.
+type Ac = { msg: Str, labels: List[Str], ecaps: List[Str],
+            areach: List[Str], aops: List[Str] }
+
+fn empty_ac() -> Ac {
+  return { msg: "", labels: [], ecaps: [], areach: [], aops: [] }
+}
+
+fn ac_msg(a: Ac, m: Str) -> Ac {
+  return { msg: m, labels: a.labels, ecaps: a.ecaps, areach: a.areach, aops: a.aops }
+}
+
+fn find_msig(svc: SvcD, nm: Str, i: Int) -> MSig {
+  if (i >= svc.methods.length()) {
+    return { name: "", isEm: false, caps: [], isAsync: false }
+  }
+  if (svc.methods[i].name == nm) { return svc.methods[i] }
+  return find_msig(svc, nm, i + 1)
+}
+
+fn svc_of(cx: Ctx, svcName: Str) -> SvcD {
+  return match cx.svcs.lookup(svcName) {
+    Some(s) => s,
+    None    => { name: svcName, methods: [] },
+  }
+}
+
+fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
+  if (i >= ss.length() || a.msg != "") { return a }
+  let s = ss[i]
+  return walk_stmts(ss, i + 1, cx, walk_expr(s.e, s.kind == "emit", cx, a))
+}
+
+fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  if (i >= xs.length() || a.msg != "") { return a }
+  return walk_exprs(xs, i + 1, marked, cx, walk_expr(xs[i], marked, cx, a))
+}
+
+fn walk_inits(xs: List[InitN], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  if (i >= xs.length() || a.msg != "") { return a }
+  return walk_inits(xs, i + 1, marked, cx, walk_expr(xs[i].value, marked, cx, a))
+}
+
+fn walk_arms(xs: List[ArmN], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  if (i >= xs.length() || a.msg != "") { return a }
+  return walk_arms(xs, i + 1, marked, cx, walk_expr(xs[i].body, marked, cx, a))
+}
+
+fn walk_parts(xs: List[PartN], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  if (i >= xs.length() || a.msg != "") { return a }
+  return walk_parts(xs, i + 1, marked, cx, walk_expr(xs[i].e, marked, cx, a))
+}
+
+fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  return match e {
+    IntLit(_)   => a,
+    FloatLit(_) => a,
+    StrLit(_)   => a,
+    BoolLit(_) => a,
+    NullLit    => a,
+    Var(_)     => a,
+    Hole(_)    => a,
+    Bad(_)     => a,
+    Bin(b)     => walk_expr(b.r, marked, cx, walk_expr(b.l, marked, cx, a)),
+    Un(u)      => walk_expr(u.e, marked, cx, a),
+    Emit(u)    => walk_expr(u.e, true, cx, a),
+    Call(c)    => call_check(c.target, c.args, marked, cx, a),
+    Field(f)   => walk_expr(f.target, marked, cx, a),
+    OptField(f) => walk_expr(f.target, marked, cx, a),
+    OptCall(c) => walk_exprs(c.args, 0, marked, cx, walk_expr(c.target, marked, cx, a)),
+    Index(x)   => walk_expr(x.idx, marked, cx, walk_expr(x.target, marked, cx, a)),
+    If(x)      => walk_expr(x.els, marked, cx,
+                           walk_expr(x.then_, marked, cx,
+                                     walk_expr(x.cond, marked, cx, a))),
+    Rec(r)     => walk_inits(r.fields, 0, marked, cx, a),
+    Lst(l)     => walk_exprs(l.items, 0, marked, cx, a),
+    Arrow(ar)  => walk_expr(ar.body, marked, cx, a),
+    Match(m)   => walk_arms(m.arms, 0, marked, cx, walk_expr(m.scrut, marked, cx, a)),
+    Templ(t)   => walk_parts(t.parts, 0, marked, cx, a),
+  }
+}
+
+fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  return match tg {
+    Field(fl) => match fl.target {
+      Var(v) => req_call(v, fl.name, args, marked, cx, a),
+      _      => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+    },
+    Var(n) => fn_call(n, args, marked, cx, a),
+    _      => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+  }
+}
+
+// A call through a required key `root.meth`. G4: an emission op must be under
+// `emit` (inline refusal), and a marked emission contributes its capability
+// (the key) and label. A1: an async op contributes to `aops`.
+fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
+            cx: Ctx, a: Ac) -> Ac {
+  if (!cx.reqMap.has(root)) {
+    // a host object or a local receiver, not a requirement — unchecked here
+    return walk_exprs(args, 0, marked, cx, a)
+  }
+  let svcName = match cx.reqMap.lookup(root) { Some(v) => v, None => "" }
+  let decl = find_msig(svc_of(cx, svcName), meth, 0)
+  if (decl.name == "") {
+    // an unknown method: out of this slice (checker.rvl's typing catches it)
+    return walk_exprs(args, 0, marked, cx, a)
+  }
+  if (decl.isEm && !marked) {
+    return ac_msg(a, "call to emission `".concat(root).concat(".")
+      .concat(meth).concat("` must be marked `emit` (G4)"))
+  }
+  var na = a
+  if (decl.isEm && marked) {
+    na = { msg: "", labels: na.labels.push(root.concat(".").concat(meth)),
+           ecaps: union_into(na.ecaps, [root]), areach: na.areach, aops: na.aops }
+  }
+  if (decl.isAsync) {
+    na = { msg: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
+           aops: union_into(na.aops, [root.concat(".").concat(meth)]) }
+  }
+  return walk_exprs(args, 0, marked, cx, na)
+}
+
+// A bare named-fn call. G4 evidence: reaching an emitting name labels `f()`
+// with its caps. A1: reaching an async-colored name records it for the reach
+// verdict.
+fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  var na = a
+  if (contains(cx.emittingNames, name)) {
+    na = { msg: "", labels: na.labels.push(name.concat("()")),
+           ecaps: union_into(na.ecaps, caps_of(cx.caps, name)),
+           areach: na.areach, aops: na.aops }
+  }
+  if (contains(cx.colored, name)) {
+    na = { msg: "", labels: na.labels, ecaps: na.ecaps,
+           areach: union_into(na.areach, [name]), aops: na.aops }
+  }
+  return walk_exprs(args, 0, marked, cx, na)
+}
+
+// ================================================================ verdicts
+
+// The G4 upper-bound verdict for one provision method (lower.py's provider
+// check). "" = admitted.
+fn g4_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac) -> Str {
+  if (!decl.isEm && decl.caps.length() == 0 && a.labels.length() > 0) {
+    return "`".concat(svcName).concat(".").concat(mname)
+      .concat("` is declared plain, but this implementation reaches ")
+      .concat(quote_join(a.labels))
+  }
+  if (decl.isEm && decl.caps.length() > 0) {
+    let extra = sort_strs(minus_list(a.ecaps, decl.caps))
+    if (extra.length() > 0) {
+      var msg = "`".concat(svcName).concat(".").concat(mname)
+        .concat("` is declared `emission[").concat(comma_join(decl.caps))
+        .concat("]`, but this implementation emits through ")
+      var i = 0
+      while (i < extra.length()) {
+        if (i > 0) { msg = msg.concat(", ") }
+        if (extra[i] == "*") { msg = msg.concat("an unnameable host boundary") }
+        else { msg = msg.concat("`").concat(extra[i]).concat("`") }
+        i += 1
+      }
+      if (a.labels.length() > 0) {
+        msg = msg.concat(" (reaching ").concat(quote_join(a.labels)).concat(")")
+      }
+      return msg
+    }
+  }
+  return ""
+}
+
+// The A1 sync-reaching-async verdict for one provision method (lower.py item
+// 117). Only fires when the method's service op is sync (`!decl.isAsync`).
+// Reaching an async callable is reported before an async service op, matching
+// the reference's two checks in order.
+fn a1_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac, cx: Ctx) -> Str {
+  if (decl.isAsync) { return "" }
+  if (a.areach.length() > 0) {
+    let names = sort_strs(a.areach)
+    let culprit = names[0]
+    let kind = contains(cx.asyncExterns, culprit) ? "extern" : "function"
+    return "`".concat(svcName).concat(".").concat(mname)
+      .concat("` is declared sync, but this implementation reaches async ")
+      .concat(kind).concat(" ").concat(quote_join(names))
+      .concat(" — a sync method has no in-flight window (A1)")
+  }
+  if (a.aops.length() > 0) {
+    let op = a.aops[0]
+    return "`".concat(svcName).concat(".").concat(mname)
+      .concat("` is declared sync, but this implementation reaches async operation `")
+      .concat(op).concat("` — a sync method has no in-flight window (A1)")
+  }
+  return ""
+}
+
+// ================================================================ admission
+//
+// The gate. Returns "" to admit, else "<tag>|<message>". Ordering mirrors
+// lower.py exactly: per-component G4 then A1 (during lowering), and only if
+// every component admits, G2 across the composition (at link).
+
+fn build_maps(pg: Prog) -> Ctx {
+  var svcs: Map[Str, SvcD] = Map.empty()
+  var si = 0
+  while (si < pg.svcs.length()) {
+    svcs = svcs.set(pg.svcs[si].name, pg.svcs[si])
+    si += 1
+  }
+  let caps = emit_caps(pg.fns)
+  let colored = async_colored(pg.fns)
+  var emitting: List[Str] = []
+  var ai: List[Str] = []
+  var fi = 0
+  while (fi < pg.fns.length()) {
+    let f = pg.fns[fi]
+    if (caps_of(caps, f.name).length() > 0) { emitting = emitting.push(f.name) }
+    if (f.isAsyncExtern) { ai = ai.push(f.name) }
+    fi += 1
+  }
+  return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai)
+}
+
+fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
+          colored: List[Str], emitting: List[Str], ai: List[Str]) -> Ctx {
+  return { svcs: svcs, reqMap: rm, caps: caps, colored: colored,
+           emittingNames: emitting, asyncExterns: ai }
+}
+
+fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  var i = 0
+  while (i < reqs.length()) {
+    m = m.set(reqs[i].name, reqs[i].ty)
+    i += 1
+  }
+  return m
+}
+
+fn ctx_for(base: Ctx, reqs: List[Bind]) -> Ctx {
+  return { svcs: base.svcs, reqMap: req_map_of(reqs), caps: base.caps,
+           colored: base.colored, emittingNames: base.emittingNames,
+           asyncExterns: base.asyncExterns }
+}
+
+fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
+
+// G4 + A1 over one component. "" = admitted, else a tagged refusal.
+fn check_component(comp: CompD, cx: Ctx) -> Str {
+  // setup gets G4/A1 too (g4_unmarked_emission gates setup)
+  let sa = walk_stmts(comp.setup, 0, cx, empty_ac())
+  if (sa.msg != "") { return tagged("G4", sa.msg) }
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    let dsvc = svc_of(cx, pv.svcName)
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      let pm = pv.methods[mi]
+      let decl = find_msig(dsvc, pm.name, 0)
+      let a = walk_stmts(pm.body, 0, cx, empty_ac())
+      if (a.msg != "") { return tagged("G4", a.msg) }
+      if (decl.name != "") {
+        let g4 = g4_verdict(pv.svcName, pm.name, decl, a)
+        if (g4 != "") { return tagged("G4", g4) }
+        let a1 = a1_verdict(pv.svcName, pm.name, decl, a, cx)
+        if (a1 != "") { return tagged("A1", a1) }
+      }
+      mi += 1
+    }
+    pi += 1
+  }
+  return ""
+}
+
+// G2 across the composition: one provider per key per (shared) realm.
+fn check_g2(pg: Prog) -> Str {
+  var owner: Map[Str, Str] = Map.empty()
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    var ki = 0
+    while (ki < comp.provKeys.length()) {
+      let key = comp.provKeys[ki].key
+      if (owner.has(key)) {
+        let first = match owner.lookup(key) { Some(v) => v, None => "" }
+        return tagged("G2", "provision conflict: key `".concat(key)
+          .concat("` is provided by both ").concat(first).concat(" and ")
+          .concat(comp.name).concat(" (G2)"))
+      }
+      owner = owner.set(key, comp.name)
+      ki += 1
+    }
+    ci += 1
+  }
+  return ""
+}
+
+// The admission entry. "" admits; "<tag>|<message>" refuses.
+pub fn admit_src(src: Str) -> Str {
+  let pg = parse_prog(src)
+  if (pg.bad != "") { return tagged("BAD", pg.bad) }
+  let base = build_maps(pg)
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    let cx = ctx_for(base, comp.reqMap)
+    let v = check_component(comp, cx)
+    if (v != "") { return v }
+    ci += 1
+  }
+  return check_g2(pg)
+}
+
+// The bare verdict tag ("" | "G2" | "G4" | "A1" | "BAD") — the coarse oracle.
+pub fn admit_tag(src: Str) -> Str {
+  let v = admit_src(src)
+  if (v == "") { return "" }
+  let bar = v.indexOf("|")
+  if (bar == 0 - 1) { return v }
+  return v.slice(0, bar)
+}
+
+// ================================================================ tests
+
+test "clean provider admits" {
+  assert admit_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }") == ""
+}
+
+test "plain provider reaching an emission is refused (G4), exact wording" {
+  let v = admit_src("service Database { emission fn execute(sql: Str) -> Int } service Cache { fn put(key: Str) } component C requires db: Database provides cache: Cache { provide cache { fn put(key) { emit db.execute(key) } } }")
+  assert v == "G4|`Cache.put` is declared plain, but this implementation reaches `db.execute`"
+}
+
+test "unmarked emission is refused (G4)" {
+  assert admit_src("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(a) undo db.execute(b) }") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
+}
+
+test "admit_tag exposes the bare guarantee" {
+  assert admit_tag("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s } } } component B provides db: D { provide db { fn q(s) { let x = s } } }") == "G2"
+}
+
+test "two providers of one key are refused (G2)" {
+  let v = admit_src("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s } } } component B provides db: D { provide db { fn q(s) { let x = s } } }")
+  assert v == "G2|provision conflict: key `db` is provided by both A and B (G2)"
+}
+
+test "sync provide method reaching an async extern is refused (A1)" {
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  assert v == "A1|`Http.post` is declared sync, but this implementation reaches async extern `http_post` — a sync method has no in-flight window (A1)"
+}
+
+test "async-declared op admits the same async body" {
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  assert v == ""
+}
