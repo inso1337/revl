@@ -143,6 +143,11 @@ use "../stdlib/value.rvl" {
 }
 use "../stdlib/list.rvl" { list_contains }
 
+// The blessed threaded-accumulator combinator (item 195, option C): `render_seq`
+// threads the `$revl_match_N` counter left-to-right through a run of renders, and
+// `Rendered` is the shared `{text, counter}` cell every render here returns.
+use "../stdlib/render.rvl" { render_seq, Rendered }
+
 // ------------------------------------------------- host formatting (kept @py)
 // The reference emitter renders string/number LITERALS with `json.dumps`; this
 // is the item-180 "NOT obsoleted" host-output set (kin to emit_py.rvl's
@@ -186,10 +191,11 @@ fn node_method(n: Any) -> Str { return value_str(value_field(n, "method")) }
 
 fn ind(n: Int) -> Str { return "  ".repeat(n) }
 
-// A rendered expression: its text AND the running `$revl_match_N` counter (the
-// reference's `ctx._counter`, threaded here since revl has no method state — the
-// document-wide match-temp numbering is otherwise unreproducible).
-type Rendered = { text: Str, counter: Int }
+// A rendered expression is `Rendered = { text: Str, counter: Int }`: its text AND
+// the running `$revl_match_N` counter (the reference's `ctx._counter`, threaded
+// here since revl has no method state, so the document-wide match-temp numbering
+// is otherwise unreproducible). The cell is imported from stdlib/render.rvl (item
+// 195) so `render_seq` and every render fn below name the same threaded shape.
 
 // One or more statement lines AND the threaded match counter.
 type StmtOut = { lines: List[Str], counter: Int }
@@ -496,14 +502,10 @@ fn paren_target(node: Any, counter: Int, acx: ACx) -> Rendered {
 }
 
 fn commajoin(nodes: List[Any], counter: Int, acx: ACx) -> Rendered {
-  var parts = []
-  var c = counter
-  for (e of nodes) {
-    let r = expr(e, c, acx)
-    parts = parts.push(r.text)
-    c = r.counter
-  }
-  return { text: parts.join(", "), counter: c }
+  // `render_seq` threads the counter through `expr` over each node in order
+  // (item 195); the hand-rolled seed/loop/hand-back is now the combinator's.
+  let r = render_seq(nodes, counter, (e, c) => expr(e, c, acx))
+  return { text: r.texts.join(", "), counter: r.counter }
 }
 
 // `_v3_var`: a bare name. None -> undefined, the Some/Ok/Err constructors ->
