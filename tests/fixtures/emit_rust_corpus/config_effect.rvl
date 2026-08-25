@@ -1,0 +1,31 @@
+// Config + effectful + a config-reading effect body (item 218): the full
+// `_emit_component_new` config surface. The provide method reads `config.banner`
+// AND carries an `emit` step, so the provider struct captures BOTH the
+// `AssistantConfig` and `ctx: Arc<cordis::Context>`; the closure emits the
+// `let config = AssistantConfig { .. ..Default::default() }` application and the
+// up-front `let __revl_provide_config = config.clone();`; the config read inside
+// the method renders `self.config.banner.clone()`; and `_revl_load` builds the
+// typed `AssistantConfig { .. }` from the JSON placement spec.
+fn seed() -> Str {
+  return "sys"
+}
+
+service Sink {
+  emission fn send(msg: Str)
+}
+
+service Chat {
+  emission fn ask(prompt: Str) -> Str
+}
+
+component Assistant requires out: Sink provides chat: Chat {
+  config { banner: Str = "sys: ", retries: Int = 3 }
+
+  provide chat {
+    fn ask(prompt) {
+      let full = config.banner + prompt
+      emit out.send(full)
+      return full
+    }
+  }
+}

@@ -1,0 +1,31 @@
+// Required services on the SIMPLE provider path (item 218): a component that
+// REQUIRES two services and provides a third, its pure provide method calling
+// through the required capabilities (`compiler.propose(assistant.complete(..))`).
+// A `fn f() = emit ..` in return position is a plain observation of the emission,
+// NOT an `effect`/`emit` STEP, so this stays on `_emit_component` — but it forces
+// the requires surface: the provider struct captures each `Arc<Box<dyn S>>`, the
+// closure gates them behind `Inject::new(["assistant", "compiler"])` and binds
+// each with `ctx.require::<Box<dyn S>>("key")?`, and the methods read them off
+// `self`. No config, no host binds, no isolate/intercept.
+fn seed() -> Str {
+  return "go"
+}
+
+service Model {
+  emission fn complete(prompt: Str) -> Str
+}
+
+service Runtime {
+  fn check(source: Str) -> Str
+  emission fn propose(source: Str) -> Str
+}
+
+service Evolve {
+  emission fn once(goal: Str) -> Str
+}
+
+component Evolver requires assistant: Model, compiler: Runtime provides evolve: Evolve {
+  provide evolve {
+    fn once(goal) = emit compiler.propose(emit assistant.complete(goal))
+  }
+}

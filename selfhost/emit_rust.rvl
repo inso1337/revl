@@ -47,14 +47,19 @@
 // Reported for follow-on rust-emitter slices, deliberately OUT of this slice —
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation:
-//   * COMPONENTS / SERVICES entirely — `_emit_component*`, the service traits,
-//     the effect/undo accumulator, `provide`/`req`/`config`, timers, the
-//     component-dialect expression kinds (`req`/`config`/`host`/`format`/`fn`
-//     and the `target`/`method` call form). They are ENTANGLED with the deferred
-//     erasure surface below: a `service` declaration alone fires `_emit_bridge`,
-//     and a `component` additionally fires the host stubs and the full
-//     component-impl machinery — so no service/component fixture can be
-//     byte-exact without also porting the bridge. Path B slice 3+;
+//   * the COMPONENT surfaces beyond the effectful/config/req core (item 218 now
+//     ports `_emit_component_new` + `_emit_component_auto`: config `<Comp>Config`
+//     struct/Default/application + the `_revl_load` typed construction, required
+//     services `req`/`Inject::new` gate/`ctx.require`, and method-body
+//     `effect`/`undo`/`emit` through `self.ctx.effect`, plus the component-dialect
+//     `req`/`config`/`fn` expression kinds and the `target`/`method` call form).
+//     Still DEFERRED and REPORTED (each fires a `<<DEFER-*>>` marker): timers /
+//     routers (`routes`), `await`/`spawn`, `isolate`/`intercept`/realms, host
+//     `let-effect` binds (`Pool`/`Map`/`Job`) and the item-114 host-Map
+//     undo-reclone, body-level `effect`/`timer`/`fail`/`if` steps, the `host`/
+//     `format` component-dialect kinds, and the non-scalar bridge marshalling
+//     (Result/serde/`Vec<Value>`/opaque-`Value`). These stay ENTANGLED with the
+//     erasure surface below;
 //   * functional record-update `{r | f = e}` — the RUST reference itself RAISES
 //     on `record_update` (only python/typescript emit it today), so it is a
 //     structural exclusion, not merely un-ported;
@@ -257,7 +262,15 @@ fn is_builtin_ctor(name: Str) -> Bool {
 //   * `rbf` (`record_by_fields`) — the sorted-field KEY of a record -> its
 //     struct type name (`<<AMBIG>>` when two records share the exact field set),
 //     so a record literal `{ a: .., b: .. }` infers its nominal Rust struct.
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str] }
+// `rn` is the component-capture RENAME map (`_render_expr`'s `rename` param):
+// a bind/req/config/param NAME -> the Rust expression it lowers to inside a
+// provide-method or effect/undo closure (`pool` -> `self.pool`, `config` ->
+// `self.config`, `x` -> `x_undo`). Empty on the pure 2.0 path (item 191's
+// slices 1-3), so those emit exactly as before; the effectful component path
+// (item 218) sets it per render. Carrying it ON THE CTX — which already threads
+// through every `render_*` — means match/interp/list/record subexpressions pick
+// up the active rename for free, exactly as the reference's `rename` recursion.
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], rn: Map[Str, Str] }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
@@ -271,7 +284,15 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: ctx.rn }
+}
+// Swap in a fresh rename map (the component-capture scope for one render).
+fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: rn }
+}
+// Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
+fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, rn: ctx.rn }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -569,9 +590,44 @@ fn render_un(node: Any, ctx: Ctx) -> Str {
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 
+// The component-form call `target.method(args)` (no `callee`): a service call
+// through a `req`, or a receiver-expression method call. Host-Map receivers
+// (`get`/`remove` key-borrow, `insert` no-clone) are DEFERRED — the covered
+// subset declares no host `Map` binding, so `recv_ty` never starts with `Map[`
+// and every argument takes the by-value service-call clone.
+fn render_component_call(node: Any, ctx: Ctx) -> Str {
+  let target = value_field(node, "target")
+  let method = mangle(mname(value_str(value_field(node, "method"))))
+  let arg_nodes = value_list(value_field(node, "args"))
+  var arg_exprs = []
+  for (a of arg_nodes) { arg_exprs = arg_exprs.push(render_expr(a, ctx)) }
+  let tkind = node_kind(target)
+  var tname = ""
+  if (tkind == "req") { tname = value_str(value_field(target, "name")) }
+  else { tname = ref_name(target) }
+  let recv_ty = map_get(ctx.vt, tname)
+  if (recv_ty.startsWith("Map[")) { return `<<DEFER-host-map-call:${method}>>` }
+  var bv = []
+  var i = 0
+  while (i < arg_nodes.length()) {
+    bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
+    i = i + 1
+  }
+  var recv = ""
+  if (tkind == "req") {
+    recv = mangle(value_str(value_field(target, "name")))
+    if (ctx.rn.has(value_str(value_field(target, "name")))) {
+      recv = map_get(ctx.rn, value_str(value_field(target, "name")))
+    }
+  } else {
+    recv = render_expr(target, ctx)
+  }
+  return `${recv}.${method}(${bv.join(", ")})`
+}
+
 fn render_call(node: Any, ctx: Ctx) -> Str {
   let callee_node = value_field(node, "callee")
-  if (value_is_null(callee_node)) { return "<<DEFER-component-call>>" }
+  if (value_is_null(callee_node)) { return render_component_call(node, ctx) }
   let arg_nodes = value_list(value_field(node, "args"))
   var arg_exprs = []
   for (a of arg_nodes) { arg_exprs = arg_exprs.push(render_expr(a, ctx)) }
@@ -702,8 +758,36 @@ fn render_interp(node: Any, ctx: Ctx) -> Str {
 fn render_inner(node: Any, ctx: Ctx) -> Str {
   let kind = node_kind(node)
   if (kind == "lit") { return rust_v3_lit(node) }
-  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (kind == "name") {
+    // A component capture (`self.pool`, `x_undo`) arrives via the rename map
+    // already rendered; otherwise it is a plain identifier (`_ident(id)`).
+    let idv = value_str(value_field(node, "id"))
+    if (ctx.rn.has(idv)) { return map_get(ctx.rn, idv) }
+    return mangle(idv)
+  }
   if (kind == "var") { return render_var(node, ctx) }
+  if (kind == "req") {
+    // component dialect: a required capability, possibly a `self.`-capture.
+    let orig = value_str(value_field(node, "name"))
+    if (ctx.rn.has(orig)) { return map_get(ctx.rn, orig) }
+    return mangle(orig)
+  }
+  if (kind == "config") {
+    // component dialect: a config read. Inside a provide-method body the base
+    // points at the captured struct field (`self.config`); at plug scope the
+    // reconstructed local `config` is in scope, so the base is bare `config`.
+    var base = "config"
+    if (ctx.rn.has("config")) { base = map_get(ctx.rn, "config") }
+    return `${base}.${mangle(value_str(value_field(node, "field")))}.clone()`
+  }
+  if (kind == "fn") {
+    // component dialect: a free-function call `name(..)`, arguments by value.
+    let fname = mangle(value_str(value_field(node, "name")))
+    let anodes = value_list(value_field(node, "args"))
+    var parts = []
+    for (a of anodes) { parts = parts.push(by_value_arg(a, render_expr(a, ctx), ctx)) }
+    return `${fname}(${parts.join(", ")})`
+  }
   if (kind == "adt") {
     var aa = []
     for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx)) }
@@ -824,7 +908,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     let params = value_list(value_field(fnode, "params"))
     var vt: Map[Str, Str] = Map.empty()
     for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
     var ps = []
     for (p of params) {
       ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tables.tn)}`)
@@ -961,10 +1045,14 @@ fn service_param_type(svc_method: Any, pname: Str) -> Any {
   return "Value"
 }
 
-// `_pure_method_statements` (SUBSET): a pure provide-method body. A lone
-// `return <expr>` inlines to just the expression (the fn-body arm renders it);
-// otherwise let/assign/return statements join with a space. Effectful steps are
-// not admitted on the simple path — they route to `_emit_component_new`, deferred.
+// `_pure_method_statements`: a pure provide-method body, RENAME-aware (item 218).
+// A lone `return <expr>` inlines to just the expression; otherwise let/assign/
+// return statements join with a space. `ctx.rn` carries the capture scope
+// (`config` -> `self.config`, a required key -> `self.<key>`), so the SIMPLE
+// path passes an empty `rn` (unchanged from slices 1-3) and the effectful path's
+// pure methods pass `_method_scope_rename`. A `let` that shadows an outer capture
+// re-points its name at the plain identifier (`rename.pop(name)` in the
+// reference), so a later use of the local is not mis-rendered as the capture.
 fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
   let steps = value_list(value_field(method, "body"))
   if (steps.length() == 1) {
@@ -974,20 +1062,24 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
     }
   }
   var parts = []
+  var c = ctx
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "let") {
+      let nm = value_str(value_field(step, "name"))
+      let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
       var mut = ""
       if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
-      parts = parts.push(`let ${mut}${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), ctx)};`)
+      parts = parts.push(`let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
+      c = cshadow
     } else {
       if (kind == "assign") {
-        parts = parts.push(`${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), ctx)};`)
+        parts = parts.push(`${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`)
       } else {
         if (kind == "return") {
           let e = value_field(step, "expr")
           if (value_is_null(e)) { parts = parts.push("return;") }
-          else { parts = parts.push(`return ${render_expr(e, ctx)};`) }
+          else { parts = parts.push(`return ${render_expr(e, c)};`) }
         } else {
           parts = parts.push(`<<DEFER-method-step:${kind}>>`)
         }
@@ -997,64 +1089,408 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
   return parts.join(" ")
 }
 
-// `_emit_component` (SIMPLE path only): the provider struct(s) + trait impl(s),
-// then the `plugin_sync` factory whose closure provisions each key. The subset
-// carries no binds/reqs/config/routes, so the struct is empty, the gate is
-// `Inject::none()`, there is no config application, and the only body step is
-// `provide`. isolate/intercept/effectful components route to the deferred
-// `_emit_component_new`; here they would surface a `<<DEFER-*>>` marker.
-fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
+// ------------------------------------------------------------ config (item 218)
+// `_binds`: the `let-effect` bind names (host acquisitions). Host bindings
+// themselves are DEFERRED; this only reports their names so a component that
+// declares one surfaces a `<<DEFER-bind-field>>` marker rather than silently
+// dropping a struct field.
+fn binds(comp: Any) -> List[Str] {
+  var out = []
+  for (s of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(s, "step")) == "let-effect") { out = out.push(value_str(value_field(s, "bind"))) }
+  }
+  return out
+}
+fn has_config(comp: Any) -> Bool { return value_list(value_field(comp, "config")).length() > 0 }
+
+// `_references_config`: does this IR subtree read component config (a `config`
+// expression node)? The generic recursion driver is `value_children`.
+fn references_config(node: Any) -> Bool {
+  let k = value_kind(node)
+  if (k == "record") {
+    if (value_str(value_field(node, "kind")) == "config") { return true }
+  }
+  for (child of value_children(node)) { if (references_config(child)) { return true } }
+  return false
+}
+
+// `_provision_uses_config`: does provision `key`'s method surface read config?
+// Only then does its provide struct capture config (item 218 note).
+fn provision_uses_config(comp: Any, key: Str) -> Bool {
+  if (!has_config(comp)) { return false }
+  for (m of provide_methods(value_list(value_field(comp, "body")), key)) {
+    if (references_config(m)) { return true }
+  }
+  return false
+}
+fn component_provide_uses_config(comp: Any) -> Bool {
+  if (!has_config(comp)) { return false }
+  for (key of value_keys(value_field(comp, "provides"))) {
+    if (provision_uses_config(comp, key)) { return true }
+  }
+  return false
+}
+// The provide-struct field / construction fragments capturing component config.
+fn config_struct_field(comp: Any, key: Str) -> List[Str] {
+  if (!provision_uses_config(comp, key)) { return [] }
+  return [`    config: ${mangle(value_str(value_field(comp, "name")))}Config,`]
+}
+fn config_ctor_field(comp: Any, key: Str) -> List[Str] {
+  if (!provision_uses_config(comp, key)) { return [] }
+  return ["config: __revl_provide_config.clone()"]
+}
+fn emit_provide_config_local(comp: Any, indent: Int) -> List[Str] {
+  if (!component_provide_uses_config(comp)) { return [] }
+  return [line(indent, "let __revl_provide_config = config.clone();")]
+}
+
+// `_default_for_rust_type` / `_config_default_lit`: an IR config default (or a
+// type fallback) as a Rust expression.
+fn default_for_rust_type(ftype: Str) -> Str {
+  if (ftype == "String") { return "String::new()" }
+  if (ftype == "i64") { return "0i64" }
+  if (ftype == "i32") { return "0i32" }
+  if (ftype == "f64") { return "0f64" }
+  if (ftype == "bool") { return "false" }
+  if (ftype == "Vec<u8>") { return "Vec::new()" }
+  if (ftype == "()") { return "()" }
+  return "Default::default()"
+}
+fn config_default_lit(dv: Any, ftype: Str) -> Str {
+  let k = value_kind(dv)
+  if (k == "null") { return default_for_rust_type(ftype) }
+  if (k == "bool") { if (value_bool(dv)) { return "true" } return "false" }
+  if (k == "str") { return `String::from(${string_lit(dv)})` }
+  if (k == "int") { return `${num_str(dv)}i64` }
+  if (k == "float") { return `${num_str(dv)}f64` }
+  return "<<UNSUPPORTED-CONFIG-DEFAULT>>"
+}
+// The `<Comp>Config` type to pass to `plugin_sync` (`()` when configless), and
+// the `#[derive(Clone)] struct <Comp>Config { .. }` + `Default` item lines.
+fn config_ty(comp: Any) -> Str {
+  if (!has_config(comp)) { return "()" }
+  return `${mangle(value_str(value_field(comp, "name")))}Config`
+}
+fn emit_config_struct_lines(comp: Any) -> List[Str] {
+  let fields = value_list(value_field(comp, "config"))
+  if (fields.length() == 0) { return [] }
+  let cname = mangle(value_str(value_field(comp, "name")))
+  var out = []
+  out = out.push("#[derive(Clone)]")
+  out = out.push(`struct ${cname}Config {`)
+  for (field of fields) {
+    out = out.push(`    ${mangle(value_str(value_field(field, "name")))}: ${rust_type(value_field(field, "type"))},`)
+  }
+  out = out.push("}")
+  out = out.push("")
+  out = out.push(`impl Default for ${cname}Config {`)
+  out = out.push("    fn default() -> Self {")
+  out = out.push("        Self {")
+  for (field of fields) {
+    let fname = mangle(value_str(value_field(field, "name")))
+    let ftype = rust_type(value_field(field, "type"))
+    out = out.push(`            ${fname}: ${config_default_lit(value_field(field, "default"), ftype)},`)
+  }
+  out = out.push("        }")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+// `_emit_config_application`: reconstruct the plugin config locally from the
+// handed `Arc<CompConfig>` fields plus `..Default::default()`.
+fn emit_config_application(comp: Any, cty: Str, indent: Int) -> List[Str] {
+  if (cty == "()") { return [] }
+  let pad = ind(indent)
+  var out = [`${pad}let config = ${cty} {`]
+  for (field of value_list(value_field(comp, "config"))) {
+    let fname = mangle(value_str(value_field(field, "name")))
+    out = out.push(`${pad}    ${fname}: config.${fname}.clone(),`)
+  }
+  out = out.push(`${pad}    ..Default::default()`)
+  out = out.push(`${pad}};`)
+  return out
+}
+
+// ------------------------------------------------- requires / gate (item 218)
+// `_rust_inject`: the `Inject` gate over the required keys. Routes are DEFERRED
+// (no routed key enters the subset), so every requirement is gated.
+fn rust_inject(reqs: List[Str]) -> Str {
+  if (reqs.length() == 0) { return "Inject::none()" }
+  var parts = []
+  for (r of reqs) { parts = parts.push(string_lit(r)) }
+  return `Inject::new([${parts.join(", ")}])`
+}
+// `_emit_req_bindings`: bind each required service through the Inject gate
+// (`ctx.require::<Box<dyn S>>("key")?`). Routed keys are DEFERRED.
+fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  var out = []
+  for (local of value_keys(reqs)) {
+    let svc = value_str(value_field(reqs, local))
+    out = out.push(`${pad}let ${local} = ctx.require::<Box<dyn ${svc}>>(${string_lit(local)})?;`)
+  }
+  return out
+}
+
+// -------------------------------------------- effectful method body (item 218)
+fn component_has_effectful_methods(comp: Any) -> Bool {
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "provide") {
+      for (method of value_list(value_field(step, "methods"))) {
+        for (bs of value_list(value_field(method, "body"))) {
+          let k = value_str(value_field(bs, "step"))
+          if (k == "effect" || k == "emit") { return true }
+        }
+      }
+    }
+  }
+  return false
+}
+fn method_has_effectful_steps(method: Any) -> Bool {
+  for (bs of value_list(value_field(method, "body"))) {
+    let k = value_str(value_field(bs, "step"))
+    if (k == "effect" || k == "emit") { return true }
+  }
+  return false
+}
+fn component_uses_await(comp: Any) -> Bool {
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) == "await") { return true }
+  }
+  return false
+}
+// The capture rename maps: a provide-method reads binds/reqs/config off `self`;
+// an undo closure re-reads pre-cloned `<name>_undo` copies.
+fn method_scope_rename(comp: Any) -> Map[Str, Str] {
+  var rn: Map[Str, Str] = Map.empty()
+  for (b of binds(comp)) { rn = rn.set(b, `self.${b}`) }
+  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `self.${req}`) }
+  if (has_config(comp)) { rn = rn.set("config", "self.config") }
+  return rn
+}
+fn method_undo_rename(comp: Any, method: Any) -> Map[Str, Str] {
+  var rn: Map[Str, Str] = Map.empty()
+  for (b of binds(comp)) { rn = rn.set(b, `${b}_undo`) }
+  for (req of value_keys(value_field(comp, "requires"))) { rn = rn.set(req, `${req}_undo`) }
+  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) rn = rn.set(pn, `${pn}_undo`) }
+  return rn
+}
+fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  var out = []
+  for (b of binds(comp)) { out = out.push(`${pad}let ${b}_undo = self.${b}.clone();`) }
+  for (req of value_keys(value_field(comp, "requires"))) { out = out.push(`${pad}let ${req}_undo = self.${req}.clone();`) }
+  for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
+  return out
+}
+// `_provide_let_type`: `_v3_infer_type` extended with the one source that only
+// exists in a provide body — a required-service method call's declared return
+// (`let answer = model.complete(seed)`), so a later by-value use of the local
+// clones instead of moving it. "" when no type is certain.
+fn provide_let_type(value: Any, ctx: Ctx, comp: Any, services: Any) -> Str {
+  let inferred = v3_infer_type(value, ctx)
+  if (inferred != "") { return inferred }
+  if (node_kind(value) == "call" && value_is_null(value_field(value, "callee"))) {
+    let target = value_field(value, "target")
+    if (node_kind(target) == "req") {
+      let svc = map_get(reqs_map(comp), value_str(value_field(target, "name")))
+      if (svc != "" && !value_is_null(value_field(services, svc))) {
+        let sm = value_field(value_field(value_field(services, svc), "methods"), value_str(value_field(value, "method")))
+        let r = value_field(sm, "returns")
+        if (!value_is_null(r)) { return value_str(r) }
+      }
+    }
+  }
+  return ""
+}
+// The `requires` map as Str->Str (key -> service name).
+fn reqs_map(comp: Any) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  let rq = value_field(comp, "requires")
+  for (k of value_keys(rq)) { m = m.set(k, value_str(value_field(rq, k))) }
+  return m
+}
+
+// `_method_body_lines`: lower effect/emit/return/let/assign steps in an
+// effectful provide-method body. Effect registration is fire-and-forget through
+// `self.ctx.effect(..)`. The host-Map reclone (item 114) is DEFERRED — the
+// subset declares no host `Map`, so `_undo_reclone_locals` is always empty.
+// Returns the lines AND the threaded ctx (its `vt` carries let-inferred types).
+fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: Int) -> Sout {
+  let pad = ind(indent)
   let name = value_str(value_field(comp, "name"))
-  let cname = mangle(name)
-  let snk = snake(name)
-  let tables = build_type_tables(value_field(ir, "types"))
+  let mnm = value_str(value_field(method, "name"))
+  let scope = method_scope_rename(comp)
+  var c = set_rn(ctx, scope)
+  var out = []
+  var index = 0
+  for (step of value_list(value_field(method, "body"))) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "return") {
+      let e = value_field(step, "expr")
+      if (value_is_null(e)) { out = out.push(`${pad}return;`) }
+      else { out = out.push(`${pad}return ${render_expr(e, c)};`) }
+    } else {
+      if (kind == "effect" || kind == "emit") {
+        let undoR = method_undo_rename(comp, method)
+        var acqR = scope
+        for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
+        let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
+        var registers_undo = kind == "effect"
+        var undonode: Any = value_field(step, "undo")
+        if (kind == "emit") {
+          undonode = value_field(step, "compensate")
+          if (!value_is_null(undonode)) { registers_undo = true }
+        }
+        var acqnode = value_field(step, "acquire")
+        if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
+        if (registers_undo) {
+          out = out.concat(method_undo_clones(comp, method, indent))
+          // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+        }
+        let acq = render_expr(acqnode, set_rn(c, acqR))
+        out = out.push(`${pad}let _ = ${acq};`)
+        if (registers_undo) {
+          let undox = render_expr(undonode, set_rn(c, undoR))
+          out = out.push(`${pad}let _ = self.ctx.effect(${label}, move || { ${undox}; Ok(()) });`)
+        }
+      } else {
+        if (kind == "let" || kind == "assign") {
+          let nm = value_str(value_field(step, "name"))
+          let inferred = provide_let_type(value_field(step, "value"), c, comp, services)
+          if (kind == "let") {
+            let cshadow = set_rn(c, c.rn.set(nm, mangle(nm)))
+            var mut = ""
+            if (value_bool(value_field(step, "mutable"))) { mut = "mut " }
+            out = out.push(`${pad}let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
+            c = cshadow
+          } else {
+            out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), c)};`)
+          }
+          if (inferred != "") { c = set_vt(c, nm, inferred) }
+        } else {
+          out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
+        }
+      }
+    }
+    index = index + 1
+  }
+  return { lines: out, ctx: c }
+}
+
+// The function-return table shared by both component paths (a `let` bound to a
+// free-function call is typed by its declared return).
+fn fr_map(ir: Any) -> Map[Str, Str] {
   var fr: Map[Str, Str] = Map.empty()
   for (fnode of value_list(value_field(ir, "functions"))) {
     let r = value_field(fnode, "returns")
     if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
   }
-  let provs = value_field(comp, "provides")
+  return fr
+}
+
+// One provider struct's impl-methods (shared by the simple + effectful paths).
+// `use_mname` selects the `_mname` (`drop`->`drop_`) rename the effectful path
+// applies to method names; the simple path names them raw (mirrors the two
+// reference sites exactly). `effectful` gives the effectful body renderer +
+// the `self.ctx` field capture.
+fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: TypeTables, fr: Map[Str, Str], effectful: Bool, use_mname: Bool) -> List[Str] {
   let body = value_list(value_field(comp, "body"))
+  let svc_methods = value_field(value_field(services, srv), "methods")
   var out = []
+  for (method of provide_methods(body, key)) {
+    let orig = value_str(value_field(method, "name"))
+    var mn = mangle(orig)
+    if (use_mname) { mn = mangle(mname(orig)) }
+    let svc_method = value_field(svc_methods, orig)
+    var ps = []
+    var vt: Map[Str, Str] = Map.empty()
+    for (pn of value_list(value_field(method, "params"))) {
+      let pname = value_str(pn)
+      let ptype = service_param_type(svc_method, pname)
+      ps = ps.push(`${pname}: ${rust_type_t(ptype, tables.tn)}`)
+      vt = vt.set(pname, value_str(ptype))
+    }
+    var ret = "()"
+    let r = value_field(svc_method, "returns")
+    if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
+    if (effectful && method_has_effectful_steps(method)) {
+      out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
+      let bl = method_body_lines(comp, method, services, ctx, 2)
+      out = out.concat(bl.lines)
+      out = out.push("    }")
+    } else {
+      let ctxr = set_rn(ctx, method_scope_rename(comp))
+      out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} { ${pure_method_statements(method, ctxr)} }`)
+    }
+  }
+  return out
+}
+
+// The plug-time provide-step construction shared by both paths: `let key_box =
+// Box::new(<Struct> { <binds>, <reqs>, <config>, [ctx] }); ctx.provide(..)?;`.
+fn emit_provide_construction(comp: Any, step: Any, effectful: Bool, indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  let name = value_str(value_field(comp, "name"))
+  let key = value_str(value_field(step, "name"))
+  let svc = value_str(value_field(step, "service"))
+  let struct = `${name}${camel(key)}`
+  var fields = []
+  for (b of binds(comp)) { fields = fields.push(`${mangle(b)}: ${b}.clone()`) }
+  for (local of value_keys(value_field(comp, "requires"))) { fields = fields.push(`${local}: ${local}.clone()`) }
+  fields = fields.concat(config_ctor_field(comp, key))
+  if (effectful) { fields = fields.push("ctx: Arc::new(ctx.clone())") }
+  var out = []
+  out = out.push(`${pad}let ${key}_box: Box<dyn ${svc}> = Box::new(${struct} { ${fields.join(", ")} });`)
+  out = out.push(`${pad}ctx.provide(${string_lit(key)}, ${key}_box)?;`)
+  return out
+}
+
+// `_emit_component` (the SIMPLE provider path): a component with NO isolate /
+// intercept and NO effectful (`effect`/`emit`) method — but it MAY carry config
+// and required services (item 218). The provider struct captures each required
+// service and the config (when a method reads it); the methods are pure and read
+// captures off `self`; the closure applies config, binds each require through
+// the Inject gate, and provisions each key. Host binds / routes / body-level
+// effect steps are DEFERRED (a `<<DEFER-*>>` marker keeps them loud).
+fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
+  let name = value_str(value_field(comp, "name"))
+  let cname = mangle(name)
+  let snk = snake(name)
+  let tables = build_type_tables(value_field(ir, "types"))
+  let fr = fr_map(ir)
+  let provs = value_field(comp, "provides")
+  let reqs = value_field(comp, "requires")
+  let body = value_list(value_field(comp, "body"))
+  let cty = config_ty(comp)
+  var out = emit_config_struct_lines(comp)
   for (key of value_keys(provs)) {
     let srv = value_str(value_field(provs, key))
-    let sname = `${cname}${camel(key)}`
-    out = out.push(`struct ${sname} {`)
+    let struct = `${cname}${camel(key)}`
+    out = out.push(`struct ${struct} {`)
+    for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
+    out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
-    out = out.push(`impl ${srv} for ${sname} {`)
-    let svc_methods = value_field(value_field(services, srv), "methods")
-    for (method of provide_methods(body, key)) {
-      let mn = value_str(value_field(method, "name"))
-      let svc_method = value_field(svc_methods, mn)
-      var ps = []
-      var vt: Map[Str, Str] = Map.empty()
-      for (pn of value_list(value_field(method, "params"))) {
-        let pname = value_str(pn)
-        let ptype = service_param_type(svc_method, pname)
-        ps = ps.push(`${pname}: ${rust_type_t(ptype, tables.tn)}`)
-        vt = vt.set(pname, value_str(ptype))
-      }
-      var ret = "()"
-      let r = value_field(svc_method, "returns")
-      if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-      let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf }
-      out = out.push(`    fn ${mangle(mn)}(&self, ${ps.join(", ")}) -> ${ret} { ${pure_method_statements(method, ctx)} }`)
-    }
+    out = out.push(`impl ${srv} for ${struct} {`)
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, false, false))
     out = out.push("}")
     out = out.push("")
   }
   out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
-  out = out.push("    cordis::plugin_sync::<(), _>(")
+  out = out.push(`    cordis::plugin_sync::<${cty}, _>(`)
   out = out.push(`        ${string_lit(name)},`)
-  out = out.push("        cordis::Inject::none(),")
+  out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
   out = out.push("        |ctx, config| {")
+  out = out.concat(emit_config_application(comp, cty, 3))
+  out = out.concat(emit_provide_config_local(comp, 3))
+  out = out.concat(emit_req_bindings(reqs, 3))
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
-      let key = value_str(value_field(step, "name"))
-      let srv = value_str(value_field(step, "service"))
-      out = out.push(`            let ${key}_box: Box<dyn ${srv}> = Box::new(${name}${camel(key)} {  });`)
-      out = out.push(`            ctx.provide(${string_lit(key)}, ${key}_box)?;`)
+      out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
       out = out.push(`<<DEFER-comp-step:${kind}>>`)
     }
@@ -1065,6 +1501,76 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push("}")
   out = out.push("")
   return out
+}
+
+// `_emit_component_new` (SUBSET): a component whose provide methods carry
+// `effect`/`emit` steps (item 218). Adds the `ctx: Arc<cordis::Context>` field
+// (so effect registration is fire-and-forget), renders effectful bodies through
+// `method_body_lines`, and constructs the provider with `ctx: Arc::new(..)`.
+// DEFERRED (each loud): isolate/intercept, routers, await/spawn, host binds,
+// and body-level effect/timer steps — none in the covered subset.
+fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
+  let name = value_str(value_field(comp, "name"))
+  let cname = mangle(name)
+  let snk = snake(name)
+  let tables = build_type_tables(value_field(ir, "types"))
+  let fr = fr_map(ir)
+  let provs = value_field(comp, "provides")
+  let reqs = value_field(comp, "requires")
+  let body = value_list(value_field(comp, "body"))
+  let cty = config_ty(comp)
+  var out = emit_config_struct_lines(comp)
+  if (value_keys(value_field(comp, "isolate")).length() > 0) { out = out.push(`<<DEFER-isolate:${name}>>`) }
+  if (value_keys(value_field(comp, "intercept")).length() > 0) { out = out.push(`<<DEFER-intercept:${name}>>`) }
+  if (component_uses_await(comp)) { out = out.push(`<<DEFER-await:${name}>>`) }
+  for (key of value_keys(provs)) {
+    let srv = value_str(value_field(provs, key))
+    let struct = `${cname}${camel(key)}`
+    out = out.push(`struct ${struct} {`)
+    for (b of binds(comp)) { out = out.push(`<<DEFER-bind-field:${b}>>`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
+    out = out.concat(config_struct_field(comp, key))
+    out = out.push("    ctx: Arc<cordis::Context>,")
+    out = out.push("}")
+    out = out.push(`impl ${srv} for ${struct} {`)
+    out = out.concat(emit_provide_methods(comp, services, key, srv, tables, fr, true, true))
+    out = out.push("}")
+    out = out.push("")
+  }
+  out = out.push(`pub fn ${snk}() -> cordis::PluginHandle {`)
+  out = out.push(`    cordis::plugin_sync::<${cty}, _>(`)
+  out = out.push(`        ${string_lit(name)},`)
+  out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
+  out = out.push("        |ctx, config| {")
+  out = out.concat(emit_config_application(comp, cty, 3))
+  out = out.concat(emit_provide_config_local(comp, 3))
+  out = out.concat(emit_req_bindings(reqs, 3))
+  for (step of body) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "provide") {
+      out = out.concat(emit_provide_construction(comp, step, true, 3))
+    } else {
+      out = out.push(`<<DEFER-comp-step:${kind}>>`)
+    }
+  }
+  out = out.push("            Ok(cordis::PluginOutput::none())")
+  out = out.push("        },")
+  out = out.push("    )")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
+// `_emit_component_auto`: a component with NO isolate/intercept and NO effectful
+// method routes to the simple `_emit_component`; anything else routes to
+// `_emit_component_new`.
+fn emit_component_auto(comp: Any, services: Any, ir: Any) -> List[Str] {
+  let iso = value_keys(value_field(comp, "isolate")).length() > 0
+  let itc = value_keys(value_field(comp, "intercept")).length() > 0
+  if (!iso && !itc && !component_has_effectful_methods(comp)) {
+    return emit_component(comp, services, ir)
+  }
+  return emit_component_new(comp, services, ir)
 }
 
 // ---------------------------------------------------------------- the bridge
@@ -1311,12 +1817,39 @@ fn emit_bridge(ir: Any) -> List[Str] {
   out = out.push("pub fn _revl_load(ctx: &cordis::Context, name: &str, config: &serde_json::Value) -> Option<cordis::Fiber> {")
   out = out.push("    match name {")
   for (comp of components) {
-    let snk = snake(value_str(value_field(comp, "name")))
+    let pascal = value_str(value_field(comp, "name"))
+    let snk = snake(pascal)
     let fields = value_list(value_field(comp, "config"))
     out = out.push(`        "${snk}" => {`)
     out = out.push(`            let ctx = _revl_isolate_ctx(ctx, "${snk}");`)
     if (fields.length() > 0) {
-      out = out.push(`<<DEFER-config:${value_str(value_field(comp, "name"))}>>`)
+      // Typed `<Comp>Config` construction from the placement spec, each field
+      // read out of the JSON with the right scalar accessor and defaulted.
+      out = out.push(`            let _c = config.get("${pascal}").cloned().unwrap_or(serde_json::Value::Null);`)
+      out = out.push(`            Some(ctx.plugin(${snk}(), ${pascal}Config {`)
+      for (field of fields) {
+        let fname = mangle(value_str(value_field(field, "name")))
+        let ftype = rust_type(value_field(field, "type"))
+        let dflt = config_default_lit(value_field(field, "default"), ftype)
+        if (ftype == "String") {
+          out = out.push(`                ${fname}: _c.get("${fname}").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| ${dflt}),`)
+        } else {
+          if (ftype == "i64") {
+            out = out.push(`                ${fname}: _c.get("${fname}").and_then(|v| v.as_i64()).unwrap_or(${dflt}),`)
+          } else {
+            if (ftype == "f64") {
+              out = out.push(`                ${fname}: _c.get("${fname}").and_then(|v| v.as_f64()).unwrap_or(${dflt}),`)
+            } else {
+              if (ftype == "bool") {
+                out = out.push(`                ${fname}: _c.get("${fname}").and_then(|v| v.as_bool()).unwrap_or(${dflt}),`)
+              } else {
+                out = out.push(`                ${fname}: ${dflt},`)
+              }
+            }
+          }
+        }
+      }
+      out = out.push("            }))")
     } else {
       out = out.push(`            Some(ctx.plugin(${snk}(), ()))`)
     }
@@ -1370,7 +1903,7 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.concat(emit_service_traits(services, tables.tn))
   out = out.concat(emit_host_stubs(ir))
   for (comp of value_list(value_field(ir, "components"))) {
-    out = out.concat(emit_component(comp, services, ir))
+    out = out.concat(emit_component_auto(comp, services, ir))
   }
   out = out.concat(emit_bridge(ir))
   return rstrip(out.join(newline())).concat(newline())
@@ -1426,7 +1959,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), rn: Map.empty() }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"

@@ -1,0 +1,31 @@
+// The effectful `emit` step (item 218): a block-body provide method with a
+// statement-position `emit store.write(k, v)`. A block-body `emit` IS an emit
+// STEP (unlike a return-position `= emit ..`), so `_component_has_effectful_
+// methods` fires and this routes to `_emit_component_new`: the provider struct
+// gains `ctx: Arc<cordis::Context>`, the emit lowers to a fire-and-forget
+// `let _ = self.store.write(..);`, and the local `let v = store.read(k)` is
+// typed `Str` from the required service's declared return so its later by-value
+// use (`v.clone()`) is cloned. A bare `emit` carries no compensate, so no undo
+// closure is registered.
+fn seed() -> Str {
+  return "k"
+}
+
+service Store {
+  fn read(k: Str) -> Str
+  emission fn write(k: Str, v: Str)
+}
+
+service Api {
+  emission fn handle(k: Str) -> Str
+}
+
+component Svc requires store: Store provides api: Api {
+  provide api {
+    fn handle(k) {
+      let v = store.read(k)
+      emit store.write(k, v)
+      return v
+    }
+  }
+}
