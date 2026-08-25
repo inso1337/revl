@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from . import parser as _ast
 from .errors import RevlError
 from .holes import refuse_admission
 from .lower import check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
+from .typecheck import format_type, parse_type
 
 
 @dataclass
@@ -253,6 +255,18 @@ def compile_files(paths: list[str], manifest: dict | None = None,
                 included_ids.add(dep_id)
                 queue.append(by_id[dep_id])
 
+    # CAPSTONE SEAM 2 (roadmap 228): a `use`d module's PRIVATE (non-`pub`)
+    # top-level declarations must not enter the merged namespace. Before the
+    # decls of the included modules are flattened into one program (below),
+    # give every private fn/type/extern whose bare name is NOT unique across
+    # the included set a per-module-qualified internal name, rewriting the
+    # references to it *inside its own module*. Only `pub` names keep their
+    # bare spelling, so two modules that each define a private `Ctx` (or
+    # `contains`) co-compile, and a `use {dedent}`-then-local-`rstrip` no
+    # longer collides — while a genuine duplicate of a `pub` name (neither is
+    # mangled) still refuses. See _apply_module_privacy.
+    _apply_module_privacy(included)
+
     for module in included:
         for decl in module.program.type_decls:
             if id(decl) not in emitted_ids:
@@ -328,6 +342,219 @@ def compile_files(paths: list[str], manifest: dict | None = None,
         # implementation (docs/holes.md).
         refuse_admission(document)
     return document
+
+
+def _apply_module_privacy(included: list[_LoadedModule]) -> None:
+    """Namespace every module-private top-level declaration (roadmap 228).
+
+    The merged program flattens the included modules into one flat table keyed
+    by bare name (`_lower_fns`' duplicate check, `_lower_type_decls`,
+    `_signature_table`). A private helper of module A therefore both false-
+    collides with — and silently overwrites — a same-named private of module B.
+    Public names are the module's *interface* and must stay bare (they are what
+    `use { … }` imports and what backends emit by contract); private names are
+    the module's *implementation* and are referenced only from within the same
+    module, so they can be renamed with no visible effect.
+
+    A private decl is renamed only when its bare name is NOT unique across the
+    included set — the sole situation that produces a collision. This makes the
+    pass a no-op for every composition that compiles today (they have no cross-
+    module private-name clash, or they would already error), so it introduces
+    no churn: it strictly *adds* the ability for clashing privates to coexist.
+
+    Functions and externs share one signature table, so they share a namespace
+    for this purpose; types are a separate namespace. `pub` duplicates stay a
+    hard error because neither side is a private and so neither is renamed.
+    """
+    val_owners: dict[str, set[int]] = {}   # fn/extern name -> {id(module)}
+    type_owners: dict[str, set[int]] = {}   # type name      -> {id(module)}
+    for module in included:
+        for decl in list(module.program.fn_decls) + list(module.program.externs):
+            val_owners.setdefault(decl.name, set()).add(id(module))
+        for decl in module.program.type_decls:
+            type_owners.setdefault(decl.name, set()).add(id(module))
+
+    for idx, module in enumerate(included):
+        program = module.program
+        val_renames: dict[str, str] = {}
+        type_renames: dict[str, str] = {}
+        for decl in list(program.fn_decls) + list(program.externs):
+            if not decl.public and len(val_owners.get(decl.name, ())) > 1:
+                val_renames[decl.name] = f"{decl.name}__m{idx}"
+        for decl in program.type_decls:
+            if not decl.public and len(type_owners.get(decl.name, ())) > 1:
+                type_renames[decl.name] = f"{decl.name}__m{idx}"
+        if val_renames or type_renames:
+            _rewrite_module(program, val_renames, type_renames)
+
+
+def _subst_type(t: str | None, renames: dict[str, str]) -> str | None:
+    """Head-substitute a type annotation, recursing through generics and
+    function types exactly as lower.py's alias expansion does (so a renamed
+    private type is rewritten inside `List[Ctx]`, `Opt[Ctx]`, `(Ctx) -> T`)."""
+    if not t or not renames:
+        return t
+    head, args = parse_type(t)
+    if args:
+        return format_type(head, [_subst_type(a, renames) for a in args])
+    return renames.get(head, head) if head is not None else head
+
+
+def _rewrite_module(program: Program, val_renames: dict[str, str],
+                    type_renames: dict[str, str]) -> None:
+    """Rename the module's private decls and every reference to them that lives
+    inside the module (its only referents — a private name never leaks)."""
+    def subst(t: str | None) -> str | None:
+        return _subst_type(t, type_renames)
+
+    # 1. declaration sites: rename the decl itself, then rewrite the type
+    #    annotations it carries (a NON-renamed decl may still mention a renamed
+    #    private type, so every decl's annotations are swept, not just renamed
+    #    ones).
+    for fn in program.fn_decls:
+        fn.name = val_renames.get(fn.name, fn.name)
+        for p in fn.params:
+            p.type = subst(p.type)
+        fn.returns = subst(fn.returns)
+    for ext in program.externs:
+        ext.name = val_renames.get(ext.name, ext.name)
+        for p in ext.params:
+            p.type = subst(p.type)
+        ext.returns = subst(ext.returns)
+    for td in program.type_decls:
+        td.name = type_renames.get(td.name, td.name)
+        for fld in td.fields:
+            fld.type = subst(fld.type)
+        for case in td.cases:
+            case.payload = subst(case.payload)
+
+    # 2. bodies: value references (shadow-aware) + body-level type annotations.
+    for fn in program.fn_decls:
+        _rewrite_body(fn.body, val_renames, type_renames,
+                      {p.name for p in fn.params})
+    for test in program.tests:
+        _rewrite_body(test.body, val_renames, type_renames, set())
+    for ptest in program.prop_tests:
+        _rewrite_body(ptest.body, val_renames, type_renames,
+                      {p.name for p in ptest.params})
+    # an extern's undo/compensate expressions can call renamed helpers
+    for ext in program.externs:
+        for slot in (getattr(ext, "undo", None), getattr(ext, "compensate", None)):
+            if slot is not None:
+                _rewrite_expr(slot, val_renames, type_renames, set())
+
+
+def _rewrite_body(stmts: list, val_renames: dict[str, str],
+                  type_renames: dict[str, str], bound: set[str]) -> None:
+    """Rewrite a statement block in place. `bound` is the set of local names in
+    scope; a bare reference that names a local is a shadow and is left alone.
+    Bindings introduced by a statement are visible to the statements after it,
+    so `bound` is threaded (and copied when a nested block opens its own scope).
+    """
+    bound = set(bound)
+    for stmt in stmts:
+        _rewrite_stmt(stmt, val_renames, type_renames, bound)
+
+
+def _rewrite_stmt(stmt, val_renames, type_renames, bound: set[str]) -> None:
+    def subst(t):
+        return _subst_type(t, type_renames)
+
+    if isinstance(stmt, _ast.LetStmt):
+        stmt.type = subst(stmt.type)
+        _rewrite_expr(stmt.value, val_renames, type_renames, bound)
+        bound.add(stmt.name)
+    elif isinstance(stmt, _ast.LetPatternStmt):
+        _rewrite_expr(stmt.value, val_renames, type_renames, bound)
+        pat = stmt.pattern
+        if isinstance(pat, _ast.RecordPattern):
+            bound.update(pat.fields)
+        elif isinstance(pat, _ast.ListPattern):
+            bound.update(pat.binds)
+            if pat.rest:
+                bound.add(pat.rest)
+    elif isinstance(stmt, _ast.AssignStmt):
+        _rewrite_expr(stmt.value, val_renames, type_renames, bound)
+    elif isinstance(stmt, (_ast.ExprStmt, _ast.AssertStmt, _ast.FailStmt,
+                           _ast.AwaitStmt)):
+        _rewrite_expr(stmt.expr, val_renames, type_renames, bound)
+    elif isinstance(stmt, _ast.ReturnStmt):
+        if stmt.expr is not None:
+            _rewrite_expr(stmt.expr, val_renames, type_renames, bound)
+    elif isinstance(stmt, _ast.IfStmt):
+        _rewrite_expr(stmt.cond, val_renames, type_renames, bound)
+        _rewrite_body(stmt.then, val_renames, type_renames, bound)
+        _rewrite_body(stmt.otherwise or [], val_renames, type_renames, bound)
+    elif isinstance(stmt, _ast.WhileStmt):
+        _rewrite_expr(stmt.cond, val_renames, type_renames, bound)
+        _rewrite_body(stmt.body, val_renames, type_renames, bound)
+    elif isinstance(stmt, _ast.ForStmt):
+        _rewrite_expr(stmt.iterable, val_renames, type_renames, bound)
+        inner = set(bound)
+        inner.add(stmt.bind)
+        _rewrite_body(stmt.body, val_renames, type_renames, inner)
+
+
+def _rewrite_expr(expr, val_renames, type_renames, bound: set[str]) -> None:
+    def recur(e, b=bound):
+        _rewrite_expr(e, val_renames, type_renames, b)
+
+    if isinstance(expr, _ast.ExprVar):
+        if expr.name in val_renames and expr.name not in bound:
+            expr.name = val_renames[expr.name]
+    elif isinstance(expr, _ast.ExprBin):
+        recur(expr.left)
+        recur(expr.right)
+    elif isinstance(expr, _ast.ExprUn):
+        recur(expr.operand)
+    elif isinstance(expr, _ast.ExprCall):
+        recur(expr.callee)
+        for arg in expr.args:
+            recur(arg)
+    elif isinstance(expr, (_ast.ExprField, _ast.ExprOptField)):
+        recur(expr.target)
+    elif isinstance(expr, _ast.ExprIndex):
+        recur(expr.target)
+        recur(expr.index)
+    elif isinstance(expr, _ast.ExprOptCall):
+        recur(expr.target)
+        for arg in expr.args:
+            recur(arg)
+    elif isinstance(expr, _ast.ExprIf):
+        recur(expr.cond)
+        recur(expr.then)
+        recur(expr.otherwise)
+    elif isinstance(expr, _ast.ExprRecord):
+        for _, value in expr.fields:
+            recur(value)
+    elif isinstance(expr, _ast.ExprRecordUpdate):
+        recur(expr.base)
+        for _, value in expr.updates:
+            recur(value)
+    elif isinstance(expr, _ast.ExprList):
+        for item in expr.items:
+            recur(item)
+    elif isinstance(expr, _ast.ExprArrow):
+        expr.param_types = [_subst_type(t, type_renames) for t in expr.param_types]
+        expr.returns = _subst_type(expr.returns, type_renames)
+        recur(expr.body, bound | set(expr.params))
+    elif isinstance(expr, _ast.ExprMatch):
+        recur(expr.scrutinee)
+        for _, bind, body in expr.arms:
+            arm = bound | ({bind} if bind is not None else set())
+            recur(body, arm)
+            if isinstance(body, _ast.ExprBlockArm):
+                inner = set(arm)
+                for s in body.stmts:
+                    recur(s.value, inner)
+                    inner.add(s.name)
+                recur(body.tail, inner)
+    elif isinstance(expr, _ast.ExprHole):
+        expr.type = _subst_type(expr.type, type_renames)
+    elif isinstance(expr, _ast.Interp):
+        for kind, part in expr.parts:
+            if kind == "expr":
+                recur(part)
 
 
 def _load_root(loader: _ModuleLoader, path: str) -> _LoadedModule:
