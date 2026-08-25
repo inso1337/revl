@@ -1,0 +1,80 @@
+// The revl stdlib Router — the load-balancer component (item 161,
+// docs/distribution-model.md).
+//
+// Load balancing and G2 (one key → one provider → one realm) are in direct
+// tension. revl resolves it with **spawn + realms + router**, NOT with N
+// providers of one key in one realm (that shape is refused — it destroys the
+// verifiability G2 buys). The resolution, in one picture:
+//
+//                        parent realm
+//                     ┌───────────────────┐
+//       consumers ───►│  Router provides  │   ONE provider of `worker` here,
+//                     │     `worker`      │   so G2 holds downstream
+//                     └─────────┬─────────┘
+//         requires worker in realms("w1","w2","w3") strategy(round_robin)
+//              ┌───────────┬───────────┐
+//              ▼           ▼           ▼
+//          realm w1    realm w2    realm w3
+//         ┌────────┐  ┌────────┐  ┌────────┐   one provider of `worker`
+//         │ Worker │  │ Worker │  │ Worker │   PER realm — G2 holds
+//         │provides│  │provides│  │provides│   per-(key, realm)
+//         └────────┘  └────────┘  └────────┘
+//
+// The Router `requires worker in realms(...)` (the multi-realm bind, item 162)
+// and `provides worker` in the parent realm. Every consumer of `worker` sees
+// exactly ONE provider — this Router — and cannot tell it is talking to a pool;
+// the fan-out is the Router's private business. G2 is invoked once per boundary:
+// N times inside (one provider per worker realm) and once outside (this Router
+// is the sole provider in the parent realm). The pool is real; the ambiguity is
+// not.
+//
+// RUNTIME ROUTING — where the fan-out actually happens. The multi-realm bind
+// records a `routes` entry on this component's IR; item 161's py-tier reference
+// driver (src/revl/run.py) reads it, resolves the N per-realm provider handles
+// off the same committed-view lookup a normal `requires` uses, and forwards each
+// call to a live worker by the strategy. A worker that withdraws (peer-death →
+// provider-withdrawal → the R2/R3 reactive coeffect the runtime already runs)
+// drops out of the live set and its calls go to the survivors — reactive
+// failover with no extra machinery. See docs/distribution-model.md §3 and the
+// docs note docs/router.md for the per-tier emitter follow-up.
+//
+// ADAPTING THIS TEMPLATE. Realms are static string literals (a config-derived
+// realm would make G2 unsound), so a Router names its worker realms and its
+// routed service concretely — this file is the canonical shape to copy, not a
+// generic import. To use it: rename `Worker`/`worker` to your service/key, list
+// your worker realms in `realms(...)`, and pick a `strategy(...)`
+// (`round_robin` — the default when omitted — or `least_loaded`). Provide one
+// worker per named realm (each `isolate <key> in realm("wK")`), exactly as the
+// three `PoolWorker`s below.
+
+service Worker {
+  fn call(request: Str) -> Str
+}
+
+// One backend per realm. Each is an ordinary component that isolates its
+// provision into its own named realm — G2 holds per (key, realm), so three
+// providers of `worker` across w1/w2/w3 is the multi-tenancy feature, not a
+// conflict. In a real deployment these are `spawn`ed instances and/or land on
+// different hosts via the TCP+mTLS seam; here they are three static shards.
+component PoolWorker1 provides worker: Worker {
+  isolate worker in realm("w1")
+  provide worker { fn call(request) = "w1:" + request }
+}
+component PoolWorker2 provides worker: Worker {
+  isolate worker in realm("w2")
+  provide worker { fn call(request) = "w2:" + request }
+}
+component PoolWorker3 provides worker: Worker {
+  isolate worker in realm("w3")
+  provide worker { fn call(request) = "w3:" + request }
+}
+
+// The Router: requires `worker` across the three worker realms, provides
+// `worker` in the parent realm. `fn call` documents the forwarding intent; the
+// py-tier reference driver realizes the actual per-realm fan-out from the
+// `routes` IR this bind records (a routed require has no single-realm provider,
+// so the emitted body is not what routes — see docs/router.md).
+component RoundRobin requires worker: Worker provides worker: Worker {
+  isolate worker in realms("w1", "w2", "w3") strategy(round_robin)
+  provide worker { fn call(request) = worker.call(request) }
+}
