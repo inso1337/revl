@@ -1169,3 +1169,61 @@ case that the reference spells `component.get("isolate") or {}`.
 No emitter/kit/stdlib defect surfaced. The realm surface fell out of the existing
 value-model + host-format kit with only additive helpers; the differential oracle
 stayed the arbiter throughout.
+
+## Slice 6 (item 234) — spawn/instances + realm placements (emit_ts)
+
+### The realm-metadata JSON stayed PURE revl — the `_json` dict is reconstructible byte-for-byte (LOW, good ergonomics)
+The reference renders `isolate`/`intercept` metadata with `_json(x) == json.dumps(x)`.
+For `isolate` the port passes the raw metadata dict straight to the existing
+`json_dumps` @py helper (byte-identical, one line). For `intercept`'s dict-form
+`inject` — the reference builds `{key: intercept.get(key) for key in inject_keys}`
+then `_json`s it — the port did NOT need to build a host dict (revl has no dict
+constructor to hand to `json_dumps`): `json.dumps` of `{k: v, …}` equals a
+piecewise build with `": "` after each key and `", "` between entries, so
+`` `${json_dumps(k)}: ${json_dumps(value_field(icept, k))}` `` joined with `, ` and
+wrapped in `{…}` reproduces it exactly, staying off `@py` for the LOGIC. This is
+the payoff of the item-180 erased-IR boundary: metadata that is already plain JSON
+in the IR needs only the host-format leaf, never a navigation `@py` block.
+
+### `value_field(...)` returning `null` for BOTH absent and present-null keys matched the reference for free (LOW)
+The reference's `intercept.get(key)` yields `None` for an absent key OR a
+present-but-null one, both rendering `null`. The port's `value_field(icept, k)`
+collapses the same two cases to a null `Value` → `json_dumps` → `"null"`, so no
+present-vs-absent distinction was needed (had it been, `value_opt` was the escape
+hatch). One fewer branch than the reference's dict comprehension implies.
+
+### `spawn`/`instance-get` are guard-free single-expression kinds — the state-threading tax (item 195) was ZERO here (LOW)
+Both new expr kinds are pure `expr_inner` branches that thread the existing
+`counter`/`acx` through their sub-exprs (spawn's config values, instance-get's
+target) with no new downward state — the `ACx` seam stood up in 219 carried them
+untouched. The `_uses_spawn` import gate is a plain `value_children` walk in the
+shape of every other `uses_*` gate; adding `spawn` to the import list reused the
+same `join(", ")` the header already builds. No kit gap, no new plumbing.
+
+### Ergonomics (item 189): reserved contextual nouns cannot be spelled as record-literal KEYS in an in-file test (MEDIUM — recurring)
+`component`, `config`, `intercept`, `isolate`, `realm`, `requires` are reserved
+keywords, so a `spawn` IR node — whose fields are literally `component:`/`config:`
+— CANNOT be written as a revl record literal in an in-file `test` block (the lexer
+rejects the key). The corpus differential oracle covers `spawn` byte-for-byte, but
+the focused in-file unit test had to be dropped for it (only `instance-get`, whose
+keys are `target:`/`key:`, is spellable). Same class bit the emitter code: three
+component-tail locals had to be renamed off `requires`/`intercept`/`isolate` to
+`req_keys`/`icept`/`iso`. A record literal keys a field by NAME, and a name that
+collides with a contextual-keyword should be allowed as a key (it is unambiguous
+after `{`/`,` and before `:`), the way many languages permit keywords as member
+names. Symptom: `expected ident, found 'component'` at the literal. Repro:
+`let n = { component: "W" }`. Fix: allow reserved contextual nouns as record-field
+keys (parser `_name()` in key position) — NOT fixed here (out of this slice's file
+scope; the parser lives in src/revl/).
+
+### Deferred, byte-honestly: routed requires + the v1/v2 path
+`routes` (item 167: `isolate <k> in realms("w1"…) strategy(...)`) is deferred whole
+— it pulls the `_TS_ROUTER_SRC` runtime literal, the `realmLabel` import, the
+`inject_keys = requires − routes` subtraction, the per-key `revlRouter` proxy
+before the body, AND the routed-`req` read path (`_revl_route_<k>`), none of which
+composes byte-exact without all parts landing together. Separately, a component
+that uses ONLY `isolate`/`intercept` (no spawn, no 2.0 types) compiles to
+ir_version 2 and the reference routes it through `_emit_v1`, which the port does
+NOT mirror (the v1/v2 path is deferred) — so both realm-placement fixtures carry a
+trivial top-level 2.0 `fn` to stay on the `_emit_v3` path the port is faithful to.
+A future slice covering `_emit_v1` (or routed requires) removes that scaffolding.

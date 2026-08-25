@@ -1,0 +1,14 @@
+// realm placements: `isolate <key> in realm("…")` pins a required (or provided)
+// key into a named realm. The placement rides out as the component's `isolate`
+// metadata — `isolate: {…},` after the apply method (docs/design-v2-realms.md).
+// A top-level 2.0 `fn` keeps the document on the v3 emit path (the v1/v2 path is
+// deferred), so the placement is verified against `_emit_v3`.
+fn zero() -> Int { return 0 }
+
+service Db { fn q() -> Int }
+service Api { fn run() -> Int }
+
+component App requires db: Db provides api: Api {
+  isolate db in realm("primary")
+  provide api { fn run() = 0 }
+}
