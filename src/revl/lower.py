@@ -3362,10 +3362,17 @@ from .emission_analysis import (  # noqa: E402,F401
 
 def _async_reached_outside_provide(node, async_names: set, acc: set) -> None:
     """Async extern names a lowered component body reaches, *excluding*
-    provide-method bodies (those are gated at their own site — async-extern.md
-    §3). Mirrors `_calls_in`'s call/value detection but prunes provide steps."""
+    provide-method and timer bodies (those get their own in-flight window —
+    async-extern.md §3, item 170). Mirrors `_calls_in`'s call/value detection
+    but prunes provide steps and timer steps.
+
+    A `timer` body (item 57) reaching an async op is no longer refused here: a
+    timer is a spawned in-flight handle (item 106's `Async[T]` window), so it is
+    coloured async in `_lower_timer_step` and its firing is awaited/cancelled by
+    the runtime, exactly like a provide method's own async reach is admitted at
+    its site above (docs/time-coeffect.md §async)."""
     if isinstance(node, dict):
-        if node.get("step") == "provide":
+        if node.get("step") in ("provide", "timer"):
             return
         kind = node.get("kind")
         if kind == "fn" and node.get("name") in async_names:
@@ -4342,12 +4349,54 @@ def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:
     boundary); its inverse is the runtime's cancellation, derived like any other
     effect teardown, so it carries no `undo` slot in the IR."""
     body = [_lower_emit_step(inner, env) for inner in stmt.body]
-    return {
+    step = {
         "step": "timer",
         "mode": stmt.mode,
         "interval_ms": stmt.interval_ms,
         "body": body,
     }
+    # async colouring (item 170): a timer body reaching an async op — a
+    # req-target async service operation (`emit agent.run_in(...)`, the
+    # scheduled-agent-run shape) or an async callable (an async extern / a
+    # phase-2 colored fn) — is ADMITTED and coloured async, not refused. The
+    # firing then opens an `Async[T]` in-flight window (item 106): the runtime
+    # awaits the body on the tick and CANCELS any pending firing + in-flight
+    # work on unload (the timer's revertible-effect/undo contract, now covering
+    # the async case — R4/A8). A sync timer body carries no `async` key and is
+    # byte-identical to before.
+    if _timer_body_reaches_async(body, env):
+        step["async"] = True
+    return step
+
+
+def _timer_body_reaches_async(body, env) -> bool:
+    """True if a lowered timer body reaches a suspension (item 170): a
+    req-target async service op (rule 3 of the item-92 async-reach), or a call
+    of an async-colored callable — an async extern or a phase-2 colored fn
+    (rule 1). Mirrors `_arrow_reaches_async`, but a timer body is a list of
+    `emit` steps with no intervening arrow value, so nothing is pruned."""
+    hit = False
+
+    def walk(n):
+        nonlocal hit
+        if hit:
+            return
+        if isinstance(n, dict):
+            if _req_op_is_async(n, env):
+                hit = True
+                return
+            for value in n.values():
+                walk(value)
+        elif isinstance(n, list):
+            for value in n:
+                walk(value)
+
+    walk(body)
+    if hit:
+        return True
+    called: set = set()
+    _calls_in(body, called, stop_async_arrows=True)
+    return bool(called & (getattr(env, "async_callables", None) or set()))
 
 
 def _instance_get_call(node: dict, env: Env):

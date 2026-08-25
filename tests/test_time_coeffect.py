@@ -673,3 +673,244 @@ def test_go_lifecycle_test_observes_deterministic_firing(tmp_path):
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[go] pass:" in result.stdout
+
+
+# ============================================================================
+# item 170: async timer bodies — the `Async[T]` in-flight window for a timer
+# ============================================================================
+#
+# Item 57's timer bodies could reach a REQUIRED service only *synchronously*
+# (G4), so a scheduled automation firing an `emission async fn` — the harness's
+# `every 60s { emit agent.run_in(...) }` — was unexpressible. Item 170 gives the
+# timer body the same async in-flight window an async provide method gets: a
+# timer body reaching an async op is ADMITTED and coloured async (frontend), its
+# firing spawns the suspension into a tracked in-flight window awaited by the
+# harness (py emit), and unload cancels the pending timer PLUS any in-flight
+# async work — residue-free (R4/A8). Sync timer bodies are unchanged.
+
+_ASYNC_AGENT = """
+service Agent { emission async fn run_in(session: Str, prompt: Str) }
+component Cron requires agent: Agent {
+  every 60s { emit agent.run_in("cron", "brief") }
+}
+"""
+
+_ASYNC_EXTERN_TIMER = """
+extern emission async fn ping(url: Str) -> Str = @py { return url }
+service Log { emission fn write(m: Str) }
+component Beat requires log: Log {
+  every 30s { emit ping("http://x") }
+}
+"""
+
+_SYNC_TIMER = """
+service Log { emission fn write(m: Str) }
+component Beat requires log: Log {
+  every 30s { emit log.write("tick") }
+}
+"""
+
+
+def _timer_step(src: str):
+    ir = compile_source(src, "<t>")
+    for comp in ir["components"]:
+        for step in comp["body"]:
+            if step.get("step") == "timer":
+                return step
+    raise AssertionError("no timer step lowered")
+
+
+# ---------------------------------------------------------------- frontend
+
+def test_timer_reaching_a_req_async_op_is_admitted_and_coloured_async():
+    """The scheduled-agent-run shape: `every 60s { emit agent.run_in(...) }`
+    reaching an `emission async fn` through a required key is ADMITTED (not
+    refused) and the timer step is coloured `async` (item 170)."""
+    step = _timer_step(_ASYNC_AGENT)
+    assert step["async"] is True
+
+
+def test_timer_reaching_an_async_extern_is_admitted_and_coloured_async():
+    """An async extern reached from a timer body was refused pre-170
+    (`reaches async extern … in a setup/activation body`); now it is admitted
+    and coloured async, exactly like the req-async-op path."""
+    step = _timer_step(_ASYNC_EXTERN_TIMER)
+    assert step["async"] is True
+
+
+def test_a_sync_timer_body_carries_no_async_colour():
+    """The sync path is unchanged: a timer body reaching only sync emissions
+    carries no `async` key on its step (byte-identical IR)."""
+    step = _timer_step(_SYNC_TIMER)
+    assert "async" not in step
+
+
+# ---------------------------------------------------------------- py emit
+
+def test_py_emits_a_sync_timer_byte_identically():
+    """A sync timer body still emits the plain `def _timer_N` closure + a
+    `lambda: handle.cancel()` inverse — no asyncio, no in-flight set."""
+    src = _emitter("python").emit(compile_source(_SYNC_TIMER, "<t>"))
+    assert "def _timer_1():" in src
+    assert "_revl_schedule_every(30000, _timer_1)" in src
+    assert "yield lambda: _timer_1_h.cancel()" in src
+    assert "_revl_asyncio" not in src            # no asyncio for a sync timer
+    assert "_inflight" not in src
+
+
+def test_py_emits_an_async_timer_with_a_tracked_in_flight_window():
+    """An async-coloured timer spawns each async emission as a tracked task and
+    yields an inverse that cancels the schedule AND every in-flight task."""
+    src = _emitter("python").emit(compile_source(_ASYNC_AGENT, "<t>"))
+    assert "import asyncio as _revl_asyncio" in src
+    assert "_timer_1_inflight = set()" in src
+    assert "_revl_task = _revl_asyncio.ensure_future(_revl_ctx.agent.run_in('cron', 'brief'))" in src
+    assert "_timer_1_inflight.add(_revl_task)" in src
+    assert "_revl_task.add_done_callback(_timer_1_inflight.discard)" in src
+    # the inverse cancels the schedule and drains the in-flight window
+    assert "def _timer_1_cancel():" in src
+    assert "_timer_1_h.cancel()" in src
+    assert "for _revl_task in list(_timer_1_inflight):" in src
+    assert "_revl_task.cancel()" in src
+    assert "yield _timer_1_cancel" in src
+
+
+# ------------------------------- runtime: async firing + in-flight cancellation
+#
+# These drive the real cordis-py runtime scheduler (backends/python/runtime.py)
+# + real asyncio directly on the *emitted* module — no cordis-py install needed —
+# so the await-on-tick and cancel-in-flight proofs run in the default suite.
+
+def _install_async_timer_module(rt):
+    """Compile+emit the async-agent composition, exec it, and drive its
+    activation body against `rt`'s scheduler with an async `agent.run_in` stub
+    that records each (session, prompt) it is awaited with. Returns
+    (run_log, disposers, fire_via_advance)."""
+    import asyncio
+    src = _emitter("python").emit(compile_source(_ASYNC_AGENT, "<t>"))
+    captured: dict = {}
+
+    class _StubFrame:
+        def __init__(self, ctx, name):
+            self.ctx = ctx
+        def install(self, body):
+            captured["body"] = body
+        def drain(self):
+            return None
+
+    fake = types.ModuleType("runtime")
+    fake.Frame = _StubFrame
+    fake.schedule_every = rt.schedule_every
+    fake.schedule_after = rt.schedule_after
+    saved = sys.modules.get("runtime")
+    sys.modules["runtime"] = fake
+
+    run_log: list = []
+
+    async def _run_in(session, prompt):
+        await asyncio.sleep(0)     # a genuine suspension in the in-flight window
+        await asyncio.sleep(0)
+        run_log.append((session, prompt))
+
+    ctx = types.SimpleNamespace(agent=types.SimpleNamespace(run_in=_run_in))
+    try:
+        ns: dict = {}
+        exec(compile(src, "<emitted>", "exec"), ns)
+        # apply() builds the Frame and installs the activation body (the stub
+        # Frame captures it); the body is a zero-arg generator closing over ctx.
+        ns["Cron"]["apply"](ctx, {})
+    finally:
+        if saved is not None:
+            sys.modules["runtime"] = saved
+        else:
+            sys.modules.pop("runtime", None)
+
+    disposers: list = []
+    for value in captured["body"]():
+        if callable(value):
+            disposers.append(value)
+    return run_log, disposers
+
+
+def test_async_timer_fires_and_is_awaited_on_each_advanced_tick(rt):
+    """The async body fires on each tick the advance crosses and is *awaited*
+    within the in-flight window: the recorded runs equal the firing count."""
+    import asyncio
+
+    async def _main():
+        run_log, disposers = _install_async_timer_module(rt)
+        rt.Clock.advance(180_000)                 # fires at 60s, 120s, 180s
+        for _ in range(20):                        # settle the in-flight window
+            await asyncio.sleep(0)
+        assert run_log == [("cron", "brief")] * 3  # awaited three times
+        assert rt.Clock.pending() == 1             # schedule still live
+        for dispose in reversed(disposers):        # unload, LIFO
+            dispose()
+        assert rt.Clock.pending() == 0             # schedule cancelled — no residue
+        rt.Clock.advance(1_000_000)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert run_log == [("cron", "brief")] * 3  # no orphaned firing
+
+    asyncio.run(_main())
+
+
+def test_unload_while_async_work_is_in_flight_cancels_it_no_residue(rt):
+    """R4/A8 for the async case: unload *while a fired body's async work is
+    still in flight* cancels both the schedule and the in-flight task, so the
+    suspended work never completes and leaves no side effect — no orphaned
+    in-flight async work after withdraw."""
+    import asyncio
+
+    async def _main():
+        run_log, disposers = _install_async_timer_module(rt)
+        rt.Clock.advance(60_000)                   # fires once -> spawns a task
+        await asyncio.sleep(0)                      # partial progress, NOT settled
+        assert run_log == []                        # the run has not completed yet
+        for dispose in reversed(disposers):         # UNLOAD mid-flight
+            dispose()
+        for _ in range(20):                         # drain
+            await asyncio.sleep(0)
+        assert rt.Clock.pending() == 0              # schedule cancelled
+        assert run_log == []                        # in-flight work cancelled — no effect
+
+    asyncio.run(_main())
+
+
+# --------------------------------------------- execution: end-to-end on cordis
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
+def test_py_async_timer_lifecycle_runs_end_to_end():
+    """The exit test for item 170 on the py reference tier: an async timer body
+    (`every 10s { emit counter.tick() }` reaching an `emission async fn`)
+    compiles, admits, RUNS — firing + awaited on each advanced tick — and
+    unload is residue-free (examples/async_timer.rvl)."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [str(CORDIS_PY), "-m", "revl", "test", str(EXAMPLES / "async_timer.rvl")],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS an async every-timer fires and is awaited on each tick" in result.stdout
+    assert "PASS an async after-timer fires once when its delay elapses" in result.stdout
+    assert "[py] pass: 2 test(s) passed" in result.stdout
+
+
+@pytest.mark.skipif(not CORDIS_PY.exists(),
+                    reason="cordis-py runtime not installed")
+def test_py_async_timer_wrong_firing_count_is_caught(tmp_path):
+    """An assertion that can only pass is not an assertion: assert the wrong
+    awaited-firing count and the async-timer lifecycle test must FAIL."""
+    src = (EXAMPLES / "async_timer.rvl").read_text(encoding="utf-8")
+    broken = src.replace("assert ticks == 3", "assert ticks == 99")
+    assert broken != src
+    path = tmp_path / "broken_async_timer.rvl"
+    path.write_text(broken, encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [str(CORDIS_PY), "-m", "revl", "test", str(path)],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAIL an async every-timer fires and is awaited on each tick" in result.stdout
