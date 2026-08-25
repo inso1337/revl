@@ -202,3 +202,83 @@ py backend, exec it, run `emit_src` on the interchange-IR corpus
 `arith.rvl` (checked int/int32 `+ - *`, `%`, i64/i32 comparisons, `&&`/`||`,
 `!`, unary `-`) and `control.rvl` (if/else, while, let/var/assign, bare-expr
 drop, assert, the trailing-`unreachable` divergence rule).
+
+# Path B, the rust emitter (item 205, slice 2): the typed-core, and why components stayed out
+
+Slice 1 (item 191) ported the FUNCTION-ONLY corner of `backends/rust/emit.py`
+byte-for-byte. Slice 2 extends it to the **v3 typed-core** — user `type` decls
+(record → `pub struct`, variant → serde-tagged `pub enum`), record literals with
+the by-value field clone, field access, ADT construction (`Enum::Case` /
+`Enum::Case(arg)`), and `match` over user variants — all still byte-identical
+against the reference (`tests/fixtures/emit_rust_corpus/{records,variants}.rvl`).
+
+## The headline: (a) components/services could NOT be a byte-exact target, and it is structural
+
+The slice was scoped to *both* the typed-core AND components/services. The
+typed-core landed clean; components/services did not, and the reason is not
+effort — it is that **the component surface is entangled with the explicitly
+deferred Value/serde erasure surface**, so no service/component fixture can be
+byte-exact without also porting the bridge this slice was told to defer:
+
+  * `_emit_components` unconditionally runs `_emit_service_traits`,
+    `_emit_host_stubs`, AND `_emit_bridge` — even for a document with zero
+    components.
+  * `_emit_bridge` emits its full interop-RPC proxy the moment `ir["services"]`
+    is non-empty (`if not services: return []` is the only escape). So a lone
+    `service` declaration — the smallest possible components-dialect fixture —
+    already drags in the ~200-line bridge (`_revl_rpc`, per-service consumer
+    proxies, serde erasure) that the slice brief lists under "Value/serde
+    ERASURE surface … DEFER".
+  * A `component` additionally fires the host stubs and the whole
+    `_emit_component_*` machinery (effect/undo accumulators, config structs,
+    timer preamble, router structs, provide impls).
+
+There is therefore no byte-exact *sub*-slice of components to take here: the
+first honest cut is "service traits + bridge + host stubs" as one unit, which is
+squarely the deferred erasure work. Recommend the next rust slice pair the two
+(traits are trivial; the bridge is the real content). Reported, not worked
+around.
+
+## `record_update` is refused by the reference — a structural exclusion, not an un-port
+
+`{r | f = e}` (functional record update) raises `EmitError` in
+`backends/rust/emit.py` itself ("not emitted by the rust backend yet … lift it
+into a helper fn"). So it is not a byte target on this tier at all — excluded
+structurally, like `let_pattern`'s output-buffer-indexed temp name.
+
+## The Ctx-threading tax recurs (kin to item 195's `Sout` tax), but the mitigation is in-hand
+
+Extending `_V3Ctx` from 2 fields (`vt`, `fr`) to 5 (`+ ca`, `cp`, `rbf`) meant
+every `Ctx` record LITERAL had to be rewritten by hand — `set_vt`, the per-fn ctx
+in `emit_v3_functions`, and the in-file tests — because revl has no shared
+mutable state and the reference just mutates one dict in place. This is the same
+threading tax item 195 logged for `Sout`. The clean fix is functional
+record-update (`{ ctx | vt: ctx.vt.set(k, v) }`), which would leave the other
+four fields implicit — and it IS available here, because the self-host emitter is
+compiled by the PYTHON backend, which emits `record_update` fine. This slice kept
+explicit literals for parity with slice-1 style, but the ergonomic lesson stands:
+a growing threaded-context record is exactly the shape record-update sugar exists
+for. LOW.
+
+## stdlib-kit validation (positive)
+
+The typed-core needed ZERO new `@py` bridges beyond the four host-formatting
+primitives slice 1 already keeps (`string_lit`, `num_str`, `newline`, `mangle`).
+`value_keys` (item 188) navigated both the `types` dict and each record's
+`fields` dict in pure revl. The one place slice 2 reaches for `sorted(...)` — the
+`record_by_fields` key, `tuple(sorted(field_names))` in the reference — is served
+byte-for-byte by `list_sort` from the list kit (item 194), which is itself
+fuzz-pinned against Python `sorted()`; an initial hand-rolled selection sort +
+private `str_lt` was deleted in favour of `use "../stdlib/list.rvl" { list_sort,
+str_lt }`. The kit did its job: no re-hand-roll survived.
+
+## How it is checked
+
+`tests/test_selfhost_emit_rust.py`: compile `selfhost/emit_rust.rvl` through the
+py backend, exec it, run `emit_src` on the interchange-IR corpus, and assert the
+Rust equals `backends/rust/emit.py`'s `emit(ir)` to the last byte — now over the
+6 slice-1 fixtures PLUS `records.rvl` (struct/field/List[Point]/clone) and
+`variants.rvl` (enum/nullary+payload ctor/match with bind, nullary, `_` wildcard
+vs `unreachable!()`, built-in Some/Ok coexisting). Excluded, by construction:
+every service/component fixture (would fire the deferred bridge), `record_update`
+(reference raises), float interpolation, stdlib builtins, and `let_pattern`.
