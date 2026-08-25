@@ -76,17 +76,27 @@ An arm body may be a statement block:
 
 ```
 match-arm := pattern '=>' (pure-expr | block-arm)
-block-arm := '{' let-stmt* pure-expr '}'
+block-arm := '{' fn-stmt* pure-expr '}'
 ```
 
-The block's value is its final expression. v1 subset, deliberately narrow:
-only single-assignment `let` statements may precede the tail — no `var`, no
-`if`/`while`/`return`, no effects. A block containing a `let` is parsed as a
-block arm; a `{` whose top level starts `ident :` stays a record literal.
+The block's value is its final expression. The block accepts the same
+statement set a normal fn/block body accepts — `let`, `var`, `while`, `if`,
+`for`, assignments — so imperative logic can live where the value is
+destructured (roadmap 202). `return` is not a block-arm statement (the arm
+yields its final expression, not an early return from the enclosing fn), and
+the block is a pure value position, so effects are still refused. A `{` after
+`=>` is a record only when it is empty, opens `ident :` (a record literal), or
+opens `base | …` (a record update); anything else is a block arm.
 
 ```revl fragment
-match shape {
-    _ => { let doubled = area * 2  doubled + 1 }
+match ft {
+    Some(xs) => {
+        var ps: List[Str] = []
+        var i = 0
+        while (i < xs.length) { ps = ps.push(xs[i])  i = i + 1 }
+        Some(ps)
+    },
+    None => None
 }
 ```
 
@@ -96,18 +106,27 @@ Both forms are **additive** — `ir_version` stays 3 and the v1/v2/v3 reference
 documents are byte-identical:
 
 - `"kind": "record_update"`, keys `base`, `updates` (list of `[name, expr]`).
-- block arms exist only in the parser AST; lowering refuses until §6 lands a
-  representation (the leading candidate is lambda-lifting the block into a
-  synthetic helper fn, which keeps the IR arm-body-as-expression invariant).
+- block arms are lowered by lambda-lifting the block into a synthetic helper
+  `fn` (`match_arm_<n>`): the arm's statements become the helper's body, the
+  final expression its `return`, and every enclosing name the block reads a
+  parameter. The arm's IR is a *call* to that helper, so the arm body stays an
+  expression and no backend needs new emit support. `ir_version` stays 3 (a
+  helper fn and a call are already v3 shapes). Lowering happens inside a module
+  `fn` body; a block arm in another position (a `test`/component/prop-test
+  body, an extern undo expression) still refuses loudly.
 
 ## 6. Tier status
 
 | form | python | typescript | rust | java | go | wasm |
 |---|---|---|---|---|---|---|
 | record update | ✅ spread | ✅ spread | refused | refused | refused | refused |
-| block arms | refused | refused | refused | refused | refused | refused |
+| block arms | ✅ lift | ✅ lift | ✅ lift | ✅ lift | ✅ lift | ✅ lift |
 
-Refusals name the tier and point here; nothing half-emits. Rust/Java need a
+Block arms lower to a helper fn + call (see §5), so every tier that emits a
+`fn` call emits them — the lift is tier-agnostic and needs no per-backend work.
+
+Record-update refusals name the tier and point here; nothing half-emits.
+Rust/Java need a
 per-record copy constructor walk; Go needs typed struct copies; Wasm needs a
 linear-memory clone routine — each is mechanical but unproven, and an
 unverified emitter is worse than a loud refusal on a tier whose contract is

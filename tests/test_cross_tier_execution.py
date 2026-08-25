@@ -116,6 +116,40 @@ test "remove is persistent and total" {
     # the two pure fns the method bodies also call; the component method's own
     # `??`/bare-return values are executed on the reference runtime by
     # `test_component_bodies_value_execute_the_four_constructs` below.
+    # A statement-block match arm (docs/records.md §4, roadmap 202): `var` and
+    # `while` live where the value is destructured, and the arm still yields its
+    # final expression. Every tier lowers it the same way — the block is
+    # lambda-lifted into a helper fn, so a construct that "only compiles" on one
+    # tier cannot silently mean the wrong thing here. A user ADT is the
+    # scrutinee (go's Opt/None value plumbing has separate, unrelated gaps), and
+    # a let-only arm rides along to pin that the pre-existing subset is unchanged.
+    "match block arm: var and while yield a value": """
+type Bag = Items(List[Int]) | Empty
+type Wrap = W(Int) | Zero
+fn sumPositives(b: Bag) -> Int {
+  return match b {
+    Items(xs) => {
+      var total = 0
+      var i = 0
+      while (i < xs.length) {
+        if (xs[i] > 0) { total = total + xs[i] }
+        i = i + 1
+      }
+      total
+    },
+    Empty => 0
+  }
+}
+fn letOnly(w: Wrap) -> Int {
+  return match w { W(n) => { let d = n * 2  d + 1 }, Zero => 0 }
+}
+pub fn positives() -> Int { return sumPositives(Items([3, -1, 4, -5])) }
+pub fn other_arm() -> Int { return sumPositives(Empty) }
+test "var and while inside a match arm compute the arm's value" { assert positives() == 7 }
+test "the second arm still yields its value"                    { assert other_arm() == 0 }
+test "a let-only block arm is unchanged"                        { assert letOnly(W(5)) == 11 }
+""",
+
     "component body: nullish, fn-call, match, bare-return": """
 type Outcome = Found(Int) | Missing
 fn double(n: Int) -> Int { return n * 2 }

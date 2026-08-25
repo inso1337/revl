@@ -441,14 +441,17 @@ class ExprRecordUpdate:
 
 @dataclass
 class ExprBlockArm:
-    """A match arm whose body is a statement block: `=> { let x = e; expr }`.
+    """A match arm whose body is a statement block: `=> { stmt* ; expr }`.
 
-    v1 subset (docs/records.md §4): the block may contain only `let`
-    statements (single-assignment, pure) and must end in an expression, whose
-    value is the arm's value. Parsed and typechecked; lowering is deferred —
-    see docs/records.md §6.
+    The block accepts the same statement set a normal fn/block body accepts
+    (`let`, `var`, `while`, `if`, `for`, assignments, ...) and ends in an
+    expression whose value is the arm's value (docs/records.md §4). Lowering
+    lambda-lifts the block into a synthetic helper fn, so the imperative
+    statements run where the value is destructured and the IR arm body stays an
+    expression (a call). `return` is not a block-arm statement — the arm yields
+    its final expression, not an early return from the enclosing function.
     """
-    stmts: list  # [LetStmt]
+    stmts: list  # block statements preceding the tail (any fn-body statement)
     tail: object
     line: int
 
@@ -2603,52 +2606,54 @@ class Parser:
 
     def _block_arm_ahead(self) -> bool:
         """Current token is `{` right after a match arm's `=>` — statement
-        block (docs/records.md §4) or record literal?
+        block (docs/records.md §4) or record value?
 
-        A block arm contains a statement keyword (`let`, `var`) at its top
-        level; a record literal starts `ident :`. Either test settles it."""
-        i = self.pos + 1  # skip the `{`
-        depth = 1
-        while i < len(self.toks):
-            tok = self.toks[i]
-            if tok.kind in ("{", "(", "["):
-                depth += 1
-            elif tok.kind in ("}", ")", "]"):
-                depth -= 1
-                if depth == 0:
-                    return False
-            elif depth == 1 and tok.kind == "kw" and tok.value in ("let", "var"):
-                return True
-            elif depth == 1 and tok.kind == "ident" and self.toks[i + 1].kind == ":":
-                return False
-            elif tok.kind == "eof":
-                return False
-            i += 1
-        return False
+        The only `{...}` an arm body can otherwise be is a record: a record
+        *literal* always opens `ident :` (or is the empty `{}`), and a record
+        *update* opens `base | ...`. Anything else — a `let`/`var`/`if`/`while`/
+        `for`/assignment, or a bare tail expression — is a statement block."""
+        first = self.toks[self.pos + 1]  # token after the `{`
+        if first.kind == "}":
+            return False  # empty record literal
+        if self._record_update_ahead():
+            return False  # `{ base | f = e }`
+        if first.kind == "ident" and self.toks[self.pos + 2].kind == ":":
+            return False  # `{ field: value, ... }`
+        return True
 
     def _match_block_arm(self, line: int):
-        """`{ let x = e; … ; expr }` — the v1 block-arm subset: only `let`
-        statements, then exactly one trailing expression whose value is the
-        arm's value."""
+        """`{ stmt* tail }` — a statement-block arm (docs/records.md §4).
+
+        The block is parsed like a normal fn/block body: any fn-body statement
+        may precede the trailing expression, whose value is the arm's value.
+        `return` is rejected here — the arm yields its final expression, and
+        lowering lambda-lifts the block into a helper fn where a `return` would
+        silently mean something else (early return from the helper, not the
+        enclosing function)."""
         self.expect("{")
         stmts = []
-        self._skip_semis()
-        while self.at("kw", "let") or self.at("kw", "var"):
-            stmt = self.fn_stmt()
-            if not isinstance(stmt, LetStmt):
-                raise self.err(getattr(stmt, "line", line),
-                               f"a match block arm may contain only `let` statements "
-                               f"(docs/records.md §4), found `{stmt.__class__.__name__}`")
-            if stmt.mutable:
-                raise self.err(stmt.line,
-                               "a match block arm may not declare `var` — arm blocks "
-                               "are pure `let` sequences (docs/records.md §4)")
-            stmts.append(stmt)
+        while True:
             self._skip_semis()
-        tail = self.pure_expr()
-        self._skip_semis()
+            if self.at("}"):
+                break
+            stmts.append(self.fn_stmt())
         self.expect("}")
-        return ExprBlockArm(stmts, tail, line)
+        if not stmts:
+            raise self.err(line,
+                           "a match block arm must end in an expression (its "
+                           "value) (docs/records.md §4)")
+        for stmt in stmts:
+            if isinstance(stmt, ReturnStmt):
+                raise self.err(stmt.line,
+                               "a match block arm yields its final expression, not "
+                               "`return` (docs/records.md §4)")
+        tail = stmts[-1]
+        if not isinstance(tail, ExprStmt):
+            raise self.err(getattr(tail, "line", line),
+                           "a match block arm must end in an expression (its "
+                           f"value), found `{tail.__class__.__name__}` "
+                           "(docs/records.md §4)")
+        return ExprBlockArm(stmts[:-1], tail.expr, line)
 
     def _match_pattern(self):
         tok = self.peek()

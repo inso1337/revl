@@ -9,7 +9,10 @@ Checked here:
   * the python tier executes exactly — fresh value, original untouched;
   * the typescript tier emits the documented spread shape;
   * rust/go/wasm/java refuse at emit time naming their tier;
-  * block arms parse and typecheck but every compile ends in the §6 refusal.
+  * block arms parse, typecheck, and lower: the imperative subset (`var`,
+    `while`, `if`, assignments) runs inside the arm and the arm still yields
+    its final expression (roadmap 202); `return` and a non-expression tail
+    are refused.
 """
 
 import importlib.util
@@ -154,20 +157,87 @@ def test_block_arm_parses():
     prog = Parser(BLOCK_ARM, "t").parse()
     arm = prog.fn_decls[0].body[0].expr.arms[0][2]
     assert isinstance(arm, ExprBlockArm)
+    # the trailing `doubled + 1` is the arm's value; only the `let` precedes it
     assert [s.name for s in arm.stmts] == ["doubled"]
 
 
-def test_block_arm_typechecks_but_lowering_refuses():
-    # parse+typecheck pass; the §6 refusal comes from lowering, naming deferral
-    msg = _err(BLOCK_ARM)
-    assert "no backend emits them yet" in msg
+def test_block_arm_var_and_while_execute_and_yield_the_value():
+    # roadmap 202: the imperative subset (`var`, `while`, `if`, assignments)
+    # now lives inside the arm, and the arm still yields its final expression.
+    src = ("fn sum_positives(xs: List[Int]) -> Int {\n"
+           "  return match xs {\n"
+           "    _ => {\n"
+           "      var total = 0\n"
+           "      var i = 0\n"
+           "      while (i < xs.length) {\n"
+           "        if (xs[i] > 0) { total = total + xs[i] }\n"
+           "        i = i + 1\n"
+           "      }\n"
+           "      total\n"
+           "    }\n"
+           "  }\n"
+           "}\n")
+    sum_positives = _exec_python(src)["sum_positives"]
+    assert sum_positives([3, -1, 4, -5]) == 7
+    assert sum_positives([]) == 0
 
 
-def test_block_arm_var_refused_at_parse():
+def test_block_arm_var_while_shape_the_item_describes():
+    # the honest `Opt[List[Str]]` the item wanted instead of a `[]` sentinel:
+    # a `var ps` accumulated in a `while`, wrapped `Some(ps)` as the arm value.
+    src = ("fn parts_of(ft: Opt[List[Str]]) -> Opt[List[Str]] {\n"
+           "  return match ft {\n"
+           "    Some(xs) => {\n"
+           "      var ps: List[Str] = []\n"
+           "      var i = 0\n"
+           "      while (i < xs.length) { ps = ps.push(xs[i])  i = i + 1 }\n"
+           "      Some(ps)\n"
+           "    },\n"
+           "    None => None\n"
+           "  }\n"
+           "}\n")
+    parts_of = _exec_python(src)["parts_of"]
+    assert parts_of(["a", "b", "c"]) == ["a", "b", "c"]
+    assert parts_of(None) is None
+
+
+def test_block_arm_nested_block_arm_executes():
+    # a block arm whose tail is itself a match with a block arm: the lifter
+    # recurses, each level a helper fn, and both compute their value.
+    src = ("fn g(o: Opt[Int]) -> Int {\n"
+           "  return match o {\n"
+           "    Some(n) => {\n"
+           "      var r = match o { Some(m) => { var t = m * 2  t + 1 }, None => 0 }\n"
+           "      r + n\n"
+           "    },\n"
+           "    None => -1\n"
+           "  }\n"
+           "}\n")
+    g = _exec_python(src)["g"]
+    assert g(4) == 13   # inner: 4*2+1 = 9; outer: 9 + 4
+    assert g(None) == -1
+
+
+def test_let_only_block_arm_still_executes():
+    # the pre-existing let-only subset is preserved exactly (no behaviour change)
+    assert _exec_python(BLOCK_ARM)["f"](3) == 7  # doubled 6, + 1
+
+
+def test_block_arm_return_is_refused_at_parse():
+    # `return` is not a block-arm statement: the arm yields its final expression,
+    # and lifting would silently change a `return`'s meaning.
     with pytest.raises(RevlError) as excinfo:
         compile_source("fn f(a: Int) -> Int "
-                       "{ return match a { _ => { var d = 2  d } } }\n")
-    assert "`var`" in str(excinfo.value)
+                       "{ return match a { _ => { return 2 } } }\n")
+    assert "`return`" in str(excinfo.value)
+
+
+def test_block_arm_must_end_in_an_expression():
+    # a block whose last statement is not an expression has no value to yield
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("fn f(a: Int) -> Int "
+                       "{ return match a { _ => { var d = 2  while (d < 1) { d = d + 1 } } } }\n")
+    assert "must end in an expression" in str(excinfo.value)
 
 
 
