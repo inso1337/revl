@@ -111,32 +111,42 @@ def test_lone_backslash_before_other_char_stays_literal():
     assert _one_string(r'"a\tb"') == "a\\tb"
 
 
-# --- item 183 does not disturb the §9 guard rail: legacy `$` forms in plain
-# strings are still rejected (item 203 — making a bare `$` fully literal — is
-# held back because it changes what `revl fmt --migrate` compiles against; see
-# `_lex_string` and tests/test_fmt.py).
+# --- item 203: a bare `$` in a plain string is ordinary literal text ---------
+#
+# In 2.0 interpolation lives ONLY in backtick templates (`` `${name}` ``), so
+# every `$`-shape inside a plain `"..."` is literal — including `$identifier`
+# (the WAT/target fragments the self-host tiers emit, e.g. `"call $int_add"`)
+# and `$$`. The old §9 guard that rejected `$name`/`$$` is gone; `revl fmt
+# --migrate` still rewrites a legacy `"$name"` to a template under its own gate
+# policy rather than relying on this lexer to reject it (see tests/test_fmt.py).
 
-def test_stale_interpolation_is_rejected_not_silently_literal():
-    import pytest
-    from revl import RevlError, compile_source
-
-    with pytest.raises(RevlError, match=r"`\$item` in a plain string"):
-        compile_source(
-            'service B { emission fn send(m: Str) }\n'
-            'component C requires b: B { emit b.send("cost for $item") }', "s.rvl")
-
-
-def test_stale_dollar_escape_is_rejected():
-    import pytest
-    from revl import RevlError, compile_source
-
-    with pytest.raises(RevlError, match=r"`\$\$` in a plain string"):
-        compile_source(
-            'service B { emission fn send(m: Str) }\n'
-            'component C requires b: B { emit b.send("5$$ off") }', "s.rvl")
+def test_dollar_identifier_in_plain_string_is_literal():
+    # the item-203 headline case: a WAT/target fragment must lex, not raise.
+    tokens = lex('"call $int_add"', "<test>")
+    assert tokens[0].kind == "string"
+    assert tokens[0].value == "call $int_add"
 
 
-def test_non_legacy_dollars_stay_legal():
+def test_bare_dollar_x_is_literal():
+    assert _one_string('"$x"') == "$x"
+
+
+def test_double_dollar_is_two_literal_dollars():
+    # 1.x read `$$` as one escaped dollar; 2.0 has no escape, so it is literal.
+    assert _one_string('"5$$ off"') == "5$$ off"
+
+
+def test_former_legacy_interpolation_now_lexes_as_literal():
+    # `"cost for $item"` used to be REJECTED (1.x interpolation); it is now a
+    # plain literal that compiles cleanly.
+    from revl import compile_source
+
+    compile_source(
+        'service B { emission fn send(m: Str) }\n'
+        'component C requires b: B { emit b.send("cost for $item") }', "s.rvl")
+
+
+def test_non_ident_dollar_stays_legal():
     from revl import compile_source
 
     compile_source(

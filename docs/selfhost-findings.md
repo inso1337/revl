@@ -1125,6 +1125,59 @@ compare; the `fn`-kind await path is deferred with the component dialect), so th
 differential oracle stays the arbiter rather than "fixing" a divergence the
 reference does not have.
 
+## `selfhost/lower.rvl::lower_to_ir` — the `functions` + `types` sections (item 232)
+
+Item 227 produced the STRUCTURAL IR surface (services, component headers, the
+simple component body). Item 232 adds the module-function spine: the `functions`
+section (every `fn` with its full lowered body) and the `types` section (record/
+variant declarations). Both are byte-identical to `src/revl/lower.py` across the
+whole emit_py/emit_rust corpus, and the function corpus is emitter-ready end to
+end (the reference python emitter renders the native IR to the same bytes as the
+reference IR for every function document).
+
+### The type annotations are the whole difficulty; the AST re-read is free
+`lower_to_ir` re-reads each body straight from the shared parser's `Expr` AST
+(`expr_at`), so the node SHAPES (`bin`/`un`/`builtin`/`call`/`field`/`index`/
+`record`/`list`/`arrow`/`match`/`interp`/`optcall`, and the `let`/`assign`/`if`/
+`while`/`for`/`return` steps) fall out of a direct structural walk. What the IR
+also carries — and 227 deferred for exactly this reason — is the checker's TYPE
+information: the `operands` tag on `+ - * / %` (and unary `-`), the `recv` tag on
+`to_int`, match-arm `payload_type`, and an arrow's resolved `param_types`/
+`returns`. Reproducing it needed a projection of `infer_ast` (`binop_ty` +
+`builtin_ret` + a structural-record field lookup) threaded through a per-body
+type environment. The projection is deliberately partial: it only has to
+ANNOTATE, never diagnose (`admit_src` already rejected the real mismatches), so a
+call result or an opaque host receiver types as unknown and simply omits the
+annotation — which is exactly what the reference does when its own inference is
+undetermined (`infer_ast(..., None)`). The sharpest witness is `divmod`: `mod` is
+in the lowering's builtin table but NOT the checker's signature table, so `a.mod(b)`
+lowers to a `builtin` node yet types as unknown — and the reference IR drops the
+`operands` tag on every later `+` that reaches it. The port matches that byte for
+byte.
+
+### Record-update is read at the token level (shared-parser gap)
+`selfhost/parser.rvl`'s expression grammar has no record-update production
+(`p_inits` reads only `field: expr`), so `{ r | x = b }` returns `Bad`. Rather
+than change another agent's parser, `lower_to_ir` recognises the form at the
+token level (a depth-0 `|` inside a brace block is unambiguous — a template's `|`
+lives inside the flattened `template` token and `||` is its own token) and hand-
+builds the `record_update` node. This is the one fn-body form the AST cannot
+carry; everything else routes through `expr_at`.
+
+### Deferred, and why (reported, not worked around)
+- **The `externs` section.** An extern's `bodies.{py,ts,...}` is the VERBATIM
+  `@py { ... }` block, dedented. Reconstructing it byte-exact needs the raw
+  source SLICE of the block (the reference reads it and runs stdlib `dedent`),
+  but the token stream carries only `line`, not source offsets, so the exact
+  whitespace/indentation cannot be recovered from tokens. A source-offset on the
+  lexer's tokens (lexer.rvl, another slice's file) would unblock it.
+- **The typed COMPONENT/method expression body.** `ir_body` is still 227's
+  simple slice (effect/undo/provide over required-service calls + literals). The
+  full typed spine there (config reads, match/ADT, saga `emit … compensate`,
+  timers, spawn) is the remaining heavy piece; the module-fn `infer`/`lir_expr`
+  built here is the reusable core for it, but the component dialect adds the
+  `req`/`config`/`host`/`spawn` node kinds and the emission-gated step lowering
+  on top.
 ## `selfhost/emit_java.rvl` — slice 4: realm placements (isolate/intercept) (item 235)
 
 Extended the modern-component path to the `isolate`/`intercept` REALM-placement
@@ -1329,3 +1382,52 @@ binding or parameter, so the ported `let acquire = …` / `let service = …` / 
 that mirrors reference identifier names hits it once per keyword-named local; it is
 the same family as the item-203 `$ident` papercut — a name the reference uses freely
 that the revl surface forbids. (Not a bug; logged as porting friction.)
+
+## ts Path B slice 7 — the v1/v2 `_emit_v1` DISPATCH path (`emit_ts.rvl`, item 240)
+
+Item 234 flagged that "a component using only isolate/intercept compiles to irv2,
+which the port doesn't mirror" and kept its realm fixtures on the v3 path by adding
+a trivial top-level 2.0 `fn`. Slice 7 chased that flag down and found the mirror
+ALREADY HOLDS byte-for-byte, with NO emitter change: `emit_src` is
+version-agnostic, and for a component-only document `_emit_v1` and `_emit_v3` emit
+the identical byte stream (same header — a v1/v2 doc can carry no test, so no
+`vitest`/lifecycle branch fires; same `_revl_helpers`; same service interfaces —
+`_ts_type`'s `known_types` default is `frozenset()`, exactly what `_emit_v3` passes
+when `types` is empty; same `_context_augmentation`; same per-`_component` object).
+Three v1/v2-dispatch fixtures now pin it: `v1_component_body.rvl` (irv1: config +
+effect/undo + emit/compensate + provide-method ternary), `v2_isolate_only.rvl` and
+`v2_intercept_only.rvl` (irv2, the item-234 case with the trivial `fn` removed).
+All three == `backends/typescript/emit.py` to the last byte.
+
+### Finding (NOT a bug — a verification win): the version dispatch was a phantom gap
+The scoped hazard was that `_emit_v1` might diverge from the version-agnostic
+`emit_src` — a header conditional, a `known_types`-flavored signature, an
+ordering. None materialized: `_emit_v1` is a proper byte-subset of the
+`_emit_v3` assembly for a component-only input. The only real v1/v2 surface that
+DOES diverge is a ROUTED require (item 167), which also lowers to irv2 but needs
+machinery `emit_src` does not emit — so the "v1/v2 path" deferral was really a
+"routed-requires" deferral wearing the version label. Recording it so a later
+slice does not re-audit the whole dispatch when only the router is missing.
+
+### Finding (item 203-adjacent, blocks routed-requires): `_TS_ROUTER_SRC` is a `${…}`/backtick literal that cannot be embedded byte-exact
+Routed-requires is the clean remaining v2 sub-slice, but its runtime realization
+`_TS_ROUTER_SRC` is ~60 lines of verbatim TypeScript that itself contains JS
+template literals — `` `revl: router for ${JSON.stringify(key)} …` `` — i.e. both
+backticks AND `${…}`. In revl a backtick template interpolates `${…}`, and a plain
+string rejects a bare `$name` as would-be 1.x interpolation (item 203, logged
+thrice on the wasm slice). So there is no literal form that reproduces this blob
+byte-for-byte: a backtick template would try to evaluate its inner `${…}`, and a
+plain string trips the 1.x guard on the `$` in `${…}`/`$JSON`. A verbatim/raw
+string form (an `r"…"` with no interpolation and no 1.x check, or sourcing the blob
+through an `@py`-returned constant the way `newline()`/`template_text` already
+bridge host text) would unblock it. Symptom/repro: pasting the router source into
+an `.rvl` string, either flavor, fails to round-trip. Deferred, not fixed here.
+
+### Ergonomics (items 189/195): a zero-code slice — no kit gap, no threading tax
+This slice added no emitter logic (only fixtures + comments), so it surfaced no new
+item-189 kit gap and no item-195 state-threading friction. It is a small data
+point FOR the port's design: because `emit_src` threads its context as plain
+arguments and keys emission off feature presence (never off an `ir_version`
+branch), a whole reference DISPATCH arm was covered for free. The reference's
+`emit()` needs an explicit `if version in (1, 2)` fork; the port did not, and was
+byte-identical anyway. (Do NOT change the reference — the fork is its right shape.)

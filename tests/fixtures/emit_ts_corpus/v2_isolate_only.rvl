@@ -1,0 +1,15 @@
+// The v2 DISPATCH path (item 240, closing item 234's flag): a component using
+// ONLY a realm placement — `isolate <key> in realm("…")` — and no v3 feature
+// lowers to ir_version 2 (isolate/intercept/routes bump v2, not v3), so `emit()`
+// routes it through `_emit_v1`, NOT `_emit_v3`. Item 234 kept its realm fixtures
+// off this path by adding a trivial top-level 2.0 `fn` (forcing v3); this fixture
+// deliberately omits that `fn` so the isolate metadata (`isolate: {…},` after the
+// apply method) is verified against the v1 emitter. The self-hosted `emit_src` is
+// version-agnostic and must stay byte-identical to the reference v2 emission.
+service Db { fn q() -> Int }
+service Api { fn run() -> Int }
+
+component App requires db: Db provides api: Api {
+  isolate db in realm("primary")
+  provide api { fn run() = 0 }
+}

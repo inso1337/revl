@@ -76,16 +76,15 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on TS-emitter slices, deliberately OUT of these slices:
-//   * the whole v1/v2 `_emit_v1`-vs-`_emit_v3` DISPATCH (emit_src assembles the
-//     v3 shape only; it matches `_emit_v1` for a component-only doc because the
-//     two share `_component`), and canonical;
+//   * the canonical ABI;
 //   * the component-body `timer` step; and the component-dialect expr kinds
 //     `spawn`/`instance-get` (unexercised);
 //   * the VARIANT half of `_emit_ts_types` (the `export type … =` union + its
 //     constructor functions) — only records are emitted; a variant type would
 //     emit a marker and diverge, so no fixture declares one;
-//   * in-file `test`/`fault_test`/`lifecycle test` emission, spawn/instances,
-//     realm placements (isolate/intercept/routes + the router), the canonical ABI;
+//   * in-file `test`/`fault_test`/`lifecycle test` emission; ROUTED requires
+//     (`realms(...)` + the `revlRouter` helper, its `realmLabel` import, and the
+//     routed-`req` proxy — see SLICE 7); the canonical ABI;
 //   * the COMPONENT-dialect async call surface: an async callable reached through
 //     the `fn` expr kind, or from an async PROVIDE method (its `async_names` are
 //     threaded EMPTY — byte-safe, since no covered component body names an async
@@ -107,6 +106,28 @@
 //     an assert temp `$revl_l`/`$revl_r` and renders via `revlShow` — implementable
 //     but not exercised by the function corpus, so deferred to keep the slice
 //     byte-VERIFIED rather than byte-guessed.
+//
+// ============================================================ SLICE 7 (item 240)
+// The v1/v2 DISPATCH path (`emit()` -> `_emit_v1`), pinned byte-exact with NO
+// emitter change. A component-only document with no v3 feature (no declared
+// type/fn/extern/test, no `if`/`fail`/setup-effect body step, no
+// builtin/adt/spawn/async-op) lowers to ir_version 1; a component carrying ONLY a
+// realm placement (`isolate`) or `intercept` metadata lowers to ir_version 2.
+// `emit_src` is version-agnostic — it assembles the same shape `_emit_v1` does for
+// a component-only doc (header, `_revl_helpers`, service interfaces,
+// `_context_augmentation`, each `_component` plugin object) — so its output is
+// byte-identical to the reference's v1/v2 emission. This CLOSES item 234's flag
+// ("compiles to irv2, which the port doesn't mirror"): the mirror already holds,
+// now verified by v1/v2-dispatch corpus fixtures rather than crutched off v3 by a
+// trivial top-level `fn`.
+//   * STILL DEFERRED — ROUTED requires (item 167): a routed require
+//     (`requires <k> in realms(...) strategy(...)`) also lowers to ir_version 2 but
+//     additionally needs the `_TS_ROUTER_SRC` runtime literal, the `realmLabel`
+//     runtime import, the `inject_keys = requires − routes` gate, the per-key
+//     `revlRouter` proxy built in `apply()`, and the routed-`req` read
+//     (`_revl_route_<key>`). The router literal embeds backtick templates and
+//     `${…}` the revl lexer reserves, so it is kept out to stay byte-VERIFIED; a
+//     routed v2 doc must NOT enter the corpus until it lands.
 //
 // ------------------------------------------------------ the erased-IR boundary
 // Navigation reads the IR in PURE revl through stdlib/value.rvl (item 180): the
@@ -1325,11 +1346,11 @@ fn emit_ts_types(types: Any) -> List[Str] {
 //
 // Slice 3 (item 208) adds the COMPOSITE signature types (List/Opt/Map/Result/
 // fn-type + the declared-record `known_types` path in `ts_type_v1`).
+// The v1/v2 `_emit_v1` dispatch is COVERED byte-exact (slice 7, item 240) —
+// `emit_src` is version-agnostic, so a component-only v1/v2 doc emits identically.
 // STILL DEFERRED (a divergence, not a bug, if fed one — excluded from the
-// corpus): async coloring (async service ops -> `Promise<…>` / `async` methods /
-// awaited call sites / async generators), spawn/instances, realm placements
-// (isolate/intercept/routes + the router), the v1/v2 `_emit_v1` path, canonical;
-// and the component-body `await`/`timer` steps.
+// corpus): ROUTED requires (`realms(...)` + the router + `realmLabel` + the
+// routed-`req` proxy), the canonical ABI, and the component-body `timer` step.
 
 // `TYPE_MAP` for a CONFIG field (`_config_interface`): the six scalar names, and
 // — unlike the service renderer — an unknown name falls back to `any`.
@@ -2044,7 +2065,8 @@ fn uses_spawn(n: Any) -> Bool {
 // `_runtime_imports`: the `import { … } from '../runtime.ts'` line. `spawn` is
 // added only when a spawn node is present. (routed-require `realmLabel` and the
 // lifecycle-test drivers are deferred — no covered document exercises them, so
-// the list is byte-identical for the spawn/realm-placement subset.)
+// the list is byte-identical for the spawn/realm-placement AND v1/v2-dispatch
+// subsets. A routed require would need `realmLabel` here, hence it stays out.)
 fn runtime_imports(ir: Any) -> Str {
   var names = ["host"]
   if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
@@ -2138,8 +2160,12 @@ fn revl_helpers(ir: Any) -> List[Str] {
   return out
 }
 
-// The document assembly, mirroring `emit()` -> `_emit_v3` for a FUNCTION-ONLY
-// document (no types/externs/tests/components in this slice).
+// The document assembly. Mirrors `emit()` -> `_emit_v3` for a function/component
+// document; being version-AGNOSTIC, it also mirrors `emit()` -> `_emit_v1` for a
+// v1/v2 component-only document byte-for-byte (slice 7, item 240) — the header,
+// helpers, service interfaces, context augmentation, and per-component plugin
+// object are the exact subset `_emit_v1` emits. (The v1/v2 dispatch has no
+// declared type/extern/fn/test, so those branches below emit nothing for it.)
 pub fn emit_src(ir: Any) -> Str {
   var out = []
   out = out.push("// Generated by revl backends/typescript/emit.py — do not edit.")

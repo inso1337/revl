@@ -1,6 +1,6 @@
 # findings — harness (agent/harness-dogfood)
 
-The first product written in revl: a deepseek-harness-like agent harness
+The lighthouse workload: a deepseek-harness-like agent harness
 (model provider, tool registry, session store, agent loop) as a revl
 composition, built to run on all six tiers. The harness repo lives at
 `~/Projects/revl-harness` (separate from the language repo); this file is
@@ -103,7 +103,7 @@ item this feeds is **77**.
 - **`no_residue` asserted in-language and it passes.** The lifecycle tests
   unload MockModel → Toolbox → SessionLedger → Agent and prove the runtime
   holds nothing — zero teardown code written; LIFO + inverse replay is
-  derived. The paradigm's headline claim, working on the first product.
+  derived. The paradigm's headline claim, working on the lighthouse workload.
 - **Emission analysis caught a design lie before it shipped.** Declaring
   `AgentLoop.step` a plain `fn` while its body reached `model.complete`
   refused with "declared plain, but this implementation reaches

@@ -333,19 +333,19 @@ def _lex_string(source: str, i: int, line: int, filename: str):
     backslash and an `n`, not a newline — matching the no-escape semantics of
     the triple-quoted form (docs/strings.md).
 
-    `$` is an ordinary literal character, except that the legacy 1.x forms
-    `$identifier` and `$$` are still rejected with a migrate hint: letting them
-    silently become a literal is the uncanny-valley trap syntax-2.0 warns about
-    (§9), and `revl fmt --migrate` relies on the rejection to admit a 1.x file
-    as newly admissible (see tests/test_fmt.py). Item 203 (making a bare `$`
-    fully literal so `"call $int_add"` lexes) is intentionally NOT done here:
-    it changes what `--migrate` compiles against, so it must land together with
-    that gate's policy fix rather than as a lexer-only change.
+    `$` is an ordinary literal character — including the shapes `$identifier`
+    and `$$` (item 203). In 2.0 interpolation lives ONLY in backtick templates
+    (`` `${name}` ``, `_lex_template`), so a bare `$` in a plain `"..."` carries
+    no special meaning and `"call $int_add"` / `"$x"` lex as literal text. The
+    legacy 1.x reading (`$name` = interpolation, `$$` = an escaped dollar) is
+    gone; `revl fmt --migrate` still rewrites a legacy `"$name"` to a template,
+    now admitted by the migrate-specific gate policy (a deliberate semantic
+    upgrade rather than an equivalence-preserving reformat) instead of relying
+    on this lexer to reject the input — see `formatter.ir_equivalent`
+    (token_preserving=False), `revl.fmt`, and tests/test_fmt.py.
 
     Returns (index-after-closing-quote, text).
     """
-    import re as _re
-
     buf: list[str] = []
     n = len(source)
     while i < n:
@@ -358,22 +358,7 @@ def _lex_string(source: str, i: int, line: int, filename: str):
             i += 2
             continue
         if c == '"':
-            text = "".join(buf)
-            # both legacy forms had a 1.x meaning that a 2.0 plain string
-            # silently changes: `$ident` was interpolation, `$$` was the
-            # escape for one literal dollar
-            stale = _re.search(r"\$\$|\$[A-Za-z_][A-Za-z0-9_]*", text)
-            if stale:
-                raise RevlError(
-                    filename, line,
-                    f"`{stale.group(0)}` in a plain string — this was "
-                    f"{'an escaped dollar' if stale.group(0) == '$$' else 'interpolation'} "
-                    f"in 1.x and would silently change meaning",
-                    hint="run `revl fmt --migrate` to convert to a template literal, "
-                         "or write a backtick template: interpolation is `${name}`, "
-                         "and a literal dollar needs no escape there (§9)",
-                )
-            return i + 1, text
+            return i + 1, "".join(buf)
         if c == "\n":
             raise RevlError(filename, line, "unterminated string literal")
         buf.append(c)

@@ -782,6 +782,35 @@ class Parser:
             return self.next().value
         return self.expect("ident", what=what).value
 
+    # -- item 237: cordis-domain nouns as record FIELD names
+
+    # A record FIELD position — a record-literal key (`{k: e}`), a functional
+    # record-update field (`{base | k = e}`), or a record-type field
+    # (`type T = {k: τ}`) — always has its name immediately followed by `:` or
+    # `=`. None of the cordis-domain nouns can head a clause in that spot, so on
+    # top of the item-158 five (`realm`/`intercept`/`isolate`/`in`/`with`, which
+    # already relax via `_name`) the three component-grammar heads
+    # `component`/`config`/`requires` (the nouns self-host dogfood item 234 hit)
+    # also relax to ordinary field names here. They stay genuine keywords
+    # everywhere they can LEAD a form — `component`/`config` as decl/body heads,
+    # `requires` as a component clause head — because none of those are field
+    # positions and none reach this helper. (Parameter position keeps refusing
+    # them: see item 158 and `_name`.)
+    _RECORD_KEY_NOUNS = _CONTEXTUAL_NOUNS | frozenset(
+        {"component", "config", "requires"})
+
+    def _record_key_name(self, what: str | None = None) -> str:
+        """A NAME in record-FIELD position, broadening `_name` (item 158) with
+        the three component-grammar nouns (item 237). A field name is always
+        followed by `:` or `=`, so no keyword reading is grammatically possible.
+        Any other reserved keyword (`type`, `fn`, …) still falls through to
+        `expect("ident", …)` with its diagnostic byte-for-byte unchanged."""
+        tok = self.peek()
+        if tok.kind == "ident" or (
+                tok.kind == "kw" and tok.value in self._RECORD_KEY_NOUNS):
+            return self.next().value
+        return self.expect("ident", what=what).value
+
     # -- productions
 
     def parse(self) -> Program:
@@ -1660,7 +1689,7 @@ class Parser:
         record: dict = {}
         while not self.at("}"):
             fline = self.peek().line
-            field_name = self._name()
+            field_name = self._record_key_name()
             if field_name in record:
                 raise self.err(fline, f"duplicate metadata field `{field_name}`")
             self.expect(":")
@@ -1699,7 +1728,7 @@ class Parser:
             fields: list[RecordField] = []
             while not self.at("}"):
                 fline = self.peek().line
-                fname = self._name()
+                fname = self._record_key_name()
                 self.expect(":")
                 ftype = self.type_()
                 fields.append(RecordField(fname, ftype, fline))
@@ -2414,13 +2443,13 @@ class Parser:
                 if optional:
                     raise self._optional_chain_error()
                 self.next()
-                node = ExprField(node, self._name(), node.line)
+                node = ExprField(node, self._record_key_name(), node.line)
             elif self.at("?."):
                 # `expr?.name` / `expr?.name(args)`: short-circuit on Opt-None.
                 # Modelled as an ExprOptField / ExprOptCall so lowering can
                 # emit a conditional and typing can flow Opt into inner types.
                 self.next()
-                name = self._name()
+                name = self._record_key_name()
                 if self.at("("):
                     self.next()
                     args = []
@@ -2665,7 +2694,7 @@ class Parser:
                 self.expect("|")
                 updates = []
                 while not self.at("}"):
-                    fname = self._name()
+                    fname = self._record_key_name()
                     self.expect("=")
                     updates.append((fname, self.pure_expr()))
                     if self.at(","):
@@ -2675,7 +2704,7 @@ class Parser:
             self.next()
             fields = []
             while not self.at("}"):
-                fname = self._name()
+                fname = self._record_key_name()
                 self.expect(":")
                 fexpr = self.pure_expr()
                 fields.append((fname, fexpr))
