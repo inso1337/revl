@@ -1,0 +1,16 @@
+// v3 typed-core: user record declarations, record literals (fields given out of
+// declaration order — the ctor call must reorder to declaration order), field
+// access, records nested in another record and in generic type positions.
+type Point = { x: Int, y: Int }
+type Segment = { from: Point, to: Point }
+type Person = { name: Str, age: Int, active: Bool }
+
+fn mkpoint(a: Int, b: Int) -> Point { return { y: b, x: a } }
+fn origin() -> Point { return { x: 0, y: 0 } }
+fn getx(p: Point) -> Int { return p.x }
+fn shift(p: Point, d: Int) -> Point { return { x: p.x + d, y: p.y - d } }
+fn seg(a: Point, b: Point) -> Segment { return { from: a, to: b } }
+fn startx(s: Segment) -> Int { return s.from.x }
+fn mkperson(n: Str, a: Int) -> Person { return { name: n, age: a, active: true } }
+fn older(p: Person) -> Bool { return p.age > 18 }
+fn corners(a: Point, b: Point) -> List[Point] { return [a, b] }
