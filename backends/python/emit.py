@@ -234,12 +234,32 @@ def _py_async_arrow(body: Any, params: str, render, requires=None,
     return f"_revl_as_async(lambda {params}: {rendered_body})"
 
 
+def _mangle(name: str) -> str:
+    """Rename a syntactically-valid identifier that collides with a *Python*
+    reserved word, so a valid revl identifier that happens to be a Python
+    keyword (`from`, `class`, `lambda`, …) emits and RUNS instead of crashing
+    at emit (roadmap item 165).
+
+    The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` (and
+    `backends/java/emit.py::_fn_name`) already use for revl-keyword bindings:
+    append `_` until the name is no longer a keyword. It is a pure function of
+    the name, so the declaration site and every use site agree without
+    threading a table around — the single property the mangling must preserve.
+    A non-keyword name is returned byte-for-byte unchanged, so no existing
+    program (none of which can currently name a Python keyword — those crash
+    today) changes its emitted output. This is TARGET keywords only; the host
+    roots (`Map`/`Pool`/`Job`) are not keywords and stay guarded in `_ident`."""
+    while keyword.iskeyword(name) or keyword.issoftkeyword(name):
+        name += "_"
+    return name
+
+
 def _ident(name: Any, what: str) -> str:
-    if not isinstance(name, str) or not name.isidentifier() or keyword.iskeyword(name):
+    if not isinstance(name, str) or not name.isidentifier():
         raise EmitError(f"{what} {name!r} is not a usable Python identifier")
     if name in _RESERVED or name.startswith("_"):
         raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
-    return name
+    return _mangle(name)
 
 
 def _snake(name: str) -> str:
@@ -671,7 +691,7 @@ class _ComponentEmitter:
         if kind == "list":
             return "[" + ", ".join(self._expr(item, where) for item in expr.get("items") or []) + "]"
         if kind == "arrow":
-            params = ", ".join(expr.get("params") or [])
+            params = ", ".join(_mangle(p) for p in expr.get("params") or [])
             prev_arrow = self._in_arrow
             self._in_arrow = True  # item 141: suppress the await-seed in the body
             try:
@@ -1149,7 +1169,12 @@ def _emit_types(types: dict) -> "_Lines":
             if not spec["fields"]:
                 out.add(1, "pass")
             for field, ftype in spec["fields"].items():
-                out.add(1, f"{field}: {_ann(ftype)}")
+                # the field is a dataclass attribute name here (a real Python
+                # identifier), so a keyword-named field is renamed; record
+                # VALUES are dicts read by string key through `_revl_field`, so
+                # this annotation-only rename never has to agree with a runtime
+                # attribute access (item 165)
+                out.add(1, f"{_mangle(field)}: {_ann(ftype)}")
             emitted.add(name)
         else:
             out.add(0, f"class {name}:")
@@ -1297,7 +1322,11 @@ def _expr(node: dict) -> str:
             return "None"
         if name == "Some":
             return "(lambda _v: _v)"  # Opt is host-None/value: Some is identity
-        return name
+        # A bare var reference may be a host root (`Map`) or a user local; only
+        # the latter can be a Python keyword, and `_mangle` leaves the roots
+        # (non-keywords) untouched, so this stays the single consistent rename
+        # site for a keyword-named local's *use* (item 165).
+        return _mangle(name)
     if kind == "bin":
         if node["op"] == "??":
             lhs = _expr(node["left"])
@@ -1387,9 +1416,10 @@ def _expr(node: dict) -> str:
         # `Map.empty()` (docs/stdlib-2.0.md §Map)
         return "{}"
     if kind == "arrow":
-        params = list(node["params"])
+        params = [_mangle(p) for p in node["params"]]
         captures = node.get("captures") or []
-        lambda_params = ", ".join(params + [f"{name}={name}" for name in captures])
+        lambda_params = ", ".join(
+            params + [f"{_mangle(name)}={_mangle(name)}" for name in captures])
         if node.get("async"):
             # a pure-fn body has no req keys, so an async arrow here reaches a
             # coroutine only through a colored fn / async local (rules 1-2).
@@ -1432,9 +1462,11 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
     out.add(indent, f"{tmp} = {_expr(node['value'])}")
     if node["pattern"] == "record":
         for name in node["names"]:
-            out.add(indent, f"{name} = {tmp}.{name}")
+            # the binding is a fresh local, so mangle its keyword collisions;
+            # the attribute-read spelling is preserved byte-for-byte
+            out.add(indent, f"{_mangle(name)} = {tmp}.{name}")
     elif node["pattern"] == "list":
-        names = node["names"]
+        names = [_mangle(n) for n in node["names"]]
         rest = node.get("rest")
         if rest is None:
             if len(names) == 1:
@@ -1442,7 +1474,7 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
             else:
                 out.add(indent, f"{', '.join(names)} = {tmp}")
         else:
-            out.add(indent, f"{', '.join(names)}, *{rest} = {tmp}")
+            out.add(indent, f"{', '.join(names)}, *{_mangle(rest)} = {tmp}")
     else:
         raise EmitError(f"unsupported let_pattern kind {node['pattern']!r}")
 
@@ -1450,7 +1482,7 @@ def _let_pattern_stmt(node: dict, out: "_Lines", indent: int) -> None:
 def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
     step = node["step"]
     if step in ("let", "assign"):
-        out.add(indent, f"{node['name']} = {_expr(node['value'])}")
+        out.add(indent, f"{_mangle(node['name'])} = {_expr(node['value'])}")
     elif step == "let_pattern":
         _let_pattern_stmt(node, out, indent)
     elif step == "return":
@@ -1474,7 +1506,7 @@ def _fn_stmt(node: dict, out: "_Lines", indent: int) -> None:
             for s in node["body"]:
                 _fn_stmt(s, out, indent + 1)
     elif step == "for":
-        out.add(indent, f"for {node['bind']} in {_expr(node['iterable'])}:")
+        out.add(indent, f"for {_mangle(node['bind'])} in {_expr(node['iterable'])}:")
         if not node["body"]:
             out.add(indent + 1, "pass")
         else:

@@ -1,0 +1,146 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "Box": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "class": "Str",
+        "default": "Str"
+      }
+    }
+  },
+  "functions": [
+    {
+      "name": "probe",
+      "params": [
+        {
+          "name": "class",
+          "type": "Str"
+        },
+        {
+          "name": "new",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "let",
+          "name": "function",
+          "value": {
+            "kind": "var",
+            "name": "class"
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "var",
+            "name": "function"
+          }
+        }
+      ]
+    },
+    {
+      "name": "unbox",
+      "params": [
+        {
+          "name": "b",
+          "type": "Box"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "field",
+            "target": {
+              "kind": "var",
+              "name": "b"
+            },
+            "name": "class"
+          }
+        }
+      ]
+    },
+    {
+      "name": "make",
+      "params": [
+        {
+          "name": "a",
+          "type": "Str"
+        }
+      ],
+      "returns": "Box",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "record",
+            "fields": [
+              [
+                "class",
+                {
+                  "kind": "var",
+                  "name": "a"
+                }
+              ],
+              [
+                "default",
+                {
+                  "kind": "var",
+                  "name": "a"
+                }
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "go",
+      "params": [
+        {
+          "name": "x",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": true,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "probe"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "x"
+              },
+              {
+                "kind": "var",
+                "name": "x"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

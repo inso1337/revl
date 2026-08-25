@@ -41,6 +41,8 @@ export function emitFixtures(): void {
   emitFixture('spawn.ir.json', 'spawn.ts')
   emitFixture('instance_get.ir.json', 'instance_get.ts')
   emitFixture('fr1_loop.ir.json', 'fr1_loop.ts')
+  // item 165: identifiers that are JS/TS reserved words, renamed uniformly
+  emitFixture('reserved_words.ir.json', 'reserved_words.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

@@ -323,12 +323,31 @@ def _split_generic(inner: str) -> list[str]:
     return parts
 
 
+def _mangle(name: str) -> str:
+    """Rename a syntactically-valid identifier that collides with a *Rust*
+    reserved word (`fn`, `impl`, `match`, `struct`, `move`, …) so a valid revl
+    identifier that happens to be a Rust keyword emits and RUNS instead of
+    crashing at emit (roadmap item 165).
+
+    The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` (and
+    `backends/java/emit.py::_fn_name`) already use for revl keywords: append `_`
+    until the name is free. It is a pure function of the name, so the
+    declaration site and every use site agree without a table. A non-reserved
+    name is returned unchanged, so no existing program — none of which can name
+    a Rust keyword, those crash today — changes its emitted output. This is
+    TARGET keywords only; the host roots take the `Pool::`/`Map::` path and the
+    emitter scaffolding stays rejected below."""
+    while name in _RUST_RESERVED:
+        name += "_"
+    return name
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    if name in _RUST_RESERVED or name in _EMITTER_RESERVED:
+    if name in _EMITTER_RESERVED:
         raise EmitError(f"{role} identifier collides with Rust/reserved name: {name!r}")
-    return name
+    return _mangle(name)
 
 
 def _snake(name: str) -> str:
@@ -2315,15 +2334,18 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) 
 
     if kind == "var":
         name = node.get("name")
-        _ident(name, "name")
+        # a keyword-named local/case is renamed at its *use* the same way
+        # `_ident` renamed it at its declaration (item 165); the built-in
+        # constructors (`Ok`/`Some`/…) are native Rust and never keywords
+        mangled = _ident(name, "name")
         if name in ctx.case_adt:
             adt = ctx.case_adt.get(name)
             if adt is not None:
-                return f"{adt}::{name}"
+                return f"{adt}::{mangled}"
             raise EmitError(f"ambiguous ADT case name {name!r}")
         if name in _V3_BUILTIN_CONSTRUCTORS:
             return name
-        return name
+        return mangled
 
     if kind == "req":
         # component dialect: a required capability, possibly a `self.`-capture.

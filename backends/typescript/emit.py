@@ -203,16 +203,35 @@ EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
 EXPR_REFUSED: frozenset[str] = frozenset({"hole"})
 
 
+def _mangle(name: str) -> str:
+    """Rename a syntactically-valid identifier that collides with a *JS/TS*
+    reserved word, so a valid revl identifier that happens to be a JS keyword
+    (`class`, `function`, `new`, …) emits and RUNS instead of crashing at emit
+    (roadmap item 165).
+
+    The scheme is the A3 append-`_` rename `src/revl/lower.py::_safe_name` and
+    `backends/java/emit.py::_fn_name` already use for revl-keyword bindings:
+    append `_` until the name is free. It is a pure function of the name, so the
+    declaration site and every use site (and the `_Scope.locals` membership
+    checks, which store the mangled form) agree without threading a table
+    around. A non-reserved name is returned unchanged, so no existing program —
+    none of which can currently name a JS keyword, those crash today — changes
+    its emitted output. This is TARGET keywords only; the host roots stay
+    routed through `host.<name>` in `_v3_var` and the emitter scaffolding stays
+    rejected below."""
+    while name in JS_RESERVED:
+        name += "_"
+    return name
+
+
 def _ident(name: object, role: str) -> str:
     if not isinstance(name, str) or not IDENT_RE.match(name):
         raise EmitError(f"invalid {role} identifier: {name!r}")
-    if name in JS_RESERVED:
-        raise EmitError(f"{role} identifier is a reserved word: {name!r}")
     if name in EMITTER_RESERVED:
         raise EmitError(
             f"{role} identifier collides with emitter scaffolding: {name!r}"
         )
-    return name
+    return _mangle(name)
 
 
 def _string(value: str) -> str:
@@ -1359,16 +1378,19 @@ class _Ctx:
 
 def _v3_var(node: dict, ctx: "_Ctx") -> str:
     name = node.get("name")
-    _ident(name, "name")
+    # a keyword-named local/function/case is renamed at its *use* the same way
+    # `_ident` renamed it at its declaration; the host roots take the
+    # `host.<name>` branch (their names are never keywords) (item 165)
+    mangled = _ident(name, "name")
     if name in ctx.function_names or name in ctx.extern_names or name in ctx.case_names:
-        return name
+        return mangled
     if name in _HOST_ROOTS:
         return f"host.{name}"
     if name == "None":
         return "undefined"
     if name in ("Some", "Ok", "Err"):
         return "((value) => value)"
-    return name
+    return mangled
 
 
 def _ts_builtin(method, target: str, args: list, arg_nodes: list, ctx: "_Ctx",
