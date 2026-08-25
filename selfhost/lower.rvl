@@ -3301,6 +3301,885 @@ fn ir_component(ts: List[Token], i: Int) -> IrCompR {
   return mk_ircompr(js, v3, v2)
 }
 
+// ================================================================ functions IR
+//
+// The `functions` section: each module `fn` lowered to its full typed body
+// (statements + the typed-expression tree), byte-identical to the reference
+// producer (`src/revl/lower.py::_lower_fns` + `_lower_pure_stmt`/
+// `_lower_pure_expr`). Unlike the admission walk, this re-reads the body from
+// the parser's Expr AST (`expr_at`) and threads a *type environment* so it can
+// reproduce the annotations the reference IR carries: the `operands` tag on
+// typed arithmetic, the `recv` tag on `to_int`, match-arm `payload_type`, and
+// the arrow's resolved `param_types`/`returns`. The inference here is the
+// projection of the checker's `infer_ast` onto the covered surface — enough to
+// annotate, never to diagnose (a definite mismatch was already refused by
+// `admit_src`). A form the shared parser cannot read (record-update `{ r | .. }`)
+// or a receiver the projection cannot type stops the body without corrupting
+// the JSON: the entry stays well-formed, it just is not byte-exact there.
+
+type LirFn   = { js: Str, i: Int }
+type StmtOne = { js: Str, env: List[Bind], muts: List[Str], i: Int }
+
+fn mk_one(js: Str, env: List[Bind], muts: List[Str], i: Int) -> StmtOne {
+  return { js: js, env: env, muts: muts, i: i }
+}
+
+// ---------------------------------------------------------------- type env
+
+fn tenv_get(env: List[Bind], n: Str) -> Str {
+  var i = env.length() - 1
+  while (i >= 0) {
+    if (env[i].name == n) { return env[i].ty }
+    i -= 1
+  }
+  return ""
+}
+
+fn tenv_put(env: List[Bind], n: Str, ty: Str) -> List[Bind] {
+  return env.push({ name: n, ty: ty })
+}
+
+// ---------------------------------------------------------------- type spellings
+
+fn ty_trim(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  while (a < b && s.charAt(a) == " ") { a += 1 }
+  while (b > a && s.charAt(b - 1) == " ") { b -= 1 }
+  return s.slice(a, b)
+}
+
+// Head of `Base[...]` -> "Base"; a bare or structural spelling is its own head.
+fn parse_head(t: Str) -> Str {
+  let b = t.indexOf("[")
+  if (b == 0 - 1) { return t }
+  return t.slice(0, b)
+}
+
+// Top-level (bracket-depth-0) comma split of a type argument list.
+fn split_top_commas(s: Str) -> List[Str] {
+  var out: List[Str] = []
+  var depth = 0
+  var cur = ""
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    if (c == "[") { depth += 1  cur = cur.concat(c) }
+    else { if (c == "]") { depth -= 1  cur = cur.concat(c) }
+    else { if (c == "," && depth == 0) { out = out.push(ty_trim(cur))  cur = "" }
+    else { cur = cur.concat(c) } } }
+    i += 1
+  }
+  return out.push(ty_trim(cur))
+}
+
+fn type_args(t: Str) -> List[Str] {
+  let b = t.indexOf("[")
+  if (b == 0 - 1) { return [] }
+  let inner = t.slice(b + 1, t.length() - 1)
+  if (inner == "") { return [] }
+  return split_top_commas(inner)
+}
+
+fn type_arg1(t: Str) -> Str {
+  let a = type_args(t)
+  if (a.length() == 0) { return "" }
+  return a[0]
+}
+
+fn is_numeric(t: Str) -> Bool {
+  return t == "Int" || t == "Int32" || t == "Float"
+}
+
+// A structural record type is `{k: T, ...}` (fields sorted); look one up.
+fn struct_field(t: Str, name: Str) -> Str {
+  if (t.length() < 2 || t.charAt(0) != "{") { return "" }
+  let parts = split_top_commas(t.slice(1, t.length() - 1))
+  var i = 0
+  while (i < parts.length()) {
+    let p = parts[i]
+    let ci = p.indexOf(":")
+    if (ci != 0 - 1 && ty_trim(p.slice(0, ci)) == name) {
+      return ty_trim(p.slice(ci + 1, p.length()))
+    }
+    i += 1
+  }
+  return ""
+}
+
+// (`sort_strs` is defined earlier in this file and reused here.)
+
+// ---------------------------------------------------------------- builtin surface
+
+// The stdlib method table (lower.py's `_BUILTIN_METHODS`): the set whose call
+// lowers to a `builtin` node rather than a plain `call`.
+fn is_builtin_method(m: Str) -> Bool {
+  return m == "length" || m == "push" || m == "slice" || m == "charAt"
+    || m == "charCodeAt" || m == "indexOf" || m == "concat" || m == "split"
+    || m == "join" || m == "repeat" || m == "startsWith" || m == "endsWith"
+    || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+    || m == "to_int" || m == "to_int32" || m == "checked_div_trunc"
+    || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
+    || m == "set" || m == "lookup" || m == "has" || m == "size" || m == "keys"
+    || m == "remove" || m == "to_str"
+}
+
+fn is_host_root(n: Str) -> Bool {
+  return n == "Map" || n == "Pool" || n == "Job"
+}
+
+// The stdlib method result type (the checker's `_BUILTIN_SIG` return, non-
+// raising). `mod` is deliberately absent from the signature table — it lowers
+// as a builtin but infers as unknown — mirroring lower.py exactly.
+fn builtin_ret(method: Str, recvTy: Str) -> Str {
+  if (method == "length") { return "Int" }
+  if (method == "push" || method == "slice" || method == "concat"
+      || method == "set" || method == "remove") { return recvTy }
+  if (method == "charAt") { return "Str" }
+  if (method == "charCodeAt") { return "Int" }
+  if (method == "indexOf") { return "Int" }
+  if (method == "split") { return "List[Str]" }
+  if (method == "join") { return "Str" }
+  if (method == "repeat") { return "Str" }
+  if (method == "startsWith" || method == "endsWith" || method == "has") { return "Bool" }
+  if (method == "div_trunc" || method == "div_floor" || method == "div_euclid") { return "Int" }
+  if (method == "to_int") {
+    if (recvTy == "Int32") { return "Int" }
+    if (parse_head(recvTy) == "Str") { return "Opt[Int]" }
+    return ""
+  }
+  if (method == "to_int32") { return "Int32" }
+  if (method == "to_str") { return "Str" }
+  if (method == "size") { return "Int" }
+  if (method == "keys") { return "List[Str]" }
+  if (method == "checked_div_trunc" || method == "checked_div_floor"
+      || method == "checked_div_euclid" || method == "checked_mod") {
+    return "Result[Int, Str]"
+  }
+  return ""
+}
+
+// ---------------------------------------------------------------- inference
+
+// `_binop_type` (non-raising): the checker's operator result type.
+fn binop_ty(op: Str, lt: Str, rt: Str) -> Str {
+  if (op == "==" || op == "!=" || op == "===" || op == "!==") { return "Bool" }
+  if (op == "<" || op == "<=" || op == ">" || op == ">=") { return "Bool" }
+  if (op == "&&" || op == "||") { return "Bool" }
+  if (op == "??") {
+    if (parse_head(lt) == "Opt") { let inner = type_arg1(lt)  return inner == "" ? rt : inner }
+    return lt == "" ? rt : lt
+  }
+  if (op == "+" && (lt == "Str" || rt == "Str")) {
+    return (lt == "Str" && rt == "Str") ? "Str" : ""
+  }
+  if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+    if (op == "/") {
+      if (is_numeric(lt) && is_numeric(rt)) { return "Float" }
+      return ""
+    }
+    if ((lt == "Int32" || rt == "Int32") && lt != rt && lt != "" && rt != "") { return "" }
+    if (op == "%" && (lt == "Int32" || rt == "Int32")) { return "" }
+    if (lt == "Float" || rt == "Float") { return "Float" }
+    if (lt == "Int32" && rt == "Int32") { return "Int32" }
+    if (lt == "Int" && rt == "Int") { return "Int" }
+    return ""
+  }
+  return ""
+}
+
+fn join_ty(a: Str, b: Str) -> Str {
+  if (a == b) { return a }
+  if (a == "") { return b }
+  if (b == "") { return a }
+  return ""
+}
+
+fn infer_field(t: Str, name: Str) -> Str {
+  if (name == "length") {
+    let h = parse_head(t)
+    if (h == "Str" || h == "Bytes" || h == "List") { return "Int" }
+  }
+  return struct_field(t, name)
+}
+
+fn infer_index(t: Str) -> Str {
+  let h = parse_head(t)
+  if (h == "List") { return type_arg1(t) }
+  if (h == "Str") { return "Str" }
+  return ""
+}
+
+fn infer_method(recv: Expr, method: Str, env: List[Bind]) -> Str {
+  let recvHostRoot = match recv { Var(n) => is_host_root(n), _ => false, }
+  if (recvHostRoot) { return "" }
+  if (!is_builtin_method(method)) { return "" }
+  return builtin_ret(method, infer(recv, env))
+}
+
+fn infer_callee(callee: Expr, env: List[Bind]) -> Str {
+  return match callee {
+    Field(f) => infer_method(f.target, f.name, env),
+    _ => "",
+  }
+}
+
+fn infer_record_ty(fields: List[InitN], env: List[Bind]) -> Str {
+  var names: List[Str] = []
+  var i = 0
+  while (i < fields.length()) { names = names.push(fields[i].name)  i += 1 }
+  let sorted = sort_strs(names)
+  var out = "{"
+  var j = 0
+  while (j < sorted.length()) {
+    let nm = sorted[j]
+    var ty = ""
+    var k = 0
+    while (k < fields.length()) {
+      if (fields[k].name == nm) { ty = infer(fields[k].value, env) }
+      k += 1
+    }
+    let seg = nm.concat(": ").concat(ty == "" ? "Any" : ty)
+    out = j == 0 ? out.concat(seg) : out.concat(", ").concat(seg)
+    j += 1
+  }
+  return out.concat("}")
+}
+
+fn infer_list_ty(items: List[Expr], env: List[Bind]) -> Str {
+  if (items.length() == 0) { return "List[Never]" }
+  var elem = infer(items[0], env)
+  var i = 1
+  while (i < items.length()) { elem = join_ty(elem, infer(items[i], env))  i += 1 }
+  if (elem == "") { return "List[Never]" }
+  return "List[".concat(elem).concat("]")
+}
+
+// Best-effort static type of a pure expression ("" = unknown). The covered
+// projection of `infer_ast`: enough to reproduce the IR's type annotations.
+fn infer(e: Expr, env: List[Bind]) -> Str {
+  return match e {
+    IntLit(v)   => "Int",
+    FloatLit(v) => "Float",
+    StrLit(v)   => "Str",
+    BoolLit(v)  => "Bool",
+    NullLit     => "",
+    Var(n)      => tenv_get(env, n),
+    Bin(b)      => binop_ty(b.op, infer(b.l, env), infer(b.r, env)),
+    Un(u)       => u.op == "!" ? "Bool" : infer(u.e, env),
+    Emit(u)     => "",
+    Call(c)     => infer_callee(c.target, env),
+    Field(f)    => infer_field(infer(f.target, env), f.name),
+    OptField(f) => "",
+    OptCall(c)  => "",
+    Index(x)    => infer_index(infer(x.target, env)),
+    If(f)       => join_ty(infer(f.then_, env), infer(f.els, env)),
+    Rec(r)      => infer_record_ty(r.fields, env),
+    Lst(l)      => infer_list_ty(l.items, env),
+    Arrow(a)    => "",
+    Match(m)    => "",
+    Templ(t)    => "Str",
+    Hole(h)     => h.ty,
+    Bad(m)      => "",
+  }
+}
+
+// The lowering's operand-type annotation for `+ - * / %` (lower.py's `bin`
+// branch): the operand type when both sides agree, Float when either is Float.
+fn operands_of(op: Str, lt: Str, rt: Str) -> Str {
+  if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+    if (lt == "Int32" && rt == "Int32") { return "Int32" }
+    if (lt == "Int" && rt == "Int") { return "Int" }
+    if (lt == "Float" || rt == "Float") { return "Float" }
+    return ""
+  }
+  return ""
+}
+
+fn arm_payload(scrutTy: Str, pat: Str) -> Str {
+  let head = parse_head(scrutTy)
+  let args = type_args(scrutTy)
+  if (head == "Opt" && pat == "Some" && args.length() >= 1) { return args[0] }
+  if (head == "Result" && args.length() == 2) {
+    if (pat == "Ok") { return args[0] }
+    if (pat == "Err") { return args[1] }
+  }
+  return ""
+}
+
+// ---------------------------------------------------------------- expr lowering
+
+fn lir_args(args: List[Expr], env: List[Bind]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < args.length()) {
+    let e = lir_expr(args[i], env)
+    out = i == 0 ? e : out.concat(",").concat(e)
+    i += 1
+  }
+  return out
+}
+
+fn lir_fields(fields: List[InitN], env: List[Bind]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < fields.length()) {
+    let seg = "[".concat(jstr(fields[i].name)).concat(",")
+      .concat(lir_expr(fields[i].value, env)).concat("]")
+    out = i == 0 ? seg : out.concat(",").concat(seg)
+    i += 1
+  }
+  return out
+}
+
+fn lir_parts(parts: List[PartN], env: List[Bind]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < parts.length()) {
+    let p = parts[i]
+    let seg = p.kind == "t"
+      ? "[\"text\",".concat(jstr(p.text)).concat("]")
+      : "[\"expr\",".concat(lir_expr(p.e, env)).concat("]")
+    out = i == 0 ? seg : out.concat(",").concat(seg)
+    i += 1
+  }
+  return out
+}
+
+fn lir_bin(b: BinN, env: List[Bind]) -> Str {
+  let opnd = operands_of(b.op, infer(b.l, env), infer(b.r, env))
+  var s = "{\"kind\":\"bin\",\"op\":".concat(jstr(b.op))
+    .concat(",\"left\":").concat(lir_expr(b.l, env))
+    .concat(",\"right\":").concat(lir_expr(b.r, env))
+  if (opnd != "") { s = s.concat(",\"operands\":").concat(jstr(opnd)) }
+  return s.concat("}")
+}
+
+fn lir_un(u: UnN, env: List[Bind]) -> Str {
+  var s = "{\"kind\":\"un\",\"op\":".concat(jstr(u.op))
+    .concat(",\"operand\":").concat(lir_expr(u.e, env))
+  if (u.op == "-") {
+    let ot = infer(u.e, env)
+    if (ot == "Int" || ot == "Int32") { s = s.concat(",\"operands\":").concat(jstr(ot)) }
+  }
+  return s.concat("}")
+}
+
+fn lir_field(f: FieldN, env: List[Bind]) -> Str {
+  if (f.name == "length") {
+    let h = parse_head(infer(f.target, env))
+    if (h == "Str" || h == "Bytes" || h == "List") {
+      return "{\"kind\":\"len\",\"target\":".concat(lir_expr(f.target, env)).concat("}")
+    }
+  }
+  return "{\"kind\":\"field\",\"target\":".concat(lir_expr(f.target, env))
+    .concat(",\"name\":").concat(jstr(f.name)).concat("}")
+}
+
+fn lir_builtin(f: FieldN, args: List[Expr], env: List[Bind]) -> Str {
+  var s = "{\"kind\":\"builtin\",\"method\":".concat(jstr(f.name))
+    .concat(",\"target\":").concat(lir_expr(f.target, env))
+    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]")
+  if (f.name == "to_int") {
+    let rt = infer(f.target, env)
+    s = s.concat(",\"recv\":").concat(rt == "" ? "null" : jstr(rt))
+  }
+  return s.concat("}")
+}
+
+fn lir_call(callee: Expr, args: List[Expr], env: List[Bind]) -> Str {
+  let builtin = match callee {
+    Field(f) => (is_host_root_recv(f.target) || !is_builtin_method(f.name))
+      ? "" : lir_builtin(f, args, env),
+    _ => "",
+  }
+  if (builtin != "") { return builtin }
+  return "{\"kind\":\"call\",\"callee\":".concat(lir_expr(callee, env))
+    .concat(",\"args\":[").concat(lir_args(args, env)).concat("]}")
+}
+
+fn is_host_root_recv(recv: Expr) -> Bool {
+  return match recv { Var(n) => is_host_root(n), _ => false, }
+}
+
+fn lir_arrow(a: ArrowN, env: List[Bind]) -> Str {
+  var pn = ""
+  var allTyped = a.params.length() > 0
+  var inner = env
+  var i = 0
+  while (i < a.params.length()) {
+    let p = a.params[i]
+    pn = i == 0 ? jstr(p.name) : pn.concat(",").concat(jstr(p.name))
+    if (p.ty == "") { allTyped = false } else { inner = tenv_put(inner, p.name, p.ty) }
+    i += 1
+  }
+  var s = "{\"kind\":\"arrow\",\"params\":[".concat(pn).concat("],\"captures\":[],\"body\":")
+    .concat(lir_expr(a.body, inner))
+  if (allTyped) {
+    var pt = ""
+    var j = 0
+    while (j < a.params.length()) {
+      pt = j == 0 ? jstr(a.params[j].ty) : pt.concat(",").concat(jstr(a.params[j].ty))
+      j += 1
+    }
+    let bt = infer(a.body, inner)
+    s = s.concat(",\"param_types\":[").concat(pt).concat("],\"returns\":")
+      .concat(jstr(bt == "" ? "Any" : bt))
+  }
+  return s.concat("}")
+}
+
+fn lir_match(m: MatchN, env: List[Bind]) -> Str {
+  let scrutTy = infer(m.scrut, env)
+  var arms = ""
+  var i = 0
+  while (i < m.arms.length()) {
+    let a = m.arms[i]
+    let pay = arm_payload(scrutTy, a.pat)
+    var inner = env
+    if (a.bind != "" && pay != "") { inner = tenv_put(inner, a.bind, pay) }
+    var arm = "{\"pattern\":".concat(jstr(a.pat))
+      .concat(",\"bind\":").concat(a.bind == "" ? "null" : jstr(a.bind))
+      .concat(",\"body\":").concat(lir_expr(a.body, inner))
+    if (pay != "") { arm = arm.concat(",\"payload_type\":").concat(jstr(pay)) }
+    arm = arm.concat("}")
+    arms = i == 0 ? arm : arms.concat(",").concat(arm)
+    i += 1
+  }
+  return "{\"kind\":\"match\",\"scrutinee\":".concat(lir_expr(m.scrut, env))
+    .concat(",\"arms\":[").concat(arms).concat("]}")
+}
+
+fn lir_expr(e: Expr, env: List[Bind]) -> Str {
+  return match e {
+    IntLit(v)   => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
+    FloatLit(v) => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
+    BoolLit(v)  => "{\"kind\":\"lit\",\"value\":".concat(v).concat("}"),
+    StrLit(v)   => "{\"kind\":\"lit\",\"value\":".concat(jstr(v)).concat("}"),
+    NullLit     => "{\"kind\":\"lit\",\"value\":null}",
+    Var(n)      => "{\"kind\":\"var\",\"name\":".concat(jstr(n)).concat("}"),
+    Bin(b)      => lir_bin(b, env),
+    Un(u)       => lir_un(u, env),
+    Emit(u)     => "{\"kind\":\"bad\"}",
+    Call(c)     => lir_call(c.target, c.args, env),
+    Field(f)    => lir_field(f, env),
+    OptField(f) => "{\"kind\":\"optfield\",\"target\":".concat(lir_expr(f.target, env))
+                     .concat(",\"name\":").concat(jstr(f.name)).concat("}"),
+    OptCall(c)  => "{\"kind\":\"optcall\",\"target\":".concat(lir_expr(c.target, env))
+                     .concat(",\"method\":").concat(jstr(c.name))
+                     .concat(",\"args\":[").concat(lir_args(c.args, env)).concat("]}"),
+    Index(x)    => "{\"kind\":\"index\",\"target\":".concat(lir_expr(x.target, env))
+                     .concat(",\"index\":").concat(lir_expr(x.idx, env)).concat("}"),
+    If(f)       => "{\"kind\":\"if\",\"cond\":".concat(lir_expr(f.cond, env))
+                     .concat(",\"then\":").concat(lir_expr(f.then_, env))
+                     .concat(",\"else\":").concat(lir_expr(f.els, env)).concat("}"),
+    Rec(r)      => "{\"kind\":\"record\",\"fields\":[".concat(lir_fields(r.fields, env)).concat("]}"),
+    Lst(l)      => "{\"kind\":\"list\",\"items\":[".concat(lir_args(l.items, env)).concat("]}"),
+    Arrow(a)    => lir_arrow(a, env),
+    Match(m)    => lir_match(m, env),
+    Templ(t)    => "{\"kind\":\"interp\",\"parts\":[".concat(lir_parts(t.parts, env)).concat("]}"),
+    Hole(h)     => "{\"kind\":\"bad\"}",
+    Bad(m)      => "{\"kind\":\"bad\"}",
+  }
+}
+
+// ---------------------------------------------------------------- stmt lowering
+
+// The `T` -> `Opt[T]` injection the checker accepts at a declared boundary
+// (lower.py's `_inject_opt`): materialised on a `return` whose value type is a
+// bare `T` where an `Opt[T]` is declared. (Widening markers are absent from the
+// covered corpus, so `_mark_widen` is not reproduced here.)
+fn apply_ret_markers(node: Str, expected: Str, actual: Str) -> Str {
+  if (actual != "" && parse_head(expected) == "Opt" && type_args(expected).length() > 0
+      && parse_head(actual) != "Opt") {
+    return "{\"kind\":\"call\",\"callee\":{\"kind\":\"var\",\"name\":\"Some\"},\"args\":["
+      .concat(node).concat("]}")
+  }
+  return node
+}
+
+fn is_compound_op(ts: List[Token], k: Str) -> Bool {
+  return k == "+" || k == "-" || k == "*" || k == "/" || k == "%"
+}
+
+// Record-update (`{ base | field = expr, ... }`) is not in the shared parser's
+// expression grammar (parser.rvl's `p_inits` reads only `field: expr` literals),
+// so it is recognised at the token level here — the one covered fn-body form the
+// AST cannot carry. The `|` is a bare punctuation token (a template's `|` lives
+// inside the flattened `template` token, and `||` is its own token), so a
+// depth-0 `|` inside a brace block is unambiguously the update separator.
+type RhsR = { js: Str, ty: Str, i: Int, ok: Bool }
+type UpsR = { js: Str, ok: Bool }
+
+fn top_pipe(ts: List[Token], lo: Int, hi: Int) -> Int {
+  var depth = 0
+  var i = lo
+  while (i < hi) {
+    if (atk(ts, i, "{") || atk(ts, i, "[") || atk(ts, i, "(")) { depth += 1 }
+    else { if (atk(ts, i, "}") || atk(ts, i, "]") || atk(ts, i, ")")) { depth -= 1 }
+    else { if (depth == 0 && atk(ts, i, "|")) { return i } } }
+    i += 1
+  }
+  return 0 - 1
+}
+
+fn lir_updates(ts: List[Token], lo: Int, hi: Int, env: List[Bind]) -> UpsR {
+  var i = lo
+  var out = ""
+  var first = true
+  while (i < hi && !atk(ts, i, "}")) {
+    if (atk(ts, i, ",")) { i += 1 }
+    else {
+      if (!atk(ts, i, "ident") || !atk(ts, i + 1, "=")) { return { js: "", ok: false } }
+      let name = tkc(ts, i).text
+      let r = expr_at(ts, i + 2)
+      if (is_bad(r.e) || r.i <= i + 2) { return { js: "", ok: false } }
+      let seg = "[".concat(jstr(name)).concat(",").concat(lir_expr(r.e, env)).concat("]")
+      out = first ? seg : out.concat(",").concat(seg)
+      first = false
+      i = r.i
+    }
+  }
+  return { js: out, ok: true }
+}
+
+// An rvalue: an ordinary expression, or a token-level record-update.
+fn lir_rhs(ts: List[Token], j: Int, env: List[Bind]) -> RhsR {
+  if (atk(ts, j, "{")) {
+    let close = close_brace(ts, j)
+    if (close != 0 - 1) {
+      let pipe = top_pipe(ts, j + 1, close - 1)
+      if (pipe != 0 - 1) {
+        let base = expr_at(ts, j + 1)
+        if (!is_bad(base.e) && base.i == pipe) {
+          let ups = lir_updates(ts, pipe + 1, close - 1, env)
+          if (ups.ok) {
+            let js = "{\"kind\":\"record_update\",\"base\":".concat(lir_expr(base.e, env))
+              .concat(",\"updates\":[").concat(ups.js).concat("]}")
+            return { js: js, ty: infer(base.e, env), i: close, ok: true }
+          }
+        }
+      }
+    }
+  }
+  let r = expr_at(ts, j)
+  if (is_bad(r.e) || r.i <= j) { return { js: "", ty: "", i: j, ok: false } }
+  return { js: lir_expr(r.e, env), ty: infer(r.e, env), i: r.i, ok: true }
+}
+
+fn assign_env(env: List[Bind], name: Str, valExpr: Expr) -> List[Bind] {
+  if (tenv_get(env, name) != "") { return env }
+  let inf = infer(valExpr, env)
+  return inf == "" ? env : tenv_put(env, name, inf)
+}
+
+fn lir_one_stmt(ts: List[Token], i: Int, hi: Int, env: List[Bind],
+                muts: List[Str], ret: Str) -> StmtOne {
+  let t = tkc(ts, i)
+  if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
+    let mutable = t.text == "var"
+    let name = tkc(ts, i + 1).text
+    var j = i + 2
+    var declared = ""
+    if (atk(ts, j, ":")) { let tr = type_at(ts, j + 1)  declared = tr.ty  j = tr.i }
+    if (!atk(ts, j, "=")) { return mk_one("", env, muts, hi) }
+    let r = lir_rhs(ts, j + 1, env)
+    if (!r.ok) { return mk_one("", env, muts, hi) }
+    let bindty = declared != "" ? declared : r.ty
+    let env2 = bindty == "" ? env : tenv_put(env, name, bindty)
+    let js = "{\"step\":\"let\",\"name\":".concat(jstr(name)).concat(",\"value\":")
+      .concat(r.js).concat(",\"mutable\":").concat(mutable ? "true" : "false").concat("}")
+    return mk_one(js, env2, mutable ? muts.push(name) : muts, r.i)
+  }
+  if (t.kind == "kw" && t.text == "return") {
+    let r = expr_at(ts, i + 1)
+    if (is_bad(r.e) || r.i <= i + 1) {
+      return mk_one("{\"step\":\"return\",\"expr\":null}", env, muts, i + 1)
+    }
+    let js = "{\"step\":\"return\",\"expr\":"
+      .concat(apply_ret_markers(lir_expr(r.e, env), ret, infer(r.e, env))).concat("}")
+    return mk_one(js, env, muts, r.i)
+  }
+  if (t.kind == "kw" && t.text == "assert") {
+    let r = expr_at(ts, i + 1)
+    if (is_bad(r.e) || r.i <= i + 1) { return mk_one("", env, muts, hi) }
+    return mk_one("{\"step\":\"assert\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
+                  env, muts, r.i)
+  }
+  if (t.kind == "kw" && t.text == "if") {
+    let c = expr_at(ts, i + 1)
+    if (is_bad(c.e) || c.i <= i + 1 || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }
+    let tend = close_brace(ts, c.i)
+    if (tend == 0 - 1) { return mk_one("", env, muts, hi) }
+    let thenjs = lir_stmts(ts, c.i + 1, tend - 1, env, muts, ret)
+    var elsejs = "null"
+    var nexti = tend
+    if (atw(ts, tend, "else") && atk(ts, tend + 1, "{")) {
+      let eend = close_brace(ts, tend + 1)
+      if (eend != 0 - 1) {
+        elsejs = "[".concat(lir_stmts(ts, tend + 2, eend - 1, env, muts, ret)).concat("]")
+        nexti = eend
+      }
+    }
+    let js = "{\"step\":\"if\",\"cond\":".concat(lir_expr(c.e, env))
+      .concat(",\"then\":[").concat(thenjs).concat("],\"else\":").concat(elsejs).concat("}")
+    return mk_one(js, env, muts, nexti)
+  }
+  if (t.kind == "kw" && t.text == "while") {
+    let c = expr_at(ts, i + 1)
+    if (is_bad(c.e) || !atk(ts, c.i, "{")) { return mk_one("", env, muts, hi) }
+    let bend = close_brace(ts, c.i)
+    if (bend == 0 - 1) { return mk_one("", env, muts, hi) }
+    let bodyjs = lir_stmts(ts, c.i + 1, bend - 1, env, muts, ret)
+    let js = "{\"step\":\"while\",\"cond\":".concat(lir_expr(c.e, env))
+      .concat(",\"body\":[").concat(bodyjs).concat("]}")
+    return mk_one(js, env, muts, bend)
+  }
+  if (t.kind == "kw" && t.text == "for") {
+    if (!atk(ts, i + 1, "(")) { return mk_one("", env, muts, hi) }
+    let bind = tkc(ts, i + 2).text
+    let it = expr_at(ts, i + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")") || !atk(ts, it.i + 1, "{")) {
+      return mk_one("", env, muts, hi)
+    }
+    let bend = close_brace(ts, it.i + 1)
+    if (bend == 0 - 1) { return mk_one("", env, muts, hi) }
+    let iterTy = infer(it.e, env)
+    var inner = env
+    if (parse_head(iterTy) == "List") {
+      let el = type_arg1(iterTy)
+      if (el != "") { inner = tenv_put(env, bind, el) }
+    }
+    let bodyjs = lir_stmts(ts, it.i + 2, bend - 1, inner, muts, ret)
+    let js = "{\"step\":\"for\",\"bind\":".concat(jstr(bind)).concat(",\"iterable\":")
+      .concat(lir_expr(it.e, env)).concat(",\"body\":[").concat(bodyjs).concat("]}")
+    return mk_one(js, env, muts, bend)
+  }
+  if (t.kind == "ident" && atk(ts, i + 1, "=")) {
+    let name = t.text
+    let r = expr_at(ts, i + 2)
+    if (is_bad(r.e) || r.i <= i + 2) { return mk_one("", env, muts, hi) }
+    let js = "{\"step\":\"assign\",\"name\":".concat(jstr(name)).concat(",\"value\":")
+      .concat(lir_expr(r.e, env)).concat("}")
+    return mk_one(js, assign_env(env, name, r.e), muts, r.i)
+  }
+  if (t.kind == "ident" && is_compound_op(ts, tkc(ts, i + 1).kind) && atk(ts, i + 2, "=")) {
+    let name = t.text
+    let baseop = tkc(ts, i + 1).text
+    let r = expr_at(ts, i + 3)
+    if (is_bad(r.e) || r.i <= i + 3) { return mk_one("", env, muts, hi) }
+    let binE = Bin({ op: baseop, l: Var(name), r: r.e, paren: false })
+    let js = "{\"step\":\"assign\",\"name\":".concat(jstr(name)).concat(",\"value\":")
+      .concat(lir_expr(binE, env)).concat("}")
+    return mk_one(js, assign_env(env, name, binE), muts, r.i)
+  }
+  let r = expr_at(ts, i)
+  if (is_bad(r.e) || r.i <= i) { return mk_one("", env, muts, hi) }
+  return mk_one("{\"step\":\"expr\",\"expr\":".concat(lir_expr(r.e, env)).concat("}"),
+                env, muts, r.i)
+}
+
+fn lir_stmts(ts: List[Token], lo: Int, hi: Int, env0: List[Bind],
+             muts0: List[Str], ret: Str) -> Str {
+  var i = lo
+  var env = env0
+  var muts = muts0
+  var out = ""
+  while (i < hi && !atk(ts, i, "}")) {
+    if (atk(ts, i, ";")) { i += 1 }
+    else {
+      let st = lir_one_stmt(ts, i, hi, env, muts, ret)
+      if (st.i <= i) { i = hi }
+      else {
+        if (st.js != "") { out = out == "" ? st.js : out.concat(",").concat(st.js) }
+        env = st.env
+        muts = st.muts
+        i = st.i
+      }
+    }
+  }
+  return out
+}
+
+fn params_env(ps: List[ParamN], acc: List[Bind]) -> List[Bind] {
+  var env = acc
+  var i = 0
+  while (i < ps.length()) {
+    if (ps[i].ty != "") { env = tenv_put(env, ps[i].name, ps[i].ty) }
+    i += 1
+  }
+  return env
+}
+
+// One module `fn` -> its `functions` entry. Advances past the whole fn.
+fn lir_function(ts: List[Token], i: Int) -> LirFn {
+  let nm = tkc(ts, i + 1).text
+  let ps = params_at(ts, i + 3)
+  var reti = ps.i
+  var retJson = "null"
+  var retTy = ""
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    retJson = jstr(tr.ty)
+    retTy = tr.ty
+    reti = tr.i
+  }
+  if (!atk(ts, reti, "{")) { return { js: "", i: skip_line(ts, i) } }
+  let bend = close_brace(ts, reti)
+  if (bend == 0 - 1) { return { js: "", i: ts.length() } }
+  let bodyjs = lir_stmts(ts, reti + 1, bend - 1, params_env(ps.ps, []), [], retTy)
+  let js = "{\"name\":".concat(jstr(nm)).concat(",\"params\":[").concat(ir_params_json(ps.ps))
+    .concat("],\"returns\":").concat(retJson).concat(",\"public\":false,\"body\":[")
+    .concat(bodyjs).concat("]}")
+  return { js: js, i: bend }
+}
+
+// Collect every top-level `fn` into the `functions` list; skip other decls
+// wholesale (a nested `fn` inside a component is not a module function).
+fn fns_walk(ts: List[Token], i: Int, acc: Str) -> Str {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  let t = tkc(ts, i)
+  if (t.kind != "kw") { return fns_walk(ts, skip_line(ts, i), acc) }
+  if (t.text == "use") { return fns_walk(ts, skip_line(ts, i), acc) }
+  if (t.text == "test") {
+    if (atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return fns_walk(ts, e, acc) }
+    }
+    return fns_walk(ts, skip_line(ts, i), acc)
+  }
+  if (t.text == "type") { return fns_walk(ts, skip_line(ts, i), acc) }
+  if (t.text == "extern") { return fns_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
+  if (t.text == "fn") {
+    let f = lir_function(ts, i)
+    let acc2 = f.js == "" ? acc : (acc == "" ? f.js : acc.concat(",").concat(f.js))
+    return fns_walk(ts, f.i, acc2)
+  }
+  if (t.text == "service") { return fns_walk(ts, p_service(ts, i, empty_prog()).i, acc) }
+  if (t.text == "component") { return fns_walk(ts, p_component(ts, i, empty_prog()).i, acc) }
+  return fns_walk(ts, skip_line(ts, i), acc)
+}
+
+// ================================================================ types IR
+//
+// The `types` section: user record/variant declarations lowered to the
+// reference's `_lower_type_decls` shape — `{Name: {params, kind, fields|cases}}`.
+// Field/payload type spellings come straight from the shared type reader
+// (`type_at`), which renders them exactly as the reference does (`List[Row]`,
+// `Map[Int, Row]`, `(Int) -> Str`). Generic parameters and type aliases are not
+// in the covered corpus; a bare-alias RHS is skipped rather than mis-lowered.
+
+fn skip_brackets(ts: List[Token], i: Int) -> Int {
+  var depth = 0
+  var j = i
+  while (j < ts.length()) {
+    if (atk(ts, j, "[")) { depth += 1 }
+    else { if (atk(ts, j, "]")) { depth -= 1  if (depth == 0) { return j + 1 } } }
+    j += 1
+  }
+  return i
+}
+
+fn ir_type_fields(ts: List[Token], lo: Int, hi: Int) -> Str {
+  var k = lo
+  var out = ""
+  var first = true
+  while (k < hi && !atk(ts, k, "}")) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let nm = tkc(ts, k).text
+      let tr = type_at(ts, k + 2)
+      let seg = jstr(nm).concat(":").concat(jstr(tr.ty))
+      out = first ? seg : out.concat(",").concat(seg)
+      first = false
+      k = tr.i
+      if (atk(ts, k, ",")) { k += 1 }
+    } else { k += 1 }
+  }
+  return out
+}
+
+fn ir_type_cases(ts: List[Token], lo: Int, hi: Int) -> Str {
+  var k = lo
+  var out = ""
+  var first = true
+  while (k < hi) {
+    if (atk(ts, k, "ident")) {
+      let nm = tkc(ts, k).text
+      var payload = "null"
+      var nk = k + 1
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        payload = jstr(tr.ty)
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      let seg = "{\"name\":".concat(jstr(nm)).concat(",\"payload\":").concat(payload).concat("}")
+      out = first ? seg : out.concat(",").concat(seg)
+      first = false
+      k = nk
+    } else { k += 1 }
+  }
+  return out
+}
+
+// True iff a variant RHS (has a `|` alternation or a `(payload)`), as opposed to
+// a bare type alias (`type Name = Other`), within [lo, hi).
+fn is_variant_rhs(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (atk(ts, k, "|") || atk(ts, k, "(")) { return true }
+    k += 1
+  }
+  return false
+}
+
+fn ir_type_decl(ts: List[Token], i: Int) -> LirFn {
+  let lineHi = line_end(ts, i, ts.length())
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return { js: "", i: lineHi } }
+  j += 1
+  if (atk(ts, j, "{")) {
+    let bend = close_brace(ts, j)
+    if (bend == 0 - 1) { return { js: "", i: lineHi } }
+    let fields = ir_type_fields(ts, j + 1, bend - 1)
+    let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"record\", \"fields\": {")
+      .concat(fields).concat("}}")
+    return { js: js, i: bend }
+  }
+  if (is_variant_rhs(ts, j, lineHi)) {
+    let cases = ir_type_cases(ts, j, lineHi)
+    let js = jstr(nm).concat(": {\"params\": [], \"kind\": \"variant\", \"cases\": [")
+      .concat(cases).concat("]}")
+    return { js: js, i: lineHi }
+  }
+  return { js: "", i: lineHi }
+}
+
+fn types_walk(ts: List[Token], i: Int, acc: Str) -> Str {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return acc }
+  let t = tkc(ts, i)
+  if (t.kind != "kw") { return types_walk(ts, skip_line(ts, i), acc) }
+  if (t.text == "type") {
+    let d = ir_type_decl(ts, i)
+    let acc2 = d.js == "" ? acc : (acc == "" ? d.js : acc.concat(", ").concat(d.js))
+    return types_walk(ts, d.i, acc2)
+  }
+  if (t.text == "test") {
+    if (atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return types_walk(ts, e, acc) }
+    }
+    return types_walk(ts, skip_line(ts, i), acc)
+  }
+  if (t.text == "extern") { return types_walk(ts, p_extern(ts, i, empty_prog()).i, acc) }
+  if (t.text == "fn") { return types_walk(ts, p_fn(ts, i, empty_prog()).i, acc) }
+  if (t.text == "service") { return types_walk(ts, p_service(ts, i, empty_prog()).i, acc) }
+  if (t.text == "component") { return types_walk(ts, p_component(ts, i, empty_prog()).i, acc) }
+  return types_walk(ts, skip_line(ts, i), acc)
+}
+
 // ---------------------------------------------------------------- top level
 
 fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
@@ -3350,8 +4229,13 @@ pub fn lower_to_ir(src: Str) -> Str {
   let ts = lex_src(src)
   let a = ir_walk(ts, 0, mk_iracc("", "", false, false))
   let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
-  return "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
-    .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]}")
+  let fnsjs = fns_walk(ts, 0, "")
+  let typesjs = types_walk(ts, 0, "")
+  var out = "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
+    .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]")
+  if (typesjs != "") { out = out.concat(", \"types\": {").concat(typesjs).concat("}") }
+  if (fnsjs != "") { out = out.concat(", \"functions\": [").concat(fnsjs).concat("]") }
+  return out.concat("}")
 }
 
 // ================================================================ tests
@@ -3373,6 +4257,21 @@ test "lower_to_ir lowers a simple effect/provide body" {
 
 test "lower_to_ir bumps ir_version to 3 on a module fn" {
   assert starts_with(lower_to_ir("fn id(x: Int) -> Int { return x }"), "{\"ir_version\": 3,")
+}
+
+test "lower_to_ir emits a module fn body (functions section)" {
+  assert lower_to_ir("fn id(x: Int) -> Int { return x }")
+    == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"id\",\"params\":[{\"name\": \"x\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"var\",\"name\":\"x\"}}]}]}"
+}
+
+test "lower_to_ir annotates typed arithmetic operands" {
+  assert lower_to_ir("fn add(a: Int, b: Int) -> Int { return a + b }")
+    == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"functions\": [{\"name\":\"add\",\"params\":[{\"name\": \"a\", \"type\": \"Int\"}, {\"name\": \"b\", \"type\": \"Int\"}],\"returns\":\"Int\",\"public\":false,\"body\":[{\"step\":\"return\",\"expr\":{\"kind\":\"bin\",\"op\":\"+\",\"left\":{\"kind\":\"var\",\"name\":\"a\"},\"right\":{\"kind\":\"var\",\"name\":\"b\"},\"operands\":\"Int\"}}]}]}"
+}
+
+test "lower_to_ir emits a record type declaration (types section)" {
+  assert lower_to_ir("type P = { x: Int, y: Int }")
+    == "{\"ir_version\": 3, \"services\": {}, \"components\": [], \"types\": {\"P\": {\"params\": [], \"kind\": \"record\", \"fields\": {\"x\":\"Int\",\"y\":\"Int\"}}}}"
 }
 
 test "clean provider admits" {

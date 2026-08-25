@@ -1881,7 +1881,12 @@ fn module_header() -> List[Str] {
 // newline, in the reference's section order (types precede functions). Components,
 // services, externs, and tests are DEFERRED — the covered corpus declares none,
 // so the reference's `_emit_components`/`_emit_v3_externs`/… contribute nothing.
-pub fn emit_src(ir: Any) -> Str {
+// Named `emit_rust_src` (not a bare `emit_src`) so the self-host pipeline can
+// `use` emit_rust.rvl BESIDE emit_py.rvl in one composition: private decls no
+// longer leak (item 228), but the merge still flattens both modules' PUBLIC decls
+// by bare name, so the two emitter entrypoints must differ (roadmap item 230 —
+// enables the fully-native `compile.rvl`).
+pub fn emit_rust_src(ir: Any) -> Str {
   let types = value_field(ir, "types")
   let tables = build_type_tables(types)
   let functions = value_list(value_field(ir, "functions"))
@@ -1928,7 +1933,7 @@ test "bin-op table maps the longest revl ops" {
   assert checked_method("*") == "checked_mul"
 }
 
-test "indentation is four spaces per level" {
+test "rust indentation is four spaces per level" {
   assert ind(0) == ""
   assert ind(2) == "        "
   assert line(1, "x") == "    x"
@@ -1967,7 +1972,7 @@ test "constructor lowers user variants and built-ins" {
 }
 
 // --------------------------------------------------------------- component wrap
-// A trivial provider so the emitted module is a valid plugin (the pure `emit_src`
+// A trivial provider so the emitted module is a valid plugin (the pure `emit_rust_src`
 // above is what the cross-check exercises); mirrors the wrapper the other
 // self-host stages carry. `render` avoids the `emit` keyword.
 service EmitStream {
@@ -1976,6 +1981,6 @@ service EmitStream {
 
 component EmitRust provides emitter: EmitStream {
   provide emitter {
-    fn render(ir) = emit_src(ir)
+    fn render(ir) = emit_rust_src(ir)
   }
 }
