@@ -1,0 +1,26 @@
+// Realm placement — `isolate` on a provided key AND `intercept` on a required
+// key, with rich interception metadata (a list, an int, a bool and a string in
+// one map) so `_metadata_lit`'s recursive object/array/scalar rendering is
+// exercised byte-for-byte. The provider carries the required `store` field even
+// though the pure `return` body never reads it (the modern path emits it
+// unconditionally). Adds the `ctx.intercept(ServiceKey.of(<Svc>.class), <meta>)`
+// header line (service resolved through `requires`). The trivial `fn` forces
+// ir_version 3 (a components-only doc lowers to v1/v2; item 217 caveat).
+fn tag() -> Str {
+  return "hi"
+}
+
+service Store {
+  fn put(key: Str, val: Str)
+}
+service Reader {
+  fn read(key: Str) -> Str
+}
+
+component AuditReader requires store: Store provides reader: Reader {
+  isolate reader in realm("r1")
+  intercept store with { tags: ["audit", "v2"], level: 3, enabled: true }
+  provide reader {
+    fn read(key) { return "x" }
+  }
+}
