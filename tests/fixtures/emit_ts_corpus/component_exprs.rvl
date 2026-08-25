@@ -1,0 +1,29 @@
+// The component-dialect expression kinds slice 3 adds to the shared renderer:
+//   * `host`  — a host builtin acquisition `Job.run(...)` -> `host.Job.run(...)`
+//   * `format` — a component-body interpolation `"go ${config.count}"`
+//   * `fn`    — a call to a top-level `fn` from a component body (`tag(...)`)
+//   * `adt`   — a tagged constructor `Ok(x)` -> `{ kind: "Ok", value: x }`
+// None uses match, so the document-wide match counter stays 0 throughout.
+fn tag(n: Int) -> Str {
+  return n.to_str()
+}
+
+service Log {
+  emission fn write(msg: Str) -> Int
+}
+
+service Maker {
+  fn make(x: Int) -> Result[Int, Str]
+}
+
+component Runner requires log: Log provides maker: Maker {
+  config { count: Int = 3 }
+
+  effect Job.run("start") undo Job.run("stop")
+
+  emit log.write(`go ${config.count}`) compensate log.write(tag(config.count))
+
+  provide maker {
+    fn make(x) = Ok(x)
+  }
+}
