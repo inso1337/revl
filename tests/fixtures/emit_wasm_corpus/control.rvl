@@ -1,0 +1,28 @@
+fn absi(a: Int) -> Int {
+  if (a < 0) { return 0 - a } else { return a }
+}
+fn countdown(n: Int) -> Int {
+  var i = n
+  var acc = 0
+  while (i > 0) {
+    acc = acc + i
+    i = i - 1
+  }
+  return acc
+}
+fn checks(a: Int, b: Int) -> Int {
+  assert a < b
+  let z = a
+  z
+  return z
+}
+fn nested(a: Int) -> Int {
+  var s = 0
+  if (a > 0) {
+    let b = a + 1
+    s = b
+  } else {
+    s = 0 - a
+  }
+  return s
+}
