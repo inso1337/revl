@@ -161,6 +161,20 @@ def _classify(e: RevlError) -> str:
         return "A1"
     if "is not a declared requirement of" in m:
         return "G1"
+    # ---- slice 6 (final): code-less spawn-form + handoff + isolate refusals ---
+    # None of these carry an `e.code`; the gate tags them so the oracle compares
+    # tag AND message. Spawn-form (bind-to-a-handle, unknown target) -> "SPAWN";
+    # handoff target/uniqueness -> "HANDOFF"; isolate target/uniqueness -> "G1"
+    # (the declared-wiring family, as `intercept` is). The handoff/isolate PRELUDE
+    # cases reuse the "must precede …" wording already classified PRELUDE above.
+    if "names an unknown component" in m or "must be bound to a handle" in m:
+        return "SPAWN"
+    if ("is not a declared provision of" in m
+            or "declares more than one `handoff`" in m):
+        return "HANDOFF"
+    if ("is not a declared requirement or provision of" in m
+            or "is isolated twice in" in m):
+        return "G1"
     if ("declared plain, but this implementation reaches" in m
             or "must be marked `emit`" in m
             or "emits through" in m):
@@ -434,6 +448,40 @@ component Supervisor provides sup: Sup {
   provide sup { fn go(prompt: Str) { let w = effect spawn Worker with { } undo w.dispose()  emit w.task.run(prompt)  return 0 } }
 }
 """),
+    # ---- slice 6 (final) --------------------------------------------------
+    # rule-2 param coloring: a fn that calls its async-typed parameter is
+    # colored, but reaching it from an ASYNC method is legal (an async op has an
+    # in-flight window) — the admitted twin of the sync-method rejection below.
+    ("async method reaching a rule-2-colored fn admits", """
+extern emission async fn tick() -> Int = @py { return 1 }
+fn caller(cb: () -> Async[Int]) -> Int { return cb() }
+service S { emission async fn go() -> Int }
+component C provides s: S {
+  provide s { async fn go() { let r = caller(() => tick())   return 0 } }
+}
+"""),
+    # item 53: a `handoff` on a PROVIDED key is valid state-handoff wiring —
+    # admitted (the twin of the not-a-provision / twice / prelude rejections).
+    ("handoff on a provided key composes", """
+service Kv { fn get(k: Str) -> Str }
+component C provides kv: Kv {
+  handoff kv: Str
+  provide kv { fn get(k) { return k } }
+}
+"""),
+    # a valid bound spawn to a KNOWN component with an in-bound emission handle
+    # admits — the twin of the unknown-target / bind-to-a-handle rejections.
+    ("a bound spawn of a known component admits", """
+service Task { emission[net] fn run(prompt: Str) -> Int  fn status() -> Int }
+service Net { emission[net] fn send(msg: Str) -> Int }
+component Worker requires net: Net provides task: Task {
+  provide task { fn run(prompt: Str) { emit net.send(prompt)  return 1 }  fn status() = 0 }
+}
+service Sup { emission fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup { fn go(prompt: Str) { let w = effect spawn Worker with { } undo w.dispose()  emit w.task.run(prompt)  return 0 } }
+}
+"""),
 ]
 
 
@@ -670,6 +718,85 @@ component Supervisor requires other: Store provides sup: Sup {
   provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
 }
 """, "G4"),
+    # ---- slice 6 (final) --------------------------------------------------
+    # async coloring rule 2 (item 92 §3): a fn that CALLS its async-typed
+    # parameter is colored; a SYNC method reaching it has no in-flight window.
+    # Both `caller` (colored by rule 2) and `tick` (reached through the arrow)
+    # are named, sorted — the message the reference computes.
+    ("a1 rule-2 param-colored fn in a sync method", """extern emission async fn tick() -> Int = @py { return 1 }
+fn caller(cb: () -> Async[Int]) -> Int { return cb() }
+service S { emission fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let r = caller(() => tick())   return 0 } }
+}
+""", "A1"),
+    # code-less spawn-form: a spawn naming a component not in this composition
+    # (`_lower_spawn`'s unknown-target refusal).
+    ("spawn names an unknown component", """service Sup { fn run() -> Int }
+component Supervisor provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Nope with { } undo w.dispose()  return 0 } }
+}
+""", "SPAWN"),
+    # code-less spawn-form: an UNBOUND `effect spawn` in a provide method — a
+    # spawn's teardown needs a handle to name (decision 2, bind-to-a-handle).
+    ("unbound spawn in a method is refused", """service Task { fn go() -> Int }
+component Worker provides task: Task { provide task { fn go() { return 0 } } }
+service Sup { fn run() -> Int }
+component Supervisor provides sup: Sup {
+  provide sup { fn run() { effect spawn Worker with { } undo dispose()  return 0 } }
+}
+""", "SPAWN"),
+    # code-less spawn-form: an UNBOUND `effect spawn` in an activation body.
+    ("unbound spawn in a setup body is refused", """service Task { fn go() -> Int }
+component Worker provides task: Task { provide task { fn go() { return 0 } } }
+component Supervisor requires t: Task {
+  effect spawn Worker with { } undo dispose()
+}
+""", "SPAWN"),
+    # item 53: a `handoff` after an action is out of prelude order — the same
+    # prelude rule `isolate`/`intercept` obey (classified PRELUDE).
+    ("handoff after an effect is refused (prelude)", """service Kv { fn get(k: Str) -> Str }
+component C provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+  handoff kv: Str
+  provide kv { fn get(k) { return k } }
+}
+""", "PRELUDE"),
+    # item 53: a `handoff` targets a key this component PROVIDES; a required
+    # (non-provided) key has no state to hand off (code-less, classified HANDOFF).
+    ("handoff on a non-provided key is refused", """service Kv { fn get(k: Str) -> Str }
+component C requires kv: Kv {
+  handoff kv: Str
+  let v = effect kv.get("x") undo kv.get("x")
+}
+""", "HANDOFF"),
+    # item 53: at most one `handoff` per component (one activation frame, one
+    # state shape) — code-less, classified HANDOFF.
+    ("two handoffs in one component are refused", """service Kv { fn get(k: Str) -> Str }
+component C provides kv: Kv {
+  handoff kv: Str
+  handoff kv: Int
+  provide kv { fn get(k) { return k } }
+}
+""", "HANDOFF"),
+    # isolate target validation: `isolate` names a key from the component header
+    # (a requirement or a provision); an undeclared key is refused (code-less,
+    # the declared-wiring G1 family).
+    ("isolate on an undeclared key is refused (G1)", """service Kv { fn get(k: Str) -> Str }
+component C requires kv: Kv {
+  isolate nope in realm("r1")
+  let v = effect kv.get("x") undo kv.get("x")
+}
+""", "G1"),
+    # isolate uniqueness: a key is pinned to one realm at most once (code-less,
+    # classified G1).
+    ("a key isolated twice is refused (G1)", """service Kv { fn get(k: Str) -> Str }
+component C requires kv: Kv {
+  isolate kv in realm("r1")
+  isolate kv in realm("r2")
+  let v = effect kv.get("x") undo kv.get("x")
+}
+""", "G1"),
 ]
 
 
