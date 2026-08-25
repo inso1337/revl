@@ -48,13 +48,17 @@ def test_rejects_undeclared_req(reference_ir):
         emit.emit(bad)
 
 
-def test_rejects_identifier_colliding_with_scaffolding(reference_ir):
-    # `ctx`/`config`/`frame` are no longer reserved (item 156); the module-level
-    # runtime import names still are, and keep the same guard.
-    bad = copy.deepcopy(reference_ir)
-    bad["components"][1]["body"][0]["bind"] = "fmt"
-    with pytest.raises(emit.EmitError, match="scaffolding"):
-        emit.emit(bad)
+def test_rejects_identifier_colliding_with_host_root(reference_ir):
+    # `ctx`/`config`/`frame` are no longer reserved (item 156); the aliasable
+    # runtime imports (`fmt`/`Frame`/`ConfigSchema`/…) no longer are either
+    # (item 160). What remains guarded is the host-root triple Pool/Map/Job —
+    # language builtins the emitter cannot alias apart from a same-named user
+    # var. All three now reject uniformly (`Job` used to be unguarded).
+    for name in ("Pool", "Map", "Job"):
+        bad = copy.deepcopy(reference_ir)
+        bad["components"][1]["body"][0]["bind"] = name
+        with pytest.raises(emit.EmitError, match="scaffolding"):
+            emit.emit(bad)
 
 
 def test_accepts_ctx_as_identifier(reference_ir):
