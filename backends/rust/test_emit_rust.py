@@ -460,6 +460,49 @@ def test_cargo_check_compiles_v2_realms(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# item 270 — a non-Copy `String` whose surface type the emitter cannot infer
+# (`source.charAt(i)` is a builtin method, not a declared-return call) and that
+# is consumed by value more than once. Each move (a call argument, both fields
+# of a record literal, and an `if`-expression branch tail) must clone, or the
+# second read borrows a moved value (E0382). This is the shape the self-host
+# lexer hits: before the fix its emitted crate failed with 8x E0382. A Copy
+# scalar (`Int`) reused just as often must NOT clone — no needless `.clone()`.
+_REUSED_VALUE_RVL = """
+pub type Tok = { kind: Str, text: Str }
+
+fn tag(c: Str) -> Str { return c }
+
+pub fn classify(source: Str, i: Int) -> Tok {
+  let c = source.charAt(i)
+  let a = tag(c)
+  let b = tag(c)
+  let kind = if (c == "@") { "at" } else { c }
+  let doubled = i + i
+  return { kind: kind, text: c }
+}
+"""
+
+
+def test_reused_uninferred_string_clones_each_move_but_not_copies():
+    src = emit.emit(compile_source(_REUSED_VALUE_RVL))
+    body = src.split("pub fn classify")[1].split("\n}")[0]
+    # every by-value use of the un-inferred `c` is cloned: the two `tag` calls,
+    # the `if`-expression else-branch tail, and the record field.
+    assert body.count("tag(c.clone())") == 2, body
+    assert 'else { c.clone() }' in body, body
+    assert "text: c.clone()" in body, body
+    # the Copy `Int` param reused across two moves is never cloned.
+    assert "i.clone()" not in body, body
+
+
+@needs_cargo
+def test_cargo_check_reused_uninferred_string_compiles(tmp_path):
+    """The regression's payoff: the emitted crate now builds. Before item 270
+    the same source produced borrow-of-moved-value (E0382)."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_REUSED_VALUE_RVL)))
+    assert result.returncode == 0, result.stderr
+
+
 def test_router_emits_per_realm_routing_struct():
     """item 167: a routed require lowers to a per-key router struct that
     re-resolves the live per-realm handle off a strict, realm-scoped
