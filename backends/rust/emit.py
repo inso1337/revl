@@ -172,6 +172,30 @@ def _arg_ref_name(arg_node: object) -> str | None:
     return None
 
 
+def _body_multi_use(body: object, counts: dict[str, int]) -> None:
+    """Count every bare variable reference in a function body, so a binding
+    consumed by value more than once can be `.clone()`d at each move.
+
+    A `let`/`for` binding whose surface type the emitter cannot infer (a string
+    index, a block expression) is typed None, so `_by_value_arg` cannot tell
+    Copy from non-Copy for it. The safe fallback is reuse: a name referenced
+    once can always be moved, but a name referenced more than once must clone at
+    each by-value use or the second use borrows a moved value (E0382). Only the
+    reference kinds (`var`/`name`/`req`) are counted; a binding's def site is a
+    plain string field, so it is never miscounted as a use.
+    """
+    if isinstance(body, dict):
+        if body.get("kind") in ("var", "name", "req"):
+            ident = body.get("id") or body.get("name")
+            if ident is not None:
+                counts[ident] = counts.get(ident, 0) + 1
+        for value in body.values():
+            _body_multi_use(value, counts)
+    elif isinstance(body, list):
+        for item in body:
+            _body_multi_use(item, counts)
+
+
 def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     """Wrap a by-value free-function argument so the call cannot consume a value
     the caller still needs (E0382). revl passes values, not moves, so a non-Copy
@@ -179,18 +203,49 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     — and a function-typed argument is passed by reference (`&F: Fn`), because an
     `impl Fn(..)` parameter is not `Clone`. Copy scalars and non-identifier
     argument expressions (fresh temporaries) are passed through untouched.
+
+    When the argument's surface type is unknown (a binding the emitter could not
+    infer, such as a string index or a block expression), Copy cannot be ruled
+    out, so the clone decision falls back to reuse: a name used more than once in
+    the body is cloned at each by-value move, while a single-use name is left
+    untouched. That keeps a lone move byte-identical to before and clones only
+    the reused shape that would otherwise fail to build.
     """
     name = _arg_ref_name(arg_node)
     if name is None:
         return rendered
     ty = ctx.var_types.get(name)
-    if ty is None:
+    if ty is not None:
+        if _is_fn_type(ty):
+            return f"&{rendered}"
+        if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+            return rendered
+        return f"{rendered}.clone()"
+    if name in ctx.multi_use:
+        return f"{rendered}.clone()"
+    return rendered
+
+
+def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Clone a bare identifier used as the tail VALUE of an `if`-expression
+    branch when the same binding is read again in the body.
+
+    Unlike a call argument (always consumed), a branch tail only strands a later
+    use when the binding is reused: `let kind = if .. { "arrow" } else { op }`
+    moves `op`, so a following `op.len()` borrows a moved value (E0382). A
+    single-use tail stays a move (byte-identical to before, no needless clone),
+    and a known-Copy binding never clones. Reuse is the same body-level signal
+    `_by_value_arg` uses for an un-inferred value.
+    """
+    name = _arg_ref_name(node)
+    if name is None:
         return rendered
-    if _is_fn_type(ty):
-        return f"&{rendered}"
-    if str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+    ty = ctx.var_types.get(name)
+    if ty is not None and str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
         return rendered
-    return f"{rendered}.clone()"
+    if name in ctx.multi_use:
+        return f"{rendered}.clone()"
+    return rendered
 
 
 # A declared function type still has no single Rust lowering — but the choice
@@ -2358,6 +2413,11 @@ class _V3Ctx:
         # disambiguates a non-unique field-set (item 268). Set per fn by
         # `_emit_v3_functions`; None everywhere the context is unknown.
         self.current_return: str | None = None
+        # Bindings referenced more than once in the fn body currently being
+        # emitted. A by-value use of one whose surface type is unknown must
+        # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
+        # empty everywhere the reuse context is not established.
+        self.multi_use: set[str] = set()
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
@@ -2769,11 +2829,14 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         return f"({target})[({_render_expr(node['index'], ctx, rename)}) as usize].clone()"
 
     if kind == "if":
-        return (
-            f"if {_render_expr(node['cond'], ctx, rename)} "
-            f"{{ {_render_expr(node['then'], ctx, rename)} }} "
-            f"else {{ {_render_expr(node['else'], ctx, rename)} }}"
-        )
+        # Each branch tail is a value position: a bare non-Copy binding reused
+        # after the `if`-expression must clone here or the later read borrows a
+        # moved value (E0382). A fresh temporary or a Copy scalar stays bare.
+        then_v = _by_value_tail(
+            node["then"], _render_expr(node["then"], ctx, rename), ctx)
+        else_v = _by_value_tail(
+            node["else"], _render_expr(node["else"], ctx, rename), ctx)
+        return f"if {_render_expr(node['cond'], ctx, rename)} {{ {then_v} }} else {{ {else_v} }}"
 
     if kind == "record_update":
         raise EmitError(
@@ -3312,6 +3375,9 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         name = _ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.current_return = fn.get("returns")
+        counts: dict[str, int] = {}
+        _body_multi_use(fn.get("body") or [], counts)
+        ctx.multi_use = {n for n, c in counts.items() if c > 1}
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: "
             f"{_rust_type(p.get('type'), types, position='param')}"
