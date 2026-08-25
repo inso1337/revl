@@ -94,6 +94,11 @@ use "../stdlib/value.rvl" {
 // copies (plus their private `is_alpha_us`/`is_word_ch`) are deleted. This is
 // the item-193 duplication cull the module was built for.
 use "../stdlib/str.rvl" { trim, lstrip, last_index_of, ident_tokens, dedent }
+// The set-shaped list helpers (item 194): `list_contains` replaces the local
+// `str_in` membership test, and `list_sort(list_dedup(...))` replaces the
+// hand-positioned canonical `sorted(uses)` order in the `from runtime import`
+// line — see `emit_py_src`.
+use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
 
 // ------------------------------------------- NAVIGATION GAP CLOSED (item 188)
 // The ONE navigation primitive slices 1-2 could not express in pure revl was an
@@ -1243,13 +1248,9 @@ fn emit_services_table(services: Any) -> List[Str] {
 
 // -------------------------------------------------------------- string utils
 // `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
-// stdlib/str.rvl (`use` above, item 193); only the helpers str.rvl does NOT
-// ship stay local: `str_in` (a List membership test) and `split_types` (the
-// comma-split whose per-part `trim` is now str.rvl's).
-fn str_in(xs: List[Str], s: Str) -> Bool {
-  for (x of xs) { if (x == s) { return true } }
-  return false
-}
+// stdlib/str.rvl (`use` above, item 193) and `list_contains` from stdlib/list.rvl
+// (item 194, replacing the former local `str_in`); only `split_types` (the
+// comma-split whose per-part `trim` is now str.rvl's) stays local.
 
 // `_split_types`: comma-split a bracket inner at depth zero, each part stripped.
 fn split_types(inner: Str) -> List[Str] {
@@ -1342,7 +1343,7 @@ fn py_type(raw: Str) -> Str {
 fn type_ann(ftype: Str, all_names: List[Str], emitted: List[Str]) -> Str {
   let rendered = py_type(ftype)
   for (tok of ident_tokens(ftype)) {
-    if (str_in(all_names, tok) && !str_in(emitted, tok)) { return py_repr(rendered) }
+    if (list_contains(all_names, tok) && !list_contains(emitted, tok)) { return py_repr(rendered) }
   }
   return rendered
 }
@@ -1553,10 +1554,11 @@ pub fn emit_py_src(ir: Any) -> Str {
   // in `sorted(uses)` order with the `_revl_` aliases. The `uses` set for this
   // slice: `Frame` iff there is any component; the `schedule_*` a timer needs;
   // and (slice 3) the host roots `Map`/`Pool`/`Job` a fn/test body references.
-  // Python `sorted` puts the capitalised names before the lower-case
-  // `schedule_*`, so the canonical order is Frame, Job, Map, Pool,
-  // schedule_after, schedule_every — walked here as a fixed sequence over the
-  // finite import vocabulary. (ConfigSchema / lifecycle drivers are deferred.)
+  // The canonical order is `list_sort(list_dedup(imports))` (stdlib/list.rvl,
+  // item 194): the codepoint sort Python `sorted` uses, which puts the
+  // capitalised names before the lower-case `schedule_*`. No longer walked as a
+  // hand-positioned fixed sequence, so it generalises to an arbitrary import
+  // vocabulary. (ConfigSchema / lifecycle drivers are deferred.)
   let components = value_list(value_field(ir, "components"))
   var need_every = false
   var need_after = false
@@ -1568,9 +1570,9 @@ pub fn emit_py_src(ir: Any) -> Str {
   for (c of components) {
     if (value_list(value_field(c, "config")).length() > 0) { need_config = true }
   }
+  // Collect the needed imports in any order; `list_sort` fixes the canonical
+  // codepoint order below. Each alias-bearing name carries its `_revl_` alias.
   var imports = []
-  // sorted(uses) puts `ConfigSchema` (C) before `Frame` (F) before the host
-  // roots (Job/Map/Pool) before the lower-case `schedule_*`.
   if (need_config) { imports = imports.push("ConfigSchema as _revl_ConfigSchema") }
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
@@ -1579,7 +1581,8 @@ pub fn emit_py_src(ir: Any) -> Str {
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
   if (imports.length() > 0) {
-    out = out.push("from runtime import ".concat(imports.join(", ")))
+    let sorted_imports = list_sort(list_dedup(imports))
+    out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
     out = out.push("")
   }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
@@ -1592,8 +1595,8 @@ pub fn emit_py_src(ir: Any) -> Str {
   let types = value_field(ir, "types")
   if (uses_builtin_result(ir)) {
     let shadow = user_case_names(types)
-    if (!str_in(shadow, "Ok")) { out = out.concat(result_class("Ok")) }
-    if (!str_in(shadow, "Err")) { out = out.concat(result_class("Err")) }
+    if (!list_contains(shadow, "Ok")) { out = out.concat(result_class("Ok")) }
+    if (!list_contains(shadow, "Err")) { out = out.concat(result_class("Err")) }
   }
   // Type declarations (gated): the dataclass/typing imports, then the classes.
   if (value_keys(types).length() > 0) {

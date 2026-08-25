@@ -37,6 +37,12 @@
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
                     parse_expr_str, is_bad, expr_at, params_at, type_at }
+// The stdlib kits (items 193/194) that replace this file's hand-rolled string
+// and list helpers: `split_top` (the depth-0 comma split behind `split_type`,
+// with its per-part trim, superseding the local `is_ws_ch`/`trim_ws`) and
+// `list_contains` (the membership test superseding the local `contains`).
+use "../stdlib/str.rvl" { split_top }
+use "../stdlib/list.rvl" { list_contains }
 
 // ---------------------------------------------------------------- env
 
@@ -260,7 +266,7 @@ fn infer_field_t(f: FieldN, env: List[Bind], tt: Tt, ct: Ct) -> Infer {
     return refuse("field access on an optional — absence is unchecked here")
   }
   if (f.name == "length"
-      && contains(["Str", "List", "Bytes"], head)) {
+      && list_contains(["Str", "List", "Bytes"], head)) {
     return ok_ty("Int")
   }
   return field_spec_ty(tgt.ty, f.name, tt)
@@ -498,13 +504,11 @@ fn quote_join(xs: List[Str]) -> Str {
   return out
 }
 
-fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
-
 fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
   var out = xs
   var i = 0
   while (i < ys.length()) {
-    if (!contains(out, ys[i])) { out = out.push(ys[i]) }
+    if (!list_contains(out, ys[i])) { out = out.push(ys[i]) }
     i += 1
   }
   return out
@@ -513,7 +517,7 @@ fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
 fn subset_of(a: List[Str], b: List[Str]) -> Bool {
   var i = 0
   while (i < a.length()) {
-    if (!contains(b, a[i])) { return false }
+    if (!list_contains(b, a[i])) { return false }
     i += 1
   }
   return true
@@ -523,7 +527,7 @@ fn minus_list(xs: List[Str], ys: List[Str]) -> List[Str] {
   var out: List[Str] = []
   var i = 0
   while (i < xs.length()) {
-    if (!contains(ys, xs[i])) { out = out.push(xs[i]) }
+    if (!list_contains(ys, xs[i])) { out = out.push(xs[i]) }
     i += 1
   }
   return out
@@ -1544,42 +1548,16 @@ type ExR = { ty: Str, ok: Bool }
 // commas only split at bracket depth zero, like lower.py's _split_top_level.
 type Split = { head: Str, args: List[Str] }
 
-fn is_ws_ch(c: Str) -> Bool {
-  return c == " " || c == "\t" || c == "\n" || c == "\r"
-}
-
-fn trim_ws(s: Str) -> Str {
-  var a = 0
-  var b = s.length()
-  while (a < b && is_ws_ch(s.slice(a, a + 1))) { a += 1 }
-  while (b > a && is_ws_ch(s.slice(b - 1, b))) { b -= 1 }
-  let aa = a
-  let bb = b
-  return s.slice(aa, bb)
-}
-
 fn split_type(t: Str) -> Split {
   let b = t.indexOf("[")
   if (b == 0 - 1 || t.slice(t.length() - 1, t.length()) != "]") {
     return { head: t, args: [] }
   }
-  var args: List[Str] = []
-  var depth = 0
-  var start = b + 1
-  var i = b + 1
-  while (i < t.length() - 1) {
-    let c = t.slice(i, i + 1)
-    if (c == "[") { depth += 1 }
-    if (c == "]") { depth -= 1 }
-    if (c == "," && depth == 0) {
-      args = args.push(trim_ws(t.slice(start, i)))
-      start = i + 1
-    }
-    i += 1
-  }
-  args = args.push(trim_ws(t.slice(start, t.length() - 1)))
-  let r_args = args
-  return { head: t.slice(0, b), args: r_args }
+  // The bracket inner, comma-split at depth zero with each arg trimmed, is
+  // exactly stdlib/str.rvl's `split_top` (item 193) — the local `is_ws_ch`/
+  // `trim_ws` it used to hand-roll are now that kit's `trim`.
+  let inner = t.slice(b + 1, t.length() - 1)
+  return { head: t.slice(0, b), args: split_top(inner, ",") }
 }
 
 // Alias substitution, ported from _resolve_type_aliases.expand: rebuild the
@@ -1615,7 +1593,7 @@ fn expand_ty(t: Str, al: Map[Str, Str], d: Int) -> ExR {
 // _ALIASABLE_BUILTINS). Anything else undeclared keeps the one-case-variant
 // reading of an opaque nominal.
 fn aliasable_builtin(h: Str) -> Bool {
-  return contains(["Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
+  return list_contains(["Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
                    "Opt", "List", "Map", "Result", "Any", "Never"], h)
 }
 
@@ -1629,7 +1607,7 @@ fn is_alias(d: TypeD, declared: List[Str]) -> Bool {
   let sp = split_type(c.name)
   if (sp.args.length() > 0) { return true }  // a type application
   if (is_fn_type(c.name)) { return true }    // a function-type spelling
-  return aliasable_builtin(sp.head) || contains(declared, sp.head)
+  return aliasable_builtin(sp.head) || list_contains(declared, sp.head)
 }
 
 // `(Int) -> Str` — the reference's parse_type reports FN_HEAD with non-empty
@@ -1768,7 +1746,7 @@ fn build_types(decls: List[TypeD]) -> TblR {
         var cs: List[CaseD] = []
         var k2 = 0
         while (k2 < d.cases.length()) {
-          if (contains(seen, d.cases[k2].name)) {
+          if (list_contains(seen, d.cases[k2].name)) {
             let dup_cs_tbl = tbl
             return { tbl: dup_cs_tbl,
                      err: "duplicate case `".concat(d.cases[k2].name)
@@ -1843,7 +1821,7 @@ fn build_cases(tbl: Tt) -> Ct {
             amb = amb.push(cn)
             ct = ct.remove(cn)
           }
-        } else if (ct.has(cn) || contains(amb, cn)) {
+        } else if (ct.has(cn) || list_contains(amb, cn)) {
           amb = amb.push(cn)
           ct = ct.remove(cn)
         } else {
