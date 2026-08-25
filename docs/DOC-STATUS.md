@@ -1,9 +1,25 @@
 # Documentation staleness inventory
 
-A triage list for the docs refresh (roadmap item 243). The single source of
-truth for what has shipped is `docs/v2.0-roadmap.md` (items marked ✅). This
-table is the state after the front-door pass; the `needs-work` rows are the
+A triage list for the docs refresh (roadmap items 243, 258, 285). The single
+source of truth for what has shipped is `docs/v2.0-roadmap.md` (items marked ✅).
+This table is the state after the front-door pass; the `needs-work` rows are the
 follow-up wave.
+
+**Pass 2 (item 285).** Priority was the self-hosting status, which had gone
+stale after item 262 (the fully-native compile of component + extern programs).
+Fixed this pass: `README.md` (self-hosting badge + status block now say the
+covered surface, functions + components + externs, compiles fully-native
+byte-exact on py and rust with no reference in the chain; added the
+`python -m revl.lsp` and `python -m revl.otel` entry points), `docs/guide-humans.md`
+(the Tooling command table completed to all 28 wired verbs, `revl run` corrected
+to all six tiers booting live including ts and go, LSP + otel added),
+`docs/guide-ai-agents.md` (LSP added), `docs/selfhost-compile.md` (rewritten:
+the typed component body is no longer a reference-only remainder; the item-262
+component/extern corpus documented), `docs/opentelemetry.md` (accuracy-verified,
+em-dash-free, stray fence + landed coordination note fixed). Still open: the bulk
+of the `needs-work` rows below (accuracy + em-dash style pass), and
+`docs/selfhost-findings.md` (a large, live-owned chronological log whose past
+slice entries record then-current state, not present-tense product claims).
 
 **Status meanings**
 
@@ -84,7 +100,7 @@ self-hosting status added; em-dash-free), `site/index.html`, `site/README.md`,
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 25 |  |
 | network-placement.md | needs-work | 16 |  |
-| opentelemetry.md | needs-work | 15 |  |
+| opentelemetry.md | stale-fixed | 0 |  |
 | operator-capabilities.md | needs-work | 24 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
@@ -105,7 +121,7 @@ self-hosting status added; em-dash-free), `site/index.html`, `site/README.md`,
 | revl-profile.md | current | 15 |  |
 | router.md | stale-fixed | 0 |  |
 | seam-deadlines.md | needs-work | 15 |  |
-| selfhost-compile.md | live-owned (not audited) | 22 |  |
+| selfhost-compile.md | stale-fixed | 0 |  |
 | selfhost-findings.md | live-owned (not audited) | 241 |  |
 | service-compat.md | needs-work | 17 |  |
 | signals-and-queries.md | needs-work | 44 |  |
