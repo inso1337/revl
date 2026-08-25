@@ -45,18 +45,31 @@
 //     the single `_expr` — the component-dialect kinds `req`/`config`/`name` and
 //     the component-shaped `call` (`target`/`method`) join the 2.0 dispatch.
 //
+// ============================================================ SLICE 3 (item 208)
+// Extends the emitter to composite SIGNATURE types and four more expr kinds:
+//   * COMPOSITE service/provide-method signature types via `ts_type_v1` — the
+//     v1 `_ts_type` composite path (List/Opt/Map/Result and the function type),
+//     plus the declared-record `known_types` path (`List[Msg]` -> `Msg[]`, which
+//     resolves to an emitted `interface Msg`). `known_types` is threaded down
+//     from the document's `types`; config-field types stay the scalar-or-`any`
+//     map (they never render a composite);
+//   * the RECORD half of `_emit_ts_types` — `export interface <Name> { … }` —
+//     so a signature carrying a declared record has a real interface to name;
+//   * the component-dialect expr kinds `host` (`host.<fn>(…)`), `format` (the
+//     v1 `$N` template -> a JS template literal), `fn` (a top-level call), and
+//     `adt` (a tagged `{ kind, value }` constructor) join the shared dispatch.
+//
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on TS-emitter slices, deliberately OUT of these slices:
 //   * async coloring across the component tail (async service ops -> `Promise`,
 //     `async` provide methods, awaited call sites, the async-generator body),
 //     the whole v1/v2 `_emit_v1` path, and canonical;
 //   * the component-body `await`/`timer` steps; and the component-dialect expr
-//     kinds `host`/`format`/`fn`/`adt`/`spawn`/`instance-get` (unexercised);
-//   * COMPOSITE service/config signature types (List/Opt/Map/Result/fn-type and
-//     the declared-record `known_types` path in `_ts_type`) — every fixture keeps
-//     these scalar so `ts_type_v1` stays byte-verified, not byte-guessed;
-//   * v3 TYPE declarations (`_emit_ts_types` — records/variants/interfaces),
-//     externs (`_emit_ts_externs`), in-file `test`/`fault_test`/`lifecycle test`
+//     kinds `spawn`/`instance-get` (unexercised);
+//   * the VARIANT half of `_emit_ts_types` (the `export type … =` union + its
+//     constructor functions) — only records are emitted; a variant type would
+//     emit a marker and diverge, so no fixture declares one;
+//   * externs (`_emit_ts_externs`), in-file `test`/`fault_test`/`lifecycle test`
 //     emission, async coloring (async fns / async externs / awaited call sites /
 //     async arrows / async match), spawn/instances, realm placements
 //     (isolate/intercept/routes + the router), and the canonical ABI;
@@ -671,6 +684,69 @@ fn render_interp(parts: List[Any], counter: Int) -> Rendered {
   return { text: segs.join(""), counter: c }
 }
 
+fn is_digit(ch: Str) -> Bool {
+  if (ch.length() == 0) { return false }
+  let x = ch.charCodeAt(0)
+  return x >= 48 && x <= 57
+}
+
+// `int(match.group(1))` — a run of ASCII digits to its Int value.
+fn parse_index(s: Str) -> Int {
+  var acc = 0
+  var i = 0
+  while (i < s.length()) {
+    acc = acc * 10 + (s.charCodeAt(i) - 48)
+    i += 1
+  }
+  return acc
+}
+
+// `_expr`'s `format` branch: scan the template for `re.finditer(r"\$\$|\$(\d+)")`
+// matches (left to right, non-overlapping, `$$` tried before `$N`), escaping the
+// literal runs between them with `template_text` and splicing each placeholder's
+// pre-rendered arg into a `${…}` slot. A lone `$` before a non-`$`/non-digit is
+// left as literal text — exactly what the regex leaves unmatched.
+fn render_format(node: Any, counter: Int) -> Rendered {
+  let template = value_str(value_field(node, "template"))
+  var argtexts = []
+  var c = counter
+  for (a of value_list(value_field(node, "args"))) {
+    let r = expr(a, c)
+    argtexts = argtexts.push(r.text)
+    c = r.counter
+  }
+  var out = []
+  var pos = 0
+  var i = 0
+  let n = template.length()
+  while (i < n) {
+    var matched = false
+    if (template.charAt(i) == "$") {
+      if (i + 1 < n && template.charAt(i + 1) == "$") {
+        out = out.push(template_text(template.slice(pos, i)))
+        out = out.push("$")
+        pos = i + 2
+        i = i + 2
+        matched = true
+      } else {
+        var j = i + 1
+        while (j < n && is_digit(template.charAt(j))) { j += 1 }
+        if (j > i + 1) {
+          out = out.push(template_text(template.slice(pos, i)))
+          let index = parse_index(template.slice(i + 1, j))
+          out = out.push("${".concat(argtexts[index]).concat("}"))
+          pos = j
+          i = j
+          matched = true
+        }
+      }
+    }
+    if (!matched) { i += 1 }
+  }
+  out = out.push(template_text(template.slice(pos, n)))
+  return { text: "`".concat(out.join("")).concat("`"), counter: c }
+}
+
 // The component-dialect atomic set (`_ATOMIC_KINDS`) — a component `call`
 // target is parenthesised UNLESS its kind is one of these (distinct from the
 // 2.0 `is_v3_atomic` set: `req`/`config`/`name`/`host` are atomic here).
@@ -786,8 +862,8 @@ fn expr_inner(node: Any, counter: Int) -> Rendered {
   // The reference validates each against the component `_Scope` (locals /
   // config_fields / requires); validation is deferred here exactly as `ident`
   // defers emitter-scaffolding rejection — the covered corpus is clean — so
-  // these render the happy-path text only. `host`/`format`/`fn`/`adt` and the
-  // routed-`req` proxy are deferred to slice 3.
+  // these render the happy-path text only. `host`/`format`/`fn`/`adt` join below
+  // (slice 3); the routed-`req` proxy stays deferred.
   if (kind == "name") {
     return { text: ident(value_str(value_field(node, "id"))), counter: counter }
   }
@@ -798,6 +874,39 @@ fn expr_inner(node: Any, counter: Int) -> Rendered {
     // Committed-view access: resolved through the fiber's snapshot (R3).
     return { text: "ctx.".concat(ident(value_str(value_field(node, "name")))), counter: counter }
   }
+  // ---- slice-3 expr kinds ----
+  // `fn` (`_fn_call`): a call to a top-level `fn`/`extern`, the component
+  // dialect's spelling of what a 2.0 body writes as a `var`-callee `call`.
+  // Validation (declared? async?) is deferred like `ident`; async awaiting is
+  // deferred entirely (slice 3 defers async coloring).
+  if (kind == "fn") {
+    let fname = ident(value_str(value_field(node, "name")))
+    let ar = commajoin(value_list(value_field(node, "args")), counter)
+    return { text: `${fname}(${ar.text})`, counter: ar.counter }
+  }
+  // `adt`: a tagged ADT value (Result / user variant), `{ kind: "Ok", value: x }`
+  // or `{ kind: "Missing" }`. Opt's Some/None is NOT tagged (rendered by `var`).
+  if (kind == "adt") {
+    let cs = json_dumps(value_str(value_field(node, "case")))
+    let args = value_list(value_field(node, "args"))
+    if (args.length() > 0) {
+      let r = expr(args[0], counter)
+      return { text: `{ kind: ${cs}, value: ${r.text} }`, counter: r.counter }
+    }
+    return { text: `{ kind: ${cs} }`, counter: counter }
+  }
+  // `host`: a host builtin acquisition (`Pool.open`/`Job.run`/…). The dotted
+  // `fn` path is host-validated upstream (IDENT_RE); rendered verbatim, NOT
+  // mangled.
+  if (kind == "host") {
+    let hfn = value_str(value_field(node, "fn"))
+    let ar = commajoin(value_list(value_field(node, "args")), counter)
+    return { text: `host.${hfn}(${ar.text})`, counter: ar.counter }
+  }
+  // `format` (v1/A4): the component-dialect string interpolation, spelled with
+  // `$N` placeholders and `$$` escapes over a template — lowered to a JS
+  // template literal, the v1 twin of the 2.0 `interp`.
+  if (kind == "format") { return render_format(node, counter) }
   return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
 }
 
@@ -921,6 +1030,32 @@ fn emit_functions(functions: List[Any]) -> List[Str] {
   return out
 }
 
+// `_emit_ts_types` — the v3 TYPE declarations. RECORDS only in this slice
+// (`export interface <Name> { <field>: <ts_type> }`), each block trailed by a
+// blank line, so a service signature carrying that record (`List[Msg]` ->
+// `Msg[]`) resolves to a real interface. VARIANT emission (the `export type … =`
+// union + its constructor functions) is DEFERRED — a variant type would emit the
+// marker below and diverge, so no fixture declares one.
+fn emit_ts_types(types: Any) -> List[Str] {
+  var out = []
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let nm = ident(name)
+    if (value_str(value_field(spec, "kind")) == "record") {
+      out = out.push(`export interface ${nm} {`)
+      let fields = value_field(spec, "fields")
+      for (fname of value_keys(fields)) {
+        out = out.push(`  ${ident(fname)}: ${ts_type(value_str(value_field(fields, fname)))}`)
+      }
+      out = out.push("}")
+    } else {
+      out = out.push(`<<UNSUPPORTED-TYPE:${nm}>>`)
+    }
+    out = out.push("")
+  }
+  return out
+}
+
 // ============================================================ components (s2)
 // The component-dialect tail of `_emit_v3`: service interfaces, the committed
 // -view context augmentation, config interfaces, and each component's plugin
@@ -928,14 +1063,13 @@ fn emit_functions(functions: List[Any]) -> List[Str] {
 // `ctx.effect(function* () { … })` activation body). Byte-identical to
 // backends/typescript/emit.py for the covered subset.
 //
-// DEFERRED to slice 3 (a divergence, not a bug, if fed one — excluded from the
+// Slice 3 (item 208) adds the COMPOSITE signature types (List/Opt/Map/Result/
+// fn-type + the declared-record `known_types` path in `ts_type_v1`).
+// STILL DEFERRED (a divergence, not a bug, if fed one — excluded from the
 // corpus): async coloring (async service ops -> `Promise<…>` / `async` methods /
 // awaited call sites / async generators), spawn/instances, realm placements
 // (isolate/intercept/routes + the router), the v1/v2 `_emit_v1` path, canonical;
-// the component-body `await`/`timer` steps; and — within a service/config
-// signature — the COMPOSITE surface types (List/Opt/Map/Result/fn-type and the
-// declared-record `known_types` path). Every fixture keeps its service/config
-// param types SCALAR so `ts_type_v1` stays byte-verified rather than guessed.
+// and the component-body `await`/`timer` steps.
 
 // `TYPE_MAP` for a CONFIG field (`_config_interface`): the six scalar names, and
 // — unlike the service renderer — an unknown name falls back to `any`.
@@ -949,24 +1083,119 @@ fn config_ts_type(name: Str) -> Str {
   return "any"
 }
 
-// `_ts_type` (v1/A6), the SCALAR subset — the renderer for service-interface and
-// provide-method signatures. Distinct from the v3 `ts_type`: the v1 `TYPE_MAP`
-// excludes `Unit`/`Any`/`Never`, and an unknown/composite name is opaque and
-// erases to `unknown` (the composite + declared-record paths are deferred).
-fn ts_type_v1(name: Str) -> Str {
+// The v1 `TYPE_MAP` (`_ts_type`): the six scalar names, "" on a miss. Distinct
+// from `ts_scalar_type` (the v3 map, which also maps Unit/Any/Never).
+fn type_map(name: Str) -> Str {
   if (name == "Str") { return "string" }
   if (name == "Int") { return "bigint" }
   if (name == "Int32") { return "number" }
   if (name == "Bool") { return "boolean" }
   if (name == "Float") { return "number" }
   if (name == "Bytes") { return "Uint8Array" }
+  return ""
+}
+
+// `[A-Za-z0-9_]` — the `\w` character class the v1 generic regex head matches.
+fn is_word_ch(ch: Str) -> Bool {
+  if (ch.length() == 0) { return false }
+  let x = ch.charCodeAt(0)
+  if (x >= 65 && x <= 90) { return true }
+  if (x >= 97 && x <= 122) { return true }
+  if (x >= 48 && x <= 57) { return true }
+  return x == 95
+}
+
+// A non-empty run of word chars — the `^(\w+)` the generic regex requires for a
+// composite head (`List`/`Opt`/`Map`/`Result`), so a dotted or spaced name
+// falls through to the `known_types`/`unknown` tail exactly as `re.match` fails.
+fn is_word(s: Str) -> Bool {
+  if (s.length() == 0) { return false }
+  var i = 0
+  while (i < s.length()) {
+    if (!is_word_ch(s.charAt(i))) { return false }
+    i += 1
+  }
+  return true
+}
+
+// The reference's `inner.split(',')` for a `Map`/`Result` arg list — a NAIVE
+// split on EVERY comma (NOT the top-level `split_type_args`); `_ts_type` reads
+// only `[0]`/`[1]` and strips each. Faithful including the pathological nesting.
+fn naive_split(s: Str) -> List[Str] {
+  var parts = []
+  var current = ""
+  var i = 0
+  let n = s.length()
+  while (i < n) {
+    let ch = s.charAt(i)
+    if (ch == ",") {
+      parts = parts.push(current)
+      current = ""
+    } else {
+      current = current.concat(ch)
+    }
+    i += 1
+  }
+  parts = parts.push(current)
+  return parts
+}
+
+// `_ts_type` (v1/A6) — the renderer for service-interface and provide-method
+// signatures, threading `known_types` (the document's declared record/ADT
+// names). Distinct from the v3 `ts_type`: the v1 `TYPE_MAP` excludes
+// Unit/Any/Never and has no `Async` branch; `Map`/`Result` args split NAIVELY;
+// a bare DECLARED name routes through the v3 renderer (`ts_type`, byte-identical
+// to `_ts_v3_type` — it renders `Msg` as `Msg` so the signature lines up with
+// the emitted `interface Msg`); any other unknown name is opaque -> `unknown`.
+fn ts_type_v1(name: Str, known_types: List[Str]) -> Str {
+  if (name == "") { return "unknown" }
+  let m = type_map(name)
+  if (m != "") { return m }
+  let stripped = py_strip(name)
+  let arrow = fn_type_arrow_index(stripped)
+  if (arrow >= 0) {
+    let sn = stripped.length()
+    let inner = py_strip(stripped.slice(1, arrow))
+    // `_split_fn_type`: lstrip past the `)`, then drop the `->` and strip — so a
+    // spaced arrow (`) -> Bool`, as the IR spells it) recovers `Bool`, not `>`.
+    let rest = py_strip(stripped.slice(arrow + 1, sn))
+    let returns = py_strip(rest.slice(2, rest.length()))
+    var params = []
+    if (inner != "") { params = split_type_args(inner) }
+    var rendered = []
+    var idx = 0
+    for (p of params) {
+      rendered = rendered.push(`a${idx}: ${ts_type_v1(p, known_types)}`)
+      idx += 1
+    }
+    return `((${rendered.join(", ")}) => ${ts_type_v1(returns, known_types)})`
+  }
+  let bi = name.indexOf("[")
+  let n = name.length()
+  if (bi > 0 && is_word(name.slice(0, bi)) && name.charAt(n - 1) == "]") {
+    let head = name.slice(0, bi)
+    let inner = name.slice(bi + 1, n - 1)
+    if (inner != "") {
+      if (head == "List") { return ts_type_v1(inner, known_types).concat("[]") }
+      if (head == "Opt") { return ts_type_v1(inner, known_types).concat(" | undefined") }
+      if (head == "Map") {
+        let parts = naive_split(inner)
+        return `Map<${ts_type_v1(py_strip(parts[0]), known_types)}, ${ts_type_v1(py_strip(parts[1]), known_types)}>`
+      }
+      if (head == "Result") {
+        let parts = naive_split(inner)
+        return `{ kind: "Ok"; value: ${ts_type_v1(py_strip(parts[0]), known_types)} } | { kind: "Err"; value: ${ts_type_v1(py_strip(parts[1]), known_types)} }`
+      }
+    }
+  }
+  if (list_contains(known_types, name)) { return ts_type(name) }
   return "unknown"
 }
 
 // A method's return slot: absent -> "void", else the v1 surface type.
-fn ts_return_type_v1(v: Any) -> Str {
+fn ts_return_type_v1(v: Any, known_types: List[Str]) -> Str {
   if (value_is_null(v)) { return "void" }
-  return ts_type_v1(value_str(v))
+  return ts_type_v1(value_str(v), known_types)
 }
 
 // `_method_body`: steps inside a provide-method body (sync only in this slice —
@@ -1047,7 +1276,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
 // `_provide_impl`: the provided service object's methods. The impl param NAMES
 // bind the body; the param TYPES come from the service declaration (arity must
 // agree). Sync methods only (async deferred).
-fn provide_impl(step: Any, services: Any, level: Int, counter: Int) -> StmtOut {
+fn provide_impl(step: Any, services: Any, known_types: List[Str], level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
@@ -1061,7 +1290,7 @@ fn provide_impl(step: Any, services: Any, level: Int, counter: Int) -> StmtOut {
     var sig_parts = []
     var i = 0
     for (pn of param_names) {
-      let ptype = ts_type_v1(value_str(value_field(value_at(spec_params, i), "type")))
+      let ptype = ts_type_v1(value_str(value_field(value_at(spec_params, i), "type")), known_types)
       sig_parts = sig_parts.push(`${ident(value_str(pn))}: ${ptype}`)
       i += 1
     }
@@ -1076,7 +1305,7 @@ fn provide_impl(step: Any, services: Any, level: Int, counter: Int) -> StmtOut {
 
 // `_component_step`: one activation-body step. Recursive (`if` branches hold
 // body steps). `await`/`timer` are deferred.
-fn component_step(step: Any, services: Any, level: Int, counter: Int) -> StmtOut {
+fn component_step(step: Any, services: Any, known_types: List[Str], level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
@@ -1104,7 +1333,7 @@ fn component_step(step: Any, services: Any, level: Int, counter: Int) -> StmtOut
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
     var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
-    let pr = provide_impl(step, services, level + 1, counter)
+    let pr = provide_impl(step, services, known_types, level + 1, counter)
     out = out.concat(pr.lines)
     out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
     return { lines: out, counter: pr.counter }
@@ -1114,7 +1343,7 @@ fn component_step(step: Any, services: Any, level: Int, counter: Int) -> StmtOut
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, level + 1, c)
+      let r = component_step(s, services, known_types, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -1122,7 +1351,7 @@ fn component_step(step: Any, services: Any, level: Int, counter: Int) -> StmtOut
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = component_step(s, services, level + 1, c)
+        let r = component_step(s, services, known_types, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -1159,7 +1388,7 @@ fn config_interface(comp: Any) -> List[Str] {
 }
 
 // `_component`: one component's config interface + plugin object.
-fn component_lines(comp: Any, services: Any, counter: Int) -> StmtOut {
+fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: Int) -> StmtOut {
   let name = ident(value_str(value_field(comp, "name")))
   var out = config_interface(comp)
   out = out.push(`export const ${name} = {`)
@@ -1199,7 +1428,7 @@ fn component_lines(comp: Any, services: Any, counter: Int) -> StmtOut {
   out = out.push("    ctx.effect(function* () {")
   var c = counter
   for (step of value_list(value_field(comp, "body"))) {
-    let r = component_step(step, services, 3, c)
+    let r = component_step(step, services, known_types, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -1212,7 +1441,7 @@ fn component_lines(comp: Any, services: Any, counter: Int) -> StmtOut {
 // The service-interface block for the whole document (`_emit_v3`'s service loop):
 // one `export interface <Service> { … }` per declared service, in declaration
 // order. Async returns (`Promise<…>`) are deferred.
-fn service_interfaces(services: Any) -> List[Str] {
+fn service_interfaces(services: Any, known_types: List[Str]) -> List[Str] {
   var out = []
   for (sname of value_keys(services)) {
     let svc = value_field(services, sname)
@@ -1222,9 +1451,9 @@ fn service_interfaces(services: Any) -> List[Str] {
       let method = value_field(methods, mname)
       var sig_parts = []
       for (p of value_list(value_field(method, "params"))) {
-        sig_parts = sig_parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type_v1(value_str(value_field(p, "type")))}`)
+        sig_parts = sig_parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type_v1(value_str(value_field(p, "type")), known_types)}`)
       }
-      let returns = ts_return_type_v1(value_field(method, "returns"))
+      let returns = ts_return_type_v1(value_field(method, "returns"), known_types)
       if (value_bool(value_field(method, "emission"))) {
         out = out.push("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
       }
@@ -1280,12 +1509,16 @@ fn context_augmentation(components: List[Any]) -> List[Str] {
 // match counter (the reference's `doc_ctx`, distinct from the function pass).
 fn emit_component_tail(ir: Any) -> List[Str] {
   var out = []
-  out = out.concat(service_interfaces(value_field(ir, "services")))
+  // `known_types` = the document's declared record/ADT names (`frozenset(types)`
+  // in `_emit_v3`): the set `_ts_type` renders a bare name by, so a service
+  // signature carrying `List[Msg]` lines up with the emitted `interface Msg`.
+  let known_types = value_keys(value_field(ir, "types"))
+  out = out.concat(service_interfaces(value_field(ir, "services"), known_types))
   let components = value_list(value_field(ir, "components"))
   out = out.concat(context_augmentation(components))
   var c = 0
   for (comp of components) {
-    let r = component_lines(comp, value_field(ir, "services"), c)
+    let r = component_lines(comp, value_field(ir, "services"), known_types, c)
     out = out.concat(r.lines)
     out = out.push("")
     c = r.counter
@@ -1561,6 +1794,11 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("import { host } from '../runtime.ts'")
   out = out.push("")
   out = out.concat(revl_helpers(ir))
+  // Slice 3: v3 TYPE declarations (records) come right after the helpers, before
+  // the functions — a service/config signature may render a declared record by
+  // name, so its `interface` must precede the interface that references it.
+  let types = value_field(ir, "types")
+  if (value_keys(types).length() > 0) { out = out.concat(emit_ts_types(types)) }
   let functions = value_list(value_field(ir, "functions"))
   if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
   // Slice 2: the component-dialect tail (service interfaces, context
@@ -1582,6 +1820,37 @@ test "the type map renders the scalar and generic surface" {
   assert ts_type("Opt[Str]") == "string | undefined"
   assert ts_type("Map[Str, Int]") == "Map<string, bigint>"
 }
+
+test "the v1 type map renders composite and declared-record signatures" {
+  // the six scalars, the composites, the naive-split Map/Result, the fn type,
+  // and the declared-record `known_types` path (`Msg` -> `Msg`, else `unknown`)
+  assert ts_type_v1("Int", []) == "bigint"
+  assert ts_type_v1("List[Int]", []) == "bigint[]"
+  assert ts_type_v1("Opt[Str]", []) == "string | undefined"
+  assert ts_type_v1("Map[Str, Int]", []) == "Map<string, bigint>"
+  assert ts_type_v1("Result[Int, Str]", []) == expected_result_type()
+  assert ts_type_v1("(Int, Str) -> Bool", []) == "((a0: bigint, a1: string) => boolean)"
+  assert ts_type_v1("List[Msg]", ["Msg"]) == "Msg[]"
+  assert ts_type_v1("Row", []) == "unknown"
+}
+
+fn expected_result_type() -> Str {
+  return `{ kind: "Ok"; value: bigint } | { kind: "Err"; value: string }`
+}
+
+test "the slice-3 expr kinds render fn and adt" {
+  // `host`/`format` end-to-end byte-checks live in the corpus (their template /
+  // `$N` literals cannot be spelled in an in-file string — the lexer reserves
+  // the legacy `$N`/`${` forms — so they are verified through component_exprs).
+  assert expr({ kind: "fn", name: "tag", args: [{ kind: "lit", value: 1 }] }, 0).text
+    == "tag(1n)"
+  assert expr({ kind: "adt", case: "Ok", args: [{ kind: "lit", value: 1 }] }, 0).text
+    == expected_ok_adt()
+  assert expr({ kind: "adt", case: "Missing", args: [] }, 0).text == expected_missing_adt()
+}
+
+fn expected_ok_adt() -> Str { return `{ kind: "Ok", value: 1n }` }
+fn expected_missing_adt() -> Str { return `{ kind: "Missing" }` }
 
 test "the JS-keyword mangle appends underscores" {
   assert mangle("class") == "class_"

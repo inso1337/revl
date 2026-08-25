@@ -79,6 +79,10 @@ CORPUS = [
     "services_config.rvl",        # config interface (required + defaulted), applyConfigDefaults
     "services_method_block.rvl",  # block-form provide method: let/return, req-as-ctx in method
     "components_mixed.rvl",       # a pure fn alongside a provider (independent match counters)
+    # slice 3 (item 208) — composite signatures + the host/format/fn/adt kinds:
+    "services_composite.rvl",         # List/Opt/Map/Result/fn-type + declared-record `List[Msg]`
+    "services_composite_provide.rvl", # composite provide-method params (Row[], Map) via `_ts_type`
+    "component_exprs.rvl",            # host (`host.Job.run`), format (`` `…${}` ``), fn, adt
 ]
 
 
