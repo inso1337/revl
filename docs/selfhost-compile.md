@@ -93,6 +93,46 @@ That is the exact, and only, *data* seam.
   and `source → target` is native from the first byte of source to the last byte
   of target.
 
+#### SEAM 1, first cut (roadmap item 227): `lower_to_ir`
+
+`selfhost/lower.rvl` now carries `pub fn lower_to_ir(src) -> Str` beside
+`admit_src` (additive — `admit_src` is byte-for-byte unchanged). It serialises
+the **covered surface** of the interchange IR as canonical JSON, structurally
+identical to `revl.compile_source` on the same source
+(`tests/test_selfhost_lower_ir.py`, cross-checked over the whole emit_py corpus):
+
+- **Covered, byte-identical:**
+  - `ir_version` — from the header-visible feature triggers (a module
+    fn/extern/type/test → 3; a component `if`/`fail`/timer/`spawn` → 3; an
+    `isolate`/`intercept` → 2; else 1);
+  - the **services table** — every service's methods with
+    `params`/`returns`/`emission` (+ `capabilities` for a scoped `emission[..]`,
+    + `async`);
+  - each component's **declaration header** — `config`/`requires`/`provides`;
+  - the component **body** for the simple-component surface (`effect …/undo …`
+    and `provide` steps over required-service calls + literals) — emitted only
+    when the whole body stays in surface (the `services_basic` intersection),
+    else omitted so the header still lands and the richer body defers.
+- **Emitter-ready proof:** the reference python emitter applied to the *native*
+  IR produces the **same bytes** as applied to the reference IR for
+  `services_basic` — the native IR is emitter-ready end to end for that surface.
+- **Deferred (the residue of the data seam):** the `functions` / `externs` /
+  `types` sections, the `manifest`/`holes`/`tests`/`fault_tests`/`prop_tests`
+  sections (link/obligation artifacts the covered emitter surface does not read),
+  the per-component `source` (the input filename, an environment artifact), and —
+  the bulk — the **typed component/method expression body**: arithmetic
+  (`typed_arith`/`widen`), stdlib builtins, `config` reads, `match`/ADT, saga
+  `emit … compensate`, timers and spawn steps. This is lower.py's typed-
+  expression spine (`_lower_pure_expr` / `_lower_component_pure_expr` /
+  `_lower_fns` / `_lower_type_decls`), which needs the static-type machinery the
+  admission gate does not carry. One `ir_version` trigger lives there too: a
+  stdlib builtin in a body bumps the reference to 3 (`_has_builtin`), which the
+  header producer under-approximates (the single corpus case, `services_methods`).
+
+Closing the full data seam is the follow-on: port the typed-expression spine so
+`lower_to_ir` produces the complete `functions`/component-body IR the emitters
+consume for the whole corpus.
+
 ### SEAM 2 — the stage modules do not co-compile into one composition
 
 A second, structural gap surfaced while wiring the driver. Each heavyweight stage
