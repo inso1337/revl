@@ -1,18 +1,16 @@
-// REJECTED — lets are FUNCTION-scoped, not block-scoped: sibling branches
-// share one namespace, so a second `let y` collides even though the first
-// lives inside an `if` body. The diagnostic states the scoping rule and the
-// two sanctioned fixes (rename, or reuse the existing binding).
+// REJECTED — a `let` binds a name once per scope. These two `let y`s live in
+// the SAME straight-line scope, so the second collides with the first. (Item
+// 155 block-scopes `let`, so a name may now be reused across DISJOINT sibling
+// blocks — the two arms of an if/else — since only one is ever live; but that
+// does not license redeclaring a name already bound in the same linear scope.)
 //
 // expected error:
 //   `y` is already declared in this function
-//   lets are function-scoped, not block-scoped — sibling branches share one
-//   namespace; rename or reuse the existing binding
+//   a `let` binds a name once per scope — rename this binding, or use `=` to
+//   reassign an existing `var`
 
 fn pick(x: Int) -> Int {
-  if (x > 0) {
-    let y = x
-    return y
-  }
+  let y = x
   let y = 0
   return y
 }

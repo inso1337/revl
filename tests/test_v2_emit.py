@@ -365,17 +365,23 @@ def test_arrow_captures_var_by_value_at_creation_time():
     assert ns["captured"]() == 6  # f saw n == 1, not the final 11
 
 
-def test_var_in_record_literal_rejected():
-    with pytest.raises(RevlError, match="`var` `n` cannot be used in a record literal"):
-        compile_source(
-            """
-            fn leak() -> Int {
-              var n = 1
-              let row = { value: n }
-              return row.value
-            }
-            """
-        )
+def test_var_by_value_in_record_literal_accepted():
+    # Item 154: a record is a value type, so a bare `var` read in a record-literal
+    # field copies the value in — the mutable cell never escapes. This now
+    # compiles and emits the copied value correctly.
+    _ir, ns = _compile_emit(
+        """
+        fn leak() -> Int {
+          var n = 1
+          let row = { value: n }
+          n = 99
+          return row.value
+        }
+        """
+    )
+    # the record captured n's value at construction (1), not the later 99 —
+    # confirming it is a by-value copy, not a live reference to the cell
+    assert ns["leak"]() == 1
 
 
 def test_compound_assignment_on_let_rejected():
