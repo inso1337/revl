@@ -157,8 +157,17 @@ use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
 // An extern OR a plain fn. An extern carries its flags and no body-calls; a
 // plain fn carries the callee NAMES its body reaches (all the two fixed points
 // need) and no flags. Unifying them lets one fixed point walk both.
+//
+// `asyncSlots` are the parameter INDICES whose declared type is an async
+// function type `(…) -> Async[T]` (item 92 / lower.py's `_is_async_fn_type`).
+// An arrow ARGUMENT landing in such a slot is the sync->async coercion
+// (lower.py's `_coerce_async_args`): it is stamped async and is legitimately
+// awaited, so the arrow-color LEAK check must NOT refuse it. `body` is a plain
+// fn's statement body — the module-fn twin refusals
+// (`_refuse_leaky_pure_arrow` and the first-class async-value refusal) walk it;
+// an extern has none, so its body is [].
 type FnD = { name: Str, isEmExtern: Bool, isAsyncExtern: Bool,
-             callees: List[Str] }
+             callees: List[Str], asyncSlots: List[Int], body: List[Stmt] }
 
 // A service method signature: enough to be an upper bound. `caps` is the
 // `emission[a, b]` scope list ([] when the method is plain or uncapped-
@@ -247,6 +256,64 @@ fn close_brace(ts: List[Token], i: Int) -> Int {
 // ================================================================ list utils
 
 fn contains(xs: List[Str], s: Str) -> Bool { return xs.indexOf(s) != 0 - 1 }
+
+fn contains_int(xs: List[Int], v: Int) -> Bool {
+  var i = 0
+  while (i < xs.length()) {
+    if (xs[i] == v) { return true }
+    i += 1
+  }
+  return false
+}
+
+// Prefix test over the string primitives the frontend exposes (no `startsWith`).
+fn starts_with(s: Str, pre: Str) -> Bool {
+  if (pre.length() > s.length()) { return false }
+  return s.slice(0, pre.length()) == pre
+}
+
+// Whether a rendered type is an async FUNCTION type `(…) -> Async[T]` — the one
+// spelling that colors a first-class callback (lower.py's `_is_async_fn_type`:
+// head is the fn-type head and the declared return's head is `Async`). The
+// parser renders a fn type as `(P1, P2) -> RET`, so: it must open with `(`, the
+// matching `)` closes the parameter list (paren depth handles a nested fn-typed
+// param), and the return part after `) -> ` must itself be an `Async[...]` type.
+// A bare `Async[T]` (not a fn type) is not one — the reference refuses those at
+// wellformedness, never colors them.
+fn is_async_fn_ty(ty: Str) -> Bool {
+  if (ty.length() == 0) { return false }
+  if (ty.charAt(0) != "(") { return false }
+  var depth = 0
+  var i = 0
+  var close = 0 - 1
+  while (i < ty.length() && close == 0 - 1) {
+    let c = ty.charAt(i)
+    if (c == "(") { depth += 1 }
+    if (c == ")") {
+      depth -= 1
+      if (depth == 0) { close = i }
+    }
+    i += 1
+  }
+  if (close == 0 - 1) { return false }
+  let rest = ty.slice(close + 1, ty.length())
+  if (!starts_with(rest, " -> ")) { return false }
+  let ret = rest.slice(4, rest.length())
+  return starts_with(ret, "Async[")
+}
+
+// The parameter INDICES whose declared type is an async function type — the
+// `Async[T]` slots a call-site coercion (lower.py's `_coerce_async_args`) stamps
+// its arrow argument async into.
+fn async_slots_of(ps: List[ParamN]) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  while (i < ps.length()) {
+    if (is_async_fn_ty(ps[i].ty)) { out = out.push(i) }
+    i += 1
+  }
+  return out
+}
 
 fn union_into(xs: List[Str], ys: List[Str]) -> List[Str] {
   var out = xs
@@ -351,8 +418,10 @@ fn mk_step(p: Prog, i: Int) -> PStep { return { pg: p, i: i } }
 // a record literal (a `var` never escapes its function, syntax-2.0 §3.5), so
 // every construction from mutable state goes through one of these, exactly as
 // checker.rvl does.
-fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str]) -> FnD {
-  return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs }
+fn mk_fnd(nm: Str, em: Bool, asy: Bool, cs: List[Str], slots: List[Int],
+          bd: List[Stmt]) -> FnD {
+  return { name: nm, isEmExtern: em, isAsyncExtern: asy, callees: cs,
+           asyncSlots: slots, body: bd }
 }
 
 fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
@@ -579,7 +648,8 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
       if (e == 0 - 1) { k = ts.length() } else { k = e }
     } else { k += 1 }
   }
-  return mk_step(push_fn(pg, mk_fnd(nm, isEm, isAsync, [])), k)
+  return mk_step(push_fn(pg, mk_fnd(nm, isEm, isAsync, [],
+                                    async_slots_of(ps.ps), [])), k)
 }
 
 fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -596,7 +666,9 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let body = p_stmts(ts, rti + 1, bend - 1, [])
   return mk_step(push_fn(pg, { name: nm, isEmExtern: false,
                               isAsyncExtern: false,
-                              callees: body_callees(body, 0, []) }), bend)
+                              callees: body_callees(body, 0, []),
+                              asyncSlots: async_slots_of(ps.ps),
+                              body: body }), bend)
 }
 
 type MethsR = { xs: List[MSig], i: Int, ok: Bool }
@@ -1051,10 +1123,21 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // `_plain_body`): only there does an unresolved bare value raise the G1
 // undeclared-access diagnostic this slice spells; a setup/activation body
 // reports a different, out-of-slice message, so its bare values are not gated.
+// `fnAsyncSlots` maps a callable name to its `Async[T]` parameter indices — the
+// call-site coercion table (lower.py's `_coerce_async_args`): an arrow argument
+// in one of these slots is stamped async and is exempt from the arrow-color
+// leak refusal. `underArrow` is true while the body walk is inside an arrow
+// value: it gates ONLY the async-service-op (`aops`) accumulation, mirroring
+// `_reached_async_req_ops`, which prunes arrows (a suspending op reached only
+// through an arrow is the leak surface's concern, not the method's own reach).
+// The emission (`ecaps`/`labels`), name-reach (`areach`) and value
+// (`avals`) accumulations still descend into arrows, exactly as the
+// reference's `_method_emissions` / `_calls_in` do.
 type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
              colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
-             plainBody: Bool }
+             plainBody: Bool, fnAsyncSlots: Map[Str, List[Int]],
+             underArrow: Bool }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -1146,7 +1229,7 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
     // binds them into scope before lowering it), so the G1 bare-value check
     // must see them — otherwise `xs.map(x => x + 1)` refuses its own `x`.
     Arrow(ar)  => walk_expr(ar.body, marked,
-                            ctx_bind(cx, param_names(ar.params)), a),
+                            ctx_under_arrow(ctx_bind(cx, param_names(ar.params))), a),
     Match(m)   => walk_arms(m.arms, 0, marked, cx, walk_expr(m.scrut, marked, cx, a)),
     Templ(t)   => walk_parts(t.parts, 0, marked, cx, a),
   }
@@ -1216,7 +1299,10 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
            ecaps: union_into(na.ecaps, [root]), areach: na.areach, aops: na.aops,
            avals: na.avals }
   }
-  if (decl.isAsync) {
+  // a suspending service op reached only THROUGH an arrow value is the leak
+  // surface's concern, not the method's own reach — `_reached_async_req_ops`
+  // prunes arrows, so `aops` is suppressed while `underArrow`.
+  if (decl.isAsync && !cx.underArrow) {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
            aops: union_into(na.aops, [root.concat(".").concat(meth)]),
            avals: na.avals }
@@ -1292,7 +1378,18 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
   return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: union_into(cx.scopeNames, names), fnNames: cx.fnNames,
-           compName: cx.compName, plainBody: cx.plainBody }
+           compName: cx.compName, plainBody: cx.plainBody,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow }
+}
+
+// The same context marked as being inside an arrow value: only the `aops`
+// accumulation is suppressed downstream (`_reached_async_req_ops` prunes arrows).
+fn ctx_under_arrow(cx: Ctx) -> Ctx {
+  return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName, plainBody: cx.plainBody,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: true }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -1419,23 +1516,27 @@ fn build_maps(pg: Prog) -> Ctx {
   let colored = async_colored(pg.fns)
   var emitting: List[Str] = []
   var ai: List[Str] = []
+  var slots: Map[Str, List[Int]] = Map.empty()
   var fi = 0
   while (fi < pg.fns.length()) {
     let f = pg.fns[fi]
     if (caps_of(caps, f.name).length() > 0) { emitting = emitting.push(f.name) }
     if (f.isAsyncExtern) { ai = ai.push(f.name) }
+    if (f.asyncSlots.length() > 0) { slots = slots.set(f.name, f.asyncSlots) }
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
-                [], fn_names_of(pg.fns), "", false)
+                [], fn_names_of(pg.fns), "", false, slots)
 }
 
 fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
           colored: List[Str], emitting: List[Str], ai: List[Str],
-          scope: List[Str], fnn: List[Str], cnm: Str, plain: Bool) -> Ctx {
+          scope: List[Str], fnn: List[Str], cnm: Str, plain: Bool,
+          slots: Map[Str, List[Int]]) -> Ctx {
   return { svcs: svcs, reqMap: rm, caps: caps, colored: colored,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
-           fnNames: fnn, compName: cnm, plainBody: plain }
+           fnNames: fnn, compName: cnm, plainBody: plain, fnAsyncSlots: slots,
+           underArrow: false }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -1454,7 +1555,8 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
   return { svcs: base.svcs, reqMap: req_map_of(comp.reqMap), caps: base.caps,
            colored: base.colored, emittingNames: base.emittingNames,
            asyncExterns: base.asyncExterns, scopeNames: scope_names_of(comp),
-           fnNames: base.fnNames, compName: comp.name, plainBody: false }
+           fnNames: base.fnNames, compName: comp.name, plainBody: false,
+           fnAsyncSlots: base.fnAsyncSlots, underArrow: false }
 }
 
 // The same context switched into a provide-method (plain) body, where G1
@@ -1463,7 +1565,8 @@ fn ctx_plain(cx: Ctx) -> Ctx {
   return { svcs: cx.svcs, reqMap: cx.reqMap, caps: cx.caps, colored: cx.colored,
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames, compName: cx.compName,
-           plainBody: true }
+           plainBody: true, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow }
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -1514,6 +1617,325 @@ fn has_await(ss: List[Stmt], i: Int) -> Bool {
   return has_await(ss, i + 1)
 }
 
+// ============================================================ arrow-color leak
+//
+// The A1 arrow-color LEAK trio (lower.py item 92 / finding #21): a sync-typed
+// arrow that reaches a suspension carries no async color, so its caller would
+// receive an unawaited suspension. The enabler is the `Async[T]` coercion model
+// (`_coerce_async_args`): an arrow ARGUMENT landing in an `Async[T]` parameter
+// slot is legitimately async (it is awaited through that colored type) and must
+// be ADMITTED — the same arrow in a sync slot must be REFUSED. `fnAsyncSlots`
+// carries which slots those are; `leaky_scan` skips a `coerced` arrow and
+// checks every other one.
+//
+//   * `reach_scan` answers `_arrow_reaches_async` for one arrow body: does it
+//     reach an async-colored callable BY NAME (`names`) or — in a component
+//     body — a required-key async service OP (`hasReq`, rule 3)? A pure module
+//     fn has no required keys, so it passes `checkReq = false` (names only,
+//     matching `_refuse_leaky_pure_arrow`'s named-callable reach). The walk
+//     descends every arrow: nesting a coerced arrow inside a leaky one is out of
+//     this slice's surface (no fixture reaches it) — the reference stops at an
+//     already-async-flagged inner arrow, an approximation this shares only where
+//     a nested arrow is BOTH coerced and the outer arrow's sole async reach.
+//
+//   * `leaky_scan` walks a body for arrows; a non-coerced arrow whose body
+//     reaches async is the refusal. In a provide method (`checkReq = true`) the
+//     message is the reference's un-named `_refuse_leaky_arrow` wording; in a
+//     module fn (`checkReq = false`) it is `_refuse_leaky_pure_arrow`'s wording,
+//     naming the first (sorted) async callable reached.
+
+type ReachAcc = { names: List[Str], hasReq: Bool }
+
+fn reach_empty() -> ReachAcc { return { names: [], hasReq: false } }
+
+fn reach_add_name(a: ReachAcc, n: Str) -> ReachAcc {
+  return { names: union_into(a.names, [n]), hasReq: a.hasReq }
+}
+
+fn reach_set_req(a: ReachAcc) -> ReachAcc {
+  return { names: a.names, hasReq: true }
+}
+
+fn reach_exprs(xs: List[Expr], i: Int, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  if (i >= xs.length()) { return a }
+  return reach_exprs(xs, i + 1, cx, cr, reach_scan(xs[i], cx, cr, a))
+}
+
+fn reach_inits(xs: List[InitN], i: Int, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  if (i >= xs.length()) { return a }
+  return reach_inits(xs, i + 1, cx, cr, reach_scan(xs[i].value, cx, cr, a))
+}
+
+fn reach_arms(xs: List[ArmN], i: Int, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  if (i >= xs.length()) { return a }
+  return reach_arms(xs, i + 1, cx, cr, reach_scan(xs[i].body, cx, cr, a))
+}
+
+fn reach_parts(xs: List[PartN], i: Int, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  if (i >= xs.length()) { return a }
+  return reach_parts(xs, i + 1, cx, cr, reach_scan(xs[i].e, cx, cr, a))
+}
+
+fn reach_reqcall(v: Str, meth: Str, args: List[Expr], cx: Ctx, cr: Bool,
+                 a: ReachAcc) -> ReachAcc {
+  var a2 = a
+  if (cr) {
+    if (cx.reqMap.has(v)) {
+      let svcName = match cx.reqMap.lookup(v) { Some(x) => x, None => "" }
+      let decl = find_msig(svc_of(cx, svcName), meth, 0)
+      if (decl.isAsync) { a2 = reach_set_req(a) }
+    }
+  }
+  return reach_exprs(args, 0, cx, cr, a2)
+}
+
+fn reach_call(tg: Expr, args: List[Expr], cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  return match tg {
+    Field(fl) => match fl.target {
+      Var(v) => reach_reqcall(v, fl.name, args, cx, cr, a),
+      _      => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
+    },
+    Var(n)  => reach_exprs(args, 0, cx, cr,
+                           contains(cx.colored, n) ? reach_add_name(a, n) : a),
+    _       => reach_exprs(args, 0, cx, cr, reach_scan(tg, cx, cr, a)),
+  }
+}
+
+// Does one expression tree reach a suspension (a call of an async-colored name,
+// or — when `cr` — a required-key async op)? Bare VALUE references are excluded:
+// a first-class async value is the `passed_async` surface, refused at the method
+// level, not here (matching `_calls_in`'s call-only reach, no `values`).
+fn reach_scan(e: Expr, cx: Ctx, cr: Bool, a: ReachAcc) -> ReachAcc {
+  return match e {
+    IntLit(_)   => a,
+    FloatLit(_) => a,
+    StrLit(_)   => a,
+    BoolLit(_)  => a,
+    NullLit     => a,
+    Var(_)      => a,
+    Hole(_)     => a,
+    Bad(_)      => a,
+    Bin(b)      => reach_scan(b.r, cx, cr, reach_scan(b.l, cx, cr, a)),
+    Un(u)       => reach_scan(u.e, cx, cr, a),
+    Emit(u)     => reach_scan(u.e, cx, cr, a),
+    Call(c)     => reach_call(c.target, c.args, cx, cr, a),
+    Field(f)    => reach_scan(f.target, cx, cr, a),
+    OptField(f) => reach_scan(f.target, cx, cr, a),
+    OptCall(c)  => reach_call(c.target, c.args, cx, cr, a),
+    Index(x)    => reach_scan(x.idx, cx, cr, reach_scan(x.target, cx, cr, a)),
+    If(x)       => reach_scan(x.els, cx, cr,
+                             reach_scan(x.then_, cx, cr, reach_scan(x.cond, cx, cr, a))),
+    Rec(r)      => reach_inits(r.fields, 0, cx, cr, a),
+    Lst(l)      => reach_exprs(l.items, 0, cx, cr, a),
+    Arrow(ar)   => reach_scan(ar.body, cx, cr, a),
+    Match(m)    => reach_arms(m.arms, 0, cx, cr, reach_scan(m.scrut, cx, cr, a)),
+    Templ(t)    => reach_parts(t.parts, 0, cx, cr, a),
+  }
+}
+
+fn or2(x: Str, y: Str) -> Str { return x != "" ? x : y }
+
+fn leaky_provide_msg() -> Str {
+  return "this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"
+}
+
+fn leaky_pure_msg(nm: Str) -> Str {
+  return "this arrow reaches async callable `".concat(nm)
+    .concat("`, but its type carries no async color — the caller would receive an unawaited suspension (A1)")
+}
+
+fn leaky_exprs(xs: List[Expr], i: Int, cx: Ctx, cr: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = leaky_scan(xs[i], false, cx, cr)
+  if (r != "") { return r }
+  return leaky_exprs(xs, i + 1, cx, cr)
+}
+
+fn leaky_inits(xs: List[InitN], i: Int, cx: Ctx, cr: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = leaky_scan(xs[i].value, false, cx, cr)
+  if (r != "") { return r }
+  return leaky_inits(xs, i + 1, cx, cr)
+}
+
+fn leaky_arms(xs: List[ArmN], i: Int, cx: Ctx, cr: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = leaky_scan(xs[i].body, false, cx, cr)
+  if (r != "") { return r }
+  return leaky_arms(xs, i + 1, cx, cr)
+}
+
+fn leaky_parts(xs: List[PartN], i: Int, cx: Ctx, cr: Bool) -> Str {
+  if (i >= xs.length()) { return "" }
+  let r = leaky_scan(xs[i].e, false, cx, cr)
+  if (r != "") { return r }
+  return leaky_parts(xs, i + 1, cx, cr)
+}
+
+// A non-coerced arrow whose body reaches async is the leak; a coerced one (in an
+// `Async[T]` slot) is admitted. Either way the body is still scanned for a
+// nested sync arrow that leaks (matching `_refuse_leaky_arrow`'s "walk below").
+fn leaky_arrow_body(body: Expr, coerced: Bool, cx: Ctx, cr: Bool) -> Str {
+  if (!coerced) {
+    let r = reach_scan(body, cx, cr, reach_empty())
+    if (cr) {
+      if (r.names.length() > 0 || r.hasReq) { return leaky_provide_msg() }
+    } else {
+      if (r.names.length() > 0) { return leaky_pure_msg(sort_strs(r.names)[0]) }
+    }
+  }
+  return leaky_scan(body, false, cx, cr)
+}
+
+// An arrow argument in an `Async[T]` slot of the callee is coerced (admitted);
+// every other argument is scanned uncoerced.
+fn leaky_args_coerced(args: List[Expr], i: Int, slots: List[Int], cx: Ctx,
+                      cr: Bool) -> Str {
+  if (i >= args.length()) { return "" }
+  let r = leaky_scan(args[i], contains_int(slots, i), cx, cr)
+  if (r != "") { return r }
+  return leaky_args_coerced(args, i + 1, slots, cx, cr)
+}
+
+fn leaky_call(tg: Expr, args: List[Expr], cx: Ctx, cr: Bool) -> Str {
+  return match tg {
+    Var(n) => leaky_args_coerced(args, 0,
+                match cx.fnAsyncSlots.lookup(n) { Some(v) => v, None => [] }, cx, cr),
+    _      => or2(leaky_scan(tg, false, cx, cr), leaky_exprs(args, 0, cx, cr)),
+  }
+}
+
+fn leaky_scan(e: Expr, coerced: Bool, cx: Ctx, cr: Bool) -> Str {
+  return match e {
+    IntLit(_)   => "",
+    FloatLit(_) => "",
+    StrLit(_)   => "",
+    BoolLit(_)  => "",
+    NullLit     => "",
+    Var(_)      => "",
+    Hole(_)     => "",
+    Bad(_)      => "",
+    Bin(b)      => or2(leaky_scan(b.l, false, cx, cr), leaky_scan(b.r, false, cx, cr)),
+    Un(u)       => leaky_scan(u.e, false, cx, cr),
+    Emit(u)     => leaky_scan(u.e, false, cx, cr),
+    Call(c)     => leaky_call(c.target, c.args, cx, cr),
+    Field(f)    => leaky_scan(f.target, false, cx, cr),
+    OptField(f) => leaky_scan(f.target, false, cx, cr),
+    OptCall(c)  => leaky_call(c.target, c.args, cx, cr),
+    Index(x)    => or2(leaky_scan(x.target, false, cx, cr), leaky_scan(x.idx, false, cx, cr)),
+    If(x)       => or2(leaky_scan(x.cond, false, cx, cr),
+                       or2(leaky_scan(x.then_, false, cx, cr), leaky_scan(x.els, false, cx, cr))),
+    Rec(r)      => leaky_inits(r.fields, 0, cx, cr),
+    Lst(l)      => leaky_exprs(l.items, 0, cx, cr),
+    Arrow(ar)   => leaky_arrow_body(ar.body, coerced, cx, cr),
+    Match(m)    => or2(leaky_scan(m.scrut, false, cx, cr), leaky_arms(m.arms, 0, cx, cr)),
+    Templ(t)    => leaky_parts(t.parts, 0, cx, cr),
+  }
+}
+
+fn leaky_body(ss: List[Stmt], i: Int, cx: Ctx, cr: Bool) -> Str {
+  if (i >= ss.length()) { return "" }
+  let r = leaky_scan(ss[i].e, false, cx, cr)
+  if (r != "") { return r }
+  return leaky_body(ss, i + 1, cx, cr)
+}
+
+// ---------------------------------------------------------------- module fns
+//
+// The module-fn TWIN of the two provide-method A1 value/leak refusals
+// (lower.py's fn loop, run over every lowered module fn BEFORE any component):
+//   * a first-class reference to an async callable as a VALUE — an arrow type
+//     carries no color, so a suspension cannot be awaited through it (the exact
+//     wording names the fn and the first sorted culprit);
+//   * a sync-typed arrow in the fn body reaching an async callable
+//     (`_refuse_leaky_pure_arrow`) — a pure fn has no required keys, so only the
+//     named-callable reach applies (`checkReq = false`).
+// The value refusal is checked before the arrow leak, per fn, in declaration
+// order, exactly as the reference's single loop does.
+
+fn col_exprs(xs: List[Expr], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return col_exprs(xs, i + 1, cx, col_values(xs[i], cx, acc))
+}
+
+fn col_inits(xs: List[InitN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return col_inits(xs, i + 1, cx, col_values(xs[i].value, cx, acc))
+}
+
+fn col_arms(xs: List[ArmN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return col_arms(xs, i + 1, cx, col_values(xs[i].body, cx, acc))
+}
+
+fn col_parts(xs: List[PartN], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return col_parts(xs, i + 1, cx, col_values(xs[i].e, cx, acc))
+}
+
+// The call HEAD var is the callee, not a flowing value (mirrors `_calls_in`,
+// which records it in `found`, never `values`); a non-var head is walked.
+fn col_call(tg: Expr, args: List[Expr], cx: Ctx, acc: List[Str]) -> List[Str] {
+  let a2 = match tg { Var(_) => acc, _ => col_values(tg, cx, acc) }
+  return col_exprs(args, 0, cx, a2)
+}
+
+// First-class async-colored names referenced as VALUES in an expression tree
+// (mirrors `_calls_in(values=…)` intersected with the colored set).
+fn col_values(e: Expr, cx: Ctx, acc: List[Str]) -> List[Str] {
+  return match e {
+    Var(n)      => contains(cx.colored, n) ? union_into(acc, [n]) : acc,
+    IntLit(_)   => acc,
+    FloatLit(_) => acc,
+    StrLit(_)   => acc,
+    BoolLit(_)  => acc,
+    NullLit     => acc,
+    Hole(_)     => acc,
+    Bad(_)      => acc,
+    Bin(b)      => col_values(b.r, cx, col_values(b.l, cx, acc)),
+    Un(u)       => col_values(u.e, cx, acc),
+    Emit(u)     => col_values(u.e, cx, acc),
+    Call(c)     => col_call(c.target, c.args, cx, acc),
+    Field(f)    => col_values(f.target, cx, acc),
+    OptField(f) => col_values(f.target, cx, acc),
+    OptCall(c)  => col_call(c.target, c.args, cx, acc),
+    Index(x)    => col_values(x.idx, cx, col_values(x.target, cx, acc)),
+    If(x)       => col_values(x.els, cx, col_values(x.then_, cx, col_values(x.cond, cx, acc))),
+    Rec(r)      => col_inits(r.fields, 0, cx, acc),
+    Lst(l)      => col_exprs(l.items, 0, cx, acc),
+    Arrow(ar)   => col_values(ar.body, cx, acc),
+    Match(m)    => col_arms(m.arms, 0, cx, col_values(m.scrut, cx, acc)),
+    Templ(t)    => col_parts(t.parts, 0, cx, acc),
+  }
+}
+
+fn col_values_body(ss: List[Stmt], i: Int, cx: Ctx, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  return col_values_body(ss, i + 1, cx, col_values(ss[i].e, cx, acc))
+}
+
+// The module-fn value + leaky-arrow verdict for one fn (lower.py's fn loop).
+// "" admits; else a tagged A1 refusal. An extern has an empty body, so both
+// checks are no-ops on it.
+fn fn_a1_verdict(f: FnD, base: Ctx) -> Str {
+  let vals = sort_strs(col_values_body(f.body, 0, base, []))
+  if (vals.length() > 0) {
+    return tagged("A1", "function `".concat(f.name)
+      .concat("` uses async callable `").concat(vals[0])
+      .concat("` as a function value, but an async callable has no arrow type"))
+  }
+  let leak = leaky_body(f.body, 0, base, false)
+  if (leak != "") { return tagged("A1", leak) }
+  return ""
+}
+
+fn check_module_fns(fns: List[FnD], i: Int, base: Ctx) -> Str {
+  if (i >= fns.length()) { return "" }
+  let v = fn_a1_verdict(fns[i], base)
+  if (v != "") { return v }
+  return check_module_fns(fns, i + 1, base)
+}
+
 // G4 + A1 over one component. "" = admitted, else a tagged refusal.
 fn check_component(comp: CompD, cx: Ctx) -> Str {
   // setup gets G4/A1/G1 too (an undeclared access or unmarked emission in
@@ -1554,6 +1976,12 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
         let a1 = a1_verdict(pv.svcName, pm.name, decl, a, cx)
         if (a1 != "") { return tagged("A1", a1) }
       }
+      // the arrow-color LEAK (lower.py's `_refuse_leaky_arrow`) runs last and
+      // for EVERY method, sync or async: a sync-typed (non-coerced) arrow whose
+      // body reaches async has no color to carry the suspension. A coerced arrow
+      // (in an `Async[T]` slot) is admitted.
+      let leak = leaky_body(pm.body, 0, pcx, true)
+      if (leak != "") { return tagged("A1", leak) }
       mi += 1
     }
     pi += 1
@@ -1736,6 +2164,12 @@ pub fn admit_src(src: Str) -> Str {
   let pg = parse_prog(src)
   if (pg.bad != "") { return tagged("BAD", pg.bad) }
   let base = build_maps(pg)
+  // the module-fn A1 twins (first-class async value, leaky pure arrow) are
+  // decided over the lowered fns BEFORE any component is lowered, so they are
+  // surfaced first, in declaration order (lower.py's fn loop precedes the
+  // component loop).
+  let fnv = check_module_fns(pg.fns, 0, base)
+  if (fnv != "") { return fnv }
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
@@ -1773,30 +2207,30 @@ test "plain provider reaching an emission is refused (G4), exact wording" {
 }
 
 test "unmarked emission is refused (G4)" {
-  assert admit_src("service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute(a) undo db.execute(b) }") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
+  assert admit_src("""service Database { emission fn execute(sql: Str) -> Int } component P requires db: Database { effect db.execute("x") undo db.execute("y") }""") == "G4|call to emission `db.execute` must be marked `emit` (G4)"
 }
 
 test "admit_tag exposes the bare guarantee" {
-  assert admit_tag("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s } } } component B provides db: D { provide db { fn q(s) { let x = s } } }") == "G2"
+  assert admit_tag("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }") == "G2"
 }
 
 test "two providers of one key are refused (G2)" {
-  let v = admit_src("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s } } } component B provides db: D { provide db { fn q(s) { let x = s } } }")
+  let v = admit_src("service D { fn q(s: Str) -> Int } component A provides db: D { provide db { fn q(s) { let x = s   return 0 } } } component B provides db: D { provide db { fn q(s) { let x = s   return 0 } } }")
   assert v == "G2|provision conflict: key `db` is provided by both A and B (G2)"
 }
 
 test "sync provide method reaching an async extern is refused (A1)" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
   assert v == "A1|`Http.post` is declared sync, but this implementation reaches async extern `http_post` — a sync method has no in-flight window (A1)"
 }
 
 test "async-declared op admits the same async body" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = http_post(url, body) } }")
   assert v == ""
 }
 
 test "sync method implementing an async op is refused (signature parity)" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
   assert v == "A1|method `post` of provision `http` is not async but service Http declares it async"
 }
 
@@ -1835,12 +2269,12 @@ test "an arrow parameter resolves in its body (no false G1)" {
 }
 
 test "async extern used as a value is refused (A1)" {
-  let v = admit_src("extern emission async fn tick() -> Int service S { emission async fn go() -> Int } component C provides s: S { provide s { async fn go() { let f = tick   return 0 } } }")
+  let v = admit_src("extern emission async fn tick() -> Int = @py { return 1 } service S { emission async fn go() -> Int } component C provides s: S { provide s { async fn go() { let f = tick   return 0 } } }")
   assert v == "A1|`S.go` uses async extern `tick` as a function value, but an async callable has no arrow type"
 }
 
 test "setup reaching an async extern is refused (A1)" {
-  let v = admit_src("extern emission async fn tick() -> Int service S { fn go() -> Int } component C provides s: S { emit tick() provide s { fn go() { return 0 } } }")
+  let v = admit_src("extern emission async fn tick() -> Int = @py { return 1 } service S { fn go() -> Int } component C provides s: S { emit tick() provide s { fn go() { return 0 } } }")
   assert v == "A1|component `C` reaches async extern `tick` in a setup/activation body, which cannot suspend a fiber (A1)"
 }
 
@@ -1864,6 +2298,36 @@ test "config before isolate composes (prelude ok)" {
 component C requires kv: Kv {
   config { tenant: Str }
   isolate kv in realm("r1")
-  let probe = effect kv.get("boot") undo probe.drop()
+  let v = effect kv.get("boot") undo kv.get("boot")
 }""") == ""
+}
+
+// ---- the arrow-color leak trio + Async[T] coercion (item 171) -------------
+
+test "sync-typed arrow reaching an async op leaks (A1)" {
+  let v = admit_src("""service Model { emission async fn complete(msgs: Str) -> Str } service S { emission async fn go() -> Str } component C requires model: Model provides s: S { provide s { async fn go() { let f = msgs => emit model.complete(msgs)   return "x" } } }""")
+  assert v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"
+}
+
+test "an arrow in an Async[T] slot is coerced, not leaky (admits)" {
+  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } } }""") == ""
+}
+
+test "the same arrow in a sync slot leaks (A1)" {
+  let v = admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } } }""")
+  assert v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"
+}
+
+test "a module fn using an async callable as a value is refused (A1)" {
+  let v = admit_src("extern emission async fn tick() -> Int = @py { return 1 } fn holder() -> Int { let f = tick   return 0 } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }")
+  assert v == "A1|function `holder` uses async callable `tick` as a function value, but an async callable has no arrow type"
+}
+
+test "a module fn's sync arrow reaching an async callable leaks (A1)" {
+  let v = admit_src("extern emission async fn tick() -> Int = @py { return 1 } fn holder(g: (Int) -> Int) -> Int { let h = x => tick()   return 0 } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }")
+  assert v == "A1|this arrow reaches async callable `tick`, but its type carries no async color — the caller would receive an unawaited suspension (A1)"
+}
+
+test "a module fn's arrow into an Async[T] slot is coerced (admits)" {
+  assert admit_src("extern emission async fn tick() -> Int = @py { return 1 } fn apply_cb(cb: () -> Async[Int]) -> Int { return cb() } fn holder() -> Int { return apply_cb(() => tick()) } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }") == ""
 }
