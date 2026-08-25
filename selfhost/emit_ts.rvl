@@ -45,6 +45,21 @@
 //     the single `_expr` — the component-dialect kinds `req`/`config`/`name` and
 //     the component-shaped `call` (`target`/`method`) join the 2.0 dispatch.
 //
+// ============================================================ SLICE 4 (item 219)
+// Adds ASYNC COLORING across the component tail, byte-identical:
+//   * async service OPERATIONS -> `Promise<T>` signatures (`service_interfaces`);
+//   * `async` provide METHODS — `async <op>(…) {` whose body renders in an async
+//     context (`provide_impl`/`method_body`);
+//   * the item-141 AWAIT-SEED — a req-keyed async-op `call` in an async body is
+//     awaited wherever it lands (return / let / a nested ternary arm), gated on
+//     `in_async && !in_arrow` and a per-component `ops` membership test;
+//   * the ASYNC-GENERATOR body — a component body with an `await` step renders
+//     `ctx.effect(async function* () {` (`component_lines`/`body_has_await`), and
+//     the `await` step lands + `yield () => {}` iteration boundary (A1).
+// The async-colouring state (`in_async`/`in_arrow`/`ops`) is threaded EXPLICITLY
+// down the expr tree as an `ACx` — revl has no shared render context — like the
+// `$revl_match_N` counter (relates to the state-threading tax, item 195).
+//
 // ============================================================ SLICE 3 (item 208)
 // Extends the emitter to composite SIGNATURE types and four more expr kinds:
 //   * COMPOSITE service/provide-method signature types via `ts_type_v1` — the
@@ -61,18 +76,19 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on TS-emitter slices, deliberately OUT of these slices:
-//   * async coloring across the component tail (async service ops -> `Promise`,
-//     `async` provide methods, awaited call sites, the async-generator body),
-//     the whole v1/v2 `_emit_v1` path, and canonical;
-//   * the component-body `await`/`timer` steps; and the component-dialect expr
-//     kinds `spawn`/`instance-get` (unexercised);
+//   * the whole v1/v2 `_emit_v1`-vs-`_emit_v3` DISPATCH (emit_src assembles the
+//     v3 shape only; it matches `_emit_v1` for a component-only doc because the
+//     two share `_component`), and canonical;
+//   * the component-body `timer` step; and the component-dialect expr kinds
+//     `spawn`/`instance-get` (unexercised);
 //   * the VARIANT half of `_emit_ts_types` (the `export type … =` union + its
 //     constructor functions) — only records are emitted; a variant type would
 //     emit a marker and diverge, so no fixture declares one;
 //   * externs (`_emit_ts_externs`), in-file `test`/`fault_test`/`lifecycle test`
-//     emission, async coloring (async fns / async externs / awaited call sites /
-//     async arrows / async match), spawn/instances, realm placements
-//     (isolate/intercept/routes + the router), and the canonical ABI;
+//     emission, the MODULE-FN async path (async fns / async externs and their
+//     `async_names`/`async_locals` await, async arrows, async match — the
+//     component-tail async surface above IS covered), spawn/instances, realm
+//     placements (isolate/intercept/routes + the router), and the canonical ABI;
 //   * `assert` statements and `let_pattern` (destructuring): the reference names
 //     an assert temp `$revl_l`/`$revl_r` and renders via `revlShow` — implementable
 //     but not exercised by the function corpus, so deferred to keep the slice
@@ -133,6 +149,49 @@ type Rendered = { text: Str, counter: Int }
 
 // One or more statement lines AND the threaded match counter.
 type StmtOut = { lines: List[Str], counter: Int }
+
+// ------------------------------------------------------ async-coloring context
+// The reference threads its async-colouring state on the rendering `_Ctx`
+// (`in_async`/`in_arrow` and the doc-level `async_ops`); revl has no such shared
+// object, so — like the `$revl_match_N` counter — it is threaded EXPLICITLY down
+// the expr tree (item 219; relates to the state-threading tax, item 195).
+//   * `in_async` — is the body currently rendered an `async` provide method (so
+//     it may `await`)? The item-141 await-seed fires only when true.
+//   * `in_arrow` — are we INSIDE an arrow body? The await-seed stays OUT of arrow
+//     bodies (an async arrow flattens its own Promise), matching the reference.
+//   * `ops` — the async service OPERATIONS reachable through THIS component's
+//     requirement keys, each as `"<reqKey>#<method>"` (the reference's
+//     `async_ops`, pre-resolved through `scope.requires` so `render_call` needs
+//     only a membership test). A method name is a bare identifier, so `#` cannot
+//     collide.
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str] }
+
+// The sync, non-component context: the pure fn/test pass and every sync body.
+fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [] } }
+
+// The `"<reqKey>#<method>"` await-seed key.
+fn async_op_key(req_key: Str, method: Str) -> Str {
+  return req_key.concat("#").concat(method)
+}
+
+// `async_ops` for one component: for each requirement `<key>: <Service>`, every
+// async operation the service declares, keyed `"<key>#<op>"`. Mirrors the
+// reference's `{(service, method) …}` set resolved through `scope.requires`.
+fn async_ops_of(req_map: Any, services: Any) -> List[Str] {
+  var ops = []
+  for (req_key of value_keys(req_map)) {
+    let svc = value_field(services, value_str(value_field(req_map, req_key)))
+    if (!value_is_null(svc)) {
+      let methods = value_field(svc, "methods")
+      for (mname of value_keys(methods)) {
+        if (value_bool(value_field(value_field(methods, mname), "async"))) {
+          ops = ops.push(async_op_key(req_key, mname))
+        }
+      }
+    }
+  }
+  return ops
+}
 
 // ---------------------------------------------------- JS/TS keyword mangle (A3)
 // `_mangle`: append `_` until a valid revl identifier that is a JS/TS reserved
@@ -335,40 +394,40 @@ fn is_float_expr(node: Any) -> Bool {
 // -------------------------------------------------------------- expressions
 // `_int_as_number`: an Int-typed expression rendered as the JS `number` an
 // index/count API needs. A literal Int drops its `n`; anything else is `Number(…)`.
-fn int_as_number(node: Any, counter: Int) -> Rendered {
+fn int_as_number(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (node_kind(node) == "lit") {
     let v = value_field(node, "value")
     if (value_kind(v) == "int") { return { text: `${value_int(v)}`, counter: counter } }
   }
-  let r = expr(node, counter)
+  let r = expr(node, counter, acx)
   return { text: `Number(${r.text})`, counter: r.counter }
 }
 
 // `_float_operand`: render so the result is a JS `number` (an Int that widened
 // into a Float position goes through `Number(…)`).
-fn float_operand(node: Any, counter: Int) -> Rendered {
+fn float_operand(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (node_kind(node) == "lit") {
     let v = value_field(node, "value")
     let vk = value_kind(v)
     if (vk == "int" || vk == "float") { return { text: json_dumps(v), counter: counter } }
   }
-  let r = expr(node, counter)
+  let r = expr(node, counter, acx)
   if (is_float_expr(node)) { return r }
   return { text: `Number(${r.text})`, counter: r.counter }
 }
 
 // Render a call/field/index/builtin TARGET, parenthesised unless atomic.
-fn paren_target(node: Any, counter: Int) -> Rendered {
-  let r = expr(node, counter)
+fn paren_target(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let r = expr(node, counter, acx)
   if (is_v3_atomic(node)) { return r }
   return { text: `(${r.text})`, counter: r.counter }
 }
 
-fn commajoin(nodes: List[Any], counter: Int) -> Rendered {
+fn commajoin(nodes: List[Any], counter: Int, acx: ACx) -> Rendered {
   var parts = []
   var c = counter
   for (e of nodes) {
-    let r = expr(e, c)
+    let r = expr(e, c, acx)
     parts = parts.push(r.text)
     c = r.counter
   }
@@ -407,7 +466,7 @@ fn render_lit(node: Any) -> Str {
 // `_ts_builtin`: the stdlib surface (docs/stdlib-2.0.md) as idiomatic TS. `args`
 // are the pre-rendered argument texts; `arg_nodes`/`counter` are threaded so the
 // `repeat` count can re-render through `_int_as_number`.
-fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any], recv: Str, counter: Int) -> Rendered {
+fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any], recv: Str, counter: Int, acx: ACx) -> Rendered {
   if (method == "length") { return { text: `revlLen(${target})`, counter: counter } }
   if (method == "push") { return { text: `[...${target}, ${args[0]}]`, counter: counter } }
   if (method == "slice") { return { text: `revlSlice(${target}, ${args[0]}, ${args[1]})`, counter: counter } }
@@ -431,7 +490,7 @@ fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any
   if (method == "split") { return { text: `${target}.split(${args[0]})`, counter: counter } }
   if (method == "join") { return { text: `${target}.join(${args[0]})`, counter: counter } }
   if (method == "repeat") {
-    let r = int_as_number(arg_nodes[0], counter)
+    let r = int_as_number(arg_nodes[0], counter, acx)
     return { text: `${target}.repeat(${r.text})`, counter: r.counter }
   }
   if (method == "startsWith") { return { text: `${target}.startsWith(${args[0]})`, counter: counter } }
@@ -468,10 +527,10 @@ fn optcall_result_is_int(method: Str) -> Bool {
 // `_v3_match_expr`: the match lowering. Opt (Some/None) discriminates on
 // `undefined`; a tagged ADT switches on `.kind`. `in_async` is false in this
 // slice, so the async wrappers are omitted.
-fn match_expr(node: Any, counter: Int) -> Rendered {
+fn match_expr(node: Any, counter: Int, acx: ACx) -> Rendered {
   let c0 = counter + 1
   let tmp = `$revl_match_${c0}`
-  let sr = expr(value_field(node, "scrutinee"), c0)
+  let sr = expr(value_field(node, "scrutinee"), c0, acx)
   var c = sr.counter
   let arms = value_list(value_field(node, "arms"))
   var is_opt = false
@@ -486,7 +545,7 @@ fn match_expr(node: Any, counter: Int) -> Rendered {
     var has_wild = false
     for (arm of arms) {
       let pattern = value_str(value_field(arm, "pattern"))
-      let br = expr(value_field(arm, "body"), c)
+      let br = expr(value_field(arm, "body"), c, acx)
       c = br.counter
       let body = br.text
       if (pattern == "_") {
@@ -517,7 +576,7 @@ fn match_expr(node: Any, counter: Int) -> Rendered {
   var has_wild = false
   for (arm of arms) {
     let pattern = value_str(value_field(arm, "pattern"))
-    let br = expr(value_field(arm, "body"), c)
+    let br = expr(value_field(arm, "body"), c, acx)
     c = br.counter
     let body = br.text
     if (pattern == "_") {
@@ -548,16 +607,16 @@ fn match_expr(node: Any, counter: Int) -> Rendered {
 }
 
 // `_expr`'s `bin` branch.
-fn render_bin(node: Any, counter: Int) -> Rendered {
+fn render_bin(node: Any, counter: Int, acx: ACx) -> Rendered {
   let op = node_op(node)
   if (op == "??") {
-    let l = expr(value_field(node, "left"), counter)
-    let r = expr(value_field(node, "right"), l.counter)
+    let l = expr(value_field(node, "left"), counter, acx)
+    let r = expr(value_field(node, "right"), l.counter, acx)
     return { text: `(${l.text} ?? ${r.text})`, counter: r.counter }
   }
   if (is_equality_op(op)) {
-    let l = expr(value_field(node, "left"), counter)
-    let r = expr(value_field(node, "right"), l.counter)
+    let l = expr(value_field(node, "left"), counter, acx)
+    let r = expr(value_field(node, "right"), l.counter, acx)
     let call = `revlEq(${l.text}, ${r.text})`
     if (op == "==" || op == "===") { return { text: call, counter: r.counter } }
     return { text: `(!${call})`, counter: r.counter }
@@ -565,17 +624,17 @@ fn render_bin(node: Any, counter: Int) -> Rendered {
   let jop = ts_bin_op(op)
   let opnd = node_operands(node)
   if (op == "/") {
-    let l = float_operand(value_field(node, "left"), counter)
-    let r = float_operand(value_field(node, "right"), l.counter)
+    let l = float_operand(value_field(node, "left"), counter, acx)
+    let r = float_operand(value_field(node, "right"), l.counter, acx)
     return { text: `(${l.text} / ${r.text})`, counter: r.counter }
   }
   if (opnd == "Float") {
-    let l = float_operand(value_field(node, "left"), counter)
-    let r = float_operand(value_field(node, "right"), l.counter)
+    let l = float_operand(value_field(node, "left"), counter, acx)
+    let r = float_operand(value_field(node, "right"), l.counter, acx)
     return { text: `(${l.text} ${jop} ${r.text})`, counter: r.counter }
   }
-  let l = expr(value_field(node, "left"), counter)
-  let r = expr(value_field(node, "right"), l.counter)
+  let l = expr(value_field(node, "left"), counter, acx)
+  let r = expr(value_field(node, "right"), l.counter, acx)
   if (is_addsubmul(op) && opnd == "Int") {
     return { text: `revlI64(${l.text} ${jop} ${r.text})`, counter: r.counter }
   }
@@ -585,8 +644,8 @@ fn render_bin(node: Any, counter: Int) -> Rendered {
   return { text: `(${l.text} ${jop} ${r.text})`, counter: r.counter }
 }
 
-fn render_un(node: Any, counter: Int) -> Rendered {
-  let r = expr(value_field(node, "operand"), counter)
+fn render_un(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let r = expr(value_field(node, "operand"), counter, acx)
   let op = node_op(node)
   if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
   if (op == "-") {
@@ -598,23 +657,23 @@ fn render_un(node: Any, counter: Int) -> Rendered {
   return { text: `<<UNSUPPORTED-UN:${op}>>`, counter: r.counter }
 }
 
-fn render_record(fields: List[Any], counter: Int) -> Rendered {
+fn render_record(fields: List[Any], counter: Int, acx: ACx) -> Rendered {
   var parts = []
   var c = counter
   for (p of fields) {
-    let vr = expr(value_at(p, 1), c)
+    let vr = expr(value_at(p, 1), c, acx)
     c = vr.counter
     parts = parts.push(`${ident(value_str(value_at(p, 0)))}: ${vr.text}`)
   }
   return { text: "{".concat(parts.join(", ")).concat("}"), counter: c }
 }
 
-fn render_record_update(node: Any, counter: Int) -> Rendered {
-  let base = expr(value_field(node, "base"), counter)
+fn render_record_update(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let base = expr(value_field(node, "base"), counter, acx)
   var c = base.counter
   var parts = []
   for (u of value_list(value_field(node, "updates"))) {
-    let vr = expr(value_at(u, 1), c)
+    let vr = expr(value_at(u, 1), c, acx)
     c = vr.counter
     parts = parts.push(`${ident(value_str(value_at(u, 0)))}: ${vr.text}`)
   }
@@ -625,12 +684,12 @@ fn render_record_update(node: Any, counter: Int) -> Rendered {
   return { text: "{ ...".concat(base.text).concat(", ").concat(overrides).concat(" }"), counter: c }
 }
 
-fn render_list(items: List[Any], counter: Int) -> Rendered {
-  let r = commajoin(items, counter)
+fn render_list(items: List[Any], counter: Int, acx: ACx) -> Rendered {
+  let r = commajoin(items, counter, acx)
   return { text: "[".concat(r.text).concat("]"), counter: r.counter }
 }
 
-fn render_arrow(node: Any, counter: Int) -> Rendered {
+fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   let names = value_list(value_field(node, "params"))
   let declared = value_list(value_field(node, "param_types"))
   var parts = []
@@ -649,8 +708,15 @@ fn render_arrow(node: Any, counter: Int) -> Rendered {
   }
   let params = parts.join(", ")
   var prefix = ""
-  if (value_bool(value_field(node, "async"))) { prefix = "async " }
-  let br = expr(value_field(node, "body"), counter)
+  let is_async = value_bool(value_field(node, "async"))
+  if (is_async) { prefix = "async " }
+  // An arrow body renders in its OWN async context: `in_async` = the arrow's
+  // color (NOT the enclosing body's — inheriting it would let an `await` land in
+  // a sync arrow, a tsc error), and `in_arrow` becomes true so the await-seed
+  // stays out of the arrow (its Promise flattens). Async arrows are deferred, so
+  // `is_async` is always false in the covered corpus.
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops }
+  let br = expr(value_field(node, "body"), counter, body_acx)
   let captures = value_list(value_field(node, "captures"))
   if (captures.length() > 0) {
     var bound = []
@@ -666,7 +732,7 @@ fn render_arrow(node: Any, counter: Int) -> Rendered {
   return { text: `(${prefix}(${params}) => (${br.text}))`, counter: br.counter }
 }
 
-fn render_interp(parts: List[Any], counter: Int) -> Rendered {
+fn render_interp(parts: List[Any], counter: Int, acx: ACx) -> Rendered {
   var segs = ["`"]
   var c = counter
   for (p of parts) {
@@ -675,7 +741,7 @@ fn render_interp(parts: List[Any], counter: Int) -> Rendered {
     if (k == "text") {
       segs = segs.push(template_text(v))
     } else {
-      let r = expr(v, c)
+      let r = expr(v, c, acx)
       c = r.counter
       segs = segs.push("${".concat(r.text).concat("}"))
     }
@@ -706,12 +772,12 @@ fn parse_index(s: Str) -> Int {
 // literal runs between them with `template_text` and splicing each placeholder's
 // pre-rendered arg into a `${…}` slot. A lone `$` before a non-`$`/non-digit is
 // left as literal text — exactly what the regex leaves unmatched.
-fn render_format(node: Any, counter: Int) -> Rendered {
+fn render_format(node: Any, counter: Int, acx: ACx) -> Rendered {
   let template = value_str(value_field(node, "template"))
   var argtexts = []
   var c = counter
   for (a of value_list(value_field(node, "args"))) {
-    let r = expr(a, c)
+    let r = expr(a, c, acx)
     argtexts = argtexts.push(r.text)
     c = r.counter
   }
@@ -756,43 +822,60 @@ fn is_component_atomic(node: Any) -> Bool {
     || k == "host" || k == "instance-get"
 }
 
-fn render_call(node: Any, counter: Int) -> Rendered {
+fn render_call(node: Any, counter: Int, acx: ACx) -> Rendered {
   // `call` exists in BOTH dialects with different shapes (the reference's one
   // renderer dispatches on SHAPE, never on kind): the component form carries a
   // `target`/`method` (a method call on a service — `ctx.<key>.<op>(…)`), the
-  // 2.0 form a `callee`/`args`. Async awaiting is deferred (slice 3).
+  // 2.0 form a `callee`/`args`.
   if (value_has(node, "target")) {
     let target = value_field(node, "target")
-    let tr = expr(target, counter)
+    let tr = expr(target, counter, acx)
     var t = tr.text
     if (!is_component_atomic(target)) { t = `(${t})` }
     let method = ident(value_str(value_field(node, "method")))
-    let ar = commajoin(value_list(value_field(node, "args")), tr.counter)
-    return { text: `${t}.${method}(${ar.text})`, counter: ar.counter }
+    let ar = commajoin(value_list(value_field(node, "args")), tr.counter, acx)
+    let rendered = `${t}.${method}(${ar.text})`
+    // item 141 await-seed: an async service op reached through a req key returns
+    // a Promise on this tier. Await it wherever it lands in an async body —
+    // return, let value, or a NESTED position (a ternary arm, a template) — so
+    // no Promise leaks un-awaited. `in_async` gates it to async provide methods;
+    // `!in_arrow` keeps it out of arrow bodies (their Promise flattens). Keyed
+    // on the RAW method name (the async_ops set holds raw names; a reserved op
+    // name would be `_ident`-mangled at the call and is out of the slice).
+    if (acx.in_async && !acx.in_arrow && node_kind(target) == "req") {
+      let key = async_op_key(value_str(value_field(target, "name")), value_str(value_field(node, "method")))
+      if (list_contains(acx.ops, key)) {
+        return { text: `(await ${rendered})`, counter: ar.counter }
+      }
+    }
+    return { text: rendered, counter: ar.counter }
   }
   let callee_node = value_field(node, "callee")
-  let cr = expr(callee_node, counter)
+  let cr = expr(callee_node, counter, acx)
   var callee = cr.text
   if (!is_v3_atomic(callee_node)) { callee = `(${callee})` }
-  let ar = commajoin(value_list(value_field(node, "args")), cr.counter)
+  let ar = commajoin(value_list(value_field(node, "args")), cr.counter, acx)
+  // The 2.0 var-callee async path (async externs / phase-2 colored fns via
+  // `async_names`/`async_locals`) is DEFERRED with the module-fn async surface;
+  // a covered fixture never names one, so the un-awaited call is byte-exact.
   return { text: `${callee}(${ar.text})`, counter: ar.counter }
 }
 
-fn render_builtin_node(node: Any, counter: Int) -> Rendered {
-  let tr = paren_target(value_field(node, "target"), counter)
+fn render_builtin_node(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let tr = paren_target(value_field(node, "target"), counter, acx)
   var c = tr.counter
   let arg_nodes = value_list(value_field(node, "args"))
   var argtexts = []
   for (a of arg_nodes) {
-    let r = expr(a, c)
+    let r = expr(a, c, acx)
     argtexts = argtexts.push(r.text)
     c = r.counter
   }
-  return render_builtin(node_method(node), tr.text, argtexts, arg_nodes, value_str(value_field(node, "recv")), c)
+  return render_builtin(node_method(node), tr.text, argtexts, arg_nodes, value_str(value_field(node, "recv")), c, acx)
 }
 
-fn render_optcall(node: Any, counter: Int) -> Rendered {
-  let tr = paren_target(value_field(node, "target"), counter)
+fn render_optcall(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let tr = paren_target(value_field(node, "target"), counter, acx)
   var c = tr.counter
   let method = value_str(value_field(node, "method"))
   let arg_nodes = value_list(value_field(node, "args"))
@@ -800,11 +883,11 @@ fn render_optcall(node: Any, counter: Int) -> Rendered {
   var idx = 0
   for (a of arg_nodes) {
     if (optcall_arg_is_int(method, idx)) {
-      let r = int_as_number(a, c)
+      let r = int_as_number(a, c, acx)
       argtexts = argtexts.push(r.text)
       c = r.counter
     } else {
-      let r = expr(a, c)
+      let r = expr(a, c, acx)
       argtexts = argtexts.push(r.text)
       c = r.counter
     }
@@ -819,45 +902,45 @@ fn render_optcall(node: Any, counter: Int) -> Rendered {
 
 // The kind dispatch (post-widen), mirroring `_expr`'s branch order for the 2.0
 // dialect; the component-only kinds refuse (no component scope in this slice).
-fn expr_inner(node: Any, counter: Int) -> Rendered {
+fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   let kind = node_kind(node)
   if (kind == "lit") { return { text: render_lit(node), counter: counter } }
   if (kind == "var") { return { text: render_var(node), counter: counter } }
-  if (kind == "record") { return render_record(value_list(value_field(node, "fields")), counter) }
-  if (kind == "record_update") { return render_record_update(node, counter) }
-  if (kind == "list") { return render_list(value_list(value_field(node, "items")), counter) }
+  if (kind == "record") { return render_record(value_list(value_field(node, "fields")), counter, acx) }
+  if (kind == "record_update") { return render_record_update(node, counter, acx) }
+  if (kind == "list") { return render_list(value_list(value_field(node, "items")), counter, acx) }
   if (kind == "maplit") { return { text: "new Map()", counter: counter } }
-  if (kind == "call") { return render_call(node, counter) }
-  if (kind == "bin") { return render_bin(node, counter) }
-  if (kind == "un") { return render_un(node, counter) }
+  if (kind == "call") { return render_call(node, counter, acx) }
+  if (kind == "bin") { return render_bin(node, counter, acx) }
+  if (kind == "un") { return render_un(node, counter, acx) }
   if (kind == "field") {
-    let tr = paren_target(value_field(node, "target"), counter)
+    let tr = paren_target(value_field(node, "target"), counter, acx)
     return { text: `${tr.text}.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
   }
   if (kind == "index") {
-    let tr = paren_target(value_field(node, "target"), counter)
-    let ir = int_as_number(value_field(node, "index"), tr.counter)
+    let tr = paren_target(value_field(node, "target"), counter, acx)
+    let ir = int_as_number(value_field(node, "index"), tr.counter, acx)
     return { text: `${tr.text}[${ir.text}]`, counter: ir.counter }
   }
   if (kind == "len") {
-    let tr = paren_target(value_field(node, "target"), counter)
+    let tr = paren_target(value_field(node, "target"), counter, acx)
     return { text: `revlLen(${tr.text})`, counter: tr.counter }
   }
-  if (kind == "builtin") { return render_builtin_node(node, counter) }
+  if (kind == "builtin") { return render_builtin_node(node, counter, acx) }
   if (kind == "if") {
-    let cr = expr(value_field(node, "cond"), counter)
-    let tr = expr(value_field(node, "then"), cr.counter)
-    let er = expr(value_field(node, "else"), tr.counter)
+    let cr = expr(value_field(node, "cond"), counter, acx)
+    let tr = expr(value_field(node, "then"), cr.counter, acx)
+    let er = expr(value_field(node, "else"), tr.counter, acx)
     return { text: `(${cr.text} ? ${tr.text} : ${er.text})`, counter: er.counter }
   }
-  if (kind == "arrow") { return render_arrow(node, counter) }
-  if (kind == "match") { return match_expr(node, counter) }
-  if (kind == "interp") { return render_interp(value_list(value_field(node, "parts")), counter) }
+  if (kind == "arrow") { return render_arrow(node, counter, acx) }
+  if (kind == "match") { return match_expr(node, counter, acx) }
+  if (kind == "interp") { return render_interp(value_list(value_field(node, "parts")), counter, acx) }
   if (kind == "optfield") {
-    let tr = paren_target(value_field(node, "target"), counter)
+    let tr = paren_target(value_field(node, "target"), counter, acx)
     return { text: `${tr.text}?.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
   }
-  if (kind == "optcall") { return render_optcall(node, counter) }
+  if (kind == "optcall") { return render_optcall(node, counter, acx) }
   // ---- component (v1) dialect scalar kinds (slice 2) ----
   // The reference validates each against the component `_Scope` (locals /
   // config_fields / requires); validation is deferred here exactly as `ident`
@@ -881,7 +964,7 @@ fn expr_inner(node: Any, counter: Int) -> Rendered {
   // deferred entirely (slice 3 defers async coloring).
   if (kind == "fn") {
     let fname = ident(value_str(value_field(node, "name")))
-    let ar = commajoin(value_list(value_field(node, "args")), counter)
+    let ar = commajoin(value_list(value_field(node, "args")), counter, acx)
     return { text: `${fname}(${ar.text})`, counter: ar.counter }
   }
   // `adt`: a tagged ADT value (Result / user variant), `{ kind: "Ok", value: x }`
@@ -890,7 +973,7 @@ fn expr_inner(node: Any, counter: Int) -> Rendered {
     let cs = json_dumps(value_str(value_field(node, "case")))
     let args = value_list(value_field(node, "args"))
     if (args.length() > 0) {
-      let r = expr(args[0], counter)
+      let r = expr(args[0], counter, acx)
       return { text: `{ kind: ${cs}, value: ${r.text} }`, counter: r.counter }
     }
     return { text: `{ kind: ${cs} }`, counter: counter }
@@ -900,29 +983,30 @@ fn expr_inner(node: Any, counter: Int) -> Rendered {
   // mangled.
   if (kind == "host") {
     let hfn = value_str(value_field(node, "fn"))
-    let ar = commajoin(value_list(value_field(node, "args")), counter)
+    let ar = commajoin(value_list(value_field(node, "args")), counter, acx)
     return { text: `host.${hfn}(${ar.text})`, counter: ar.counter }
   }
   // `format` (v1/A4): the component-dialect string interpolation, spelled with
   // `$N` placeholders and `$$` escapes over a template — lowered to a JS
   // template literal, the v1 twin of the 2.0 `interp`.
-  if (kind == "format") { return render_format(node, counter) }
+  if (kind == "format") { return render_format(node, counter, acx) }
   return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
 }
 
 // The implicit widen markers (docs/arithmetic.md): Int -> Float is `Number(…)`,
-// Int32 -> Int is `BigInt(…)`, then dispatch the un-widened node.
-fn expr(node: Any, counter: Int) -> Rendered {
+// Int32 -> Int is `BigInt(…)`, then dispatch the un-widened node. `acx` carries
+// the async-colouring context (item 219) down to the await-seed in `render_call`.
+fn expr(node: Any, counter: Int, acx: ACx) -> Rendered {
   let w = value_str(value_field(node, "widen"))
   if (w == "Float") {
-    let r = expr_inner(node, counter)
+    let r = expr_inner(node, counter, acx)
     return { text: `Number(${r.text})`, counter: r.counter }
   }
   if (w == "Int") {
-    let r = expr_inner(node, counter)
+    let r = expr_inner(node, counter, acx)
     return { text: `BigInt(${r.text})`, counter: r.counter }
   }
-  return expr_inner(node, counter)
+  return expr_inner(node, counter, acx)
 }
 
 // -------------------------------------------------------------- statements
@@ -930,24 +1014,26 @@ fn expr(node: Any, counter: Int) -> Rendered {
 fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
   let step = value_str(value_field(node, "step"))
   let pad = ind(indent)
+  // The pure fn/test pass never renders an async body, so the await-seed is off.
+  let a = sync_acx()
   if (step == "let") {
-    let r = expr(value_field(node, "value"), counter)
+    let r = expr(value_field(node, "value"), counter, a)
     var kw = "const"
     if (value_bool(value_field(node, "mutable"))) { kw = "let" }
     return { lines: [`${pad}${kw} ${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
   }
   if (step == "assign") {
-    let r = expr(value_field(node, "value"), counter)
+    let r = expr(value_field(node, "value"), counter, a)
     return { lines: [`${pad}${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
   }
   if (step == "return") {
     let e = value_field(node, "expr")
     if (value_is_null(e)) { return { lines: [`${pad}return`], counter: counter } }
-    let r = expr(e, counter)
+    let r = expr(e, counter, a)
     return { lines: [`${pad}return ${r.text}`], counter: r.counter }
   }
   if (step == "if") {
-    let cr = expr(value_field(node, "cond"), counter)
+    let cr = expr(value_field(node, "cond"), counter, a)
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(node, "then"))) {
@@ -968,7 +1054,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     return { lines: out, counter: c }
   }
   if (step == "while") {
-    let cr = expr(value_field(node, "cond"), counter)
+    let cr = expr(value_field(node, "cond"), counter, a)
     var out = [`${pad}while (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(node, "body"))) {
@@ -980,7 +1066,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     return { lines: out, counter: c }
   }
   if (step == "for") {
-    let ir = expr(value_field(node, "iterable"), counter)
+    let ir = expr(value_field(node, "iterable"), counter, a)
     let bind = ident(value_str(value_field(node, "bind")))
     var out = [`${pad}for (const ${bind} of ${ir.text}) {`]
     var c = ir.counter
@@ -993,7 +1079,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
     return { lines: out, counter: c }
   }
   if (step == "expr") {
-    let r = expr(value_field(node, "expr"), counter)
+    let r = expr(value_field(node, "expr"), counter, a)
     return { lines: [`${pad}${r.text}`], counter: r.counter }
   }
   return { lines: [`${pad}<<UNSUPPORTED-STEP:${step}>>`], counter: counter }
@@ -1198,23 +1284,25 @@ fn ts_return_type_v1(v: Any, known_types: List[Str]) -> Str {
   return ts_type_v1(value_str(v), known_types)
 }
 
-// `_method_body`: steps inside a provide-method body (sync only in this slice —
-// `await` is deferred). Threads the match counter like every body renderer.
-fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
+// `_method_body`: steps inside a provide-method body. An `async` provide method
+// (services 2.0 §5) renders its body with `in_async` set (via `acx`), so the
+// item-141 await-seed fires on a req-keyed async-op call, and an explicit
+// `await` step lands (A1). A sync method's `acx` is `sync_acx()`.
+fn method_body(steps: List[Any], level: Int, counter: Int, acx: ACx) -> StmtOut {
   let pad = ind(level)
   var out = []
   var c = counter
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "let") {
-      let r = expr(value_field(step, "value"), c)
+      let r = expr(value_field(step, "value"), c, acx)
       c = r.counter
       var kw = "const"
       if (value_bool(value_field(step, "mutable"))) { kw = "let" }
       out = out.push(`${pad}${kw} ${ident(value_str(value_field(step, "name")))} = ${r.text}`)
     } else {
       if (kind == "assign") {
-        let r = expr(value_field(step, "value"), c)
+        let r = expr(value_field(step, "value"), c, acx)
         c = r.counter
         out = out.push(`${pad}${ident(value_str(value_field(step, "name")))} = ${r.text}`)
       } else {
@@ -1223,11 +1311,20 @@ fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
           if (value_is_null(e)) {
             out = out.push(`${pad}return`)
           } else {
-            let r = expr(e, c)
+            let r = expr(e, c, acx)
             c = r.counter
             out = out.push(`${pad}return ${r.text}`)
           }
         } else {
+          if (kind == "await") {
+            // A1: an in-flight window inside an async method (a request awaiting
+            // a host async value or an instance disposal). The awaited expr is a
+            // non-req value here, so the await-seed adds nothing over the step's
+            // own `await` (a req async-op call would double-await — out of slice).
+            let r = expr(value_field(step, "expr"), c, acx)
+            c = r.counter
+            out = out.push(`${pad}await ${r.text}`)
+          } else {
           if (kind == "effect" || kind == "let-effect") {
             var bind = ""
             var has_bind = false
@@ -1236,8 +1333,8 @@ fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
               has_bind = true
               out = out.push(`${pad}let ${bind}: any`)
             }
-            let ar = expr(value_field(step, "acquire"), c)
-            let ur = expr(value_field(step, "undo"), ar.counter)
+            let ar = expr(value_field(step, "acquire"), c, acx)
+            let ur = expr(value_field(step, "undo"), ar.counter, acx)
             c = ur.counter
             out = out.push(`${pad}ctx.effect(() => {`)
             if (has_bind) {
@@ -1249,13 +1346,13 @@ fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
             out = out.push(`${pad}})`)
           } else {
             if (kind == "emit") {
-              let er = expr(value_field(step, "expr"), c)
+              let er = expr(value_field(step, "expr"), c, acx)
               c = er.counter
               let comp = value_field(step, "compensate")
               if (value_is_null(comp)) {
                 out = out.push(`${pad}${er.text}`)
               } else {
-                let cr = expr(comp, c)
+                let cr = expr(comp, c, acx)
                 c = cr.counter
                 out = out.push(`${pad}ctx.effect(() => {`)
                 out = out.push(`${pad}  ${er.text}`)
@@ -1266,6 +1363,7 @@ fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
               out = out.push(`${pad}<<UNSUPPORTED-METHOD-STEP:${kind}>>`)
             }
           }
+          }
         }
       }
     }
@@ -1275,8 +1373,9 @@ fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
 
 // `_provide_impl`: the provided service object's methods. The impl param NAMES
 // bind the body; the param TYPES come from the service declaration (arity must
-// agree). Sync methods only (async deferred).
-fn provide_impl(step: Any, services: Any, known_types: List[Str], level: Int, counter: Int) -> StmtOut {
+// agree). An operation the service declares `async` lowers to an `async` method
+// whose body renders in an async context (the await-seed's `ops`, item 219).
+fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str], level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
@@ -1294,8 +1393,17 @@ fn provide_impl(step: Any, services: Any, known_types: List[Str], level: Int, co
       sig_parts = sig_parts.push(`${ident(value_str(pn))}: ${ptype}`)
       i += 1
     }
-    out = out.push(`${pad}${name}(${sig_parts.join(", ")}) {`)
-    let br = method_body(value_list(value_field(method, "body")), level + 1, c)
+    // services 2.0 §5: the async flag lives on the SERVICE declaration (the
+    // single source of truth for the operation's shape).
+    let is_async = value_bool(value_field(spec, "async"))
+    var prefix = ""
+    var body_acx = sync_acx()
+    if (is_async) {
+      prefix = "async "
+      body_acx = { in_async: true, in_arrow: false, ops: ops }
+    }
+    out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
+    let br = method_body(value_list(value_field(method, "body")), level + 1, c, body_acx)
     out = out.concat(br.lines)
     c = br.counter
     out = out.push(`${pad}},`)
@@ -1304,12 +1412,16 @@ fn provide_impl(step: Any, services: Any, known_types: List[Str], level: Int, co
 }
 
 // `_component_step`: one activation-body step. Recursive (`if` branches hold
-// body steps). `await`/`timer` are deferred.
-fn component_step(step: Any, services: Any, known_types: List[Str], level: Int, counter: Int) -> StmtOut {
+// body steps). The activation body renders with `in_async` OFF (the reference's
+// `_component_body` scopes on `doc_ctx`, whose `in_async` is false): an `await`
+// step supplies its own `await`, so no await-seed is needed here. `timer` is
+// deferred. `ops` is passed through to the provide-method bodies.
+fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[Str], level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
+  let a = sync_acx()
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
-    let ar = expr(value_field(step, "acquire"), counter)
+    let ar = expr(value_field(step, "acquire"), counter, a)
     var out = []
     if (kind == "let-effect") {
       let bind = ident(value_str(value_field(step, "bind")))
@@ -1317,33 +1429,42 @@ fn component_step(step: Any, services: Any, known_types: List[Str], level: Int, 
     } else {
       out = out.push(`${pad}${ar.text}`)
     }
-    let ur = expr(value_field(step, "undo"), ar.counter)
+    let ur = expr(value_field(step, "undo"), ar.counter, a)
     out = out.push(`${pad}yield () => ${ur.text}`)
     return { lines: out, counter: ur.counter }
   }
+  if (kind == "await") {
+    // v1/A1: the await lands (inertia), then the `yield` closes the iteration so
+    // a divert during the await skips every later step. This is what colors the
+    // whole body an async generator (see `component_lines`).
+    let er = expr(value_field(step, "expr"), counter, a)
+    var out = [`${pad}await ${er.text}`]
+    out = out.push(`${pad}yield () => {}  // iteration boundary (A1)`)
+    return { lines: out, counter: er.counter }
+  }
   if (kind == "emit") {
-    let er = expr(value_field(step, "expr"), counter)
+    let er = expr(value_field(step, "expr"), counter, a)
     var out = [`${pad}${er.text}`]
     let comp = value_field(step, "compensate")
     if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
-    let cr = expr(comp, er.counter)
+    let cr = expr(comp, er.counter, a)
     out = out.push(`${pad}yield () => ${cr.text}`)
     return { lines: out, counter: cr.counter }
   }
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
     var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
-    let pr = provide_impl(step, services, known_types, level + 1, counter)
+    let pr = provide_impl(step, services, ops, known_types, level + 1, counter)
     out = out.concat(pr.lines)
     out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
     return { lines: out, counter: pr.counter }
   }
   if (kind == "if") {
-    let cr = expr(value_field(step, "cond"), counter)
+    let cr = expr(value_field(step, "cond"), counter, a)
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, known_types, level + 1, c)
+      let r = component_step(s, services, ops, known_types, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -1351,7 +1472,7 @@ fn component_step(step: Any, services: Any, known_types: List[Str], level: Int, 
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = component_step(s, services, known_types, level + 1, c)
+        let r = component_step(s, services, ops, known_types, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -1360,10 +1481,19 @@ fn component_step(step: Any, services: Any, known_types: List[Str], level: Int, 
     return { lines: out, counter: c }
   }
   if (kind == "fail") {
-    let mr = expr(value_field(step, "message"), counter)
+    let mr = expr(value_field(step, "message"), counter, a)
     return { lines: [`${pad}throw new Error(${mr.text})`], counter: mr.counter }
   }
   return { lines: [`${pad}<<UNSUPPORTED-STEP:${kind}>>`], counter: counter }
+}
+
+// The activation body is an async generator when any TOP-LEVEL step is an
+// `await` (v1/A1) — mirrors the reference's `any(step == "await" …)`.
+fn body_has_await(steps: List[Any]) -> Bool {
+  for (step of steps) {
+    if (value_str(value_field(step, "step")) == "await") { return true }
+  }
+  return false
 }
 
 // `_config_interface`: the `export interface <Name>Config { … }` block, or [].
@@ -1423,12 +1553,17 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
   } else {
     out = out.push("  apply(ctx: Context) {")
   }
-  // One generator per body (LIFO teardown); the async-generator form is
-  // deferred (no `await` steps in the covered subset).
-  out = out.push("    ctx.effect(function* () {")
+  // One generator per body (LIFO teardown). A body with an `await` step is an
+  // async generator (v1/A1). `ops` = the async operations reachable through this
+  // component's requirement keys, threaded to the provide-method await-seed.
+  let body = value_list(value_field(comp, "body"))
+  var gen = "function*"
+  if (body_has_await(body)) { gen = "async function*" }
+  out = out.push(`    ctx.effect(${gen} () {`)
+  let ops = async_ops_of(value_field(comp, "requires"), services)
   var c = counter
-  for (step of value_list(value_field(comp, "body"))) {
-    let r = component_step(step, services, known_types, 3, c)
+  for (step of body) {
+    let r = component_step(step, services, ops, known_types, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -1440,7 +1575,8 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], counter: In
 
 // The service-interface block for the whole document (`_emit_v3`'s service loop):
 // one `export interface <Service> { … }` per declared service, in declaration
-// order. Async returns (`Promise<…>`) are deferred.
+// order. An `async` operation returns a `Promise<…>` on this tier (services
+// 2.0 §5).
 fn service_interfaces(services: Any, known_types: List[Str]) -> List[Str] {
   var out = []
   for (sname of value_keys(services)) {
@@ -1453,7 +1589,8 @@ fn service_interfaces(services: Any, known_types: List[Str]) -> List[Str] {
       for (p of value_list(value_field(method, "params"))) {
         sig_parts = sig_parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type_v1(value_str(value_field(p, "type")), known_types)}`)
       }
-      let returns = ts_return_type_v1(value_field(method, "returns"), known_types)
+      var returns = ts_return_type_v1(value_field(method, "returns"), known_types)
+      if (value_bool(value_field(method, "async"))) { returns = `Promise<${returns}>` }
       if (value_bool(value_field(method, "emission"))) {
         out = out.push("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
       }
@@ -1842,11 +1979,28 @@ test "the slice-3 expr kinds render fn and adt" {
   // `host`/`format` end-to-end byte-checks live in the corpus (their template /
   // `$N` literals cannot be spelled in an in-file string — the lexer reserves
   // the legacy `$N`/`${` forms — so they are verified through component_exprs).
-  assert expr({ kind: "fn", name: "tag", args: [{ kind: "lit", value: 1 }] }, 0).text
+  assert expr({ kind: "fn", name: "tag", args: [{ kind: "lit", value: 1 }] }, 0, sync_acx()).text
     == "tag(1n)"
-  assert expr({ kind: "adt", case: "Ok", args: [{ kind: "lit", value: 1 }] }, 0).text
+  assert expr({ kind: "adt", case: "Ok", args: [{ kind: "lit", value: 1 }] }, 0, sync_acx()).text
     == expected_ok_adt()
-  assert expr({ kind: "adt", case: "Missing", args: [] }, 0).text == expected_missing_adt()
+  assert expr({ kind: "adt", case: "Missing", args: [] }, 0, sync_acx()).text == expected_missing_adt()
+}
+
+test "the await-seed awaits a req-keyed async op only in an async, non-arrow body" {
+  // `<key>.<op>(args)` on a required async service (item 141). The seed's four
+  // gates: in an async provide method it awaits; a sync body, an arrow body, and
+  // an op absent from `ops` all leave the Promise un-awaited (byte-for-byte the
+  // reference's `_expr` component-`call` branch).
+  let call = { kind: "call", target: { kind: "req", name: "store" }, method: "get",
+               args: [{ kind: "name", id: "k" }] }
+  let ops = [async_op_key("store", "get")]
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops }).text
+    == "(await ctx.store.get(k))"
+  assert expr(call, 0, sync_acx()).text == "ctx.store.get(k)"
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops }).text
+    == "ctx.store.get(k)"
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [] }).text
+    == "ctx.store.get(k)"
 }
 
 fn expected_ok_adt() -> Str { return `{ kind: "Ok", value: 1n }` }

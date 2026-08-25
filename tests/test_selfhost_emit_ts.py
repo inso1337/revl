@@ -41,14 +41,19 @@ and ``_provide_impl``/``_method_body`` (let/assign/return/effect/emit), reusing
 the single ``_expr`` (the component kinds ``req``/``config``/``name`` and the
 component-shaped ``call``).
 
-Deliberately OUT (deferred to a follow-on slice): async coloring across the
-component tail (async service ops/methods, awaited call sites, async-generator
-bodies), the component-body ``await``/``timer`` steps, the component-dialect expr
-kinds ``host``/``format``/``fn``/``adt``/``spawn``/``instance-get``, COMPOSITE
-service/config signature types (List/Opt/Map/Result/fn-type + declared records),
-the v1/v2 ``_emit_v1`` path, v3 TYPE declarations (``_emit_ts_types``), externs,
-in-file ``test``/``fault_test``/``lifecycle test`` emission, spawn/instances,
-realm placements (isolate/intercept/routes), the canonical ABI, and
+Slice 4 (item 219) adds ASYNC COLORING across the component tail, byte-identical:
+async service operations (``Promise<T>`` signatures), ``async`` provide methods,
+the item-141 await-seed on a req-keyed async-op call (direct + nested-in-ternary),
+and the async-generator activation body (``ctx.effect(async function* …)``) with
+the ``await`` step's iteration boundary.
+
+Deliberately OUT (deferred to a follow-on slice): the MODULE-FN async path (async
+fns / async externs and their ``async_names``/``async_locals`` await, async
+arrows, async match — the component-tail async surface IS in as of slice 4), the
+component-body ``timer`` step, the component-dialect expr kinds
+``spawn``/``instance-get``, VARIANT type declarations, externs, in-file
+``test``/``fault_test``/``lifecycle test`` emission, spawn/instances, realm
+placements (isolate/intercept/routes), the canonical ABI, and
 ``assert``/``let_pattern`` statements — all kept out so the slice stays
 byte-VERIFIED rather than byte-guessed.
 """
@@ -83,6 +88,10 @@ CORPUS = [
     "services_composite.rvl",         # List/Opt/Map/Result/fn-type + declared-record `List[Msg]`
     "services_composite_provide.rvl", # composite provide-method params (Row[], Map) via `_ts_type`
     "component_exprs.rvl",            # host (`host.Job.run`), format (`` `…${}` ``), fn, adt
+    # slice 4 (item 219) — async coloring across the component tail, byte-exact:
+    "services_async.rvl",       # async op `Promise<T>` sigs, `async` methods, the item-141
+                                # await-seed (direct `fetch` + nested ternary arm `pick`)
+    "components_await.rvl",     # activation-body `await` -> `async function*` + iteration boundary
 ]
 
 
