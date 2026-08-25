@@ -1125,6 +1125,59 @@ compare; the `fn`-kind await path is deferred with the component dialect), so th
 differential oracle stays the arbiter rather than "fixing" a divergence the
 reference does not have.
 
+## `selfhost/lower.rvl::lower_to_ir` — the `functions` + `types` sections (item 232)
+
+Item 227 produced the STRUCTURAL IR surface (services, component headers, the
+simple component body). Item 232 adds the module-function spine: the `functions`
+section (every `fn` with its full lowered body) and the `types` section (record/
+variant declarations). Both are byte-identical to `src/revl/lower.py` across the
+whole emit_py/emit_rust corpus, and the function corpus is emitter-ready end to
+end (the reference python emitter renders the native IR to the same bytes as the
+reference IR for every function document).
+
+### The type annotations are the whole difficulty; the AST re-read is free
+`lower_to_ir` re-reads each body straight from the shared parser's `Expr` AST
+(`expr_at`), so the node SHAPES (`bin`/`un`/`builtin`/`call`/`field`/`index`/
+`record`/`list`/`arrow`/`match`/`interp`/`optcall`, and the `let`/`assign`/`if`/
+`while`/`for`/`return` steps) fall out of a direct structural walk. What the IR
+also carries — and 227 deferred for exactly this reason — is the checker's TYPE
+information: the `operands` tag on `+ - * / %` (and unary `-`), the `recv` tag on
+`to_int`, match-arm `payload_type`, and an arrow's resolved `param_types`/
+`returns`. Reproducing it needed a projection of `infer_ast` (`binop_ty` +
+`builtin_ret` + a structural-record field lookup) threaded through a per-body
+type environment. The projection is deliberately partial: it only has to
+ANNOTATE, never diagnose (`admit_src` already rejected the real mismatches), so a
+call result or an opaque host receiver types as unknown and simply omits the
+annotation — which is exactly what the reference does when its own inference is
+undetermined (`infer_ast(..., None)`). The sharpest witness is `divmod`: `mod` is
+in the lowering's builtin table but NOT the checker's signature table, so `a.mod(b)`
+lowers to a `builtin` node yet types as unknown — and the reference IR drops the
+`operands` tag on every later `+` that reaches it. The port matches that byte for
+byte.
+
+### Record-update is read at the token level (shared-parser gap)
+`selfhost/parser.rvl`'s expression grammar has no record-update production
+(`p_inits` reads only `field: expr`), so `{ r | x = b }` returns `Bad`. Rather
+than change another agent's parser, `lower_to_ir` recognises the form at the
+token level (a depth-0 `|` inside a brace block is unambiguous — a template's `|`
+lives inside the flattened `template` token and `||` is its own token) and hand-
+builds the `record_update` node. This is the one fn-body form the AST cannot
+carry; everything else routes through `expr_at`.
+
+### Deferred, and why (reported, not worked around)
+- **The `externs` section.** An extern's `bodies.{py,ts,...}` is the VERBATIM
+  `@py { ... }` block, dedented. Reconstructing it byte-exact needs the raw
+  source SLICE of the block (the reference reads it and runs stdlib `dedent`),
+  but the token stream carries only `line`, not source offsets, so the exact
+  whitespace/indentation cannot be recovered from tokens. A source-offset on the
+  lexer's tokens (lexer.rvl, another slice's file) would unblock it.
+- **The typed COMPONENT/method expression body.** `ir_body` is still 227's
+  simple slice (effect/undo/provide over required-service calls + literals). The
+  full typed spine there (config reads, match/ADT, saga `emit … compensate`,
+  timers, spawn) is the remaining heavy piece; the module-fn `infer`/`lir_expr`
+  built here is the reusable core for it, but the component dialect adds the
+  `req`/`config`/`host`/`spawn` node kinds and the emission-gated step lowering
+  on top.
 ## `selfhost/emit_java.rvl` — slice 4: realm placements (isolate/intercept) (item 235)
 
 Extended the modern-component path to the `isolate`/`intercept` REALM-placement
