@@ -159,6 +159,11 @@ REJECTIONS = {
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
     "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",
+    # item 153: a provide block keyed on something the `provides` clause never
+    # announced is the sibling of A6 (A6 bounds the *methods* of a declared key;
+    # A9 bounds the *key* against the clause). Dedicated code A9 (A1-A8 are all
+    # occupied in the amendment table), with a hint naming both fixes.
+    "a9_provide_key_not_declared.rvl": "`skin` is not declared in the `provides` clause of S (A9)",
     "g1_template_undeclared.rvl": "`nobody` is not declared in this function",
     "t3_config_default_type.rvl": "config field `n` default expects `Int`, got `Str`",
     "t4_field_arg_type.rvl": "`s.take` argument `s` expects `Str`, got `Int`",

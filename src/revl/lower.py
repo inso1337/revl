@@ -3777,7 +3777,13 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
     filename = env.filename
     comp = env.component
     if stmt.key not in provides:
-        raise RevlError(filename, stmt.line, f"`{stmt.key}` is not declared in the `provides` clause of {comp.name}")
+        declared = ", ".join(f"`{k}`" for k in provides) or "none"
+        raise RevlError(
+            filename, stmt.line,
+            f"`{stmt.key}` is not declared in the `provides` clause of {comp.name} (A9)",
+            hint=f"rename the provide block to a declared key (declared: {declared}), "
+                 f"or add `{stmt.key}: <Service>` to the `provides` clause of {comp.name}",
+        )
     if stmt.key in provided_keys:
         raise RevlError(filename, stmt.line, f"provision `{stmt.key}` is installed twice in {comp.name}")
     provided_keys.add(stmt.key)
