@@ -1,14 +1,14 @@
 # OpenTelemetry export (`revl.otel`)
 
 `revl run` records every lifecycle transition of a composition as a structured
-JSONL trace, where each transition carries its **cause** — who caused it and why
+JSONL trace, where each transition carries its **cause**, who caused it and why
 (see [`why-runtime`](why-runtime.md) and `src/revl/why_runtime.py`). Because
 revl's dependency graph is a *checked* artifact (G2 makes each provision unique,
 G3 makes the graph acyclic), those causal edges are exact, not reconstructed
-from timing — which is exactly what a conventional APM cannot know.
+from timing, which is exactly what a conventional APM cannot know.
 
 `revl.otel` translates that causal vocabulary into the OpenTelemetry data model,
-so a revl composition shows up — with its causality intact — in any standard
+so a revl composition shows up, with its causality intact, in any standard
 observability stack (Grafana Tempo, Datadog, Honeycomb, Jaeger).
 
 This is a **format mapping**, not new semantics. The traces are already
@@ -18,12 +18,12 @@ structured and causal; we translate them.
 
 | `why_runtime` vocabulary | OpenTelemetry |
 | --- | --- |
-| a lifecycle transition — a `load` or `withdraw` event | a **span** (`"<Component> load"` / `"<Component> withdraw"`) |
-| the transition's state move, e.g. `ACTIVE -> DISPOSED` | span attributes `revl.transition.from` / `.to` (and the full `revl.transition`) |
+| a lifecycle transition (a `load` or `withdraw` event) | a **span** (`"<Component> load"` / `"<Component> withdraw"`) |
+| the transition's state move (e.g. `ACTIVE -> DISPOSED`) | span attributes `revl.transition.from` / `.to` (and the full `revl.transition`) |
 | the transition's **cause** (the "why" recorded on it) | a **span event** named `cause:<kind>` |
-| a `requirements` edge — a load's resolved providers | a **span link** per provider (relation `requirement`) to that provider's *load* span |
-| a `provider-withdrawn` edge — a teardown's cause | a **span link** (relation `provider-withdrawn`) to the provider's *withdraw* span |
-| the root cause — `boot` or `trigger` | a child of the synthetic **run root** span |
+| a `requirements` edge (a load's resolved providers) | a **span link** per provider (relation `requirement`) to that provider's *load* span |
+| a `provider-withdrawn` edge (a teardown's cause) | a **span link** (relation `provider-withdrawn`) to the provider's *withdraw* span |
+| the root cause (`boot` or `trigger`) | a child of the synthetic **run root** span |
 
 ### Parent/child follows the cause chain
 
@@ -33,7 +33,7 @@ as `why_runtime.Trace.cause_chain` walks it:
 - a `requirements` load is parented on its **first provider's load** span (and
   links to every provider);
 - a `provider-withdrawn` teardown is parented on the **provider's withdraw**
-  span — even though, under LIFO teardown, that provider withdrawal is recorded
+  span, even though, under LIFO teardown, that provider withdrawal is recorded
   *later* in the trace than the dependent's; the mapping resolves it by
   component and generation regardless of trace order;
 - `boot` and `trigger` roots hang directly off the synthetic run root, so one
@@ -51,7 +51,7 @@ completed transition is `OK`.
 
 ## Enabling it
 
-The OpenTelemetry SDK is an **optional dependency** — the base `revl` install
+The OpenTelemetry SDK is an **optional dependency**: the base `revl` install
 stays dependency-light and imports no OTel code on any core path.
 
 ```bash
@@ -65,20 +65,19 @@ Point the exporter at a recorded trace:
 python -m revl.otel run.jsonl
 
 # print the intermediate span mapping as JSON instead (works with or without
-# the SDK installed — useful for inspecting the translation)
+# the SDK installed, useful for inspecting the translation)
 python -m revl.otel run.jsonl --json
 ```
 
 If the SDK is **not** installed, `python -m revl.otel run.jsonl` degrades
 gracefully: it prints the span mapping as JSON and a note telling you to install
-`revl[otel]` — never a hard `ImportError`.
+`revl[otel]`, never a hard `ImportError`.
 
-> Coordination note (item 123 owns `__main__.py`): the opt-in is deliberately a
-> standalone `python -m revl.otel` entry point rather than a `revl … --otel`
-> flag, so this change touches neither the CLI dispatcher nor the runtime hot
-> path. If a `revl`-subcommand `--otel` flag is wanted later, it can call
-> `revl.otel.export_trace_file` — the integration surface is already a single
-> function.
+> Design note: the opt-in is deliberately a standalone `python -m revl.otel`
+> entry point rather than a `revl … --otel` flag, so it touches neither the CLI
+> dispatcher nor the runtime hot path. If a `revl`-subcommand `--otel` flag is
+> wanted later, it can call `revl.otel.export_trace_file`; the integration
+> surface is already a single function.
 
 ## From your own code
 
@@ -98,7 +97,6 @@ or `{"exported": False, "reason": ...}` when the SDK is absent.
 ### The mapping is testable without the SDK
 
 `revl.otel.build_spans(events)` is pure Python with no OTel import. It returns
-the intermediate `SpanModel` list — span id, name, kind, parent, attributes,
-status, `events` (causes) and `links` (provision edges) — which is what the
+the intermediate `SpanModel` list (span id, name, kind, parent, attributes,
+status, `events` (causes) and `links` (provision edges)), which is what the
 mapping tests assert directly. The SDK is only touched by `export_to_otel`.
-```
