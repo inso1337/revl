@@ -690,3 +690,62 @@ brush: the `_revl_rpc` preamble's `line.push('\n');` needs a literal backslash-n
 in the OUTPUT, written `"line.push('\\n');"` (item-183 `\\`/`\"` in a plain
 single-line string); the whole preamble stays a plain double-quoted block (braces
 are literal, no `${}` interpolation in `"…"`), so no `$`-fragment needed backticks.
+
+## selfhost/emit_java.rvl — slice 3: the SIMPLE component/service unit (item 216)
+
+Ported the smallest byte-exact corner of the java component surface item 210
+deferred whole: `_emit_service_interfaces_v3`, the LEGACY `_emit_component`
+simple-provider path, and the no-config `_emit_plugin_ctors` + A8-self-revert
+`apply`. Two new fixtures (`service.rvl`, `services_multi.rvl`) are byte-identical
+to `backends/java/emit.py`; the nine slice-1/2 fixtures stayed green with zero
+change (the services/components blocks are non-empty-guarded, so a
+functions-only document is untouched).
+
+### Reference-behavior smell: an empty void op emits a THROWING stub (MEDIUM, REPORT)
+`_method_body` (backends/java/emit.py:2536) admits exactly one shape — a single
+`return <expr>`. EVERY other body, INCLUDING a legitimately EMPTY void op, falls
+through to `throw new UnsupportedOperationException("effectful method body");`.
+Repro: a provider `fn reset() { }` (a deliberately no-op void operation) lowers to
+`public void reset() { throw new UnsupportedOperationException(...); }` — calling
+the op at runtime throws, though the source said "do nothing". `services_multi.rvl`
+exercises exactly this (its `reset()`), so the port reproduces it byte-for-byte,
+but the behavior is a smell: an empty void body and an unported effectful body are
+indistinguishable to the reference, and the former is silently turned into a trap.
+A one-line special-case (`len(steps) == 0 and _method_return(...) is None` ->
+emit an empty `{ }` body) would make an intentionally-empty op a no-op. NOT fixed
+here (byte-frozen surface; the port must MATCH it, and the fix belongs in the
+reference with a golden update). Rust/TS likely share the shape — worth a sweep.
+
+### Ergonomics: absent-vs-empty asymmetry on component sub-maps (item 189, LOW)
+The `component_simple_ok` predicate must gate on `requires`/`isolate`/`intercept`,
+but the IR is inconsistent about presence: `config`/`requires` are always emitted
+(`[]`/`{}`), while `isolate`/`intercept` are OMITTED when unused (the key is
+absent, so `value_field(comp, "isolate")` is null, not an empty map). `value_*`
+totality (item 188) softens this — `value_keys(null)` would still need a guard, so
+a two-line `map_nonempty`/`list_nonempty` (null-reads-as-empty) covers both the
+present-empty and absent cases uniformly. Not a bug; a note that the erased-IR
+walker cannot assume a component carries every optional sub-map, so "absent" and
+"present-but-empty" must be unified at the predicate, not the accessor.
+
+### Positive: the item-195 counter-threading tax did NOT recur in the component block
+The document-wide `__revl_case_N` match counter (item 210's threaded Int) is a
+FUNCTION-body concern only: legacy provider method bodies render through the v1
+`_expr` (ctx=None) which never touches the match counter, and `_emit_v3` emits
+components AFTER functions, so the component block neither reads nor advances it.
+`emit_component`/`method_body` are plain `List[Str]` builders with no counter in
+their signatures — a clean contrast to the `Rendered { text, counter }` threading
+the typed-core carries. One nicety worth reusing: the v1 legacy `_lit` and the v3
+`java_lit` render a `lit` node byte-identically, so `method_body` reused the
+existing `java_lit(node)` for the two kinds the simple provider forces (`lit`/
+`name`) with no second literal path.
+
+### Host-formatting kept `@py` (item-180 "NOT obsoleted"): `camel` only
+One new bridged helper, `camel` (`_camel` verbatim — `"".join(part.capitalize()
+for part in name.split("_"))`), kin to `json_dumps`/`num_str`; item 207 bridged
+the byte-identical body for the rust slice. Everything else — the interface
+assembly, the provider/plugin scaffold, and the `apply` LIFO undo list — is PURE
+revl over `value_*`. The reserved-keyword-vs-IR-vocabulary collision (item 207's
+note above) recurred verbatim: `service`/`component`/`provides` are all revl
+keywords, so the IR-walking locals had to be `srv`/`comp`/`provs` again — a second
+data point for the same guide note (`struct`/`case`/`comp` are FINE as locals;
+`service`/`component`/`provides` are NOT).

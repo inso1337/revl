@@ -1,0 +1,30 @@
+// A wider service/component fixture: two services and one component providing
+// both, exercising the multi-provision provider classes and the multi-`provide`
+// routing in `apply`. Covers the scalar param/return surface (`long`/`boolean`/
+// `String`/`void`), a `return <name>` (a bound param), and the empty void body
+// that lowers to the reference's `UnsupportedOperationException("effectful method
+// body")` trap. Still the simple path: pure providers, no config/req/isolate.
+fn seed() -> Int {
+  return 1
+}
+
+service Counter {
+  fn bump(n: Int) -> Int
+  fn reset()
+  fn ready(flag: Bool) -> Bool
+}
+
+service Namer {
+  fn label(id: Int) -> Str
+}
+
+component Registry provides count: Counter, name: Namer {
+  provide count {
+    fn bump(n) = n
+    fn reset() { }
+    fn ready(flag) = flag
+  }
+  provide name {
+    fn label(id) = "n"
+  }
+}

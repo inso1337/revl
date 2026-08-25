@@ -42,16 +42,29 @@ Covered subset (what emits byte-identical):
     temp numbering threaded as an Int counter, the ``.value`` unpack, and the
     ``_covers_variant`` omission of the ``default`` throw for a total match); and
     the built-in Opt ``Some``/``None`` match (``.map(..).orElseGet(..)``).
+  * slice 3 (item 216) — the SIMPLE component/service unit: a ``service`` as a
+    ``public interface`` (``_emit_service_interfaces_v3``), and the LEGACY
+    ``_emit_component`` simple-provider path (the branch ``_component_needs_modern``
+    leaves False) — one ``public static final class <Comp><Camel(key)> implements
+    <Svc>`` per provision (empty ctor, one inline method whose body is
+    ``_method_body``: a lone ``return <lit|name>``, a void op run for effect, or
+    the ``UnsupportedOperationException("effectful method body")`` trap for an
+    empty/multi-step body), then the ``<Comp>Plugin`` (the no-config
+    ``_emit_plugin_ctors`` ctor + the A8 self-revert ``apply`` that registers each
+    ``provide`` step onto a LIFO undo list).
 
-Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 3+):
-  * COMPONENTS / SERVICES entirely, deferred AS ONE UNIT — a lone service drags
-    in a very large, bridge-entangled block (``_emit_service_interfaces_v3``,
-    ``_emit_plugin_ctors``, ``provide``/``req``/``config``, the component-dialect
-    expression kinds, the modern-vs-legacy ``_emit_component`` split, AND the
-    host-stub ``HashMap<String,V>`` per-site value-type inference
-    (``_map_value_expr_type``)), far bigger than the typed-core;
-  * the HOST Map/generics surface (``_emit_host_stubs``, component territory —
-    the plain ``maplit`` and ``Map[K,V]`` type lowering ARE covered);
+Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 4+):
+  * the MODERN component path (``_emit_component_modern``) — isolate/intercept,
+    effectful method bodies, and ``if``/``fail``/``await``/``return``/``setup``
+    body steps (the ``Context.EffectScope fx`` provider shape); component
+    ``config`` (the parameterised ``<Comp>Plugin`` ctor + ``_config_default_lit``);
+    required-service routing (``req``/the ``ctx.get`` locals + provider fields);
+    ``let-effect``/``effect``/``emit`` teardown steps; async/spawn/realms; and the
+    ``await``->AsyncPlugin / ``fail``->CordisException import widening. A component
+    outside the simple predicate surfaces a loud ``<<DEFER-component-nonsimple>>``;
+  * the HOST Map/generics surface (``_emit_host_stubs``' ``HashMap<String,V>`` with
+    ``_map_value_expr_type`` per-site inference — component territory; the plain
+    ``maplit`` and ``Map[K,V]`` type lowering ARE covered);
   * the stdlib surface (every ``builtin``/``len`` node and
     ``_emit_stdlib_helpers``); the built-in Result surface (``Ok``/``Err`` ctor
     and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``);
@@ -91,6 +104,14 @@ CORPUS = [
     "adts.rvl",      # sealed-interface variants, `adt` ctors, `match` (exhaustive/
                      # wildcard/partial-default/nested), the `final Owner` let
     "optmatch.rvl",  # the built-in Opt Some/None match (.map/.orElseGet)
+    # slice 3 (item 216) — the SIMPLE component/service unit
+    "service.rvl",       # one `service` interface + a lone pure-provider component:
+                         # `_emit_service_interfaces_v3`, the legacy `_emit_component`
+                         # simple path (empty provider class + inline `return <lit>`),
+                         # and the `<Comp>Plugin` `apply` provisioning
+    "services_multi.rvl",# two services, one component providing both — multi-provision
+                         # classes, `return <name>`, the empty-void-body throw trap,
+                         # and the scalar param/return surface (long/boolean/String/void)
 ]
 
 

@@ -1,0 +1,21 @@
+// A function + a service + a single pure-provider component: the smallest
+// byte-exact unit that forces the components/services surface (slice 3, item 216)
+// INSIDE a v3 document. It exercises `_emit_service_interfaces_v3`, the legacy
+// `_emit_component` SIMPLE provider path (an empty provider class, one inline
+// `return <lit>` method), and the `<Comp>Plugin` `apply` provisioning. No
+// requires, config, isolate/intercept, effects, host objects, or floats — so the
+// modern path, host stubs, and every preamble helper stay unreached. The trivial
+// `fn` forces ir_version 3 (a components-only doc lowers to v1; item 217 caveat).
+fn tag() -> Str {
+  return "hi"
+}
+
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) = "hi"
+  }
+}
