@@ -49,7 +49,20 @@ def test_rejects_undeclared_req(reference_ir):
 
 
 def test_rejects_identifier_colliding_with_scaffolding(reference_ir):
+    # `ctx`/`config`/`frame` are no longer reserved (item 156); the module-level
+    # runtime import names still are, and keep the same guard.
     bad = copy.deepcopy(reference_ir)
-    bad["components"][1]["body"][0]["bind"] = "ctx"
+    bad["components"][1]["body"][0]["bind"] = "fmt"
     with pytest.raises(emit.EmitError, match="scaffolding"):
         emit.emit(bad)
+
+
+def test_accepts_ctx_as_identifier(reference_ir):
+    """item 156: a body local named `ctx` no longer collides with the emitter
+    scaffolding — it emits verbatim while the context handle is `_revl_ctx`."""
+    ok = copy.deepcopy(reference_ir)
+    ok["components"][1]["body"][0]["bind"] = "ctx"
+    # the `let-effect` undo references the same binding by name
+    ok["components"][1]["body"][0]["undo"]["target"]["id"] = "ctx"
+    source = emit.emit(ok)  # must not raise
+    assert "_revl_ctx" in source and "_revl_frame" in source
