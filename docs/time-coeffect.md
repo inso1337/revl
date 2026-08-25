@@ -214,7 +214,7 @@ the py emit + runtime contract). The **ts/rust/go** tiers already carry a timer
 scheduler and an effect-ledger cancel inverse, but their timer emit renders a
 *sync* firing closure; giving each an awaitable firing body + in-flight
 cancellation (mirroring this py contract on `backends/{typescript,rust,go}/
-emit.py` and each tier's runtime scheduler) is a documented follow-on. **wasm**
+emit.py` and each tier's runtime scheduler) is landed (item 223: ts emits the async firing + cancel; rust/go run via async-erasure — the `async` flag is a correct no-op where nothing suspends). **wasm**
 still refuses timers honestly (below), so the async case is moot there until it
 lowers timers at all.
 
