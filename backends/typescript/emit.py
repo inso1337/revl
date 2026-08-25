@@ -1004,6 +1004,33 @@ def _component_body(component: dict, services: dict, indent: str, doc_ctx: "_Ctx
     return lines
 
 
+def _ts_emission_is_async(expr: dict, ctx: "_Ctx") -> bool:
+    """True if a timer-body emission returns a `Promise` on this tier (item 170).
+
+    A timer body the frontend coloured `async` reaches an async op; each such
+    emission spawns a tracked in-flight `Promise` rather than firing-and-
+    forgetting an un-awaited one. This mirrors the await-seed condition in
+    `_expr`'s component-`call` branch (a req-target async service op, or a call
+    to an async extern / async-colored callable), and the py backend's
+    `_py_reaches_coroutine` gate on `_timer`. A timer body is emissions-only
+    (`emit …`), so the emission expression is a single call and this top-level
+    check suffices."""
+    if not isinstance(expr, dict) or expr.get("kind") != "call":
+        return False
+    if "target" in expr:
+        target = expr.get("target")
+        scope = ctx.component_scope
+        if isinstance(target, dict) and target.get("kind") == "req" \
+                and scope is not None:
+            method = expr.get("method")
+            return (scope.requires.get(target.get("name")), method) in ctx.async_ops
+        return False
+    callee = expr.get("callee")
+    return isinstance(callee, dict) and callee.get("kind") == "var" \
+        and (callee.get("name") in ctx.async_names
+             or callee.get("name") in ctx.async_locals)
+
+
 def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                     indent: str, lines: list[str]) -> None:
     """One step of the activation body, appended to `lines`.
@@ -1085,15 +1112,55 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         fn = f"$revl_timer_{n}"
         handle = f"$revl_timer_{n}_h"
         verb = "scheduleEvery" if step.get("mode") == "every" else "scheduleAfter"
-        lines.append(f"{indent}const {fn} = () => {{")
-        for emission in step.get("body") or []:
+        emissions = step.get("body") or []
+        for emission in emissions:
             if emission.get("step") != "emit":  # pragma: no cover — lowerer invariant
                 raise EmitError(f"a timer body carries emissions only, "
                                 f"found {emission.get('step')!r}")
-            lines.append(f"{indent}  {_expr(emission['expr'], ctx)}")
+        interval = int(step["interval_ms"])
+        if not step.get("async"):
+            lines.append(f"{indent}const {fn} = () => {{")
+            for emission in emissions:
+                lines.append(f"{indent}  {_expr(emission['expr'], ctx)}")
+            lines.append(f"{indent}}}")
+            lines.append(f"{indent}const {handle} = host.{verb}({interval}, {fn})")
+            lines.append(f"{indent}yield () => {handle}.cancel()")
+            return
+        # async in-flight window (item 170): a timer body the frontend coloured
+        # `async` reaches an async op, whose emission returns a `Promise`. Each
+        # async emission is *spawned* as a tracked in-flight task (a per-timer
+        # Set) rather than fired-and-forgotten un-awaited: the firing returns
+        # immediately, and the harness's `_revl_settle` after a clock advance
+        # drains the microtask-queued in-flight work to quiescence before the
+        # next statement observes it (docs/time-coeffect.md §advance). The
+        # inverse cancels the schedule AND drops every still-in-flight task, so a
+        # torn-down timer leaves no orphaned in-flight reference (R4/A8) — the
+        # sync path's residue-free teardown extended to the async case. (A JS
+        # Promise is not abortable, so "drop in-flight" clears tracking rather
+        # than aborting mid-flight the way py's `task.cancel()` does; the settle
+        # before any assert has already drained the window, and a still-pending
+        # body's effect lands in its own component's ledger, reverted there.) A
+        # sync timer body carries no `async` key and emits byte-identically.
+        inflight = f"$revl_timer_{n}_inflight"
+        lines.append(f"{indent}const {inflight} = new Set<Promise<void>>()")
+        lines.append(f"{indent}const {fn} = () => {{")
+        for emission in emissions:
+            expr = emission["expr"]
+            rendered = _expr(expr, ctx)
+            if _ts_emission_is_async(expr, ctx):
+                # spawn the suspension into the in-flight window and track it so
+                # the inverse can drop it; a settled task removes itself.
+                lines.append(f"{indent}  const _revl_task: Promise<void> = "
+                             f"Promise.resolve({rendered})"
+                             f".then(() => {{ {inflight}.delete(_revl_task) }}, "
+                             f"() => {{ {inflight}.delete(_revl_task) }})")
+                lines.append(f"{indent}  {inflight}.add(_revl_task)")
+            else:
+                # a sync emission in a mixed body still fires inline
+                lines.append(f"{indent}  {rendered}")
         lines.append(f"{indent}}}")
-        lines.append(f"{indent}const {handle} = host.{verb}({int(step['interval_ms'])}, {fn})")
-        lines.append(f"{indent}yield () => {handle}.cancel()")
+        lines.append(f"{indent}const {handle} = host.{verb}({interval}, {fn})")
+        lines.append(f"{indent}yield () => {{ {handle}.cancel(); {inflight}.clear() }}")
     elif kind == "return":
         raise EmitError("return steps are only allowed inside method bodies")
     else:
