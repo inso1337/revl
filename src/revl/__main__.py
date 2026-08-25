@@ -1231,6 +1231,38 @@ def _run_metrics(args) -> int:
     return 0
 
 
+def _run_profile(args) -> int:
+    """`revl profile <composition> <run.jsonl> [--json] [--strict]` — the
+    least-privilege companion to `revl audit`/`revl metrics` (item 124). Diffs a
+    component's declared emission surface (the static G8 walk) against the
+    emissions a recorded run exercised (`emit` events), and flags
+    over-declaration: a declared emission the run never used.
+
+    Descriptive by default (exit 0 — a profile is not a gate). `--strict` turns
+    it into an authority-drift gate: nonzero when anything is over-declared. A
+    composition/trace mismatch (an emission used but not declared, or an emitter
+    with no declared surface) is surfaced as a warning either way, never faked."""
+    from . import profile as _profile  # noqa: PLC0415
+
+    try:
+        computed = _profile.profile_from_files(args.composition, args.trace)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as error:
+        print(f"error: cannot profile: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(computed, indent=2))
+    else:
+        print(_profile.render(computed))
+
+    if args.strict and computed["summary"]["overDeclaredKeys"] > 0:
+        return 1
+    return 0
+
+
 def _run_explain(args) -> int:
     """`revl explain <code>` — the other half of a structured diagnostic. A
     rejection hands back a code; this turns the code back into the guarantee
@@ -1793,6 +1825,27 @@ def main(argv: list[str] | None = None) -> int:
         "--json", action="store_true",
         help="machine-readable metrics document instead of the human table")
 
+    profile_cmd = sub.add_parser(
+        "profile",
+        help="capability/emission profiling (item 124): diff a component's "
+             "DECLARED emission surface against what a `revl run --trace` JSONL "
+             "trace actually emitted, flagging over-declaration "
+             "(docs/revl-profile.md)")
+    profile_cmd.add_argument(
+        "composition", metavar="COMPOSITION",
+        help="the composition whose declarations to read — a `.rvl` source, a "
+             "compiled IR (`revl compile -o`), or an `audit --json` document")
+    profile_cmd.add_argument(
+        "trace", metavar="FILE",
+        help="a JSONL causal trace written by `revl run --trace`")
+    profile_cmd.add_argument(
+        "--json", action="store_true",
+        help="machine-readable profile document instead of the human table")
+    profile_cmd.add_argument(
+        "--strict", action="store_true",
+        help="least-privilege gate: exit nonzero if any component over-declares "
+             "an emission the run never exercised")
+
     dash = sub.add_parser(
         "dash",
         help="the supervisor's cockpit (item 63): a READ-ONLY live view over a "
@@ -1911,6 +1964,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "metrics":
         return _run_metrics(args)
+
+    if args.command == "profile":
+        return _run_profile(args)
 
     if args.command == "dash":
         return _run_dash(args)
