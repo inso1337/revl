@@ -51,10 +51,26 @@ Emitter-readiness is proven end to end for the function corpus: the reference
 python emitter applied to the NATIVE IR produces the SAME bytes as applied to
 the reference IR, for every function document.
 
-Deferred (reported for the full capstone): the `externs` section (its verbatim
-`@py` body needs source offsets the token stream does not carry) and the typed
-COMPONENT/method expression body (the `ir_body` surface is still item 227's
-simple slice — effect/undo/provide over required-service calls + literals).
+Roadmap items 242 + 241 complete the last mile:
+  * item 242 — the FULL typed COMPONENT/method expression body. The `ir_body`
+    surface is no longer item 227's simple slice: it lowers the component
+    dialect (`{kind:"name",id}` for a scoped name, `{kind:"config",field}` for a
+    config read, a `req`-target call, plain `bin`/`un` with no `operands`,
+    `builtin`) across let-effect/effect steps, `emit … compensate` sagas,
+    `if`+`fail` guards, `every`/`after` timers (with `interval_ms`), and
+    `provide` blocks with full method bodies — byte-identical to the reference
+    over every component document. A body-level stdlib builtin now bumps
+    `ir_version` to v3 (the lowered node is visible to `_has_builtin`), closing
+    the last version gap, so ``VERSION_BODY_DEPENDENT`` is empty;
+  * item 241 — the `externs` section. The lexer (selfhost/lexer.rvl) grew a
+    `hostbody` token capturing the verbatim brace-balanced `@backend` body, so
+    each extern's class/params/returns and raw bodies lower byte-identical.
+
+Emitter-readiness is proven end to end for the component AND externs corpus too.
+With that, `lower_to_ir` is COMPLETE for the whole covered surface — function,
+component, and extern programs — up to the per-component `source` (input
+filename) and top-level `manifest` (linker artifact), which are environment/link
+artifacts the covered emitter surface never reads.
 """
 
 import importlib.util
@@ -76,10 +92,12 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_py_corpus"
 # externs, and the component/service documents)
 CORPUS = sorted(p.name for p in CORPUS_DIR.glob("*.rvl"))
 
-# ir_version triggers the header producer cannot see: a stdlib-builtin call in a
-# component/method body bumps the reference to v3 (`_has_builtin`); the native
-# producer under-approximates to 1. The only such corpus document.
-VERSION_BODY_DEPENDENT = {"services_methods.rvl"}
+# ir_version triggers the header producer cannot see used to include the one
+# body-level trigger (a stdlib-builtin call in a component body bumps the
+# reference to v3, `_has_builtin`). Item 242 closes that gap: the now-lowered
+# component body makes the `builtin`/`adt` node visible, so the native producer
+# bumps v3 too and `ir_version` matches the reference on EVERY corpus document.
+VERSION_BODY_DEPENDENT: set[str] = set()
 
 # The function documents whose whole `functions` body is inside the covered
 # emitter surface, so the reference python emitter renders the native IR to the
@@ -88,6 +106,19 @@ FUNCTION_EMIT_READY_DOCS = [
     "arith.rvl", "control.rvl", "strings.rvl", "records.rvl", "result.rvl",
     "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
 ]
+
+# The component documents whose whole activation/method body is now lowered
+# byte-exact (item 242): effect/let-effect, emit+compensate sagas, if+fail
+# guards, timers, and provide-method bodies over the component dialect. Every
+# one carries a `body` and is emitter-ready end to end.
+COMPONENT_DOCS = [
+    "services_basic.rvl", "services_config.rvl", "services_body.rvl",
+    "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
+]
+
+# The document whose `externs` section is lowered byte-exact (item 241): the
+# verbatim `@py` bodies come from the lexer's new `hostbody` token.
+EXTERN_DOCS = ["externs.rvl"]
 
 
 # ---------------------------------------------------------------- harness
@@ -174,8 +205,9 @@ def test_native_ir_matches_reference_component_headers(lower_to_ir, rel):
 
 @pytest.mark.parametrize("rel", CORPUS)
 def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
-    """Where the native producer emits a component `body` (the simple-component
-    surface), it is byte-identical to the reference body."""
+    """Where the native producer emits a component `body` (item 242: the FULL
+    typed component/method expression spine), it is byte-identical to the
+    reference body."""
     src = (CORPUS_DIR / rel).read_text()
     native = json.loads(lower_to_ir(src))
     reference = compile_source(src)
@@ -188,6 +220,58 @@ def test_native_ir_matches_reference_bodies_where_covered(lower_to_ir, rel):
     if rel == "services_basic.rvl":
         # the capstone-intersection document: both its components carry a body
         assert covered == 2
+
+
+@pytest.mark.parametrize("rel", COMPONENT_DOCS)
+def test_component_docs_emit_full_body(lower_to_ir, rel):
+    """Item 242 — every component in the covered corpus now carries a `body`,
+    byte-identical to the reference (not merely the simple-component slice): the
+    activation/method spine (let-effect, effect, emit/compensate sagas, if+fail
+    guards, timers, provide-method bodies) is complete."""
+    src = (CORPUS_DIR / rel).read_text()
+    native = json.loads(lower_to_ir(src))
+    reference = compile_source(src)
+    ref_by_name = {c["name"]: c for c in reference["components"]}
+    assert native["components"], rel
+    for comp in native["components"]:
+        assert "body" in comp, f"{rel}:{comp['name']} lost its body"
+        assert comp["body"] == ref_by_name[comp["name"]]["body"], comp["name"]
+
+
+@pytest.mark.parametrize("rel", CORPUS)
+def test_native_ir_matches_reference_externs(lower_to_ir, rel):
+    """The `externs` section (item 241) — each extern's class/params/returns and
+    the verbatim `@backend` bodies (from the lexer's `hostbody` token) — is byte-
+    identical to the reference IR on every corpus document (absent together on
+    the extern-free documents)."""
+    src = (CORPUS_DIR / rel).read_text()
+    native = json.loads(lower_to_ir(src))
+    reference = compile_source(src)
+    assert native.get("externs") == reference.get("externs")
+
+
+def test_native_component_and_extern_ir_is_emitter_ready(lower_to_ir):
+    """End-to-end: the reference python emitter applied to the NATIVE IR produces
+    the SAME bytes as applied to the reference IR, for every component document
+    AND the externs document — the native component/method body and externs IR is
+    emitter-ready, the completion proof for component programs (item 230)."""
+    refemit = _reference_emit()
+    stub = types.ModuleType("runtime")
+    stub.__getattr__ = lambda name: (lambda *a, **k: None)
+    had = "runtime" in sys.modules
+    previous = sys.modules.get("runtime")
+    sys.modules["runtime"] = stub
+    try:
+        for rel in COMPONENT_DOCS + EXTERN_DOCS:
+            src = (CORPUS_DIR / rel).read_text()
+            reference_ir = compile_source(src)
+            native_ir = json.loads(lower_to_ir(src))
+            assert refemit.emit(native_ir) == refemit.emit(reference_ir), rel
+    finally:
+        if had:
+            sys.modules["runtime"] = previous
+        else:
+            del sys.modules["runtime"]
 
 
 @pytest.mark.parametrize("rel", CORPUS)
