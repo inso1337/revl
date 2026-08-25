@@ -12,9 +12,11 @@
 //
 // ============================================================ WHAT IT COVERS
 // Every IR the frontend produces is ir_version 3, so the covered slice mirrors
-// the reference's v3 path (`_emit_v3` -> `_emit_v3_types` / `_emit_v3_functions`
-// -> `_expr` / `_v3_stmt`) for a document with NO services, NO components, NO
-// externs, NO tests, NO stdlib builtins, NO built-in Result — the v3 typed-core:
+// the reference's v3 path (`_emit_v3` -> `_emit_v3_types` /
+// `_emit_service_interfaces_v3` / `_emit_v3_functions` / `_emit_component` ->
+// `_expr` / `_v3_stmt`) for a document with NO externs, NO tests, NO stdlib
+// builtins, NO built-in Result, and only SIMPLE (pure-provider) components — the
+// v3 typed-core PLUS the smallest byte-exact component/service unit:
 //
 //   * SLICE 1 (item 199) — the module scaffold (the two banner comments, the
 //     `package revl;`, the five unconditional `import io.cordis4j.core.*;` lines,
@@ -53,20 +55,22 @@
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on java-emitter slices, deliberately OUT of this slice —
 // each is a real reference surface this slice does not reach (its fixtures avoid
-// it), NOT an approximation:
-//   * COMPONENTS / SERVICES entirely — deferred AS ONE UNIT (see the dogfood note
-//     in docs/selfhost-findings.md). A lone service drags in a very large,
-//     bridge-entangled block: `_emit_service_interfaces_v3`, `_emit_plugin_ctors`,
-//     `provide`/`req`/`config`, the component-dialect expression kinds
-//     (`req`/`config`/`host`/`format`/`target`-`method`), the modern-vs-legacy
-//     `_emit_component`/`_emit_component_modern` split, AND the host-stub
-//     `HashMap<String,V>` per-site value-type inference (`_map_value_expr_type`
-//     et al.) — far bigger than the typed-core, so it lands whole in a later
-//     slice, not half-emitted here;
+// it), NOT an approximation. Where a covered fixture could plausibly reach one, a
+// loud `<<DEFER-*>>` marker keeps a byte diff from silently passing (item 207):
+//   * the MODERN component path (`_emit_component_modern`) — isolate/intercept,
+//     effectful method bodies, and any `if`/`fail`/`await`/`return`/`setup` body
+//     step (the `Context.EffectScope fx` provider shape). A component outside the
+//     `component_simple_ok` predicate routes to `<<DEFER-component-nonsimple:N>>`;
+//   * component `config` (the parameterised `<Comp>Plugin` ctor +
+//     `_config_default_lit`) — a config-carrying component stays LEGACY but is
+//     deferred here; required-service routing (`req`/the `ctx.get` locals +
+//     provider fields); `let-effect`/`effect`/`emit` teardown steps; async/spawn/
+//     realms; and the `await`->AsyncPlugin / `fail`->CordisException import
+//     widening (`_core_imports`);
 //   * the HOST Map/generics surface — `_emit_host_stubs`' `HashMap<String,V>` with
-//     per-site value inference is component territory (deferred with them). The
-//     plain v3 `maplit` (`new java.util.HashMap<>()`) and the `Map[K,V]` TYPE
-//     lowering ARE covered;
+//     per-site value inference (`_map_value_expr_type`) is component-bind territory
+//     (deferred with them). The plain v3 `maplit` (`new java.util.HashMap<>()`)
+//     and the `Map[K,V]` TYPE lowering ARE covered;
 //   * the STDLIB surface — every `builtin`/`len` node and `_emit_stdlib_helpers`
 //     / `revlLength`;
 //   * the built-in Result surface — `Ok`/`Err` construction and `match`, the
@@ -111,6 +115,14 @@ extern pure fn json_dumps(v: Any) -> Str = @py {
 // float as `f"{value}d"`, both `str(value)`. Sourced here so the numeral text is
 // exactly Python's.
 extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// `_camel` verbatim (item 207 bridges the identical body for rust): a provision
+// key -> its PascalCase struct suffix, `"".join(part.capitalize() for part in
+// name.split("_"))`. The java reference `_camel` IS this python byte-for-byte, so
+// bridging it is faithful host FORMATTING (the item-180 "NOT obsoleted" category,
+// like `json_dumps`/`num_str`), not compiler logic left in @py.
+extern pure fn camel(name: Str) -> Str = @py {
+    return "".join(part.capitalize() for part in name.split("_"))
+}
 
 // A real newline (U+000A) as the line SEPARATOR (`"\n".join(out)` in the
 // reference). PURE revl: revl `"..."` carries no escapes, but a backtick
@@ -910,6 +922,220 @@ fn build_ctx(ir: Any) -> Ctx {
   return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields }
 }
 
+// ============================================================ components/services
+// SLICE 3 (item 216 — THIS slice) the SIMPLE component/service unit. The java
+// reference emits components as ONE entangled block; item 210 deferred it whole.
+// This slice ports the smallest byte-exact corner of it — a `service` interface
+// plus the LEGACY simple-provider path of `_emit_component` (the branch taken when
+// `_component_needs_modern` is False): a pure provider whose methods are a lone
+// `return <lit|name>` (or an empty void body), NO requires, NO config, NO
+// isolate/intercept, and body steps that are all `provide`.
+//
+// Everything richer is DEFERRED, each behind a loud `<<DEFER-*>>` marker so a byte
+// diff can never silently pass on an unported form (item 207's discipline):
+//   * the MODERN `_emit_component_modern` path — isolate/intercept, effectful
+//     method bodies, and any `if`/`fail`/`await`/`return` or `setup` body step
+//     (the `Context.EffectScope fx` provider shape). Detected conservatively:
+//     anything outside the simple predicate below routes to a
+//     `<<DEFER-component-nonsimple:NAME>>` marker;
+//   * component `config` (the `<Comp>Plugin(params)` ctor + `_config_default_lit`
+//     application) — a config-carrying component stays LEGACY but is deferred here;
+//   * required-service routing (`req`/the `ctx.get(..)` locals + provider fields),
+//     host-object binds and their `_emit_host_stubs` `HashMap<String,V>` per-site
+//     `_map_value_expr_type` inference, `let-effect`/`effect`/`emit` teardown
+//     steps, async/spawn/realms, and the `<Comp>` await->AsyncPlugin / fail->
+//     CordisException import widening.
+// The provider METHOD body reuses the v1 `_expr` surface for the two kinds the
+// simple unit forces — `lit` (`_lit`) and `name` (a bound param, `_ident`) — and
+// marks any other kind `<<DEFER-method-expr:KIND>>`.
+
+// `_emit_service_interfaces_v3`: each `service` -> a `public interface S` with one
+// method per op (param names `_ident`ed/mangled, a `void` return when the op
+// declares none). The v3 variant carries NO idempotent/emission doc comments (that
+// is the v1 `_emit_service_interfaces`).
+fn emit_service_interfaces_v3(services: Any) -> List[Str] {
+  var out = []
+  for (sname of value_keys(services)) {
+    let srv = value_field(services, sname)
+    out = out.push(`public interface ${sname} {`)
+    let methods = value_field(srv, "methods")
+    for (mname of value_keys(methods)) {
+      let method = value_field(methods, mname)
+      var params = []
+      for (p of value_list(value_field(method, "params"))) {
+        params = params.push(`${java_v3_type(value_field(p, "type"), false)} ${mangle(value_str(value_field(p, "name")))}`)
+      }
+      var ret = "void"
+      let r = value_field(method, "returns")
+      if (!value_is_null(r)) { ret = java_v3_type(r, false) }
+      out = out.push(`    ${ret} ${mname}(${params.join(", ")});`)
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// The v1 method-body expression surface for the simple provider path: only the
+// two kinds a pure `return` forces (`lit`/`name`), every other kind DEFERRED. The
+// simple unit carries no binds/reqs, so the reference's `rename` map is empty and
+// a `name` is just `_ident` (mangle). A user-case `name` cannot occur here (the
+// method returns a scalar), so no ADT/ctx lookup is needed.
+fn v1_method_expr(node: Any) -> Str {
+  let k = node_kind(node)
+  if (k == "lit") { return java_lit(node) }
+  if (k == "name") { return mangle(value_str(value_field(node, "id"))) }
+  return `<<DEFER-method-expr:${k}>>`
+}
+
+// `_method_body` (SUBSET): a single `return <expr>` inlines to `return <expr>;`
+// (or `<expr>;` for a void op run for effect); a void op with a bare `return`
+// gives `return;`; ANY other shape (empty body, multi-step, effectful) gives the
+// reference's `throw new UnsupportedOperationException("effectful method body");`.
+// A bare `return` in a value-returning op is a reference ERROR (deferred marker).
+fn method_body(method: Any, ret_is_void: Bool) -> Str {
+  let steps = value_list(value_field(method, "body"))
+  if (steps.length() == 1) {
+    let s0 = steps[0]
+    if (value_str(value_field(s0, "step")) == "return") {
+      let e = value_field(s0, "expr")
+      if (value_is_null(e)) {
+        if (!ret_is_void) { return "<<DEFER-bare-return-nonvoid>>" }
+        return "return;"
+      }
+      let value = v1_method_expr(e)
+      if (ret_is_void) { return value.concat(";") }
+      return `return ${value};`
+    }
+  }
+  return `throw new UnsupportedOperationException("effectful method body");`
+}
+
+// The provide-step methods for a provision `key` (`_provision_methods`): the
+// `provide` body step whose `name` matches, else `[]`.
+fn provide_methods(body: List[Any], key: Str) -> List[Any] {
+  for (s of body) {
+    if (value_str(value_field(s, "step")) == "provide" && value_str(value_field(s, "name")) == key) {
+      return value_list(value_field(s, "methods"))
+    }
+  }
+  return []
+}
+
+// A provision method's declared param type, looked up in the SERVICE signature
+// (the provide body carries only names): `_param_type`. Missing -> "Object".
+fn service_param_type(svc_method: Any, pname: Str) -> Any {
+  for (mp of value_list(value_field(svc_method, "params"))) {
+    if (value_str(value_field(mp, "name")) == pname) { return value_field(mp, "type") }
+  }
+  return "Object"
+}
+
+// A nullable map/list is "empty" when absent (a component with no requires/isolate
+// simply omits the key) OR present-but-empty.
+fn map_nonempty(v: Any) -> Bool {
+  if (value_is_null(v)) { return false }
+  return value_keys(v).length() > 0
+}
+fn list_nonempty(v: Any) -> Bool {
+  if (value_is_null(v)) { return false }
+  return value_list(v).length() > 0
+}
+
+// The SIMPLE-path predicate: a component this slice emits byte-exactly via the
+// legacy `_emit_component`. STRICTLY a subset of `not _component_needs_modern`
+// (config/requires/isolate/intercept absent, every step a `provide`, every method
+// empty or a lone `return <lit|name>`), so anything it admits the reference emits
+// via the legacy path with a lit/name body — and anything it rejects gets a loud
+// `<<DEFER-component-nonsimple:NAME>>` rather than a wrong-shaped emission.
+fn method_simple_ok(method: Any) -> Bool {
+  let steps = value_list(value_field(method, "body"))
+  if (steps.length() == 0) { return true }
+  if (steps.length() != 1) { return false }
+  let s0 = steps[0]
+  if (value_str(value_field(s0, "step")) != "return") { return false }
+  let e = value_field(s0, "expr")
+  if (value_is_null(e)) { return false }
+  let k = node_kind(e)
+  return k == "lit" || k == "name"
+}
+fn component_simple_ok(comp: Any) -> Bool {
+  if (list_nonempty(value_field(comp, "config"))) { return false }
+  if (map_nonempty(value_field(comp, "requires"))) { return false }
+  if (map_nonempty(value_field(comp, "isolate"))) { return false }
+  if (map_nonempty(value_field(comp, "intercept"))) { return false }
+  for (step of value_list(value_field(comp, "body"))) {
+    if (value_str(value_field(step, "step")) != "provide") { return false }
+    for (method of value_list(value_field(step, "methods"))) {
+      if (!method_simple_ok(method)) { return false }
+    }
+  }
+  return true
+}
+
+// `_emit_component` (SIMPLE legacy path only): a provider `public static final
+// class <Comp><Camel(key)> implements <Svc>` per provision (an empty ctor, one
+// inline method per op), then the `<Comp>Plugin` whose `apply` registers each
+// provision (`ctx.provide(ServiceKey.of(<Svc>.class), new <struct>())`) onto a
+// LIFO undo list (`_emit_plugin_ctors` no-config form + the A8 self-revert catch).
+fn emit_component(comp: Any, services: Any) -> List[Str] {
+  let name = value_str(value_field(comp, "name"))
+  if (!component_simple_ok(comp)) { return [`<<DEFER-component-nonsimple:${name}>>`] }
+  let cname = mangle(name)
+  let provs = value_field(comp, "provides")
+  let body = value_list(value_field(comp, "body"))
+  var out = []
+  for (key of value_keys(provs)) {
+    let srv = value_str(value_field(provs, key))
+    let struct = `${cname}${camel(key)}`
+    out = out.push(`public static final class ${struct} implements ${srv} {`)
+    out = out.push(`    ${struct}() {`)
+    out = out.push("    }")
+    let svc_methods = value_field(value_field(services, srv), "methods")
+    for (method of provide_methods(body, key)) {
+      let mn = value_str(value_field(method, "name"))
+      let svc_method = value_field(svc_methods, mn)
+      var params = []
+      for (pn of value_list(value_field(method, "params"))) {
+        let pname = value_str(pn)
+        params = params.push(`${java_v3_type(service_param_type(svc_method, pname), false)} ${pname}`)
+      }
+      var ret_is_void = true
+      var ret = "void"
+      let r = value_field(svc_method, "returns")
+      if (!value_is_null(r)) { ret = java_v3_type(r, false) ret_is_void = false }
+      out = out.push(`    public ${ret} ${mangle(mn)}(${params.join(", ")}) { ${method_body(method, ret_is_void)} }`)
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  out = out.push(`public static final class ${cname}Plugin implements Plugin {`)
+  out = out.push(`    public ${cname}Plugin() {`)
+  out = out.push("    }")
+  out = out.push("    @Override")
+  out = out.push("    public Disposable apply(Context ctx) {")
+  out = out.push("        java.util.ArrayList<Disposable> undos = new java.util.ArrayList<>();")
+  out = out.push("        try {")
+  for (step of body) {
+    let key = value_str(value_field(step, "name"))
+    let srv = value_str(value_field(step, "service"))
+    let struct = `${cname}${camel(key)}`
+    out = out.push(`            undos.add(ctx.provide(ServiceKey.of(${srv}.class), new ${struct}()));`)
+  }
+  out = out.push("            java.util.Collections.reverse(undos);")
+  out = out.push("            return Disposables.composite(undos.toArray(new Disposable[0]));")
+  out = out.push("        } catch (RuntimeException | Error failure) {")
+  out = out.push("            for (int i = undos.size() - 1; i >= 0; i--) {")
+  out = out.push("                undos.get(i).dispose();")
+  out = out.push("            }")
+  out = out.push("            throw failure;")
+  out = out.push("        }")
+  out = out.push("    }")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
 // The document assembly for a typed-core v3 document (`_emit_v3`, subset): the
 // two banner comments, the package, the core imports, the `Components` wrapper,
 // then the user `type` decls and the free functions — each line 4-space indented
@@ -935,9 +1161,29 @@ pub fn emit_src(ir: Any) -> Str {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
     }
   }
+  // Service interfaces follow the type decls, mirroring `_emit_v3`'s block order
+  // (result-type / types / services / host-stubs / ... / functions / components).
+  // Host stubs, stdlib, ftoa, checked-div, externs, tests and spawn are all
+  // DEFERRED and contribute nothing for the covered corpus.
+  let services = value_field(ir, "services")
+  if (!value_is_null(services) && value_keys(services).length() > 0) {
+    for (l of emit_service_interfaces_v3(services)) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
   if (functions.length() > 0) {
     for (l of emit_v3_functions(functions, ctx)) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
+  // Components close the class body (after the free functions), each provider +
+  // plugin block 4-space indented into `Components`.
+  let components = value_field(ir, "components")
+  if (!value_is_null(components)) {
+    for (comp of value_list(components)) {
+      for (l of emit_component(comp, services)) {
+        if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+      }
     }
   }
   out = out.push("}")
@@ -978,6 +1224,11 @@ test "the field-set key canonicalises regardless of order" {
   assert resolved("Outcome") == true
   assert resolved("<<AMBIG>>") == false
   assert resolved("") == false
+}
+
+test "camel maps a provision key to its PascalCase struct suffix" {
+  assert camel("greeting") == "Greeting"
+  assert camel("count") == "Count"
 }
 
 // --------------------------------------------------------------- component wrap
