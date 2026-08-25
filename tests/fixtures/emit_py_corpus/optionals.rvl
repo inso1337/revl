@@ -1,0 +1,2 @@
+fn call_chain(s: Opt[Str]) -> Opt[Int] { return s?.length() }
+fn call_chain2(s: Opt[Str]) -> Opt[Str] { return s?.concat("!") }
