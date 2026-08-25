@@ -430,6 +430,33 @@ item 90's ts slice must now be built:
 - The asyncio lifecycle driver (:1362-1441, `_revl_call` awaiting flagged
   methods :1431-1441) is unchanged.
 
+#### The invariant behind the arrow shapes: an `await` never lands in a lambda
+
+Shapes 1-3 all serve one rule: on py an `await` may appear only in an
+`async def` frame, never in a lambda (a lambda is always a sync frame, and
+`await` inside one is an import-time `SyntaxError`). Two later lighthouse
+findings were the same rule violated in different emitter positions, both
+admitted green then dying at py exec time (the item-78 compiles-implies-runs
+class):
+
+- **item 263 — `match` in an async body.** The match binder rides one-shot
+  lambdas (`(lambda match: …)(scrut)`, `(lambda bind: …)(payload)`). An arm
+  that crosses an async boundary (`Go => emit store.get(k)`) renders an
+  `await`, which the lambda then traps. Fix: in an async frame `_match_expr`
+  switches the binder to walrus assignments carried by `(<bind>, <body>)[1]`,
+  so the arm helper hoisted out of the async body inherits the async color and
+  the `await` lands at the enclosing `async def`'s top level.
+- **item 264 — an async arrow re-passed from an async frame.** Following the
+  wrap hint (`h => complete(h)`, `complete` an async local) inside an async
+  caller hit shape 2's wrapper while the await-seed still fired in the arrow
+  body, emitting `_revl_as_async(lambda h: (await complete(h)))`. The module
+  `_expr` had no in-arrow suppression (the component emitter got it in item
+  141) and did not thread the async-typed params into the arrow's coroutine
+  predicate. Fix (emitter, not a checker refusal: the arrow is a legal shape-1
+  tail call): suppress the await-seed inside an arrow body and thread the
+  async locals, so the arrow renders as the plain coroutine lambda shape 1
+  already prescribes.
+
 ### rust, go, java — erasure
 
 `Async[T]` erases to `T` in each backend's type rendering (rust:

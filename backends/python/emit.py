@@ -156,6 +156,7 @@ _PY_ASYNC_SVC_OPS: set = set()      # {(service_name, method_name)} async operat
 # per-body context, threaded through the stateless module `_expr`:
 _PY_AWAIT_LOCALS: set = set()       # async-typed parameter names of the body being rendered
 _PY_IN_ASYNC: bool = False          # is the body being rendered an `async def`
+_PY_IN_ARROW: bool = False          # is the body being rendered inside an arrow (item 141/264)
 _PY_USES_AS_ASYNC: bool = False     # did any body need the `_revl_as_async` wrapper
 
 
@@ -742,10 +743,18 @@ class _ComponentEmitter:
         if kind == "match":
             # the ADT eliminator, now legal in component/method bodies; the
             # module-level renderer already knows the node shape
+            arms = expr.get("arms") or []
+            # item 263: an arm that crosses an async boundary inside an async
+            # method renders an `await`; the walrus binder keeps it out of the
+            # scrutinee/payload lambdas (which are sync frames).
+            awaited = self._in_async and any(
+                _py_reaches_coroutine(arm.get("body"), self.requires)
+                for arm in arms)
             return _match_expr(self._expr(expr.get("scrutinee"), where),
                                [{**arm, "body": _RenderedBody(
                                    self._expr(arm.get("body"), where))}
-                                for arm in expr.get("arms") or []])
+                                for arm in arms],
+                               awaited=awaited)
         if kind == "adt":
             case = _ident(expr.get("case"), f"{where}: adt case")
             args = ", ".join(self._expr(a, where) for a in expr.get("args") or [])
@@ -1425,19 +1434,35 @@ def _interp_fstring(parts) -> str:
     return "(" + " + ".join(pieces) + ")"
 
 
-def _match_expr(scrutinee: str, arms: list) -> str:
+def _match_expr(scrutinee: str, arms: list, awaited: bool = False) -> str:
     """Emit a match expression as a nested `isinstance` chain.
 
     Python has no expression-level `elif`, so the chain is built from nested
-    conditional expressions inside a one-shot lambda. The scrutinee is
-    evaluated exactly once into `match`; payload arms bind the case's
-    `.value` by immediately invoking another lambda whose parameter is the
-    revl bind name. A wildcard arm becomes the chain's final `else`.
+    conditional expressions. The scrutinee is evaluated exactly once into
+    `match`; payload arms bind the case's `.value` before the arm body runs.
+    A wildcard arm becomes the chain's final `else`.
+
+    The scrutinee-once binding and each payload bind normally ride a one-shot
+    lambda. But a lambda is a SYNC frame: an arm body that crosses an async
+    boundary renders an `await`, and `await` inside a lambda is a py
+    `SyntaxError` (item 263 — the arm helper hoisted out of an async body must
+    inherit its color). When `awaited` is set the binder switches to walrus
+    assignments carried by a `(<bind>, <body>)[1]` tuple instead, so every
+    `await` lands directly in the enclosing `async def` and none is trapped in
+    a lambda. The two forms are otherwise byte-identical.
     """
     # `match` is a revl keyword, so it can never be a user binding in the
     # revl source. Python 3.10+ treats it as a soft keyword, which is still
-    # legal as a lambda parameter.
+    # legal as a lambda parameter and as a walrus target.
     tmp = "match"
+
+    def bind_payload(bind: str, body: str, payload: str) -> str:
+        # `await`-free arm -> the classic one-shot lambda; an awaited arm ->
+        # a walrus bind so the body (which carries the `await`) stays at the
+        # frame's top level rather than inside a lambda.
+        if awaited:
+            return f"(({bind} := {payload}), {body})[1]"
+        return f"(lambda {bind}: {body})({payload})"
 
     def branch(arm: dict, rest: str | None) -> str:
         pattern = arm.get("pattern")
@@ -1453,10 +1478,10 @@ def _match_expr(scrutinee: str, arms: list) -> str:
         elif pattern == "Some":
             cond = f"{tmp} is not None"
             if bind:
-                body = f"(lambda {bind}: {body})({tmp})"
+                body = bind_payload(bind, body, tmp)
         else:
             if bind:
-                body = f"(lambda {bind}: {body})({tmp}.value)"
+                body = bind_payload(bind, body, f"{tmp}.value")
             cond = f"isinstance({tmp}, {pattern})"
         if rest is None:
             return f"({body} if {cond} else (_ for _ in ()).throw(TypeError('non-exhaustive match')))"
@@ -1467,10 +1492,13 @@ def _match_expr(scrutinee: str, arms: list) -> str:
         result = branch(arm, result)
     if result is None:
         result = "(_ for _ in ()).throw(TypeError('non-exhaustive match'))"
+    if awaited:
+        return f"(({tmp} := {scrutinee}), {result})[1]"
     return f"(lambda {tmp}: {result})({scrutinee})"
 
 
 def _expr(node: dict) -> str:
+    global _PY_IN_ARROW
     if isinstance(node, dict) and node.get("kind") == "__rendered__":
         return node["text"]
     # An implicit Int -> Float coercion site (docs/arithmetic.md): the
@@ -1561,7 +1589,11 @@ def _expr(node: dict) -> str:
         # and is excluded — its result is not awaitable). The frontend admits
         # such a call only in an async context, so `_PY_IN_ASYNC` holds here.
         callee = node.get("callee")
-        if _PY_IN_ASYNC and isinstance(callee, dict) and callee.get("kind") == "var" \
+        # item 141/264: suppressed inside an arrow body — a colored tail call
+        # there stays a plain coroutine-returning lambda its awaiting call site
+        # settles, never an `await` trapped in a (sync) lambda frame.
+        if _PY_IN_ASYNC and not _PY_IN_ARROW and isinstance(callee, dict) \
+                and callee.get("kind") == "var" \
                 and (callee.get("name") in _PY_COLORED_FNS
                      or callee.get("name") in _PY_ASYNC_EXTERNS
                      or callee.get("name") in _PY_AWAIT_LOCALS):
@@ -1594,13 +1626,29 @@ def _expr(node: dict) -> str:
         captures = node.get("captures") or []
         lambda_params = ", ".join(
             params + [f"{_mangle(name)}={_mangle(name)}" for name in captures])
-        if node.get("async"):
-            # a pure-fn body has no req keys, so an async arrow here reaches a
-            # coroutine only through a colored fn / async local (rules 1-2).
-            return _py_async_arrow(node["body"], lambda_params, _expr)
-        return f"lambda {lambda_params}: {_expr(node['body'])}"
+        prev_arrow = _PY_IN_ARROW
+        _PY_IN_ARROW = True  # item 141/264: suppress the await-seed in the body
+        try:
+            if node.get("async"):
+                # a pure-fn body has no req keys, so an async arrow here reaches
+                # a coroutine only through a colored fn / async local (rules
+                # 1-2). Thread the async-typed params (item 264) so a tail call
+                # of one is recognised as a coroutine and renders as a plain
+                # lambda, not a broken `_revl_as_async(lambda: (await …))`.
+                return _py_async_arrow(node["body"], lambda_params, _expr,
+                                       async_locals=frozenset(_PY_AWAIT_LOCALS))
+            return f"lambda {lambda_params}: {_expr(node['body'])}"
+        finally:
+            _PY_IN_ARROW = prev_arrow
     if kind == "match":
-        return _match_expr(_expr(node["scrutinee"]), node["arms"])
+        # item 263: inside an async-colored module fn an arm may reach a
+        # coroutine (a colored fn / async extern / async local), rendering an
+        # `await`; switch the binder to the walrus form so it is not trapped in
+        # the scrutinee/payload lambdas.
+        awaited = _PY_IN_ASYNC and any(
+            _py_reaches_coroutine(arm.get("body"), async_locals=_PY_AWAIT_LOCALS)
+            for arm in node["arms"])
+        return _match_expr(_expr(node["scrutinee"]), node["arms"], awaited=awaited)
     if kind == "record_update":
         # functional record update (docs/records.md §2): fresh dict spreading
         # the base, updated fields overriding it
@@ -1732,18 +1780,22 @@ def _emit_assert(expr: dict, out: "_Lines", indent: int) -> None:
 
 
 def _emit_functions(functions: list) -> "_Lines":
-    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS
+    global _PY_IN_ASYNC, _PY_AWAIT_LOCALS, _PY_IN_ARROW
     out = _Lines()
     for fn in functions:
         name = _ident(fn["name"], "function name")
         params = ", ".join(_ident(p["name"], "parameter name") for p in fn["params"])
         # item 92: a phase-2 async-colored fn emits `async def`; its body renders
         # in an async context with its async-typed parameters as the await-locals
-        # (a call through one yields a coroutine to settle).
+        # (a call through one yields a coroutine to settle). item 264: an
+        # async-typed param is an async local of a SYNC fn too — the enclosing
+        # `def` never awaits it (that is gated on `_PY_IN_ASYNC`), but an arrow
+        # re-passing it must still render it as a coroutine tail call.
         is_async = bool(fn.get("async"))
         _PY_IN_ASYNC = is_async
+        _PY_IN_ARROW = False
         _PY_AWAIT_LOCALS = {p["name"] for p in fn["params"]
-                            if _is_async_fn_type(p.get("type"))} if is_async else set()
+                            if _is_async_fn_type(p.get("type"))}
         out.add(0, f"{'async def' if is_async else 'def'} {name}({params}):")
         if not fn.get("body"):
             out.add(1, "pass")
@@ -1751,6 +1803,7 @@ def _emit_functions(functions: list) -> "_Lines":
             _fn_stmt(stmt, out, 1)
         out.add(0)
     _PY_IN_ASYNC = False
+    _PY_IN_ARROW = False
     _PY_AWAIT_LOCALS = set()
     return out
 
