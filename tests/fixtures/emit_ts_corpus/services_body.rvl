@@ -1,0 +1,17 @@
+// The activation-body surface: a bound block effect (let-effect), an `if`
+// L-Raise guard containing `fail` (G6), and a saga `emit ... compensate ...`.
+service Bus {
+  fn open() -> Int
+  fn close(h: Int) -> Int
+  emission fn send(msg: Str) -> Int
+}
+
+component Worker requires bus: Bus {
+  let token = effect bus.open() undo bus.close(token)
+
+  if (token < 0) {
+    fail "bus handle is invalid"
+  }
+
+  emit bus.send("go") compensate bus.send("undo-go")
+}

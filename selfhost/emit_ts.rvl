@@ -31,12 +31,30 @@
 //     the optional field/call forms; plus the implicit `Number(...)` / `BigInt(...)`
 //     widen markers and the `$revl_match_N` document-wide temp counter.
 //
+// ============================================================ SLICE 2 (item 204)
+// Extends the emitter to the COMPONENT-dialect tail of `_emit_v3`, byte-exact:
+//   * service interfaces (`export interface <Service>`) over scalar signatures;
+//   * `_context_augmentation` — the committed-view `ctx.<key>` `declare module`
+//     block, provisions then requirements, first-occurrence order;
+//   * config interfaces (`<Name>Config`, required + defaulted fields);
+//   * each component's plugin object — `_component`: inject/provide wiring, the
+//     `apply(ctx[, rawConfig])` scaffold + `host.applyConfigDefaults`, and the
+//     `ctx.effect(function* () { … })` activation body;
+//   * `_component_step` (let-effect/effect/emit+compensate/provide/if/fail) and
+//     `_provide_impl` -> `_method_body` (let/assign/return/effect/emit), reusing
+//     the single `_expr` — the component-dialect kinds `req`/`config`/`name` and
+//     the component-shaped `call` (`target`/`method`) join the 2.0 dispatch.
+//
 // ============================================================ WHAT IT DEFERS
-// Reported for follow-on TS-emitter slices, deliberately OUT of this slice:
-//   * components/services entirely (`_component` / `_component_body` /
-//     `_provide_impl` / `_method_body` / `_Scope`, the committed-view `ctx.<key>`
-//     access, service interfaces, `_context_augmentation`, config interfaces) —
-//     the whole v1/v2 `_emit_v1` path and the v3 component tail;
+// Reported for follow-on TS-emitter slices, deliberately OUT of these slices:
+//   * async coloring across the component tail (async service ops -> `Promise`,
+//     `async` provide methods, awaited call sites, the async-generator body),
+//     the whole v1/v2 `_emit_v1` path, and canonical;
+//   * the component-body `await`/`timer` steps; and the component-dialect expr
+//     kinds `host`/`format`/`fn`/`adt`/`spawn`/`instance-get` (unexercised);
+//   * COMPOSITE service/config signature types (List/Opt/Map/Result/fn-type and
+//     the declared-record `known_types` path in `_ts_type`) — every fixture keeps
+//     these scalar so `ts_type_v1` stays byte-verified, not byte-guessed;
 //   * v3 TYPE declarations (`_emit_ts_types` — records/variants/interfaces),
 //     externs (`_emit_ts_externs`), in-file `test`/`fault_test`/`lifecycle test`
 //     emission, async coloring (async fns / async externs / awaited call sites /
@@ -56,9 +74,10 @@
 // Every byte of emitter LOGIC (kind dispatch, type rendering, indentation,
 // string building, the JS-keyword mangle) stays pure revl.
 use "../stdlib/value.rvl" {
-  value_kind, value_is_null, value_field, value_opt,
+  value_kind, value_is_null, value_field, value_opt, value_has, value_keys,
   value_list, value_at, value_str, value_int, value_bool, value_children
 }
+use "../stdlib/list.rvl" { list_contains }
 
 // ------------------------------------------------- host formatting (kept @py)
 // The reference emitter renders string/number LITERALS with `json.dumps`; this
@@ -354,9 +373,10 @@ fn render_var(node: Any) -> Str {
 }
 
 // `_literal`: null/bool are keywords, an Int literal is a BigInt literal (`123n`),
-// a Float/Str literal renders through `json.dumps`.
-fn render_lit(node: Any) -> Str {
-  let v = value_field(node, "value")
+// a Float/Str literal renders through `json.dumps`. `literal_of` renders a RAW
+// value (a config default, item-204 slice 2); `render_lit` reads the `value`
+// field off a `lit` node.
+fn literal_of(v: Any) -> Str {
   let vk = value_kind(v)
   if (vk == "null") { return "null" }
   if (vk == "bool") {
@@ -365,6 +385,10 @@ fn render_lit(node: Any) -> Str {
   }
   if (vk == "int") { return `${value_int(v)}n` }
   return json_dumps(v)
+}
+
+fn render_lit(node: Any) -> Str {
+  return literal_of(value_field(node, "value"))
 }
 
 // `_ts_builtin`: the stdlib surface (docs/stdlib-2.0.md) as idiomatic TS. `args`
@@ -647,9 +671,29 @@ fn render_interp(parts: List[Any], counter: Int) -> Rendered {
   return { text: segs.join(""), counter: c }
 }
 
+// The component-dialect atomic set (`_ATOMIC_KINDS`) — a component `call`
+// target is parenthesised UNLESS its kind is one of these (distinct from the
+// 2.0 `is_v3_atomic` set: `req`/`config`/`name`/`host` are atomic here).
+fn is_component_atomic(node: Any) -> Bool {
+  let k = node_kind(node)
+  return k == "name" || k == "config" || k == "req" || k == "call"
+    || k == "host" || k == "instance-get"
+}
+
 fn render_call(node: Any, counter: Int) -> Rendered {
-  // The v3 (callee/args) form only in this slice; the component target/method
-  // form and async awaiting are deferred.
+  // `call` exists in BOTH dialects with different shapes (the reference's one
+  // renderer dispatches on SHAPE, never on kind): the component form carries a
+  // `target`/`method` (a method call on a service — `ctx.<key>.<op>(…)`), the
+  // 2.0 form a `callee`/`args`. Async awaiting is deferred (slice 3).
+  if (value_has(node, "target")) {
+    let target = value_field(node, "target")
+    let tr = expr(target, counter)
+    var t = tr.text
+    if (!is_component_atomic(target)) { t = `(${t})` }
+    let method = ident(value_str(value_field(node, "method")))
+    let ar = commajoin(value_list(value_field(node, "args")), tr.counter)
+    return { text: `${t}.${method}(${ar.text})`, counter: ar.counter }
+  }
   let callee_node = value_field(node, "callee")
   let cr = expr(callee_node, counter)
   var callee = cr.text
@@ -738,6 +782,22 @@ fn expr_inner(node: Any, counter: Int) -> Rendered {
     return { text: `${tr.text}?.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
   }
   if (kind == "optcall") { return render_optcall(node, counter) }
+  // ---- component (v1) dialect scalar kinds (slice 2) ----
+  // The reference validates each against the component `_Scope` (locals /
+  // config_fields / requires); validation is deferred here exactly as `ident`
+  // defers emitter-scaffolding rejection — the covered corpus is clean — so
+  // these render the happy-path text only. `host`/`format`/`fn`/`adt` and the
+  // routed-`req` proxy are deferred to slice 3.
+  if (kind == "name") {
+    return { text: ident(value_str(value_field(node, "id"))), counter: counter }
+  }
+  if (kind == "config") {
+    return { text: "config.".concat(ident(value_str(value_field(node, "field")))), counter: counter }
+  }
+  if (kind == "req") {
+    // Committed-view access: resolved through the fiber's snapshot (R3).
+    return { text: "ctx.".concat(ident(value_str(value_field(node, "name")))), counter: counter }
+  }
   return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
 }
 
@@ -857,6 +917,378 @@ fn emit_functions(functions: List[Any]) -> List[Str] {
     }
     out = out.push("}")
     out = out.push("")
+  }
+  return out
+}
+
+// ============================================================ components (s2)
+// The component-dialect tail of `_emit_v3`: service interfaces, the committed
+// -view context augmentation, config interfaces, and each component's plugin
+// object (inject/provide wiring, the `apply(ctx[, rawConfig])` scaffold, and the
+// `ctx.effect(function* () { … })` activation body). Byte-identical to
+// backends/typescript/emit.py for the covered subset.
+//
+// DEFERRED to slice 3 (a divergence, not a bug, if fed one — excluded from the
+// corpus): async coloring (async service ops -> `Promise<…>` / `async` methods /
+// awaited call sites / async generators), spawn/instances, realm placements
+// (isolate/intercept/routes + the router), the v1/v2 `_emit_v1` path, canonical;
+// the component-body `await`/`timer` steps; and — within a service/config
+// signature — the COMPOSITE surface types (List/Opt/Map/Result/fn-type and the
+// declared-record `known_types` path). Every fixture keeps its service/config
+// param types SCALAR so `ts_type_v1` stays byte-verified rather than guessed.
+
+// `TYPE_MAP` for a CONFIG field (`_config_interface`): the six scalar names, and
+// — unlike the service renderer — an unknown name falls back to `any`.
+fn config_ts_type(name: Str) -> Str {
+  if (name == "Str") { return "string" }
+  if (name == "Int") { return "bigint" }
+  if (name == "Int32") { return "number" }
+  if (name == "Bool") { return "boolean" }
+  if (name == "Float") { return "number" }
+  if (name == "Bytes") { return "Uint8Array" }
+  return "any"
+}
+
+// `_ts_type` (v1/A6), the SCALAR subset — the renderer for service-interface and
+// provide-method signatures. Distinct from the v3 `ts_type`: the v1 `TYPE_MAP`
+// excludes `Unit`/`Any`/`Never`, and an unknown/composite name is opaque and
+// erases to `unknown` (the composite + declared-record paths are deferred).
+fn ts_type_v1(name: Str) -> Str {
+  if (name == "Str") { return "string" }
+  if (name == "Int") { return "bigint" }
+  if (name == "Int32") { return "number" }
+  if (name == "Bool") { return "boolean" }
+  if (name == "Float") { return "number" }
+  if (name == "Bytes") { return "Uint8Array" }
+  return "unknown"
+}
+
+// A method's return slot: absent -> "void", else the v1 surface type.
+fn ts_return_type_v1(v: Any) -> Str {
+  if (value_is_null(v)) { return "void" }
+  return ts_type_v1(value_str(v))
+}
+
+// `_method_body`: steps inside a provide-method body (sync only in this slice —
+// `await` is deferred). Threads the match counter like every body renderer.
+fn method_body(steps: List[Any], level: Int, counter: Int) -> StmtOut {
+  let pad = ind(level)
+  var out = []
+  var c = counter
+  for (step of steps) {
+    let kind = value_str(value_field(step, "step"))
+    if (kind == "let") {
+      let r = expr(value_field(step, "value"), c)
+      c = r.counter
+      var kw = "const"
+      if (value_bool(value_field(step, "mutable"))) { kw = "let" }
+      out = out.push(`${pad}${kw} ${ident(value_str(value_field(step, "name")))} = ${r.text}`)
+    } else {
+      if (kind == "assign") {
+        let r = expr(value_field(step, "value"), c)
+        c = r.counter
+        out = out.push(`${pad}${ident(value_str(value_field(step, "name")))} = ${r.text}`)
+      } else {
+        if (kind == "return") {
+          let e = value_field(step, "expr")
+          if (value_is_null(e)) {
+            out = out.push(`${pad}return`)
+          } else {
+            let r = expr(e, c)
+            c = r.counter
+            out = out.push(`${pad}return ${r.text}`)
+          }
+        } else {
+          if (kind == "effect" || kind == "let-effect") {
+            var bind = ""
+            var has_bind = false
+            if (kind == "let-effect") {
+              bind = ident(value_str(value_field(step, "bind")))
+              has_bind = true
+              out = out.push(`${pad}let ${bind}: any`)
+            }
+            let ar = expr(value_field(step, "acquire"), c)
+            let ur = expr(value_field(step, "undo"), ar.counter)
+            c = ur.counter
+            out = out.push(`${pad}ctx.effect(() => {`)
+            if (has_bind) {
+              out = out.push(`${pad}  ${bind} = ${ar.text}`)
+            } else {
+              out = out.push(`${pad}  ${ar.text}`)
+            }
+            out = out.push(`${pad}  return () => ${ur.text}`)
+            out = out.push(`${pad}})`)
+          } else {
+            if (kind == "emit") {
+              let er = expr(value_field(step, "expr"), c)
+              c = er.counter
+              let comp = value_field(step, "compensate")
+              if (value_is_null(comp)) {
+                out = out.push(`${pad}${er.text}`)
+              } else {
+                let cr = expr(comp, c)
+                c = cr.counter
+                out = out.push(`${pad}ctx.effect(() => {`)
+                out = out.push(`${pad}  ${er.text}`)
+                out = out.push(`${pad}  return () => ${cr.text}`)
+                out = out.push(`${pad}})`)
+              }
+            } else {
+              out = out.push(`${pad}<<UNSUPPORTED-METHOD-STEP:${kind}>>`)
+            }
+          }
+        }
+      }
+    }
+  }
+  return { lines: out, counter: c }
+}
+
+// `_provide_impl`: the provided service object's methods. The impl param NAMES
+// bind the body; the param TYPES come from the service declaration (arity must
+// agree). Sync methods only (async deferred).
+fn provide_impl(step: Any, services: Any, level: Int, counter: Int) -> StmtOut {
+  let pad = ind(level)
+  let svc_name = value_str(value_field(step, "service"))
+  let declared = value_field(value_field(services, svc_name), "methods")
+  var out = []
+  var c = counter
+  for (method of value_list(value_field(step, "methods"))) {
+    let name = ident(value_str(value_field(method, "name")))
+    let spec = value_field(declared, value_str(value_field(method, "name")))
+    let spec_params = value_list(value_field(spec, "params"))
+    let param_names = value_list(value_field(method, "params"))
+    var sig_parts = []
+    var i = 0
+    for (pn of param_names) {
+      let ptype = ts_type_v1(value_str(value_field(value_at(spec_params, i), "type")))
+      sig_parts = sig_parts.push(`${ident(value_str(pn))}: ${ptype}`)
+      i += 1
+    }
+    out = out.push(`${pad}${name}(${sig_parts.join(", ")}) {`)
+    let br = method_body(value_list(value_field(method, "body")), level + 1, c)
+    out = out.concat(br.lines)
+    c = br.counter
+    out = out.push(`${pad}},`)
+  }
+  return { lines: out, counter: c }
+}
+
+// `_component_step`: one activation-body step. Recursive (`if` branches hold
+// body steps). `await`/`timer` are deferred.
+fn component_step(step: Any, services: Any, level: Int, counter: Int) -> StmtOut {
+  let pad = ind(level)
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "let-effect" || kind == "effect") {
+    let ar = expr(value_field(step, "acquire"), counter)
+    var out = []
+    if (kind == "let-effect") {
+      let bind = ident(value_str(value_field(step, "bind")))
+      out = out.push(`${pad}const ${bind} = ${ar.text}`)
+    } else {
+      out = out.push(`${pad}${ar.text}`)
+    }
+    let ur = expr(value_field(step, "undo"), ar.counter)
+    out = out.push(`${pad}yield () => ${ur.text}`)
+    return { lines: out, counter: ur.counter }
+  }
+  if (kind == "emit") {
+    let er = expr(value_field(step, "expr"), counter)
+    var out = [`${pad}${er.text}`]
+    let comp = value_field(step, "compensate")
+    if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
+    let cr = expr(comp, er.counter)
+    out = out.push(`${pad}yield () => ${cr.text}`)
+    return { lines: out, counter: cr.counter }
+  }
+  if (kind == "provide") {
+    let name = value_str(value_field(step, "name"))
+    var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
+    let pr = provide_impl(step, services, level + 1, counter)
+    out = out.concat(pr.lines)
+    out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
+    return { lines: out, counter: pr.counter }
+  }
+  if (kind == "if") {
+    let cr = expr(value_field(step, "cond"), counter)
+    var out = [`${pad}if (${cr.text}) {`]
+    var c = cr.counter
+    for (s of value_list(value_field(step, "then"))) {
+      let r = component_step(s, services, level + 1, c)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    let els = value_list(value_field(step, "else"))
+    if (els.length() > 0) {
+      out = out.push(`${pad}} else {`)
+      for (s of els) {
+        let r = component_step(s, services, level + 1, c)
+        out = out.concat(r.lines)
+        c = r.counter
+      }
+    }
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: c }
+  }
+  if (kind == "fail") {
+    let mr = expr(value_field(step, "message"), counter)
+    return { lines: [`${pad}throw new Error(${mr.text})`], counter: mr.counter }
+  }
+  return { lines: [`${pad}<<UNSUPPORTED-STEP:${kind}>>`], counter: counter }
+}
+
+// `_config_interface`: the `export interface <Name>Config { … }` block, or [].
+fn config_interface(comp: Any) -> List[Str] {
+  let fields = value_list(value_field(comp, "config"))
+  if (fields.length() == 0) { return [] }
+  let raw_name = value_str(value_field(comp, "name"))
+  var out = [`export interface ${raw_name}Config {`]
+  for (field of fields) {
+    let fname = ident(value_str(value_field(field, "name")))
+    let ty = config_ts_type(value_str(value_field(field, "type")))
+    let dflt = value_field(field, "default")
+    if (value_is_null(dflt)) {
+      out = out.push(`  ${fname}: ${ty}`)
+    } else {
+      out = out.push(`  /** default: ${json_dumps(dflt)} */`)
+      out = out.push(`  ${fname}?: ${ty}`)
+    }
+  }
+  out = out.push("}")
+  return out
+}
+
+// `_component`: one component's config interface + plugin object.
+fn component_lines(comp: Any, services: Any, counter: Int) -> StmtOut {
+  let name = ident(value_str(value_field(comp, "name")))
+  var out = config_interface(comp)
+  out = out.push(`export const ${name} = {`)
+  out = out.push(`  name: ${json_dumps(name)},`)
+  // inject: the requirement keys (routed keys are deferred, so all of them);
+  // the array form (the dict/intercept form is deferred).
+  var inject_parts = []
+  for (k of value_keys(value_field(comp, "requires"))) {
+    inject_parts = inject_parts.push(json_dumps(k))
+  }
+  out = out.push(`  inject: [${inject_parts.join(", ")}],`)
+  let provide_keys = value_keys(value_field(comp, "provides"))
+  if (provide_keys.length() > 0) {
+    var pk = []
+    for (k of provide_keys) { pk = pk.push(json_dumps(k)) }
+    out = out.push(`  provide: [${pk.join(", ")}],`)
+  }
+  let fields = value_list(value_field(comp, "config"))
+  if (fields.length() > 0) {
+    out = out.push(`  apply(ctx: Context, rawConfig: ${name}Config) {`)
+    var spec_parts = []
+    for (field of fields) {
+      let fname = value_str(value_field(field, "name"))
+      let dflt = value_field(field, "default")
+      if (value_is_null(dflt)) {
+        spec_parts = spec_parts.push(`${fname}: { required: true }`)
+      } else {
+        spec_parts = spec_parts.push(`${fname}: { default: ${literal_of(dflt)} }`)
+      }
+    }
+    out = out.push(`    const config = host.applyConfigDefaults(${json_dumps(name)}, rawConfig, { ${spec_parts.join(", ")} }) as Required<${name}Config>`)
+  } else {
+    out = out.push("  apply(ctx: Context) {")
+  }
+  // One generator per body (LIFO teardown); the async-generator form is
+  // deferred (no `await` steps in the covered subset).
+  out = out.push("    ctx.effect(function* () {")
+  var c = counter
+  for (step of value_list(value_field(comp, "body"))) {
+    let r = component_step(step, services, 3, c)
+    out = out.concat(r.lines)
+    c = r.counter
+  }
+  out = out.push(`    }, ${json_dumps(name.concat(".body"))})`)
+  out = out.push("  },")
+  out = out.push("}")
+  return { lines: out, counter: c }
+}
+
+// The service-interface block for the whole document (`_emit_v3`'s service loop):
+// one `export interface <Service> { … }` per declared service, in declaration
+// order. Async returns (`Promise<…>`) are deferred.
+fn service_interfaces(services: Any) -> List[Str] {
+  var out = []
+  for (sname of value_keys(services)) {
+    let svc = value_field(services, sname)
+    out = out.push(`export interface ${sname} {`)
+    let methods = value_field(svc, "methods")
+    for (mname of value_keys(methods)) {
+      let method = value_field(methods, mname)
+      var sig_parts = []
+      for (p of value_list(value_field(method, "params"))) {
+        sig_parts = sig_parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type_v1(value_str(value_field(p, "type")))}`)
+      }
+      let returns = ts_return_type_v1(value_field(method, "returns"))
+      if (value_bool(value_field(method, "emission"))) {
+        out = out.push("  /** emission — crosses the system boundary (DESIGN.md §3.5) */")
+      }
+      if (value_bool(value_field(method, "idempotent"))) {
+        out = out.push("  /** idempotent — safe to re-deliver; the runtime may auto-retry a transient failure (item 44) */")
+      }
+      out = out.push(`  ${mname}(${sig_parts.join(", ")}): ${returns}`)
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// `_context_augmentation`: typed committed-view access `ctx.<key>` for every key
+// the document touches — PROVISIONS first (component order), then REQUIREMENTS —
+// each in first-occurrence order. Identical interface members merge, so a key
+// repeated across components is emitted once.
+fn context_augmentation(components: List[Any]) -> List[Str] {
+  var keys = []
+  var svcs = []
+  for (comp of components) {
+    for (k of value_keys(value_field(comp, "provides"))) {
+      if (!list_contains(keys, k)) {
+        keys = keys.push(k)
+        svcs = svcs.push(value_str(value_field(value_field(comp, "provides"), k)))
+      }
+    }
+  }
+  for (comp of components) {
+    for (k of value_keys(value_field(comp, "requires"))) {
+      if (!list_contains(keys, k)) {
+        keys = keys.push(k)
+        svcs = svcs.push(value_str(value_field(value_field(comp, "requires"), k)))
+      }
+    }
+  }
+  if (keys.length() == 0) { return [] }
+  var out = ["declare module 'cordis' {", "  interface Context {"]
+  var i = 0
+  for (k of keys) {
+    out = out.push(`    ${k}: ${svcs[i]}`)
+    i += 1
+  }
+  out = out.push("  }")
+  out = out.push("}")
+  out = out.push("")
+  return out
+}
+
+// The component tail of the document (`_emit_v3` after the pure passes): service
+// interfaces, the context augmentation, then each component. Threads a FRESH
+// match counter (the reference's `doc_ctx`, distinct from the function pass).
+fn emit_component_tail(ir: Any) -> List[Str] {
+  var out = []
+  out = out.concat(service_interfaces(value_field(ir, "services")))
+  let components = value_list(value_field(ir, "components"))
+  out = out.concat(context_augmentation(components))
+  var c = 0
+  for (comp of components) {
+    let r = component_lines(comp, value_field(ir, "services"), c)
+    out = out.concat(r.lines)
+    out = out.push("")
+    c = r.counter
   }
   return out
 }
@@ -1131,6 +1563,14 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.concat(revl_helpers(ir))
   let functions = value_list(value_field(ir, "functions"))
   if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  // Slice 2: the component-dialect tail (service interfaces, context
+  // augmentation, components). Emits nothing for a function-only document, so
+  // the slice-1 corpus stays byte-identical.
+  let components = value_list(value_field(ir, "components"))
+  let services = value_field(ir, "services")
+  if (components.length() > 0 || value_keys(services).length() > 0) {
+    out = out.concat(emit_component_tail(ir))
+  }
   return py_rstrip(out.join(newline())).concat(newline())
 }
 
