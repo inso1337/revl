@@ -315,16 +315,6 @@ def lex(source: str, filename: str) -> list[Token]:
             else:
                 tokens.append(Token("@", "@", line))
                 i += 1
-        elif c == ";":
-            # `;` lexes fine (it sits in SINGLE_OPERATORS for host bodies),
-            # but the grammar never uses it — and agents coming from
-            # C-family languages reach for it as a statement separator
-            raise RevlError(
-                filename, line,
-                "unexpected ';'",
-                hint="statements are newline-separated — `;` is not a "
-                     "statement separator in revl; put each statement on "
-                     "its own line")
         elif c in SYMBOLS or c in SINGLE_OPERATORS:
             tokens.append(Token(c, c, line))
             i += 1
