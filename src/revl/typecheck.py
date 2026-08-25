@@ -307,6 +307,10 @@ def is_tparam_name(name: str, declared: dict) -> bool:
 _BUILTIN_TYPE_NAMES = {
     "Int", "Int32", "Float", "Str", "Bool", "Bytes", "Unit",
     "Opt", "List", "Map", "Result", "Any", "Never",
+    # `Value` — the stdlib erased-dynamic type (stdlib/value.rvl, item 180): a
+    # reserved builtin so no `[Value]` tparam or `type Value = ...` may shadow
+    # the type whose total accessor surface navigates a dynamic IR document.
+    "Value",
 }
 
 
@@ -449,6 +453,19 @@ def _is_wildcard(name: str | None) -> bool:
 def compatible(expected: str | None, actual: str | None) -> bool:
     """May a value of type `actual` flow into a position typed `expected`?"""
     if _is_wildcard(expected) or _is_wildcard(actual):
+        return True
+    # `Value` is the stdlib erased-dynamic type (stdlib/value.rvl, roadmap item
+    # 180): the runtime union of every host-representable shape (record / list /
+    # scalar / null). Any concrete value flows INTO a `Value` position (it is
+    # boxed into the host's dynamic representation), and a `Value` flows OUT into
+    # any typed position (the total accessors are the checked exits). So — like
+    # `Any`, but a NAMED, reusable type with a documented accessor surface — it
+    # is compatible with anything in both directions. Narrower than adding it to
+    # `_is_wildcard`: this touches value-flow compatibility only, leaving tparam
+    # unification and inference joins to treat `Value` as the ordinary nominal
+    # it is. A `List[Value]` / `Opt[Value]` reaches this rule elementwise via the
+    # same-head recursion below, so a container of dynamic values is admitted too.
+    if parse_type(expected)[0] == "Value" or parse_type(actual)[0] == "Value":
         return True
     if expected == actual:
         return True
