@@ -1,0 +1,40 @@
+// wasm Path B slice 2 — the string-literal corner of the memory ABI.
+//
+// Every value here is an ASCII `Str` literal, so the document exercises exactly
+// the new allocation surface: `_collect_string_literals` (the pre-order walk,
+// first-encounter dedup, per-literal `data` offset, 4-byte stride, 8-aligned
+// `heap_start`), the `_wat_bytes` encoding (the u32 length prefix and the
+// verbatim/`\xx`/escaped byte forms), and `_str_ptr` (a literal lowers to the
+// `(i32.const <offset>)` of its pooled bytes). No concat, interpolation,
+// builtin, list, record, or scratch pointer is touched — those are later slices.
+
+// A bare literal return: the pool's first entry, at offset 0.
+fn greet() -> Str { return "hello" }
+
+// A second, shorter literal — its offset is where `"hello"` (9 data bytes)
+// rounded up to a 4-byte boundary leaves the cursor.
+fn tag() -> Str { return "hi" }
+
+// A duplicate of the first literal: `_collect_string_literals` dedups it, so it
+// reuses `"hello"`'s offset rather than pooling a second copy.
+fn again() -> Str { return "hello" }
+
+// A let-bound literal flows through an `i32` (address) local, then out.
+fn viaLocal() -> Str {
+  let s = "TAG"
+  return s
+}
+
+// The empty string: a bare `[u32 0]` prefix with no payload bytes.
+fn empty() -> Str { return "" }
+
+// Punctuation that forces the escape forms: `"` (\22) and `\` (\5c) inside the
+// bytes, alongside verbatim printable ASCII.
+fn quoted() -> Str { return "a\"b\\c" }
+
+// A literal in bare-expression (drop) position, then a scalar return, so the
+// string pool and the scalar ABI coexist in one body.
+fn mixed() -> Int {
+  "side"
+  return 7
+}

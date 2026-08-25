@@ -163,6 +163,7 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
     let vk = value_kind(value_field(node, "value"))
     if (vk == "bool") { return "Bool" }
     if (vk == "int") { return "Int" }
+    if (vk == "str") { return "Str" }
     return ""
   }
   if (k == "var") { return map_get(sty, value_str(value_field(node, "name"))) }
@@ -187,14 +188,17 @@ fn infer_ty(node: Any, sty: Map[Str, Str]) -> Str {
 // the width of a later instruction, so it is threaded like the reference's `_E`).
 type E = { wat: Str, ty: Str }
 // The names visible to the body emitter: a slot expression and a surface type
-// per binding (`_Scope`).
-type Scope = { slots: Map[Str, Str], types: Map[Str, Str] }
+// per binding (`_Scope`), plus the document-global string pool — each pooled
+// literal's value mapped to its `(i32.const <offset>)` pointer (`_str_ptr`).
+// The pool is constant for the whole module, so it rides in the scope that is
+// already threaded to every expression rather than a separate parameter.
+type Scope = { slots: Map[Str, Str], types: Map[Str, Str], strs: Map[Str, Str] }
 // A statement-emission result: the emitted lines, the threaded scope, and the
 // accumulated local-width map (the reference's function-global `_local_types`).
 type Sout = { lines: List[Str], scope: Scope, widths: Map[Str, Str] }
 
 fn scope_bind(s: Scope, name: Str, slot: Str, ty: Str) -> Scope {
-  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty) }
+  return { slots: s.slots.set(name, slot), types: s.types.set(name, ty), strs: s.strs }
 }
 
 // -------------------------------------------------------------- expressions
@@ -252,6 +256,10 @@ fn render_inner(node: Any, s: Scope) -> E {
       return { wat: "(i32.const 0)", ty: "Bool" }
     }
     if (vk == "int") { return { wat: `(i64.const ${num_str(v)})`, ty: "Int" } }
+    // A Str literal is a pointer into the pooled `data` segment (`_str_ptr`):
+    // its `(i32.const <offset>)` was computed once, when the pool was laid out,
+    // and threaded here through the scope.
+    if (vk == "str") { return { wat: map_get(s.strs, value_str(v)), ty: "Str" } }
     return { wat: "<<UNSUPPORTED-LIT>>", ty: "" }
   }
   if (k == "var") {
@@ -397,7 +405,7 @@ fn diverges(nodes: List[Any]) -> Bool {
 }
 
 // `_emit_function`: one v3 function -> its `(func $name (export "name") ..)` block.
-fn emit_function(fnode: Any) -> Str {
+fn emit_function(fnode: Any, strs: Map[Str, Str]) -> Str {
   let name = value_str(value_field(fnode, "name"))
   let params = value_list(value_field(fnode, "params"))
   var sig = []
@@ -418,7 +426,7 @@ fn emit_function(fnode: Any) -> Str {
   raw = collect_locals(body, raw)
   let names = list_sort(list_dedup(raw))
   var localOrder = []
-  var scope: Scope = { slots: slots, types: types }
+  var scope: Scope = { slots: slots, types: types, strs: strs }
   for (nm of names) {
     if (!scope.types.has(nm)) {
       localOrder = localOrder.push(`l_${nm}`)
@@ -889,6 +897,80 @@ fn helper_preamble() -> Str {
     (local.get $p))"""
 }
 
+// ------------------------------------------------------- the string-literal ABI
+// A string constant lives in a `data` segment as `[u32 length][utf-8 bytes]` and
+// is named by the byte OFFSET of its length prefix; `_str_ptr` hands out that
+// offset as an `(i32.const <offset>)`. This slice mirrors the reference's
+// `_collect_string_literals` + `_wat_bytes` + `_str_ptr` byte-for-byte for
+// ASCII string literals (see the header note on the multi-byte exclusion).
+
+// `_align4`/`_align8` as integer arithmetic — for the non-negative offsets here
+// `((x+3)/4)*4` is exactly the reference's `(x+3) & ~3`.
+fn align4(x: Int) -> Int { return (x + 3).div_trunc(4) * 4 }
+fn align8(x: Int) -> Int { return (x + 7).div_trunc(8) * 8 }
+
+// Two lowercase hex digits of a byte (0..255), the `f"\\{byte:02x}"` tail.
+fn hex2(b: Int) -> Str {
+  let digits = "0123456789abcdef"
+  return digits.charAt(b.div_trunc(16)).concat(digits.charAt(b % 16))
+}
+
+// Printable ASCII 0x20..0x7e in order, so `charAt(b - 32)` is `chr(b)` for a
+// printable byte — the one place the reference calls `chr` (the 0x22/0x5c
+// special cases below reach the escape form before this is indexed).
+fn printable() -> Str {
+  return " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+}
+
+// `_wat_bytes` for one byte: `"` and `\` escape, other printable ASCII stays
+// verbatim, everything else is a `\xx` hex escape.
+fn wat_byte(b: Int) -> Str {
+  if (b == 34) { return "\\".concat(hex2(b)) }
+  if (b == 92) { return "\\".concat(hex2(b)) }
+  if (b >= 32 && b <= 126) { return printable().charAt(b - 32) }
+  return "\\".concat(hex2(b))
+}
+
+// The full `_wat_bytes(len.to_bytes(4,'little') + raw)` payload of one ASCII
+// string: a little-endian u32 length prefix then one `wat_byte` per character
+// (for ASCII, `charCodeAt` is the byte and `length()` is the byte count).
+fn wat_data(v: Str) -> Str {
+  let n = v.length()
+  var out = wat_byte(n % 256)
+  out = out.concat(wat_byte(n.div_trunc(256) % 256))
+  out = out.concat(wat_byte(n.div_trunc(65536) % 256))
+  out = out.concat(wat_byte(n.div_trunc(16777216) % 256))
+  var i = 0
+  while (i < n) {
+    out = out.concat(wat_byte(v.charCodeAt(i)))
+    i = i + 1
+  }
+  return out
+}
+
+// `_collect_string_literals`'s walk: a pre-order DFS that records every
+// `kind:"lit"` node whose value is a string, in first-encounter order.
+// `value_children` is exactly the reference's `list(node.values())` for a
+// record and `list(node)` for a list, so the traversal order — and hence the
+// pool offsets — are reproduced byte-for-byte (dedup by `list_dedup`, which
+// keeps the first occurrence, is `seen.setdefault`).
+fn collect_lits(node: Any, acc: List[Str]) -> List[Str] {
+  var a = acc
+  let k = value_kind(node)
+  if (k == "record") {
+    if (node_kind(node) == "lit") {
+      let vv = value_field(node, "value")
+      if (value_kind(vv) == "str") { a = a.push(value_str(vv)) }
+    }
+    for (c of value_children(node)) { a = collect_lits(c, a) }
+  } else {
+    if (k == "list") {
+      for (c of value_children(node)) { a = collect_lits(c, a) }
+    }
+  }
+  return a
+}
+
 // The document assembly for a FUNCTION-ONLY, scalar-only v3 document
 // (`emit` -> `_emit_v3` -> `_V3Emitter.emit`, subset): banner, `(module`, the
 // exported memory, the hp global at 0 (no data segments — no strings), the
@@ -898,6 +980,25 @@ fn helper_preamble() -> Str {
 // so the reference's corresponding sections all contribute nothing here.
 pub fn emit_src(ir: Any) -> Str {
   let functions = value_list(value_field(ir, "functions"))
+  // Pool the string literals first (`_collect_string_literals`): the walk order
+  // is function bodies in document order, then test bodies — the corpus is
+  // function-only, but the test roots are walked for faithfulness.
+  var raw = []
+  for (f of functions) { raw = collect_lits(value_field(f, "body"), raw) }
+  for (t of value_list(value_field(ir, "tests"))) { raw = collect_lits(value_field(t, "body"), raw) }
+  let lits = list_dedup(raw)
+  // Lay the pool out: each literal at its running offset, the next offset
+  // 4-byte-aligned past `[u32 len][bytes]`; the heap starts 8-aligned above.
+  var strs: Map[Str, Str] = Map.empty()
+  var dataLines = []
+  var offset = 0
+  for (v of lits) {
+    strs = strs.set(v, `(i32.const ${num_str(offset)})`)
+    dataLines = dataLines.push(`  (data (i32.const ${num_str(offset)}) "${wat_data(v)}")`)
+    offset = align4(offset + 4 + v.length())
+  }
+  let heap = align8(offset)
+
   var lines = []
   lines = lines.push(";; Generated by the revl cordis-wasm backend (ir_version 3) — do not edit.")
   lines = lines.push(";; pure functions + documented type layouts; Int is i64 (values), addresses")
@@ -905,11 +1006,12 @@ pub fn emit_src(ir: Any) -> Str {
   lines = lines.push(";; (u32 length/count prefix, then one 8-byte slot per field/element)")
   lines = lines.push("(module")
   lines = lines.push("""  (memory (export "memory") 1)""")
-  lines = lines.push(`  (global $__hp (mut i32) (i32.const 0))`)
+  for (d of dataLines) { lines = lines.push(d) }
+  lines = lines.push(`  (global $__hp (mut i32) (i32.const ${num_str(heap)}))`)
   lines = lines.push(helper_preamble())
   if (functions.length() > 0) { lines = lines.push("") }
   for (f of functions) {
-    lines = lines.push(emit_function(f))
+    lines = lines.push(emit_function(f, strs))
     lines = lines.push("")
   }
   lines = lines.push(")")

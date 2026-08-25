@@ -690,3 +690,85 @@ brush: the `_revl_rpc` preamble's `line.push('\n');` needs a literal backslash-n
 in the OUTPUT, written `"line.push('\\n');"` (item-183 `\\`/`\"` in a plain
 single-line string); the whole preamble stays a plain double-quoted block (braces
 are literal, no `${}` interpolation in `"…"`), so no `$`-fragment needed backticks.
+
+---
+
+## Item 220 — `emit_wasm.rvl` slice 2: the string-literal memory ABI (Str `data` pooling + `_str_ptr`)
+
+Slice 1 (item 200) mirrored the scalar value ABI and flagged that the reference
+"falls off a cliff" at the first `Str`/`List`/record because it pools literals
+into a `data` segment (moving `heap_start`) and threads a nesting-depth scratch
+pointer (`_acquire_tmp`). This slice took the **string-literal** corner of that
+surface — the smallest byte-reproducible subset — byte-for-byte: a Str literal in
+return/let/assign/bare-expr position. New corpus fixture `strlit.rvl`; cross-check
+green over all three fixtures (arith/control/strlit), 5/5 in the target test, full
+`pytest tests/` = 3382 passed / 254 skipped, `backends/wasm/test_v3_emit.py` 37/37.
+
+### The feared blocker did NOT bite: the pool traversal is deterministically reproducible
+The task flagged `_collect_string_literals` and `_acquire_tmp` as candidate
+item-179-class hazards (an `id()`/traversal-order dependency a second impl can't
+reproduce). Neither did:
+- `_acquire_tmp` keys the scratch name off **nesting depth** (`len(self._tmp_stack)`),
+  which is structural and deterministic — and it is not even reached by a bare Str
+  literal (a literal lowers straight to `(i32.const <offset>)`, no scratch). It
+  only matters once an allocation nests inside another (record/list/variant), i.e.
+  slice 3+.
+- `_collect_string_literals`' offset assignment IS traversal-order-dependent (first
+  encounter in a pre-order DFS over `node.values()`), but that order is **fully
+  reproducible** from stdlib: `value_children` is documented as exactly
+  `list(v.values())` for a dict / `list(v)` for a list (value.rvl §"generic
+  recursion driver"), and `list_dedup` keeps the first occurrence — so the revl
+  `collect_lits` walk + dedup reproduce `seen.setdefault` byte-for-byte. This is the
+  same shape emit_py's whole-document walk already relies on; no new primitive, no
+  `@py` escape.
+
+So the byte oracle IS the right check for the string-literal memory surface — the
+data-segment bytes, offsets, and `heap_start` are a pure function of the IR.
+
+### The one genuine boundary: multi-byte (non-ASCII) string literals are OUT, cleanly
+`_wat_bytes` operates on **utf-8 bytes** (`value.encode("utf-8")`, byte length in
+the u32 prefix, per-byte escape). revl's string kit is code-point-based:
+`s.length()` counts code points and `s.charCodeAt(i)` yields a scalar value, with
+no code-point-free primitive to get utf-8 byte length or the byte sequence of a
+non-ASCII scalar. For **ASCII** (scalar < 0x80) code point == byte and length ==
+byte count, so the encoding is exact; for anything above 0x7f it would need a
+utf-8 re-encoder in revl. Excluded and documented in `strlit.rvl`'s header. Repro:
+a literal `"é"` would pool one byte too short. Fix belongs in the str kit (a
+`str_utf8_bytes`/`str_byte_length` bridged primitive), NOT here — noted for a
+future kit item. LOW-to-fix, and only unblocks non-ASCII data, which no covered
+fixture needs.
+
+### Ergonomics
+- **`/` is Float, silently, until the return type catches it (papercut).** The
+  align/hex/byte-split math (`(x+3)/4`, `b/16`, `n/256`) reads as integer division
+  but `/` yields `Float` on this tier, so the first compile failed only at the
+  `emit_src` boundary with `expects Int, got Float` — the error points at the
+  *return*, not the `/`. The fix is `.div_trunc(k)` (or `.div_floor`), which for
+  the non-negative offsets here equals the reference's `& ~3` bit-mask. Worth a
+  guide line: "integer floor/trunc is `.div_trunc`/`.div_floor`; bare `/` is Float
+  and will surface as a type error somewhere downstream." `%` is already integer
+  (`i64.rem_s`), so the mixed `n.div_trunc(256) % 256` byte-split reads oddly but
+  is correct.
+- **`value_children` as the generic walk driver is a clean win.** Pooling needed
+  exactly one small recursive `collect_lits` over `value_children` + `list_dedup`
+  — no `@py`, no counter threading, and it dedups in first-encounter order for
+  free. This is the ergonomic payoff of value.rvl's totality contract (item 188)
+  showing up again.
+- **The `$ident`-in-string lexer papercut (item 203) did NOT bite here, but was
+  one character away.** The printable-ASCII lookup table
+  `" !\"#$%&'()*+…~"` (needed for `chr(b)` on printable bytes) embeds a literal
+  `$` immediately followed by `%`. It compiled fine — `$%` is not `$ident`, so the
+  interpolation lexer left it alone — and `\"`/`\\` inside the plain
+  double-quoted literal worked (item 183 closed). Had the table instead been built
+  with a `$`-then-letter neighbour it would have tripped item 203. Still open; the
+  table dodges it by luck of ASCII ordering, not by design.
+- **Threading the pool through `Scope` (not a new parameter) kept the diff small.**
+  The string pool is document-global and constant, so adding a third `strs`
+  field to the already-threaded `Scope` record (mirroring the reference's
+  `self.literal_offsets`) reached every expression site through the existing
+  scope plumbing — only `scope_bind`, the `emit_function` seed, and the `render_inner`
+  Str branch changed. No signature churn across the statement emitters.
+
+### New findings
+None beyond the two above (the `/`-is-Float surfacing-point papercut and the
+str-kit utf-8-byte gap). No divergence from the reference in the covered subset.
