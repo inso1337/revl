@@ -1,0 +1,139 @@
+// THE CAPSTONE — the integrated native `revl_compile`, in revl (roadmap item
+// 224). Where the lexer/parser/checker/lower stages each port ONE compiler pass
+// and the emit_* stages port the tail, THIS file is the driver that composes the
+// self-host stages into a revl-native pipeline: it runs the native FRONTEND over
+// source and, for an admitted program, marks the target tier whose native
+// emitter produces the bytes — target source built by revl, from source, end to
+// end (see THE TWO SEAMS for exactly where the chain is still stitched by hand).
+//
+// ============================================================ THE PIPELINE
+//   source ──▶ admit_src (lower.rvl)         the native FRONTEND, one artifact:
+//                                            lexer.rvl → parser.rvl → the checker
+//                                            → the lowering ADMISSION gate, all
+//                                            co-compiled (lower.rvl `use`s
+//                                            lexer+parser and reimplements the
+//                                            rest). Returns the cordis verdict:
+//                                            "" admits; "<TAG>|<message>" refuses.
+//          ──▶ [interchange IR]              docs/backend-ir.md — the JSON every
+//                                            backend consumes.
+//          ──▶ emit_src (emit_py / emit_rust) the native EMITTER, a separate
+//                                            artifact per tier: IR → target
+//                                            source, byte-exact vs the reference
+//                                            (tests/test_selfhost_emit_{py,rust}).
+//
+// `compile_to(source, tier)` here IS the front half in one co-compiled artifact:
+// the full native frontend admission over `source`, plus the tier selection. An
+// ADMITTED program is stamped `ADMITTED|<tier>` — the go-ahead for that tier's
+// native emitter; a REFUSED one carries the native gate's verdict and never
+// reaches an emitter (a program the checker rejects cannot be compiled — the one
+// revl promise). The end-to-end byte-exact proof — this native gate, then the
+// reference IR, then the native emitter, equalling the reference compile
+// BYTE-FOR-BYTE on py AND rust — is driven in tests/test_selfhost_compile.py.
+//
+// ============================================================ THE TWO SEAMS
+// Two gaps stand between this and a single-call native `source → target`; the
+// capstone names both, and each is a concrete follow-up.
+//
+//   SEAM 1 — lower yields a VERDICT, not the IR.  `admit_src` was built as an
+//   ADMISSION GATE: it decides admit/refuse, it does not PRODUCE the interchange
+//   IR the emitters consume. So the native frontend cannot yet HAND its lowered
+//   IR to the native emitter — there is no native `source → interchange-IR`
+//   producer. In the end-to-end proof the IR is therefore supplied by the
+//   reference lowering (`revl.compile_source`). Follow-up: lower.rvl must also
+//   EMIT the interchange IR, not only the verdict.
+//
+//   SEAM 2 — the stage modules do not co-compile into ONE composition.  Each
+//   heavyweight stage was built to compile ALONE against the reference, so their
+//   type tables and fn scopes collide when merged: importing lower.rvl beside
+//   emit_py.rvl, or emit_py.rvl beside emit_rust.rvl, fails (a duplicate private
+//   `Ctx`, cross-module `contains`/`for..of` type interference). That is why
+//   this driver co-compiles exactly the frontend span (lower.rvl) and the
+//   emitters stay separate artifacts, chained by the harness rather than by a
+//   single `use`. Follow-up: reconcile the stages' private declarations (or a
+//   module-private-namespace rule) so one revl composition can hold the whole
+//   pipeline — the step that turns this driver into an in-file `source → target`.
+//
+// The whole pipeline is a differential-composition oracle in the shape of every
+// other self-host stage: on the function + simple-component surface (the
+// intersection all six stages cover) the composed native chain must equal the
+// reference — BYTE-FOR-BYTE — and its refusal must equal the reference's
+// refusal. Ground truth is the reference; any divergence is a defect in a stage.
+
+use "./lower.rvl" { admit_src }
+
+// The tiers whose self-host emitter is byte-exact against its reference on this
+// surface. Any other tier is out of this slice — reported, never silently waved
+// through as if the pipeline covered it.
+fn supported_tier(tier: Str) -> Bool {
+  return (tier == "py") || (tier == "rust")
+}
+
+// The native FRONTEND admission gate: the cordis verdict over the source, run
+// entirely in revl (lower.rvl's `admit_src` drives lexer.rvl, parser.rvl, the
+// checker and the lowering admission). "" admits; "<TAG>|<message>" refuses.
+pub fn admit(source: Str) -> Str {
+  return admit_src(source)
+}
+
+// The integrated driver — the capstone entry point (front half). It runs the
+// full native frontend over `source` and selects the target tier:
+//   * an unsupported tier            -> "UNKNOWN_TIER|<tier>";
+//   * a program the native gate      -> "REFUSED|<TAG>|<message>" (the gate's own
+//     refuses                           verdict; the emitter is never reached);
+//   * an admitted program            -> "ADMITTED|<tier>" — the go-ahead for that
+//                                        tier's native emitter, whose IR→target
+//                                        output is byte-exact with the reference
+//                                        (SEAM 1: the IR itself is still produced
+//                                        by the reference lowering).
+// The complete, byte-exact `source → target` chain is assembled from this native
+// front and the native emitter tail in tests/test_selfhost_compile.py.
+pub fn compile_to(source: Str, tier: Str) -> Str {
+  if (!supported_tier(tier)) { return "UNKNOWN_TIER|".concat(tier) }
+  let verdict = admit_src(source)
+  if (verdict != "") { return "REFUSED|".concat(verdict) }
+  return "ADMITTED|".concat(tier)
+}
+
+// ============================================================ component wrap
+// A trivial provider so the emitted module is a valid plugin (the pure driver
+// functions above are what the cross-check exercises); mirrors the wrapper the
+// other self-host stages carry.
+service CompileStream {
+  fn drive(source: Str, tier: Str) -> Str
+}
+
+component Compile provides pipeline: CompileStream {
+  provide pipeline {
+    fn drive(source, tier) = compile_to(source, tier)
+  }
+}
+
+// ================================================================ tests
+
+test "an unsupported tier is reported, not waved through" {
+  assert compile_to("fn id(x: Int) -> Int { return x }", "java") == "UNKNOWN_TIER|java"
+  assert supported_tier("py")
+  assert supported_tier("rust")
+  assert !supported_tier("go")
+}
+
+test "the native gate admits a clean provider, stamped for its tier" {
+  let src = "service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }"
+  assert compile_to(src, "py") == "ADMITTED|py"
+  assert compile_to(src, "rust") == "ADMITTED|rust"
+  assert admit(src) == ""
+}
+
+test "a plain provider reaching an emission is refused (G4), before any emitter" {
+  let src = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = audit_write(key) } } }"
+  let out = compile_to(src, "py")
+  assert out.slice(0, 8) == "REFUSED|"
+  // the refusal carries the native gate's guarantee tag
+  assert out.slice(0, 11) == "REFUSED|G4|"
+}
+
+test "a G2 provision conflict is refused for every tier" {
+  let src = "service S { fn op(x: Str) -> Str } component A provides k: S { provide k { fn op(x) { return x } } } component B provides k: S { provide k { fn op(x) { return x } } }"
+  assert compile_to(src, "py").slice(0, 11) == "REFUSED|G2|"
+  assert compile_to(src, "rust").slice(0, 11) == "REFUSED|G2|"
+}
