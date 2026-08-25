@@ -6,7 +6,7 @@
   <a href="https://github.com/inso1337/revl/actions/workflows/ci.yml"><img src="https://github.com/inso1337/revl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/runtimes-6-2dd4bf" alt="6 runtimes">
   <img src="https://img.shields.io/badge/emitted%20code-validated%20by%20real%20compilers-2dd4bf" alt="validated by real compilers">
-  <img src="https://img.shields.io/badge/self--hosting-native%20(fn%20surface)-2dd4bf" alt="self-hosting: native for the function surface">
+  <img src="https://img.shields.io/badge/self--hosting-native%20(components%20%2B%20externs)-2dd4bf" alt="self-hosting: native compile of component and extern programs">
   <img src="https://img.shields.io/badge/agent--native-MCP-a78bfa" alt="MCP native">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
 </p>
@@ -166,16 +166,21 @@ code transitively. The expression layer is **type-safe and null-safe**
 (see above); the remaining typing frontier and everything else in flight
 is tracked in the [2.0 roadmap](docs/v2.0-roadmap.md).
 
-**Status: self-hosting (function surface).** revl now compiles itself
-natively. `selfhost/compile.rvl` composes a revl-native pipeline,
-`admit_src → lower_to_ir → emit_{py,rust}_src`, and for the function surface
-its output is byte-identical to the reference compiler with no reference
-anywhere in the chain (py 10/10 docs, rust 5 docs). The self-hosted stages,
-lexer, parser, checker, lowering, and six emitters, live in
-[selfhost/](selfhost/); component-body lowering is still handed to the
-reference and is tracked in the [2.0 roadmap](docs/v2.0-roadmap.md). The point
-is a differential oracle: two independent implementations of one grammar, each
-a check on the other.
+**Status: self-hosting.** revl compiles itself natively. `selfhost/compile.rvl`
+composes a revl-native pipeline, `admit_src → lower_to_ir → emit_{py,rust}_src`,
+and compiles both function programs and component/extern programs to output that
+is byte-identical to the reference compiler, with no reference anywhere in the
+chain, on py and rust (the function corpus plus the item-262 component/extern
+corpus: 15 function cases and 14 component/extern cases). `selfhost/lower.rvl`
+produces the complete interchange IR natively (functions, components, externs),
+byte-exact against the reference lowerer. The self-hosted stages, lexer, parser,
+checker, lowering, and all six tier emitters
+(`emit_{py,rust,ts,java,wasm,go}.rvl`, each cross-checked byte-for-byte against
+its reference), live in [selfhost/](selfhost/). The point is a differential
+oracle: two independent implementations of one grammar, each a check on the
+other. What remains is native-tier runtime performance and per-tier run
+coverage ([2.0 roadmap](docs/v2.0-roadmap.md) items 283/284), not the
+self-hosting question, which is settled.
 
 **Language additions on the frozen core.** Each is a separate spec-then-code
 step with its own reference; the entry points below index them.
@@ -271,6 +276,18 @@ replay REPL (`:timeline`, `:back`, `:forward`, `:inspect`, `:bisect`; see
 [replay.md](docs/replay.md)), and `run --placement` opens a `swap>` prompt whose
 `swap <component> --to <backend>` migrates a live component across tiers
 ([swap.md](docs/swap.md)).
+
+Two module entry points sit outside the `revl` subcommand tree. `python -m
+revl.lsp` runs the human-facing language server over stdio: it pushes
+`textDocument/publishDiagnostics` from the checker, answers `textDocument/hover`
+from the diagnostic explanations and symbol info, and answers
+`textDocument/definition` from the resolver, reusing the compiler surfaces
+read-only (`src/revl/lsp/`). `python -m revl.otel run.jsonl` exports a `revl run
+--trace` lifecycle trace to OpenTelemetry spans, events and links (a lifecycle
+transition is a span, its cause an event, a causal edge a link), so a
+composition's causality shows up in Grafana, Datadog, Honeycomb or Jaeger; the
+OTel SDK is the optional `revl[otel]` extra, and `--json` prints the span model
+without it. See [docs/opentelemetry.md](docs/opentelemetry.md).
 
 **MCP verbs** (`revl mcp serve`), the definitive advertised set from
 `src/revl/mcp/server.py` and `query_tools.py`. Full shapes:

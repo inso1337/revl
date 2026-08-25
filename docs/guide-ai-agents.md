@@ -300,6 +300,12 @@ compile runs before the transition, so the running system keeps serving), and
 `revl_unload` **proves** the component left nothing behind before you commit
 it to disk. See [docs/mcp-bridge.md](mcp-bridge.md).
 
+MCP is your interface, but a human editing the same sources gets the same
+checker through a language server. `python -m revl.lsp` speaks LSP over stdio:
+diagnostics from the checker, hover from the diagnostic explanations, and
+go-to-definition from the resolver (`src/revl/lsp/`). Same admission gate, a
+different transport.
+
 ### The modern agent loop, scaffold → fill → resolve → admit
 
 The verbs above compose into one workflow, and it is the discoverable path from
