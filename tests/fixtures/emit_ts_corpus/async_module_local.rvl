@@ -1,0 +1,9 @@
+// slice 5 (item 226) — the item-92 async-VALUE-local path: a module fn with a
+// parameter typed `(Str) -> Async[Str]`. The async-typed callback colors `run`
+// async; the parameter renders `((a0: string) => Promise<string>)`, and a call
+// THROUGH it (`step(...)`) returns a Promise and is awaited via `async_locals`.
+fn run(start: Str, step: (Str) -> Async[Str]) -> Str {
+  let a = step(start)
+  let b = step(a)
+  return b
+}

@@ -1,0 +1,14 @@
+// slice 5 (item 226) — an async ARROW at module level: `y => seed(y)` is checked
+// against `drive`'s `(Str) -> Async[Str]` parameter, so it renders `async (y:
+// string) => (…)` with its body awaiting `seed`. `wrap` in turn awaits the call
+// to the colored fn `drive` (a `var`-callee in `async_names`).
+extern emission async fn seed(x: Str) -> Str = @ts { return x }
+
+fn drive(cb: (Str) -> Async[Str], x: Str) -> Str {
+  let r = cb(x)
+  return r
+}
+
+fn wrap(x: Str) -> Str {
+  return drive(y => seed(y), x)
+}
