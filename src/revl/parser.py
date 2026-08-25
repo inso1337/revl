@@ -2537,6 +2537,46 @@ class Parser:
         self.expect("}")
         return ExprMatch(scrutinee, arms, line)
 
+    def _if_expr(self) -> ExprIf:
+        """`if (cond) { then } else { otherwise }` in EXPRESSION position — a
+        block-bodied conditional whose value is the taken branch's final
+        expression (item 196). It is the block-bodied twin of the ternary
+        `cond ? then : otherwise` and lowers to the very same ExprIf node, so
+        both branches are required (an expression-if needs an `else`) and must
+        agree in type, which the checker enforces on ExprIf exactly as it does
+        for the ternary. Statement-position `if` (no `else`, side-effecting
+        body) is dispatched in `fn_stmt`/`component_if` before `_primary` is
+        ever reached, so it keeps its existing semantics untouched."""
+        line = self.expect("kw", "if").line
+        self.expect("(")
+        cond = self.pure_expr()
+        self.expect(")")
+        then = self._if_branch_expr()
+        if not self.at("kw", "else"):
+            tok = self.peek()
+            raise self.err(
+                tok.line,
+                f"an `if` used as an expression needs an `else`, found {tok.value!r}",
+                hint="an expression must produce a value on every path; write "
+                     "`if (c) { a } else { b }` (or use a statement `if` for a "
+                     "side-effecting body)",
+            )
+        self.next()
+        otherwise = self._if_branch_expr()
+        return ExprIf(cond, then, otherwise, line)
+
+    def _if_branch_expr(self):
+        """A `{ expr }` branch of an expression-position `if`: one value
+        expression wrapped in braces. Keeping the branch a single expression
+        (not a statement block) is what makes the whole `if` carry the same
+        node shape as a ternary operand, so no backend needs new emit support."""
+        self.expect("{")
+        self._skip_semis()
+        value = self.pure_expr()
+        self._skip_semis()
+        self.expect("}")
+        return value
+
     def _record_update_ahead(self) -> bool:
         """Current token is `{` — is this `{base | f = e, …}` (functional
         record update, docs/records.md §1) rather than a record literal?
@@ -2723,6 +2763,8 @@ class Parser:
             return ExprList(items, tok.line)
         if tok.kind == "kw" and tok.value == "match":
             return self._match_expr()
+        if tok.kind == "kw" and tok.value == "if":
+            return self._if_expr()
         raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
 
     def _arrow_params_ahead(self) -> bool:
