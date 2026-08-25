@@ -1263,6 +1263,68 @@ def _run_profile(args) -> int:
     return 0
 
 
+def _run_attest(args) -> int:
+    """`revl attest <comp> [--json] [--key ...]` — sign a portable record that
+    a composition was admitted; `revl attest --verify <att> [--against comp]`
+    checks one (docs/revl-attest.md, roadmap item 127).
+
+    Sign mode exits 0 on success. Verify mode is a check: it exits nonzero when
+    the attestation is invalid (bad signature/key, tampered, or — with
+    --against — the composition changed)."""
+    from . import attest as _attest  # noqa: PLC0415
+    from .composition_diff import load_composition  # noqa: PLC0415 — READ-ONLY IR loader
+
+    try:
+        key = _attest.resolve_key(args.key)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.verify:
+        try:
+            att = _attest.load_attestation(args.target)
+        except RevlError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        ir = None
+        if args.against:
+            try:
+                ir = load_composition(args.against)
+            except RevlError as error:
+                print(f"error: cannot load composition {args.against}: {error}",
+                      file=sys.stderr)
+                return 1
+        ok, reason = _attest.verify_attestation(att, key, ir)
+        if args.json:
+            print(json.dumps({"valid": ok, "reason": reason,
+                              "composition_hash": att.get("composition_hash"),
+                              "checked_composition": bool(ir)}, indent=2))
+        else:
+            print(_attest.render_verify(ok, reason, att))
+        return 0 if ok else 1
+
+    # sign mode
+    try:
+        ir = load_composition(args.target)
+    except RevlError as error:
+        print(f"error: cannot load composition {args.target}: {error}",
+              file=sys.stderr)
+        return 1
+    import os  # noqa: PLC0415 — lazy: localized to this handler
+    signer = args.signer or os.environ.get(_attest.SIGNER_ENV)
+    try:
+        att = _attest.make_attestation(ir, key, signer=signer)
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(att, indent=2))
+    else:
+        print(_attest.render_attestation(att))
+    return 0
+
+
 def _run_explain(args) -> int:
     """`revl explain <code>` — the other half of a structured diagnostic. A
     rejection hands back a code; this turns the code back into the guarantee
@@ -1846,6 +1908,41 @@ def main(argv: list[str] | None = None) -> int:
         help="least-privilege gate: exit nonzero if any component over-declares "
              "an emission the run never exercised")
 
+    attest_cmd = sub.add_parser(
+        "attest",
+        help="cryptographic attestation of a verified composition (item 127): "
+             "sign a portable record that this exact composition was admitted "
+             "(canonical IR hash + verdict + guarantees + timestamp), or "
+             "--verify one (docs/revl-attest.md)")
+    attest_cmd.add_argument(
+        "target", metavar="TARGET",
+        help="what to attest: a composition (a `.rvl` source, a compiled IR, "
+             "or an `audit --json` document). With --verify, the attestation "
+             "JSON to check instead")
+    attest_cmd.add_argument(
+        "--verify", action="store_true",
+        help="verify mode: TARGET is an attestation JSON — check its signature "
+             "(and, with --against, that the composition still matches). Exits "
+             "nonzero if the attestation is invalid")
+    attest_cmd.add_argument(
+        "--against", metavar="COMPOSITION", default=None,
+        help="with --verify: the composition to re-hash and check the "
+             "attestation against (a `.rvl` source or compiled IR). Omit to "
+             "check only the signature over the attestation's embedded hash")
+    attest_cmd.add_argument(
+        "--key", metavar="PATH", default=None,
+        help="the signing/verifying key file. Falls back to the "
+             "REVL_ATTEST_KEY_FILE (a path) or REVL_ATTEST_KEY (the secret) "
+             "environment variables. Never hardcoded")
+    attest_cmd.add_argument(
+        "--signer", metavar="NAME", default=None,
+        help="an optional signer label recorded in (and signed into) the "
+             "attestation; falls back to the REVL_ATTEST_SIGNER env var")
+    attest_cmd.add_argument(
+        "--json", action="store_true",
+        help="machine-readable output: the attestation document, or the "
+             "verify verdict as JSON")
+
     dash = sub.add_parser(
         "dash",
         help="the supervisor's cockpit (item 63): a READ-ONLY live view over a "
@@ -1967,6 +2064,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "profile":
         return _run_profile(args)
+
+    if args.command == "attest":
+        return _run_attest(args)
 
     if args.command == "dash":
         return _run_dash(args)
