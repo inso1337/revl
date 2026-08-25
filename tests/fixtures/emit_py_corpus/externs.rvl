@@ -1,0 +1,20 @@
+// Externs (`_emit_externs`): the verbatim `@py` body de-indented via
+// stdlib/str.rvl::dedent (item 193) and split into `def`-body lines. A
+// multi-line body (nested indentation -> a common margin dedent must strip), a
+// one-line body, and a call site so the externs are wired into a function.
+extern pure fn host_open(path: Str) -> Int
+= @py {
+      import os
+      flags = os.O_RDONLY
+      return os.open(path, flags)
+    }
+
+extern pure fn host_double(n: Int) -> Int
+= @py {
+      return n * 2
+    }
+
+fn drive(path: Str) -> Int {
+  let fd = host_open(path)
+  return host_double(fd)
+}
