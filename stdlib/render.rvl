@@ -1,0 +1,95 @@
+// The revl stdlib RENDER module (roadmap item 195, option C).
+//
+// A Path B enabler, kin to stdlib/list.rvl (194) and stdlib/value.rvl (180):
+// the blessed threaded-accumulator combinator a self-hosted emitter reaches for
+// when it must thread a document-wide counter through a run of pure renderers.
+//
+// ------------------------------------------------------------------ the tax
+// revl has NO emitter-local mutable state. The reference emitters keep the
+// document-wide `$revl_match_N` temp counter on a mutable `_Ctx` and bump it in
+// place; a pure revl port cannot, so the counter is threaded EXPLICITLY as
+// `render(node, counter) -> {text, counter}` through every combinator in exact
+// evaluation order. The threading itself is one shape repeated: seed a counter,
+// walk a list left-to-right, and at each step feed the PREVIOUS step's counter
+// into the next render, collecting each rendered fragment. Hand-rolled that is
+//
+//     var c = counter
+//     var texts = []
+//     for (e of nodes) {
+//       let r = render(e, c)     // the previous `c`, in order
+//       texts = texts.push(r.text)
+//       c = r.counter            // drop this line and the name is silently wrong
+//     }
+//
+// re-derived at every list-shaped site (call args, tuple/record fields, match
+// arms). Option C keeps the purity model INTACT (no hidden mutable counter,
+// nothing survives a pure-fn call unthreaded) and instead names that one shape
+// once: `render_seq`. The typed `{text, counter}` cell is retained, so a dropped
+// counter is still a COMPILE error (the accumulator is not optional), not a
+// silent wrong `$revl_match_N`.
+//
+// ------------------------------------------------------------------ pure revl
+// Like stdlib/list.rvl (and unlike value.rvl), every function here is PURE revl
+// built on the base List surface (`for … of`, `.push`). There is no `@py` block,
+// so there is nothing to defer per tier: the module compiles and runs
+// identically on EVERY backend the moment they emit the base List builtins. The
+// py tier is executed by the test suite (tests/test_render_stdlib.py); the other
+// tiers inherit for free.
+//
+// ------------------------------------------------ evaluation order is the point
+// `render_seq` threads the counter STRICTLY left-to-right: item i is rendered
+// with the counter that item i-1 returned, and the returned counter is the one
+// the LAST item left. This is the whole correctness property (the emitter's
+// `$revl_match_N` numbering is defined by evaluation order), so it is pinned
+// directly in tests/test_render_stdlib.py: a renderer that stamps the counter it
+// was given reproduces the seed sequence exactly, and the final counter equals
+// `seed + len`.
+//
+// ------------------------------------------------------- {text, counter}, not S
+// `render_seq` is specialised to the `Rendered = {text, counter}` cell rather
+// than a generic `{value: V, state: S}`, for the SAME reason stdlib/list.rvl is
+// `Str`-specialised: revl's generics do not carry the shape cleanly across the
+// boundary a caller needs. A generic `render_seq[E, S]` type-checks in isolation,
+// but the renderer a caller passes returns the caller's OWN nominal cell (the
+// emitter's `Rendered`), and two nominal records unify only by NAME, so a
+// generic `{value, state}` param rejects it; and the generic RETURN does not
+// concretise at the call site, so `r.texts` lands unpinned. Owning ONE cell type
+// that the caller imports sidesteps both: the counter (an `Int`) IS the threaded
+// accumulator, and anything a caller wants to thread it encodes into that `Int`.
+// The element type `E` stays generic, so the sequence walks a list of anything
+// (the emitter threads over `Any` IR nodes). A general `{value, state}` combinator
+// is a language/generics question, not stdlib; see the item 195 note.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/render.rvl" { render_seq, Rendered, Threaded }
+
+// ---------------------------------------------------------------- the cell
+// One rendered fragment AND the running counter threaded past it. The counter is
+// the state a caller carries in evaluation order (the emitter's document-wide
+// `$revl_match_N` gensym); a caller's own render fn returns this shape, so it is
+// exported for the caller to name in its signatures.
+pub type Rendered = { text: Str, counter: Int }
+
+// The result of threading a whole sequence: every fragment in order AND the
+// counter the last render left. `texts` is joined/wrapped by the caller (the
+// combinator does not assume a separator), `counter` is threaded onward.
+pub type Threaded = { texts: List[Str], counter: Int }
+
+// -------------------------------------------------------------- the combinator
+// Thread `counter` left-to-right through `render` over each item, collecting the
+// rendered fragments. `render` is called with the item and the counter the
+// PREVIOUS item returned (the first with `counter` itself); the counter it
+// returns is fed to the next and, from the last item, becomes the result's
+// `counter`. This is the one blessed shape: a caller writes the sequence as a
+// single call instead of re-rolling the seed/loop/hand-back by hand.
+pub fn render_seq[E](items: List[E], counter: Int, render: (E, Int) -> Rendered) -> Threaded {
+  var c = counter
+  var texts = []
+  for (e of items) {
+    let r = render(e, c)
+    texts = texts.push(r.text)
+    c = r.counter
+  }
+  return { texts: texts, counter: c }
+}
