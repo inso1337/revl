@@ -1,0 +1,23 @@
+// The component `config` surface (item 218) on the SIMPLE provider path: a
+// component with a `config { .. }` block whose pure provide method READS config
+// (`config.prefix`). Because a provision reads config, the provider struct
+// captures `HelloConfig` and the closure takes the up-front
+// `__revl_provide_config` clone; the `#[derive(Clone)] struct HelloConfig` +
+// its `Default`, the local `let config = HelloConfig { .. ..Default::default() }`
+// application, and the `_revl_load` typed-config construction are all exercised.
+// The method is pure (no effect/emit), so this stays on `_emit_component`.
+fn seed() -> Str {
+  return "hi"
+}
+
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  config { prefix: Str = "hi, ", count: Int = 1 }
+
+  provide greeting {
+    fn greet(who) = config.prefix + who
+  }
+}

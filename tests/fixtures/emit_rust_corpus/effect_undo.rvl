@@ -1,0 +1,31 @@
+// The revertible `effect`/`undo` pair (item 218): a block-body method that
+// acquires a resource, registers a compensating `undo`, and returns. This
+// exercises the full undo machinery of `_emit_component_new`: the up-front
+// `let res_undo = self.res.clone();` / `let id_undo = id.clone();` pre-clones
+// (item 114) so the `move` closure owns its captures, the labelled
+// `self.ctx.effect("Worker.run.effect.1", move || { res_undo.grab(id_undo.clone());
+// Ok(()) })` registration, and the `drop` -> `drop_` method rename (`_mname`,
+// Rust's `Drop::drop` collision). No config, no host binds.
+fn seed() -> Str {
+  return "id"
+}
+
+service Res {
+  fn grab(id: Str) -> Str
+  fn drop(id: Str)
+}
+
+service Job {
+  emission fn run(id: Str) -> Str
+}
+
+component Worker requires res: Res provides job: Job {
+  provide job {
+    fn run(id) {
+      let h = res.grab(id)
+      effect res.drop(id)
+      undo   res.grab(id)
+      return h
+    }
+  }
+}
