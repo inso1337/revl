@@ -57,6 +57,10 @@ If you are unsure whether something is in scope, report it privately anyway and
 let us make the call. A false alarm costs a few minutes; a missed soundness
 hole costs the project's one promise.
 
+For why capability confinement makes revl structurally resistant to prompt
+injection — and where that resistance stops — see
+[docs/prompt-injection-resistance.md](docs/prompt-injection-resistance.md).
+
 ## How to report
 
 **Please do not open a public issue for a suspected vulnerability**, and please
