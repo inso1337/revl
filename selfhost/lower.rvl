@@ -41,30 +41,48 @@
 //     at most one provider per realm. Two components providing the same key in
 //     the shared realm is a conflict. Ported from lower.py's `_link`.
 //
+// Slice two (this file) adds three more, in the reference's order (G1 during
+// lowering, then G2/G3 at link):
+//
+//   * G1 (declared access) — a component body reads only names it can resolve:
+//     a required key, a local/parameter, a callable (module fn/extern or a
+//     host/stdlib constructor), or `config`. A `root.<m>(...)` or `f(...)` head
+//     that resolves to none of these is an undeclared access, refused with the
+//     reference's `` `<x>` is not a declared requirement of <Comp> `` (from
+//     `_lower_postfix`'s head resolution).
+//
+//   * G3 (acyclic dependencies) — a dependency cycle can never activate. Over
+//     provider -> consumer edges (a consumer's required key resolved in the
+//     realm its provider provides it), lower.py's colored DFS reports the first
+//     back edge as `dependency cycle: A -> B -> A (G3)`; a component that
+//     requires a key it provides itself is the degenerate one-node case.
+//
+//   * per-realm G2 — provision disjointness scoped to (key, realm): the same
+//     key in two DIFFERENT realms composes (multi-tenancy), while two providers
+//     in the SAME realm conflict, the realm named only when it isn't shared.
+//     `isolate <k> in realm("<r>")` supplies the realm dimension.
+//
 // ============================================================ WHAT REMAINS
 // Deliberately out of this slice, for follow-on lowerings (each a real part of
 // lower.py the gate does not yet mirror):
-//   * G1 (undeclared access) and the whole type/arg-checking spine — the
-//     corpus excludes programs whose only refusal would be out of slice, so
-//     the gate need not re-derive it (checker.rvl already cross-checks typing).
-//   * G3 (dependency cycles) in `_link` — the topological sort and the cycle
-//     why-trace.
-//   * Per-realm G2 with `isolate` (multi-tenancy): only the SHARED realm is
-//     mirrored here; `isolate`/`intercept` parsing is skipped.
+//   * The type/arg-checking spine (checker.rvl already cross-checks typing) and
+//     G1's bare-value name resolution — only call/access HEADS are resolved
+//     here, not every `Var` used as a value.
 //   * A1's remaining surfaces: the pure-fn async-value refusal, the component
 //     setup/activation async-reach refusal, `await` outside a component body,
 //     and the sync-typed-arrow leak (`_refuse_leaky_arrow`).
 //   * The spawn/instance dimension entirely: templates, G4/G6 spawn-boundary
 //     bounds, capability attenuation (`_check_spawn_*`).
-//   * State hand-off admission, service replacement admission, ambient
-//     (running-manifest) composition, fault/lifecycle/prop tests, ir_version
-//     computation, and — of course — every emitter-oriented lowering detail
-//     (the gate produces a verdict, not an IR document).
+//   * The realm PRELUDE rule (an `isolate`/`intercept` after an effect) and
+//     `intercept` metadata; state hand-off admission, service replacement
+//     admission, ambient (running-manifest) composition, fault/lifecycle/prop
+//     tests, ir_version computation, and — of course — every emitter-oriented
+//     lowering detail (the gate produces a verdict, not an IR document).
 //
 // Verdict shape: `admit_src` returns "" to admit, else a two-part string
-// "<G>|<message>" where <G> is the guarantee tag ("G2" | "G4" | "A1") and
-// <message> is the refusal spelled exactly as the reference spells it. The
-// cross-check compares both the tag and the message.
+// "<G>|<message>" where <G> is the guarantee tag ("G1" | "G2" | "G3" | "G4" |
+// "A1") and <message> is the refusal spelled exactly as the reference spells
+// it. The cross-check compares both the tag and the message.
 
 use "./lexer.rvl" { Token, lex_src }
 use "./parser.rvl" { Expr, ParamN, InitN, ArmN, PartN, CallN, FieldN,
@@ -91,15 +109,24 @@ type SvcD = { name: Str, methods: List[MSig] }
 
 // A body statement. kind: emit | effect | undo | return | expr | skip. The
 // `emit` kind (statement-level `emit ...`, or `let x = emit ...`) marks the
-// expression's calls as crossing the boundary intentionally.
-type Stmt = { kind: Str, e: Expr }
+// expression's calls as crossing the boundary intentionally. `bind` is the
+// name a `let x = ...` introduces ("" when the statement binds nothing) — the
+// G1 name-resolution scope reads it (a component local is visible to every
+// provide method, exactly as the reference's `env.locals` is).
+type Stmt = { kind: Str, e: Expr, bind: Str }
 
-type ProvM   = { name: Str, body: List[Stmt] }
+// A provide method: its parameters feed the G1 scope (a param is a declared
+// name in the method body), and its body is walked for G4/A1/G1.
+type ProvM   = { name: Str, params: List[Str], body: List[Stmt] }
 type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
 // A declared provision key and the realm it lives in ("" = the shared realm).
 type ProvKey = { key: Str, rlm: Str }
+// `iso` carries the component's `isolate <key> in realm("<label>")` bindings:
+// key -> realm. It scopes both a provided key (its provision's realm, for G2)
+// and a required key (the realm it resolves in, for G3 edges), exactly as
+// lower.py's `_realm(entry, key)` reads one isolate map for both roles.
 type CompD   = { name: Str, provKeys: List[ProvKey], provs: List[Provide],
-                 reqMap: List[Bind], setup: List[Stmt] }
+                 reqMap: List[Bind], setup: List[Stmt], iso: List[ProvKey] }
 
 type Bind = { name: Str, ty: Str }
 
@@ -271,8 +298,8 @@ fn mk_msig(nm: Str, em: Bool, cs: List[Str], asy: Bool) -> MSig {
 }
 
 fn mk_compd(nm: Str, pks: List[ProvKey], pvs: List[Provide],
-            rq: List[Bind], su: List[Stmt]) -> CompD {
-  return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su }
+            rq: List[Bind], su: List[Stmt], iso: List[ProvKey]) -> CompD {
+  return { name: nm, provKeys: pks, provs: pvs, reqMap: rq, setup: su, iso: iso }
 }
 
 fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
@@ -284,7 +311,11 @@ fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
 // emission (`emit`) and the expression carried. `effect X undo Y` on one line
 // yields two statements.
 
-fn mkstmt(kind: Str, e: Expr) -> Stmt { return { kind: kind, e: e } }
+fn mkstmt(kind: Str, e: Expr) -> Stmt { return { kind: kind, e: e, bind: "" } }
+
+fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
+  return { kind: kind, e: e, bind: bind }
+}
 
 fn int_lit0() -> Expr { return IntLit("0") }
 
@@ -292,6 +323,7 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && t.text == "let") {
     if (!atk(ts, lo + 2, "=")) { return [mkstmt("skip", int_lit0())] }
+    let bn = tkc(ts, lo + 1).text
     var j = lo + 3
     var kd = "expr"
     if (atw(ts, j, "emit")) {
@@ -305,7 +337,7 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
     }
     let r = expr_at(ts, j)
     if (is_bad(r.e)) { return [mkstmt("skip", r.e)] }
-    var out: List[Stmt] = [mkstmt(kd, r.e)]
+    var out: List[Stmt] = [mkstmtb(kd, r.e, bn)]
     if (atw(ts, r.i, "undo")) {
       let u = expr_at(ts, r.i + 1)
       if (!is_bad(u.e)) { out = out.push(mkstmt("undo", u.e)) }
@@ -536,6 +568,18 @@ fn p_service(ts: List[Token], i: Int, pg: Prog) -> PStep {
 
 type ProvMR = { xs: List[ProvM], i: Int, ok: Bool }
 
+// The parameter NAMES of a signature — the declared names a method body may
+// read (they seed the G1 scope, just as `env.params` does in the reference).
+fn param_names(ps: List[ParamN]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ps.length()) {
+    out = out.push(ps[i].name)
+    i += 1
+  }
+  return out
+}
+
 // A provide method body is either a brace block `fn m(p) { ... }` or the arrow
 // shorthand `fn m(p) = expr` (one expression, unmarked). The shorthand is what
 // the A1 fixtures use, so it must parse.
@@ -549,16 +593,25 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
   if (!atw(ts, h, "fn")) { return { xs: acc, i: h, ok: false } }
   let nm = tkc(ts, h + 1).text
   let ps = params_at(ts, h + 3)
+  let pnames = param_names(ps.ps)
   if (atk(ts, ps.i, "=")) {
     let re = line_end(ts, ps.i + 1, end)
     let ebody = p_stmt_run(ts, ps.i + 1, re)
-    return p_prov_methods(ts, re, end, acc.push({ name: nm, body: ebody }))
+    return p_prov_methods(ts, re, end,
+                          acc.push({ name: nm, params: pnames, body: ebody }))
   }
   if (!atk(ts, ps.i, "{")) { return { xs: acc, i: ps.i, ok: false } }
   let bend = close_brace(ts, ps.i)
   if (bend == 0 - 1) { return { xs: acc, i: ts.length(), ok: false } }
   let bbody = p_stmts(ts, ps.i + 1, bend - 1, [])
-  return p_prov_methods(ts, bend, end, acc.push({ name: nm, body: bbody }))
+  return p_prov_methods(ts, bend, end,
+                        acc.push({ name: nm, params: pnames, body: bbody }))
+}
+
+// The names bound by a list of `key: Service` pairs (a header row).
+fn bind_names(env: List[Bind], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= env.length()) { return acc }
+  return bind_names(env, i + 1, acc.push(env[i].name))
 }
 
 fn bind_lookup(env: List[Bind], n: Str, i: Int) -> Str {
@@ -567,36 +620,73 @@ fn bind_lookup(env: List[Bind], n: Str, i: Int) -> Str {
   return bind_lookup(env, n, i + 1)
 }
 
-type ProvR = { provs: List[Provide], setup: List[Stmt], i: Int, ok: Bool }
+type ProvR = { provs: List[Provide], setup: List[Stmt], iso: List[ProvKey],
+               i: Int, ok: Bool }
+
+fn mk_provr(pv: List[Provide], su: List[Stmt], iso: List[ProvKey],
+            i: Int, ok: Bool) -> ProvR {
+  return { provs: pv, setup: su, iso: iso, i: i, ok: ok }
+}
 
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
-               provs: List[Provide], setup: List[Stmt]) -> ProvR {
+               provs: List[Provide], setup: List[Stmt],
+               iso: List[ProvKey]) -> ProvR {
   if (i >= end || atk(ts, i, "}")) {
-    return { provs: provs, setup: setup, i: i, ok: true }
+    return mk_provr(provs, setup, iso, i, true)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
-    if (!atk(ts, i + 2, "{")) {
-      return { provs: provs, setup: setup, i: i + 2, ok: false }
-    }
+    if (!atk(ts, i + 2, "{")) { return mk_provr(provs, setup, iso, i + 2, false) }
     let pend = close_brace(ts, i + 2)
     if (pend == 0 - 1) {
-      return { provs: provs, setup: setup, i: ts.length(), ok: false }
+      return mk_provr(provs, setup, iso, ts.length(), false)
     }
     let ms = p_prov_methods(ts, i + 3, pend - 1, [])
-    if (!ms.ok) {
-      return { provs: provs, setup: setup, i: pend, ok: false }
-    }
+    if (!ms.ok) { return mk_provr(provs, setup, iso, pend, false) }
     return p_comp_body(ts, pend, end, provh,
                        provs.push({ key: key,
                                     svcName: bind_lookup(provh, key, 0),
                                     methods: ms.xs }),
-                       setup)
+                       setup, iso)
   }
-  // component setup: one statement run per line — G4/A1 gate setup too.
+  // `isolate <key> in realm("<label>")` — the realm dimension G2/G3 read.
+  // (The prelude-rule ordering refusal is out of this slice; only the wiring
+  // identity <key> -> <label> is captured here.)
+  if (atw(ts, i, "isolate")) {
+    let key = tkc(ts, i + 1).text
+    // kw `in`, kw `realm`, `(`, string label, `)`
+    if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
+        && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")) {
+      let rlm = tkc(ts, i + 5).text
+      return p_comp_body(ts, skip_line(ts, i), end, provh, provs, setup,
+                         iso.push(mk_provkey(key, rlm)))
+    }
+    return p_comp_body(ts, skip_line(ts, i), end, provh, provs, setup, iso)
+  }
+  // `intercept <key> with { ... }` supplies metadata, not a realm; skip its
+  // block structurally so a program that carries one still parses.
+  if (atw(ts, i, "intercept")) {
+    var k = i + 1
+    while (k < end && !atk(ts, k, "{")) { k += 1 }
+    if (atk(ts, k, "{")) {
+      let ce = close_brace(ts, k)
+      if (ce != 0 - 1) {
+        return p_comp_body(ts, ce, end, provh, provs, setup, iso)
+      }
+    }
+    return p_comp_body(ts, skip_line(ts, i), end, provh, provs, setup, iso)
+  }
+  // component setup: one statement run per line — G4/A1/G1 gate setup too.
   let re = line_end(ts, i, end)
   let ss = p_stmt_run(ts, i, re)
-  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss))
+  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss), iso)
+}
+
+// The realm a component resolves `key` in: its isolate binding, else shared.
+fn realm_of(iso: List[ProvKey], key: Str, i: Int) -> Str {
+  if (i >= iso.length()) { return "" }
+  if (iso[i].key == key) { return iso[i].rlm }
+  return realm_of(iso, key, i + 1)
 }
 
 fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -625,19 +715,23 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
     return { pg: bad_prog(pg, "unbalanced braces in component"),
              i: ts.length() }
   }
-  let body = p_comp_body(ts, j + 1, end - 1, provh, [], [])
+  let body = p_comp_body(ts, j + 1, end - 1, provh, [], [], [])
   if (!body.ok) {
     return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
              i: end }
   }
-  // the shared realm for every declared key (isolate is out of this slice)
+  // each declared provision key carries the realm its `isolate` names (shared
+  // when unisolated); the linker's per-(key, realm) G2 reads these. Keys are
+  // sorted, mirroring lower.py's `sorted(comp["provides"])`.
+  let pkeys = sort_strs(bind_names(provh, 0, []))
   var pks: List[ProvKey] = []
   var pi = 0
-  while (pi < provh.length()) {
-    pks = pks.push(mk_provkey(provh[pi].name, ""))
+  while (pi < pkeys.length()) {
+    pks = pks.push(mk_provkey(pkeys[pi], realm_of(body.iso, pkeys[pi], 0)))
     pi += 1
   }
-  return mk_step(push_comp(pg, mk_compd(nm, pks, body.provs, reqs, body.setup)),
+  return mk_step(push_comp(pg,
+                 mk_compd(nm, pks, body.provs, reqs, body.setup, body.iso)),
                  end)
 }
 
@@ -772,23 +866,31 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // `_method_emissions` + `_component_req_call`.
 
 // svcs: name -> SvcD ; reqMap: local key -> service name ; caps: the emit
-// fixed point ; colored: async-colored names.
+// fixed point ; colored: async-colored names. `scopeNames` are the names
+// declared inside the component (its setup/method locals and every provide
+// method's parameters) and `fnNames` the callable names (module fns, externs,
+// and host/stdlib constructors) — together they are the G1 resolution
+// environment: a `root.<m>(...)` or `f(...)` head that is none of a
+// requirement, a scope name, a callable, `config`, or an Upper-cased host
+// constructor is an undeclared access.
 type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
-             colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str] }
+             colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
+             scopeNames: List[Str], fnNames: List[Str], compName: Str }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
-// inline refusal (the G4 emit-marker rule). `labels`/`ecaps` are the G4
-// evidence; `areach` the async callables reached by name; `aops` the async
-// service ops "req.op" reached.
-type Ac = { msg: Str, labels: List[Str], ecaps: List[Str],
+// inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
+// by `tag`. `labels`/`ecaps` are the G4 evidence; `areach` the async callables
+// reached by name; `aops` the async service ops "req.op" reached.
+type Ac = { msg: Str, tag: Str, labels: List[Str], ecaps: List[Str],
             areach: List[Str], aops: List[Str] }
 
 fn empty_ac() -> Ac {
-  return { msg: "", labels: [], ecaps: [], areach: [], aops: [] }
+  return { msg: "", tag: "", labels: [], ecaps: [], areach: [], aops: [] }
 }
 
-fn ac_msg(a: Ac, m: Str) -> Ac {
-  return { msg: m, labels: a.labels, ecaps: a.ecaps, areach: a.areach, aops: a.aops }
+fn ac_refuse(a: Ac, tag: Str, m: Str) -> Ac {
+  return { msg: m, tag: tag, labels: a.labels, ecaps: a.ecaps,
+           areach: a.areach, aops: a.aops }
 }
 
 fn find_msig(svc: SvcD, nm: Str, i: Int) -> MSig {
@@ -872,12 +974,40 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   }
 }
 
-// A call through a required key `root.meth`. G4: an emission op must be under
-// `emit` (inline refusal), and a marked emission contributes its capability
-// (the key) and label. A1: an async op contributes to `aops`.
+// A head whose first character is upper-cased is a host/stdlib constructor
+// receiver (`Map.new()`, `Pool.open(...)`) — the reference lowers an
+// Upper-cased call head as a host acquisition, never a G1 access.
+fn is_upper_head(name: Str) -> Bool {
+  if (name.length() == 0) { return false }
+  let c = name.charAt(0)
+  return c >= "A" && c <= "Z"
+}
+
+// The reference's head resolution (lower.py `_lower_postfix` / component-expr
+// `ExprVar`): a name resolves if it is a declared scope name (local/param), a
+// callable, `config`, or an Upper-cased host constructor. A required key is
+// resolved separately (it is the service path). Anything else is a G1
+// undeclared access.
+fn head_declared(cx: Ctx, name: Str) -> Bool {
+  return contains(cx.scopeNames, name) || contains(cx.fnNames, name)
+      || name == "config" || is_upper_head(name)
+}
+
+fn g1_refuse(cx: Ctx, name: Str, a: Ac) -> Ac {
+  return ac_refuse(a, "G1", "`".concat(name)
+    .concat("` is not a declared requirement of ").concat(cx.compName))
+}
+
+// A call through a receiver `root.meth`. When `root` is a required key this is
+// the service path (G4: an emission op must be under `emit`, an inline refusal,
+// and a marked emission contributes its capability (the key) and label; A1: an
+// async op contributes to `aops`). Otherwise `root` must resolve to a declared
+// name (local/param/callable/host); an unresolved head is a G1 undeclared
+// access — the reference refuses the receiver before it ever inspects the op.
 fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
             cx: Ctx, a: Ac) -> Ac {
   if (!cx.reqMap.has(root)) {
+    if (!head_declared(cx, root)) { return g1_refuse(cx, root, a) }
     // a host object or a local receiver, not a requirement — unchecked here
     return walk_exprs(args, 0, marked, cx, a)
   }
@@ -888,33 +1018,36 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
     return walk_exprs(args, 0, marked, cx, a)
   }
   if (decl.isEm && !marked) {
-    return ac_msg(a, "call to emission `".concat(root).concat(".")
+    return ac_refuse(a, "G4", "call to emission `".concat(root).concat(".")
       .concat(meth).concat("` must be marked `emit` (G4)"))
   }
   var na = a
   if (decl.isEm && marked) {
-    na = { msg: "", labels: na.labels.push(root.concat(".").concat(meth)),
+    na = { msg: "", tag: "", labels: na.labels.push(root.concat(".").concat(meth)),
            ecaps: union_into(na.ecaps, [root]), areach: na.areach, aops: na.aops }
   }
   if (decl.isAsync) {
-    na = { msg: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
+    na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps, areach: na.areach,
            aops: union_into(na.aops, [root.concat(".").concat(meth)]) }
   }
   return walk_exprs(args, 0, marked, cx, na)
 }
 
-// A bare named-fn call. G4 evidence: reaching an emitting name labels `f()`
-// with its caps. A1: reaching an async-colored name records it for the reach
-// verdict.
+// A bare named call `name(...)`. The head must resolve to a callable (or a
+// declared local, an Upper-cased constructor, or `config`) — an unresolved
+// head is a G1 undeclared access, exactly as a `req` receiver is. G4 evidence:
+// reaching an emitting name labels `f()` with its caps. A1: reaching an
+// async-colored name records it for the reach verdict.
 fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  if (!head_declared(cx, name)) { return g1_refuse(cx, name, a) }
   var na = a
   if (contains(cx.emittingNames, name)) {
-    na = { msg: "", labels: na.labels.push(name.concat("()")),
+    na = { msg: "", tag: "", labels: na.labels.push(name.concat("()")),
            ecaps: union_into(na.ecaps, caps_of(cx.caps, name)),
            areach: na.areach, aops: na.aops }
   }
   if (contains(cx.colored, name)) {
-    na = { msg: "", labels: na.labels, ecaps: na.ecaps,
+    na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps,
            areach: union_into(na.areach, [name]), aops: na.aops }
   }
   return walk_exprs(args, 0, marked, cx, na)
@@ -982,6 +1115,47 @@ fn a1_verdict(svcName: Str, mname: Str, decl: MSig, a: Ac, cx: Ctx) -> Str {
 // lower.py exactly: per-component G4 then A1 (during lowering), and only if
 // every component admits, G2 across the composition (at link).
 
+// The callable name universe G1 resolves a bare-call head against: every
+// module fn/extern, plus the host constructors (`_HOST_CALLABLES`) and the
+// Opt/Result constructors (`_BUILTIN_CONSTRUCTORS`) the reference treats as
+// callables in a component body.
+fn fn_names_of(fns: List[FnD]) -> List[Str] {
+  var out: List[Str] = ["Map", "Pool", "Job", "Some", "None", "Ok", "Err"]
+  var i = 0
+  while (i < fns.length()) {
+    out = out.push(fns[i].name)
+    i += 1
+  }
+  return out
+}
+
+// The names a component declares locally (setup + method locals) and its
+// method parameters — the G1 scope. Over-approximated across the whole
+// component (a setup local is visible to every method, as in the reference;
+// merging the methods' own locals only widens the resolved set, never a
+// refusal into an admit on a reference-clean program).
+fn stmt_binds(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let b = ss[i].bind
+  return stmt_binds(ss, i + 1, b != "" ? acc.push(b) : acc)
+}
+
+fn methods_scope(ms: List[ProvM], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ms.length()) { return acc }
+  let m = ms[i]
+  return methods_scope(ms, i + 1,
+                       stmt_binds(m.body, 0, union_into(acc, m.params)))
+}
+
+fn provs_scope(pvs: List[Provide], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= pvs.length()) { return acc }
+  return provs_scope(pvs, i + 1, methods_scope(pvs[i].methods, 0, acc))
+}
+
+fn scope_names_of(comp: CompD) -> List[Str] {
+  return provs_scope(comp.provs, 0, stmt_binds(comp.setup, 0, []))
+}
+
 fn build_maps(pg: Prog) -> Ctx {
   var svcs: Map[Str, SvcD] = Map.empty()
   var si = 0
@@ -1000,13 +1174,16 @@ fn build_maps(pg: Prog) -> Ctx {
     if (f.isAsyncExtern) { ai = ai.push(f.name) }
     fi += 1
   }
-  return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai)
+  return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
+                [], fn_names_of(pg.fns), "")
 }
 
 fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
-          colored: List[Str], emitting: List[Str], ai: List[Str]) -> Ctx {
+          colored: List[Str], emitting: List[Str], ai: List[Str],
+          scope: List[Str], fnn: List[Str], cnm: Str) -> Ctx {
   return { svcs: svcs, reqMap: rm, caps: caps, colored: colored,
-           emittingNames: emitting, asyncExterns: ai }
+           emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
+           fnNames: fnn, compName: cnm }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -1019,19 +1196,23 @@ fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
   return m
 }
 
-fn ctx_for(base: Ctx, reqs: List[Bind]) -> Ctx {
-  return { svcs: base.svcs, reqMap: req_map_of(reqs), caps: base.caps,
+// The per-component context: the shared maps/fixed points from `base`, plus
+// this component's requirements, local scope, and name (for the G1 diagnostic).
+fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
+  return { svcs: base.svcs, reqMap: req_map_of(comp.reqMap), caps: base.caps,
            colored: base.colored, emittingNames: base.emittingNames,
-           asyncExterns: base.asyncExterns }
+           asyncExterns: base.asyncExterns, scopeNames: scope_names_of(comp),
+           fnNames: base.fnNames, compName: comp.name }
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
 
 // G4 + A1 over one component. "" = admitted, else a tagged refusal.
 fn check_component(comp: CompD, cx: Ctx) -> Str {
-  // setup gets G4/A1 too (g4_unmarked_emission gates setup)
+  // setup gets G4/A1/G1 too (an undeclared access or unmarked emission in
+  // setup is refused exactly as in a provide body)
   let sa = walk_stmts(comp.setup, 0, cx, empty_ac())
-  if (sa.msg != "") { return tagged("G4", sa.msg) }
+  if (sa.msg != "") { return tagged(sa.tag, sa.msg) }
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
@@ -1041,7 +1222,7 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
       let pm = pv.methods[mi]
       let decl = find_msig(dsvc, pm.name, 0)
       let a = walk_stmts(pm.body, 0, cx, empty_ac())
-      if (a.msg != "") { return tagged("G4", a.msg) }
+      if (a.msg != "") { return tagged(a.tag, a.msg) }
       if (decl.name != "") {
         let g4 = g4_verdict(pv.svcName, pm.name, decl, a)
         if (g4 != "") { return tagged("G4", g4) }
@@ -1055,25 +1236,168 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   return ""
 }
 
-// G2 across the composition: one provider per key per (shared) realm.
-fn check_g2(pg: Prog) -> Str {
-  var owner: Map[Str, Str] = Map.empty()
-  var ci = 0
-  while (ci < pg.comps.length()) {
-    let comp = pg.comps[ci]
-    var ki = 0
-    while (ki < comp.provKeys.length()) {
-      let key = comp.provKeys[ki].key
-      if (owner.has(key)) {
-        let first = match owner.lookup(key) { Some(v) => v, None => "" }
-        return tagged("G2", "provision conflict: key `".concat(key)
-          .concat("` is provided by both ").concat(first).concat(" and ")
-          .concat(comp.name).concat(" (G2)"))
-      }
-      owner = owner.set(key, comp.name)
-      ki += 1
-    }
-    ci += 1
+// ================================================================ link (G2/G3)
+//
+// The composition-time gate, mirroring lower.py's `_link`. Provision
+// disjointness is per-(key, realm): the SAME key in two DIFFERENT realms is
+// the multi-tenancy feature (no conflict), while two providers in the SAME
+// realm conflict — and the realm is named in the diagnostic only when it isn't
+// the shared one, so the v1 wording is byte-identical. Dependency acyclicity
+// (G3) then runs over provider -> consumer edges, where an edge exists only
+// when the consumer resolves a required key in the SAME realm its provider
+// provides it — realm separation legitimately breaks a would-be cycle.
+
+// A resolved provider entry: which component provides `key` in realm `rlm`.
+type Prov3 = { key: Str, rlm: Str, comp: Str }
+
+fn find_provider(ps: List[Prov3], key: Str, rlm: Str, i: Int) -> Str {
+  if (i >= ps.length()) { return "" }
+  if (ps[i].key == key && ps[i].rlm == rlm) { return ps[i].comp }
+  return find_provider(ps, key, rlm, i + 1)
+}
+
+type LinkR = { provs: List[Prov3], msg: Str }
+
+fn realm_where(rlm: Str) -> Str {
+  if (rlm == "") { return "" }
+  return " in realm `".concat(rlm).concat("`")
+}
+
+fn scan_prov_keys(comp: CompD, pks: List[ProvKey], ki: Int,
+                  acc: List[Prov3]) -> LinkR {
+  if (ki >= pks.length()) { return { provs: acc, msg: "" } }
+  let pk = pks[ki]
+  let first = find_provider(acc, pk.key, pk.rlm, 0)
+  if (first != "") {
+    return { provs: acc,
+             msg: "provision conflict: key `".concat(pk.key).concat("`")
+               .concat(realm_where(pk.rlm)).concat(" is provided by both ")
+               .concat(first).concat(" and ").concat(comp.name).concat(" (G2)") }
+  }
+  return scan_prov_keys(comp, pks, ki + 1,
+                        acc.push({ key: pk.key, rlm: pk.rlm, comp: comp.name }))
+}
+
+fn g2_scan(comps: List[CompD], ci: Int, provs: List[Prov3]) -> LinkR {
+  if (ci >= comps.length()) { return { provs: provs, msg: "" } }
+  let r = scan_prov_keys(comps[ci], comps[ci].provKeys, 0, provs)
+  if (r.msg != "") { return r }
+  return g2_scan(comps, ci + 1, r.provs)
+}
+
+// ---------------------------------------------------------------- G3 edges
+
+type EdgeR = { succ: Map[Str, List[Str]], msg: Str }
+
+fn succ_of(succ: Map[Str, List[Str]], name: Str) -> List[Str] {
+  return match succ.lookup(name) { Some(v) => v, None => [] }
+}
+
+fn add_edge(succ: Map[Str, List[Str]], src: Str, dst: Str) -> Map[Str, List[Str]] {
+  return succ.set(src, succ_of(succ, src).push(dst))
+}
+
+fn scan_reqs(comp: CompD, provs: List[Prov3], keys: List[Str], ki: Int,
+             succ: Map[Str, List[Str]]) -> EdgeR {
+  if (ki >= keys.length()) { return { succ: succ, msg: "" } }
+  let key = keys[ki]
+  let provider = find_provider(provs, key, realm_of(comp.iso, key, 0), 0)
+  if (provider == comp.name) {
+    return { succ: succ,
+             msg: "component ".concat(comp.name)
+               .concat(" requires a key it provides itself (`").concat(key)
+               .concat("`) (G3)") }
+  }
+  if (provider != "") {
+    return scan_reqs(comp, provs, keys, ki + 1, add_edge(succ, provider, comp.name))
+  }
+  return scan_reqs(comp, provs, keys, ki + 1, succ)
+}
+
+fn build_edges(comps: List[CompD], ci: Int, provs: List[Prov3],
+               succ: Map[Str, List[Str]]) -> EdgeR {
+  if (ci >= comps.length()) { return { succ: succ, msg: "" } }
+  let comp = comps[ci]
+  let keys = sort_strs(bind_names(comp.reqMap, 0, []))
+  let r = scan_reqs(comp, provs, keys, 0, succ)
+  if (r.msg != "") { return r }
+  return build_edges(comps, ci + 1, provs, r.succ)
+}
+
+// ---------------------------------------------------------------- G3 DFS
+//
+// The reference's colored DFS: state 1 = on the stack (gray), 2 = done. A back
+// edge to a gray node closes a cycle; the reported path is the stack slice from
+// that node onward, with the node repeated to show the edge that shuts the loop
+// (`stack[stack.index(succ):] + [succ]`). Entries are visited in composition
+// order; each node's successors in the order the edges were added — the two
+// orderings that fix which components the diagnostic names.
+
+type DfsRes = { state: Map[Str, Int], cycle: List[Str] }
+
+fn mget_int(m: Map[Str, Int], k: Str) -> Int {
+  return match m.lookup(k) { Some(v) => v, None => 0 }
+}
+
+fn sub_from(xs: List[Str], idx: Int, i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return sub_from(xs, idx, i + 1, i >= idx ? acc.push(xs[i]) : acc)
+}
+
+fn dfs_visit(succ: Map[Str, List[Str]], name: Str, state: Map[Str, Int],
+             stack: List[Str]) -> DfsRes {
+  return dfs_iter(succ, name, stack.push(name), succ_of(succ, name), 0,
+                  state.set(name, 1))
+}
+
+fn dfs_iter(succ: Map[Str, List[Str]], name: Str, stack2: List[Str],
+            list: List[Str], j: Int, state: Map[Str, Int]) -> DfsRes {
+  if (j >= list.length()) { return { state: state.set(name, 2), cycle: [] } }
+  let s = list[j]
+  let st = mget_int(state, s)
+  if (st == 1) {
+    let idx = stack2.indexOf(s)
+    return { state: state, cycle: sub_from(stack2, idx, 0, []).push(s) }
+  }
+  if (st == 0) {
+    let r = dfs_visit(succ, s, state, stack2)
+    if (r.cycle.length() > 0) { return r }
+    return dfs_iter(succ, name, stack2, list, j + 1, r.state)
+  }
+  return dfs_iter(succ, name, stack2, list, j + 1, state)
+}
+
+fn find_cycle(comps: List[CompD], ci: Int, succ: Map[Str, List[Str]],
+              state: Map[Str, Int]) -> List[Str] {
+  if (ci >= comps.length()) { return [] }
+  let name = comps[ci].name
+  if (mget_int(state, name) == 0) {
+    let r = dfs_visit(succ, name, state, [])
+    if (r.cycle.length() > 0) { return r.cycle }
+    return find_cycle(comps, ci + 1, succ, r.state)
+  }
+  return find_cycle(comps, ci + 1, succ, state)
+}
+
+fn arrow_join(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(" -> ") }
+    out = out.concat(xs[i])
+    i += 1
+  }
+  return out
+}
+
+fn link_g2_g3(pg: Prog) -> Str {
+  let g2 = g2_scan(pg.comps, 0, [])
+  if (g2.msg != "") { return tagged("G2", g2.msg) }
+  let edges = build_edges(pg.comps, 0, g2.provs, Map.empty())
+  if (edges.msg != "") { return tagged("G3", edges.msg) }
+  let cyc = find_cycle(pg.comps, 0, edges.succ, Map.empty())
+  if (cyc.length() > 0) {
+    return tagged("G3", "dependency cycle: ".concat(arrow_join(cyc)).concat(" (G3)"))
   }
   return ""
 }
@@ -1086,15 +1410,16 @@ pub fn admit_src(src: Str) -> Str {
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
-    let cx = ctx_for(base, comp.reqMap)
+    let cx = ctx_for(base, comp)
     let v = check_component(comp, cx)
     if (v != "") { return v }
     ci += 1
   }
-  return check_g2(pg)
+  return link_g2_g3(pg)
 }
 
-// The bare verdict tag ("" | "G2" | "G4" | "A1" | "BAD") — the coarse oracle.
+// The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "A1" | "BAD") — the
+// coarse oracle.
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
@@ -1134,5 +1459,30 @@ test "sync provide method reaching an async extern is refused (A1)" {
 
 test "async-declared op admits the same async body" {
   let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  assert v == ""
+}
+
+test "undeclared access is refused (G1), exact wording" {
+  let v = admit_src("service Log { fn write(msg: Str) } component Logger provides log: Log { provide log { fn write(msg) { emit db.execute(msg) } } }")
+  assert v == "G1|`db` is not a declared requirement of Logger"
+}
+
+test "a declared local receiver is not a G1 access" {
+  let v = admit_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { let store = effect Map.new() undo store.drop() provide cache { fn put(key, value) { effect store.insert(key, value) undo store.remove(key) } } }")
+  assert v == ""
+}
+
+test "dependency cycle is refused (G3), exact path" {
+  let v = admit_src("service A { fn ping(tag: Str) -> Str } service B { fn pong(tag: Str) -> Str } component Alpha requires b: B provides a: A { provide a { fn ping(tag) = b.pong(tag) } } component Beta requires a: A provides b: B { provide b { fn pong(tag) = a.ping(tag) } }")
+  assert v == "G3|dependency cycle: Alpha -> Beta -> Alpha (G3)"
+}
+
+test "same key in the same realm conflicts (G2), realm named" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm("tenant_a") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm("tenant_a") provide kv { fn get(k) { return k } } }""")
+  assert v == "G2|provision conflict: key `kv` in realm `tenant_a` is provided by both StoreOne and StoreTwo (G2)"
+}
+
+test "same key in different realms composes (per-realm G2)" {
+  let v = admit_src("""service Kv { fn get(k: Str) -> Str } component StoreOne provides kv: Kv { isolate kv in realm("tenant_a") provide kv { fn get(k) { return k } } } component StoreTwo provides kv: Kv { isolate kv in realm("tenant_b") provide kv { fn get(k) { return k } } }""")
   assert v == ""
 }
