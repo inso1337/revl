@@ -138,10 +138,16 @@ Byte-oriented work keeps its own type: `Bytes` is a sequence of `u8` and its
 
 A plain double-quoted string `"..."` has **no escape sequences**: `"a\nb"` is
 the five literal characters `a`, `\`, `n`, `b` (a backslash and an `n`), not a
-newline. `$name`/`$$` are the one guarded exception — they were interpolation
-and dollar-escape in 1.x, so a plain string containing them is rejected with a
-migrate hint rather than silently changing meaning (see lexer `_lex_string` and
-the §9 guard-rail tests). A single-quoted `"` string may not span lines.
+newline. A `$` is an **ordinary literal character** too (item 203): every
+`$`-shape inside a plain string — `$name`, `$$`, and the WAT/target fragments
+the self-host tiers emit like `"call $int_add"` — is literal text, because in
+2.0 interpolation lives *only* in backtick templates (`` `${name}` ``). The old
+1.x meanings (`$name` = interpolation, `$$` = an escaped dollar) are gone; a 1.x
+file still migrates with `revl fmt --migrate`, which rewrites `"$name"` to a
+template under a migrate-specific gate (a deliberate literal→interpolation
+upgrade — see `formatter.ir_equivalent` with `token_preserving=False`, `revl.fmt`,
+and tests/test_fmt.py), no longer relying on the lexer to reject the input.
+A single-quoted `"` string may not span lines.
 
 For multi-line content there is a **triple-quoted** form, `"""..."""`:
 
