@@ -17,7 +17,7 @@ import re
 from .errors import RevlError
 
 # guarantee/amendment tag embedded in the message, e.g. "... (G4)"
-_TAG = re.compile(r"\((G[1-8]|A[1-8]|R[1-5]|T[1-9])\)")
+_TAG = re.compile(r"\((G[1-8]|A[1-9]|R[1-5]|T[1-9])\)")
 
 # what each guarantee is *about* — the one-line description an agent can
 # surface without reading DESIGN.md
@@ -36,6 +36,7 @@ GUARANTEES = {
     "A5": "compensation accompanies an emission",
     "A6": "provide-methods match the service signature",
     "A8": "mid-body failure reverts and contains (L-Raise)",
+    "A9": "a provide key is declared in the component's `provides` clause",
     "T1": "declared types are checked",
     "T2": "absence is Opt[T]; `null` has no type",
     "T3": "a hole is an obligation: it checks, but it never runs (docs/holes.md)",
@@ -70,6 +71,9 @@ FIXES = {
           "parameter types, `async`",
     "A8": "a mid-body failure reverts and contains; `fail` belongs in a component "
           "activation body",
+    "A9": "the provide block's key must appear in the `provides` clause — rename "
+          "the block to a declared key, or add the key (with its service) to the "
+          "clause",
     "T1": "make the types agree at the call site, or change the declaration",
     "T2": "revl has no `null` — model absence as `Opt[T]` and unwrap with `??`, "
           "`?.` or `match`",

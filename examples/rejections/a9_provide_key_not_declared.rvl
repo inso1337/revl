@@ -1,0 +1,17 @@
+// REJECTED — A9: a provide block's key must be named in the `provides` clause.
+// The component declares `provides skin1: Skin`, but the provide block is
+// keyed `skin` — a key the composition never announced. The `provides`
+// clause, not the provide block, is the source of truth for what the
+// component offers (the sibling of A6, which bounds the *methods* of a
+// declared key against its service). A site-playground user hit exactly
+// this: declared `skin1`, wrote `provide skin { … }`, and the diagnostic
+// card could not name the fix. The two fixes are named in the hint.
+//
+// expected error:
+//   a9_provide_key_not_declared.rvl:16: `skin` is not declared in the `provides` clause of S (A9)
+
+service Skin { fn name() -> Str }
+
+component S provides skin1: Skin {
+  provide skin { fn name() = "x" }
+}

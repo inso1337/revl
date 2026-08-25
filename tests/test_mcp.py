@@ -430,3 +430,21 @@ def test_type_errors_carry_expected_and_actual():
         compile_source("fn f() -> Int { return \"nope\" }")
     record = classify(excinfo.value)
     assert (record["expected"], record["actual"]) == ("Int", "Str")
+
+
+def test_provide_key_mismatch_is_coded_A9_with_a_two_fix_hint():
+    """item 153: a provide block keyed on something the `provides` clause never
+    announced classifies as A9 (the sibling of A6) and carries a hint naming
+    both fixes — rename the block, or add the key to the clause."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(
+            "service Skin { fn name() -> Str }\n"
+            "component S provides skin1: Skin {\n"
+            "  provide skin { fn name() = \"x\" }\n"
+            "}\n"
+        )
+    record = classify(excinfo.value)
+    assert record["code"] == "A9"
+    assert record["guarantee"].startswith("a provide key is declared")
+    assert record["hint"]
+    assert "rename" in record["hint"] and "add" in record["hint"]

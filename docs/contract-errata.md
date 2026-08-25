@@ -38,6 +38,7 @@ This goes in the compiler spec, not the runtimes.
 | A6 | Service methods untyped (`any` in TS output); provide-method params duplicate the service declaration | ts | v1 carries param/return types; emitters derive signatures from the service, methods stop restating params |
 | A7 | `emission` flags are advisory to backends (unenforceable there) | py | working as intended — enforcement is the *checker's* job (G4); noted so nobody expects backend enforcement |
 | A8 | Mid-body acquire-failure semantics inherited from runtime, not contracted | py | v1 contracts the paper's L-Raise reading: accumulated effects revert, component lands FAILED, siblings unaffected |
+| A9 | A `provide` block keyed outside the `provides` clause was rejected with a bare, uncoded `RevlError` — no guarantee, no fix hint (item 153, site-playground finding) | py | sibling of A6 (A6 bounds a declared key's *methods*; A9 bounds the *key* against the clause). Dedicated code A9 — A1–A8 are all occupied above (A4 = `format` `$$`-escaping, A7 = advisory emission flags), so A9 is the next amendment slot. Hint names both fixes: rename the provide block to a declared key, or add the key (with its service) to the `provides` clause. `diagnostics.GUARANTEES`/`FIXES` + `lower.py` raise; `examples/rejections/a9_provide_key_not_declared.rvl` |
 
 ## Upstream issues surfaced (to file / track)
 
