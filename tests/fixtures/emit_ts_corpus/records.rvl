@@ -1,0 +1,11 @@
+fn recs(a: Int, b: Int) -> Int {
+  let r = { x: a, y: b }
+  let s = { r | x = b }
+  return r.x + s.y
+}
+fn lists(a: Int, b: Int) -> List[Int] {
+  let xs = [a, b, a]
+  let ys = xs.push(b)
+  let w = ys[0]
+  return ys
+}

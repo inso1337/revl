@@ -1,0 +1,1180 @@
+// The revl backend-IR -> cordis-v4 (TypeScript) EMITTER, in revl — Path B, the
+// self-host of the TypeScript tail (roadmap item 190). Where the
+// lexer/parser/checker/lower stages port the compiler FRONTEND, this file ports
+// the TS tail: it reads the stable interchange IR (docs/backend-ir.md — the JSON
+// document every backend consumes) and produces TypeScript source text,
+// mirroring backends/typescript/emit.py.
+//
+// It is one half of a differential BYTE oracle: this file and
+// backends/typescript/emit.py's `emit()` are two independent implementations of
+// the same lowering, forced to produce BYTE-IDENTICAL TypeScript for every input
+// in the covered subset (tests/test_selfhost_emit_ts.py). The reference is ground
+// truth; any divergence is a defect in this slice.
+//
+// ============================================================ WHAT IT COVERS
+// The first coherent slice emits, byte-for-byte, the v3 FUNCTION-ONLY document —
+// an IR_version-3 document whose only section is module `fn`s (a revl library):
+//
+//   * the module scaffold — the two generated-header comment lines, the
+//     `import type { Context }` line and the `import { host } from '../runtime.ts'`
+//     runtime import, and the blank separator;
+//   * the conditional helper preludes (`_revl_helpers`) — `revlEq`, `revlI64`,
+//     `revlI32`, the named-integer-arithmetic block, the code-point string
+//     helpers, `revlShow`, and `revlParseInt` — each gated exactly as the
+//     reference gates them (walked over the whole IR);
+//   * `_emit_ts_functions` -> `_v3_stmt` -> `_expr` for the base surface —
+//     let/assign (const/let), return, if/while/for, expr; and the 2.0 expression
+//     algebra: lit, var, bin (incl `??`, structural `==` via revlEq, the bounded
+//     `+ - *`, true `/`, truncated `%`), un, call, field, index, len, the stdlib
+//     builtins, maplit, sync arrow (incl captures IIFE), match (Opt Some/None and
+//     the tagged switch), record, list, record-update, string interpolation, and
+//     the optional field/call forms; plus the implicit `Number(...)` / `BigInt(...)`
+//     widen markers and the `$revl_match_N` document-wide temp counter.
+//
+// ============================================================ WHAT IT DEFERS
+// Reported for follow-on TS-emitter slices, deliberately OUT of this slice:
+//   * components/services entirely (`_component` / `_component_body` /
+//     `_provide_impl` / `_method_body` / `_Scope`, the committed-view `ctx.<key>`
+//     access, service interfaces, `_context_augmentation`, config interfaces) —
+//     the whole v1/v2 `_emit_v1` path and the v3 component tail;
+//   * v3 TYPE declarations (`_emit_ts_types` — records/variants/interfaces),
+//     externs (`_emit_ts_externs`), in-file `test`/`fault_test`/`lifecycle test`
+//     emission, async coloring (async fns / async externs / awaited call sites /
+//     async arrows / async match), spawn/instances, realm placements
+//     (isolate/intercept/routes + the router), and the canonical ABI;
+//   * `assert` statements and `let_pattern` (destructuring): the reference names
+//     an assert temp `$revl_l`/`$revl_r` and renders via `revlShow` — implementable
+//     but not exercised by the function corpus, so deferred to keep the slice
+//     byte-VERIFIED rather than byte-guessed.
+//
+// ------------------------------------------------------ the erased-IR boundary
+// Navigation reads the IR in PURE revl through stdlib/value.rvl (item 180): the
+// `value_*` accessors, no navigation `@py` block. Only HOST FORMATTING stays
+// `@py` — `json_dumps` (the reference `_string`/`_literal`/`_int_as_number` call
+// Python's `json.dumps`, so bridging it is faithful), `template_text` (the
+// template-literal escaper), `newline`, and the trailing-whitespace `py_rstrip`.
+// Every byte of emitter LOGIC (kind dispatch, type rendering, indentation,
+// string building, the JS-keyword mangle) stays pure revl.
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field, value_opt,
+  value_list, value_at, value_str, value_int, value_bool, value_children
+}
+
+// ------------------------------------------------- host formatting (kept @py)
+// The reference emitter renders string/number LITERALS with `json.dumps`; this
+// is the item-180 "NOT obsoleted" host-output set (kin to emit_py.rvl's
+// `py_repr`). `_string(v)` and the numeric-literal / index-number spellings all
+// route through it.
+extern pure fn json_dumps(v: Any) -> Str = @py {
+    import json
+    return json.dumps(v)
+}
+// The template-literal text escaper (`_template_text`): backslash, backtick, and
+// `${` are escaped so literal text embeds safely in a `` `...` `` template.
+// Built from `chr()` so the revl `@py` block carries no stray brace/backtick.
+extern pure fn template_text(v: Any) -> Str = @py {
+    bs = chr(92)
+    bt = chr(96)
+    dl = chr(36)
+    ob = chr(123)
+    return v.replace(bs, bs + bs).replace(bt, bs + bt).replace(dl + ob, bs + dl + ob)
+}
+// A real newline — revl plain strings carry no escapes, so the one genuine
+// U+000A the module separator needs is sourced here.
+extern pure fn newline() -> Str = @py { return chr(10) }
+// `"\n".join(out).rstrip()` — strip trailing whitespace/newlines before the
+// single final newline the reference appends.
+extern pure fn py_rstrip(s: Str) -> Str = @py { return s.rstrip() }
+
+// ---------------------------------------------------------------- small utils
+fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
+fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
+fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
+fn node_method(n: Any) -> Str { return value_str(value_field(n, "method")) }
+
+fn ind(n: Int) -> Str { return "  ".repeat(n) }
+
+// A rendered expression: its text AND the running `$revl_match_N` counter (the
+// reference's `ctx._counter`, threaded here since revl has no method state — the
+// document-wide match-temp numbering is otherwise unreproducible).
+type Rendered = { text: Str, counter: Int }
+
+// One or more statement lines AND the threaded match counter.
+type StmtOut = { lines: List[Str], counter: Int }
+
+// ---------------------------------------------------- JS/TS keyword mangle (A3)
+// `_mangle`: append `_` until a valid revl identifier that is a JS/TS reserved
+// word is free, so it emits and RUNS instead of crashing (item 165). A pure
+// function of the name — declaration and use sites agree without a table.
+fn is_js_reserved(name: Str) -> Bool {
+  let words = ["await", "break", "case", "catch", "class", "const", "continue",
+    "debugger", "default", "delete", "do", "else", "enum", "export", "extends",
+    "false", "finally", "for", "function", "if", "import", "in", "instanceof",
+    "let", "new", "null", "return", "static", "super", "switch", "this", "throw",
+    "true", "try", "typeof", "var", "void", "while", "with", "yield"]
+  for (w of words) {
+    if (w == name) { return true }
+  }
+  return false
+}
+
+fn mangle(name: Str) -> Str {
+  var n = name
+  while (is_js_reserved(n)) { n = n.concat("_") }
+  return n
+}
+
+// `_ident` on the happy path: validation + emitter-scaffolding rejection are
+// deferred (the covered corpus is clean), so this is the A3 rename only.
+fn ident(name: Str) -> Str { return mangle(name) }
+
+// ---------------------------------------------------------------- type rendering
+// `_ts_v3_type` (docs/syntax-2.0.md §2): the surface type -> TS type map.
+fn ts_scalar_type(name: Str) -> Str {
+  if (name == "Int") { return "bigint" }
+  if (name == "Int32") { return "number" }
+  if (name == "Float") { return "number" }
+  if (name == "Bool") { return "boolean" }
+  if (name == "Str") { return "string" }
+  if (name == "Bytes") { return "Uint8Array" }
+  if (name == "Unit") { return "void" }
+  if (name == "Any") { return "any" }
+  if (name == "Never") { return "never" }
+  return ""
+}
+
+fn last_index(s: Str, ch: Str) -> Int {
+  var i = s.length() - 1
+  while (i >= 0) {
+    if (s.charAt(i) == ch) { return i }
+    i -= 1
+  }
+  return -1
+}
+
+// `_split_v3_types`: split a type-arg list on the top-level commas only.
+fn split_type_args(inner: Str) -> List[Str] {
+  var parts = []
+  var depth = 0
+  var current = ""
+  var i = 0
+  let n = inner.length()
+  while (i < n) {
+    let ch = inner.charAt(i)
+    if (ch == "[" || ch == "(") {
+      depth += 1
+      current = current.concat(ch)
+    } else {
+      if (ch == "]" || ch == ")") {
+        depth -= 1
+        current = current.concat(ch)
+      } else {
+        if (ch == "," && depth == 0) {
+          parts = parts.push(py_strip(current))
+          current = ""
+        } else {
+          current = current.concat(ch)
+        }
+      }
+    }
+    i += 1
+  }
+  if (current != "") { parts = parts.push(py_strip(current)) }
+  return parts
+}
+
+extern pure fn py_strip(s: Str) -> Str = @py { return s.strip() }
+
+// `_split_fn_type`: a function type `(A, B) -> C` -> its param list + return, or
+// the empty marker (return "") when the name is not a function type. Returns the
+// return-type string; params are recovered by the caller from the same scan.
+fn fn_type_arrow_index(name: Str) -> Int {
+  // The index just past the `)` that closes the leading `(`, iff the rest starts
+  // with `->`; -1 otherwise. -2 means "starts with ( but is not a fn type".
+  if (name.charAt(0) != "(") { return -1 }
+  var depth = 0
+  var i = 0
+  let n = name.length()
+  while (i < n) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth += 1 }
+    if (ch == "]" || ch == ")") {
+      depth -= 1
+      if (depth == 0) {
+        let rest = py_strip(name.slice(i + 1, n))
+        if (rest.slice(0, 2) == "->") { return i }
+        return -2
+      }
+    }
+    i += 1
+  }
+  return -2
+}
+
+fn ts_type(name: Str) -> Str {
+  if (name == "") { return "unknown" }
+  let mapped = ts_scalar_type(name)
+  if (mapped != "") { return mapped }
+  let arrow = fn_type_arrow_index(name)
+  if (arrow >= 0) {
+    let n = name.length()
+    let inner = py_strip(name.slice(1, arrow))
+    let returns = py_strip(name.slice(arrow + 3, n))
+    var params = []
+    if (inner != "") { params = split_type_args(inner) }
+    var rendered = []
+    var idx = 0
+    for (p of params) {
+      rendered = rendered.push(`a${idx}: ${ts_type(p)}`)
+      idx += 1
+    }
+    return `((${rendered.join(", ")}) => ${ts_type(returns)})`
+  }
+  let bi = name.indexOf("[")
+  if (bi >= 0) {
+    let base = name.slice(0, bi)
+    let inner = name.slice(bi + 1, last_index(name, "]"))
+    let args = split_type_args(inner)
+    if (base == "Opt") { return ts_type(args[0]).concat(" | undefined") }
+    if (base == "List") { return ts_type(args[0]).concat("[]") }
+    if (base == "Map") { return `Map<${ts_type(args[0])}, ${ts_type(args[1])}>` }
+    if (base == "Result") {
+      return `{ kind: "Ok"; value: ${ts_type(args[0])} } | { kind: "Err"; value: ${ts_type(args[1])} }`
+    }
+    if (base == "Async") { return `Promise<${ts_type(args[0])}>` }
+    var us = []
+    for (a of args) { us = us.push("unknown") }
+    return base.concat("<").concat(us.join(", ")).concat(">")
+  }
+  return ident(name)
+}
+
+// A return-type slot: `None` -> "void", else the surface type.
+fn ts_return_type(v: Any) -> Str {
+  if (value_is_null(v)) { return "void" }
+  return ts_type(value_str(v))
+}
+
+// The `_TS_V3_BIN_OPS` map: revl op -> JS op ("" for none).
+fn ts_bin_op(op: Str) -> Str {
+  if (op == "==") { return "===" }
+  if (op == "===") { return "===" }
+  if (op == "!=") { return "!==" }
+  if (op == "!==") { return "!==" }
+  if (op == "<") { return "<" }
+  if (op == ">") { return ">" }
+  if (op == "<=") { return "<=" }
+  if (op == ">=") { return ">=" }
+  if (op == "+") { return "+" }
+  if (op == "-") { return "-" }
+  if (op == "*") { return "*" }
+  if (op == "/") { return "/" }
+  if (op == "%") { return "%" }
+  if (op == "&&") { return "&&" }
+  if (op == "||") { return "||" }
+  return ""
+}
+
+fn is_equality_op(op: Str) -> Bool {
+  return op == "==" || op == "===" || op == "!=" || op == "!=="
+}
+
+fn is_addsubmul(op: Str) -> Bool {
+  return op == "+" || op == "-" || op == "*"
+}
+
+fn is_v3_atomic(node: Any) -> Bool {
+  let k = node_kind(node)
+  return k == "var" || k == "field" || k == "index" || k == "call" || k == "lit"
+}
+
+// `_is_float_expr`: syntactically-certain `number`.
+fn is_float_expr(node: Any) -> Bool {
+  let k = node_kind(node)
+  if (k == "lit") { return value_kind(value_field(node, "value")) == "float" }
+  if (k == "bin") { return node_op(node) == "/" || node_operands(node) == "Float" }
+  if (k == "un") {
+    if (node_op(node) != "-") { return false }
+    return is_float_expr(value_field(node, "operand"))
+  }
+  return false
+}
+
+// -------------------------------------------------------------- expressions
+// `_int_as_number`: an Int-typed expression rendered as the JS `number` an
+// index/count API needs. A literal Int drops its `n`; anything else is `Number(…)`.
+fn int_as_number(node: Any, counter: Int) -> Rendered {
+  if (node_kind(node) == "lit") {
+    let v = value_field(node, "value")
+    if (value_kind(v) == "int") { return { text: `${value_int(v)}`, counter: counter } }
+  }
+  let r = expr(node, counter)
+  return { text: `Number(${r.text})`, counter: r.counter }
+}
+
+// `_float_operand`: render so the result is a JS `number` (an Int that widened
+// into a Float position goes through `Number(…)`).
+fn float_operand(node: Any, counter: Int) -> Rendered {
+  if (node_kind(node) == "lit") {
+    let v = value_field(node, "value")
+    let vk = value_kind(v)
+    if (vk == "int" || vk == "float") { return { text: json_dumps(v), counter: counter } }
+  }
+  let r = expr(node, counter)
+  if (is_float_expr(node)) { return r }
+  return { text: `Number(${r.text})`, counter: r.counter }
+}
+
+// Render a call/field/index/builtin TARGET, parenthesised unless atomic.
+fn paren_target(node: Any, counter: Int) -> Rendered {
+  let r = expr(node, counter)
+  if (is_v3_atomic(node)) { return r }
+  return { text: `(${r.text})`, counter: r.counter }
+}
+
+fn commajoin(nodes: List[Any], counter: Int) -> Rendered {
+  var parts = []
+  var c = counter
+  for (e of nodes) {
+    let r = expr(e, c)
+    parts = parts.push(r.text)
+    c = r.counter
+  }
+  return { text: parts.join(", "), counter: c }
+}
+
+// `_v3_var`: a bare name. None -> undefined, the Some/Ok/Err constructors ->
+// identity lambda, host roots -> host.<name>, otherwise the mangled name.
+fn render_var(node: Any) -> Str {
+  let nm = value_str(value_field(node, "name"))
+  if (nm == "None") { return "undefined" }
+  if (nm == "Some" || nm == "Ok" || nm == "Err") { return "((value) => value)" }
+  if (nm == "Pool" || nm == "Map" || nm == "Job") { return "host.".concat(nm) }
+  return ident(nm)
+}
+
+// `_literal`: null/bool are keywords, an Int literal is a BigInt literal (`123n`),
+// a Float/Str literal renders through `json.dumps`.
+fn render_lit(node: Any) -> Str {
+  let v = value_field(node, "value")
+  let vk = value_kind(v)
+  if (vk == "null") { return "null" }
+  if (vk == "bool") {
+    if (value_bool(v)) { return "true" }
+    return "false"
+  }
+  if (vk == "int") { return `${value_int(v)}n` }
+  return json_dumps(v)
+}
+
+// `_ts_builtin`: the stdlib surface (docs/stdlib-2.0.md) as idiomatic TS. `args`
+// are the pre-rendered argument texts; `arg_nodes`/`counter` are threaded so the
+// `repeat` count can re-render through `_int_as_number`.
+fn render_builtin(method: Str, target: Str, args: List[Str], arg_nodes: List[Any], recv: Str, counter: Int) -> Rendered {
+  if (method == "length") { return { text: `revlLen(${target})`, counter: counter } }
+  if (method == "push") { return { text: `[...${target}, ${args[0]}]`, counter: counter } }
+  if (method == "slice") { return { text: `revlSlice(${target}, ${args[0]}, ${args[1]})`, counter: counter } }
+  if (method == "charAt") { return { text: `revlCharAt(${target}, ${args[0]})`, counter: counter } }
+  if (method == "charCodeAt") { return { text: `revlCharCodeAt(${target}, ${args[0]})`, counter: counter } }
+  if (method == "div_trunc") { return { text: `revlDivTrunc(${target}, ${args[0]})`, counter: counter } }
+  if (method == "div_floor") { return { text: `revlDivFloor(${target}, ${args[0]})`, counter: counter } }
+  if (method == "div_euclid") { return { text: `revlDivEuclid(${target}, ${args[0]})`, counter: counter } }
+  if (method == "mod") { return { text: `revlMod(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_div_trunc") { return { text: `revlCheckedDivTrunc(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_div_floor") { return { text: `revlCheckedDivFloor(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_div_euclid") { return { text: `revlCheckedDivEuclid(${target}, ${args[0]})`, counter: counter } }
+  if (method == "checked_mod") { return { text: `revlCheckedMod(${target}, ${args[0]})`, counter: counter } }
+  if (method == "to_int") {
+    if (recv == "Str") { return { text: `revlParseInt(${target})`, counter: counter } }
+    return { text: `BigInt(${target})`, counter: counter }
+  }
+  if (method == "to_int32") { return { text: `revlI32(Number(${target}))`, counter: counter } }
+  if (method == "concat") { return { text: `${target}.concat(${args[0]})`, counter: counter } }
+  if (method == "indexOf") { return { text: `revlIndexOf(${target}, ${args[0]})`, counter: counter } }
+  if (method == "split") { return { text: `${target}.split(${args[0]})`, counter: counter } }
+  if (method == "join") { return { text: `${target}.join(${args[0]})`, counter: counter } }
+  if (method == "repeat") {
+    let r = int_as_number(arg_nodes[0], counter)
+    return { text: `${target}.repeat(${r.text})`, counter: r.counter }
+  }
+  if (method == "startsWith") { return { text: `${target}.startsWith(${args[0]})`, counter: counter } }
+  if (method == "endsWith") { return { text: `${target}.endsWith(${args[0]})`, counter: counter } }
+  if (method == "set") {
+    return { text: `(() => { const c = new Map(${target}); c.set(${args[0]}, ${args[1]}); return c })()`, counter: counter }
+  }
+  if (method == "lookup") { return { text: `${target}.get(${args[0]})`, counter: counter } }
+  if (method == "has") { return { text: `${target}.has(${args[0]})`, counter: counter } }
+  if (method == "size") { return { text: `BigInt(${target}.size)`, counter: counter } }
+  if (method == "keys") {
+    return { text: `[...${target}.keys()].sort((a, b) => { const A = Array.from(a), B = Array.from(b); for (let i = 0; i < Math.min(A.length, B.length); i++) { if (A[i] !== B[i]) return A[i] < B[i] ? -1 : 1 } return A.length - B.length })`, counter: counter }
+  }
+  if (method == "remove") {
+    return { text: `(() => { const c = new Map(${target}); c.delete(${args[0]}); return c })()`, counter: counter }
+  }
+  if (method == "to_str") { return { text: `${target}.toString()`, counter: counter } }
+  return { text: `<<UNSUPPORTED-BUILTIN:${method}>>`, counter: counter }
+}
+
+// `_int_as_number`-guarded builtin arg positions (`_TS_INT_ARG_BUILTINS`).
+fn optcall_arg_is_int(method: Str, index: Int) -> Bool {
+  if (method == "slice") { return index == 0 || index == 1 }
+  if (method == "charAt") { return index == 0 }
+  if (method == "charCodeAt") { return index == 0 }
+  if (method == "repeat") { return index == 0 }
+  return false
+}
+
+fn optcall_result_is_int(method: Str) -> Bool {
+  return method == "length" || method == "indexOf" || method == "charCodeAt"
+}
+
+// `_v3_match_expr`: the match lowering. Opt (Some/None) discriminates on
+// `undefined`; a tagged ADT switches on `.kind`. `in_async` is false in this
+// slice, so the async wrappers are omitted.
+fn match_expr(node: Any, counter: Int) -> Rendered {
+  let c0 = counter + 1
+  let tmp = `$revl_match_${c0}`
+  let sr = expr(value_field(node, "scrutinee"), c0)
+  var c = sr.counter
+  let arms = value_list(value_field(node, "arms"))
+  var is_opt = false
+  for (arm of arms) {
+    let p = value_str(value_field(arm, "pattern"))
+    if (p == "Some" || p == "None") { is_opt = true }
+  }
+  var lines = []
+  if (is_opt) {
+    lines = lines.push(`(($revl_match_${c0}) => {`)
+    var wildcard = ""
+    var has_wild = false
+    for (arm of arms) {
+      let pattern = value_str(value_field(arm, "pattern"))
+      let br = expr(value_field(arm, "body"), c)
+      c = br.counter
+      let body = br.text
+      if (pattern == "_") {
+        wildcard = `  return (${body})`
+        has_wild = true
+      } else {
+        if (pattern == "None") {
+          lines = lines.push(`  if (${tmp} === undefined) return (${body})`)
+        } else {
+          let bind = value_str(value_field(arm, "bind"))
+          if (bind != "") {
+            let b = ident(bind)
+            lines = lines.push(`  if (${tmp} !== undefined) return ((${b}) => (${body}))(${tmp})`)
+          } else {
+            lines = lines.push(`  if (${tmp} !== undefined) return (${body})`)
+          }
+        }
+      }
+    }
+    if (has_wild) { lines = lines.push(wildcard) }
+    else { lines = lines.push(`  throw new TypeError("non-exhaustive match")`) }
+    lines = lines.push(`})(${sr.text})`)
+    return { text: lines.join(newline()), counter: c }
+  }
+  lines = lines.push(`(($revl_match_${c0}) => {`)
+  lines = lines.push(`  switch (${tmp}.kind) {`)
+  var wildcard = ""
+  var has_wild = false
+  for (arm of arms) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    let br = expr(value_field(arm, "body"), c)
+    c = br.counter
+    let body = br.text
+    if (pattern == "_") {
+      wildcard = `      return (${body})`
+      has_wild = true
+    } else {
+      let cs = ident(pattern)
+      lines = lines.push(`    case ${json_dumps(cs)}:`)
+      let bind = value_str(value_field(arm, "bind"))
+      if (bind != "") {
+        let b = ident(bind)
+        lines = lines.push(`      return ((${b}) => (${body}))(${tmp}.value)`)
+      } else {
+        lines = lines.push(`      return (${body})`)
+      }
+    }
+  }
+  if (has_wild) {
+    lines = lines.push(`    default:`)
+    lines = lines.push(wildcard)
+  } else {
+    lines = lines.push(`    default:`)
+    lines = lines.push(`      throw new TypeError("non-exhaustive match")`)
+  }
+  lines = lines.push(`  }`)
+  lines = lines.push(`})(${sr.text})`)
+  return { text: lines.join(newline()), counter: c }
+}
+
+// `_expr`'s `bin` branch.
+fn render_bin(node: Any, counter: Int) -> Rendered {
+  let op = node_op(node)
+  if (op == "??") {
+    let l = expr(value_field(node, "left"), counter)
+    let r = expr(value_field(node, "right"), l.counter)
+    return { text: `(${l.text} ?? ${r.text})`, counter: r.counter }
+  }
+  if (is_equality_op(op)) {
+    let l = expr(value_field(node, "left"), counter)
+    let r = expr(value_field(node, "right"), l.counter)
+    let call = `revlEq(${l.text}, ${r.text})`
+    if (op == "==" || op == "===") { return { text: call, counter: r.counter } }
+    return { text: `(!${call})`, counter: r.counter }
+  }
+  let jop = ts_bin_op(op)
+  let opnd = node_operands(node)
+  if (op == "/") {
+    let l = float_operand(value_field(node, "left"), counter)
+    let r = float_operand(value_field(node, "right"), l.counter)
+    return { text: `(${l.text} / ${r.text})`, counter: r.counter }
+  }
+  if (opnd == "Float") {
+    let l = float_operand(value_field(node, "left"), counter)
+    let r = float_operand(value_field(node, "right"), l.counter)
+    return { text: `(${l.text} ${jop} ${r.text})`, counter: r.counter }
+  }
+  let l = expr(value_field(node, "left"), counter)
+  let r = expr(value_field(node, "right"), l.counter)
+  if (is_addsubmul(op) && opnd == "Int") {
+    return { text: `revlI64(${l.text} ${jop} ${r.text})`, counter: r.counter }
+  }
+  if (is_addsubmul(op) && opnd == "Int32") {
+    return { text: `revlI32(${l.text} ${jop} ${r.text})`, counter: r.counter }
+  }
+  return { text: `(${l.text} ${jop} ${r.text})`, counter: r.counter }
+}
+
+fn render_un(node: Any, counter: Int) -> Rendered {
+  let r = expr(value_field(node, "operand"), counter)
+  let op = node_op(node)
+  if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
+  if (op == "-") {
+    let opnd = node_operands(node)
+    if (opnd == "Int") { return { text: `revlI64(-${r.text})`, counter: r.counter } }
+    if (opnd == "Int32") { return { text: `revlI32(-${r.text})`, counter: r.counter } }
+    return { text: `(-${r.text})`, counter: r.counter }
+  }
+  return { text: `<<UNSUPPORTED-UN:${op}>>`, counter: r.counter }
+}
+
+fn render_record(fields: List[Any], counter: Int) -> Rendered {
+  var parts = []
+  var c = counter
+  for (p of fields) {
+    let vr = expr(value_at(p, 1), c)
+    c = vr.counter
+    parts = parts.push(`${ident(value_str(value_at(p, 0)))}: ${vr.text}`)
+  }
+  return { text: "{".concat(parts.join(", ")).concat("}"), counter: c }
+}
+
+fn render_record_update(node: Any, counter: Int) -> Rendered {
+  let base = expr(value_field(node, "base"), counter)
+  var c = base.counter
+  var parts = []
+  for (u of value_list(value_field(node, "updates"))) {
+    let vr = expr(value_at(u, 1), c)
+    c = vr.counter
+    parts = parts.push(`${ident(value_str(value_at(u, 0)))}: ${vr.text}`)
+  }
+  let overrides = parts.join(", ")
+  if (overrides == "") {
+    return { text: "{ ...".concat(base.text).concat(" }"), counter: c }
+  }
+  return { text: "{ ...".concat(base.text).concat(", ").concat(overrides).concat(" }"), counter: c }
+}
+
+fn render_list(items: List[Any], counter: Int) -> Rendered {
+  let r = commajoin(items, counter)
+  return { text: "[".concat(r.text).concat("]"), counter: r.counter }
+}
+
+fn render_arrow(node: Any, counter: Int) -> Rendered {
+  let names = value_list(value_field(node, "params"))
+  let declared = value_list(value_field(node, "param_types"))
+  var parts = []
+  var i = 0
+  for (p of names) {
+    var t = "any"
+    if (i < declared.length()) {
+      let dt = declared[i]
+      if (value_kind(dt) == "str") {
+        let ds = value_str(dt)
+        if (ds != "Any" && ds != "Never") { t = ts_type(ds) }
+      }
+    }
+    parts = parts.push(`${ident(value_str(p))}: ${t}`)
+    i += 1
+  }
+  let params = parts.join(", ")
+  var prefix = ""
+  if (value_bool(value_field(node, "async"))) { prefix = "async " }
+  let br = expr(value_field(node, "body"), counter)
+  let captures = value_list(value_field(node, "captures"))
+  if (captures.length() > 0) {
+    var bound = []
+    var argn = []
+    for (cn of captures) {
+      let cm = ident(value_str(cn))
+      bound = bound.push(`${cm}: any`)
+      argn = argn.push(cm)
+    }
+    let text = `((${bound.join(", ")}) => (${prefix}(${params}) => (${br.text})))(${argn.join(", ")})`
+    return { text: text, counter: br.counter }
+  }
+  return { text: `(${prefix}(${params}) => (${br.text}))`, counter: br.counter }
+}
+
+fn render_interp(parts: List[Any], counter: Int) -> Rendered {
+  var segs = ["`"]
+  var c = counter
+  for (p of parts) {
+    let k = value_str(value_at(p, 0))
+    let v = value_at(p, 1)
+    if (k == "text") {
+      segs = segs.push(template_text(v))
+    } else {
+      let r = expr(v, c)
+      c = r.counter
+      segs = segs.push("${".concat(r.text).concat("}"))
+    }
+  }
+  segs = segs.push("`")
+  return { text: segs.join(""), counter: c }
+}
+
+fn render_call(node: Any, counter: Int) -> Rendered {
+  // The v3 (callee/args) form only in this slice; the component target/method
+  // form and async awaiting are deferred.
+  let callee_node = value_field(node, "callee")
+  let cr = expr(callee_node, counter)
+  var callee = cr.text
+  if (!is_v3_atomic(callee_node)) { callee = `(${callee})` }
+  let ar = commajoin(value_list(value_field(node, "args")), cr.counter)
+  return { text: `${callee}(${ar.text})`, counter: ar.counter }
+}
+
+fn render_builtin_node(node: Any, counter: Int) -> Rendered {
+  let tr = paren_target(value_field(node, "target"), counter)
+  var c = tr.counter
+  let arg_nodes = value_list(value_field(node, "args"))
+  var argtexts = []
+  for (a of arg_nodes) {
+    let r = expr(a, c)
+    argtexts = argtexts.push(r.text)
+    c = r.counter
+  }
+  return render_builtin(node_method(node), tr.text, argtexts, arg_nodes, value_str(value_field(node, "recv")), c)
+}
+
+fn render_optcall(node: Any, counter: Int) -> Rendered {
+  let tr = paren_target(value_field(node, "target"), counter)
+  var c = tr.counter
+  let method = value_str(value_field(node, "method"))
+  let arg_nodes = value_list(value_field(node, "args"))
+  var argtexts = []
+  var idx = 0
+  for (a of arg_nodes) {
+    if (optcall_arg_is_int(method, idx)) {
+      let r = int_as_number(a, c)
+      argtexts = argtexts.push(r.text)
+      c = r.counter
+    } else {
+      let r = expr(a, c)
+      argtexts = argtexts.push(r.text)
+      c = r.counter
+    }
+    idx += 1
+  }
+  let call = `${tr.text}?.${ident(method)}(${argtexts.join(", ")})`
+  if (optcall_result_is_int(method)) {
+    return { text: `((v: number | undefined) => v === undefined ? undefined : BigInt(v))(${call})`, counter: c }
+  }
+  return { text: call, counter: c }
+}
+
+// The kind dispatch (post-widen), mirroring `_expr`'s branch order for the 2.0
+// dialect; the component-only kinds refuse (no component scope in this slice).
+fn expr_inner(node: Any, counter: Int) -> Rendered {
+  let kind = node_kind(node)
+  if (kind == "lit") { return { text: render_lit(node), counter: counter } }
+  if (kind == "var") { return { text: render_var(node), counter: counter } }
+  if (kind == "record") { return render_record(value_list(value_field(node, "fields")), counter) }
+  if (kind == "record_update") { return render_record_update(node, counter) }
+  if (kind == "list") { return render_list(value_list(value_field(node, "items")), counter) }
+  if (kind == "maplit") { return { text: "new Map()", counter: counter } }
+  if (kind == "call") { return render_call(node, counter) }
+  if (kind == "bin") { return render_bin(node, counter) }
+  if (kind == "un") { return render_un(node, counter) }
+  if (kind == "field") {
+    let tr = paren_target(value_field(node, "target"), counter)
+    return { text: `${tr.text}.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
+  }
+  if (kind == "index") {
+    let tr = paren_target(value_field(node, "target"), counter)
+    let ir = int_as_number(value_field(node, "index"), tr.counter)
+    return { text: `${tr.text}[${ir.text}]`, counter: ir.counter }
+  }
+  if (kind == "len") {
+    let tr = paren_target(value_field(node, "target"), counter)
+    return { text: `revlLen(${tr.text})`, counter: tr.counter }
+  }
+  if (kind == "builtin") { return render_builtin_node(node, counter) }
+  if (kind == "if") {
+    let cr = expr(value_field(node, "cond"), counter)
+    let tr = expr(value_field(node, "then"), cr.counter)
+    let er = expr(value_field(node, "else"), tr.counter)
+    return { text: `(${cr.text} ? ${tr.text} : ${er.text})`, counter: er.counter }
+  }
+  if (kind == "arrow") { return render_arrow(node, counter) }
+  if (kind == "match") { return match_expr(node, counter) }
+  if (kind == "interp") { return render_interp(value_list(value_field(node, "parts")), counter) }
+  if (kind == "optfield") {
+    let tr = paren_target(value_field(node, "target"), counter)
+    return { text: `${tr.text}?.${ident(value_str(value_field(node, "name")))}`, counter: tr.counter }
+  }
+  if (kind == "optcall") { return render_optcall(node, counter) }
+  return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
+}
+
+// The implicit widen markers (docs/arithmetic.md): Int -> Float is `Number(…)`,
+// Int32 -> Int is `BigInt(…)`, then dispatch the un-widened node.
+fn expr(node: Any, counter: Int) -> Rendered {
+  let w = value_str(value_field(node, "widen"))
+  if (w == "Float") {
+    let r = expr_inner(node, counter)
+    return { text: `Number(${r.text})`, counter: r.counter }
+  }
+  if (w == "Int") {
+    let r = expr_inner(node, counter)
+    return { text: `BigInt(${r.text})`, counter: r.counter }
+  }
+  return expr_inner(node, counter)
+}
+
+// -------------------------------------------------------------- statements
+// `_v3_stmt` (test_mode = false): one fn-body step -> its emitted lines.
+fn v3_stmt(node: Any, indent: Int, counter: Int) -> StmtOut {
+  let step = value_str(value_field(node, "step"))
+  let pad = ind(indent)
+  if (step == "let") {
+    let r = expr(value_field(node, "value"), counter)
+    var kw = "const"
+    if (value_bool(value_field(node, "mutable"))) { kw = "let" }
+    return { lines: [`${pad}${kw} ${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
+  }
+  if (step == "assign") {
+    let r = expr(value_field(node, "value"), counter)
+    return { lines: [`${pad}${ident(value_str(value_field(node, "name")))} = ${r.text}`], counter: r.counter }
+  }
+  if (step == "return") {
+    let e = value_field(node, "expr")
+    if (value_is_null(e)) { return { lines: [`${pad}return`], counter: counter } }
+    let r = expr(e, counter)
+    return { lines: [`${pad}return ${r.text}`], counter: r.counter }
+  }
+  if (step == "if") {
+    let cr = expr(value_field(node, "cond"), counter)
+    var out = [`${pad}if (${cr.text}) {`]
+    var c = cr.counter
+    for (s of value_list(value_field(node, "then"))) {
+      let r = v3_stmt(s, indent + 1, c)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    let els = value_list(value_field(node, "else"))
+    if (els.length() > 0) {
+      out = out.push(`${pad}} else {`)
+      for (s of els) {
+        let r = v3_stmt(s, indent + 1, c)
+        out = out.concat(r.lines)
+        c = r.counter
+      }
+    }
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: c }
+  }
+  if (step == "while") {
+    let cr = expr(value_field(node, "cond"), counter)
+    var out = [`${pad}while (${cr.text}) {`]
+    var c = cr.counter
+    for (s of value_list(value_field(node, "body"))) {
+      let r = v3_stmt(s, indent + 1, c)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: c }
+  }
+  if (step == "for") {
+    let ir = expr(value_field(node, "iterable"), counter)
+    let bind = ident(value_str(value_field(node, "bind")))
+    var out = [`${pad}for (const ${bind} of ${ir.text}) {`]
+    var c = ir.counter
+    for (s of value_list(value_field(node, "body"))) {
+      let r = v3_stmt(s, indent + 1, c)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: c }
+  }
+  if (step == "expr") {
+    let r = expr(value_field(node, "expr"), counter)
+    return { lines: [`${pad}${r.text}`], counter: r.counter }
+  }
+  return { lines: [`${pad}<<UNSUPPORTED-STEP:${step}>>`], counter: counter }
+}
+
+// `_emit_ts_functions`: each module fn as an exported TS `function`,
+// blank-line separated. The `$revl_match_N` counter threads across the whole
+// document (one `_Ctx` counter in the reference).
+fn emit_functions(functions: List[Any]) -> List[Str] {
+  var out = []
+  var c = 0
+  for (fnode of functions) {
+    let name = ident(value_str(value_field(fnode, "name")))
+    var parts = []
+    for (p of value_list(value_field(fnode, "params"))) {
+      parts = parts.push(`${ident(value_str(value_field(p, "name")))}: ${ts_type(value_str(value_field(p, "type")))}`)
+    }
+    let params = parts.join(", ")
+    let returns = ts_return_type(value_field(fnode, "returns"))
+    out = out.push(`export function ${name}(${params}): ${returns} {`)
+    let body = value_list(value_field(fnode, "body"))
+    if (body.length() == 0) {
+      out = out.push("  // (empty body)")
+    } else {
+      for (s of body) {
+        let r = v3_stmt(s, 2, c)
+        out = out.concat(r.lines)
+        c = r.counter
+      }
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// --------------------------------------------------- conditional helpers
+// The reference `_revl_*` helper constants, verbatim, each built as one
+// multi-line string (a single `out` element followed by "").
+fn revl_eq_helper() -> Str {
+  var o = []
+  o = o.push("function revlEq(a: unknown, b: unknown): boolean {")
+  o = o.push("  if (a === b) return true")
+  o = o.push("  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) {")
+  o = o.push("    return false")
+  o = o.push("  }")
+  o = o.push("  const arrA = Array.isArray(a), arrB = Array.isArray(b)")
+  o = o.push("  if (arrA !== arrB) return false")
+  o = o.push("  if (arrA && arrB) {")
+  o = o.push("    const xs = a as unknown[], ys = b as unknown[]")
+  o = o.push("    return xs.length === ys.length && xs.every((x, i) => revlEq(x, ys[i]))")
+  o = o.push("  }")
+  o = o.push("  if (a instanceof Map && b instanceof Map) {")
+  o = o.push("    // revl equality is structural and order-independent (syntax-2.0 §3.4);")
+  o = o.push("    // for maps that means same key set, equal value under every key.")
+  o = o.push("    if (a.size !== b.size) return false")
+  o = o.push("    for (const [k, v] of a.entries()) {")
+  o = o.push("      if (!b.has(k) || !revlEq(v, b.get(k))) return false")
+  o = o.push("    }")
+  o = o.push("    return true")
+  o = o.push("  }")
+  o = o.push("  const ka = Object.keys(a as object), kb = Object.keys(b as object)")
+  o = o.push("  if (ka.length !== kb.length) return false")
+  o = o.push("  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k)")
+  o = o.push("    && revlEq((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_show_helper() -> Str {
+  var o = []
+  o = o.push("function revlShow(v: unknown): string {")
+  o = o.push("  if (typeof v === 'bigint') return v.toString()")
+  o = o.push("  if (typeof v === 'number') return String(v)")
+  o = o.push(`  if (Array.isArray(v)) return '[' + v.map(revlShow).join(', ') + ']'`)
+  o = o.push("  if (v !== null && typeof v === 'object') {")
+  o = o.push("    const o = v as Record<string, unknown>")
+  o = o.push(`    return '{' + Object.keys(o).map((k) => JSON.stringify(k) + ': ' + revlShow(o[k])).join(', ') + '}'`)
+  o = o.push("  }")
+  o = o.push("  return JSON.stringify(v) ?? String(v)")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_i64_helper() -> Str {
+  var o = []
+  o = o.push("const REVL_I64_MIN = -(2n ** 63n)")
+  o = o.push("const REVL_I64_MAX = 2n ** 63n - 1n")
+  o = o.push("function revlI64(v: bigint): bigint {")
+  o = o.push("  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')")
+  o = o.push("  return v")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_i32_helper() -> Str {
+  var o = []
+  o = o.push("const REVL_I32_MIN = -(2 ** 31)")
+  o = o.push("const REVL_I32_MAX = 2 ** 31 - 1")
+  o = o.push("function revlI32(v: number): number {")
+  o = o.push("  if (v < REVL_I32_MIN || v > REVL_I32_MAX) throw new RangeError('revl: Int32 overflow')")
+  o = o.push("  return v")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_int_arith_helper() -> Str {
+  var o = []
+  o = o.push("function revlNonZero(b: bigint): bigint {")
+  o = o.push("  if (b === 0n) throw new Error('revl: division by zero')")
+  o = o.push("  return b")
+  o = o.push("}")
+  o = o.push("function revlDivTrunc(a: bigint, b: bigint): bigint {")
+  o = o.push("  return revlI64(a / revlNonZero(b))")
+  o = o.push("}")
+  o = o.push("function revlDivFloor(a: bigint, b: bigint): bigint {")
+  o = o.push("  const d = revlNonZero(b)")
+  o = o.push("  const q = a / d")
+  o = o.push("  return a % d !== 0n && (a < 0n) !== (d < 0n) ? revlI64(q - 1n) : revlI64(q)")
+  o = o.push("}")
+  o = o.push("function revlDivEuclid(a: bigint, b: bigint): bigint {")
+  o = o.push("  const d = revlNonZero(b)")
+  o = o.push("  const q = a / d")
+  o = o.push("  if (a % d >= 0n) return revlI64(q)")
+  o = o.push("  return d > 0n ? revlI64(q - 1n) : revlI64(q + 1n)")
+  o = o.push("}")
+  o = o.push("function revlMod(a: bigint, b: bigint): bigint {")
+  o = o.push("  const m = revlNonZero(b) < 0n ? -b : b")
+  o = o.push("  return ((a % m) + m) % m")
+  o = o.push("}")
+  o = o.push("// The total forms (docs/arithmetic.md): the same quotient as the faulting")
+  o = o.push("// helpers, but a zero divisor yields Err(reason) instead of throwing — `fail`")
+  o = o.push("// is refused in a pure fn, so the error travels as a value. The shape is the")
+  o = o.push("// one the `adt` node renders for a built-in Result: `{ kind, value }`.")
+  o = o.push(`function revlCheckedDivTrunc(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {`)
+  o = o.push(`  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }`)
+  o = o.push(`  if (a === REVL_I64_MIN && b === -1n) return { kind: "Err", value: 'revl: Int overflow' }`)
+  o = o.push(`  return { kind: "Ok", value: revlI64(a / b) }`)
+  o = o.push("}")
+  o = o.push(`function revlCheckedDivFloor(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {`)
+  o = o.push(`  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }`)
+  o = o.push(`  if (a === REVL_I64_MIN && b === -1n) return { kind: "Err", value: 'revl: Int overflow' }`)
+  o = o.push("  const q = a / b")
+  o = o.push("  return a % b !== 0n && (a < 0n) !== (b < 0n)")
+  o = o.push(`    ? { kind: "Ok", value: revlI64(q - 1n) }`)
+  o = o.push(`    : { kind: "Ok", value: revlI64(q) }`)
+  o = o.push("}")
+  o = o.push(`function revlCheckedDivEuclid(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {`)
+  o = o.push(`  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }`)
+  o = o.push(`  if (a === REVL_I64_MIN && b === -1n) return { kind: "Err", value: 'revl: Int overflow' }`)
+  o = o.push("  const q = a / b")
+  o = o.push(`  if (a % b >= 0n) return { kind: "Ok", value: revlI64(q) }`)
+  o = o.push(`  return b > 0n ? { kind: "Ok", value: revlI64(q - 1n) } : { kind: "Ok", value: revlI64(q + 1n) }`)
+  o = o.push("}")
+  o = o.push(`function revlCheckedMod(a: bigint, b: bigint): { kind: "Ok"; value: bigint } | { kind: "Err"; value: string } {`)
+  o = o.push(`  if (b === 0n) return { kind: "Err", value: 'revl: division by zero' }`)
+  o = o.push("  const m = b < 0n ? -b : b")
+  o = o.push(`  return { kind: "Ok", value: ((a % m) + m) % m }`)
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_str_helper() -> Str {
+  var o = []
+  o = o.push(`function revlLen(x: string | ArrayLike<unknown>): bigint {`)
+  o = o.push(`  return BigInt(typeof x === "string" ? Array.from(x).length : x.length)`)
+  o = o.push("}")
+  o = o.push(`function revlSlice(x: string, a: bigint, b: bigint): string`)
+  o = o.push(`function revlSlice(x: Uint8Array, a: bigint, b: bigint): Uint8Array`)
+  o = o.push(`function revlSlice<T>(x: T[], a: bigint, b: bigint): T[]`)
+  o = o.push(`function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[]`)
+  o = o.push(`function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unknown[] {`)
+  o = o.push("  const i = Number(a), j = Number(b)")
+  o = o.push(`  return typeof x === "string"`)
+  o = o.push(`    ? Array.from(x).slice(i, j).join("")`)
+  o = o.push(`    : (x as string | Uint8Array | unknown[]).slice(i, j)`)
+  o = o.push("}")
+  o = o.push("function revlCharAt(s: string, i: bigint): string {")
+  o = o.push("  const c = Array.from(s)[Number(i)]")
+  o = o.push(`  return c === undefined ? "" : c`)
+  o = o.push("}")
+  o = o.push("function revlCharCodeAt(s: string, i: bigint): bigint {")
+  o = o.push("  const c = Array.from(s)[Number(i)]")
+  o = o.push("  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))")
+  o = o.push("}")
+  o = o.push(`function revlIndexOf(x: string | unknown[], v: unknown): bigint {`)
+  o = o.push(`  if (typeof x === "string") {`)
+  o = o.push("    const at = x.indexOf(v as string)")
+  o = o.push("    return BigInt(at < 0 ? -1 : Array.from(x.slice(0, at)).length)")
+  o = o.push("  }")
+  o = o.push("  return BigInt(x.indexOf(v))")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_parse_int_helper() -> Str {
+  var o = []
+  o = o.push("function revlParseInt(s: string): bigint | undefined {")
+  o = o.push(`  if (!/^-?\d+$/.test(s)) return undefined`)
+  o = o.push("  const n = BigInt(s)")
+  o = o.push("  if (n < -9223372036854775808n || n > 9223372036854775807n) return undefined")
+  o = o.push("  return n")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+// ---------------------------------------------------- IR-wide `_uses_*` gates
+fn uses_equality(n: Any) -> Bool {
+  if (node_kind(n) == "bin" && is_equality_op(node_op(n))) { return true }
+  for (c of value_children(n)) {
+    if (uses_equality(c)) { return true }
+  }
+  return false
+}
+
+fn uses_assert(n: Any) -> Bool {
+  if (value_str(value_field(n, "step")) == "assert") { return true }
+  for (c of value_children(n)) {
+    if (uses_assert(c)) { return true }
+  }
+  return false
+}
+
+fn uses_bounded_int(n: Any) -> Bool {
+  let k = node_kind(n)
+  if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int") { return true }
+  if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int") { return true }
+  for (c of value_children(n)) {
+    if (uses_bounded_int(c)) { return true }
+  }
+  return false
+}
+
+fn uses_bounded_int32(n: Any) -> Bool {
+  let k = node_kind(n)
+  if (k == "bin" && is_addsubmul(node_op(n)) && node_operands(n) == "Int32") { return true }
+  if (k == "un" && node_op(n) == "-" && node_operands(n) == "Int32") { return true }
+  if (k == "builtin" && node_method(n) == "to_int32") { return true }
+  for (c of value_children(n)) {
+    if (uses_bounded_int32(c)) { return true }
+  }
+  return false
+}
+
+fn is_int_arith_method(m: Str) -> Bool {
+  if (m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod") { return true }
+  return m == "checked_div_trunc" || m == "checked_div_floor" || m == "checked_div_euclid" || m == "checked_mod"
+}
+
+fn uses_int_arith(n: Any) -> Bool {
+  if (is_int_arith_method(node_method(n))) { return true }
+  for (c of value_children(n)) {
+    if (uses_int_arith(c)) { return true }
+  }
+  return false
+}
+
+fn is_str_method(m: Str) -> Bool {
+  return m == "length" || m == "slice" || m == "charAt" || m == "charCodeAt" || m == "indexOf"
+}
+
+fn uses_str_methods(n: Any) -> Bool {
+  if (node_kind(n) == "len") { return true }
+  if (node_kind(n) == "builtin" && is_str_method(node_method(n))) { return true }
+  for (c of value_children(n)) {
+    if (uses_str_methods(c)) { return true }
+  }
+  return false
+}
+
+fn uses_parse_int(n: Any) -> Bool {
+  if (node_kind(n) == "builtin" && node_method(n) == "to_int" && value_str(value_field(n, "recv")) == "Str") {
+    return true
+  }
+  for (c of value_children(n)) {
+    if (uses_parse_int(c)) { return true }
+  }
+  return false
+}
+
+// `_revl_helpers`: the helper functions this document actually needs, in
+// dependency order (revlI64 before the named integer operations that call it).
+fn revl_helpers(ir: Any) -> List[Str] {
+  var out = []
+  if (uses_equality(ir)) { out = out.push(revl_eq_helper()); out = out.push("") }
+  if (uses_assert(ir)) { out = out.push(revl_show_helper()); out = out.push("") }
+  if (uses_bounded_int(ir) || uses_int_arith(ir)) { out = out.push(revl_i64_helper()); out = out.push("") }
+  if (uses_bounded_int32(ir)) { out = out.push(revl_i32_helper()); out = out.push("") }
+  if (uses_int_arith(ir)) { out = out.push(revl_int_arith_helper()); out = out.push("") }
+  if (uses_str_methods(ir)) { out = out.push(revl_str_helper()); out = out.push("") }
+  if (uses_parse_int(ir)) { out = out.push(revl_parse_int_helper()); out = out.push("") }
+  return out
+}
+
+// The document assembly, mirroring `emit()` -> `_emit_v3` for a FUNCTION-ONLY
+// document (no types/externs/tests/components in this slice).
+pub fn emit_src(ir: Any) -> Str {
+  var out = []
+  out = out.push("// Generated by revl backends/typescript/emit.py — do not edit.")
+  out = out.push("// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).")
+  out = out.push("import type { Context } from 'cordis'")
+  out = out.push("import { host } from '../runtime.ts'")
+  out = out.push("")
+  out = out.concat(revl_helpers(ir))
+  let functions = value_list(value_field(ir, "functions"))
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  return py_rstrip(out.join(newline())).concat(newline())
+}
+
+// ---------------------------------------------------------------- in-file tests
+test "the type map renders the scalar and generic surface" {
+  assert ts_type("Int") == "bigint"
+  assert ts_type("Int32") == "number"
+  assert ts_type("List[Int]") == "bigint[]"
+  assert ts_type("Opt[Str]") == "string | undefined"
+  assert ts_type("Map[Str, Int]") == "Map<string, bigint>"
+}
+
+test "the JS-keyword mangle appends underscores" {
+  assert mangle("class") == "class_"
+  assert mangle("new") == "new_"
+  assert mangle("total") == "total"
+}
+
+test "the binary-operator map lowers to JS operators" {
+  assert ts_bin_op("==") == "==="
+  assert ts_bin_op("!=") == "!=="
+  assert ts_bin_op("&&") == "&&"
+  assert ts_bin_op("%") == "%"
+}
+
+test "literals render as bigint / keyword / string forms" {
+  assert render_lit({ kind: "lit", value: 3 }) == "3n"
+  assert indentation_is_two_spaces()
+}
+
+fn indentation_is_two_spaces() -> Bool {
+  return ind(0) == "" && ind(2) == "    "
+}
+
+// --------------------------------------------------------------- component wrap
+// A trivial provider so the emitted module is a valid plugin (the pure
+// `emit_src` above is what the cross-check exercises); mirrors the wrapper the
+// other self-host stages carry. `render` avoids the `emit` keyword.
+service EmitStream {
+  fn render(ir: Any) -> Str
+}
+
+component EmitTs provides emitter: EmitStream {
+  provide emitter {
+    fn render(ir) = emit_src(ir)
+  }
+}

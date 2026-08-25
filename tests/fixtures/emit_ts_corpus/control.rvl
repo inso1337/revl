@@ -1,0 +1,18 @@
+fn loops(xs: List[Int]) -> Int {
+  var total = 0
+  var i = 0
+  while (i < xs.length()) { total += xs[i]; i += 1 }
+  for (x of xs) { total += x }
+  if (total > 0) { total = total - 1 } else { total = 0 }
+  return total
+}
+fn opt(o: Opt[Int]) -> Int {
+  return match o { Some(v) => v + 1, None => 0 }
+}
+fn wildcard(o: Opt[Int]) -> Int {
+  return match o { Some(v) => v, _ => 99 }
+}
+fn arrows(xs: List[Int]) -> List[Int] {
+  let f = (n: Int) => n + 1
+  return xs
+}
