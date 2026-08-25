@@ -1,0 +1,13 @@
+// slice 5 (item 226) — module-fn async: an async extern and the phase-2
+// async-colored module fn that reaches it. `fetch_it` colors `load` async by
+// the frontend fixed point, so the extern emits `export async function …:
+// Promise<T>` (verbatim @ts body), `load` emits the same signature form, and
+// every `var`-callee call to the async extern is awaited (let-bound + returned).
+extern emission async fn fetch_it(url: Str) -> Str
+  = @ts { return await Promise.resolve(url) }
+
+fn load(url: Str) -> Str {
+  let a = fetch_it(url)
+  let b = fetch_it(a)
+  return b
+}

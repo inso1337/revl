@@ -1,0 +1,13 @@
+// slice 5 (item 226) — async `match` (Opt form) in a colored module fn: the Some
+// arm reaches the async extern `lookup`, coloring `choose` async, so the match
+// lowers to the async IIFE `(await (async (…) => {…})(<scrut>))` with the binding
+// arm-arrow awaited and the inner `var`-callee call awaited too.
+extern emission async fn lookup(k: Str) -> Str
+  = @ts { return await Promise.resolve(k) }
+
+fn choose(o: Opt[Str]) -> Str {
+  return match o {
+    Some(v) => lookup(v),
+    None => "none",
+  }
+}
