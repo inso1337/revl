@@ -1,0 +1,42 @@
+// The GATE composition (roadmap item 151, the fully independent two-composition
+// shape). This is one half of the split of examples/gate_service.rvl: the py
+// provider ONLY. It declares `service Gate`, the `@py` compiler externs, and
+// `GateProvider` — and nothing else. It is compiled and deployed on its OWN
+// placement (examples/placement/gate_provider_network.toml), serving the gate
+// behind a TCP+mTLS listener at an address.
+//
+// The consumer half lives in a SEPARATE composition (gate_consumer.rvl) that
+// shares only the `service Gate` interface below and reaches this provider by
+// address alone — it never sees these externs. That is the decoupling item 151
+// finishes: not a shared IR with the compiler extern filtered out
+// (placement.ts_safe_ir), but two IRs that never overlapped on it.
+
+service Gate {
+  // Admit a candidate composition (its files as a {path: source} JSON object)
+  // against an optional running manifest, returning a verdict JSON
+  // {ok, diagnostic, admitted, manifest}. A refusal carries the compiler's
+  // why-trace verbatim in `diagnostic` (G2 rides back across the seam).
+  async fn admit(sourcesJson: Str, manifestJson: Str) -> Str
+
+  // A fixture-driven convenience so a placement *probe* (literal args only) can
+  // drive a real cross-tier admission: caseName is "collide" (refused by G2) or
+  // "clean" (admitted).
+  async fn admit_case(caseName: Str) -> Str
+}
+
+// The gate itself: `compile_files`, in-process on the py tier. `pure` because an
+// in-memory compile has no observable effect — which is what keeps `Gate.admit`
+// transport-safe. These `@py`-only externs live in the PROVIDER composition; the
+// consumer composition never declares them.
+extern pure fn host_gate_admit(sourcesJson: Str, manifestJson: Str) -> Str
+  = @py { from revl.gate_service import admit; return admit(sourcesJson, manifestJson) }
+
+extern pure fn host_gate_admit_case(caseName: Str) -> Str
+  = @py { from revl.gate_service import admit_case; return admit_case(caseName) }
+
+component GateProvider provides gate: Gate {
+  provide gate {
+    async fn admit(sourcesJson, manifestJson) = host_gate_admit(sourcesJson, manifestJson)
+    async fn admit_case(caseName) = host_gate_admit_case(caseName)
+  }
+}

@@ -773,6 +773,41 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             explicit_tls[pname] = {"cert": tconf["cert"], "key": tconf["key"],
                                    "ca": tconf["ca"], "identity": tconf["identity"]}
 
+    # --- two-composition topology (item 151): a `[remotes.<key>]` names a seam
+    # whose provider lives in a *separate* composition, on its own placement —
+    # item 56's stated non-goal made reachable ("the provider runs its own
+    # placement on its own machine"; docs/network-placement.md "Non-goals"). This
+    # composition declares only `service <service>` (the interface) and reaches
+    # the provider **by address alone**: it never names the provider component,
+    # never shares its IR, and — the point of the decoupling — its own IR never
+    # carries the provider's `@py` externs (e.g. the `compile_files` gate). So a
+    # remote seam is a network seam with no local owner, wired straight to the
+    # declared machine over the same TCP+mTLS transport (docs/network-path.md).
+    services = ir.get("services") or {}
+    remote_specs: dict[str, dict] = {}
+    for key, rconf in (placement.get("remotes") or {}).items():
+        rhost, rport, rservice = rconf.get("host"), rconf.get("port"), rconf.get("service")
+        if rhost is None or rport is None:
+            return abort(f"remote {key!r} needs both host and port")
+        if not rservice:
+            return abort(f"remote {key!r} needs a `service` (the interface it reaches)")
+        if rservice not in services:
+            return abort(f"remote {key!r} names service {rservice!r}, which this "
+                         "composition does not declare — a consumer reaches a "
+                         "remote only through a `service` it holds the interface for")
+        if key in owner:
+            return abort(f"remote {key!r} is also provided by local process "
+                         f"{owner[key]!r}; a key is either local or remote, not both")
+        if not any(key in requires[p] and key not in provides[p] for p in processes):
+            return abort(f"remote {key!r} is required by no process in this placement")
+        # SNI for the mTLS handshake: it must match a SAN on the remote's leaf.
+        # Defaults to the host, but a loopback IP is not a legal TLS servername
+        # (node refuses `servername: 127.0.0.1`), so a remote on an IP host names
+        # the DNS SAN its cert carries (`server_hostname = "localhost"`).
+        remote_specs[key] = {"service": rservice, "host": str(rhost),
+                             "port": int(rport), "rtt_ms": rconf.get("rtt_ms"),
+                             "server_hostname": str(rconf.get("server_hostname", rhost))}
+
     # which processes take part in a network seam (as provider or consumer)?
     network_processes: set[str] = set(addresses)  # a provider serves remotely
     for pname in processes:
@@ -782,6 +817,8 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             if owner.get(key) in addresses:
                 network_processes.add(pname)          # this consumer crosses TCP
                 network_processes.add(owner[key])     # to that provider
+            elif key in remote_specs:
+                network_processes.add(pname)          # this consumer dials a remote
 
     # identity per process (item 55): every network process must name one, and —
     # when an operator profile is configured — it must be a declared operator.
@@ -890,11 +927,24 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             if key in provides[pname]:
                 continue
             host = owner.get(key)
-            if host is None:
+            if host is None and key not in remote_specs:
                 return abort(f"key {key!r} required by {pname!r} is provided by no process")
             entry = {"methods": methods.get(service, []), "service": service,
                      "deadline": p_deadline}
-            if host in addresses:
+            if key in remote_specs:
+                # a remote seam (item 151): the provider is a *separate*
+                # composition on its own placement, reached by address alone.
+                # The consumer presents its own mTLS identity/CA (certs[pname])
+                # and verifies the remote against the same CA — the shared trust
+                # root two independent placements agree on out of band; there is
+                # no local process to own the key.
+                rs = remote_specs[key]
+                entry["endpoint"] = {"host": rs["host"], "port": rs["port"],
+                                     "tls": {**certs[pname],
+                                             "server_hostname": rs["server_hostname"]}}
+                entry["latency_ms"] = rs["rtt_ms"]
+                net_seams.append((pname, key, rs["host"], rs["port"], rs["rtt_ms"]))
+            elif host in addresses:
                 # a network seam: point the proxy at the machine over TCP+mTLS,
                 # and record its latency class (the configured RTT; the conductor
                 # also measures a real number once the provider is up, below).

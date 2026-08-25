@@ -1,0 +1,29 @@
+# The GATE placement (roadmap item 151, two-composition shape) — the provider
+# half. Compiled from examples/placement/gate_provider.rvl (py `GateProvider` +
+# the `@py` compiler externs), it boots the `Gate` service behind a TCP+mutual-
+# TLS listener at an address and serves it to whoever dials in. There is NO
+# consumer here: the consumer is a *separate* composition on its own placement
+# (gate_consumer_network.toml) that reaches this address by itself.
+#
+#   revl run examples/placement/gate_provider.rvl \
+#       --placement examples/placement/gate_provider_network.toml
+#
+# Certs: two independent placements cannot each mint their own throwaway CA and
+# still trust each other, so `generate_test_certs` (a single-placement
+# convenience) does NOT span this split. Both halves reference a **shared CA**
+# out of band — mint one leaf per identity off one CA (openssl, or
+# placement.generate_seam_certs) and point each [tls] at cert/key/ca
+# (docs/network-placement.md, "real deployment"). The paths below are relative
+# to this file; the test templates in a freshly minted shared CA.
+
+[processes.gate]
+components = ["GateProvider"]          # py tier — the @py extern calls compile_files
+[processes.gate.address]
+host = "127.0.0.1"
+port = 39471
+rtt_ms = 0.3
+[processes.gate.tls]
+identity = "gate"
+cert = "certs/seam_gate.crt"
+key = "certs/seam_gate.key"
+ca = "certs/seam_ca.crt"

@@ -1,0 +1,28 @@
+// The CONSUMER composition (roadmap item 151, the fully independent
+// two-composition shape). This is the other half of the split of
+// examples/gate_service.rvl: the ts consumer ONLY.
+//
+// It declares just the `service Gate` INTERFACE and `GateUser`. It has NO
+// externs at all — in particular not the `@py` `host_gate_admit*` /
+// `compile_files` gate, which lives only in the provider composition
+// (gate_provider.rvl). Compiled on its own, this composition's IR never
+// contains the compiler extern, so `placement.ts_safe_ir` has nothing to filter
+// (there is nothing to filter): the decoupling is real, not masked.
+//
+// `GateUser requires gate: Gate` with no local provider is not an error — the
+// key is satisfied by a `[remotes.gate]` address in the placement
+// (gate_consumer_network.toml), reaching a separately-deployed gate over
+// TCP+mTLS by address alone (docs/network-path.md; item 56's "the provider runs
+// its own placement on its own machine").
+
+service Gate {
+  async fn admit(sourcesJson: Str, manifestJson: Str) -> Str
+  async fn admit_case(caseName: Str) -> Str
+}
+
+// A consumer on the ts tier. It requires the gate so a real seam exists between
+// its process and the remote provider's; a placement probe drives
+// `gate.admit_case(...)` across that seam.
+component GateUser requires gate: Gate {
+  let scratch = effect Map.new() undo scratch.drop()
+}
