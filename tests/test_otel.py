@@ -155,6 +155,87 @@ def test_malformed_records_are_skipped():
     assert [s.component for s in spans if s.component] == ["A"]
 
 
+# ---- schema v2 tolerance: ts, failure code, emit events ------------------
+
+
+def _v2_trace_with_emit() -> list[dict]:
+    """The conforming cascade, plus a v2 `emit` event (an emission crossing) and
+    a `ts` on the transitions — everything a v2 trace can carry."""
+    return [
+        wr.make_event(0, 1, wr.LOAD, "PgDatabase", "PENDING -> ACTIVE",
+                      wr.cause_boot(), ts=100.0),
+        wr.make_event(1, 1, wr.LOAD, "UserCache", "PENDING -> ACTIVE",
+                      wr.cause_requirements(
+                          [{"component": "PgDatabase", "key": "db"}]), ts=100.1),
+        wr.make_event(2, 1, wr.WITHDRAW, "UserCache", "ACTIVE -> PENDING",
+                      wr.cause_provider_withdrawn("PgDatabase", "db"), ts=101.0),
+        wr.make_event(3, 1, wr.WITHDRAW, "PgDatabase", "ACTIVE -> DISPOSED",
+                      wr.cause_trigger("withdrawn by operator"), ts=101.1),
+        wr.make_emit_event(4, 1, "UserCache", "Audit", "audit.write",
+                           wr.cause_trigger("crossed by step-back to 2"),
+                           ts=101.2),
+    ]
+
+
+def test_emit_event_maps_to_a_plain_span_without_regressing_the_cascade():
+    spans = otel.build_spans(_v2_trace_with_emit())
+    by_id = _by_id(spans)
+    # the four cascade spans are exactly as before (root + 5 total now)
+    assert by_id["s0"].parent_id == otel.ROOT_SPAN_ID
+    assert by_id["s2"].parent_id == "s3"  # provider-withdrawn link intact
+    # the emit event became its own span: unset status, capability + key carried
+    emit = by_id["s4"]
+    assert emit.kind == wr.EMIT
+    assert emit.status == otel.STATUS_UNSET       # nothing settled
+    assert emit.attributes["revl.capability"] == "Audit"
+    assert emit.attributes["revl.emission.key"] == "audit.write"
+
+
+def test_ts_is_surfaced_on_spans_when_present():
+    spans = _by_id(otel.build_spans(_v2_trace_with_emit()))
+    assert spans["s0"].attributes["revl.ts"] == 100.0
+    # a v1 event (no ts) simply has no revl.ts attribute
+    v1 = _by_id(otel.build_spans(_cascade_trace()))
+    assert "revl.ts" not in v1["s0"].attributes
+
+
+def test_failure_code_is_surfaced_on_the_cause_event():
+    events = [
+        wr.make_event(0, 1, wr.LOAD, "Svc", "PENDING -> ACTIVE",
+                      wr.cause_boot()),
+        wr.make_event(1, 1, wr.WITHDRAW, "Svc", "ACTIVE -> FAILED",
+                      wr.cause_trigger("crashed", code="G7")),
+    ]
+    spans = _by_id(otel.build_spans(events))
+    failed = spans["s1"]
+    assert failed.status == otel.STATUS_ERROR
+    assert failed.events[0].attributes["revl.cause.code"] == "G7"
+    # a FAILED with no code carries no fabricated one
+    nocode = _by_id(otel.build_spans([
+        wr.make_event(0, 1, wr.WITHDRAW, "Svc", "ACTIVE -> FAILED",
+                      wr.cause_trigger("crashed")),
+    ]))
+    assert "revl.cause.code" not in nocode["s0"].events[0].attributes
+
+
+def test_v1_trace_builds_the_same_spans_as_before():
+    """A literal v1 trace (v:1, no ts/code/emit) must map identically — no new
+    attributes appear, and the span count/shape is unchanged."""
+    v1 = [
+        {"v": 1, "seq": 0, "event": "load", "component": "A",
+         "transition": "PENDING -> ACTIVE", "cause": {"kind": "boot"}},
+        {"v": 1, "seq": 1, "event": "withdraw", "component": "A",
+         "transition": "ACTIVE -> DISPOSED",
+         "cause": {"kind": "trigger", "detail": "op"}},
+    ]
+    spans = otel.build_spans(v1)
+    assert len(spans) == 3  # root + 2
+    for s in spans[1:]:
+        assert "revl.ts" not in s.attributes
+        assert "revl.capability" not in s.attributes
+        assert "revl.cause.code" not in s.events[0].attributes
+
+
 # ---- the optional-dependency contract ------------------------------------
 
 
@@ -215,6 +296,28 @@ def test_export_through_the_sdk_emits_spans_events_and_links():
     assert len(uc_withdraw.links) == 1
     trace_ids = {s.context.trace_id for s in finished.values()}
     assert len(trace_ids) == 1
+
+
+@needs_otel
+def test_export_of_a_v2_trace_with_an_emit_event_does_not_regress():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    result = otel.export_to_otel(_v2_trace_with_emit(), tracer_provider=provider)
+    provider.force_flush()
+    assert result["exported"] is True
+    finished = {s.name: s for s in exporter.get_finished_spans()}
+    assert "revl run" in finished
+    # the emit event exported as its own span alongside the cascade
+    assert "UserCache emit" in finished
+    assert finished["UserCache emit"].attributes["revl.capability"] == "Audit"
 
 
 @needs_otel

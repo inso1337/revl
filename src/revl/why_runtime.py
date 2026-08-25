@@ -40,11 +40,12 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # event kinds (the `event` field)
 LOAD = "load"          # a component came up (… -> ACTIVE)
 WITHDRAW = "withdraw"  # a component went down (ACTIVE -> DISPOSED/PENDING/FAILED)
+EMIT = "emit"          # (v2) an emission crossed an irreversible boundary at runtime
 
 # cause kinds (the `cause.kind` field)
 BOOT = "boot"                          # root: the composition booted
@@ -59,10 +60,17 @@ PROVIDER_WITHDRAWN = "provider-withdrawn"  # went down because a provider did
 
 
 def make_event(seq: int, gen: int, event: str, component: str,
-               transition: str, cause: dict) -> dict:
+               transition: str, cause: dict, ts: float | None = None) -> dict:
     """One trace record. `transition` is the observed state move
-    (``"ACTIVE -> DISPOSED"``); `cause` is one of the cause dicts below."""
-    return {
+    (``"ACTIVE -> DISPOSED"``); `cause` is one of the cause dicts below.
+
+    `ts` (v2, additive) is a monotonic-clock reading in fractional seconds
+    (:func:`time.monotonic`), stamped when the transition is recorded. It is
+    meaningful only for *durations within one run* — differences between two
+    events of the same run — never as a wall-clock time. Omitted (a v1 event)
+    means the recorder did not stamp one; a consumer treats duration as
+    unavailable rather than assuming zero."""
+    record = {
         "v": SCHEMA_VERSION,
         "seq": seq,
         "gen": gen,
@@ -71,14 +79,51 @@ def make_event(seq: int, gen: int, event: str, component: str,
         "transition": transition,
         "cause": cause,
     }
+    if ts is not None:
+        record["ts"] = ts
+    return record
+
+
+def make_emit_event(seq: int, gen: int, component: str, capability: str,
+                    key: str, cause: dict, ts: float | None = None) -> dict:
+    """One ``emit`` trace record (v2). Recorded when an emission crosses an
+    irreversible boundary at runtime (the driver's ``emissionsCrossed`` site).
+
+    Unlike a load/withdraw, an emit carries no `transition` (nothing settled to
+    a new fiber state — a boundary was crossed). It names the `capability` the
+    emission is scoped to (the target service) and the `key` — the emission
+    label ``"<key>.<method>"``. `cause` explains why the crossing happened.
+    A v1 reader never sees this kind; a v2 reader that does not model emissions
+    ignores it (it is neither a load nor a withdraw)."""
+    record = {
+        "v": SCHEMA_VERSION,
+        "seq": seq,
+        "gen": gen,
+        "event": EMIT,
+        "component": component,
+        "cause": cause,
+        "capability": capability,
+        "key": key,
+    }
+    if ts is not None:
+        record["ts"] = ts
+    return record
 
 
 def cause_boot() -> dict:
     return {"kind": BOOT}
 
 
-def cause_trigger(detail: str) -> dict:
-    return {"kind": TRIGGER, "detail": detail}
+def cause_trigger(detail: str, code: str | None = None) -> dict:
+    """Root cause: an external trigger. `code` (v2, additive) is the failure's
+    diagnostic code (from :func:`revl.diagnostics.classify`) when this trigger
+    is the settle into a ``FAILED`` state; omitted when the failure carries no
+    classifiable ``RevlError`` (a bare crash), so a consumer buckets it as
+    unclassified rather than under a fabricated code."""
+    cause = {"kind": TRIGGER, "detail": detail}
+    if code is not None:
+        cause["code"] = code
+    return cause
 
 
 def cause_requirements(providers: list[dict]) -> dict:
@@ -88,9 +133,17 @@ def cause_requirements(providers: list[dict]) -> dict:
     return {"kind": REQUIREMENTS, "providers": list(providers)}
 
 
-def cause_provider_withdrawn(component: str, key: str) -> dict:
-    """Went down because the provider of injected `key` withdrew."""
-    return {"kind": PROVIDER_WITHDRAWN, "component": component, "key": key}
+def cause_provider_withdrawn(component: str, key: str,
+                             code: str | None = None) -> dict:
+    """Went down because the provider of injected `key` withdrew. `code` (v2,
+    additive) is the diagnostic code when this dependent settled into ``FAILED``
+    rather than cleanly ``PENDING``/``DISPOSED``; omitted otherwise. The causal
+    *edge* is unchanged — the code is extra detail on *how* it went down, so the
+    cause-chain walk and the oracle read it exactly as before."""
+    cause = {"kind": PROVIDER_WITHDRAWN, "component": component, "key": key}
+    if code is not None:
+        cause["code"] = code
+    return cause
 
 
 # --------------------------------------------------------------------------
@@ -305,7 +358,8 @@ def render_chain(component: str, frames: list[Frame]) -> str:
     """Human rendering of a cause chain, mirroring `why.render`'s shape."""
     if not frames:
         return f"why {component}: nothing recorded for it in this trace"
-    verb = {LOAD: "was loaded", WITHDRAW: "was withdrawn"}.get(
+    verb = {LOAD: "was loaded", WITHDRAW: "was withdrawn",
+            EMIT: "crossed an emission boundary"}.get(
         frames[0].event, "transitioned")
     lines = [f"why {component} {verb}:"]
     width = max(len(f.component) for f in frames)
