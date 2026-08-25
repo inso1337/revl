@@ -1,0 +1,22 @@
+// A `fail` activation guard (item 238): an `if (..) { fail ".." }` body step
+// lowers the fail to `throw new CordisException(String.valueOf(..))`, and the
+// `fail` component step widens the core imports with `CordisException`. Also
+// exercises a config field with no default (`null`), a required-service effect,
+// and a body-level `if`. The trivial `fn` forces ir_version 3.
+fn seed() -> Int {
+  return 0
+}
+
+service Sink {
+  fn write(line: Str) -> Int
+}
+
+component Guard requires sink: Sink {
+  config { prefix: Str, level: Int = 1 }
+
+  effect sink.write(config.prefix) undo sink.write("bye")
+
+  if (config.level < 0) {
+    fail "bad level"
+  }
+}
