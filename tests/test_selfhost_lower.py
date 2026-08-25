@@ -28,6 +28,17 @@ more surfaces from lower.py, cross-checked here alongside slices 1+2:
   * the realm PRELUDE rule — an `isolate`/`intercept` placed after an effect/
     emit/await/provide is refused (lower.py `_lower_component`'s `action_seen`).
 
+Slice 5b adds the spawn/instance dimension (lower.py's `_check_spawn_*`),
+cross-checked here alongside every earlier slice. All three surfaces reduce to
+the same emission-capability machinery G4 runs, so they classify G4:
+  * capability attenuation (item 66) — an activation-body spawn may only grant a
+    child capabilities its spawner holds (`_check_spawn_attenuation`).
+  * G4/G6 spawn-emission bounds (decision 8) — a provide-method spawn may not
+    exceed the method's declared emission bound (`_check_spawn_emission_bounds`).
+  * an unmarked emission reached through a spawn handle (`_instance_get_call`).
+Spawn targets are runtime TEMPLATES, excluded from the static G2/G3 composition
+(decision 5/6) — so two workers providing one key compose when both are spawned.
+
 The slice mirrors three guarantees, in the reference's own checking order
 (per-component G4 then A1 during lowering, then G2 at link):
   * G4 (capability containment) — a plain-declared provider that reaches an
@@ -389,6 +400,40 @@ fn holder() -> Int { return apply_cb(() => tick()) }
 service S { fn go() -> Int }
 component C provides s: S { provide s { fn go() { return 0 } } }
 """),
+    # ---- slice 5b: the spawn/instance dimension ---------------------------
+    # Capability attenuation NARROWING: the canonical multi-tenant router — each
+    # per-tenant worker reaches only its own store (kv_a ⊆ {kv_a,kv_b}), so every
+    # spawn narrows. Both workers provide `worker`, but as spawn templates neither
+    # enters the static G2 table, so there is no provision conflict.
+    ("per-tenant spawn narrowing composes",
+     (ROOT / "examples" / "tenant_attenuation.rvl").read_text()),
+    # G4/G6 spawn-emission bounds ADMIT: an `emission[kv]` method spawning a
+    # target that emits only `kv` is within bound.
+    ("scoped method whose spawn target stays in bound admits", """
+service Store { emission[kv] fn write(row: Str) -> Int }
+service Task { emission[kv] fn go() -> Int }
+service Sup { emission[kv] fn run() -> Int }
+component Worker requires kv: Store provides task: Task {
+  provide task { fn go() { emit kv.write("x")  return 0 } }
+}
+component Supervisor requires kv: Store provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
+}
+"""),
+    # The marked twin of the unmarked-handle rejection: an emission through a
+    # spawn handle, correctly `emit`-marked from an `emission`-declared method —
+    # the boundary is marked one level up, so it is admitted.
+    ("marked emission through a spawn handle admits", """
+service Net { emission[net] fn send(msg: Str) -> Int }
+service Task { emission[net] fn run(prompt: Str) -> Int  fn status() -> Int }
+component Worker requires net: Net provides task: Task {
+  provide task { fn run(prompt: Str) { emit net.send(prompt)  return 1 }  fn status() = 0 }
+}
+service Sup { emission fn go(prompt: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup { fn go(prompt: Str) { let w = effect spawn Worker with { } undo w.dispose()  emit w.task.run(prompt)  return 0 } }
+}
+"""),
 ]
 
 
@@ -590,6 +635,41 @@ fn holder() -> Int { let f = tick   return 0 }
 service S { fn go() -> Int }
 component C provides s: S { provide s { fn go() { return 0 } } }
 """, "A1"),
+    # ---- slice 5b: the spawn/instance dimension --------------------------
+    # capability attenuation (item 66): an activation-body spawn that grants a
+    # child a boundary its spawner does not hold is widening — refused (the
+    # checked-in fixture; `code="G4"`).
+    ("g4 spawn widens a child's capability",
+     _fixture("g4_spawn_widens_capability"), "G4"),
+    # an unmarked emission reached THROUGH a spawn handle (`w.task.run`) must
+    # still be `emit`-marked, exactly as a required-service emission (fixture).
+    ("g4 unmarked emission through a spawn handle",
+     _fixture("g4_unmarked_handle_emission"), "G4"),
+    # G4/G6 spawn-emission bounds (decision 8): a PLAIN provide method spawning
+    # an emitting target — the emission cannot escape the (absent) bound by
+    # moving into a child.
+    ("g4 plain method spawns an emitting target", """service Store { emission[kv] fn write(row: Str) -> Int }
+service Task { emission[kv] fn go() -> Int }
+service Sup { fn run() -> Int }
+component Worker requires kv: Store provides task: Task {
+  provide task { fn go() { emit kv.write("x")  return 0 } }
+}
+component Supervisor provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
+}
+""", "G4"),
+    # G4/G6 spawn-emission bounds: an `emission[other]` method spawning a target
+    # that emits outside its scope (`kv` ∉ {other}).
+    ("g4 scoped method spawns a target that widens its caps", """service Store { emission[kv] fn write(row: Str) -> Int }
+service Task { emission[kv] fn go() -> Int }
+service Sup { emission[other] fn run() -> Int }
+component Worker requires kv: Store provides task: Task {
+  provide task { fn go() { emit kv.write("x")  return 0 } }
+}
+component Supervisor requires other: Store provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
+}
+""", "G4"),
 ]
 
 
@@ -826,6 +906,51 @@ def test_generated_leaky_arrows_agree(admit, seed, oneline):
         ref_tag, _ = _ref(src)
         # the callback either coerces (admit) or leaks (A1) — nothing else
         assert ref_tag in ("", "A1"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
+
+
+# ---------------------------------------------- spawn attenuation fuzz
+
+# The capability-attenuation differential (slice 5b): a supervisor that holds a
+# random subset of {kv_a, kv_b} (its `requires`) spawns, in its activation body,
+# a leaker that emits exactly one of them. The spawn narrows (admits) when the
+# leaked key is held, and widens (G4) when it is not — the two gates are each
+# other's oracle on the verdict AND the "granting it … holds only …" wording,
+# including which held set the message names.
+_STORE = {"kv_a": ("StoreA", "write_a"), "kv_b": ("StoreB", "write_b")}
+
+
+def _spawn_atten(rng: random.Random) -> str:
+    held = rng.choice([["kv_a"], ["kv_b"], ["kv_a", "kv_b"]])
+    reach = rng.choice(["kv_a", "kv_b"])
+    svc_a, op_a = _STORE["kv_a"]
+    svc_b, op_b = _STORE["kv_b"]
+    rsvc, rop = _STORE[reach]
+    reqs = " ".join(f"requires {k}: {_STORE[k][0]}" for k in held)
+    return (
+        f"service {svc_a} {{ emission[kv_a] fn {op_a}(r: Str) -> Int }}\n"
+        f"service {svc_b} {{ emission[kv_b] fn {op_b}(r: Str) -> Int }}\n"
+        "service Task { emission fn go() -> Int }\n"
+        f"component Leaker requires {reach}: {rsvc} provides task: Task {{\n"
+        f"  provide task {{ fn go() {{ emit {reach}.{rop}(\"x\")  return 0 }} }}\n"
+        "}\n"
+        f"component Supervisor {reqs} {{\n"
+        "  let l = effect spawn Leaker with { } undo l.dispose()\n"
+        "}\n")
+
+
+@pytest.mark.parametrize("oneline", [False, True])
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_spawn_attenuation_agree(admit, seed, oneline):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _spawn_atten(rng)
+        if oneline:
+            src = _oneline(src)
+        ref_tag, _ = _ref(src)
+        # a narrowing spawn admits; a widening spawn is refused by G4 — nothing else
+        assert ref_tag in ("", "G4"), \
             f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
         _agree(admit, src)
 

@@ -119,19 +119,48 @@
 //     an `async fn` service op must be implemented by an `async fn` method, and
 //     vice-versa — the `async` marker is part of the interface.
 //
+// Slice 5a (this file) closed the A1 arrow-color LEAK trio and the module-fn
+// first-class async-value refusal, on the `Async[T]` param-slot coercion model
+// (`_coerce_async_args`): a sync-typed arrow reaching a suspension leaks, while
+// the same arrow landing in an `Async[T]` slot is coerced and admits.
+//
+// Slice 5b (this file) mirrors the spawn/instance dimension core
+// (lower.py's `_check_spawn_*`, docs/design-v2-instances.md). A `spawn <Comp>`
+// is read at the token level (parser.rvl has no spawn production) and the
+// component it instantiates becomes a runtime TEMPLATE:
+//
+//   * templates are EXCLUDED from the static G2/G3 composition (decision 5/6),
+//     so two components providing one key both compose when both are spawned.
+//
+//   * G4/G6 spawn-emission bounds (`_check_spawn_emission_bounds`, decision 8):
+//     a spawn inside a PROVIDE method whose op is plain — or `emission[caps]` —
+//     may not spawn a target whose (closed) emission surface exceeds that bound.
+//
+//   * capability attenuation (`_check_spawn_attenuation`, item 66): a spawn in an
+//     ACTIVATION body may only grant a child capabilities its spawner HOLDS (its
+//     `requires` keys plus its own emit surface) — narrowing is sound, widening
+//     is not.
+//
+//   * an unmarked emission reached through a spawn HANDLE (`h.<key>.<op>(…)`,
+//     `_instance_get_call`) is the same G4 refusal as an unmarked required-
+//     service emission — enforced inline during the body walk.
+// All four carry `code="G4"` (the emission-capability machinery), so they
+// cross-check on tag AND message exactly like the other G4 surfaces.
+//
 // ============================================================ WHAT REMAINS
 // Deliberately out of this file, for follow-on lowerings (each a real part of
 // lower.py the gate does not yet mirror):
 //   * The type/arg-checking spine (checker.rvl already cross-checks typing).
-//   * A1's arrow-color LEAK surfaces: the sync-typed-arrow leak in a provide
-//     method (`_refuse_leaky_arrow`) and its module-fn twin
-//     (`_refuse_leaky_pure_arrow`), plus the module-fn first-class async-value
-//     refusal — these need the arrow async-color / `Async[T]` param-type
-//     coercion (`_coerce_async_args`) the gate's IR does not carry: soundly
-//     mirroring them requires modelling which arrow argument lands in an
-//     `Async[T]` parameter slot, so they are DEFERRED to a later slice.
-//   * The spawn/instance dimension entirely: templates, G4/G6 spawn-boundary
-//     bounds, capability attenuation (`_check_spawn_*`) — its own slice.
+//   * Two async-coloring APPROXIMATIONS this slice still carries (both documented
+//     at their sites): (a) rule-2 param-coloring — a fn that CALLS an async-typed
+//     parameter is not itself colored in `async_colored`; (b) leak-reach descends
+//     into a nested COERCED arrow rather than stopping at it. Neither is reached
+//     by any cross-checked fixture; closing them soundly needs richer arrow-color
+//     tracking, so they are DEFERRED.
+//   * Spawn sub-checks that carry NO `code` (so they are outside the differential
+//     tag vocabulary): `spawn`-config field validation, unknown/ambient spawn
+//     target, the bind-to-a-handle rule, and nested (non-statement) spawn
+//     discovery — the gate parses these forms without validating them.
 //   * State hand-off admission (`handoff`), multi-realm routing (`isolate … in
 //     realms(...)`), service replacement admission, ambient (running-manifest)
 //     composition, fault/lifecycle/prop tests, ir_version computation, and — of
@@ -181,7 +210,12 @@ type SvcD = { name: Str, methods: List[MSig] }
 // name a `let x = ...` introduces ("" when the statement binds nothing) — the
 // G1 name-resolution scope reads it (a component local is visible to every
 // provide method, exactly as the reference's `env.locals` is).
-type Stmt = { kind: Str, e: Expr, bind: Str }
+// `spawnTarget` (non-"") marks a statement as a `spawn <Comp> with { … }`
+// acquisition (`let h = effect spawn Comp …`): the component it instantiates.
+// parser.rvl's expression grammar has no spawn form, so the statement reader
+// recognises `spawn` at the token level (below) and records the target here,
+// while `bind` carries the handle name. Every non-spawn statement leaves it "".
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
@@ -444,10 +478,20 @@ fn mk_provkey(k: Str, r: Str) -> ProvKey { return { key: k, rlm: r } }
 // emission (`emit`) and the expression carried. `effect X undo Y` on one line
 // yields two statements.
 
-fn mkstmt(kind: Str, e: Expr) -> Stmt { return { kind: kind, e: e, bind: "" } }
+fn mkstmt(kind: Str, e: Expr) -> Stmt {
+  return { kind: kind, e: e, bind: "", spawnTarget: "" }
+}
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
-  return { kind: kind, e: e, bind: bind }
+  return { kind: kind, e: e, bind: bind, spawnTarget: "" }
+}
+
+// A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
+// statement (an acquisition, an action for the prelude rule); its expression is
+// an inert placeholder — the spawn's admission is decided from `spawnTarget`,
+// not by walking an expression parser.rvl cannot produce.
+fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
+  return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
@@ -481,6 +525,27 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
         kd = "effect"
         j += 1
       }
+    }
+    // `let h = effect spawn <Comp> with { … } [undo …]` — an instance
+    // acquisition (docs/design-v2-instances.md). parser.rvl has no spawn
+    // expression, so the target is read at the token level here and carried on
+    // the statement; the optional `with { … }` config block is skipped
+    // structurally (config-field validation is an out-of-slice, code-less
+    // refusal). The handle `bn` binds a local exactly as any `let` does.
+    if (kd == "effect" && atw(ts, j, "spawn")) {
+      let tgt = tkc(ts, j + 1).text
+      var sk = j + 2
+      if (atw(ts, sk, "with") && atk(ts, sk + 1, "{")) {
+        let ce = close_brace(ts, sk + 1)
+        if (ce != 0 - 1) { sk = ce }
+      }
+      let sp = mkstmt_spawn(bn, tgt)
+      if (atw(ts, sk, "undo")) {
+        let su = expr_at(ts, sk + 1)
+        if (!is_bad(su.e)) { return mk_srun([sp, mkstmt("undo", su.e)], su.i) }
+        return mk_srun([sp], hi)
+      }
+      return mk_srun([sp], sk)
     }
     let r = expr_at(ts, j)
     if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
@@ -1133,11 +1198,18 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // The emission (`ecaps`/`labels`), name-reach (`areach`) and value
 // (`avals`) accumulations still descend into arrows, exactly as the
 // reference's `_method_emissions` / `_calls_in` do.
+// `handles` maps a spawn-handle local (bound by `let h = effect spawn C …`) to
+// the target component C, so a provision-method call off a handle
+// (`h.<key>.<op>(…)`) can be resolved and its emission-marker discipline
+// enforced (lower.py's `_instance_get_call` unmarked-handle-emission G4).
+// `provKeySvc` is the global (component `#` key -> service) table those handle
+// reads resolve the op's service through (a target's provided key -> its SvcD).
 type Ctx = { svcs: Map[Str, SvcD], reqMap: Map[Str, Str], caps: CapsT,
              colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
              plainBody: Bool, fnAsyncSlots: Map[Str, List[Int]],
-             underArrow: Bool }
+             underArrow: Bool, handles: Map[Str, Str],
+             provKeySvc: Map[Str, Str] }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -1238,12 +1310,45 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
 fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   return match tg {
     Field(fl) => match fl.target {
-      Var(v) => req_call(v, fl.name, args, marked, cx, a),
-      _      => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+      Var(v)      => req_call(v, fl.name, args, marked, cx, a),
+      // `h.<key>.<op>(…)` — a doubly-nested field head is a candidate provision
+      // read off a spawn handle. If `h` is a known handle it is the instance
+      // path (checked like a `req` emission); otherwise it is walked as a value.
+      Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, a),
+      _           => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
     },
     Var(n) => fn_call(n, args, marked, cx, a),
     _      => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
   }
+}
+
+// The spawn-handle provision-method path (lower.py's `_instance_get_call`): a
+// call `h.<key>.<op>(…)` where `h` is a handle bound to `spawn <Comp>`. `<key>`
+// must be a provision of `<Comp>`, and if the resolved op is an `emission` it
+// crosses the boundary exactly as a required-service emission — an unmarked
+// call is the same G4 refusal, spelled `h.<key>.<op>`. A non-handle head, or an
+// op that is not an emission, is nothing special: it is walked as a value.
+fn handle_call(inner: FieldN, op: Str, args: List[Expr], tg: Expr,
+               marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  return match inner.target {
+    Var(h) => cx.handles.has(h)
+      ? handle_emit(h, inner.name, op, args, marked, cx, a)
+      : walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+    _ => walk_exprs(args, 0, marked, cx, walk_expr(tg, marked, cx, a)),
+  }
+}
+
+fn handle_emit(h: Str, key: Str, op: Str, args: List[Expr], marked: Bool,
+               cx: Ctx, a: Ac) -> Ac {
+  let comp = match cx.handles.lookup(h) { Some(c) => c, None => "" }
+  let svcName = match cx.provKeySvc.lookup(comp.concat("#").concat(key)) {
+    Some(s) => s, None => "" }
+  let decl = find_msig(svc_of(cx, svcName), op, 0)
+  if (decl.isEm && !marked) {
+    return ac_refuse(a, "G4", "call to emission `".concat(h).concat(".")
+      .concat(key).concat(".").concat(op).concat("` must be marked `emit` (G4)"))
+  }
+  return walk_exprs(args, 0, marked, cx, a)
 }
 
 // A head whose first character is upper-cased is a host/stdlib constructor
@@ -1379,7 +1484,8 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: union_into(cx.scopeNames, names), fnNames: cx.fnNames,
            compName: cx.compName, plainBody: cx.plainBody,
-           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow }
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -1389,7 +1495,8 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName, plainBody: cx.plainBody,
-           fnAsyncSlots: cx.fnAsyncSlots, underArrow: true }
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
+           handles: cx.handles, provKeySvc: cx.provKeySvc }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -1526,17 +1633,36 @@ fn build_maps(pg: Prog) -> Ctx {
     fi += 1
   }
   return mk_ctx(svcs, Map.empty(), caps, colored, emitting, ai,
-                [], fn_names_of(pg.fns), "", false, slots)
+                [], fn_names_of(pg.fns), "", false, slots, prov_key_svc(pg))
+}
+
+// The global (component `#` key -> service) table: every component's provided
+// keys mapped to the service each supplies. A spawn-handle read `h.<key>.<op>`
+// resolves the op's service through the target component's entry here.
+fn prov_key_svc(pg: Prog) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let c = pg.comps[ci]
+    var pi = 0
+    while (pi < c.provs.length()) {
+      let pv = c.provs[pi]
+      m = m.set(c.name.concat("#").concat(pv.key), pv.svcName)
+      pi += 1
+    }
+    ci += 1
+  }
+  return m
 }
 
 fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
           colored: List[Str], emitting: List[Str], ai: List[Str],
           scope: List[Str], fnn: List[Str], cnm: Str, plain: Bool,
-          slots: Map[Str, List[Int]]) -> Ctx {
+          slots: Map[Str, List[Int]], pks: Map[Str, Str]) -> Ctx {
   return { svcs: svcs, reqMap: rm, caps: caps, colored: colored,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, plainBody: plain, fnAsyncSlots: slots,
-           underArrow: false }
+           underArrow: false, handles: Map.empty(), provKeySvc: pks }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -1556,7 +1682,8 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            colored: base.colored, emittingNames: base.emittingNames,
            asyncExterns: base.asyncExterns, scopeNames: scope_names_of(comp),
            fnNames: base.fnNames, compName: comp.name, plainBody: false,
-           fnAsyncSlots: base.fnAsyncSlots, underArrow: false }
+           fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
+           handles: handles_of(comp), provKeySvc: base.provKeySvc }
 }
 
 // The same context switched into a provide-method (plain) body, where G1
@@ -1566,7 +1693,35 @@ fn ctx_plain(cx: Ctx) -> Ctx {
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames, compName: cx.compName,
            plainBody: true, fnAsyncSlots: cx.fnAsyncSlots,
-           underArrow: cx.underArrow }
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: cx.provKeySvc }
+}
+
+// The spawn handles a component binds: every `let h = effect spawn C …` in its
+// setup or any provide-method body maps `h` -> C. Over-approximated across the
+// whole component (a handle bound in one method is visible only there in the
+// reference's `type_env`, but merging all only ever RESOLVES more handle reads,
+// never turns a clean program's read into a refusal).
+fn handles_of(comp: CompD) -> Map[Str, Str] {
+  var m: Map[Str, Str] = handles_in(comp.setup, 0, Map.empty())
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      m = handles_in(pv.methods[mi].body, 0, m)
+      mi += 1
+    }
+    pi += 1
+  }
+  return m
+}
+
+fn handles_in(ss: List[Stmt], i: Int, m: Map[Str, Str]) -> Map[Str, Str] {
+  if (i >= ss.length()) { return m }
+  let s = ss[i]
+  let m2 = s.spawnTarget != "" ? m.set(s.bind, s.spawnTarget) : m
+  return handles_in(ss, i + 1, m2)
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -1993,6 +2148,341 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
   return ""
 }
 
+// ============================================================ spawn boundary
+//
+// The instance dimension (docs/design-v2-instances.md, lower.py's `_check_spawn_*`).
+// A `spawn <Comp> with { … }` acquisition instantiates a component as a runtime
+// TEMPLATE — excluded from the static G2/G3 composition (decision 5/6) — while
+// the spawner incurs two boundary obligations, decided after every component is
+// lowered:
+//
+//   * G4/G6 spawn-emission bounds (`_check_spawn_emission_bounds`, decision 8):
+//     a spawn inside a PROVIDE method whose service op is plain, or `emission[caps]`,
+//     may not spawn a target whose emission surface exceeds that bound — an
+//     emission cannot escape its clause by moving into a child.
+//
+//   * capability attenuation (`_check_spawn_attenuation`, item 66): a spawn in an
+//     ACTIVATION (setup) body may only grant a child capabilities its spawner
+//     HOLDS (its `requires` keys plus what its own body emits) — a spawn narrows
+//     lineage, never widens it, so a supervisor cannot amplify authority.
+//
+// A third, per-call obligation — an unmarked emission reached through a spawn
+// handle (`h.<key>.<op>(…)`) — is enforced inline during the body walk
+// (`handle_emit`, mirroring `_instance_get_call`), so it surfaces with the
+// per-component checks, before these two composition-time bounds.
+//
+// All three surfaces reduce to the SAME emission-capability machinery G4 already
+// runs, so they carry `code="G4"`; the two below run in the reference's order
+// (bounds, then attenuation) and only when the program actually spawns.
+
+type SpawnEdge = { parent: Str, child: Str }
+
+// Every spawn target across the program (setup + provide-method bodies): the
+// templates. A template never joins the static G2/G3 table.
+fn stmt_spawns(ss: List[Stmt], i: Int, acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  return stmt_spawns(ss, i + 1, s.spawnTarget != "" ? acc.push(s.spawnTarget) : acc)
+}
+
+fn comp_all_spawns(comp: CompD) -> List[Str] {
+  var out = stmt_spawns(comp.setup, 0, [])
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      out = append_stmts_str(out, stmt_spawns(pv.methods[mi].body, 0, []))
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+fn append_stmts_str(a: List[Str], b: List[Str]) -> List[Str] {
+  var out = a
+  var i = 0
+  while (i < b.length()) {
+    out = out.push(b[i])
+    i += 1
+  }
+  return out
+}
+
+fn spawn_templates(comps: List[CompD]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < comps.length()) {
+    out = union_into(out, comp_all_spawns(comps[i]))
+    i += 1
+  }
+  return out
+}
+
+fn spawn_edges(comps: List[CompD]) -> List[SpawnEdge] {
+  var out: List[SpawnEdge] = []
+  var i = 0
+  while (i < comps.length()) {
+    let tgts = comp_all_spawns(comps[i])
+    var k = 0
+    while (k < tgts.length()) {
+      out = out.push({ parent: comps[i].name, child: tgts[k] })
+      k += 1
+    }
+    i += 1
+  }
+  return out
+}
+
+// The capability an `emit` statement crosses (lower.py's `_collect_emit_caps`):
+// a required-service emission names its key (`req.op` -> the key); every other
+// emission — a host call, a handle emission — is the unnameable `*` boundary.
+fn emit_cap(e: Expr, reqSet: List[Str]) -> Str {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => contains(reqSet, v) ? v : "*",
+        _      => "*",
+      },
+      _ => "*",
+    },
+    _ => "*",
+  }
+}
+
+// The caps a component's OWN body emits (its `emit` statements) — the exact
+// reached surface attenuation measures (`_spawn_reached_surface`). Scans setup
+// and every provide-method body.
+fn emit_caps_in(ss: List[Stmt], i: Int, reqSet: List[Str], acc: List[Str]) -> List[Str] {
+  if (i >= ss.length()) { return acc }
+  let s = ss[i]
+  let a2 = s.kind == "emit" ? union_into(acc, [emit_cap(s.e, reqSet)]) : acc
+  return emit_caps_in(ss, i + 1, reqSet, a2)
+}
+
+fn own_emit_caps(comp: CompD, reqSet: List[Str]) -> List[Str] {
+  var out = emit_caps_in(comp.setup, 0, reqSet, [])
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      out = emit_caps_in(pv.methods[mi].body, 0, reqSet, out)
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+// The declaration-based emission surface (`_spawn_emission_surface`, decision 8):
+// every emission method of the services the component provides (uncapped -> `*`,
+// else its caps), plus its own emit caps. A conservative over-approximation.
+fn svc_emission_caps(comp: CompD, cx: Ctx, acc: List[Str]) -> List[Str] {
+  var out = acc
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let svc = svc_of(cx, comp.provs[pi].svcName)
+    var mi = 0
+    while (mi < svc.methods.length()) {
+      let m = svc.methods[mi]
+      if (m.isEm) {
+        out = m.caps.length() == 0 ? union_into(out, ["*"]) : union_into(out, m.caps)
+      }
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+fn emis_surface_of(comp: CompD, cx: Ctx, reqSet: List[Str]) -> List[Str] {
+  return svc_emission_caps(comp, cx, own_emit_caps(comp, reqSet))
+}
+
+// The req keys of a component — the boundaries it holds by wiring.
+fn comp_req_keys(comp: CompD) -> List[Str] {
+  return bind_names(comp.reqMap, 0, [])
+}
+
+type SurfMap = Map[Str, List[Str]]
+
+fn surf_get(m: SurfMap, k: Str) -> List[Str] {
+  return match m.lookup(k) { Some(v) => v, None => [] }
+}
+
+// Fold the spawn graph into a base surface until fixed: after this a component's
+// set includes everything its transitive spawned children can (`_spawn_surface_closure`).
+fn surf_closure(base: SurfMap, edges: List[SpawnEdge]) -> SurfMap {
+  var surf = base
+  var changed = true
+  while (changed) {
+    changed = false
+    var i = 0
+    while (i < edges.length()) {
+      let e = edges[i]
+      let before = surf_get(surf, e.parent)
+      let merged = union_into(before, surf_get(surf, e.child))
+      if (merged.length() > before.length()) {
+        surf = surf.set(e.parent, merged)
+        changed = true
+      }
+      i += 1
+    }
+  }
+  return surf
+}
+
+// Render an offending capability list (`*` -> an unnameable host boundary),
+// exactly as the capped-emission and attenuation diagnostics spell it.
+fn offending_join(xs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < xs.length()) {
+    if (i > 0) { out = out.concat(", ") }
+    if (xs[i] == "*") { out = out.concat("an unnameable host boundary") }
+    else { out = out.concat("`").concat(xs[i]).concat("`") }
+    i += 1
+  }
+  return out
+}
+
+// The reached (own-emit) surface, per component — the base attenuation closes.
+fn reach_surface_map(comps: List[CompD]) -> SurfMap {
+  var m: SurfMap = Map.empty()
+  var i = 0
+  while (i < comps.length()) {
+    let c = comps[i]
+    m = m.set(c.name, own_emit_caps(c, comp_req_keys(c)))
+    i += 1
+  }
+  return m
+}
+
+// The declaration-based emission surface, per component — the base bounds closes.
+fn emis_surface_map(comps: List[CompD], cx: Ctx) -> SurfMap {
+  var m: SurfMap = Map.empty()
+  var i = 0
+  while (i < comps.length()) {
+    let c = comps[i]
+    m = m.set(c.name, emis_surface_of(c, cx, comp_req_keys(c)))
+    i += 1
+  }
+  return m
+}
+
+// G4/G6 spawn-emission bounds. For every provide-method spawn, the target's
+// (closed) emission surface must fit the method's declared bound.
+fn bounds_method(pv: Provide, m: ProvM, cx: Ctx, closed: SurfMap) -> Str {
+  let decl = find_msig(svc_of(cx, pv.svcName), m.name, 0)
+  if (decl.name == "") { return "" }
+  let where = pv.svcName.concat(".").concat(m.name)
+  let tgts = stmt_spawns(m.body, 0, [])
+  var i = 0
+  while (i < tgts.length()) {
+    let tsurf = surf_get(closed, tgts[i])
+    if (tsurf.length() > 0) {
+      if (!decl.isEm) {
+        return "`".concat(where)
+          .concat("` is declared plain, but it spawns `").concat(tgts[i])
+          .concat("`, which emits through ").concat(quote_join(sort_strs(tsurf)))
+      }
+      if (decl.caps.length() > 0) {
+        let extra = sort_strs(minus_list(tsurf, decl.caps))
+        if (extra.length() > 0) {
+          let declared = comma_join(decl.caps)
+          let dstr = declared == "" ? "no capabilities" : declared
+          return "`".concat(where)
+            .concat("` is declared `emission[").concat(dstr)
+            .concat("]`, but it spawns `").concat(tgts[i])
+            .concat("`, which emits through ").concat(offending_join(extra))
+        }
+      }
+    }
+    i += 1
+  }
+  return ""
+}
+
+fn bounds_comp(comp: CompD, cx: Ctx, closed: SurfMap) -> Str {
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      let r = bounds_method(pv, pv.methods[mi], cx, closed)
+      if (r != "") { return r }
+      mi += 1
+    }
+    pi += 1
+  }
+  return ""
+}
+
+fn check_spawn_bounds(comps: List[CompD], ci: Int, cx: Ctx, closed: SurfMap) -> Str {
+  if (ci >= comps.length()) { return "" }
+  let r = bounds_comp(comps[ci], cx, closed)
+  if (r != "") { return r }
+  return check_spawn_bounds(comps, ci + 1, cx, closed)
+}
+
+// Capability attenuation. For every ACTIVATION (setup) spawn, the child's
+// (closed) reachable set must be a subset of what the spawner HOLDS.
+fn atten_comp(comp: CompD, base: SurfMap, closed: SurfMap) -> Str {
+  let held = union_into(comp_req_keys(comp), surf_get(base, comp.name))
+  let tgts = stmt_spawns(comp.setup, 0, [])
+  var i = 0
+  while (i < tgts.length()) {
+    let child = tgts[i]
+    let extra = sort_strs(minus_list(surf_get(closed, child), held))
+    if (extra.length() > 0) {
+      let hs = sort_strs(held)
+      let heldStr = hs.length() == 0 ? "no capabilities" : quote_join(hs)
+      return "`".concat(comp.name).concat("` spawns `").concat(child)
+        .concat("`, granting it ").concat(offending_join(extra))
+        .concat(", but `").concat(comp.name).concat("` holds only ").concat(heldStr)
+        .concat(" — a spawn may narrow a child's capabilities, never widen them")
+    }
+    i += 1
+  }
+  return ""
+}
+
+fn check_spawn_atten(comps: List[CompD], ci: Int, base: SurfMap, closed: SurfMap) -> Str {
+  if (ci >= comps.length()) { return "" }
+  let r = atten_comp(comps[ci], base, closed)
+  if (r != "") { return r }
+  return check_spawn_atten(comps, ci + 1, base, closed)
+}
+
+// The spawn-boundary gate: bounds then attenuation, both `code="G4"`, run only
+// when the program spawns (empty edge list -> no obligation, as in the reference).
+fn check_spawn(pg: Prog, cx: Ctx) -> Str {
+  let edges = spawn_edges(pg.comps)
+  if (edges.length() == 0) { return "" }
+  let emisClosed = surf_closure(emis_surface_map(pg.comps, cx), edges)
+  let bv = check_spawn_bounds(pg.comps, 0, cx, emisClosed)
+  if (bv != "") { return tagged("G4", bv) }
+  let reachBase = reach_surface_map(pg.comps)
+  let reachClosed = surf_closure(reachBase, edges)
+  let av = check_spawn_atten(pg.comps, 0, reachBase, reachClosed)
+  if (av != "") { return tagged("G4", av) }
+  return ""
+}
+
+// The static composition excludes spawn templates (decision 5/6): a template is
+// instantiated into a fresh per-instance realm, so it never enters G2/G3.
+fn non_template_comps(comps: List[CompD], templates: List[Str]) -> List[CompD] {
+  var out: List[CompD] = []
+  var i = 0
+  while (i < comps.length()) {
+    if (!contains(templates, comps[i].name)) { out = out.push(comps[i]) }
+    i += 1
+  }
+  return out
+}
+
 // ================================================================ link (G2/G3)
 //
 // The composition-time gate, mirroring lower.py's `_link`. Provision
@@ -2148,11 +2638,14 @@ fn arrow_join(xs: List[Str]) -> Str {
 }
 
 fn link_g2_g3(pg: Prog) -> Str {
-  let g2 = g2_scan(pg.comps, 0, [])
+  // spawn templates are runtime instances, not static composition members — they
+  // take no place in the G2/G3 table or loadOrder (decision 5/6).
+  let live = non_template_comps(pg.comps, spawn_templates(pg.comps))
+  let g2 = g2_scan(live, 0, [])
   if (g2.msg != "") { return tagged("G2", g2.msg) }
-  let edges = build_edges(pg.comps, 0, g2.provs, Map.empty())
+  let edges = build_edges(live, 0, g2.provs, Map.empty())
   if (edges.msg != "") { return tagged("G3", edges.msg) }
-  let cyc = find_cycle(pg.comps, 0, edges.succ, Map.empty())
+  let cyc = find_cycle(live, 0, edges.succ, Map.empty())
   if (cyc.length() > 0) {
     return tagged("G3", "dependency cycle: ".concat(arrow_join(cyc)).concat(" (G3)"))
   }
@@ -2182,6 +2675,11 @@ pub fn admit_src(src: Str) -> Str {
     if (v != "") { return v }
     ci += 1
   }
+  // the spawn-boundary bounds (G4/G6) and capability attenuation (item 66) run
+  // once every component is lowered, before the G2/G3 link — the reference's
+  // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
+  let sv = check_spawn(pg, base)
+  if (sv != "") { return sv }
   return link_g2_g3(pg)
 }
 
@@ -2330,4 +2828,104 @@ test "a module fn's sync arrow reaching an async callable leaks (A1)" {
 
 test "a module fn's arrow into an Async[T] slot is coerced (admits)" {
   assert admit_src("extern emission async fn tick() -> Int = @py { return 1 } fn apply_cb(cb: () -> Async[Int]) -> Int { return cb() } fn holder() -> Int { return apply_cb(() => tick()) } service S { fn go() -> Int } component C provides s: S { provide s { fn go() { return 0 } } }") == ""
+}
+
+// ---- slice 5b: the spawn/instance dimension -------------------------------
+
+// Capability attenuation (item 66): an activation-body spawn may only grant a
+// child capabilities its spawner HOLDS. Supervisor holds only `kv_a` but spawns
+// Leaker, which reaches `kv_b` — widening, refused (G4).
+test "a spawn that widens a child's capabilities is refused (G4)" {
+  let v = admit_src("""service StoreA { emission[kv_a] fn wa(r: Str) -> Int }
+service StoreB { emission[kv_b] fn wb(r: Str) -> Int }
+service Task { emission fn go() -> Int }
+component Leaker requires kv_b: StoreB provides task: Task {
+  provide task { fn go() { emit kv_b.wb("x")  return 0 } }
+}
+component Supervisor requires kv_a: StoreA {
+  let l = effect spawn Leaker with { } undo l.dispose()
+}""")
+  assert v == "G4|`Supervisor` spawns `Leaker`, granting it `kv_b`, but `Supervisor` holds only `kv_a` — a spawn may narrow a child's capabilities, never widen them"
+}
+
+// An emission reached through a spawn handle (`w.task.run`) must still be marked
+// `emit` — reaching it through a handle instead of a `requires` key does not
+// exempt it (G4, lower.py's `_instance_get_call`).
+test "an unmarked emission through a spawn handle is refused (G4)" {
+  let v = admit_src("""service Net { emission[net] fn send(m: Str) -> Int }
+service Task { emission[net] fn run(p: Str) -> Int  fn status() -> Int }
+component Worker requires net: Net provides task: Task {
+  provide task { fn run(p: Str) { emit net.send(p)  return 1 }  fn status() = 0 }
+}
+service Sup { emission fn go(p: Str) -> Int }
+component Supervisor provides sup: Sup {
+  provide sup { fn go(p: Str) { let w = effect spawn Worker with { } undo w.dispose()  let r = w.task.run(p)  return r } }
+}""")
+  assert v == "G4|call to emission `w.task.run` must be marked `emit` (G4)"
+}
+
+// G4/G6 spawn-emission bounds (decision 8): a PLAIN provide method may not spawn
+// a target that emits — the emission cannot escape the (absent) bound by moving
+// into a child.
+test "a plain method spawning an emitting target is refused (G4)" {
+  let v = admit_src("""service Store { emission[kv] fn write(row: Str) -> Int }
+service Task { emission[kv] fn go() -> Int }
+service Sup { fn run() -> Int }
+component Worker requires kv: Store provides task: Task {
+  provide task { fn go() { emit kv.write("x")  return 0 } }
+}
+component Supervisor provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
+}""")
+  assert v == "G4|`Sup.run` is declared plain, but it spawns `Worker`, which emits through `kv`"
+}
+
+// An `emission[kv]`-scoped method spawning a target that emits outside its
+// declared caps is refused, the caps named (G4).
+test "a scoped method spawning a target that widens its caps is refused (G4)" {
+  let v = admit_src("""service Store { emission[kv] fn write(row: Str) -> Int }
+service Task { emission[kv] fn go() -> Int }
+service Sup { emission[other] fn run() -> Int }
+component Worker requires kv: Store provides task: Task {
+  provide task { fn go() { emit kv.write("x")  return 0 } }
+}
+component Supervisor requires other: Store provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
+}""")
+  assert v == "G4|`Sup.run` is declared `emission[other]`, but it spawns `Worker`, which emits through `kv`"
+}
+
+// The admitted twin: an `emission[kv]`-scoped method spawning a target that
+// emits only `kv` is within bound — admitted. The spawn target `Worker` is a
+// template, so its `task` provision never collides at G2 either.
+test "a scoped method whose spawn target stays in bound admits" {
+  assert admit_src("""service Store { emission[kv] fn write(row: Str) -> Int }
+service Task { emission[kv] fn go() -> Int }
+service Sup { emission[kv] fn run() -> Int }
+component Worker requires kv: Store provides task: Task {
+  provide task { fn go() { emit kv.write("x")  return 0 } }
+}
+component Supervisor requires kv: Store provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()  return 0 } }
+}""") == ""
+}
+
+// A multi-tenant router that spawns one worker per tenant NARROWS each instance
+// to its own store (`kv_a`/`kv_b` ⊆ {kv_a, kv_b}) — least authority per
+// instance, admitted. Both workers provide `worker`, but as templates neither
+// enters the static G2 table, so there is no provision conflict.
+test "per-tenant spawn narrowing composes (attenuation admits)" {
+  assert admit_src("""service Store { emission[kv_a] fn write_a(row: Str) -> Int }
+service StoreB { emission[kv_b] fn write_b(row: Str) -> Int }
+service Worker { emission fn tenant() -> Str }
+component TenantAWorker requires kv_a: Store provides worker: Worker {
+  provide worker { fn tenant() { emit kv_a.write_a("a")  return "a" } }
+}
+component TenantBWorker requires kv_b: StoreB provides worker: Worker {
+  provide worker { fn tenant() { emit kv_b.write_b("b")  return "b" } }
+}
+component Router requires kv_a: Store requires kv_b: StoreB {
+  let a = effect spawn TenantAWorker with { } undo a.dispose()
+  let b = effect spawn TenantBWorker with { } undo b.dispose()
+}""") == ""
 }
