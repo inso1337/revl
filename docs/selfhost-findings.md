@@ -970,3 +970,73 @@ becomes an emit step that routes to `_emit_component_new`. Repro: `requires.rvl`
 store.write(k, v)` as a statement) routes NEW. A self-host author reaching for an
 effectful fixture has to know this split; a one-line note in the guide
 ("`= emit` is an expression, block `emit` is a step") would save the round-trip.
+
+---
+
+## `selfhost/emit_java.rvl` — modern component path, config/req/effectful (item 225)
+
+Slice 3 addendum for the Java tier: the config / required-service-routing /
+effectful-method-body corner of `_emit_component_modern`, byte-exact against
+`backends/java/emit.py`. Two fixtures (`comp_config_req.rvl`, `comp_multi_effect.rvl`).
+
+### Reused the rust seam: `rn` as a Ctx FIELD, not a threaded `rename` param (kit ergonomics, item 189)
+Item 218's rust port solved this and the same seam paid off verbatim for Java.
+The reference threads `rename: dict` as a separate parameter through every
+`_expr` recursion; the port carries `rn: Map[Str,Str]` on the already-threaded
+`Ctx`. Only three kinds consult it (`name`/`req`, plus the component-form v1
+`call` whose receiver renders through it) — `config` renders a BARE `_ident`
+with no rename in the Java reference, unlike rust's `self.config.field.clone()`.
+Cost of adding a 7th field to the erased-IR `Ctx` record: two literal sites
+(`build_ctx`, the new `set_rn`) — immutability churn, but bounded, and slices 1-3
+stay byte-exact passing `rn = Map.empty()` with zero call-site edits.
+
+### State-threading tax (item 195): the match counter RESETS per component
+`_method_body_lines` renders method bodies through `_expr`, which threads the
+document-wide `_V3Ctx._match_counter` (a mutable field). The port threads it as
+an `Int` (`Sout.counter`) through `method_body_lines` and ACROSS the methods of
+one component. The subtle part: the reference constructs a FRESH `_V3Ctx` inside
+`_emit_component_modern`, so the counter RESETS to 0 per component and is
+independent of the free-function bodies. The port starts `counter = 0` per
+component to match. Nothing in the covered corpus puts a `match` in a provide
+method, so the value never leaves 0 — but had the port threaded the free-function
+counter in instead, a component-body `match` would have silently diverged. The
+immutable-record threading forced the question the reference's in-place mutation
+hides; getting it right was a read of WHERE the reference news-up the ctx.
+
+### Friction: reserved-keyword collisions, now on the COMPONENT vocabulary (LOW, recurs)
+The item-207/218 note (`service`/`component`/`provides`/`acquire`/`undo` are
+keywords) claims two more: `requires` and `provides` cannot name a local, so the
+natural `let requires = value_field(comp, "requires")` / `let provides = …`
+parse-fail (`expected ident, found 'requires'`). Renamed to `reqs_m`/`provs_m`.
+Same collision class as every prior slice — the guide's "name IR-walking locals
+obliquely" caveat should list the component header words
+(`reqs`/`provs`/`caps`) next to the step words.
+
+### Two reference behaviours replicated verbatim, NOT "corrected" (latent keyword divergences)
+The differential oracle stays the arbiter, so both were mirrored exactly:
+(1) a provider method emits its PARAMETER with the RAW param name (`{p}`) while
+the method BODY references the same param MANGLED (`_ident(p)`) — identical for
+every non-keyword param, a latent divergence for a param literally named `long`
+that neither backend exercises; (2) `_param_type`/`_method_return` look up the
+service method by the MANGLED method name against a service table keyed by the
+ORIGINAL name — again identical unless a service op is a Java keyword. Both are
+the reference's shapes; the port carries them rather than "fixing" one side.
+
+### Note: the G4 emission gate shapes an effectful FIXTURE (LOW, mirrors the rust note)
+`effect X undo Y` must wrap a REVERSIBLE observation (a service `fn`); an
+`emission fn` must be `emit`-marked, not `effect`-ed. So an effect body cannot
+acquire through an emission — `effect bus.send(..)` where `send` is an
+`emission fn` fails `call to emission 'bus.send' must be marked emit (G4)`. The
+fixture had to add an observation `fn touch(..)` for the `effect`/`undo` pair and
+keep `send`/`retract` for the `emit`/`compensate` pair. A self-host author
+writing an effectful Java fixture hits the identical split the rust note flags.
+
+### No NEW compiler defect found — the port matches byte-for-byte
+Both modern fixtures are byte-identical across the provider-class shape
+(`Context`/`Context.EffectScope fx`/`<Svc>` fields + ctor), `_method_body_lines`
+(`return`/`effect`+`undo`/`emit`+`compensate`), `_emit_plugin_ctors` (param + no-arg
+ctors, `_config_default_lit`/`_zero_java_value`), and the `apply` effect-scope /
+`ctx.get` / A8 self-revert try-catch. A host-`Map` `let-effect` component
+(`demo/components/user_cache.rvl`) routes to the loud
+`<<DEFER-component-nonsimple:UserCache>>` marker instead of mis-emitting — the
+`_emit_host_stubs` `HashMap<String,V>` per-site inference stays slice 4+.

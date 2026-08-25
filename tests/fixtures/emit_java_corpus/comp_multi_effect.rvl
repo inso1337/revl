@@ -1,0 +1,38 @@
+// A modern component with NO config and MULTIPLE provisions, exercising the
+// no-arg-only `<Comp>Plugin` ctor branch, two provider classes routed in one
+// `apply`, an `emit ... compensate` pair (two `fx.track` lines), and an
+// effect/undo body in a void observation method. `fn` forces ir_version 3.
+fn origin() -> Int {
+  return 7
+}
+
+service Bus {
+  emission fn send(topic: Str) -> Int
+  emission fn retract(topic: Str) -> Int
+  fn peek() -> Str
+  fn touch(topic: Str) -> Int
+}
+
+service Feed {
+  emission fn publish(item: Str)
+  fn latest() -> Str
+}
+
+service Ctrl {
+  fn stop()
+}
+
+component Relay requires bus: Bus provides feed: Feed, ctrl: Ctrl {
+  provide feed {
+    fn publish(item) {
+      emit bus.send(item) compensate bus.retract(item)
+    }
+    fn latest() = bus.peek()
+  }
+  provide ctrl {
+    fn stop() {
+      effect bus.touch("start")
+      undo   bus.touch("start")
+    }
+  }
+}
