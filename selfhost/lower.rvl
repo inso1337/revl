@@ -2910,7 +2910,470 @@ pub fn admit_tag(src: Str) -> Str {
   return v.slice(0, bar)
 }
 
+// ============================================================ interchange IR
+//
+// SEAM 1 (roadmap item 227): lower.rvl also PRODUCES the emittable interchange
+// IR, not only the admission VERDICT. `lower_to_ir(src)` serialises the covered
+// surface of the interchange IR (docs/backend-ir.md) — the shape emit_py.rvl /
+// emit_rust.rvl navigate via stdlib/value.rvl's `value_*` — as canonical JSON,
+// structurally IDENTICAL to what src/revl/lower.py's `check_and_lower` produces
+// for the same source. This is what lets item 224's `compile.rvl` drop the
+// reference `compile_source` from the middle of the native pipeline (SEAM 1).
+//
+// COVERED (byte-identical to the reference IR on the emit_py/emit_rust corpora):
+//   * `ir_version` — 1 / 2 / 3, from the header-visible feature triggers (a
+//     module fn/extern/type/test declaration; a component `if`/`fail`/timer/
+//     `spawn` for v3, an `isolate`/`intercept` for v2). One reference trigger is
+//     body-level only and DEFERRED here: a stdlib-builtin call in a
+//     component/method body bumps the reference to v3 (`_has_builtin`), which
+//     this gate cannot see without the typed-expression spine (below).
+//   * the SERVICES table — every service's methods with `params` / `returns` /
+//     `emission` (+ `capabilities` for a scoped `emission[..]`, + `async`).
+//   * each COMPONENT's declaration header — `config` / `requires` / `provides`.
+//   * the component BODY for the simple-component surface: `effect …/undo …` and
+//     `provide` steps over required-service method calls (`{kind:"req"}`) and
+//     literals — the intersection the capstone covers (services_basic), emitted
+//     only when the whole body stays inside that surface, else OMITTED so the
+//     header is still emitted and the richer body deferred.
+//
+// DEFERRED (reported for the full capstone): the `functions` / `externs` /
+// `types` sections, and the typed component/method expression body (arithmetic,
+// stdlib builtins, `config` reads, saga `emit … compensate`, timers, spawn) —
+// the typed-expression spine lower.py runs (`_lower_pure_expr` /
+// `_lower_component_pure_expr` / `_lower_fns` / `_lower_type_decls`). The IR's
+// per-component `source` is the input filename (an environment artifact, not a
+// property of the program text), so it is intentionally not emitted here.
+//
+// The whole section is ADDITIVE: `admit_src` is unchanged, and this code reuses
+// the in-file token reader (`tkc`/`atw`/`close_brace`/`params_at`/`type_at`/…)
+// plus the declaration advancers (`p_service`/`p_component`/`p_fn`/`p_extern`)
+// so its structural walk never drifts from the admission parser's.
+
+// A built IR fragment plus whether it stayed inside the covered surface.
+type IrRes    = { ok: Bool, js: Str }
+type IrSvcR   = { js: Str, v3: Bool }
+type IrCompR  = { js: Str, v3: Bool, v2: Bool }
+type IrMethR  = { js: Str, i: Int, v3: Bool }
+type IrAcc    = { svcs: Str, comps: Str, v3: Bool, v2: Bool }
+
+fn mk_irres(ok: Bool, js: Str) -> IrRes { return { ok: ok, js: js } }
+fn mk_irsvcr(js: Str, v3: Bool) -> IrSvcR { return { js: js, v3: v3 } }
+fn mk_ircompr(js: Str, v3: Bool, v2: Bool) -> IrCompR {
+  return { js: js, v3: v3, v2: v2 }
+}
+fn mk_irmethr(js: Str, i: Int, v3: Bool) -> IrMethR {
+  return { js: js, i: i, v3: v3 }
+}
+fn mk_iracc(svcs: Str, comps: Str, v3: Bool, v2: Bool) -> IrAcc {
+  return { svcs: svcs, comps: comps, v3: v3, v2: v2 }
+}
+
+fn empty_prog() -> Prog { return { fns: [], svcs: [], comps: [], bad: "" } }
+
+// A JSON string literal: the covered values are identifiers/type spellings, but
+// the escaper is faithful so a literal carrying `"`/`\`/control chars round-trips.
+fn json_escape(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < s.length()) {
+    let c = s.charAt(i)
+    if (c == "\\") { out = out.concat("\\\\") }
+    else { if (c == "\"") { out = out.concat("\\\"") }
+    else { if (c == "\n") { out = out.concat("\\n") }
+    else { if (c == "\t") { out = out.concat("\\t") }
+    else { if (c == "\r") { out = out.concat("\\r") }
+    else { out = out.concat(c) } } } } }
+    i += 1
+  }
+  return out
+}
+
+fn jstr(s: Str) -> Str { return "\"".concat(json_escape(s)).concat("\"") }
+
+// ---------------------------------------------------------------- services IR
+
+fn ir_params_json(ps: List[ParamN]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < ps.length()) {
+    let e = "{\"name\": ".concat(jstr(ps[i].name))
+      .concat(", \"type\": ").concat(jstr(ps[i].ty)).concat("}")
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
+fn ir_caps_json(cs: List[Str]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < cs.length()) {
+    out = out == "" ? jstr(cs[i]) : out.concat(", ").concat(jstr(cs[i]))
+    i += 1
+  }
+  return out
+}
+
+// One service's method table -> `"m": {params, returns, emission[, caps][, async]}`
+// pairs. Mirrors the reference's per-method dict (check_and_lower's `services`
+// comprehension): `capabilities` present iff a SCOPED `emission[..]`, `async`
+// iff the op is `async` (each of which also bumps `ir_version` to 3).
+fn ir_methods(ts: List[Token], i: Int, end: Int, acc: Str, v3: Bool) -> IrMethR {
+  if (i >= end || atk(ts, i, "}")) { return mk_irmethr(acc, i, v3) }
+  var j = i
+  var em = false
+  var scoped = false
+  var isAsync = false
+  var caps: List[Str] = []
+  while (atw(ts, j, "emission") || atw(ts, j, "async")) {
+    if (atw(ts, j, "emission")) {
+      em = true
+      j += 1
+      if (atk(ts, j, "[")) {
+        scoped = true
+        var k = j + 1
+        while (k < end && !atk(ts, k, "]")) {
+          if (atk(ts, k, "ident")) { caps = caps.push(tkc(ts, k).text) }
+          k += 1
+        }
+        j = k + 1
+      }
+    } else {
+      isAsync = true
+      j += 1
+    }
+  }
+  if (!atw(ts, j, "fn")) { return mk_irmethr(acc, j, v3) }
+  let nm = tkc(ts, j + 1).text
+  let ps = params_at(ts, j + 3)
+  var retJson = "null"
+  var nexti = ps.i
+  if (atk(ts, ps.i, "arrow")) {
+    let tr = type_at(ts, ps.i + 1)
+    retJson = jstr(tr.ty)
+    nexti = tr.i
+  }
+  var mj = jstr(nm).concat(": {\"params\": [").concat(ir_params_json(ps.ps))
+    .concat("], \"returns\": ").concat(retJson)
+    .concat(", \"emission\": ").concat(em ? "true" : "false")
+  if (scoped) {
+    mj = mj.concat(", \"capabilities\": [").concat(ir_caps_json(caps)).concat("]")
+  }
+  if (isAsync) { mj = mj.concat(", \"async\": true") }
+  mj = mj.concat("}")
+  let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
+  return ir_methods(ts, nexti, end, nacc, v3 || isAsync)
+}
+
+fn ir_service(ts: List[Token], i: Int) -> IrSvcR {
+  let nm = tkc(ts, i + 1).text
+  let end = close_brace(ts, i + 2)
+  let hi = end == 0 - 1 ? i + 3 : end - 1
+  let ms = ir_methods(ts, i + 3, hi, "", false)
+  return mk_irsvcr(jstr(nm).concat(": {\"methods\": {").concat(ms.js).concat("}}"),
+                   ms.v3)
+}
+
+// ---------------------------------------------------------------- body IR
+//
+// The simple-component surface (the capstone intersection). Every helper returns
+// `ok:false` the moment it meets a form outside the surface, so the caller omits
+// the `body` and keeps the byte-identical header.
+
+// A pure value expression -> an IR node. Only literals and required-service
+// method calls (`req.op(args)`) are in surface; anything else exits.
+fn ir_expr(e: Expr, reqSet: List[Str]) -> IrRes {
+  return match e {
+    IntLit(v)   => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
+    FloatLit(v) => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
+    BoolLit(v)  => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
+    StrLit(v)   => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(jstr(v)).concat("}")),
+    Call(c)     => ir_call(c.target, c.args, reqSet),
+    _           => mk_irres(false, ""),
+  }
+}
+
+fn ir_args(args: List[Expr], i: Int, reqSet: List[Str], acc: Str) -> IrRes {
+  if (i >= args.length()) { return mk_irres(true, acc) }
+  let e = ir_expr(args[i], reqSet)
+  if (!e.ok) { return mk_irres(false, "") }
+  let nacc = acc == "" ? e.js : acc.concat(", ").concat(e.js)
+  return ir_args(args, i + 1, reqSet, nacc)
+}
+
+fn ir_reqcall(root: Str, meth: Str, args: List[Expr], reqSet: List[Str]) -> IrRes {
+  let a = ir_args(args, 0, reqSet, "")
+  if (!a.ok) { return mk_irres(false, "") }
+  return mk_irres(true,
+    "{\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": "
+      .concat(jstr(root)).concat("}, \"method\": ").concat(jstr(meth))
+      .concat(", \"args\": [").concat(a.js).concat("]}"))
+}
+
+fn ir_call(tg: Expr, args: List[Expr], reqSet: List[Str]) -> IrRes {
+  return match tg {
+    Field(fl) => match fl.target {
+      Var(root) => contains(reqSet, root)
+        ? ir_reqcall(root, fl.name, args, reqSet)
+        : mk_irres(false, ""),
+      _ => mk_irres(false, ""),
+    },
+    _ => mk_irres(false, ""),
+  }
+}
+
+// A brace method body of `return <expr>` statements (the shorthand `= expr` is
+// handled at the call site). Any other statement exits the surface.
+fn ir_ret_stmts(ts: List[Token], lo: Int, hi: Int, reqSet: List[Str], acc: Str) -> IrRes {
+  if (lo >= hi || atk(ts, lo, "}")) { return mk_irres(true, acc) }
+  if (atw(ts, lo, "return")) {
+    let r = expr_at(ts, lo + 1)
+    if (is_bad(r.e)) { return mk_irres(false, "") }
+    let e = ir_expr(r.e, reqSet)
+    if (!e.ok) { return mk_irres(false, "") }
+    let step = "{\"step\": \"return\", \"expr\": ".concat(e.js).concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return ir_ret_stmts(ts, r.i, hi, reqSet, nacc)
+  }
+  return mk_irres(false, "")
+}
+
+// Provide-method table for a `provide <key> { … }` block. In surface only when
+// every method is a sync, zero-parameter op with a `return`-shaped body (the
+// services_basic `status()` shape). A param, `async`, or a richer body exits.
+fn ir_prov_methods(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
+                   acc: Str) -> IrRes {
+  if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
+  if (atw(ts, i, "async")) { return mk_irres(false, "") }
+  if (!atw(ts, i, "fn")) { return mk_irres(false, "") }
+  let nm = tkc(ts, i + 1).text
+  let ps = params_at(ts, i + 3)
+  if (ps.ps.length() != 0) { return mk_irres(false, "") }
+  var h = ps.i
+  if (atk(ts, h, "arrow")) { h = type_at(ts, h + 1).i }
+  if (atk(ts, h, "=")) {
+    let r = expr_at(ts, h + 1)
+    if (is_bad(r.e)) { return mk_irres(false, "") }
+    let be = ir_expr(r.e, reqSet)
+    if (!be.ok) { return mk_irres(false, "") }
+    let mj = "{\"name\": ".concat(jstr(nm))
+      .concat(", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": ")
+      .concat(be.js).concat("}]}")
+    let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
+    return ir_prov_methods(ts, r.i, end, reqSet, nacc)
+  }
+  if (atk(ts, h, "{")) {
+    let bend = close_brace(ts, h)
+    if (bend == 0 - 1) { return mk_irres(false, "") }
+    let br = ir_ret_stmts(ts, h + 1, bend - 1, reqSet, "")
+    if (!br.ok) { return mk_irres(false, "") }
+    let mj = "{\"name\": ".concat(jstr(nm)).concat(", \"params\": [], \"body\": [")
+      .concat(br.js).concat("]}")
+    let nacc = acc == "" ? mj : acc.concat(", ").concat(mj)
+    return ir_prov_methods(ts, bend, end, reqSet, nacc)
+  }
+  return mk_irres(false, "")
+}
+
+// A component body -> its `body` step list, in surface only for `config` (a
+// declaration, skipped structurally — it is a header field, not a step),
+// `provide` steps and `effect …/undo …` steps over required-service calls.
+fn ir_body(ts: List[Token], i: Int, end: Int, reqSet: List[Str],
+           provs: List[Bind], acc: Str) -> IrRes {
+  if (i >= end || atk(ts, i, "}")) { return mk_irres(true, acc) }
+  if (atw(ts, i, "config") && atk(ts, i + 1, "{")) {
+    let ce = close_brace(ts, i + 1)
+    if (ce == 0 - 1) { return mk_irres(false, "") }
+    return ir_body(ts, ce, end, reqSet, provs, acc)
+  }
+  if (atw(ts, i, "provide")) {
+    let key = tkc(ts, i + 1).text
+    if (!atk(ts, i + 2, "{")) { return mk_irres(false, "") }
+    let pend = close_brace(ts, i + 2)
+    if (pend == 0 - 1) { return mk_irres(false, "") }
+    let ms = ir_prov_methods(ts, i + 3, pend - 1, reqSet, "")
+    if (!ms.ok) { return mk_irres(false, "") }
+    let svc = bind_lookup(provs, key, 0)
+    let step = "{\"step\": \"provide\", \"name\": ".concat(jstr(key))
+      .concat(", \"service\": ").concat(jstr(svc))
+      .concat(", \"methods\": [").concat(ms.js).concat("]}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return ir_body(ts, pend, end, reqSet, provs, nacc)
+  }
+  if (atw(ts, i, "effect")) {
+    if (atw(ts, i + 1, "spawn")) { return mk_irres(false, "") }
+    let acq = expr_at(ts, i + 1)
+    if (is_bad(acq.e)) { return mk_irres(false, "") }
+    let ae = ir_expr(acq.e, reqSet)
+    if (!ae.ok) { return mk_irres(false, "") }
+    if (!atw(ts, acq.i, "undo")) { return mk_irres(false, "") }
+    let und = expr_at(ts, acq.i + 1)
+    if (is_bad(und.e)) { return mk_irres(false, "") }
+    let ue = ir_expr(und.e, reqSet)
+    if (!ue.ok) { return mk_irres(false, "") }
+    let step = "{\"step\": \"effect\", \"acquire\": ".concat(ae.js)
+      .concat(", \"undo\": ").concat(ue.js).concat("}")
+    let nacc = acc == "" ? step : acc.concat(", ").concat(step)
+    return ir_body(ts, und.i, end, reqSet, provs, nacc)
+  }
+  return mk_irres(false, "")
+}
+
+// ---------------------------------------------------------------- components IR
+
+fn ir_binds_json(bs: List[Bind]) -> Str {
+  var out = ""
+  var i = 0
+  while (i < bs.length()) {
+    let e = jstr(bs[i].name).concat(": ").concat(jstr(bs[i].ty))
+    out = out == "" ? e : out.concat(", ").concat(e)
+    i += 1
+  }
+  return out
+}
+
+// The `config { field: Type … }` block -> `[{name, type, default}]`. Config
+// defaults (`field: Type = <expr>`) are deferred (emitted `null`); the corpus
+// carries none, and a present default is a value-lowering the body spine owns.
+fn ir_config(ts: List[Token], lo: Int, hi: Int) -> Str {
+  var j = lo
+  while (j < hi && !(atw(ts, j, "config") && atk(ts, j + 1, "{"))) { j += 1 }
+  if (j >= hi) { return "" }
+  let ce = close_brace(ts, j + 1)
+  let cend = ce == 0 - 1 ? hi : ce - 1
+  var k = j + 2
+  var out = ""
+  while (k < cend) {
+    if (atk(ts, k, "ident") && atk(ts, k + 1, ":")) {
+      let nm = tkc(ts, k).text
+      let tr = type_at(ts, k + 2)
+      let entry = "{\"name\": ".concat(jstr(nm)).concat(", \"type\": ")
+        .concat(jstr(tr.ty)).concat(", \"default\": null}")
+      out = out == "" ? entry : out.concat(", ").concat(entry)
+      k = tr.i
+    } else { k += 1 }
+  }
+  return out
+}
+
+fn comp_has_kw(ts: List[Token], lo: Int, hi: Int, w: Str) -> Bool {
+  var k = lo
+  while (k < hi) {
+    if (atw(ts, k, w)) { return true }
+    k += 1
+  }
+  return false
+}
+
+fn ir_component(ts: List[Token], i: Int) -> IrCompR {
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  var reqs: List[Bind] = []
+  var provs: List[Bind] = []
+  while (atw(ts, j, "requires") || atw(ts, j, "provides")) {
+    let isReq = atw(ts, j, "requires")
+    var k = j + 1
+    while (k < ts.length() && !atk(ts, k, "{") && !atk(ts, k, "eof")
+           && !atw(ts, k, "requires") && !atw(ts, k, "provides")) {
+      if (atk(ts, k, "ident") && atk(ts, k + 1, ":") && atk(ts, k + 2, "ident")) {
+        let pair = { name: tkc(ts, k).text, ty: tkc(ts, k + 2).text }
+        if (isReq) { reqs = reqs.push(pair) } else { provs = provs.push(pair) }
+        k += 3
+      } else { k += 1 }
+    }
+    j = k
+  }
+  let end = close_brace(ts, j)
+  let lo = j + 1
+  let hi = end == 0 - 1 ? j + 1 : end - 1
+  let reqSet = bind_names(reqs, 0, [])
+  let bodyRes = ir_body(ts, lo, hi, reqSet, provs, "")
+  var js = "{\"name\": ".concat(jstr(nm))
+    .concat(", \"config\": [").concat(ir_config(ts, lo, hi))
+    .concat("], \"requires\": {").concat(ir_binds_json(reqs))
+    .concat("}, \"provides\": {").concat(ir_binds_json(provs)).concat("}")
+  if (bodyRes.ok) { js = js.concat(", \"body\": [").concat(bodyRes.js).concat("]") }
+  js = js.concat("}")
+  let v3 = comp_has_kw(ts, lo, hi, "if") || comp_has_kw(ts, lo, hi, "fail")
+    || comp_has_kw(ts, lo, hi, "every") || comp_has_kw(ts, lo, hi, "after")
+    || comp_has_kw(ts, lo, hi, "spawn")
+  let v2 = comp_has_kw(ts, lo, hi, "isolate") || comp_has_kw(ts, lo, hi, "intercept")
+  return mk_ircompr(js, v3, v2)
+}
+
+// ---------------------------------------------------------------- top level
+
+fn ir_walk(ts: List[Token], i: Int, a: IrAcc) -> IrAcc {
+  if (i >= ts.length() || atk(ts, i, "eof")) { return a }
+  let t = tkc(ts, i)
+  if (t.kind != "kw") { return ir_walk(ts, skip_line(ts, i), a) }
+  if (t.text == "use") { return ir_walk(ts, skip_line(ts, i), a) }
+  if (t.text == "test") {
+    let na = mk_iracc(a.svcs, a.comps, true, a.v2)
+    if (atk(ts, i + 1, "{")) {
+      let e = close_brace(ts, i + 1)
+      if (e != 0 - 1) { return ir_walk(ts, e, na) }
+    }
+    return ir_walk(ts, skip_line(ts, i), na)
+  }
+  if (t.text == "type") {
+    return ir_walk(ts, skip_line(ts, i), mk_iracc(a.svcs, a.comps, true, a.v2))
+  }
+  if (t.text == "extern") {
+    return ir_walk(ts, p_extern(ts, i, empty_prog()).i,
+                   mk_iracc(a.svcs, a.comps, true, a.v2))
+  }
+  if (t.text == "fn") {
+    return ir_walk(ts, p_fn(ts, i, empty_prog()).i,
+                   mk_iracc(a.svcs, a.comps, true, a.v2))
+  }
+  if (t.text == "service") {
+    let sv = ir_service(ts, i)
+    let svcs2 = a.svcs == "" ? sv.js : a.svcs.concat(", ").concat(sv.js)
+    return ir_walk(ts, p_service(ts, i, empty_prog()).i,
+                   mk_iracc(svcs2, a.comps, a.v3 || sv.v3, a.v2))
+  }
+  if (t.text == "component") {
+    let cp = ir_component(ts, i)
+    let comps2 = a.comps == "" ? cp.js : a.comps.concat(", ").concat(cp.js)
+    return ir_walk(ts, p_component(ts, i, empty_prog()).i,
+                   mk_iracc(a.svcs, comps2, a.v3 || cp.v3, a.v2 || cp.v2))
+  }
+  return ir_walk(ts, skip_line(ts, i), a)
+}
+
+// The IR producer (SEAM 1). Returns the covered surface of the interchange IR
+// as canonical JSON: `{ir_version, services, components}`. Additive to, and
+// independent of, `admit_src` — a caller admits FIRST, then lowers an admitted
+// program to this IR for the emitter.
+pub fn lower_to_ir(src: Str) -> Str {
+  let ts = lex_src(src)
+  let a = ir_walk(ts, 0, mk_iracc("", "", false, false))
+  let ver = a.v3 ? "3" : (a.v2 ? "2" : "1")
+  return "{\"ir_version\": ".concat(ver).concat(", \"services\": {")
+    .concat(a.svcs).concat("}, \"components\": [").concat(a.comps).concat("]}")
+}
+
 // ================================================================ tests
+
+test "lower_to_ir emits the services table for a simple provider" {
+  assert lower_to_ir("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }")
+    == "{\"ir_version\": 1, \"services\": {\"Cache\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"key\", \"type\": \"Str\"}, {\"name\": \"value\", \"type\": \"Str\"}], \"returns\": null, \"emission\": false}}}}, \"components\": [{\"name\": \"C\", \"config\": [], \"requires\": {}, \"provides\": {\"cache\": \"Cache\"}}]}"
+}
+
+test "lower_to_ir marks an emission op and a scoped capability" {
+  assert lower_to_ir("service Db { emission[net] fn go(x: Str) -> Int }")
+    == "{\"ir_version\": 1, \"services\": {\"Db\": {\"methods\": {\"go\": {\"params\": [{\"name\": \"x\", \"type\": \"Str\"}], \"returns\": \"Int\", \"emission\": true, \"capabilities\": [\"net\"]}}}}, \"components\": []}"
+}
+
+test "lower_to_ir lowers a simple effect/provide body" {
+  assert lower_to_ir("service Store { fn put(k: Int, v: Int) } service Health { fn status() -> Str } component B requires store: Store provides health: Health { effect store.put(1, 10) undo store.put(1, 0) provide health { fn status() = \"ok\" } }")
+    == "{\"ir_version\": 1, \"services\": {\"Store\": {\"methods\": {\"put\": {\"params\": [{\"name\": \"k\", \"type\": \"Int\"}, {\"name\": \"v\", \"type\": \"Int\"}], \"returns\": null, \"emission\": false}}}, \"Health\": {\"methods\": {\"status\": {\"params\": [], \"returns\": \"Str\", \"emission\": false}}}}, \"components\": [{\"name\": \"B\", \"config\": [], \"requires\": {\"store\": \"Store\"}, \"provides\": {\"health\": \"Health\"}, \"body\": [{\"step\": \"effect\", \"acquire\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 10}]}, \"undo\": {\"kind\": \"call\", \"target\": {\"kind\": \"req\", \"name\": \"store\"}, \"method\": \"put\", \"args\": [{\"kind\": \"lit\", \"value\": 1}, {\"kind\": \"lit\", \"value\": 0}]}}, {\"step\": \"provide\", \"name\": \"health\", \"service\": \"Health\", \"methods\": [{\"name\": \"status\", \"params\": [], \"body\": [{\"step\": \"return\", \"expr\": {\"kind\": \"lit\", \"value\": \"ok\"}}]}]}]}]}"
+}
+
+test "lower_to_ir bumps ir_version to 3 on a module fn" {
+  assert starts_with(lower_to_ir("fn id(x: Int) -> Int { return x }"), "{\"ir_version\": 3,")
+}
 
 test "clean provider admits" {
   assert admit_src("service Cache { fn put(key: Str, value: Str) } component C provides cache: Cache { provide cache { fn put(key, value) { let k = key } } }") == ""
