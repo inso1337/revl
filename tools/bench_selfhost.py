@@ -426,7 +426,7 @@ def main() -> int:
     sh_parse = parser_ns["parse_render"]
     sh_infer = checker_ns["infer_expr_str"]
     sh_admit = lower_ns["admit_src"]
-    sh_emit = emit_ns["emit_src"]
+    sh_emit = emit_ns["emit_py_src"]
 
     # ---- load corpora -------------------------------------------------------
     lexer_items = [(rel, (ROOT / rel).read_text(encoding="utf-8"))
