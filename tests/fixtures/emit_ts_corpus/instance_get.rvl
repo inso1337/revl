@@ -1,0 +1,16 @@
+// instances: reading a provision back off a spawn handle — `w.counter` lowers
+// to an `instance-get` (`w.get("counter")`), then the service operation is a
+// field-call on it. Exercises the `instance-get` expr kind alongside `spawn`.
+service Counter { fn value() -> Int }
+service Probe { fn read() -> Int }
+
+component Worker provides counter: Counter {
+  config { tag: Str }
+  let m = effect Map.new() undo m.drop()
+  provide counter { fn value() = 0 }
+}
+
+component Sup provides probe: Probe {
+  let w = effect spawn Worker with { tag: "a" } undo w.dispose()
+  provide probe { fn read() = w.counter.value() }
+}

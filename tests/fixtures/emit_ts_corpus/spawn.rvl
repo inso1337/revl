@@ -1,0 +1,15 @@
+// spawn/instances: a supervisor spawns a worker template in its activation
+// body (the `spawn` acquisition node) — `spawn(ctx, Worker, {…}, […])` — with
+// the handle's `undo` disposing the child fiber. Exercises the `spawn` expr
+// kind and the `_uses_spawn` runtime-import gate.
+service Counter { fn value() -> Int }
+
+component Worker provides counter: Counter {
+  config { tag: Str }
+  let m = effect Map.new() undo m.drop()
+  provide counter { fn value() = 0 }
+}
+
+component Sup {
+  let w = effect spawn Worker with { tag: "x" } undo w.dispose()
+}

@@ -1,0 +1,14 @@
+// realm placements: `intercept <key> with { … }` attaches consumer-declared
+// metadata to a required key. With any intercept present, the plugin's `inject`
+// switches from the array form to the dict form — `inject: {"db": {…}},` — the
+// non-null values copied into the fiber context's intercept chain. A top-level
+// 2.0 `fn` keeps the document on the v3 emit path (the v1/v2 path is deferred).
+fn zero() -> Int { return 0 }
+
+service Db { fn q() -> Int }
+service Api { fn run() -> Int }
+
+component App requires db: Db provides api: Api {
+  intercept db with { tag: "primary", tier: 2 }
+  provide api { fn run() = 0 }
+}
