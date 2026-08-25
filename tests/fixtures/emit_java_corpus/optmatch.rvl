@@ -1,0 +1,23 @@
+// The built-in Opt match: Some/None (NOT shadowed by a user variant) lowers to
+// `.map(..).orElseGet(..)`, distinct from the sealed-`switch` path. Kept clear of
+// the deferred Result/Ok-Err surface.
+fn unwrap(o: Opt[Int]) -> Int {
+  return match o {
+    Some(v) => v,
+    None => 0
+  }
+}
+
+fn unwrapOr(o: Opt[Int], d: Int) -> Int {
+  return match o {
+    Some(v) => v + 1,
+    None => d
+  }
+}
+
+fn label(o: Opt[Str]) -> Str {
+  return match o {
+    Some(s) => s,
+    None => "none"
+  }
+}

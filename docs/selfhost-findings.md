@@ -546,3 +546,82 @@ fallthrough are byte-identical), so `emit_go.rvl`'s existing `go_type` fallback
 correctly — no `types`-table parameter had to be threaded into `go_type` at all,
 unlike the rust port's `rust_type_t(t, tnames)`. The go tier's decision to not
 special-case the known-vs-unknown named type paid off directly in the self-host.
+
+## emit_java.rvl slice 2 (item 210): the v3 typed-core
+
+### Component/service tail deferred AS ONE UNIT — bridge-entangled, as feared
+Per the slice's own gate (defer components if a lone service drags in a large
+interop block, like rust's `_emit_bridge`, item 205/207), I checked the Java
+component path before committing to it and deferred it whole. `backends/java/
+emit.py`'s component tail is the single largest surface in the file
+(`_emit_component`/`_emit_component_modern` ~250 lines, plus `_emit_service_
+interfaces_v3`, `_emit_plugin_ctors`, `provide`/`req`/`config`, the modern-vs-
+legacy `_component_needs_modern` split) AND it is entangled with the host-stub
+`HashMap<String,V>` machinery: `_emit_host_stubs` -> `_map_value_expr_type` /
+`_map_expr_inserts` / `_map_insert_candidates` / `_map_value_surface_type` do
+per-SITE value-type inference by walking every `insert` call in the document to
+learn the map's `V`. That is a second whole analysis pass, not a formatter, and
+it is reachable ONLY through a component (v3 top-level fns never lower a `host`
+node). Landing "just a service interface" would have pulled the erasure block in
+behind it. Coherent green sub-slice = the typed-core; components are a clean
+follow-on (call it slice 3). NOT a defect — a scoping call the gate anticipated.
+
+### stdlib-kit validation (positive) — `value_keys` again closes the gap, ZERO bridges
+The typed-core keys three IR shapes BY NAME: the document `types`
+(name->spec), each record's `fields` (name->type), and — for the record-literal
+nominal-type inference — a record's DECLARED field order. All three navigated in
+pure revl with `stdlib/value.rvl::value_keys` (item 180) and `list_sort`/
+`list_dedup`/`list_contains` (stdlib/list.rvl), with NO new `@py`. The slice
+added exactly zero bridges beyond the two slice-1 host-formatting externs
+(`json_dumps`, `num_str`). Corroborates the item-189 finding from emit_ts slice 2:
+the kit is adequate for the name-keyed IR sections a typed-core emitter touches.
+
+### Friction (corroborates emit_ts): the counter-threading tax, now with an ORDER trap (MED)
+Same root cause as the emit_ts slice-2 note — the reference carries the
+document-wide match-temp counter as mutable `_V3Ctx._match_counter` and mutates
+in place, so revl must THREAD it: this slice converted EVERY expression renderer
+from `(node, ctx) -> Str` to `(node, ctx, counter) -> {text, counter}` and every
+statement renderer to `-> {lines, counter}`. That is the whole expr/stmt layer
+re-plumbed for one integer. The Java-specific sharp edge on top of the ts note:
+the counter's numbering is ORDER-SENSITIVE in a way that is invisible in the
+reference's imperative code. In `_v3_match_expr`, each arm's `body` is rendered
+(`_expr(...)`, advancing the counter for any NESTED match) BEFORE that arm's own
+`__revl_case_N`/`__revl_ignored_N` is allocated (`ctx._match_counter += 1`). So a
+nested match inside an arm body gets a LOWER number than the arm that contains
+it (the corpus `describe` fn: outer Circle arm is `__revl_case_8`, its nested
+match's arm is `__revl_case_7`). Repro: render the arm name before the arm body
+and the numbering desyncs from the reference while every OTHER fixture still
+passes — a silent, single-fixture byte diff. Symptom: the pure-functional port
+has to reproduce not just WHICH counter values are used but the exact evaluation
+ORDER the reference's expression statements imply. Fix applied here: render the
+body first (`let br = render_expr(body, ctx, c); c = br.counter`), then allocate.
+Not a bug in revl — inherent to porting stateful numbering — but worth a sharper
+line in the emitter guide than the ts note carried: "thread the counter AND
+match the reference's sub-expression evaluation order; a body that may nest a
+match must be rendered before the enclosing site consumes a counter value." MED
+(a real trap that only one fixture would have caught).
+
+### Positive: `record_by_fields` set-key inference ported straight
+The record-literal nominal-type inference (`_V3Ctx.record_type_for_fields`: a
+literal's field SET -> its unique declared record class) reduced to a
+canonical sorted-join key (`list_sort(names).join(",")`) used on BOTH the decl
+side (`value_keys(fields)`) and the literal side, with `<<AMBIG>>` standing in
+for the reference's `None`-on-collision — the same shape emit_rust slice 2 used.
+The literal renders its VALUES in literal order (threading the counter) but emits
+the ctor args in DECLARED order (`rfields`), and that split — value-order for the
+counter, decl-order for the output — fell out cleanly once the two orders were
+kept as separate lists. No kit friction.
+
+### How it is checked (slice 2)
+`tests/fixtures/emit_java_corpus/`: `records` (record decls, OUT-OF-ORDER literals
+that must reorder to declared field order, field access, records nested in a
+record and in `List[Point]`), `adts` (sealed-interface variants, `adt` ctors incl
+a nullary `new Shape.Dot()`, `match` that is exhaustive-with-no-`default`,
+wildcard-`default`, partial-synthesised-`default`, and NESTED — the counter
+threads across the whole document — plus the `final Shape c = …` adt-binding
+`let`), and `optmatch` (the built-in Opt Some/None `.map(..).orElseGet(..)`
+path, kept clear of the deferred Result surface). Each `emit_src(ir) ==
+backends/java/emit.py emit(ir)` byte-for-byte. Deferred features (components/
+services, the host `HashMap<String,V>`, stdlib builtins, built-in Result/Ok/Err,
+`record_update`, float interpolation, async/spawn/externs/tests, `let_pattern`)
+are EXCLUDED from the corpus, not approximated.
