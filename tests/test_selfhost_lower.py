@@ -100,6 +100,13 @@ def _classify(e: RevlError) -> str:
     m = e.message
     if "provision conflict" in m and "(G2)" in m:
         return "G2"
+    # G3 (dependency-cycle / self-provision) and G1 (undeclared access) set no
+    # code, so their message markers classify them. G3's two shapes both end
+    # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
+    if "(G3)" in m:
+        return "G3"
+    if "is not a declared requirement of" in m:
+        return "G1"
     if ("declared plain, but this implementation reaches" in m
             or "must be marked `emit`" in m
             or "emits through" in m):
@@ -188,6 +195,35 @@ component Poster provides http: Http {
   provide http { async fn post(url, body) = http_post(url, body) }
 }
 """),
+    # per-realm G2: the same key provided in two DIFFERENT realms composes —
+    # this is the multi-tenancy feature, not a conflict.
+    ("same key in different realms composes", """
+service Kv { fn get(k: Str) -> Opt[Str] }
+component StoreOne provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(k) }
+}
+component StoreTwo provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  let m = effect Map.new() undo m.drop()
+  provide kv { fn get(k) = m.get(k) }
+}
+"""),
+    # a dependency edge that is broken by realm separation: Beta requires `a`
+    # in realm r2, but Alpha provides it in the shared realm — no edge, so the
+    # would-be Alpha<->Beta cycle never forms and the composition admits.
+    ("realm separation breaks a would-be cycle", """
+service A { fn ping(tag: Str) -> Str }
+service B { fn pong(tag: Str) -> Str }
+component Alpha requires b: B provides a: A {
+  provide a { fn ping(tag) = b.pong(tag) }
+}
+component Beta requires a: A provides b: B {
+  isolate a in realm("r2")
+  provide b { fn pong(tag) = a.ping(tag) }
+}
+"""),
     ("pure helper chain stays clean", """
 fn normalize(k: Str) -> Str { return k }
 service Cache { fn put(key: Str, value: Str) }
@@ -239,6 +275,20 @@ component Poster provides http: Http {
   provide http { fn post(url, body) = helper(url) }
 }
 """, "A1"),
+    # G1: `db` is read but never declared in the requires row (fixture).
+    ("g1 undeclared access", _fixture("g1_undeclared_access"), "G1"),
+    # G1 in a provide-method body (not just setup): the receiver head resolves
+    # to nothing declared, so the reference refuses it before the op.
+    ("g1 undeclared receiver in method", """service Log { fn write(msg: Str) }
+component Logger provides log: Log {
+  provide log { fn write(msg) { emit db.execute(msg) } }
+}
+""", "G1"),
+    # G3: Alpha and Beta each require what the other provides (fixture).
+    ("g3 dependency cycle", _fixture("g3_dependency_cycle"), "G3"),
+    # per-realm G2: same key, SAME realm — a conflict, and the realm is named
+    # (fixture).
+    ("g2 same-realm conflict", _fixture("v2_same_realm_conflict"), "G2"),
 ]
 
 
@@ -289,6 +339,42 @@ def test_generated_compositions_agree(admit, seed):
         ref_tag, _ = _ref(src)
         # the generator can only produce an admit or a G2 conflict
         assert ref_tag in ("", "G2"), f"corpus bug: reference tag {ref_tag!r}"
+        _agree(admit, src)
+
+
+# --------------------------------------------------------- per-realm G2 fuzz
+
+# The multi-tenancy differential: random single-key providers over a small key
+# pool, each key optionally isolated into one of a few realms (the empty realm
+# = no isolate = the shared realm). Provision disjointness is now per-(key,
+# realm), so the two linkers must agree on the verdict AND — for a conflict —
+# the "in realm `<r>`" wording and which two components the message names. No
+# requires, so the only possible refusal is a per-realm G2 conflict.
+_REALMS = ["", "r1", "r2"]
+
+
+def _compose_realms(rng: random.Random) -> str:
+    n = rng.randint(2, 5)
+    lines = ["service S { fn op(x: Str) -> Str }"]
+    for i in range(n):
+        key = rng.choice(_KEYS)
+        realm = rng.choice(_REALMS)
+        iso = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
+        lines.append(
+            f"component C{i} provides {key}: S {{\n{iso}"
+            f"  provide {key} {{ fn op(x) {{ return x }} }}\n}}")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_realm_compositions_agree(admit, seed):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _compose_realms(rng)
+        ref_tag, _ = _ref(src)
+        # per-realm composition admits or conflicts under G2, nothing else
+        assert ref_tag in ("", "G2"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
         _agree(admit, src)
 
 
