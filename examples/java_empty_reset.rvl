@@ -1,0 +1,23 @@
+// A legitimately-EMPTY void provide-op (docs/v2.0-roadmap.md item 222).
+//
+// `reset()` has an empty body, so it is a real no-op — not an unported effect.
+// The java emitter used to turn any body it could not render into a throwing
+// `UnsupportedOperationException` trap, which made this valid empty method
+// throw at runtime the moment a consumer called it. The provider stays a plain
+// v1 component (no config, no effects, no ADTs), so its `reset()` lowers
+// through the simple method-body renderer — the exact path that emitted the
+// trap. The consumer invokes `reset()` during activation, so a run that boots
+// and tears down cleanly proves the body is a no-op rather than a throw.
+service Resettable {
+  emission fn reset()
+}
+
+component ResetSvc provides r: Resettable {
+  provide r {
+    fn reset() { }
+  }
+}
+
+component ResetUser requires r: Resettable {
+  emit r.reset()
+}

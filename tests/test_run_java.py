@@ -43,6 +43,12 @@ PAIR = str(ROOT / "examples" / "counter_pair.rvl")
 # must compile the emitted module at `--release 21` — at 17 javac refuses it.
 MATCH = str(ROOT / "examples" / "java_match.rvl")
 
+# A legitimately-empty void provide-op (roadmap item 222): `reset()` has an
+# empty body, and a consumer calls it during activation. The emitter used to
+# render an unrenderable body as a throwing trap, which made this valid no-op
+# throw at runtime; the composition must now boot and tear down cleanly.
+EMPTY_RESET = str(ROOT / "examples" / "java_empty_reset.rvl")
+
 _JAVA_REASON = java_runtime_reason()
 needs_jdk = pytest.mark.skipif(
     _JAVA_REASON is not None,
@@ -116,6 +122,25 @@ def test_java_match_composition_emits_a_pattern_switch():
     assert "case RevlResult.Ok" in source
 
 
+def test_java_empty_void_op_emits_a_noop_not_a_trap():
+    """Roadmap item 222, pinned without a JDK: an empty void provide-op
+    (`fn reset() { }`) lowers to an empty method body, not the
+    `UnsupportedOperationException` trap the emitter used for bodies it cannot
+    render. Assertable off the emitted source — the runtime boot below proves
+    the same no-op fires without throwing."""
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location(
+        "revl_java_emit", ROOT / "backends" / "java" / "emit.py")
+    emit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit)
+    from revl.compiler import compile_files  # noqa: PLC0415
+
+    source = emit.emit(compile_files([EMPTY_RESET]))
+    assert "public void reset() {  }" in source, source
+    assert "reset() { throw new UnsupportedOperationException" not in source
+
+
 # --------------------------------------------------------- with the runtime
 #
 # The golden path: emit java -> javac -> boot the composition as a JVM process
@@ -145,6 +170,34 @@ def test_run_java_once_boots_tears_down_lifo_and_proves_no_residue():
     # the no-residue proof, read off the live runtime after teardown (the java
     # mirror of the py driver's registry/reflect check): no provided service
     # still resolves
+    assert "0 service(s) still provided" in out
+    assert "NO-RESIDUE" in out
+    assert "[run] DOWN" in out
+
+
+@needs_jdk
+def test_run_java_once_boots_an_empty_void_op_as_a_noop():
+    """Roadmap item 222: an empty void provide-op is a real no-op. The consumer
+    (ResetUser) calls `reset()` during activation, so the emitter's old throwing
+    trap would have blown up the boot; the composition must instead reach Active
+    and tear down LIFO with no residue and exit 0."""
+    result = _run_cli([EMPTY_RESET, "--backend", "java", "--once"], input_text="")
+    assert result.returncode == 0, result.stderr + result.stdout
+    out = result.stdout
+
+    assert "== load composition (java tier) ==" in out
+    assert "ResetSvc" in out and "ResetUser" in out
+    assert "state=Active" in out
+    assert "[run] UP" in out
+    # the no-op fired without throwing: no UnsupportedOperationException escaped
+    assert "UnsupportedOperationException" not in out
+    assert "UnsupportedOperationException" not in result.stderr
+
+    # LIFO teardown: the consumer (ResetUser) before the provider (ResetSvc).
+    down_user = out.index("swap  | ResetUser")
+    down_svc = out.index("swap  | ResetSvc")
+    assert down_user < down_svc, "consumer must tear down before its provider"
+
     assert "0 service(s) still provided" in out
     assert "NO-RESIDUE" in out
     assert "[run] DOWN" in out

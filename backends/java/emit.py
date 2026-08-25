@@ -2535,6 +2535,18 @@ def _method_return(env: _Env, key: str, mname: str):
 
 def _method_body(env: _Env, key: str, method: dict) -> str:
     steps = method.get("body") or []
+    if not steps:
+        # A genuinely EMPTY body (`fn reset() { }`) is a real no-op, not an
+        # unported effect: emit an empty method. The two are distinguishable
+        # here because an empty body carries zero steps, whereas an
+        # unemittable effectful body carries steps this simple renderer does
+        # not handle (it falls through to the honest trap below). A void op
+        # becomes a no-op; an empty body on a value-returning op is ill-typed,
+        # so it keeps the trap rather than emitting a method that returns
+        # nothing.
+        if _method_return(env, key, method.get("name")) is None:
+            return ""
+        return 'throw new UnsupportedOperationException("effectful method body");'
     if len(steps) == 1 and steps[0].get("step") == "return":
         if steps[0].get("expr") is None:
             # bare `return` — a void service operation
