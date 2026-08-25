@@ -1391,7 +1391,15 @@ def _lower_tests(program: Program, filename: str, types: dict,
     """
     if not program.tests:
         return []
-    callables = _HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn.name for fn in program.fn_decls}
+    # A `test` body is the same callable scope a `fn` body is (mirrors
+    # `_lower_fns`' `default_callables` and `_lower_prop_tests`): module `fn`s
+    # AND `extern`s, plus the host callables/constructors already in fn scope.
+    # Without the externs an in-module `extern pure fn` visible to fn bodies was
+    # invisible inside a `test`, forcing every extern-backed helper to be
+    # wrapped in a `fn` just to be unit-tested in-file (roadmap item 182).
+    callables = (_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS
+                 | {fn.name for fn in program.fn_decls}
+                 | {ext.name for ext in program.externs})
     tests: list[dict] = []
     seen: set[str] = set()
     for decl in program.tests:
