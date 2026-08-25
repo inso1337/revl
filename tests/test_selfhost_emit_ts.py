@@ -65,6 +65,22 @@ dict-form ``inject: {key: metadata},`` replacing the array form). All four
 fixtures are on the v3 emit path (the isolate/intercept ones carry a trivial
 top-level 2.0 ``fn`` to keep them off the deferred v1/v2 path).
 
+Slice 7 (item 240) pins the v1/v2 DISPATCH path (``emit()`` -> ``_emit_v1``),
+byte-identical. A component-only document with no v3 feature (no declared
+type/fn/extern/test, no ``if``/``fail``/setup-effect body step, no
+builtin/adt/spawn/async-op) lowers to ir_version 1; a component carrying ONLY a
+realm placement (``isolate``) or intercept metadata lowers to ir_version 2 —
+item 234 kept its realm fixtures off this path by adding a trivial top-level 2.0
+``fn`` (forcing v3), and this slice removes that crutch. The self-hosted
+``emit_src`` is version-agnostic: it assembles the same shape ``_emit_v1`` does
+for a component-only doc (the header, ``_revl_helpers``, service interfaces, the
+``_context_augmentation`` block, and each ``_component`` plugin object), so its
+output is byte-identical to the reference's v1/v2 emission with NO emitter change
+— the item-234 concern ("compiles to irv2, which the port doesn't mirror") is
+closed by verification. ``components_await.rvl`` (already v1 in the corpus) covers
+the async-generator body on this path; the three new fixtures add the config /
+saga / provide-method v1 body and the isolate/intercept-only v2 dispatch.
+
 Deliberately OUT (deferred to a follow-on slice): the component-dialect async
 call surface — an async callable reached through the ``fn`` expr kind or from an
 async PROVIDE method (its ``async_names`` are threaded empty, byte-safe because no
@@ -72,10 +88,14 @@ covered component body names one); the component-body ``timer`` step, VARIANT
 type declarations (so an async ``match`` is exercised over Opt/built-in
 ``Result`` only, never a declared variant), in-file
 ``test``/``fault_test``/``lifecycle test`` emission, ROUTED requires
-(``realms(...)`` + the ``revlRouter`` helper and its ``realmLabel`` import and the
-routed-``req`` proxy), the ``_emit_v1`` (ir_version 1/2) path, the canonical ABI,
-and ``assert``/``let_pattern`` statements — all kept out so the slice stays
-byte-VERIFIED rather than byte-guessed.
+(item 167 — a routed require, ``requires <k> in realms(...) strategy(...)``, also
+lowers to ir_version 2 but additionally needs the ``_TS_ROUTER_SRC`` runtime
+literal, the ``realmLabel`` runtime import, the ``inject_keys = requires − routes``
+gate, the per-key ``revlRouter`` proxy, and the routed-``req`` read; the router
+literal embeds backtick templates and ``${…}`` the revl lexer reserves, so it is
+kept out to stay byte-VERIFIED — a routed v2 doc must NOT enter this corpus until
+that lands), the canonical ABI, and ``assert``/``let_pattern`` statements — all
+kept out so the slice stays byte-VERIFIED rather than byte-guessed.
 """
 
 import importlib.util
@@ -125,6 +145,11 @@ CORPUS = [
     "instance_get.rvl",     # reading a provision off a handle: `w.counter` -> `w.get("counter")`
     "realm_isolate.rvl",    # `isolate db in realm("primary")` -> `isolate: {…},` after apply
     "realm_intercept.rvl",  # `intercept db with {…}` -> the dict-form `inject: {"db": {…}},`
+    # slice 7 (item 240) — the v1/v2 DISPATCH path (`emit()` -> `_emit_v1`), byte-exact:
+    "v1_component_body.rvl",  # a component-only doc with no v3 feature lowers to ir_version 1
+                              # (config, effect/undo, emit/compensate saga, provide method + ternary)
+    "v2_isolate_only.rvl",    # isolate ONLY (no trivial v3 `fn`) -> ir_version 2 (closes item 234's flag)
+    "v2_intercept_only.rvl",  # intercept ONLY (no trivial v3 `fn`) -> ir_version 2, dict-form inject
 ]
 
 
