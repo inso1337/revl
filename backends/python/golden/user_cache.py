@@ -3,7 +3,7 @@
 Components: PgDatabase, UserCache
 """
 
-from runtime import ConfigSchema, Frame, Map, Pool, fmt
+from runtime import ConfigSchema as _revl_ConfigSchema, Frame as _revl_Frame, Map, Pool, fmt as _revl_fmt
 
 def _revl_field(v, name):
     """Record literals are dicts, ADT payloads are objects."""
@@ -21,14 +21,14 @@ SERVICES = {
 }
 
 
-_PG_DATABASE_CONFIG = ConfigSchema([
+_PG_DATABASE_CONFIG = _revl_ConfigSchema([
     ('url', 'Str', None),
     ('pool_size', 'Int', 10),
 ])
 
 
 def _pg_database_apply(_revl_ctx, _revl_config):
-    _revl_frame = Frame(_revl_ctx, 'PgDatabase')
+    _revl_frame = _revl_Frame(_revl_ctx, 'PgDatabase')
 
     def _body():
         pool = Pool.open(_revl_config['url'], _revl_config['pool_size'])
@@ -60,7 +60,7 @@ PgDatabase = {
 
 
 def _user_cache_apply(_revl_ctx, _revl_config):
-    _revl_frame = Frame(_revl_ctx, 'UserCache')
+    _revl_frame = _revl_Frame(_revl_ctx, 'UserCache')
 
     def _body():
         store = Map.new()
@@ -77,7 +77,7 @@ def _user_cache_apply(_revl_ctx, _revl_config):
                     store.insert(key, value)
                     yield lambda: store.remove(key)
                 _revl_frame.adopt(_revl_ctx.effect(_effect_0, 'UserCache.cache.put#1'))
-                _revl_ctx.db.execute(fmt('INSERT INTO cache_log VALUES ($0)', key))
+                _revl_ctx.db.execute(_revl_fmt('INSERT INTO cache_log VALUES ($0)', key))
 
         yield _revl_ctx.provide('cache')
         _revl_ctx.set('cache', _Cache())

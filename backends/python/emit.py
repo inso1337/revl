@@ -36,21 +36,54 @@ IR_VERSION = 1
 
 _HOST_ROOTS = {"Pool", "Map", "Job"}
 
-# names the emitted scaffolding owns; an IR identifier colliding with one of
-# these would capture the wrong binding, so the emitter rejects it (the IR
-# contract defines no identifier lexicon — see REPORT.md).
+# The module-level `from runtime import …` names the emitter injects. Every one
+# of them shared the same failure mode: a user identifier the checker accepts
+# would collide with the import in module scope and blow up (or silently shadow)
+# deep in this backend. Two coherent fixes, applied by kind (roadmap items 156,
+# 160):
 #
-# The per-activation scaffolding locals the emitter injects into user body
-# scope — the context handle, the resolved config, and the component Frame —
-# are named in revl's reserved `_revl_*` namespace (`_revl_ctx`,
-# `_revl_config`, `_revl_frame`). Because `_ident` already forbids any user
-# identifier that starts with `_`, those names can never collide with an IR
-# identifier, so they are NOT reserved here: an ordinary revl var named `ctx`,
-# `config`, or `frame` now compiles and runs (roadmap item 156). The remaining
-# entries are the Python method receiver and the module-level `from runtime
-# import …` names, which live in a different namespace and are still rejected
-# (reported as a follow-up: they share this late-at-emit failure mode).
-_RESERVED = {"self", "fmt", "Pool", "Map", "ConfigSchema", "Frame"}
+#   * The per-activation scaffolding locals (`_revl_ctx` / `_revl_config` /
+#     `_revl_frame`) already live in the reserved `_revl_*` namespace, which
+#     `_ident` forbids any user identifier from entering (item 156).
+#
+#   * `_IMPORT_ALIAS` extends that trick to the pure-emitter runtime imports —
+#     the format/frame/config-schema helpers, the spawn/timer/lifecycle drivers.
+#     None of these are language-surface builtins the user names directly, so
+#     the emitter fully controls every reference site: each is imported `as
+#     _revl_<name>` and referenced through the alias, so a user identifier
+#     `fmt` / `Frame` / `schedule_every` / … now compiles and RUNS (item 160).
+#     A name in this map is therefore NOT reserved.
+#
+# What CANNOT be aliased is the host-root triple `Pool` / `Map` / `Job`
+# (`_HOST_ROOTS`): these are language builtins the user writes verbatim
+# (`Map.new()`), and in v3 fn/test bodies a builtin reference and a user var of
+# the same name are the identical `var` node — the emitter cannot tell them
+# apart to rewrite only one. Aliasing is intractable, so they stay guarded, now
+# uniformly: `Job` used to be missing from `_RESERVED` (unguarded — a spurious
+# `from runtime import Job` was emitted for a user `Job` and silently shadowed
+# it; the builtin would break if actually used), and joins its siblings here.
+# `self` is the emitted Python method receiver; the frontend's `_safe_name`
+# already mangles a user `self` to `self_`, so it can never reach this backend,
+# but it stays listed as defense-in-depth.
+_IMPORT_ALIAS = {
+    "fmt": "_revl_fmt",
+    "Frame": "_revl_Frame",
+    "ConfigSchema": "_revl_ConfigSchema",
+    "spawn": "_revl_spawn",
+    "schedule_every": "_revl_schedule_every",
+    "schedule_after": "_revl_schedule_after",
+    "plug": "_revl_plug",
+    "set_trace": "_revl_set_trace",
+    "retry_idempotent": "_revl_retry_idempotent",
+    "Clock": "_revl_Clock",
+}
+_RESERVED = _HOST_ROOTS | {"self"}
+
+
+def _runtime_ref(name: str) -> str:
+    """The in-module name a runtime import is referenced by: its `_revl_*`
+    alias when it has one, else the bare name (the guarded host roots)."""
+    return _IMPORT_ALIAS.get(name, name)
 
 # Members cordis-py's Context already owns. A provision key colliding with one
 # used to compile and then die at activation with `property "runtime" is
@@ -658,7 +691,7 @@ class _ComponentEmitter:
             if not isinstance(template, str):
                 raise EmitError(f"{where}: format template must be a string")
             args = "".join(", " + self._expr(arg, where) for arg in expr.get("args") or [])
-            return f"fmt({template!r}{args})"
+            return f"{_runtime_ref('fmt')}({template!r}{args})"
         if kind == "optfield":
             name = expr.get("name")
             if not isinstance(name, str) or not name.isidentifier():
@@ -686,7 +719,7 @@ class _ComponentEmitter:
                 f"{k!r}: {self._expr(v, where)}"
                 for k, v in (expr.get("config") or {}).items()) + "}"
             realms = tuple(expr.get("realms") or ())
-            return f"spawn(_revl_ctx, {target}, {cfg}, {realms!r})"
+            return f"{_runtime_ref('spawn')}(_revl_ctx, {target}, {cfg}, {realms!r})"
         if kind == "instance-get":
             # instance-parametric components (docs/design-v2-instances.md):
             # `s.<key>` reads a provision off a spawn handle. The handle
@@ -805,7 +838,7 @@ class _ComponentEmitter:
                                 f"found {emission.get('step')!r}")
             out.add(indent + 1, self._expr(emission.get("expr"), where))
         interval = int(step.get("interval_ms"))
-        out.add(indent, f"{handle} = {schedule}({interval}, {fn})")
+        out.add(indent, f"{handle} = {_runtime_ref(schedule)}({interval}, {fn})")
         out.add(indent, f"yield lambda: {handle}.cancel()")
 
     def _provide(self, out: _Lines, indent: int, step: dict, where: str) -> None:
@@ -937,7 +970,7 @@ class _ComponentEmitter:
 
         if self.config_fields:
             self.uses.add("ConfigSchema")
-            out.add(0, f"_{self.snake.upper()}_CONFIG = ConfigSchema([")
+            out.add(0, f"_{self.snake.upper()}_CONFIG = {_runtime_ref('ConfigSchema')}([")
             for spec in self.config_fields:
                 field = _ident(spec.get("name"), f"{where}: config field")
                 out.add(1, f"({field!r}, {spec.get('type')!r}, {spec.get('default')!r}),")
@@ -951,7 +984,7 @@ class _ComponentEmitter:
         is_async = any(step.get("step") == "await" for step in self.ir.get("body") or [])
 
         out.add(0, f"def _{self.snake}_apply(_revl_ctx, _revl_config):")
-        out.add(1, f"_revl_frame = Frame(_revl_ctx, {self.name!r})")
+        out.add(1, f"_revl_frame = {_runtime_ref('Frame')}(_revl_ctx, {self.name!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
         for step in self.ir.get("body") or []:
@@ -1679,7 +1712,7 @@ async def _revl_call(root, key, method, args, where):
     # failure iff the checked property says this emission is idempotent. A
     # non-idempotent emission gets exactly one delivery attempt.
     idempotent = method in _REVL_IDEMPOTENT.get(key, ())
-    return await retry_idempotent(
+    return await _revl_retry_idempotent(
         lambda: getattr(impl, method)(*args),
         idempotent=idempotent, where=where)
 '''
@@ -1714,10 +1747,10 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
         # item 102: the clock coeffect is a module-global; reset it so this
         # test's `advance` steps start from t=0 and see only its own timers,
         # independent of any earlier lifecycle test in the file.
-        out.add(2, "Clock.reset()")
+        out.add(2, "_revl_Clock.reset()")
     out.add(2, "events = []")
     out.add(2, "_revl_fibers = {}")
-    out.add(2, "set_trace(events.append)")
+    out.add(2, "_revl_set_trace(events.append)")
     out.add(2, "try:")
     out.add(3, "baseline = _revl_residue(root)")
     body = test.get("body") or []
@@ -1726,7 +1759,7 @@ def _emit_lifecycle_test(test: dict, fn_name: str) -> "_Lines":
     for step in body:
         _lifecycle_step(out, 3, step, where)
     out.add(2, "finally:")
-    out.add(3, "set_trace(None)")
+    out.add(3, "_revl_set_trace(None)")
     out.add(3, "for fiber in reversed(list(_revl_fibers.values())):")
     out.add(4, "try:")
     out.add(5, "await fiber.dispose()")
@@ -1744,7 +1777,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         component = _ident(step["component"], "component name")
         config = ", ".join(f"{name!r}: {_expr(value)}"
                            for name, value in (step.get("config") or {}).items())
-        out.add(indent, f"_revl_fibers[{component!r}] = plug(root, {component}, {{{config}}})")
+        out.add(indent, f"_revl_fibers[{component!r}] = _revl_plug(root, {component}, {{{config}}})")
         out.add(indent, "await _revl_settle()")
     elif kind == "unload":
         component = _ident(step["component"], "component name")
@@ -1762,7 +1795,7 @@ def _lifecycle_step(out: "_Lines", indent: int, step: dict, where: str) -> None:
         # deterministic timeline step, so `_revl_settle` after it lets the
         # fired body's async work (if any) run to quiescence before the next
         # statement observes it (docs/time-coeffect.md §advance).
-        out.add(indent, f"Clock.advance({int(step['ms'])})")
+        out.add(indent, f"_revl_Clock.advance({int(step['ms'])})")
         out.add(indent, "await _revl_settle()")
     elif kind == "assert_no_residue":
         out.add(indent, f"_revl_no_residue(root, baseline, events, {where!r})")
@@ -1946,7 +1979,11 @@ def emit(ir: dict) -> str:
     out.add(0, '"""')
     out.add(0)
     if uses:
-        out.add(0, f"from runtime import {', '.join(uses)}")
+        imported = ", ".join(
+            f"{name} as {_IMPORT_ALIAS[name]}" if name in _IMPORT_ALIAS else name
+            for name in uses
+        )
+        out.add(0, f"from runtime import {imported}")
         out.add(0)
     if lifecycle:
         out.add(0, "import asyncio as _revl_asyncio")
