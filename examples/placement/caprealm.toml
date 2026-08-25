@@ -1,0 +1,34 @@
+# Capability/realm-aware host placement (roadmap item 119). A VALID placement:
+# every component sits on a host that offers the capabilities it needs and whose
+# declared realm is consistent with the realm the component belongs to.
+#
+#   revl run examples/placement/caprealm_app.rvl --placement examples/placement/caprealm.toml --once
+#
+# See docs/capability-realm-placement.md for the model, the refusal rules, and
+# the optional `report_colocation` advisory.
+
+# Component capability requirements live in the placement layer (no .rvl change):
+# Vault reaches a host permit (`host_seal`), so it needs the "seal" capability.
+[capabilities]
+Vault = ["seal"]
+
+# The Vault host OFFERS the "seal" permit; it is realm-neutral (unpinned), so it
+# accepts any component — here just Vault.
+[processes.vault]
+components = ["Vault"]
+capabilities = ["seal"]
+
+# Each tenant subsystem sits on a host PINNED to its realm; a component isolating
+# a key into a foreign realm would be refused on it.
+[processes.tenant_a]
+components = ["TenantAStore", "TenantAApp"]
+realm = "tenant_a"
+
+[processes.tenant_b]
+components = ["TenantBStore", "TenantBApp"]
+realm = "tenant_b"
+
+# Optional: with `report_colocation = true`, the conductor prints a co-location
+# advisory when a named realm spans more than one host (a same-realm seam that
+# realm-affinity would remove). Off by default; here every realm is already on a
+# single host, so it has nothing to say.
