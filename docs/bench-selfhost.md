@@ -134,12 +134,76 @@ reclaim; the rest is the value-layer tax that a native tier is what erases.
   composed py callable, so no single end-to-end self-host callable exists to
   time; the total is the honest aggregate of the parts).
 
+## Native tier (rust) — the item-229 "after" (item 266)
+
+The CPython table above is the *before*. The meaningful comparison this doc
+defers is the same self-host stages emitted to a fast **native tier (rust)** vs
+CPython: how much of the per-access interpreter tax the native tier erases.
+`tools/bench_selfhost_rust.py` builds that number. It reuses the exact stage
+list and corpus from `tools/bench_selfhost.py` (imported, not copied), and for
+each stage: emits the stage to rust through the reference rust backend
+(`backends/rust/emit.py`), assembles a runnable cargo binary whose `main` drives
+the stage's pure entry point over the corpus, `cargo build --release` ONCE in
+setup, then runs the binary once. The binary times the run **in process** with
+`std::time::Instant` using the same methodology as the py tier (warmup passes
+discarded, median of many whole-corpus passes), so only the run is timed and the
+one-time build is a note. rust-vs-CPython is the CPython self-host run time (from
+the table above) divided by the native run.
+
+Machine: `Darwin-25.2.0-arm64` (Apple Silicon). Toolchain: **cargo 1.85.1 /
+rustc 1.85.1**. cordis-rs resolves here (the same `needs_cordis_rs` gate the
+runtime tests use is green: `rust_runtime_reason()` returns `None`), and the
+backend's own scenario/router suites prove emitted rust builds and runs on this
+box. So this is **not** a toolchain skip.
+
+The number is nonetheless **unmeasured**, for a different and specific reason:
+the reference rust backend cannot yet **emit** any of the five self-host stages.
+Each stage is refused at emit time by a distinct, real limitation:
+
+| stage    | cpython run ms | rust run ms | rust vs cpython | emit blocker (backends/rust/emit.py) |
+|----------|---------------:|------------:|----------------:|--------------------------------------|
+| lexer    | 20.55          | unmeasured  | unmeasured      | `unknown builtin method 'is_digit'`: the item-233 char-classification builtins (`is_digit`/`is_alnum`/`is_alpha`/`is_space`) are implemented on the py tier but not the rust tier |
+| parser   | 3.74           | unmeasured  | unmeasured      | `cannot infer Rust struct type for record literal with fields ['e', 'i']`: anonymous record literal not resolvable to a named struct |
+| checker  | 1.41           | unmeasured  | unmeasured      | `record field identifier collides with Rust/reserved name: 'ctx'`: a stage record field named `ctx` hits the emitter's reserved set |
+| lower    | 2.57           | unmeasured  | unmeasured      | `cannot infer Rust struct type for record literal with fields ['i', 'ok', 'xs']`: same anonymous-record class as parser |
+| emit_py  | 4.93           | unmeasured  | unmeasured      | `extern py_repr has no @rs body`: the stage depends on a CPython-only extern (`repr`), fundamentally not portable to a native tier |
+
+These are all inside `backends/rust/emit.py` (and, for emit_py, an intentionally
+py-only extern in `selfhost/emit_py.rvl`). Closing them is out of scope for this
+item; when they close, `tools/bench_selfhost_rust.py` fills the table with no
+further change. The harness is committed and verified end to end: a trivial
+emittable stage runs the full emit → assemble → `cargo build --release` → run →
+median path on this box, so the only missing piece is emitter coverage of the
+self-host source.
+
+### Reading for item 231a
+
+Item 231a asks whether the lexer's residual py-tier overhead (4.9x → 4.4x after
+item 233's inline char classification) is a **py-only lever** or one a native
+tier would erase anyway. This run cannot answer that with a measured native
+number yet, and the reason is itself the finding: the rust tier does not
+implement the item-233 char-classification builtins at all, so it cannot even
+run the lexer's hot per-byte path, let alone show what a native version of it
+costs. Until `backends/rust/emit.py` grows those builtins (and the parser /
+checker / lower record and reserved-word gaps close), the native "after" for the
+lexer stays open, and the 4.4x should be read as a py-tier figure whose native
+counterpart is not yet observable. The honest status is "blocked on rust-emitter
+coverage", not a factor.
+
 ## Reproducing
 
 ```
-python3 tools/bench_selfhost.py
+python3 tools/bench_selfhost.py        # CPython py-tier baseline (item 229)
+python3 tools/bench_selfhost_rust.py   # native rust tier (item 266)
 ```
 
-Prints the machine/CPython line, the correctness-gate confirmation, the
-per-stage table, the heaviest-overhead and pre-195 emit callouts, and the
-one-time compile-cost note. No third-party dependencies; times only the run.
+`bench_selfhost.py` prints the machine/CPython line, the correctness-gate
+confirmation, the per-stage table, the heaviest-overhead and pre-195 emit
+callouts, and the one-time compile-cost note. No third-party dependencies; times
+only the run.
+
+`bench_selfhost_rust.py` prints the machine/toolchain line, then per stage emits
+to rust, builds a cargo binary once, and times only the run; a stage that cannot
+be emitted, built, or run is reported "unable to measure" with the exact reason
+(never a fabricated number). It needs cargo and a resolvable cordis-rs; with
+neither it skips with the same reason `tests/test_run_rust.py` skips on.
