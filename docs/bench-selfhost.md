@@ -134,6 +134,47 @@ reclaim; the rest is the value-layer tax that a native tier is what erases.
   composed py callable, so no single end-to-end self-host callable exists to
   time; the total is the honest aggregate of the parts).
 
+## Lexer before/after: emitter inlining of small pure fns (item 231a)
+
+Item 231a adds a **py-tier inlining pass** to `backends/python/emit.py`: a small,
+pure, non-recursive helper fn with the guarded-return shape (`if (c) { return X }`
+guards then one terminal `return Y`) and at most one parameter is folded into its
+call sites inside `fn` bodies, so a hot loop pays an inline comparison instead of
+a CPython call frame. It is deliberately conservative and behavior-preserving:
+only helpers whose fully-expanded body references nothing but their parameter,
+and only where substituting the argument cannot change evaluation (used once in
+an always-evaluated spot; or, when duplicated, effect-free). The native tiers
+already inline these, so this is the py-tier equivalent. The self-host lexer's
+per-character helpers (`code0`, `is_alpha`, `is_alnum`, `is_digit`, `is_space`,
+`is_ws`) are exactly the shape the pass folds, and it inlines every one of them
+(tokens stay identical to the reference across the change, the correctness gate).
+
+Measured on the same machine (`Darwin-25.2.0-arm64`, CPython 3.14.6), same
+methodology, median of repeated whole-corpus passes:
+
+| lexer stage                     | ref ms | self-host ms | overhead |
+|---------------------------------|:------:|:------------:|:--------:|
+| **before** (item 233)           |  5.20  |    25.3      | **4.9x** |
+| **after** (item 231a inlining)  |  5.14  |    24.8      | **4.8x** |
+
+The honest finding: on the **current** self-host lexer the movement is inside
+run-to-run noise (±0.1x). The reason is not that inlining fails, it is that the
+lexer's premise (item 229's "per-byte `is_alnum(charAt(j))` fn-call layering")
+no longer holds in the source: `selfhost/lexer.rvl`'s hottest loops (`scan_word`,
+`scan_digits`, the main `step` scan) were already hand-rewritten to call the
+item-233 char builtins directly (`source.charAt(j).is_alnum()`), so the fn calls
+the pass removes (`code0`, `is_alpha`) now sit on the colder per-token paths, a
+smaller share of the per-byte work.
+
+The pass does deliver where the per-call pattern is still present. A synthetic
+hot loop that classifies every byte through the helper fns (the pattern the
+lexer used to have) runs **1.22x faster** inlined than called (14.6 ms vs 17.8 ms
+over the same input, output identical), which is the general py hot-loop lever
+231a targets: any revl-on-py code that still calls a small pure helper per
+iteration gets that saving, even though the self-host lexer has already captured
+most of its own share by hand. `parser`/`checker`/`lower` move within noise too
+(their hot paths are not per-byte helper calls).
+
 ## Native tier (rust) — the item-229 "after" (item 266)
 
 The CPython table above is the *before*. The meaningful comparison this doc

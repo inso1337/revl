@@ -27,6 +27,7 @@ enter — so a revl var named ``ctx`` no longer collides (item 156).
 
 from __future__ import annotations
 
+import copy
 import keyword
 import re
 import textwrap
@@ -2168,6 +2169,303 @@ def _refuse_holes(ir: dict) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# py-tier inlining of small pure functions (roadmap item 231a)
+#
+# CPython pays a real per-call frame cost, and revl's pure functional style
+# leans on tiny helper fns on the hot path. The self-host LEXER's per-byte
+# scan calls `code0`/`is_alpha`/`is_digit`/`is_space` once per source byte
+# (item 229 found the lexer the heaviest stage on CPython for exactly this
+# reason). The native tiers inline these for free; this pass gives the py tier
+# the same win by folding a small pure helper's body into its call sites, so a
+# hot loop pays an inline comparison instead of a function call.
+#
+# It is an OPTIMIZER, so it is deliberately conservative: it inlines only where
+# the substitution is provably behavior-preserving and skips everything else:
+#
+#   * only a v3 pure `fn` (no effects, sync) with 0 or 1 parameters, whose body
+#     is the "guarded return" shape (zero or more `if (c) { return X }` guards
+#     followed by one terminal `return Y`), which folds into one conditional
+#     expression `(X if c else Y)`. Anything with a loop, a `let`, an `else`, a
+#     multi-statement guard, or more than one parameter is left alone. Capping
+#     at one parameter removes every argument-evaluation-ORDER concern.
+#   * calls are rewritten only inside pure `fn` and `test` bodies (the module
+#     `_expr` domain, where arguments are themselves pure); component/method
+#     orchestration (where an argument could carry an effect) is never touched
+#     (a module-fn call there is a `fn` node, not the `call` node this rewrites).
+#   * the fully-expanded template must reference nothing but its parameter (no
+#     free global name, no residual call, no host root), so there is no
+#     name-capture hazard when the body lands in the caller's scope.
+#   * per call site, the argument is substituted only when doing so cannot
+#     change evaluation: used exactly once in an eagerly-evaluated position (any
+#     argument), used more than once (the argument must be effect-free so
+#     re-evaluating it is invisible), or used zero/only-conditionally (the
+#     argument must be a bare name/literal that neither raises nor has effects).
+#
+# A helper that fails any check keeps its call: a correct un-inlined call is
+# always a better outcome than a risky inline.
+# ---------------------------------------------------------------------------
+
+# Template size cap: the point is the small hot helpers, not folding a big
+# list-returning fn (`keywords()`) into every call site.
+_INLINE_MAX_NODES = 24
+# Expression kinds whose evaluation may carry an effect (or resolve a live host
+# value): an argument containing one must never be duplicated or elided.
+_INLINE_IMPURE = frozenset({"call", "optcall", "req", "spawn", "instance-get",
+                            "host"})
+# Kinds that neither raise nor have an effect, safe to duplicate OR drop: a
+# bare read of a local/literal/empty-map.
+_INLINE_TRIVIAL = frozenset({"var", "name", "lit", "config", "maplit"})
+
+
+def _inline_node_count(node: Any) -> int:
+    if isinstance(node, dict):
+        return 1 + sum(_inline_node_count(v) for v in node.values())
+    if isinstance(node, list):
+        return sum(_inline_node_count(v) for v in node)
+    return 0
+
+
+def _inline_free_names(node: Any, out: set) -> None:
+    """Every identifier a `var`/`name` node references in an expression."""
+    if isinstance(node, dict):
+        if node.get("kind") in ("var", "name"):
+            nm = node.get("name") if node.get("kind") == "var" else node.get("id")
+            if nm is not None:
+                out.add(nm)
+        for v in node.values():
+            _inline_free_names(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _inline_free_names(v, out)
+
+
+def _inline_contains(node: Any, kinds: frozenset) -> bool:
+    if isinstance(node, dict):
+        if node.get("kind") in kinds:
+            return True
+        return any(_inline_contains(v, kinds) for v in node.values())
+    if isinstance(node, list):
+        return any(_inline_contains(v, kinds) for v in node)
+    return False
+
+
+def _inline_count_var(node: Any, name: str) -> int:
+    n = 0
+    if isinstance(node, dict):
+        if node.get("kind") == "var" and node.get("name") == name:
+            n += 1
+        for v in node.values():
+            n += _inline_count_var(v, name)
+    elif isinstance(node, list):
+        for v in node:
+            n += _inline_count_var(v, name)
+    return n
+
+
+def _inline_eager_vars(node: Any) -> set:
+    """Parameter names an expression is GUARANTEED to evaluate: the ones whose
+    argument is therefore evaluated unconditionally when the inlined body runs.
+
+    Conservative by construction: a name is reported only where control
+    provably reaches it (the always-taken side of a short-circuit / ternary,
+    the receiver of a builtin whose args may ride a conditional lambda).
+    Under-reporting is safe (it just demands a trivial argument); over-reporting
+    would not be, so this never guesses."""
+    if not isinstance(node, dict):
+        return set()
+    kind = node.get("kind")
+    if kind == "var":
+        return {node.get("name")}
+    if kind == "bin":
+        if node.get("op") in ("&&", "||", "??"):
+            # the right operand is short-circuited; only the left is guaranteed
+            return _inline_eager_vars(node.get("left"))
+        return _inline_eager_vars(node.get("left")) | _inline_eager_vars(node.get("right"))
+    if kind == "un":
+        return _inline_eager_vars(node.get("operand"))
+    if kind == "if":
+        # the condition always runs; a name on BOTH arms is still guaranteed
+        return (_inline_eager_vars(node.get("cond"))
+                | (_inline_eager_vars(node.get("then"))
+                   & _inline_eager_vars(node.get("else"))))
+    if kind == "builtin":
+        # the receiver is always evaluated; some builtins wrap their args in a
+        # conditional lambda, so args are not counted
+        return _inline_eager_vars(node.get("target"))
+    if kind == "index":
+        return _inline_eager_vars(node.get("target")) | _inline_eager_vars(node.get("index"))
+    if kind in ("field", "optfield"):
+        return _inline_eager_vars(node.get("target"))
+    if kind == "list":
+        out: set = set()
+        for item in node.get("items") or []:
+            out |= _inline_eager_vars(item)
+        return out
+    if kind == "match":
+        return _inline_eager_vars(node.get("scrutinee"))
+    # record / format / interp / arrow / adt / call / ... : nothing provably
+    # eager for the parameter (kept empty, which forces a trivial-arg demand)
+    return set()
+
+
+def _inline_replace_var(node: Any, name: str, arg: dict) -> Any:
+    """A fresh copy of `node` with every `var name` replaced by a fresh copy of
+    `arg` (never mutates either input)."""
+    if isinstance(node, dict):
+        if node.get("kind") == "var" and node.get("name") == name:
+            return copy.deepcopy(arg)
+        return {k: _inline_replace_var(v, name, arg) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_inline_replace_var(v, name, arg) for v in node]
+    return node
+
+
+def _inline_substitute(param: str | None, template: dict, arg: dict | None) -> dict | None:
+    """Substitute `arg` for the single parameter in `template`, returning None
+    when the substitution would not be behavior-preserving. `template` is not
+    mutated."""
+    if param is None:
+        return copy.deepcopy(template)
+    uses = _inline_count_var(template, param)
+    arg_trivial = arg.get("kind") in _INLINE_TRIVIAL
+    arg_pure = not _inline_contains(arg, _INLINE_IMPURE)
+    if param in _inline_eager_vars(template):
+        # the argument is evaluated unconditionally at least once
+        ok = True if uses == 1 else arg_pure  # once: any arg; more: no effects
+    else:
+        # only conditionally (or never) evaluated -> the arg must neither raise
+        # nor have an effect if it is skipped or duplicated
+        ok = arg_trivial
+    if not ok:
+        return None
+    return _inline_replace_var(template, param, arg)
+
+
+def _fn_inline_template(fn: dict) -> tuple[str | None, dict] | None:
+    """`(param, expr)` if `fn` is a small pure fn whose body is the guarded
+    return shape, else None. The guards fold into one conditional expression."""
+    if fn.get("async"):
+        return None
+    params = fn.get("params") or []
+    if len(params) > 1:
+        return None
+    body = fn.get("body") or []
+    if not body:
+        return None
+    *guards, last = body
+    if last.get("step") != "return" or last.get("expr") is None:
+        return None
+    expr = last["expr"]
+    for guard in reversed(guards):
+        if guard.get("step") != "if" or guard.get("else"):
+            return None
+        then = guard.get("then") or []
+        if len(then) != 1 or then[0].get("step") != "return":
+            return None
+        ret = then[0].get("expr")
+        cond = guard.get("cond")
+        if ret is None or cond is None:
+            return None
+        expr = {"kind": "if", "cond": cond, "then": ret, "else": expr}
+    param = params[0]["name"] if params else None
+    return param, copy.deepcopy(expr)
+
+
+def _inline_templates(functions: list) -> dict:
+    """`{name: (param, expanded_expr)}` for every safely-inlinable fn. Nested
+    candidate calls are expanded (so `is_space` folds in `code0`); a fn that
+    cannot fully expand to a closed, side-effect-free template is dropped."""
+    raw: dict = {}
+    for fn in functions:
+        tmpl = _fn_inline_template(fn)
+        if tmpl is not None:
+            raw[fn["name"]] = tmpl
+
+    memo: dict = {}
+
+    def inline_calls(node: Any, stack: frozenset) -> Any:
+        if isinstance(node, dict):
+            node = {k: inline_calls(v, stack) for k, v in node.items()}
+            callee = node.get("callee")
+            if node.get("kind") == "call" and isinstance(callee, dict) \
+                    and callee.get("kind") == "var" and callee.get("name") in raw \
+                    and callee.get("name") not in stack:
+                name = callee["name"]
+                template = expand(name, stack)
+                if template is not None:
+                    param = raw[name][0]
+                    args = node.get("args") or []
+                    if (param is None) == (len(args) == 0):
+                        sub = _inline_substitute(
+                            param, template, args[0] if args else None)
+                        if sub is not None:
+                            return sub
+            return node
+        if isinstance(node, list):
+            return [inline_calls(v, stack) for v in node]
+        return node
+
+    def expand(name: str, stack: frozenset) -> dict | None:
+        if name in memo:
+            return memo[name]
+        result = inline_calls(copy.deepcopy(raw[name][1]), stack | {name})
+        param = raw[name][0]
+        allowed = {param} if param is not None else set()
+        names: set = set()
+        _inline_free_names(result, names)
+        if (names - allowed) or _inline_contains(result, _INLINE_IMPURE) \
+                or _inline_node_count(result) > _INLINE_MAX_NODES:
+            result = None
+        memo[name] = result
+        return result
+
+    final: dict = {}
+    for name in raw:
+        expanded = expand(name, frozenset())
+        if expanded is not None:
+            final[name] = (raw[name][0], expanded)
+    return final
+
+
+def _inline_pure_fns(ir: dict) -> dict:
+    """Return a copy of `ir` with calls to safely-inlinable pure fns folded into
+    their call sites, inside pure `fn` bodies. The fn definitions are kept (a fn
+    may still be referenced as a value), so this only rewrites call sites; an
+    unused def is harmless.
+
+    Only `fn` bodies are rewritten, not `test` bodies: hot loops live in fns
+    (the self-host stages are fns), a `test` block is an assertion and never a
+    hot path, and leaving test bodies alone keeps the call-site spelling a
+    cross-tier assertion pins (tests/test_cross_tier_execution.py) intact."""
+    templates = _inline_templates(ir.get("functions") or [])
+    if not templates:
+        return ir
+
+    def rewrite(node: Any) -> Any:
+        if isinstance(node, dict):
+            node = {k: rewrite(v) for k, v in node.items()}
+            callee = node.get("callee")
+            if node.get("kind") == "call" and isinstance(callee, dict) \
+                    and callee.get("kind") == "var" and callee.get("name") in templates:
+                param, template = templates[callee["name"]]
+                args = node.get("args") or []
+                if (param is None) == (len(args) == 0):
+                    sub = _inline_substitute(
+                        param, template, args[0] if args else None)
+                    if sub is not None:
+                        return sub
+            return node
+        if isinstance(node, list):
+            return [rewrite(v) for v in node]
+        return node
+
+    ir = copy.deepcopy(ir)
+    for fn in ir.get("functions") or []:
+        fn["body"] = rewrite(fn.get("body") or [])
+    return ir
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
@@ -2175,6 +2473,11 @@ def emit(ir: dict) -> str:
     _refuse_holes(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
+
+    # item 231a: fold small pure helper fns into their call sites, cutting the
+    # per-call CPython frame cost on hot loops (the self-host lexer's per-byte
+    # scan). Behavior-preserving and conservative; see `_inline_pure_fns`.
+    ir = _inline_pure_fns(ir)
 
     services = ir.get("services") or {}
     components = ir.get("components") or []
