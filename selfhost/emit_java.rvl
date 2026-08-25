@@ -1,8 +1,8 @@
-// The revl backend-IR -> cordis4j EMITTER, in revl — Path B slice 1 for the
-// JAVA tier (roadmap item 199). Where selfhost/emit_py.rvl ports the tail of the
-// compiler to Python and selfhost/emit_rust.rvl to Rust, this file ports it to
-// Java: it reads the stable interchange IR (docs/backend-ir.md) and produces
-// Java source text, mirroring backends/java/emit.py.
+// The revl backend-IR -> cordis4j EMITTER, in revl — Path B for the JAVA tier.
+// Where selfhost/emit_py.rvl ports the tail of the compiler to Python and
+// selfhost/emit_rust.rvl to Rust, this file ports it to Java: it reads the stable
+// interchange IR (docs/backend-ir.md) and produces Java source text, mirroring
+// backends/java/emit.py.
 //
 // It is one half of a differential BYTE oracle: this file and
 // backends/java/emit.py's `emit()` are two independent implementations of the
@@ -12,86 +12,92 @@
 //
 // ============================================================ WHAT IT COVERS
 // Every IR the frontend produces is ir_version 3, so the covered slice mirrors
-// the reference's v3 path (`_emit_v3` -> `_emit_v3_functions` -> `_expr` /
-// `_v3_stmt`) for a FUNCTION-ONLY document with NO services, NO components, NO
-// user types, NO externs, NO tests, NO stdlib builtins — the corner of the v3
-// surface that emits, byte-for-byte, with only the module scaffold and the
-// free-function bodies:
+// the reference's v3 path (`_emit_v3` -> `_emit_v3_types` / `_emit_v3_functions`
+// -> `_expr` / `_v3_stmt`) for a document with NO services, NO components, NO
+// externs, NO tests, NO stdlib builtins, NO built-in Result — the v3 typed-core:
 //
-//   * the module scaffold — the two banner comments, the `package revl;`, the
-//     five unconditional `import io.cordis4j.core.*;` lines (a function-only
-//     doc uses no `await`/`fail` component step, so `_core_imports` adds neither
-//     `AsyncPlugin` nor `CordisException`), and the `public final class
-//     Components { private Components() {} }` wrapper;
-//   * `_emit_v3_functions` — each module fn as a `public static` Java method,
-//     with `_java_v3_type` for scalar / `List` / `Opt` / `Map` / `Result`
-//     parameter and return types (boxed in type-argument position), keyword
-//     renaming via `_fn_name`, and `// (empty body)` for an empty body;
-//   * `_v3_stmt` for the base statement surface — let/assign (with the
-//     `_let_keyword` `final var` / `var` / bare `java.util.List` choice), return,
-//     if/while/for, the bare-expr statement, and assert (the `if (!(..)) throw
-//     new AssertionError("assertion failed");` lowering);
-//   * `_expr` for the base expression algebra — lit, name, var (incl the `None`
-//     -> `Optional.empty()` reference), bin (incl `??` via `.orElseGet`, `==`/
-//     `!=` via `java.util.Objects.equals`, the trapping `Math.addExact/
-//     subtractExact/multiplyExact` for Int/Int32, `/`, `%`, comparisons,
-//     `&&`/`||`, and native string `+`), un (incl `Math.negateExact`), the 2.0
-//     `callee`/`args` call and the `fn` call (with the `Some`/`None`
-//     constructors), the Int->Float / Int32->Int `widen` markers, field, index,
-//     ternary-if, list, the empty map literal, and non-float `${..}`
-//     interpolation via `String.valueOf`.
+//   * SLICE 1 (item 199) — the module scaffold (the two banner comments, the
+//     `package revl;`, the five unconditional `import io.cordis4j.core.*;` lines,
+//     and the `public final class Components { private Components() {} }`
+//     wrapper); `_emit_v3_functions` (each module fn a `public static` method,
+//     `_java_v3_type` for scalar / `List` / `Opt` / `Map` / `Result` types,
+//     keyword renaming, `// (empty body)`); `_v3_stmt` (let/assign, return,
+//     if/while/for, bare-expr, assert); and the base `_expr` algebra (lit, name,
+//     var incl `None`->`Optional.empty()`, bin incl `??`/`==`/exact-arith/`/`/
+//     comparisons/`&&`, un incl `Math.negateExact`, the 2.0 call and the `fn`
+//     call with `Some`/`None`, the widen markers, field, index, ternary, list,
+//     the empty `maplit`, and non-float `${..}` interpolation).
+//
+//   * SLICE 2 (item 210 — THIS slice) the v3 TYPED-CORE:
+//       - `_emit_v3_types` — a user `record` type as a `public static final class`
+//         (public final fields + a canonical ctor), a `variant` type as a
+//         `public sealed interface … permits …` with one `final class … implements`
+//         per case (nullary or single-`value` payload);
+//       - the `_V3Ctx` type-table inference — `case_owners` (a case name -> its
+//         sealed interface), each case's has-payload flag, `record_by_fields` (a
+//         record's field-SET -> its nominal class), and each variant's full case
+//         set (drives `_covers_variant`);
+//       - ADT construction — the `adt` node AND a `call`/`var` whose callee names
+//         a user case, both `new Owner.Case(args)`; the `_adt_binding_type` `let`
+//         (`final Owner o = …`, restoring the interface type the frontend gave);
+//       - record LITERALS — `new Type(args)` with the argument order taken from
+//         the type's DECLARED field order (values rendered in literal order);
+//       - `match` over user variants — a pattern `switch` with the reference's
+//         document-wide `__revl_case_N` / `__revl_ignored_N` temp numbering
+//         (threaded here as an Int counter — revl has no method state — since the
+//         numbering is otherwise unreproducible), the bound-arm `.value` unpack,
+//         the `_covers_variant` omission of the `default` throw for a total match;
+//         and the built-in Opt `Some`/`None` match (`.map(..).orElseGet(..)`);
+//       - user type NAMES wherever `_java_v3_type` meets one (`_ident`/`_mangle`).
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on java-emitter slices, deliberately OUT of this slice —
 // each is a real reference surface this slice does not reach (its fixtures avoid
 // it), NOT an approximation:
-//   * COMPONENTS / SERVICES entirely — `_emit_component*`, the service
-//     interfaces, plugin ctors, `provide`/`req`/`config`, the component-dialect
-//     expression kinds (`req`/`config`/`host`/`format`/`fn`-method and the
-//     `target`/`method` call form), and the `_core_imports` growth
-//     (`AsyncPlugin`/`CordisException`) they drive — Path B slice 2+;
-//   * the v3 TYPED-CORE — user `type` decls (`_emit_v3_types`), record literals
-//     and functional record-update, ADT construction (`adt`) and `match` over
-//     user variants, and the record/variant type-name inference in `_V3Ctx`;
-//   * the HOST Map/generics surface — `backends/java/emit.py` emits a
-//     `HashMap<String,V>` host stub (`_emit_host_stubs`) with per-site value-type
-//     inference (`_map_value_expr_type`); that is component territory. The plain
-//     v3 `maplit` (`new java.util.HashMap<>()`) and the `Map[K,V]` TYPE lowering
-//     ARE covered — only the host-stub Map is deferred;
-//   * the STDLIB surface — every `builtin`/`len` node and the
-//     `_emit_stdlib_helpers` / `revlLength` it pulls in (a fixture with any
-//     builtin trips `_uses_stdlib` and grows the whole helper block);
-//   * the built-in Result surface — `Ok`/`Err` construction and the
-//     `_emit_result_type` sealed `RevlResult` (`_uses_builtin_result`), plus the
-//     total-division `_emit_checked_div_helpers` (`_uses_checked_div`);
+//   * COMPONENTS / SERVICES entirely — deferred AS ONE UNIT (see the dogfood note
+//     in docs/selfhost-findings.md). A lone service drags in a very large,
+//     bridge-entangled block: `_emit_service_interfaces_v3`, `_emit_plugin_ctors`,
+//     `provide`/`req`/`config`, the component-dialect expression kinds
+//     (`req`/`config`/`host`/`format`/`target`-`method`), the modern-vs-legacy
+//     `_emit_component`/`_emit_component_modern` split, AND the host-stub
+//     `HashMap<String,V>` per-site value-type inference (`_map_value_expr_type`
+//     et al.) — far bigger than the typed-core, so it lands whole in a later
+//     slice, not half-emitted here;
+//   * the HOST Map/generics surface — `_emit_host_stubs`' `HashMap<String,V>` with
+//     per-site value inference is component territory (deferred with them). The
+//     plain v3 `maplit` (`new java.util.HashMap<>()`) and the `Map[K,V]` TYPE
+//     lowering ARE covered;
+//   * the STDLIB surface — every `builtin`/`len` node and `_emit_stdlib_helpers`
+//     / `revlLength`;
+//   * the built-in Result surface — `Ok`/`Err` construction and `match`, the
+//     sealed `RevlResult` (`_emit_result_type`), and `_emit_checked_div_helpers`;
+//   * functional record-update `{r | f = e}` — the JAVA reference itself RAISES on
+//     `record_update` (only python/typescript emit it), a structural exclusion;
 //   * async coloring (await/join), spawn/instances (`_v3_spawn`/`instance-get`),
 //     externs (`_emit_v3_externs`), in-file `test`/lifecycle-test emission, and
 //     the canonical Float->Str `revlFtoa` (so `${aFloat}` interpolation is
 //     excluded, since it also pulls in the `_emit_ftoa_helper` block);
-//   * java-specific NUANCES beyond the core — the `_reject_fn_type` refusal of a
-//     declared function type (no JDK functional interface targets it), local
-//     `let`-bound arrows and their `_inline_arrow` beta-reduction at the call
-//     site (a walk detail — `_arrow_repeatable`/`_name_uses` — a second
-//     implementation cannot track), and `let_pattern` (its temp name is
-//     `__revl_destructure_{id(node)}`, a host-object identity no port can
-//     reproduce — a structural exclusion).
+//   * java-specific NUANCES — the `_reject_fn_type` refusal of a declared function
+//     type, local `let`-bound arrows and their `_inline_arrow` beta-reduction, and
+//     `let_pattern` (its temp name is `__revl_destructure_{id(node)}`, a host
+//     identity no port reproduces).
 //
 // ------------------------------------------------------ the erased-IR boundary
 // Navigation of the IR is PURE revl through stdlib/value.rvl's `value_*` (items
 // 180 / 188), stdlib/str.rvl's `trim`/`split_top`, and stdlib/list.rvl's
-// `list_contains` — exactly as the other Path B emitters do: every byte of
-// emitter LOGIC (dispatch, formatting, the string building) is revl. Only HOST
-// FORMATTING stays `@py` — the item-180 "NOT obsoleted" category: `json_dumps`
-// (the reference `_string`/`_lit` call Python's `json.dumps`, so bridging it is
-// faithful) and `num_str` (the `f"{value}L"`/`f"{value}d"` body, i.e.
-// `str(value)`). `newline` and `mangle`/`_fn_name` are PURE revl here (a
-// backtick literal newline and a `list_contains` scan), no `@py` needed.
+// `list_contains`/`list_sort`/`list_dedup` — exactly as the other Path B emitters
+// do: every byte of emitter LOGIC (dispatch, formatting, the string building) is
+// revl. Only HOST FORMATTING stays `@py` — the item-180 "NOT obsoleted" category:
+// `json_dumps` (the reference `_string`/`_lit` call Python's `json.dumps`, so
+// bridging it is faithful) and `num_str` (`str(value)`). `newline` and
+// `mangle`/`_fn_name` are PURE revl (a backtick newline and a `list_contains`
+// scan), no `@py` needed.
 use "../stdlib/value.rvl" {
-  value_kind, value_is_null, value_field,
+  value_kind, value_is_null, value_field, value_keys,
   value_list, value_at, value_str, value_bool
 }
 use "../stdlib/str.rvl" { trim, split_top, last_index_of, rstrip }
-use "../stdlib/list.rvl" { list_contains }
+use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
 
 // ------------------------------------------------- host formatting (kept @py)
 // The reference renders string literals with `json.dumps` (`_string`), and a
@@ -142,7 +148,7 @@ fn java_reserved() -> List[Str] {
 // `_EMITTER_RESERVED`: `_fn_name` also renames a callable colliding with these.
 fn emitter_reserved() -> List[Str] { return ["ctx", "config", "root"] }
 
-// `_mangle` (== `_ident`'s rename for a binding/param/name).
+// `_mangle` (== `_ident`'s rename for a binding/param/name/type).
 fn mangle(name: Str) -> Str {
   var n = name
   while (list_contains(java_reserved(), n)) { n = n.concat("_") }
@@ -206,14 +212,63 @@ fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
 fn is_int_operand(opnd: Str) -> Bool { return opnd == "Int" || opnd == "Int32" }
 
 // ---------------------------------------------------------------- lowering ctx
-// The names visible to the expression emitters (`_V3Ctx`, subset): the set of
-// top-level callable names, so a `var`/`call` callee that names a function is
-// resolved through `_fn_name`. The user-type tables (`case_owners`) and local
-// arrow bindings are empty in this slice, and Java threads no `var_types`, so the
-// ctx is immutable across a body.
-type Ctx = { fns: Map[Str, Bool] }
+// The names and type layouts visible to the expression emitters (`_V3Ctx`,
+// subset). The user-type tables mirror the reference's `_V3Ctx` construction:
+//   * `fns`    — top-level callable names, so a `var`/`call` callee that names a
+//                function resolves through `_fn_name`;
+//   * `ca`     — `case_owners`: a variant case name -> its sealed interface name
+//                (`<<AMBIG>>` when two decls share a case name, exactly where the
+//                reference stores `None`);
+//   * `cp`     — each case's has-payload flag ("y"/"n");
+//   * `rbf`    — `record_by_fields`: a record's field-SET key -> its class name;
+//   * `vcases` — a variant name -> the sorted-joined KEY of its full case set,
+//                for `_covers_variant`;
+//   * `rfields`— a record name -> its DECLARED field names, comma-joined, so a
+//                record literal orders its ctor arguments by declaration order.
+// The counter (`_V3Ctx._match_counter`) is NOT here: revl records are immutable,
+// so it is threaded separately as an Int through every renderer.
+type Ctx = {
+  fns: Map[Str, Bool], ca: Map[Str, Str], cp: Map[Str, Str],
+  rbf: Map[Str, Str], vcases: Map[Str, Str], rfields: Map[Str, Str]
+}
+// A rendered expression: its text AND the running match-temp counter.
+type Rendered = { text: Str, counter: Int }
+// One or more statement lines AND the threaded match counter.
+type Sout = { lines: List[Str], counter: Int }
+
+fn map_get(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
 fn has_fn(ctx: Ctx, name: Str) -> Bool {
   return match ctx.fns.lookup(name) { Some(v) => v, None => false }
+}
+// A resolved (unique, non-ambiguous) lookup — an empty string OR the `<<AMBIG>>`
+// sentinel both mean "not a byte-exact target here".
+fn resolved(name: Str) -> Bool { return name != "" && name != "<<AMBIG>>" }
+// The field/case-set KEY: the names sorted (Python `set(..)`/`sorted(..)`),
+// joined with a `,`. `list_sort` is the codepoint sort the reference uses.
+fn sorted_key(names: List[Str]) -> Str { return list_sort(names).join(",") }
+
+// `_V3Ctx.record_type_for_fields`: a record literal's nominal class, from its
+// field SET. Reference RAISES on no-unique-match; here the sentinel keeps the
+// emitter total (no in-corpus literal is ambiguous or unknown).
+fn record_type_for_fields(ctx: Ctx, names: List[Str]) -> Str {
+  return map_get(ctx.rbf, sorted_key(names))
+}
+
+// `_covers_variant`: do these arm patterns name EVERY case of one sealed ADT? If
+// so the reference omits the `default -> throw` arm (a total pattern switch is
+// complete to javac). One owner, and its full case set present.
+fn covers_variant(ctx: Ctx, patterns: List[Str]) -> Bool {
+  let ps = list_dedup(patterns)
+  var owner = ""
+  for (p of ps) {
+    let o = map_get(ctx.ca, p)
+    if (!resolved(o)) { return false }
+    if (owner == "") { owner = o } else { if (owner != o) { return false } }
+  }
+  if (owner == "") { return false }
+  return sorted_key(ps) == map_get(ctx.vcases, owner)
 }
 
 // -------------------------------------------------------------------- types
@@ -268,7 +323,7 @@ fn java_v3_type(tv: Any, boxed: Bool) -> Str {
     for (a of args) { objs = objs.push("Object") }
     return `${base}<${objs.join(", ")}>`
   }
-  // A user type name (`_ident`) — DEFERRED (no `type` decls in this slice).
+  // A user type name (`_ident`) — mapped to its emitted class/interface name.
   return mangle(name)
 }
 
@@ -309,211 +364,473 @@ fn render_var(node: Any, ctx: Ctx) -> Str {
   return m
 }
 
-fn render_bin(node: Any, ctx: Ctx) -> Str {
+fn render_bin(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let op = node_op(node)
   if (op == "??") {
     let ln = value_field(node, "left")
-    var left = render_expr(ln, ctx)
+    let lr = render_expr(ln, ctx, counter)
+    var left = lr.text
     if (!is_postfix_safe(node_kind(ln))) { left = `(${left})` }
-    return `${left}.orElseGet(() -> ${render_expr(value_field(node, "right"), ctx)})`
+    let rr = render_expr(value_field(node, "right"), ctx, lr.counter)
+    return { text: `${left}.orElseGet(() -> ${rr.text})`, counter: rr.counter }
   }
-  let left = render_expr(value_field(node, "left"), ctx)
-  let right = render_expr(value_field(node, "right"), ctx)
-  if (op == "==" || op == "===") { return `java.util.Objects.equals(${left}, ${right})` }
-  if (op == "!=" || op == "!==") { return `!java.util.Objects.equals(${left}, ${right})` }
+  let lr = render_expr(value_field(node, "left"), ctx, counter)
+  let rr = render_expr(value_field(node, "right"), ctx, lr.counter)
+  let left = lr.text
+  let right = rr.text
+  let c = rr.counter
+  if (op == "==" || op == "===") { return { text: `java.util.Objects.equals(${left}, ${right})`, counter: c } }
+  if (op == "!=" || op == "!==") { return { text: `!java.util.Objects.equals(${left}, ${right})`, counter: c } }
   let opnd = node_operands(node)
   if (is_addsubmul(op) && is_int_operand(opnd)) {
-    return `Math.${exact_method(op)}(${left}, ${right})`
+    return { text: `Math.${exact_method(op)}(${left}, ${right})`, counter: c }
   }
   let opr = java_bin_ops(op)
-  if (opr == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
-  return `(${left} ${opr} ${right})`
+  if (opr == "") { return { text: `<<UNSUPPORTED-BIN:${op}>>`, counter: c } }
+  return { text: `(${left} ${opr} ${right})`, counter: c }
 }
 
-fn render_un(node: Any, ctx: Ctx) -> Str {
+fn render_un(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let op = node_op(node)
-  let operand = render_expr(value_field(node, "operand"), ctx)
-  if (op == "!") { return `(!${operand})` }
+  let r = render_expr(value_field(node, "operand"), ctx, counter)
+  if (op == "!") { return { text: `(!${r.text})`, counter: r.counter } }
   if (op == "-") {
-    if (is_int_operand(node_operands(node))) { return `Math.negateExact(${operand})` }
-    return `(-${operand})`
+    if (is_int_operand(node_operands(node))) { return { text: `Math.negateExact(${r.text})`, counter: r.counter } }
+    return { text: `(-${r.text})`, counter: r.counter }
   }
-  return `<<UNSUPPORTED-UN:${op}>>`
+  return { text: `<<UNSUPPORTED-UN:${op}>>`, counter: r.counter }
 }
 
-fn render_field(node: Any, ctx: Ctx) -> Str {
+fn render_field(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let tn = value_field(node, "target")
-  var target = render_expr(tn, ctx)
+  let tr = render_expr(tn, ctx, counter)
+  var target = tr.text
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-  return `${target}.${mangle(value_str(value_field(node, "name")))}`
+  return { text: `${target}.${mangle(value_str(value_field(node, "name")))}`, counter: tr.counter }
 }
 
-fn render_index(node: Any, ctx: Ctx) -> Str {
+fn render_index(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let tn = value_field(node, "target")
-  var target = render_expr(tn, ctx)
+  let tr = render_expr(tn, ctx, counter)
+  var target = tr.text
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-  return `${target}.get((int)(${render_expr(value_field(node, "index"), ctx)}))`
+  let ir = render_expr(value_field(node, "index"), ctx, tr.counter)
+  return { text: `${target}.get((int)(${ir.text}))`, counter: ir.counter }
 }
 
-fn render_list(node: Any, ctx: Ctx) -> Str {
+fn render_list(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   var parts = []
-  for (it of value_list(value_field(node, "items"))) { parts = parts.push(render_expr(it, ctx)) }
-  return "java.util.List.of(".concat(parts.join(", ")).concat(")")
+  var c = counter
+  for (it of value_list(value_field(node, "items"))) {
+    let r = render_expr(it, ctx, c)
+    parts = parts.push(r.text)
+    c = r.counter
+  }
+  return { text: "java.util.List.of(".concat(parts.join(", ")).concat(")"), counter: c }
+}
+
+// `adt`: a user variant construction (`new Owner.Case(args)`), used for both the
+// `adt` node and a `call`/`var` callee naming a case. The case name is used RAW
+// (only the owner interface is mangled), exactly as the reference does. Built-in
+// Ok/Err (the sealed RevlResult) are DEFERRED.
+fn render_adt(case: Str, args: List[Str], ctx: Ctx) -> Str {
+  let owner = map_get(ctx.ca, case)
+  if (resolved(owner)) { return `new ${mangle(owner)}.${case}(${args.join(", ")})` }
+  if (case == "Ok" || case == "Err") { return `<<DEFER-result-ctor:${case}>>` }
+  return `<<UNSUPPORTED-ADT:${case}>>`
 }
 
 // `_v3_call`: the 2.0 `callee`/`args` form. Arrow callees (beta-reduced by the
-// reference) and method-call/`.apply` callees are DEFERRED.
-fn render_call(node: Any, ctx: Ctx) -> Str {
+// reference) are DEFERRED; a method-call callee lowers as a real invocation.
+fn render_call(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let callee = value_field(node, "callee")
   let arg_nodes = value_list(value_field(node, "args"))
   var args = []
-  for (a of arg_nodes) { args = args.push(render_expr(a, ctx)) }
+  var c = counter
+  for (a of arg_nodes) {
+    let r = render_expr(a, ctx, c)
+    args = args.push(r.text)
+    c = r.counter
+  }
   let ck = node_kind(callee)
   if (ck == "var") {
     let name = value_str(value_field(callee, "name"))
-    if (has_fn(ctx, name)) { return `${fn_name(name)}(${args.join(", ")})` }
-    if (name == "Some") { return `java.util.Optional.of(${args[0]})` }
-    if (name == "None") { return "java.util.Optional.empty()" }
-    if (name == "Ok" || name == "Err") { return `<<DEFER-result-ctor:${name}>>` }
-    return `${name}(${args.join(", ")})`
+    if (has_fn(ctx, name)) { return { text: `${fn_name(name)}(${args.join(", ")})`, counter: c } }
+    if (resolved(map_get(ctx.ca, name))) { return { text: render_adt(name, args, ctx), counter: c } }
+    if (name == "Some") { return { text: `java.util.Optional.of(${args[0]})`, counter: c } }
+    if (name == "None") { return { text: "java.util.Optional.empty()", counter: c } }
+    if (name == "Ok" || name == "Err") { return { text: `<<DEFER-result-ctor:${name}>>`, counter: c } }
+    return { text: `${name}(${args.join(", ")})`, counter: c }
   }
   if (ck == "field") {
     let tn = value_field(callee, "target")
-    var target = render_expr(tn, ctx)
+    let tr = render_expr(tn, ctx, c)
+    var target = tr.text
     if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-    return `${target}.${mangle(value_str(value_field(callee, "name")))}(${args.join(", ")})`
+    return { text: `${target}.${mangle(value_str(value_field(callee, "name")))}(${args.join(", ")})`, counter: tr.counter }
   }
-  return `${render_expr(callee, ctx)}.apply(${args.join(", ")})`
+  let cr = render_expr(callee, ctx, c)
+  return { text: `${cr.text}.apply(${args.join(", ")})`, counter: cr.counter }
+}
+
+// `record`: a nominal `new Type(args)` literal. The struct name is inferred from
+// the (field-SET) `record_by_fields`; the ctor arguments are ordered by the
+// type's DECLARED field order (`rfields`), while the VALUES are rendered in
+// literal order (so the match counter advances in literal order).
+fn render_record(node: Any, ctx: Ctx, counter: Int) -> Rendered {
+  let fields = value_list(value_field(node, "fields"))
+  var names = []
+  for (f of fields) { names = names.push(value_str(value_at(f, 0))) }
+  let tn = record_type_for_fields(ctx, names)
+  var by: Map[Str, Str] = Map.empty()
+  var c = counter
+  for (f of fields) {
+    let k = value_str(value_at(f, 0))
+    let r = render_expr(value_at(f, 1), ctx, c)
+    by = by.set(k, r.text)
+    c = r.counter
+  }
+  var out_args = []
+  for (fname of split_top(map_get(ctx.rfields, tn), ",")) {
+    out_args = out_args.push(map_get(by, fname))
+  }
+  return { text: `new ${mangle(tn)}(${out_args.join(", ")})`, counter: c }
 }
 
 // `interp`: a `${..}` template as Java string `+` concatenation. A Float part
 // routes through the canonical `revlFtoa` (DEFERRED — such a part is excluded
 // from the corpus, since it also pulls in the `_emit_ftoa_helper` block).
-fn render_interp(node: Any, ctx: Ctx) -> Str {
+fn render_interp(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   var segs = []
+  var c = counter
   for (part of value_list(value_field(node, "parts"))) {
     let k = value_str(value_at(part, 0))
     let v = value_at(part, 1)
     if (k == "text") {
       segs = segs.push(json_dumps(v))
     } else {
+      let r = render_expr(v, ctx, c)
+      c = r.counter
       if (is_float_expr(v)) {
-        segs = segs.push(`revlFtoa(${render_expr(v, ctx)})`)
+        segs = segs.push(`revlFtoa(${r.text})`)
       } else {
-        segs = segs.push(`String.valueOf(${render_expr(v, ctx)})`)
+        segs = segs.push(`String.valueOf(${r.text})`)
       }
     }
   }
-  if (segs.length() == 0) { return json_dumps("") }
-  return segs.join(" + ")
+  if (segs.length() == 0) { return { text: json_dumps(""), counter: c } }
+  return { text: segs.join(" + "), counter: c }
+}
+
+// `_v3_match_expr`: a `match`. The built-in Opt (`Some`/`None`, when NOT shadowed
+// by a user variant) discriminates via `.map(..).orElseGet(..)`; a user variant
+// lowers to a pattern `switch` carrying the document-wide `__revl_case_N` /
+// `__revl_ignored_N` temp numbering. The arm lines carry a fixed indent (the
+// enclosing statement only pads the first line). Built-in Result (`Ok`/`Err`) is
+// DEFERRED.
+fn opt_arm_body(arms: List[Any], want: Str, ctx: Ctx, counter: Int) -> Rendered {
+  for (arm of arms) {
+    if (value_str(value_field(arm, "pattern")) == want) {
+      return render_expr(value_field(arm, "body"), ctx, counter)
+    }
+  }
+  for (arm of arms) {
+    if (value_str(value_field(arm, "pattern")) == "_") {
+      return render_expr(value_field(arm, "body"), ctx, counter)
+    }
+  }
+  return { text: "", counter: counter }
+}
+fn has_optional_arms(arms: List[Any], ctx: Ctx) -> Bool {
+  for (arm of arms) {
+    let p = value_str(value_field(arm, "pattern"))
+    if ((p == "Some" || p == "None") && !resolved(map_get(ctx.ca, p))) { return true }
+  }
+  return false
+}
+fn opt_bind(arms: List[Any]) -> Str {
+  for (arm of arms) {
+    if (value_str(value_field(arm, "pattern")) == "Some") {
+      let b = value_str(value_field(arm, "bind"))
+      if (b != "") { return mangle(b) }
+    }
+  }
+  return "__revl_v"
+}
+fn match_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
+  let sr = render_expr(value_field(node, "scrutinee"), ctx, counter)
+  let arms = value_list(value_field(node, "arms"))
+  var c = sr.counter
+  if (has_optional_arms(arms, ctx)) {
+    let some_bind = opt_bind(arms)
+    let some_body = opt_arm_body(arms, "Some", ctx, c)
+    let none_body = opt_arm_body(arms, "None", ctx, some_body.counter)
+    return {
+      text: `(${sr.text}).map(${some_bind} -> (${some_body.text})).orElseGet(() -> (${none_body.text}))`,
+      counter: none_body.counter
+    }
+  }
+  var lines = [`switch (${sr.text}) {`]
+  var wildcard = ""
+  var has_wild = false
+  var patterns = []
+  for (arm of arms) {
+    let pattern = value_str(value_field(arm, "pattern"))
+    let br = render_expr(value_field(arm, "body"), ctx, c)
+    c = br.counter
+    if (pattern == "_") {
+      wildcard = `            default -> { yield (${br.text}); }`
+      has_wild = true
+    } else {
+      patterns = patterns.push(pattern)
+      let case_m = mangle(pattern)
+      let owner = map_get(ctx.ca, pattern)
+      var qualified = case_m
+      if (resolved(owner)) { qualified = `${mangle(owner)}.${case_m}` }
+      let bind = value_str(value_field(arm, "bind"))
+      if (bind != "") {
+        c = c + 1
+        let case_var = `__revl_case_${c}`
+        lines = lines.push(`            case ${qualified} ${case_var} -> {`)
+        lines = lines.push(`                final var ${mangle(bind)} = ${case_var}.value;`)
+        lines = lines.push(`                yield (${br.text});`)
+        lines = lines.push(`            }`)
+      } else {
+        c = c + 1
+        let ignored = `__revl_ignored_${c}`
+        lines = lines.push(`            case ${qualified} ${ignored} -> {`)
+        lines = lines.push(`                yield (${br.text});`)
+        lines = lines.push(`            }`)
+      }
+    }
+  }
+  if (has_wild) {
+    lines = lines.push(wildcard)
+  } else {
+    if (!covers_variant(ctx, patterns)) {
+      lines = lines.push(`            default -> { throw new IllegalArgumentException("non-exhaustive match"); }`)
+    }
+  }
+  lines = lines.push(`        }`)
+  return { text: lines.join(newline()), counter: c }
 }
 
 // The kind dispatch, mirroring `_expr`'s branch order (post-widen).
-fn render_inner(node: Any, ctx: Ctx) -> Str {
+fn render_inner(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let kind = node_kind(node)
-  if (kind == "lit") { return java_lit(node) }
-  if (kind == "var") { return render_var(node, ctx) }
-  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
-  if (kind == "call") { return render_call(node, ctx) }
+  if (kind == "lit") { return { text: java_lit(node), counter: counter } }
+  if (kind == "var") { return { text: render_var(node, ctx), counter: counter } }
+  if (kind == "name") { return { text: mangle(value_str(value_field(node, "id"))), counter: counter } }
+  if (kind == "adt") {
+    var args = []
+    var c = counter
+    for (a of value_list(value_field(node, "args"))) {
+      let r = render_expr(a, ctx, c)
+      args = args.push(r.text)
+      c = r.counter
+    }
+    return { text: render_adt(value_str(value_field(node, "case")), args, ctx), counter: c }
+  }
+  if (kind == "call") { return render_call(node, ctx, counter) }
   if (kind == "fn") {
     var args = []
-    for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx)) }
-    return `${fn_name(value_str(value_field(node, "name")))}(${args.join(", ")})`
+    var c = counter
+    for (a of value_list(value_field(node, "args"))) {
+      let r = render_expr(a, ctx, c)
+      args = args.push(r.text)
+      c = r.counter
+    }
+    return { text: `${fn_name(value_str(value_field(node, "name")))}(${args.join(", ")})`, counter: c }
   }
-  if (kind == "bin") { return render_bin(node, ctx) }
-  if (kind == "un") { return render_un(node, ctx) }
-  if (kind == "field") { return render_field(node, ctx) }
-  if (kind == "index") { return render_index(node, ctx) }
+  if (kind == "bin") { return render_bin(node, ctx, counter) }
+  if (kind == "un") { return render_un(node, ctx, counter) }
+  if (kind == "field") { return render_field(node, ctx, counter) }
+  if (kind == "index") { return render_index(node, ctx, counter) }
+  if (kind == "record") { return render_record(node, ctx, counter) }
+  if (kind == "match") { return match_expr(node, ctx, counter) }
   if (kind == "if") {
-    return `(${render_expr(value_field(node, "cond"), ctx)} ? ${render_expr(value_field(node, "then"), ctx)} : ${render_expr(value_field(node, "else"), ctx)})`
+    let cr = render_expr(value_field(node, "cond"), ctx, counter)
+    let tr = render_expr(value_field(node, "then"), ctx, cr.counter)
+    let er = render_expr(value_field(node, "else"), ctx, tr.counter)
+    return { text: `(${cr.text} ? ${tr.text} : ${er.text})`, counter: er.counter }
   }
-  if (kind == "list") { return render_list(node, ctx) }
-  if (kind == "maplit") { return "new java.util.HashMap<>()" }
-  if (kind == "interp") { return render_interp(node, ctx) }
-  return `<<UNSUPPORTED-EXPR:${kind}>>`
+  if (kind == "list") { return render_list(node, ctx, counter) }
+  if (kind == "maplit") { return { text: "new java.util.HashMap<>()", counter: counter } }
+  if (kind == "interp") { return render_interp(node, ctx, counter) }
+  return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
 }
 
 // The `widen` coercion markers (docs/arithmetic.md): render the conversion the
 // reference makes explicit, then dispatch the un-widened node.
-fn render_expr(node: Any, ctx: Ctx) -> Str {
+fn render_expr(node: Any, ctx: Ctx, counter: Int) -> Rendered {
   let w = value_str(value_field(node, "widen"))
-  if (w == "Float") { return `((double) (${render_inner(node, ctx)}))` }
-  if (w == "Int") { return `((long) (${render_inner(node, ctx)}))` }
-  return render_inner(node, ctx)
+  if (w == "Float") {
+    let r = render_inner(node, ctx, counter)
+    return { text: `((double) (${r.text}))`, counter: r.counter }
+  }
+  if (w == "Int") {
+    let r = render_inner(node, ctx, counter)
+    return { text: `((long) (${r.text}))`, counter: r.counter }
+  }
+  return render_inner(node, ctx, counter)
 }
 
 // -------------------------------------------------------------- statements
 // `_let_keyword`: an empty list literal declares as raw `java.util.List` (keeps
-// erasure in play); ADT bindings are DEFERRED (empty `case_owners`); else the
-// `var` / `final var` inference.
-fn let_keyword(node: Any) -> Str {
+// erasure in play); an ADT-construction binding declares as its sealed interface
+// (`final Owner o`, restoring the type the frontend gave the expression); else
+// the `var` / `final var` inference.
+fn let_keyword(node: Any, ctx: Ctx) -> Str {
   let value = value_field(node, "value")
   if (node_kind(value) == "list" && value_list(value_field(value, "items")).length() == 0) {
     return "java.util.List"
+  }
+  if (node_kind(value) == "adt") {
+    let owner = map_get(ctx.ca, value_str(value_field(value, "case")))
+    if (resolved(owner)) {
+      if (value_bool(value_field(node, "mutable"))) { return mangle(owner) }
+      return `final ${mangle(owner)}`
+    }
   }
   if (value_bool(value_field(node, "mutable"))) { return "var" }
   return "final var"
 }
 
-fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> List[Str] {
+fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int, counter: Int) -> Sout {
   var lines = []
-  for (n of nodes) { lines = lines.concat(v3_stmt(n, ctx, indent)) }
-  return lines
+  var c = counter
+  for (n of nodes) {
+    let r = v3_stmt(n, ctx, indent, c)
+    lines = lines.concat(r.lines)
+    c = r.counter
+  }
+  return { lines: lines, counter: c }
 }
 
 // `_v3_stmt`: one fn-body step -> its emitted (indented) lines.
-fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> List[Str] {
+fn v3_stmt(node: Any, ctx: Ctx, indent: Int, counter: Int) -> Sout {
   let pad = ind(indent)
   let step = value_str(value_field(node, "step"))
   if (step == "let" || step == "assign") {
     let nm = mangle(value_str(value_field(node, "name")))
-    let value = render_expr(value_field(node, "value"), ctx)
+    let r = render_expr(value_field(node, "value"), ctx, counter)
     if (step == "let") {
-      return [pad.concat(`${let_keyword(node)} ${nm} = ${value};`)]
+      return { lines: [pad.concat(`${let_keyword(node, ctx)} ${nm} = ${r.text};`)], counter: r.counter }
     }
-    return [pad.concat(`${nm} = ${value};`)]
+    return { lines: [pad.concat(`${nm} = ${r.text};`)], counter: r.counter }
   }
   if (step == "return") {
     let e = value_field(node, "expr")
-    if (value_is_null(e)) { return [pad.concat("return;")] }
-    return [pad.concat(`return ${render_expr(e, ctx)};`)]
+    if (value_is_null(e)) { return { lines: [pad.concat("return;")], counter: counter } }
+    let r = render_expr(e, ctx, counter)
+    return { lines: [pad.concat(`return ${r.text};`)], counter: r.counter }
   }
   if (step == "if") {
-    var out = [pad.concat(`if (${render_expr(value_field(node, "cond"), ctx)}) {`)]
-    out = out.concat(emit_stmts(value_list(value_field(node, "then")), ctx, indent + 1))
+    let cr = render_expr(value_field(node, "cond"), ctx, counter)
+    var out = [pad.concat(`if (${cr.text}) {`)]
+    let tr = emit_stmts(value_list(value_field(node, "then")), ctx, indent + 1, cr.counter)
+    out = out.concat(tr.lines)
+    var c = tr.counter
     let els = value_list(value_field(node, "else"))
     if (els.length() > 0) {
       out = out.push(pad.concat("} else {"))
-      out = out.concat(emit_stmts(els, ctx, indent + 1))
+      let er = emit_stmts(els, ctx, indent + 1, c)
+      out = out.concat(er.lines)
+      c = er.counter
     }
     out = out.push(pad.concat("}"))
-    return out
+    return { lines: out, counter: c }
   }
   if (step == "while") {
-    var out = [pad.concat(`while (${render_expr(value_field(node, "cond"), ctx)}) {`)]
-    out = out.concat(emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1))
+    let cr = render_expr(value_field(node, "cond"), ctx, counter)
+    var out = [pad.concat(`while (${cr.text}) {`)]
+    let br = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1, cr.counter)
+    out = out.concat(br.lines)
     out = out.push(pad.concat("}"))
-    return out
+    return { lines: out, counter: br.counter }
   }
   if (step == "for") {
+    let ir = render_expr(value_field(node, "iterable"), ctx, counter)
     let bind = mangle(value_str(value_field(node, "bind")))
-    var out = [pad.concat(`for (var ${bind} : ${render_expr(value_field(node, "iterable"), ctx)}) {`)]
-    out = out.concat(emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1))
+    var out = [pad.concat(`for (var ${bind} : ${ir.text}) {`)]
+    let br = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1, ir.counter)
+    out = out.concat(br.lines)
     out = out.push(pad.concat("}"))
-    return out
+    return { lines: out, counter: br.counter }
   }
   if (step == "expr") {
-    return [pad.concat(`${render_expr(value_field(node, "expr"), ctx)};`)]
+    let r = render_expr(value_field(node, "expr"), ctx, counter)
+    return { lines: [pad.concat(`${r.text};`)], counter: r.counter }
   }
   if (step == "assert") {
-    return [pad.concat(`if (!(${render_expr(value_field(node, "expr"), ctx)})) throw new AssertionError("assertion failed");`)]
+    let r = render_expr(value_field(node, "expr"), ctx, counter)
+    return { lines: [pad.concat(`if (!(${r.text})) throw new AssertionError("assertion failed");`)], counter: r.counter }
   }
-  return [pad.concat(`<<UNSUPPORTED-STEP:${step}>>`)]
+  return { lines: [pad.concat(`<<UNSUPPORTED-STEP:${step}>>`)], counter: counter }
 }
 
-// `_emit_v3_functions`: each module fn as a `public static` method.
+// -------------------------------------------------------------- type decls
+// `_emit_v3_types`: a user `record` type as a `public static final class` (public
+// final fields + a canonical ctor), a `variant` type as a `public sealed
+// interface … permits …` with one `final class … implements` per case.
+fn emit_v3_types(types: Any) -> List[Str] {
+  var out = []
+  for (name of value_keys(types)) {
+    let mn = mangle(name)
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    if (kind == "record") {
+      out = out.push(`public static final class ${mn} {`)
+      let fields = value_field(spec, "fields")
+      let fnames = value_keys(fields)
+      for (f of fnames) {
+        out = out.push(`    public final ${java_v3_type(value_field(fields, f), false)} ${mangle(f)};`)
+      }
+      var params = []
+      for (f of fnames) {
+        params = params.push(`${java_v3_type(value_field(fields, f), false)} ${mangle(f)}`)
+      }
+      out = out.push(`    public ${mn}(${params.join(", ")}) {`)
+      for (f of fnames) {
+        out = out.push(`        this.${mangle(f)} = ${mangle(f)};`)
+      }
+      out = out.push("    }")
+      out = out.push("}")
+    } else {
+      let cases = value_list(value_field(spec, "cases"))
+      var permits = []
+      for (case of cases) {
+        permits = permits.push(`${mn}.${mangle(value_str(value_field(case, "name")))}`)
+      }
+      out = out.push(`public sealed interface ${mn} permits ${permits.join(", ")} {`)
+      for (case of cases) {
+        let cname = mangle(value_str(value_field(case, "name")))
+        let payload = value_field(case, "payload")
+        if (value_is_null(payload)) {
+          out = out.push(`    final class ${cname} implements ${mn} {`)
+          out = out.push(`        public ${cname}() {}`)
+          out = out.push("    }")
+        } else {
+          let ptype = java_v3_type(payload, false)
+          out = out.push(`    final class ${cname} implements ${mn} {`)
+          out = out.push(`        public final ${ptype} value;`)
+          out = out.push(`        public ${cname}(${ptype} value) { this.value = value; }`)
+          out = out.push("    }")
+        }
+      }
+      out = out.push("}")
+    }
+    out = out.push("")
+  }
+  return out
+}
+
+// `_emit_v3_functions`: each module fn as a `public static` method. The match
+// counter threads across the whole document (one `_V3Ctx` counter in the
+// reference, NOT reset per function).
 fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
   var lines = []
+  var c = 0
   for (fnode of functions) {
     let name = fn_name(value_str(value_field(fnode, "name")))
     var ps = []
@@ -526,7 +843,9 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
     if (body.length() == 0) {
       lines = lines.push("    // (empty body)")
     } else {
-      lines = lines.concat(emit_stmts(body, ctx, 1))
+      let r = emit_stmts(body, ctx, 1, c)
+      lines = lines.concat(r.lines)
+      c = r.counter
     }
     lines = lines.push("}")
     lines = lines.push("")
@@ -534,7 +853,8 @@ fn emit_v3_functions(functions: List[Any], ctx: Ctx) -> List[Str] {
   return lines
 }
 
-// `_core_imports` for a function-only doc: the five unconditional names, sorted.
+// `_core_imports` for a function/typed-core doc (no component await/fail step):
+// the five unconditional names, sorted.
 fn core_imports() -> List[Str] {
   return ["import io.cordis4j.core.Context;",
           "import io.cordis4j.core.Disposable;",
@@ -543,17 +863,63 @@ fn core_imports() -> List[Str] {
           "import io.cordis4j.core.ServiceKey;"]
 }
 
-// The document assembly for a FUNCTION-ONLY v3 document (`_emit_v3`, subset): the
-// two banner comments, the package, the core imports, the `Components` wrapper,
-// then the free functions — each line 4-space indented into the class — joined
-// with newlines, right-stripped, and closed with a single trailing newline.
-// Components/services/types/externs/tests are DEFERRED; the covered corpus
-// declares none, so every gated block contributes nothing.
-pub fn emit_src(ir: Any) -> Str {
-  let functions = value_list(value_field(ir, "functions"))
+// `_V3Ctx`'s type-table construction: fold the document `types` into the case /
+// record lookups. Ambiguity (a case name / field set shared by two decls) is
+// marked `<<AMBIG>>`, exactly where the reference stores `None`.
+fn build_ctx(ir: Any) -> Ctx {
   var fns: Map[Str, Bool] = Map.empty()
-  for (fnode of functions) { fns = fns.set(value_str(value_field(fnode, "name")), true) }
-  let ctx = { fns: fns }
+  for (fnode of value_list(value_field(ir, "functions"))) {
+    fns = fns.set(value_str(value_field(fnode, "name")), true)
+  }
+  var ca: Map[Str, Str] = Map.empty()
+  var cp: Map[Str, Str] = Map.empty()
+  var rbf: Map[Str, Str] = Map.empty()
+  var vcases: Map[Str, Str] = Map.empty()
+  var rfields: Map[Str, Str] = Map.empty()
+  let types = value_field(ir, "types")
+  for (name of value_keys(types)) {
+    let spec = value_field(types, name)
+    let kind = value_str(value_field(spec, "kind"))
+    if (kind == "record") {
+      let fnames = value_keys(value_field(spec, "fields"))
+      let key = sorted_key(fnames)
+      if (resolved(map_get(rbf, key)) || map_get(rbf, key) == "<<AMBIG>>") {
+        rbf = rbf.set(key, "<<AMBIG>>")
+      } else {
+        rbf = rbf.set(key, name)
+      }
+      rfields = rfields.set(name, fnames.join(","))
+    }
+    if (kind == "variant") {
+      var cnames = []
+      for (case of value_list(value_field(spec, "cases"))) {
+        let cn = value_str(value_field(case, "name"))
+        cnames = cnames.push(cn)
+        var pres = "n"
+        if (!value_is_null(value_field(case, "payload"))) { pres = "y" }
+        cp = cp.set(cn, pres)
+        if (resolved(map_get(ca, cn)) || map_get(ca, cn) == "<<AMBIG>>") {
+          ca = ca.set(cn, "<<AMBIG>>")
+        } else {
+          ca = ca.set(cn, name)
+        }
+      }
+      vcases = vcases.set(name, sorted_key(cnames))
+    }
+  }
+  return { fns: fns, ca: ca, cp: cp, rbf: rbf, vcases: vcases, rfields: rfields }
+}
+
+// The document assembly for a typed-core v3 document (`_emit_v3`, subset): the
+// two banner comments, the package, the core imports, the `Components` wrapper,
+// then the user `type` decls and the free functions — each line 4-space indented
+// into the class — joined with newlines, right-stripped, closed with a single
+// trailing newline. Components/services/externs/tests/Result/stdlib are DEFERRED;
+// the covered corpus declares none, so every gated block contributes nothing.
+pub fn emit_src(ir: Any) -> Str {
+  let ctx = build_ctx(ir)
+  let types = value_field(ir, "types")
+  let functions = value_list(value_field(ir, "functions"))
   var out = []
   out = out.push("// Generated by the revl cordis4j backend (ir_version 3) — do not edit.")
   out = out.push("// Target: cordis4j (github.com/1na-ko/cordis4j).")
@@ -564,6 +930,11 @@ pub fn emit_src(ir: Any) -> Str {
   out = out.push("public final class Components {")
   out = out.push("    private Components() {}")
   out = out.push("")
+  if (value_keys(types).length() > 0) {
+    for (l of emit_v3_types(types)) {
+      if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
+    }
+  }
   if (functions.length() > 0) {
     for (l of emit_v3_functions(functions, ctx)) {
       if (l == "") { out = out.push("") } else { out = out.push("    ".concat(l)) }
@@ -599,6 +970,14 @@ test "keyword-colliding identifiers are renamed by appending underscore" {
   assert fn_name("double") == "double_"
   assert fn_name("config") == "config_"
   assert fn_name("add") == "add"
+}
+
+test "the field-set key canonicalises regardless of order" {
+  assert sorted_key(["y", "x"]) == "x,y"
+  assert sorted_key(["x", "y"]) == "x,y"
+  assert resolved("Outcome") == true
+  assert resolved("<<AMBIG>>") == false
+  assert resolved("") == false
 }
 
 // --------------------------------------------------------------- component wrap

@@ -1,0 +1,48 @@
+// v3 typed-core: user variant (sealed-interface) declarations, ADT construction
+// through both `adt` (nullary + payload) nodes, `match` over user variants with
+// bound and unbound arms, an exhaustive match (no `default`), a partial match
+// (synthesised `default -> throw`), a wildcard arm, a nested match (the temp
+// counter threads across the whole document), and the `_adt_binding_type` `let`.
+type Shape = Circle(Int) | Square(Int) | Dot
+type Tree = Leaf(Int) | Branch(Int)
+
+fn mkcircle(r: Int) -> Shape { return Circle(r) }
+fn mkdot() -> Shape { return Dot }
+
+fn area(s: Shape) -> Int {
+  return match s {
+    Circle(r) => r * r,
+    Square(w) => w * w,
+    Dot => 0
+  }
+}
+
+fn name(s: Shape) -> Str {
+  return match s {
+    Circle(r) => "circle",
+    _ => "other"
+  }
+}
+
+fn weigh(t: Tree) -> Int {
+  return match t {
+    Leaf(n) => n,
+    Branch(n) => n + n
+  }
+}
+
+fn doubled(s: Shape) -> Shape {
+  let c = Circle(2)
+  return c
+}
+
+fn describe(s: Shape) -> Int {
+  return match s {
+    Circle(r) => match s {
+      Square(w) => w,
+      _ => r
+    },
+    Square(w) => w,
+    Dot => 0
+  }
+}
