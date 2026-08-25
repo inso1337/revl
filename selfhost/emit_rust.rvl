@@ -1,0 +1,721 @@
+// The revl backend-IR -> cordis-rs EMITTER, in revl — Path B slice 1 for the
+// RUST tier (roadmap item 191). Where selfhost/emit_py.rvl ports the tail of the
+// compiler to Python, this file ports it to Rust: it reads the stable
+// interchange IR (docs/backend-ir.md) and produces Rust source text, mirroring
+// backends/rust/emit.py.
+//
+// It is one half of a differential BYTE oracle: this file and
+// backends/rust/emit.py's `emit()` are two independent implementations of the
+// same lowering, forced to produce BYTE-IDENTICAL Rust for every input in the
+// covered subset (tests/test_selfhost_emit_rust.py). The reference is ground
+// truth; any divergence is a defect in this slice.
+//
+// ============================================================ WHAT IT COVERS
+// Every IR the frontend produces is ir_version 3, so the covered slice mirrors
+// the reference's v3 path (`_emit_v3` -> `_emit_v3_functions` -> `_render_expr`
+// / `_v3_stmt`) for a FUNCTION-ONLY document with NO services, NO user types,
+// NO stdlib builtins — the corner of the v3 surface that emits, byte-for-byte,
+// with only the module scaffold and the free-function bodies:
+//
+//   * the module scaffold — `_module_header(3)` (the two `//!` banner lines, the
+//     `#![allow(..)]`, and the `use std::sync::Arc;` / `use cordis::Value;`);
+//   * `_emit_v3_functions` — each module fn as a Rust `fn`, with `_rust_type`
+//     for scalar/`List`/`Opt`/`Map`/`Result` parameter and return types,
+//     `pub` visibility, and `todo!()` for an empty body;
+//   * `_v3_stmt` for the base statement surface — let/assign (with the
+//     `var_types` seeding that drives by-value clone decisions), return,
+//     if/while/for, the bare-expr `let _ = ..;`, and assert;
+//   * `_render_expr` for the base expression algebra — lit, name, var (incl the
+//     `Some`/`None`/`Ok`/`Err` built-in constructors), bin (incl `??`, the
+//     bounded `checked_add/sub/mul` for Int/Int32, `/` as the widened f64 true
+//     division, `%`, comparisons, `&&`/`||`, and string `+` via `format!`), un,
+//     the 2.0 `callee`/`args` call (with `_by_value_arg` argument cloning), the
+//     Int->Float / Int32->Int `widen` markers, index, ternary-if, list, maplit,
+//     the sync arrow, and non-float `${..}` string interpolation.
+//
+// ============================================================ WHAT IT DEFERS
+// Reported for follow-on rust-emitter slices, deliberately OUT of this slice —
+// each is a real reference surface this slice does not reach (its fixtures avoid
+// it), NOT an approximation:
+//   * COMPONENTS / SERVICES entirely — `_emit_component*`, the service traits,
+//     the effect/undo accumulator, `provide`/`req`/`config`, timers, the
+//     component-dialect expression kinds (`req`/`config`/`host`/`format`/`fn`
+//     and the `target`/`method` call form) — Path B slice 2+;
+//   * the v3 TYPED-CORE — user `type` decls (`_emit_v3_types`), record literals
+//     and functional record-update, ADT construction and `match` over user
+//     variants, and the record/variant type-name inference in `_V3Ctx`;
+//   * the STDLIB surface — every `builtin`/`len` node and the `_stdlib_helper_traits`
+//     / `revl_length` it pulls in (a fixture with any builtin trips `_uses_stdlib`
+//     and grows the whole helper-trait block);
+//   * the Value/serde ERASURE surface — `_emit_bridge` (the interop RPC proxy),
+//     `Pool`/`Map`/`Job` host stubs (`_emit_host_stubs`), and the serde derives;
+//   * async coloring (async methods / `await` / `plugin_async`), spawn/instances
+//     (`_v3_spawn`/`instance-get`), realms (`isolate`/`intercept`/`routes`),
+//     externs, in-file `test`/lifecycle-test emission, and the canonical
+//     Float->Str `revl_ftoa` (so `${aFloat}` interpolation is excluded);
+//   * rust-specific NUANCES beyond the core — the `impl Fn(..)` lowering of a
+//     declared function type and its escaping-position refusal, and the
+//     non-ASCII / `\u{..}` reaches of `_string` beyond the ASCII core (the
+//     escaper itself is bridged verbatim, but such literals are not in-corpus);
+//   * `let_pattern` (record/list destructuring): the list form names a temporary
+//     `_revl_list_{indent}_{len(out)}` from the output-buffer length, a walk
+//     detail a second implementation cannot track — a structural exclusion.
+//
+// ------------------------------------------------------ the erased-IR boundary
+// Navigation of the IR is PURE revl through stdlib/value.rvl's `value_*` /
+// `value_keys` (items 180 / 188), exactly as selfhost/emit_py.rvl does after its
+// slice-2 rewrite: every byte of emitter LOGIC (dispatch, formatting, the
+// var_types threading, string building) is revl. Only HOST FORMATTING stays
+// `@py` — the item-180 "NOT obsoleted" category: `string_lit` (the reference
+// `_string` Rust-literal escaper, kin to py's `py_repr`), `num_str` (the
+// `f"{value}i64"` / `f"{value}f64"` body, i.e. `str(value)`), `newline` (the one
+// genuine U+000A), and `mangle` (the Rust-keyword rename `_mangle`).
+use "../stdlib/value.rvl" {
+  value_kind, value_is_null, value_field, value_opt,
+  value_list, value_at, value_str, value_int, value_bool
+}
+
+// ------------------------------------------------- host formatting (kept @py)
+// `string_lit` is backends/rust/emit.py::_string for a `str` input, verbatim: a
+// Rust double-quoted string literal escaped FROM code points (docs/strings.md).
+// The list form (`Inject::new([..])`) is components-only, deferred, so the str
+// path is all this slice needs.
+extern pure fn string_lit(v: Any) -> Str = @py {
+    out = ['"']
+    for ch in v:
+        cp = ord(ch)
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 0x20 <= cp <= 0x7E:
+            out.append(ch)
+        elif cp >= 0x80 and ch.isprintable():
+            out.append(ch)
+        else:
+            out.append("\\u{%x}" % cp)
+    out.append('"')
+    return "".join(out)
+}
+// The literal-body host numeral: `_rust_v3_lit` renders an int as `f"{value}i64"`
+// and a float as `f"{value}f64"`, both `str(value)`. Sourced here so the numeral
+// text is exactly Python's.
+extern pure fn num_str(v: Any) -> Str = @py { return str(v) }
+// A real newline — the line SEPARATOR (`"\n".join(out)` in the reference).
+extern pure fn newline() -> Str = @py { return chr(10) }
+// `_mangle` verbatim: append `_` until the name is not a Rust reserved word, so a
+// valid revl identifier that is a Rust keyword emits and RUNS. A tuple, not a
+// set, keeps the host body free of `{}` (the @py raw-brace balancer counts
+// structural braces; a set literal would unbalance the block).
+extern pure fn mangle(name: Str) -> Str = @py {
+    reserved = ("as", "break", "const", "continue", "crate", "else", "enum",
+                "extern", "false", "fn", "for", "if", "impl", "in", "let",
+                "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+                "self", "Self", "static", "struct", "super", "trait", "true",
+                "type", "unsafe", "use", "where", "while", "async", "await",
+                "dyn")
+    while name in reserved:
+        name = name + "_"
+    return name
+}
+
+// ---------------------------------------------------------------- small utils
+fn ind(n: Int) -> Str { return "    ".repeat(n) }
+fn line(indent: Int, text: Str) -> Str { return ind(indent).concat(text) }
+fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
+fn node_op(n: Any) -> Str { return value_str(value_field(n, "op")) }
+fn node_operands(n: Any) -> Str { return value_str(value_field(n, "operands")) }
+
+// Trailing-whitespace trim, mirroring `"\n".join(out).rstrip()` before the final
+// newline: the module assembly ends its function list with a blank line, and the
+// reference strips it (plus any tab/CR/space) before re-appending one `\n`.
+fn rstrip(s: Str) -> Str {
+  var i = s.length()
+  var go = true
+  while (go && i > 0) {
+    let c = s.charCodeAt(i - 1)
+    if (c == 32 || c == 10 || c == 9 || c == 13) { i = i - 1 } else { go = false }
+  }
+  return s.slice(0, i)
+}
+
+fn strip_spaces(s: Str) -> Str {
+  var a = 0
+  var b = s.length()
+  var go = true
+  while (go && a < b) { if (s.charCodeAt(a) == 32) { a = a + 1 } else { go = false } }
+  go = true
+  while (go && b > a) { if (s.charCodeAt(b - 1) == 32) { b = b - 1 } else { go = false } }
+  return s.slice(a, b)
+}
+
+// The postfix-safe primaries (`_ATOMIC_KINDS`): a `.method()`/`.field`/`[i]`/
+// `.unwrap_or_else(..)` suffix appends without wrapping parens.
+fn is_atomic(kind: Str) -> Bool {
+  if (kind == "var") { return true }
+  if (kind == "name") { return true }
+  if (kind == "field") { return true }
+  if (kind == "index") { return true }
+  if (kind == "call") { return true }
+  if (kind == "lit") { return true }
+  if (kind == "req") { return true }
+  if (kind == "config") { return true }
+  return kind == "host"
+}
+
+// The `_V3_BIN_OPS` table: revl operator -> Rust operator, "" when unmapped.
+fn v3_bin_ops(op: Str) -> Str {
+  if (op == "==") { return "==" }
+  if (op == "===") { return "==" }
+  if (op == "!=") { return "!=" }
+  if (op == "!==") { return "!=" }
+  if (op == "<") { return "<" }
+  if (op == ">") { return ">" }
+  if (op == "<=") { return "<=" }
+  if (op == ">=") { return ">=" }
+  if (op == "+") { return "+" }
+  if (op == "-") { return "-" }
+  if (op == "*") { return "*" }
+  if (op == "/") { return "/" }
+  if (op == "%") { return "%" }
+  if (op == "&&") { return "&&" }
+  if (op == "||") { return "||" }
+  return ""
+}
+
+fn checked_method(op: Str) -> Str {
+  if (op == "+") { return "checked_add" }
+  if (op == "-") { return "checked_sub" }
+  return "checked_mul"
+}
+
+fn is_addsubmul(op: Str) -> Bool { return op == "+" || op == "-" || op == "*" }
+
+fn is_builtin_ctor(name: Str) -> Bool {
+  return name == "Some" || name == "None" || name == "Ok" || name == "Err"
+}
+
+// ---------------------------------------------------------------- lowering ctx
+// The names visible to the expression/statement emitters (`_V3Ctx`, subset): a
+// binding's surface type (seeded from params and `let` right-hand sides) drives
+// the by-value clone decision and string-`+` detection; a free function's
+// declared return type types a `let` bound to its call. The user-type tables
+// (`case_adt`, `record_by_fields`) are empty in this slice.
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str] }
+// A statement-emission result: the lines produced AND the threaded ctx, since
+// revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
+// is visible to every later statement (the reference mutates one `ctx` in place).
+type Sout = { lines: List[Str], ctx: Ctx }
+
+fn map_get(m: Map[Str, Str], k: Str) -> Str {
+  return match m.lookup(k) { Some(v) => v, None => "" }
+}
+fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx { return { vt: ctx.vt.set(k, v), fr: ctx.fr } }
+
+// -------------------------------------------------------------------- types
+fn is_fn_type(name: Str) -> Bool {
+  // A declared function type `(P, ..) -> R` is the one spelling starting with a
+  // paren. Its `impl Fn(..)` lowering is DEFERRED; no in-slice type starts with
+  // `(`, so this both keeps `_by_value_arg`'s fn-type branch honest and lets
+  // `rust_type` flag one out of subset rather than mis-lower it.
+  return name.startsWith("(")
+}
+
+fn type_map(name: Str) -> Str {
+  if (name == "Str") { return "String" }
+  if (name == "Int") { return "i64" }
+  if (name == "Int32") { return "i32" }
+  if (name == "Float") { return "f64" }
+  if (name == "Bool") { return "bool" }
+  if (name == "Bytes") { return "Vec<u8>" }
+  if (name == "Unit") { return "()" }
+  return ""
+}
+
+// `_split_generic`: split `P1, P2, ..` on top-level commas.
+fn split_generic(inner: Str) -> List[Str] {
+  var parts = []
+  var depth = 0
+  var start = 0
+  var i = 0
+  while (i < inner.length()) {
+    let ch = inner.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") { depth = depth - 1 }
+      else {
+        if (ch == "," && depth == 0) {
+          parts = parts.push(strip_spaces(inner.slice(start, i)))
+          start = i + 1
+        }
+      }
+    }
+    i = i + 1
+  }
+  parts = parts.push(strip_spaces(inner.slice(start, inner.length())))
+  return parts
+}
+
+// `_rust_type` (subset): scalars, the `List`/`Opt`/`Map`/`Result` generics, and
+// the opaque `Value` fallback for an unknown/empty/function type.
+fn rust_type(tv: Any) -> Str {
+  let name = value_str(tv)
+  if (name == "") { return "Value" }
+  if (is_fn_type(name)) { return "<<DEFER-fn-type>>" }
+  let tm = type_map(name)
+  if (tm != "") { return tm }
+  if (name.endsWith("]")) {
+    let lb = name.indexOf("[")
+    if (lb > 0) {
+      let head = name.slice(0, lb)
+      let inner = name.slice(lb + 1, name.length() - 1)
+      if (head == "List") { return `Vec<${rust_type(inner)}>` }
+      if (head == "Opt") { return `Option<${rust_type(inner)}>` }
+      if (head == "Map") {
+        let ps = split_generic(inner)
+        return `std::collections::HashMap<${rust_type(ps[0])}, ${rust_type(ps[1])}>`
+      }
+      if (head == "Result") {
+        let ps = split_generic(inner)
+        return `Result<${rust_type(ps[0])}, ${rust_type(ps[1])}>`
+      }
+    }
+  }
+  return "Value"
+}
+
+// `_rust_v3_lit`: a v3 literal. Strings are owned `String` (revl `Str`).
+fn rust_v3_lit(node: Any) -> Str {
+  let v = value_field(node, "value")
+  let k = value_kind(v)
+  if (k == "null") { return "None" }
+  if (k == "bool") { if (value_bool(v)) { return "true" } return "false" }
+  if (k == "str") { return "String::from(".concat(string_lit(v)).concat(")") }
+  if (k == "int") { return num_str(v).concat("i64") }
+  if (k == "float") { return num_str(v).concat("f64") }
+  return "<<UNSUPPORTED-LIT>>"
+}
+
+// --------------------------------------------------- type inference (subset)
+// `_v3_is_float`: syntactically-certain Float.
+fn v3_is_float(node: Any) -> Bool {
+  let k = node_kind(node)
+  if (k == "lit") { return value_kind(value_field(node, "value")) == "float" }
+  if (k == "bin") { return node_op(node) == "/" || node_operands(node) == "Float" }
+  if (k == "un") {
+    if (node_op(node) != "-") { return false }
+    return v3_is_float(value_field(node, "operand"))
+  }
+  return false
+}
+
+fn ref_name(node: Any) -> Str {
+  let k = node_kind(node)
+  if (k == "var" || k == "req") { return value_str(value_field(node, "name")) }
+  if (k == "name") {
+    let idv = value_str(value_field(node, "id"))
+    if (idv != "") { return idv }
+    return value_str(value_field(node, "name"))
+  }
+  return ""
+}
+
+// `_v3_is_str`: certainly a `Str` (a literal, a template, a Str-typed binding, or
+// a `+` over those). Conservative — never guesses.
+fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
+  let k = node_kind(node)
+  if (k == "lit") { return value_kind(value_field(node, "value")) == "str" }
+  if (k == "interp") { return true }
+  if (k == "name" || k == "var") { return map_get(ctx.vt, ref_name(node)) == "Str" }
+  if (k == "bin" && node_op(node) == "+") {
+    return v3_is_str(value_field(node, "left"), ctx) || v3_is_str(value_field(node, "right"), ctx)
+  }
+  return false
+}
+
+// `_v3_infer_type`: the surface type of an expression when knowable, else "".
+fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
+  let k = node_kind(node)
+  if (k == "name" || k == "var" || k == "req") { return map_get(ctx.vt, ref_name(node)) }
+  if (k == "adt") { return "" }
+  if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
+  if (k == "call" && !value_is_null(value_field(node, "callee"))) {
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") {
+      let cn = value_str(value_field(callee, "name"))
+      if (ctx.fr.has(cn)) { return map_get(ctx.fr, cn) }
+    }
+  }
+  if (k == "list") { return "List" }
+  if (v3_is_str(node, ctx)) { return "Str" }
+  if (v3_is_float(node)) { return "Float" }
+  return ""
+}
+
+// `_by_value_arg`: wrap a by-value free-function/constructor argument so the call
+// cannot consume a value the caller still needs (E0382). A bare non-Copy variable
+// is `.clone()`d; a function-typed one is passed `&`; Copy scalars and fresh
+// temporaries pass through.
+fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let name = ref_name(arg_node)
+  if (name == "") { return rendered }
+  let ty = map_get(ctx.vt, name)
+  if (ty == "") { return rendered }
+  if (is_fn_type(ty)) { return "&".concat(rendered) }
+  let head = strip_spaces(ty.split("[")[0])
+  if (head == "Int" || head == "Bool" || head == "Float") { return rendered }
+  return rendered.concat(".clone()")
+}
+
+// -------------------------------------------------------------- expressions
+// `_V3Ctx.constructor` (subset): the built-in Result/Option constructors.
+fn constructor(name: Str, args: List[Str]) -> Str {
+  if (name == "None") { return "None" }
+  if (name == "Some" || name == "Ok" || name == "Err") {
+    return `${name}(${args[0]})`
+  }
+  return `<<DEFER-ctor:${name}>>`
+}
+
+fn render_var(node: Any, ctx: Ctx) -> Str {
+  let name = value_str(value_field(node, "name"))
+  if (is_builtin_ctor(name)) { return name }
+  return mangle(name)
+}
+
+fn render_bin(node: Any, ctx: Ctx) -> Str {
+  let op = node_op(node)
+  if (op == "??") {
+    let ln = value_field(node, "left")
+    var left = render_expr(ln, ctx)
+    if (!is_atomic(node_kind(ln))) { left = `(${left})` }
+    return `${left}.unwrap_or_else(|| ${render_expr(value_field(node, "right"), ctx)})`
+  }
+  if (op == "+") {
+    let lf = value_field(node, "left")
+    let rf = value_field(node, "right")
+    if (v3_is_str(lf, ctx) || v3_is_str(rf, ctx)) {
+      return `format!("{}{}", ${render_expr(lf, ctx)}, ${render_expr(rf, ctx)})`
+    }
+  }
+  let opr = v3_bin_ops(op)
+  if (opr == "") { return `<<UNSUPPORTED-BIN:${op}>>` }
+  let left = render_expr(value_field(node, "left"), ctx)
+  let right = render_expr(value_field(node, "right"), ctx)
+  let opnd = node_operands(node)
+  if (is_addsubmul(op) && opnd == "Int") {
+    return `(${left}).${checked_method(op)}(${right}).expect("revl: Int overflow")`
+  }
+  if (is_addsubmul(op) && opnd == "Int32") {
+    return `(${left}).${checked_method(op)}(${right}).expect("revl: Int32 overflow")`
+  }
+  if (op == "/" && (opnd == "Int" || opnd == "Int32")) {
+    return `((${left}) as f64 / (${right}) as f64)`
+  }
+  return `(${left} ${opr} ${right})`
+}
+
+fn render_un(node: Any, ctx: Ctx) -> Str {
+  let op = node_op(node)
+  let operand = render_expr(value_field(node, "operand"), ctx)
+  if (op == "!") { return `(!${operand})` }
+  if (op == "-") { return `(-${operand})` }
+  return `<<UNSUPPORTED-UN:${op}>>`
+}
+
+fn render_call(node: Any, ctx: Ctx) -> Str {
+  let callee_node = value_field(node, "callee")
+  if (value_is_null(callee_node)) { return "<<DEFER-component-call>>" }
+  let arg_nodes = value_list(value_field(node, "args"))
+  var arg_exprs = []
+  for (a of arg_nodes) { arg_exprs = arg_exprs.push(render_expr(a, ctx)) }
+  let ckind = node_kind(callee_node)
+  if (ckind == "field") { return "<<DEFER-method-call>>" }
+  var callee_name = ""
+  if (ckind == "var") { callee_name = value_str(value_field(callee_node, "name")) }
+  if (callee_name != "" && is_builtin_ctor(callee_name)) {
+    return constructor(callee_name, arg_exprs)
+  }
+  var callee = render_expr(callee_node, ctx)
+  if (!is_atomic(ckind)) { callee = `(${callee})` }
+  var bv = []
+  var i = 0
+  while (i < arg_nodes.length()) {
+    bv = bv.push(by_value_arg(arg_nodes[i], arg_exprs[i], ctx))
+    i = i + 1
+  }
+  return `${callee}(${bv.join(", ")})`
+}
+
+fn render_index(node: Any, ctx: Ctx) -> Str {
+  let tn = value_field(node, "target")
+  var target = render_expr(tn, ctx)
+  if (!is_atomic(node_kind(tn))) { target = `(${target})` }
+  return `(${target})[(${render_expr(value_field(node, "index"), ctx)}) as usize].clone()`
+}
+
+fn render_list(node: Any, ctx: Ctx) -> Str {
+  var parts = []
+  for (it of value_list(value_field(node, "items"))) { parts = parts.push(render_expr(it, ctx)) }
+  return "vec![".concat(parts.join(", ")).concat("]")
+}
+
+fn render_arrow(node: Any, ctx: Ctx) -> Str {
+  var ps = []
+  for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
+  return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), ctx)} }`
+}
+
+fn escape_braces(s: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < s.length()) {
+    let ch = s.charAt(i)
+    if (ch == "{") { out = out.concat("{{") }
+    else {
+      if (ch == "}") { out = out.concat("}}") } else { out = out.concat(ch) }
+    }
+    i = i + 1
+  }
+  return out
+}
+
+// `_v3_interp`: a `${..}` template as a Rust `format!`. A Float part routes
+// through the canonical `revl_ftoa` (DEFERRED — such a part is excluded from the
+// corpus, since it also pulls in the `revl_ftoa` helper the scaffold omits).
+fn render_interp(node: Any, ctx: Ctx) -> Str {
+  var fmt = []
+  var args = []
+  for (part of value_list(value_field(node, "parts"))) {
+    let k = value_str(value_at(part, 0))
+    let v = value_at(part, 1)
+    if (k == "text") {
+      fmt = fmt.push(escape_braces(value_str(v)))
+    } else {
+      fmt = fmt.push("{}")
+      if (v3_is_float(v)) {
+        args = args.push(`revl_ftoa(${render_expr(v, ctx)})`)
+      } else {
+        args = args.push(render_expr(v, ctx))
+      }
+    }
+  }
+  let joined = fmt.join("")
+  if (args.length() == 0) { return `format!(${string_lit(joined)})` }
+  return `format!(${string_lit(joined)}, ${args.join(", ")})`
+}
+
+// The kind dispatch, mirroring `_render_expr`'s branch order (post-widen).
+fn render_inner(node: Any, ctx: Ctx) -> Str {
+  let kind = node_kind(node)
+  if (kind == "lit") { return rust_v3_lit(node) }
+  if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
+  if (kind == "var") { return render_var(node, ctx) }
+  if (kind == "bin") { return render_bin(node, ctx) }
+  if (kind == "un") { return render_un(node, ctx) }
+  if (kind == "call") { return render_call(node, ctx) }
+  if (kind == "index") { return render_index(node, ctx) }
+  if (kind == "if") {
+    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${render_expr(value_field(node, "then"), ctx)} } else { ${render_expr(value_field(node, "else"), ctx)} }`
+  }
+  if (kind == "list") { return render_list(node, ctx) }
+  if (kind == "maplit") { return "std::collections::HashMap::new()" }
+  if (kind == "arrow") { return render_arrow(node, ctx) }
+  if (kind == "interp") { return render_interp(node, ctx) }
+  return `<<UNSUPPORTED-EXPR:${kind}>>`
+}
+
+// The `widen` coercion markers (docs/arithmetic.md): render the conversion the
+// reference makes visible, then dispatch the un-widened node.
+fn render_expr(node: Any, ctx: Ctx) -> Str {
+  let w = value_str(value_field(node, "widen"))
+  if (w == "Float") { return `(${render_inner(node, ctx)} as f64)` }
+  if (w == "Int") { return `(${render_inner(node, ctx)} as i64)` }
+  return render_inner(node, ctx)
+}
+
+// -------------------------------------------------------------- statements
+fn emit_stmts(nodes: List[Any], ctx: Ctx, indent: Int) -> Sout {
+  var lines = []
+  var c = ctx
+  for (n of nodes) {
+    let r = v3_stmt(n, c, indent)
+    lines = lines.concat(r.lines)
+    c = r.ctx
+  }
+  return { lines: lines, ctx: c }
+}
+
+// `_v3_stmt`: one fn-body step -> its emitted (indented) lines and threaded ctx.
+fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
+  let step = value_str(value_field(node, "step"))
+  if (step == "let" || step == "assign") {
+    let raw = value_str(value_field(node, "name"))
+    let nm = mangle(raw)
+    let valnode = value_field(node, "value")
+    let inferred = v3_infer_type(valnode, ctx)
+    let value = render_expr(valnode, ctx)
+    var nctx = ctx
+    if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
+    var out = []
+    if (step == "let") {
+      var kw = "let"
+      if (value_bool(value_field(node, "mutable"))) { kw = "let mut" }
+      out = out.push(line(indent, `${kw} ${nm} = ${value};`))
+    } else {
+      out = out.push(line(indent, `${nm} = ${value};`))
+    }
+    return { lines: out, ctx: nctx }
+  }
+  if (step == "return") {
+    let e = value_field(node, "expr")
+    var out = []
+    if (value_is_null(e)) { out = out.push(line(indent, "return;")) }
+    else { out = out.push(line(indent, `return ${render_expr(e, ctx)};`)) }
+    return { lines: out, ctx: ctx }
+  }
+  if (step == "if") {
+    var out = [line(indent, `if ${render_expr(value_field(node, "cond"), ctx)} {`)]
+    let thenR = emit_stmts(value_list(value_field(node, "then")), ctx, indent + 1)
+    out = out.concat(thenR.lines)
+    var c = thenR.ctx
+    let els = value_list(value_field(node, "else"))
+    if (els.length() > 0) {
+      out = out.push(line(indent, "} else {"))
+      let elseR = emit_stmts(els, c, indent + 1)
+      out = out.concat(elseR.lines)
+      c = elseR.ctx
+    }
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: c }
+  }
+  if (step == "while") {
+    var out = [line(indent, `while ${render_expr(value_field(node, "cond"), ctx)} {`)]
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    out = out.concat(bodyR.lines)
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: bodyR.ctx }
+  }
+  if (step == "for") {
+    let bind = mangle(value_str(value_field(node, "bind")))
+    var out = [line(indent, `for ${bind} in ${render_expr(value_field(node, "iterable"), ctx)} {`)]
+    let bodyR = emit_stmts(value_list(value_field(node, "body")), ctx, indent + 1)
+    out = out.concat(bodyR.lines)
+    out = out.push(line(indent, "}"))
+    return { lines: out, ctx: bodyR.ctx }
+  }
+  if (step == "expr") {
+    return { lines: [line(indent, `let _ = ${render_expr(value_field(node, "expr"), ctx)};`)], ctx: ctx }
+  }
+  if (step == "assert") {
+    return { lines: [line(indent, `assert!(${render_expr(value_field(node, "expr"), ctx)});`)], ctx: ctx }
+  }
+  return { lines: [line(indent, `<<UNSUPPORTED-STEP:${step}>>`)], ctx: ctx }
+}
+
+// `_emit_v3_functions`: each module fn as a Rust `fn`, blank-line separated. The
+// per-fn `var_types` is seeded from the parameter signatures (the reference's
+// `ctx.var_types = {p.name: p.type ..}`).
+fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str]) -> List[Str] {
+  var out = []
+  for (fnode of functions) {
+    let name = mangle(value_str(value_field(fnode, "name")))
+    let params = value_list(value_field(fnode, "params"))
+    var vt: Map[Str, Str] = Map.empty()
+    for (p of params) { vt = vt.set(value_str(value_field(p, "name")), value_str(value_field(p, "type"))) }
+    let ctx = { vt: vt, fr: fr }
+    var ps = []
+    for (p of params) {
+      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type(value_field(p, "type"))}`)
+    }
+    let returns = rust_type(value_field(fnode, "returns"))
+    var vis = ""
+    if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
+    out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)
+    let body = value_list(value_field(fnode, "body"))
+    if (body.length() == 0) {
+      out = out.push(line(1, "todo!()"))
+    } else {
+      let r = emit_stmts(body, ctx, 1)
+      out = out.concat(r.lines)
+    }
+    out = out.push("}")
+    out = out.push("")
+  }
+  return out
+}
+
+// `_module_header(3)`: the banner, the lint allowances, and the crate uses.
+fn module_header() -> List[Str] {
+  var o = []
+  o = o.push("//! Generated by the revl cordis-rs backend (ir_version 3): do not edit.")
+  o = o.push("//! Target: cordis-rs 0.3.x (docs.rs/cordis-rs).")
+  o = o.push("#![allow(dead_code, unused_variables, unused_mut, unused_imports, unused_parens, unreachable_patterns)]")
+  o = o.push("")
+  o = o.push("use std::sync::Arc;")
+  o = o.push("use cordis::Value;")
+  o = o.push("")
+  return o
+}
+
+// The document assembly for a FUNCTION-ONLY v3 document (`_emit_v3`, subset): the
+// module header then the free functions, joined with newlines, right-stripped,
+// and closed with a single trailing newline. Components/services/types/externs/
+// tests are DEFERRED — the covered corpus declares none, so the reference's
+// `_emit_components`/`_emit_v3_types`/… all contribute nothing there.
+pub fn emit_src(ir: Any) -> Str {
+  let functions = value_list(value_field(ir, "functions"))
+  var fr: Map[Str, Str] = Map.empty()
+  for (fnode of functions) {
+    let r = value_field(fnode, "returns")
+    if (!value_is_null(r)) { fr = fr.set(value_str(value_field(fnode, "name")), value_str(r)) }
+  }
+  var out = module_header()
+  if (functions.length() > 0) { out = out.concat(emit_v3_functions(functions, fr)) }
+  return rstrip(out.join(newline())).concat(newline())
+}
+
+// ---------------------------------------------------------------- in-file tests
+test "rust_type covers the scalar and generic surface" {
+  assert rust_type("Int") == "i64"
+  assert rust_type("Str") == "String"
+  assert rust_type("Bool") == "bool"
+  assert rust_type("List[Int]") == "Vec<i64>"
+  assert rust_type("Opt[Str]") == "Option<String>"
+  assert rust_type("Map[Str, Int]") == "std::collections::HashMap<String, i64>"
+}
+
+test "bin-op table maps the longest revl ops" {
+  assert v3_bin_ops("===") == "=="
+  assert v3_bin_ops("!==") == "!="
+  assert v3_bin_ops("&&") == "&&"
+  assert v3_bin_ops("||") == "||"
+  assert checked_method("+") == "checked_add"
+  assert checked_method("*") == "checked_mul"
+}
+
+test "indentation is four spaces per level" {
+  assert ind(0) == ""
+  assert ind(2) == "        "
+  assert line(1, "x") == "    x"
+}
+
+// --------------------------------------------------------------- component wrap
+// A trivial provider so the emitted module is a valid plugin (the pure `emit_src`
+// above is what the cross-check exercises); mirrors the wrapper the other
+// self-host stages carry. `render` avoids the `emit` keyword.
+service EmitStream {
+  fn render(ir: Any) -> Str
+}
+
+component EmitRust provides emitter: EmitStream {
+  provide emitter {
+    fn render(ir) = emit_src(ir)
+  }
+}
