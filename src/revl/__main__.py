@@ -1209,6 +1209,28 @@ def _run_recover(args) -> int:
     return 0 if report.get("residue", {}).get("clean") else 1
 
 
+def _run_metrics(args) -> int:
+    """`revl metrics <run.jsonl> [--json]` — capability-aware runtime metrics
+    over a recorded lifecycle trace (docs/revl-metrics.md, roadmap item 122):
+    emission count by capability, failure count by G-rule, and average
+    lifecycle duration. A read-only rollup, not a gate — it always exits 0. A
+    v1 trace (or one missing `ts`) degrades the duration metric to
+    `unavailable` rather than failing."""
+    from . import metrics as _metrics  # noqa: PLC0415
+
+    try:
+        computed = _metrics.metrics_from_file(args.trace)
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read trace {args.trace}: {error}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(computed, indent=2))
+    else:
+        print(_metrics.render(computed))
+    return 0
+
+
 def _run_explain(args) -> int:
     """`revl explain <code>` — the other half of a structured diagnostic. A
     rejection hands back a code; this turns the code back into the guarantee
@@ -1759,6 +1781,18 @@ def main(argv: list[str] | None = None) -> int:
                           "recorded cascade; a mismatch is a defect (nonzero exit)")
     why.add_argument("--json", action="store_true", help="machine-readable output")
 
+    metrics_cmd = sub.add_parser(
+        "metrics",
+        help="capability-aware runtime metrics over a `revl run --trace` JSONL "
+             "trace (item 122): emission count by capability, failure count by "
+             "G-rule, and average lifecycle duration (docs/revl-metrics.md)")
+    metrics_cmd.add_argument(
+        "trace", metavar="FILE",
+        help="a JSONL causal trace written by `revl run --trace`")
+    metrics_cmd.add_argument(
+        "--json", action="store_true",
+        help="machine-readable metrics document instead of the human table")
+
     dash = sub.add_parser(
         "dash",
         help="the supervisor's cockpit (item 63): a READ-ONLY live view over a "
@@ -1874,6 +1908,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "why":
         return _run_why(args)
+
+    if args.command == "metrics":
+        return _run_metrics(args)
 
     if args.command == "dash":
         return _run_dash(args)
