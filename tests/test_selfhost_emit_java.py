@@ -53,18 +53,32 @@ Covered subset (what emits byte-identical):
     ``_emit_plugin_ctors`` ctor + the A8 self-revert ``apply`` that registers each
     ``provide`` step onto a LIFO undo list).
 
+  * slice 3 addendum (item 225) — the MODERN component path
+    (``_emit_component_modern``) config/req/effectful CORNER: component ``config``
+    (the parameterised + no-arg ``<Comp>Plugin`` ctors via ``_emit_plugin_ctors``,
+    ``_config_default_lit`` / ``_zero_java_value``); required-service routing (the
+    provider-class ``Context``/``Context.EffectScope fx``/``<Svc>`` fields + ctor,
+    the ``ctx.get(<Svc>.class)`` locals, and the ``this.<req>`` capture rename);
+    effectful provide-method bodies (``_method_body_lines`` ``return``/``effect``
+    +``undo``/``emit`` +``compensate`` as ``fx.track(Disposables.of(() -> ..))``);
+    and the ``apply`` that opens ``ctx.effect()`` and registers every provision
+    under the A8 self-revert ``try/catch`` returning ``fx``. Routed to only when a
+    component ``needs_modern`` AND falls in the supported subset (no isolate/
+    intercept, every body step a ``provide``, every method step
+    ``return``/``effect``/``emit``); anything else stays a loud
+    ``<<DEFER-component-nonsimple>>``.
+
 Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 4+):
-  * the MODERN component path (``_emit_component_modern``) — isolate/intercept,
-    effectful method bodies, and ``if``/``fail``/``await``/``return``/``setup``
-    body steps (the ``Context.EffectScope fx`` provider shape); component
-    ``config`` (the parameterised ``<Comp>Plugin`` ctor + ``_config_default_lit``);
-    required-service routing (``req``/the ``ctx.get`` locals + provider fields);
-    ``let-effect``/``effect``/``emit`` teardown steps; async/spawn/realms; and the
-    ``await``->AsyncPlugin / ``fail``->CordisException import widening. A component
-    outside the simple predicate surfaces a loud ``<<DEFER-component-nonsimple>>``;
+  * the rest of the MODERN component path — isolate/intercept realms, ``let-effect``
+    host binds and body-level ``effect``/``emit``/``if``/``fail``/``setup``
+    activation steps, method-body ``let``/``assign``/arrow bindings,
+    async/spawn/timers/routers, and the ``await``->AsyncPlugin /
+    ``fail``->CordisException import widening (a component outside the supported
+    subset surfaces a loud ``<<DEFER-component-nonsimple>>``);
   * the HOST Map/generics surface (``_emit_host_stubs``' ``HashMap<String,V>`` with
-    ``_map_value_expr_type`` per-site inference — component territory; the plain
-    ``maplit`` and ``Map[K,V]`` type lowering ARE covered);
+    ``_map_value_expr_type`` per-site inference — a component with a host-``Map``
+    ``let-effect`` bind DEFERS; the plain ``maplit`` and ``Map[K,V]`` type lowering
+    ARE covered);
   * the stdlib surface (every ``builtin``/``len`` node and
     ``_emit_stdlib_helpers``); the built-in Result surface (``Ok``/``Err`` ctor
     and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``);
@@ -112,6 +126,18 @@ CORPUS = [
     "services_multi.rvl",# two services, one component providing both — multi-provision
                          # classes, `return <name>`, the empty-void-body throw trap,
                          # and the scalar param/return surface (long/boolean/String/void)
+    # slice 3 addendum (item 225) — the MODERN component path (config/req/effectful)
+    "comp_config_req.rvl",  # config fields (`_emit_plugin_ctors` param+default ctors,
+                            # `_config_default_lit`/`_zero_java_value`) + a required
+                            # service (provider `Context`/`fx`/`Sink` fields, ctor, and
+                            # the `ctx.get(Sink.class)` local) + effectful provide-method
+                            # bodies (`effect`/`undo`/`emit` through the `this.sink`
+                            # rename; the `Context.EffectScope fx` provider shape, the A8
+                            # self-revert `apply` try/catch returning `fx`)
+    "comp_multi_effect.rvl",# a NO-config, MULTI-provision modern component: the no-arg-
+                            # only `<Comp>Plugin` ctor, two provider classes routed in one
+                            # `apply`, an `emit ... compensate` pair (two `fx.track`s), and
+                            # an `effect`/`undo` body in a void observation method
 ]
 
 

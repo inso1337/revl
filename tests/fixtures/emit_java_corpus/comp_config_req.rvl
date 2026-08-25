@@ -1,0 +1,31 @@
+// A modern component: config fields + a required service + a provider whose
+// method is EFFECTFUL (effect/undo/emit through the required service), forcing
+// `_emit_component_modern` (config ctors, req field/ctx.get routing, and the
+// `Context.EffectScope fx` effect body). The trivial `fn` forces ir_version 3.
+fn seed() -> Int {
+  return 1
+}
+
+service Sink {
+  fn open(line: Str) -> Int
+  emission fn write(line: Str) -> Int
+  fn read() -> Str
+}
+
+service Logger {
+  emission fn log(msg: Str)
+  fn tag(id: Int) -> Str
+}
+
+component Audit requires sink: Sink provides logger: Logger {
+  config { prefix: Str = "log", level: Int = 3, on: Bool = true }
+
+  provide logger {
+    fn log(msg) {
+      effect sink.open(msg)
+      undo   sink.open("revert")
+      emit   sink.write(msg)
+    }
+    fn tag(id) = sink.read()
+  }
+}
