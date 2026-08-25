@@ -1,0 +1,16 @@
+// Component `config` (`ConfigSchema`): the resolved-config schema block, the
+// sorted `ConfigSchema`-first runtime import, the plugin dict `Config` key, and
+// a `config.<field>` read inside a provide method (`_revl_config['field']`).
+service Conf {
+  fn get() -> Str
+  fn limit() -> Int
+}
+
+component Settings provides conf: Conf {
+  config { name: Str, size: Int }
+
+  provide conf {
+    fn get() = config.name
+    fn limit() = config.size
+  }
+}

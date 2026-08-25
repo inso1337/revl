@@ -1,0 +1,19 @@
+service Res {
+  fn open() -> Int
+  fn close(h: Int) -> Int
+  emission fn ping(msg: Str) -> Int
+}
+
+service Ops {
+  emission fn run(x: Int) -> Int
+}
+
+component Mgr requires res: Res provides ops: Ops {
+  provide ops {
+    fn run(x) {
+      effect res.open() undo res.close(x)
+      emit res.ping("hi") compensate res.ping("bye")
+      return x
+    }
+  }
+}

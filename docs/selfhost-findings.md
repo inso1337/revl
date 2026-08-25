@@ -203,6 +203,83 @@ py backend, exec it, run `emit_src` on the interchange-IR corpus
 `!`, unary `-`) and `control.rvl` (if/else, while, let/var/assign, bare-expr
 drop, assert, the trailing-`unreachable` divergence rule).
 
+# Path B, the py emitter (item 206, slice 4): externs, config, method-body effects
+
+Slice 4 closes the three forms slice 3 flagged: `_emit_externs`, component
+`config`/`ConfigSchema`, and method-body `effect`/`emit … compensate` (the
+`_revl_frame.adopt` accumulator + the `_label`/`_effect_N`/`_emit_N` counter).
+All three land byte-identical to `backends/python/emit.py`. Three notes below are
+friction worth acting on (none fixed here); two are positive validations.
+
+## stdlib::dedent validation (positive) — item 193 held in real use
+
+`_emit_externs` is `textwrap.dedent(bodies["py"].strip("\n")).splitlines()`.
+`stdlib/str.rvl::dedent` (item 193) reproduced `textwrap.dedent` byte-for-byte on
+a real multi-line `@py` body — the nested-indent margin, and the
+whitespace-only-line normalization that turns a trailing `"…\n    "` into a
+trailing `"\n"`. That trailing `\n` is exactly where the port had to be careful
+(next note). The dedent step needed NO `@py` of its own: the whole externs form
+is pure revl over str.rvl + two local `Str`-surface helpers. Item 193 delivered
+precisely what it promised.
+
+## `str.splitlines()` is NOT `split("\n")` — the one subtle host-semantics gap
+
+Symptom: `textwrap.dedent(body).splitlines()` and `body.split("\n")` agree on
+every body EXCEPT one that ends in a newline — which dedent PRODUCES whenever the
+`@py` body's last line was whitespace-only (normalized to `""`, so the join
+re-emits a trailing `\n`). `"a\n".splitlines()` is `["a"]`; `"a\n".split("\n")`
+is `["a", ""]`. A naive `split("\n")` therefore emits a spurious blank line
+inside the `def`. Repro: any extern whose surface `@py { … }` block closes with
+the brace on its own indented line (the common case). Fix used: a local
+`splitlines` that splits on `\n` then drops the final empty segment iff the text
+ends in `\n`. Line boundaries other than `\n` (`\r`/`\v`/`\f`/`\x1c…`) are out of
+scope — real py extern bodies are `\n`-separated — and are noted as such. Worth
+one line in the self-host emitter guide: "splitlines ≠ split on a trailing
+newline." LOW, informational (the port handles it).
+
+## Friction (item 189 ergonomics): a `use` links an imported module's PRIVATES,
+## so the importer may not define ANY name that module defines
+
+Symptom: adding `use "../stdlib/str.rvl" { dedent }` to pull ONE function made
+the compile fail with `duplicate function is_word_ch` — a name emit_py.rvl
+declared locally and `dedent` never references. Cause (compiler.py, the
+pure-declaration closure): an imported module's ENTIRE top-level fn set — its
+module-PRIVATE helpers included — is emitted into the linked program so its own
+fns can call them, and `_lower_fns` then rejects any duplicate NAME across the
+link. So importing `dedent` silently drags in str.rvl's private `is_word_ch` /
+`is_alpha_us` / `is_sp_tab` / `nl` / `line_is_ws_only` / …, and the importer must
+not itself declare `trim`/`lstrip`/`last_index_of`/`is_alpha_us`/`is_word_ch`/
+`ident_tokens` — all of which slices 1-3 hand-rolled. Repro: any module that both
+`use`s str.rvl and declares a fn whose name str.rvl declares privately.
+
+This is not a bug — the private helpers genuinely must ride into the link — but
+the ERROR is misdirected: it blames the importer's own line for a "duplicate"
+whose other definition is an invisible private of the imported module, with no
+hint that the collision came through a `use`. Two things would help: (a) name the
+importing `use` and the source module in the duplicate-function error when one
+side is an imported private; (b) document in the module-authoring guide that a
+public module's PRIVATE fn names are effectively reserved against every importer.
+The silver lining: it FORCED the item-193 migration the str.rvl header calls for
+— emit_py.rvl now `use`s `trim`/`lstrip`/`last_index_of`/`ident_tokens` from
+str.rvl and deleted its six local copies, and slices 1-3 stayed byte-identical
+(the refactor's own proof). So the kit did its job; the diagnostic is the gap.
+MEDIUM (diagnostic clarity).
+
+## in-file `test` blocks could not call the file's own externs — RESOLVED by item 182
+
+Symptom (hit while writing the slice-4 unit tests): a `test` block calling
+`newline()` or `upper()` (both `extern pure fn` declared in the same file, freely
+called from the file's `fn` bodies) failed with `` `newline` is not declared in
+this function `` — `_lower_tests` (lower.py) built its callable set as
+`_HOST_CALLABLES | _BUILTIN_CONSTRUCTORS | {fn names}`, omitting `program.externs`
+so a file's own externs were invisible to its `test` blocks. This independently
+re-surfaced the exact gap **item 182** closes ("externs are in scope inside test
+blocks, not only fn bodies", landed on `origin/main` in parallel and merged into
+this branch) — the dogfood signal and the fix agree. The slice-4 tests keep the
+backtick-newline form (tier-portable, as str.rvl's `nl` does) rather than depend
+on the just-landed fix; either spelling now works. Closed; kept as a note that
+two independent efforts converged on the same diagnostic.
+
 # Path B, the rust emitter (item 205, slice 2): the typed-core, and why components stayed out
 
 Slice 1 (item 191) ported the FUNCTION-ONLY corner of `backends/rust/emit.py`
