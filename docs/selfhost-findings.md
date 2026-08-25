@@ -899,3 +899,74 @@ method.get("async")` idiom exactly. `list_contains` (already in the file for the
 context-augmentation dedup) covered the seed's membership test with no new kit. And
 `body_has_await` over the top-level steps is a three-line total fold — the
 async-generator gate needed no helper beyond it.
+
+---
+
+## Rust self-host slice 4 (item 218) — the effectful/config/req component surface
+
+### Finding: item-195 `var_types`/`Sout` threading tax RECURS for effectful bodies (MEDIUM)
+Slice 3 dodged it (pure single-`return` provider bodies). The effectful path
+brings it straight back: `_method_body_lines` MUTATES `env.v3_ctx().var_types` as
+it walks — a `let answer = model.complete(seed)` seeds `answer: Str` (from the
+required service's declared return) so a LATER `emit`/`return` clones it by value
+(item 114). revl has no shared mutable ctx, so the port threads a `Ctx` through a
+`{lines, ctx}` return (`Sout`, reused from the fn-body renderer) and rebuilds it
+per step. Repro: `effect_emit.rvl`'s `let v = store.read(k)` then `emit
+store.write(k, v)` — the second `v` must render `v.clone()`, which only happens
+if the let's inferred `Str` survived into the emit step's `Ctx`. Not a defect; the
+threading is mechanical but it is the SAME tax the guide flagged at item 195, now
+paid a second time in a second emitter. A shared "statement-fold returns
+(lines, ctx)" helper across the fn-body AND method-body renderers would amortise
+it; this slice open-codes both. LOW-to-fix (a refactor, not a bug).
+
+### Ergonomics (positive): the capture-rename map rides ON the `Ctx`, not a param
+The reference threads `rename: dict` as a SEPARATE parameter through every
+`_render_expr`/`_v3_match_expr`/`_v3_interp`. Porting that literally would have
+added a param to ~13 `render_*` functions and every call site (churn the pure
+slices 1-3 would have to absorb). Instead the port carries `rn: Map[Str,Str]` as
+a FIELD on the already-threaded `Ctx`: only the four kinds that consult it
+(`name`/`req`/`config`/component-form `call`) read `ctx.rn`, and match/interp/
+list/record subexpressions pick up the active rename FOR FREE because they already
+forward `ctx`. Pure bodies pass `rn = Map.empty()`, so slices 1-3 stay byte-exact
+with zero call-site edits. The varying per-render scopes (method `self.*`, acquire
+`param.clone()`, undo `*_undo`) are just `set_rn(ctx, …)` before each render.
+A clean win where the erased-IR `Ctx` bundle was the right seam.
+
+### Friction: reserved-keyword collisions bite AGAIN, now on step/effect vocab (LOW, recurs)
+The item-207 note (`service`/`component`/`provides` are keywords) extends to the
+STEP vocabulary: `acquire` and `undo` are reserved too, so the natural
+`let acquire = …` / `var undo_node = …` / `let undo = render(…)` in the
+effect-body renderer all parse-fail (`expected ident, found 'acquire'`). Same for
+a service op literally named `drop` in a FIXTURE (`fn drop(id: Str)` in a service
+block → `expected ident, found 'acquire'`-class error is avoided only because the
+service parser path differs, but a body local `drop` would trip). Repro: `let
+acquire = render_expr(acqnode, …)` → parse error; renamed to `acq`. Mirror of the
+Rust-side `_mname` (`drop`→`drop_`) the emitter already carries for OUTPUT — the
+same collision class, on the emitter's own SOURCE. Not a bug; the guide's
+"name IR-walking locals obliquely" caveat should list the step words
+(`acq`/`acqnode`/`undonode`/`undox`) alongside `srv`/`comp`/`provs`.
+
+### No defect found — the reference is ground truth and the port matches byte-for-byte
+The effectful/config/req subset (5 new fixtures) is byte-identical to
+`backends/rust/emit.py` across `_emit_component_new`, `_emit_component_auto`, the
+config struct/Default/application/`_revl_load`, and the `Inject`/`ctx.require`
+gate. Two reference behaviours look surprising but were replicated verbatim, NOT
+"corrected": (1) a by-value service-call argument that is already a renamed
+`param.clone()` gets a SECOND `.clone()` from `_by_value_arg` (`store.write(k
+.clone().clone(), …)`), because `_arg_ref_name` reads the NODE's identity, not the
+rendered string; (2) `_revl_load`'s `{pascal}Config` uses the RAW component name
+while the struct decl uses `_ident(name)` — identical for non-keyword names, a
+latent divergence for a keyword-named component that neither backend exercises.
+Both are the reference's, so the differential oracle stays the arbiter.
+
+### Note: the G4 emission gate shapes what an effectful FIXTURE can say (LOW)
+`effect X` must wrap a REVERSIBLE op (a service `fn`, host acquire) with an
+explicit `undo`; an emission (`emission fn`) must be `emit`-marked, not
+`effect`-ed (`call to emission 'logger.log' must be marked emit (G4)`). And a
+RETURN-position `fn f() = emit g()` is NOT an `emit` STEP — it lowers to a plain
+observation and stays on the SIMPLE path; only a BLOCK-body statement `emit g()`
+becomes an emit step that routes to `_emit_component_new`. Repro: `requires.rvl`
+(`= emit compiler.propose(…)`) routes SIMPLE; `effect_emit.rvl` (`emit
+store.write(k, v)` as a statement) routes NEW. A self-host author reaching for an
+effectful fixture has to know this split; a one-line note in the guide
+("`= emit` is an expression, block `emit` is a step") would save the round-trip.

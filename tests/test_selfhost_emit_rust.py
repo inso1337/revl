@@ -55,16 +55,37 @@ Covered subset (slice 3, item 207) — the components/services + bridge surface:
     and the fixed key/service/plugin/isolate/load routing tables over the provided
     keys.
 
-Deliberately OUT (excluded from the corpus, deferred to Rust Path B slice 4+):
-the ENTANGLED-but-larger component surface — ``_emit_component_new`` (the
-effectful / isolate / intercept path: effect/undo, ``emit``, timers, routers,
-``await``/``spawn``), component ``config`` (the ``<Comp>Config`` struct +
-``Default`` + application + the ``_revl_load`` typed-config construction),
-required services (``req``/routes/the ``Inject`` gate), realm placements
-(``_revl_realm``/``_revl_isolate_ctx`` non-empty arms), the host-object stubs
-(``Map``/``Pool``/``Job``) and every preamble helper (timer/stdlib/float/realm/
-spawn), and the non-scalar bridge marshalling (Result/serde/``Vec<Value>``/
-opaque-``Value`` params and returns); functional record-update ``{r | f = e}`` (the
+Covered subset (slice 4, item 218) — the effectful/config/req component surface
+(``_emit_component_new`` + the ``_emit_component_auto`` dispatch):
+  * required services — the ``Inject::new([..])`` gate, the ``ctx.require::<Box<
+    dyn S>>("key")?`` bindings, and the per-req ``Arc<Box<dyn S>>`` provider-
+    struct capture read off ``self`` (``requires.rvl``);
+  * method-body effects — a block-body ``emit`` STEP and an ``effect``/``undo``
+    pair through ``self.ctx.effect(label, move || { .. })``, the
+    ``ctx: Arc<cordis::Context>`` field, ``_method_undo_clones``, the item-101/114
+    let-inference (a required-service call's declared return types the local so a
+    later by-value use clones), and the ``drop`` -> ``drop_`` method rename
+    (``effect_emit.rvl`` / ``effect_undo.rvl``);
+  * component ``config`` — the ``<Comp>Config`` ``#[derive(Clone)]`` struct +
+    ``Default``, the local ``let config = <C>Config { .. ..Default::default() }``
+    application, the captured-config provide struct + the up-front
+    ``__revl_provide_config`` clone, ``config.<field>`` -> ``self.config.<field>
+    .clone()`` in a method, and the ``_revl_load`` typed-config construction from
+    the JSON placement spec (``config.rvl`` / ``config_effect.rvl``);
+  * the component-dialect expression kinds ``req``/``config``/``fn`` and the
+    ``target``/``method`` call form, threaded through the shared renderer via the
+    on-``ctx`` capture-rename map.
+
+Deliberately OUT (excluded from the corpus, deferred to Rust Path B slice 5+):
+the remaining ``_emit_component_new`` surfaces — timers / routers (``routes``),
+``await``/``spawn``, ``isolate``/``intercept`` (and the realm placements
+``_revl_realm``/``_revl_isolate_ctx`` non-empty arms), host ``let-effect`` binds
+(``Pool``/``Map``/``Job``) and the item-114 host-Map undo-reclone, body-level
+``effect``/``timer``/``fail``/``if`` steps, and the ``host``/``format``
+component-dialect expression kinds; the host-object stubs (``Map``/``Pool``/
+``Job``) and every preamble helper (timer/stdlib/float/realm/spawn); and the
+non-scalar bridge marshalling (Result/serde/``Vec<Value>``/opaque-``Value``
+params and returns); functional record-update ``{r | f = e}`` (the
 Rust reference itself *raises* on ``record_update`` — a structural exclusion, not
 merely un-ported); the stdlib surface (every ``builtin``/``len`` node and the
 ``_stdlib_helper_traits`` it pulls in); the Value/serde erasure surface
@@ -108,6 +129,23 @@ CORPUS = [
                          #   forcing the full `_emit_bridge` erasure block
     "services_multi.rvl",# two services, one component providing both — the bridge's
                          #   i64/bool/void marshalling and multi-provision routing
+    # slice 4 (item 218) — the effectful/config/req component surface
+    # (`_emit_component_new` + `_emit_component_auto` dispatch):
+    "requires.rvl",      # required services on the SIMPLE path — the `Inject::new`
+                         #   gate, `ctx.require` bindings, and the per-req struct
+                         #   capture read off `self` in a pure method
+    "effect_emit.rvl",   # a block-body `emit` STEP -> `_emit_component_new`: the
+                         #   `ctx: Arc<cordis::Context>` field, the fire-and-forget
+                         #   `let _ = self.store.write(..);`, and the req-call let
+                         #   type inference driving the by-value clone
+    "effect_undo.rvl",   # the revertible `effect`/`undo` pair — `method_undo_clones`,
+                         #   the labelled `self.ctx.effect(.., move || { .. })`
+                         #   registration, and the `drop` -> `drop_` method rename
+    "config.rvl",        # component `config` on the SIMPLE path — `<Comp>Config`
+                         #   struct + `Default` + application, the captured-config
+                         #   provide struct, and the `_revl_load` typed construction
+    "config_effect.rvl", # config + effectful: config capture in an effect body
+                         #   (`self.config.banner.clone()`) + `__revl_provide_config`
 ]
 
 
@@ -224,6 +262,51 @@ def test_selfhosted_emitter_component_bridge_scaffold(emitted):
     assert '"hello" => Some(hello()),' in src
     # no deferred-feature marker leaked into a covered-subset output
     assert "<<DEFER" not in src and "<<NONE>>" not in src
+
+
+def test_selfhosted_emitter_effectful_component_scaffold(emitted):
+    """Pin the effectful/config/req surface (slice 4, item 218): the
+    `_emit_component_new` path (effect/undo, `emit`, the `ctx: Arc<Context>`
+    capture, the required-service `Inject` gate) and the `config` surface
+    (`<Comp>Config` struct/Default/application + the captured provide struct +
+    the `_revl_load` typed construction) — so a regression in any of these
+    surfaces here, not only in the byte diff."""
+    # required services on the simple path
+    req = emitted["emit_src"](compile_files([str(CORPUS_DIR / "requires.rvl")]))
+    assert 'cordis::Inject::new(["assistant", "compiler"]),' in req
+    assert 'let assistant = ctx.require::<Box<dyn Model>>("assistant")?;' in req
+    assert "struct EvolverEvolve {\n    assistant: Arc<Box<dyn Model>>," in req
+    assert "self.compiler.propose(self.assistant.complete(goal.clone()))" in req
+    # a block-body emit -> _emit_component_new (the ctx field + fire-and-forget)
+    eff = emitted["emit_src"](compile_files([str(CORPUS_DIR / "effect_emit.rvl")]))
+    assert "    ctx: Arc<cordis::Context>,\n}" in eff
+    assert "let v = self.store.read(k.clone());" in eff
+    assert "let _ = self.store.write(k.clone().clone(), v.clone());" in eff
+    assert "Box::new(SvcApi { store: store.clone(), ctx: Arc::new(ctx.clone()) })" in eff
+    # the revertible effect/undo pair + the drop -> drop_ rename
+    und = emitted["emit_src"](compile_files([str(CORPUS_DIR / "effect_undo.rvl")]))
+    assert "let res_undo = self.res.clone();" in und
+    assert "let id_undo = id.clone();" in und
+    assert "let _ = self.res.drop_(id.clone().clone());" in und
+    assert ('let _ = self.ctx.effect("Worker.run.effect.1", '
+            "move || { res_undo.grab(id_undo.clone()); Ok(()) });") in und
+    # component config on the simple path (struct/Default/application/_revl_load)
+    cfg = emitted["emit_src"](compile_files([str(CORPUS_DIR / "config.rvl")]))
+    assert "#[derive(Clone)]\nstruct HelloConfig {" in cfg
+    assert "impl Default for HelloConfig {" in cfg
+    assert 'prefix: String::from("hi, "),' in cfg
+    assert "cordis::plugin_sync::<HelloConfig, _>(" in cfg
+    assert "let __revl_provide_config = config.clone();" in cfg
+    assert 'let _c = config.get("Hello").cloned().unwrap_or(serde_json::Value::Null);' in cfg
+    assert ('prefix: _c.get("prefix").and_then(|v| v.as_str()).map(|s| s.to_string())'
+            '.unwrap_or_else(|| String::from("hi, ")),') in cfg
+    # config read inside an effectful body renders self.config.<field>.clone()
+    cfe = emitted["emit_src"](compile_files([str(CORPUS_DIR / "config_effect.rvl")]))
+    assert "let full = format!(\"{}{}\", self.config.banner.clone(), prompt);" in cfe
+    assert "    config: AssistantConfig,\n    ctx: Arc<cordis::Context>,\n}" in cfe
+    # no deferred-feature marker leaked into any covered-subset output
+    for src in (req, eff, und, cfg, cfe):
+        assert "<<DEFER" not in src and "<<NONE>>" not in src
 
 
 def test_selfhosted_emitter_in_file_tests_pass(emitted):
