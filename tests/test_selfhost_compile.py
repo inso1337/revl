@@ -1,45 +1,45 @@
-"""THE CAPSTONE (roadmap item 224): the integrated native ``revl_compile`` —
-selfhost/compile.rvl composed with the native emitters, proving revl compiles
-revl to a target tier, end to end, BYTE-FOR-BYTE against the reference.
+"""THE CAPSTONE (roadmap item 230, extending 224): the integrated, FULLY-NATIVE
+``revl_compile`` — selfhost/compile.rvl composing lower.rvl + emit_py.rvl +
+emit_rust.rvl into ONE co-compiled revl artifact, proving revl compiles revl to a
+target tier END TO END with NO REFERENCE anywhere in the chain, BYTE-FOR-BYTE
+against the reference — for the module-FUNCTION + TYPE surface.
 
-This test assembles the self-host pipeline from its native artifacts and holds
-the composition to the strongest agreement an emitter can be held to — the
-emitted target source must equal the reference's to the last byte — on the
-function + simple-component surface (the intersection all six stages cover):
+What changed from item 224's capstone (whose two SEAMs this closes):
+  * SEAM 1 (the reference IR in the middle) is GONE for the function surface:
+    ``compile_to`` now calls the native IR producer ``lower_to_ir`` (item 232),
+    parses it with the native ``json_parse``, and hands the ``Any`` to the native
+    emitter. The reference ``compile_source`` is no longer in the pipeline.
+  * SEAM 2 (the stages could not co-compile) is GONE: ``compile.rvl`` ``use``s
+    lower.rvl, emit_py.rvl AND emit_rust.rvl in ONE composition. Item 228 stopped a
+    ``use``d module's private decls from leaking; item 230 gave the emitter
+    entrypoints distinct public names (``emit_py_src`` / ``emit_rust_src``) so the
+    merge no longer sees a duplicate ``emit_src``.
 
-    source ──▶ compile.rvl `compile_to`        the native FRONTEND, one artifact:
-                                               lexer.rvl → parser.rvl → the
-                                               checker → the lowering ADMISSION
-                                               gate (lower.rvl). Verdict only.
-           ──▶ [interchange IR]                SEAM 1 — produced here by the
-                                               reference lowering, because the
-                                               native gate yields a VERDICT, not
-                                               the IR (lower.rvl is an admission
-                                               gate; it does not emit the IR).
-           ──▶ emit_py.rvl / emit_rust.rvl     the native EMITTER, a separate
-               `emit_src`                       artifact per tier: IR → target
-                                               source, revl compiling revl.
+    source ──▶ compile.rvl ``compile_to``      ONE native artifact, no reference:
+                                               admit_src (frontend gate) →
+                                               lower_to_ir (native IR, item 232) →
+                                               json_parse → emit_py_src /
+                                               emit_rust_src (native emitter).
 
-What is proven native, end to end, on this surface:
-  * the FRONTEND is native and its admission verdict AGREES with the reference on
-    the whole emit surface (`test_native_gate_admits_the_emit_surface`), and a
-    program the reference REJECTS the native driver also refuses — before any
-    emitter runs (`test_refused_program_never_reaches_an_emitter`), the one revl
-    promise carried through the composition;
-  * the EMITTER is native and BYTE-IDENTICAL to the reference for py AND rust over
-    every corpus document (`test_native_pipeline_is_byte_identical`).
+The proof — ``compile_to(source, tier)`` takes ONLY the raw source string and
+returns the target bytes; the reference (``compile_files`` / ``reference_emit``) is
+used SOLELY to compute the EXPECTED value, never to produce the native output. So a
+byte-for-byte match is a proof that the whole lex→parse→check→lower→emit chain ran
+in revl.
 
-The two seams that remain before a single-call in-file native ``source → target``
-(both named in selfhost/compile.rvl's header, each a concrete follow-up):
-  * SEAM 1 — lower.rvl must also EMIT the interchange IR, not only the verdict;
-    until then the IR between the native front and the native tail is the
-    reference's.
-  * SEAM 2 — the stage modules do not co-compile into one revl composition (a
-    duplicate private ``Ctx``, cross-module ``contains``/``for..of`` type
-    interference), so the driver co-compiles only the frontend span and the
-    emitters are chained here by the harness rather than by a single ``use``.
+The boundary (honest scope):
+  * FULLY NATIVE, byte-exact: the module-function + type surface — the emitter-ready
+    documents item 232 proved ``lower_to_ir`` byte-exact on (py corpus), and the
+    pure-function/type/variant slice of the rust corpus the rust emitter covers.
+  * STILL NEEDS THE REFERENCE: the typed COMPONENT/method expression BODY. The
+    native IR producer covers only the simple-component slice (item 227); the
+    general component body is the item-242 gap. For those documents the native gate
+    is still exercised (the refusal is native), but the component-body BYTES are not
+    yet held byte-exact — verified here only that the gate admits them, parity with
+    the reference.
 
-Ground truth is the reference; any divergence is a defect in a stage.
+Ground truth is the reference; on the covered surface any divergence is a defect in
+a stage.
 """
 
 import importlib.util
@@ -101,25 +101,24 @@ def _load_reference_emit(tier: str):
 
 @pytest.fixture(scope="module")
 def compile_rvl() -> dict:
+    """selfhost/compile.rvl — the ONE co-compiled artifact holding the whole
+    native pipeline (lower + emit_py + emit_rust `use`d together). That this even
+    compiles and execs is the SEAM-2-is-closed / 3-way-co-compilation proof."""
     return _exec_selfhost("selfhost/compile.rvl")
 
 
 @pytest.fixture(scope="module")
 def compile_to(compile_rvl):
-    """The capstone driver's front half: source + tier -> "ADMITTED|<tier>" |
-    "REFUSED|<TAG>|<message>" | "UNKNOWN_TIER|<tier>"."""
+    """The fully-native driver: source + tier -> target SOURCE (byte-exact vs the
+    reference on the function surface) | "REFUSED|<TAG>|<msg>" | "UNKNOWN_TIER|<t>".
+    Takes only the raw source string — no reference is in its chain."""
     return compile_rvl["compile_to"]
 
 
 @pytest.fixture(scope="module")
-def native_emit() -> dict:
-    """The native emitters, one artifact per tier (SEAM 2: they cannot be
-    co-compiled, so each is compiled on its own, exactly as its own self-host
-    test compiles it)."""
-    return {
-        "py": _exec_selfhost("selfhost/emit_py.rvl")["emit_src"],
-        "rust": _exec_selfhost("selfhost/emit_rust.rvl")["emit_src"],
-    }
+def admit(compile_rvl):
+    """The native frontend admission gate (verdict only)."""
+    return compile_rvl["admit"]
 
 
 @pytest.fixture(scope="module")
@@ -129,73 +128,90 @@ def reference_emit() -> dict:
 
 # ---------------------------------------------------------------- corpus
 
-# The function + simple-component surface — the checked-in emitter corpora, which
-# are exactly the documents the self-host emitters are held byte-exact on. Each
-# is (tier, relative-path); the fixture directory differs per tier.
-def _corpus(tier: str, subdir: str) -> list[tuple[str, str]]:
-    d = ROOT / "tests" / "fixtures" / subdir
-    return [(tier, f.name) for f in sorted(d.glob("*.rvl"))]
+# The FULLY-NATIVE, byte-exact surface — the module-function + type documents where
+# lower_to_ir's native IR is complete (item 232) AND the tier's native emitter
+# covers the form. Each entry is (tier, fixture-subdir, filename).
+#
+#   py: the ten emitter-ready documents item 232 proved lower_to_ir byte-exact on.
+#   rust: the pure function / type / variant slice of the rust corpus (the rust
+#         emitter's covered function surface — the component and record-inference
+#         documents are the item-242 / reference-IR remainder).
+PY_FUNCTION_DOCS = [
+    "arith.rvl", "control.rvl", "strings.rvl", "records.rvl", "result.rvl",
+    "optionals.rvl", "floats.rvl", "mixed.rvl", "hostroots.rvl", "types.rvl",
+]
+RUST_FUNCTION_DOCS = [
+    "arith.rvl", "control.rvl", "lists.rvl", "strings.rvl", "variants.rvl",
+]
+
+NATIVE_CORPUS = (
+    [("py", "emit_py_corpus", n) for n in PY_FUNCTION_DOCS]
+    + [("rust", "emit_rust_corpus", n) for n in RUST_FUNCTION_DOCS]
+)
 
 
-CORPUS = _corpus("py", "emit_py_corpus") + _corpus("rust", "emit_rust_corpus")
-_FIXTURE_DIR = {"py": "emit_py_corpus", "rust": "emit_rust_corpus"}
+def _fixture_path(subdir: str, name: str) -> Path:
+    return ROOT / "tests" / "fixtures" / subdir / name
 
 
-def _fixture_path(tier: str, name: str) -> Path:
-    return ROOT / "tests" / "fixtures" / _FIXTURE_DIR[tier] / name
+# ---------------------------------------- the fully-native byte-exact proof
 
+@pytest.mark.parametrize(
+    "tier,subdir,name", NATIVE_CORPUS,
+    ids=[f"{t}:{n}" for t, _, n in NATIVE_CORPUS])
+def test_native_compile_is_byte_identical_with_no_reference(
+        compile_to, reference_emit, tier, subdir, name):
+    """THE HEADLINE. The whole chain, end to end, on one function document:
+    ``compile_to(source, tier)`` — which runs lower_to_ir + emit_<tier>_src, both
+    native, in one co-compiled revl artifact — produces the target source
+    BYTE-FOR-BYTE equal to the reference compile.
 
-# ---------------------------------------------------- the byte-exact proof
-
-@pytest.mark.parametrize("tier,name", CORPUS, ids=[f"{t}:{n}" for t, n in CORPUS])
-def test_native_pipeline_is_byte_identical(compile_to, native_emit,
-                                           reference_emit, tier, name):
-    """The whole composed native chain, end to end, on one corpus document:
-    the native FRONTEND admits the source, and the native EMITTER's target
-    source equals the reference's BYTE-FOR-BYTE.
-
-    (SEAM 1: the interchange IR the emitter consumes is produced by the
-    reference lowering, because the native gate yields a verdict, not the IR.)
-    """
-    path = _fixture_path(tier, name)
+    ``got`` is produced from the raw source string alone; the reference
+    (``compile_files`` + ``reference_emit``) computes only the expected ``want``.
+    A match therefore proves revl compiled the program to ``tier`` entirely in revl,
+    with NO reference in the chain."""
+    path = _fixture_path(subdir, name)
     source = path.read_text(encoding="utf-8")
 
-    # front half — the native frontend admits, in revl
-    gate = compile_to(source, tier)
-    assert gate == f"ADMITTED|{tier}", (
-        f"native gate did not admit {tier}:{name}: {gate!r}")
+    # native output — source string in, target bytes out; nothing else touched
+    got = compile_to(source, tier)
+    assert not got.startswith(("REFUSED|", "UNKNOWN_TIER|")), (
+        f"native driver did not emit for {tier}:{name}: {got[:80]!r}")
 
-    # the IR the emitter consumes (SEAM 1 — the reference's, for now)
-    ir = compile_files([str(path)])
+    # expected — the reference compile (used ONLY to compute want)
+    want = reference_emit[tier](compile_files([str(path)]))
 
-    # tail — the native emitter's bytes == the reference's, exactly
-    want = reference_emit[tier](ir)
-    got = native_emit[tier](ir)
     assert got == want, (
-        f"native emitter diverged from the reference on {tier}:{name}\n"
+        f"native compile diverged from the reference on {tier}:{name}\n"
         f"--- lengths ref={len(want)} got={len(got)} ---")
 
 
-def test_native_gate_admits_the_emit_surface(compile_to):
-    """The native frontend's admission verdict AGREES with the reference over the
-    entire emitter surface: every corpus document the reference admits, the
-    native gate stamps ``ADMITTED|<tier>``. (The gate's verdict-parity vs the
-    reference on rejected programs is proven exhaustively in
-    tests/test_selfhost_lower.py; here the claim is that the frontend covers the
-    whole surface the emitter tail does.)"""
-    for tier, name in CORPUS:
-        path = _fixture_path(tier, name)
-        # the reference admits every corpus document
-        compile_files([str(path)])
-        gate = compile_to(path.read_text(encoding="utf-8"), tier)
-        assert gate == f"ADMITTED|{tier}", f"{tier}:{name}: {gate!r}"
+def test_three_way_composition_co_compiles(compile_rvl):
+    """SEAM 2 is closed: lower.rvl + emit_py.rvl + emit_rust.rvl ``use``d together
+    in compile.rvl compile into ONE artifact whose namespace exposes the driver.
+    (If the composition failed — a duplicate public ``emit_src``, a leaked private
+    ``Ctx``, a colliding test name — the ``compile_rvl`` fixture would have raised.)"""
+    assert callable(compile_rvl["compile_to"])
+    assert callable(compile_rvl["admit"])
+
+
+def test_native_gate_admits_the_whole_emit_surface(admit):
+    """The native frontend's admission verdict covers the ENTIRE emitter surface —
+    every corpus document (functions AND components, both tiers) the reference
+    admits, the native gate admits (``""``). This includes the component documents
+    whose BODIES still need the reference (item 242): the gate is native for them
+    even though their emitted bytes are not yet byte-exact."""
+    for subdir in ("emit_py_corpus", "emit_rust_corpus"):
+        for path in sorted((ROOT / "tests" / "fixtures" / subdir).glob("*.rvl")):
+            compile_files([str(path)])  # the reference admits it
+            verdict = admit(path.read_text(encoding="utf-8"))
+            assert verdict == "", f"{subdir}/{path.name}: {verdict!r}"
 
 
 # --------------------------------------------- the refusal composes too
 
-# Programs the reference REJECTS. The composed driver must refuse them with a
-# guarantee tag — and never reach an emitter. (name, source, expected tag.)
-# `e.code` is authoritative for G4/A1; G2 carries its "(G2)" message marker.
+# Programs the reference REJECTS. The composed native driver must refuse them with
+# the reference's guarantee tag — and never reach the IR producer or an emitter.
 _REJECTED = [
     ("g4 plain provider reaches an emission",
      "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 }\n"
@@ -234,13 +250,13 @@ def _reference_tag(src: str) -> str:
 @pytest.mark.parametrize("tier", ["py", "rust"])
 def test_refused_program_never_reaches_an_emitter(compile_to, tier, case):
     """A program the reference rejects is refused by the composed native driver
-    with the SAME guarantee tag, for every tier — and the ``REFUSED|`` verdict
-    means the emitter is never reached (a rejected program cannot be compiled)."""
+    with the SAME guarantee tag, for every tier — the ``REFUSED|`` verdict means
+    the native IR producer and emitter are never reached (the one revl promise,
+    enforced natively before any code is generated)."""
     name, src, tag = case
-    # the reference rejects it with this guarantee
     assert _reference_tag(src) == tag, f"corpus bug: {name}"
     got = compile_to(src, tier)
-    assert got.startswith("REFUSED|"), f"{name} ({tier}): {got!r}"
+    assert got.startswith("REFUSED|"), f"{name} ({tier}): {got[:80]!r}"
     got_tag = got.split("|")[1]
     assert got_tag == tag, f"{name} ({tier}): tag {got_tag!r} != {tag!r}"
 
@@ -253,7 +269,9 @@ def test_unknown_tier_is_reported(compile_to):
 
 
 def test_compile_rvl_in_file_tests_pass(compile_rvl):
-    """The driver's own `test` blocks run under the python backend."""
+    """The composed artifact's own `test` blocks run under the python backend —
+    including the driver's four (unsupported tier, native refusal, fully-native
+    py/rust) and every block the three co-compiled stages contribute."""
     tests = compile_rvl.get("REVL_TESTS")
     assert tests and len(tests) >= 4, "expected the driver's test blocks in REVL_TESTS"
     for entry in tests:
