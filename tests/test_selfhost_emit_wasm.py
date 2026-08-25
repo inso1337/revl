@@ -64,6 +64,8 @@ CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_wasm_corpus"
 CORPUS = [
     "arith.rvl",    # checked int/int32 +-*, % (rem_s), i64/i32 cmp, &&/||, !, unary -
     "control.rvl",  # if/else, while, let/var/assign, bare-expr drop, assert, divergence
+    "strlit.rvl",   # the Str-literal memory ABI: data-segment pooling, _wat_bytes,
+                    # first-encounter dedup, 4-byte stride, 8-aligned heap_start, _str_ptr
 ]
 
 
