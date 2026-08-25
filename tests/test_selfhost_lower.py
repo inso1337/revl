@@ -134,6 +134,20 @@ def _classify(e: RevlError) -> str:
     # mirrors it, so it is an in-slice tag rather than OUT.
     if "must precede every effect, emit, await, and provide statement" in m:
         return "PRELUDE"
+    # ---- slice 4 -----------------------------------------------------------
+    # `intercept` metadata validation (target must be a required key, no double
+    # interception): the undeclared case reuses the "is not a declared
+    # requirement of" G1 diagnostic below; the provision and double-intercept
+    # cases carry their own text but are the same declared-wiring (G1) family.
+    if "applies to required keys only" in m or "is intercepted twice in" in m:
+        return "G1"
+    # `await` outside a component body, and the services-2.0 async signature
+    # parity mismatch — both async-color (A1) surfaces, neither carrying an
+    # explicit `(A1)` marker or `code`.
+    if "`await` is only allowed in a component body" in m:
+        return "A1"
+    if "declares it async" in m or "declares it not async" in m:
+        return "A1"
     if "is not a declared requirement of" in m:
         return "G1"
     if ("declared plain, but this implementation reaches" in m
@@ -157,6 +171,19 @@ def _ref(src: str) -> tuple[str, str]:
 
 def _fixture(name: str) -> str:
     return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text()
+
+
+def _oneline(src: str) -> str:
+    """Collapse a program onto a SINGLE source line (item 168): every run of
+    whitespace — newlines included — becomes one space. The reference lexer and
+    the gate both accept whitespace-separated statements, so this preserves the
+    program's meaning while removing the newline the gate's statement reader used
+    to lean on. Before the item-168 fix the gate's line-based reader swallowed a
+    single-line body's trailing statements/declarations; the single-line fuzzer
+    variants below exercise exactly that path for every mirrored check. (None of
+    the generators emit comments or space-bearing string literals, so the naive
+    whitespace collapse is safe.)"""
+    return " ".join(src.split())
 
 
 def _agree(admit, src: str) -> None:
@@ -311,6 +338,28 @@ component C requires kv: Kv {
   let probe = effect kv.get("boot") undo probe.drop()
 }
 """),
+    # slice 4: `intercept` on a REQUIRED key is valid metadata wiring — admitted.
+    ("intercept on a required key composes", """
+service Kv { fn get(k: Str) -> Opt[Str] }
+component C requires kv: Kv {
+  intercept kv with { quota: 5 }
+  let probe = effect kv.get("boot") undo probe.drop()
+}
+"""),
+    # slice 4: `await` inside an ASYNC provide method is legal (the async op has
+    # an in-flight window) — admitted, the twin of the sync-method refusal.
+    ("await in an async provide method composes", """
+service Cache { async fn get(key: Str) -> Opt[Str] }
+component C provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+  provide cache {
+    async fn get(key) {
+      await Job.run("lookup")
+      return store.get(key)
+    }
+  }
+}
+"""),
 ]
 
 
@@ -442,6 +491,44 @@ component C requires d: D provides s: S {
   isolate d in realm("r1")
 }
 """, "PRELUDE"),
+    # ---- slice 4 ---------------------------------------------------------
+    # `intercept` metadata validation: an intercept on a key that is not a
+    # declared requirement is the reference's G1 head-resolution refusal
+    # (fixture — the exact message names the undeclared key and the component).
+    ("intercept on an undeclared key (G1)",
+     _fixture("v2_intercept_undeclared"), "G1"),
+    # `intercept` on a PROVIDED key: a provision has nothing to intercept — the
+    # reference refuses with its provision-specific wording (fixture).
+    ("intercept on a provision (G1)",
+     _fixture("v2_intercept_on_provision"), "G1"),
+    # `intercept` uniqueness: the same key intercepted twice in one component.
+    ("intercept twice on one key (G1)", """service D { fn q(s: Str) -> Int }
+service S { fn go() -> Int }
+component C requires d: D provides s: S {
+  intercept d with { retries: 3 }
+  intercept d with { retries: 4 }
+  provide s { fn go() { return 0 } }
+}
+""", "G1"),
+    # A1 await-outside-body: a SYNC provide method containing an `await` has no
+    # in-flight window to suspend — refused (fixture).
+    ("await in a sync provide method (A1)",
+     _fixture("a1_await_in_method"), "A1"),
+    # services-2.0 signature parity: a sync `fn` implementing an `async fn`
+    # service op is refused — the async marker is part of the interface (fixture).
+    ("async signature mismatch (A1)",
+     _fixture("v2_async_signature_mismatch"), "A1"),
+    # item 168 regression: the WHOLE component body on ONE source line. Before
+    # the statement-reader fix the gate's line-based reader let the `let` line
+    # swallow the trailing `isolate`/`provide`, so it ADMITTED while the
+    # reference refuses PRELUDE. The reader now ends a run at a structural
+    # boundary, so both refuse.
+    ("single-line body: isolate after effect (PRELUDE)",
+     'service D { fn q(s: Str) -> Int } service S { fn go() -> Int } '
+     'component C requires d: D provides s: S { '
+     'let store = effect Map.new() undo store.drop() '
+     'isolate d in realm("r1") provide s { fn go() { return 0 } } }',
+     "PRELUDE"),
 ]
 
 
@@ -484,11 +571,14 @@ def _compose(rng: random.Random) -> str:
     return "\n".join(lines)
 
 
+@pytest.mark.parametrize("oneline", [False, True])
 @pytest.mark.parametrize("seed", range(24))
-def test_generated_compositions_agree(admit, seed):
+def test_generated_compositions_agree(admit, seed, oneline):
     rng = random.Random(seed)
     for _ in range(20):
         src = _compose(rng)
+        if oneline:
+            src = _oneline(src)
         ref_tag, _ = _ref(src)
         # the generator can only produce an admit or a G2 conflict
         assert ref_tag in ("", "G2"), f"corpus bug: reference tag {ref_tag!r}"
@@ -519,11 +609,14 @@ def _compose_realms(rng: random.Random) -> str:
     return "\n".join(lines)
 
 
+@pytest.mark.parametrize("oneline", [False, True])
 @pytest.mark.parametrize("seed", range(24))
-def test_generated_realm_compositions_agree(admit, seed):
+def test_generated_realm_compositions_agree(admit, seed, oneline):
     rng = random.Random(seed)
     for _ in range(20):
         src = _compose_realms(rng)
+        if oneline:
+            src = _oneline(src)
         ref_tag, _ = _ref(src)
         # per-realm composition admits or conflicts under G2, nothing else
         assert ref_tag in ("", "G2"), \
@@ -553,11 +646,14 @@ def _provider(rng: random.Random) -> str:
         "}\n")
 
 
+@pytest.mark.parametrize("oneline", [False, True])
 @pytest.mark.parametrize("seed", range(24))
-def test_generated_providers_agree(admit, seed):
+def test_generated_providers_agree(admit, seed, oneline):
     rng = random.Random(seed)
     for _ in range(20):
         src = _provider(rng)
+        if oneline:
+            src = _oneline(src)
         ref_tag, _ = _ref(src)
         # a provider over one emission op is admitted or refused by G4 only
         assert ref_tag in ("", "G4"), \
@@ -587,11 +683,14 @@ def _prelude(rng: random.Random) -> str:
     return "\n".join(lines)
 
 
+@pytest.mark.parametrize("oneline", [False, True])
 @pytest.mark.parametrize("seed", range(24))
-def test_generated_preludes_agree(admit, seed):
+def test_generated_preludes_agree(admit, seed, oneline):
     rng = random.Random(seed)
     for _ in range(20):
         src = _prelude(rng)
+        if oneline:
+            src = _oneline(src)
         ref_tag, _ = _ref(src)
         # the generator can only produce an admit or a PRELUDE refusal
         assert ref_tag in ("", "PRELUDE"), \
@@ -614,11 +713,14 @@ def _bare_value(rng: random.Random) -> str:
             f"  provide s {{ fn go(p) {{ let x = {name}   return p }} }}\n}}\n")
 
 
+@pytest.mark.parametrize("oneline", [False, True])
 @pytest.mark.parametrize("seed", range(24))
-def test_generated_bare_values_agree(admit, seed):
+def test_generated_bare_values_agree(admit, seed, oneline):
     rng = random.Random(seed)
     for _ in range(20):
         src = _bare_value(rng)
+        if oneline:
+            src = _oneline(src)
         ref_tag, _ = _ref(src)
         # a lone bare-value read is admitted or refused by G1 only
         assert ref_tag in ("", "G1"), \

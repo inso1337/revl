@@ -93,24 +93,50 @@
 //     `config` is a component-level declaration, not an action, so it never
 //     shifts that boundary.
 //
+// Slice four (this file) hardens the statement reader (item 168) and mirrors the
+// remaining tractable non-spawn admission surface:
+//
+//   * item 168 — the statement reader now ends a run at a STRUCTURAL boundary,
+//     not only a newline (`p_stmt_run` reports where it ended; callers advance
+//     by THAT). A single-line component body — `{ let s = effect … undo …
+//     isolate d … provide s {…} }` — now parses into the same statement
+//     sequence the reference sees, closing an oracle gap the multi-line-only
+//     fuzzers never covered. The cross-check fuzzers now each run a single-line
+//     variant too.
+//
+//   * `intercept` metadata VALIDATION (lower.py's `InterceptStmt` branch): the
+//     target must name a REQUIRED key (an undeclared key is the G1
+//     head-resolution refusal — this is why fixture `v2_intercept_undeclared`
+//     classifies G1; a PROVIDED key has its own provision-specific wording), and
+//     a key may be intercepted at most once. Surfaced (with the prelude ORDER
+//     rule) through `CompD.refuse`, already tagged.
+//
+//   * A1 `await` outside a component body (`_lower_provide`'s AwaitStmt check):
+//     an `await` in a SYNC provide method has no in-flight window; an `async`
+//     method (or a component activation body) may await.
+//
+//   * services-2.0 signature parity (lower.py's `method.async_ != decl.async_`):
+//     an `async fn` service op must be implemented by an `async fn` method, and
+//     vice-versa — the `async` marker is part of the interface.
+//
 // ============================================================ WHAT REMAINS
-// Deliberately out of this slice, for follow-on lowerings (each a real part of
+// Deliberately out of this file, for follow-on lowerings (each a real part of
 // lower.py the gate does not yet mirror):
 //   * The type/arg-checking spine (checker.rvl already cross-checks typing).
-//   * A1's arrow-color surfaces: the sync-typed-arrow leak in a provide method
-//     (`_refuse_leaky_arrow`) and its module-fn twin (`_refuse_leaky_pure_arrow`),
-//     plus `await` outside a component body and the module-fn first-class
-//     async-value refusal — all need the arrow async-color / `Async[T]`
-//     coercion the IR here does not yet carry (a coherent slice-4 chunk).
-//   * `intercept` metadata VALIDATION (target must be a required key, no double
-//     interception): only the prelude ORDER rule for `isolate`/`intercept` is
-//     mirrored here, not the target/uniqueness checks.
+//   * A1's arrow-color LEAK surfaces: the sync-typed-arrow leak in a provide
+//     method (`_refuse_leaky_arrow`) and its module-fn twin
+//     (`_refuse_leaky_pure_arrow`), plus the module-fn first-class async-value
+//     refusal — these need the arrow async-color / `Async[T]` param-type
+//     coercion (`_coerce_async_args`) the gate's IR does not carry: soundly
+//     mirroring them requires modelling which arrow argument lands in an
+//     `Async[T]` parameter slot, so they are DEFERRED to a later slice.
 //   * The spawn/instance dimension entirely: templates, G4/G6 spawn-boundary
-//     bounds, capability attenuation (`_check_spawn_*`).
-//   * State hand-off admission, service replacement admission, ambient
-//     (running-manifest) composition, fault/lifecycle/prop tests, ir_version
-//     computation, and — of course — every emitter-oriented lowering detail
-//     (the gate produces a verdict, not an IR document).
+//     bounds, capability attenuation (`_check_spawn_*`) — its own slice.
+//   * State hand-off admission (`handoff`), multi-realm routing (`isolate … in
+//     realms(...)`), service replacement admission, ambient (running-manifest)
+//     composition, fault/lifecycle/prop tests, ir_version computation, and — of
+//     course — every emitter-oriented lowering detail (the gate produces a
+//     verdict, not an IR document).
 //
 // Verdict shape: `admit_src` returns "" to admit, else a two-part string
 // "<G>|<message>" where <G> is the guarantee tag ("G1" | "G2" | "G3" | "G4" |
@@ -149,8 +175,10 @@ type SvcD = { name: Str, methods: List[MSig] }
 type Stmt = { kind: Str, e: Expr, bind: Str }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
-// name in the method body), and its body is walked for G4/A1/G1.
-type ProvM   = { name: Str, params: List[Str], body: List[Stmt] }
+// name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
+// the method's own `async fn` modifier — checked for signature parity against
+// the service op it implements (lower.py's `method.async_ != decl.async_`).
+type ProvM   = { name: Str, params: List[Str], body: List[Stmt], isAsync: Bool }
 type Provide = { key: Str, svcName: Str, methods: List[ProvM] }
 // A declared provision key and the realm it lives in ("" = the shared realm).
 type ProvKey = { key: Str, rlm: Str }
@@ -355,10 +383,24 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 
 fn int_lit0() -> Expr { return IntLit("0") }
 
-fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+// One statement run and the index just PAST the tokens it consumed. Item 168:
+// the reader must end a run at a STRUCTURAL boundary, not only a newline, so a
+// single-line body (`let x = a() let y = b() isolate d …`) parses into the same
+// statement sequence the reference sees. The expression grammar already stops
+// at a keyword head (`let`/`return`/`emit`/`effect`/`isolate`/`provide`/…), so
+// reporting where the run actually ended — and having callers advance by THAT,
+// not by `line_end` — is the whole fix: a caller re-dispatches at the next
+// statement/declaration even when it shares the source line. `i` falls back to
+// `hi` (skip to the next line) only on a bad/degenerate parse, to guarantee
+// forward progress.
+type SRun = { ss: List[Stmt], i: Int }
+
+fn mk_srun(ss: List[Stmt], i: Int) -> SRun { return { ss: ss, i: i } }
+
+fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && t.text == "let") {
-    if (!atk(ts, lo + 2, "=")) { return [mkstmt("skip", int_lit0())] }
+    if (!atk(ts, lo + 2, "=")) { return mk_srun([mkstmt("skip", int_lit0())], hi) }
     let bn = tkc(ts, lo + 1).text
     var j = lo + 3
     var kd = "expr"
@@ -372,37 +414,46 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
       }
     }
     let r = expr_at(ts, j)
-    if (is_bad(r.e)) { return [mkstmt("skip", r.e)] }
-    var out: List[Stmt] = [mkstmtb(kd, r.e, bn)]
+    if (is_bad(r.e)) { return mk_srun([mkstmt("skip", r.e)], hi) }
+    let out: List[Stmt] = [mkstmtb(kd, r.e, bn)]
     if (atw(ts, r.i, "undo")) {
       let u = expr_at(ts, r.i + 1)
-      if (!is_bad(u.e)) { out = out.push(mkstmt("undo", u.e)) }
+      if (!is_bad(u.e)) { return mk_srun(out.push(mkstmt("undo", u.e)), u.i) }
+      return mk_srun(out, hi)
     }
-    return out
+    return mk_srun(out, r.i)
   }
   if (t.kind == "kw" && t.text == "return") {
     let rr = expr_at(ts, lo + 1)
-    if (is_bad(rr.e)) { return [mkstmt("skip", rr.e)] }
-    return [mkstmt("return", rr.e)]
+    if (is_bad(rr.e)) { return mk_srun([mkstmt("skip", rr.e)], hi) }
+    return mk_srun([mkstmt("return", rr.e)], rr.i)
   }
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = expr_at(ts, lo + 1)
-    if (is_bad(re1.e)) { return [mkstmt("skip", re1.e)] }
-    return [mkstmt("emit", re1.e)]
+    if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
+    return mk_srun([mkstmt("emit", re1.e)], re1.i)
+  }
+  // `await <expr>` is a statement of its own (the A1 await-outside-body surface
+  // reads its kind). The expression is still walked for G4/A1/G1.
+  if (t.kind == "kw" && t.text == "await") {
+    let ra = expr_at(ts, lo + 1)
+    if (is_bad(ra.e)) { return mk_srun([mkstmt("skip", ra.e)], hi) }
+    return mk_srun([mkstmt("await", ra.e)], ra.i)
   }
   if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
     let rf = expr_at(ts, lo + 1)
-    if (is_bad(rf.e)) { return [mkstmt("skip", rf.e)] }
-    var out2: List[Stmt] = [mkstmt(t.text, rf.e)]
+    if (is_bad(rf.e)) { return mk_srun([mkstmt("skip", rf.e)], hi) }
+    let out2: List[Stmt] = [mkstmt(t.text, rf.e)]
     if (atw(ts, rf.i, "undo")) {
       let u2 = expr_at(ts, rf.i + 1)
-      if (!is_bad(u2.e)) { out2 = out2.push(mkstmt("undo", u2.e)) }
+      if (!is_bad(u2.e)) { return mk_srun(out2.push(mkstmt("undo", u2.e)), u2.i) }
+      return mk_srun(out2, hi)
     }
-    return out2
+    return mk_srun(out2, rf.i)
   }
   let r2 = expr_at(ts, lo)
-  if (is_bad(r2.e)) { return [mkstmt("skip", r2.e)] }
-  return [mkstmt("expr", r2.e)]
+  if (is_bad(r2.e)) { return mk_srun([mkstmt("skip", r2.e)], hi) }
+  return mk_srun([mkstmt("expr", r2.e)], r2.i)
 }
 
 fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
@@ -417,8 +468,10 @@ fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
 
 fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
   if (lo >= hi || atk(ts, lo, "}")) { return acc }
-  let re = line_end(ts, lo, hi)
-  return p_stmts(ts, re, hi, append_stmts(acc, p_stmt_run(ts, lo, re)))
+  let le = line_end(ts, lo, hi)
+  let r = p_stmt_run(ts, lo, le)
+  let nx = r.i > lo ? r.i : le
+  return p_stmts(ts, nx, hi, append_stmts(acc, r.ss))
 }
 
 // ---------------------------------------------------------------- fn callees
@@ -622,26 +675,30 @@ fn param_names(ps: List[ParamN]) -> List[Str] {
 fn p_prov_methods(ts: List[Token], i: Int, end: Int,
                   acc: List[ProvM]) -> ProvMR {
   if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
-  // a provide method may be declared `async fn` (matching an async service op);
-  // admission reads asyncness off the service declaration, so the modifier is
-  // skipped structurally here — only the body walk matters at this position.
-  let h = atw(ts, i, "async") ? i + 1 : i
+  // a provide method may be declared `async fn` (matching an async service op).
+  // The modifier is captured for the signature-parity check (lower.py's
+  // `method.async_ != decl.async_`); the body walk uses the service op's color.
+  let masync = atw(ts, i, "async")
+  let h = masync ? i + 1 : i
   if (!atw(ts, h, "fn")) { return { xs: acc, i: h, ok: false } }
   let nm = tkc(ts, h + 1).text
   let ps = params_at(ts, h + 3)
   let pnames = param_names(ps.ps)
   if (atk(ts, ps.i, "=")) {
-    let re = line_end(ts, ps.i + 1, end)
-    let ebody = p_stmt_run(ts, ps.i + 1, re)
-    return p_prov_methods(ts, re, end,
-                          acc.push({ name: nm, params: pnames, body: ebody }))
+    let le = line_end(ts, ps.i + 1, end)
+    let r = p_stmt_run(ts, ps.i + 1, le)
+    let nx = r.i > ps.i + 1 ? r.i : le
+    return p_prov_methods(ts, nx, end,
+                          acc.push({ name: nm, params: pnames, body: r.ss,
+                                     isAsync: masync }))
   }
   if (!atk(ts, ps.i, "{")) { return { xs: acc, i: ps.i, ok: false } }
   let bend = close_brace(ts, ps.i)
   if (bend == 0 - 1) { return { xs: acc, i: ts.length(), ok: false } }
   let bbody = p_stmts(ts, ps.i + 1, bend - 1, [])
   return p_prov_methods(ts, bend, end,
-                        acc.push({ name: nm, params: pnames, body: bbody }))
+                        acc.push({ name: nm, params: pnames, body: bbody,
+                                   isAsync: masync }))
 }
 
 // The names bound by a list of `key: Service` pairs (a header row).
@@ -656,10 +713,17 @@ fn bind_lookup(env: List[Bind], n: Str, i: Int) -> Str {
   return bind_lookup(env, n, i + 1)
 }
 
+// Whether a header row declares `n` (a requirement type is never "", so the
+// lookup's empty result is an unambiguous "absent").
+fn bind_has(env: List[Bind], n: Str) -> Bool { return bind_lookup(env, n, 0) != "" }
+
 // `refuse` (non-"") is a semantic admission refusal spelled fully as the
-// reference spells it, tagged and surfaced by `admit_src` — currently the
-// realm PRELUDE rule (an `isolate`/`intercept` placed after an action). It is
-// distinct from `ok: false`, which is a structural parse failure ("BAD").
+// reference spells it, ALREADY TAGGED ("<TAG>|<message>") and surfaced verbatim
+// by `admit_src`. Two families flow through it, both decided as the component
+// body is scanned (before its provide methods are gated): the realm PRELUDE
+// rule (an `isolate`/`intercept` placed after an action) and `intercept`
+// metadata validation (a G1 target/uniqueness refusal). It is distinct from
+// `ok: false`, which is a structural parse failure ("BAD").
 type ProvR = { provs: List[Provide], setup: List[Stmt], iso: List[ProvKey],
                refuse: Str, i: Int, ok: Bool }
 
@@ -679,9 +743,29 @@ fn prelude_msg(kw: Str) -> Str {
     .concat("` must precede every effect, emit, await, and provide statement")
 }
 
+// `intercept` metadata validation (lower.py's `InterceptStmt` branch): the
+// target must name a REQUIRED key. Interception is the component-declared
+// metadata d(k) whose domain is the dependency set — a provision has nothing
+// to intercept, and an undeclared key resolves to nothing. Both surface the
+// reference's exact wording; both are the declared-wiring (G1) family, so the
+// undeclared case is the very `` `<x>` is not a declared requirement of <C> ``
+// G1 diagnostic (this is why fixture `v2_intercept_undeclared` classifies G1).
+fn intercept_target_msg(key: Str, cname: Str, isProv: Bool) -> Str {
+  if (isProv) {
+    return "`intercept` applies to required keys only — `".concat(key)
+      .concat("` is a provision")
+  }
+  return "`".concat(key).concat("` is not a declared requirement of ").concat(cname)
+}
+
+fn intercept_twice_msg(key: Str, cname: Str) -> Str {
+  return "key `".concat(key).concat("` is intercepted twice in ").concat(cname)
+}
+
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
-               provs: List[Provide], setup: List[Stmt],
-               iso: List[ProvKey], action: Bool) -> ProvR {
+               reqh: List[Bind], cname: Str, provs: List[Provide],
+               setup: List[Stmt], iso: List[ProvKey], icept: List[Str],
+               action: Bool) -> ProvR {
   if (i >= end || atk(ts, i, "}")) {
     return mk_provr(provs, setup, iso, "", i, true)
   }
@@ -695,17 +779,17 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     let ms = p_prov_methods(ts, i + 3, pend - 1, [])
     if (!ms.ok) { return mk_provr(provs, setup, iso, "", pend, false) }
     // a `provide` block is an action: it counts against later prelude decls.
-    return p_comp_body(ts, pend, end, provh,
+    return p_comp_body(ts, pend, end, provh, reqh, cname,
                        provs.push({ key: key,
                                     svcName: bind_lookup(provh, key, 0),
                                     methods: ms.xs }),
-                       setup, iso, true)
+                       setup, iso, icept, true)
   }
   // `isolate <key> in realm("<label>")` — the realm dimension G2/G3 read, and
   // (this slice) the prelude ordering rule: after an action it is refused.
   if (atw(ts, i, "isolate")) {
     if (action) {
-      return mk_provr(provs, setup, iso, prelude_msg("isolate"),
+      return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("isolate")),
                       skip_line(ts, i), true)
     }
     let key = tkc(ts, i + 1).text
@@ -713,27 +797,42 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     if (atw(ts, i + 2, "in") && atw(ts, i + 3, "realm")
         && atk(ts, i + 4, "(") && atk(ts, i + 5, "string")) {
       let rlm = tkc(ts, i + 5).text
-      return p_comp_body(ts, skip_line(ts, i), end, provh, provs, setup,
-                         iso.push(mk_provkey(key, rlm)), action)
+      return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                         setup, iso.push(mk_provkey(key, rlm)), icept, action)
     }
-    return p_comp_body(ts, skip_line(ts, i), end, provh, provs, setup, iso, action)
+    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                       setup, iso, icept, action)
   }
   // `intercept <key> with { ... }` supplies metadata, not a realm; the prelude
-  // rule applies to it too. Its block is skipped structurally.
+  // rule applies first, then the target/uniqueness validation. Its block is
+  // skipped structurally. A valid `intercept` is NOT an action (it `continue`s
+  // in the reference), so `action` is threaded unchanged.
   if (atw(ts, i, "intercept")) {
     if (action) {
-      return mk_provr(provs, setup, iso, prelude_msg("intercept"),
+      return mk_provr(provs, setup, iso, tagged("PRELUDE", prelude_msg("intercept")),
                       skip_line(ts, i), true)
+    }
+    let key = tkc(ts, i + 1).text
+    if (!bind_has(reqh, key)) {
+      return mk_provr(provs, setup, iso,
+        tagged("G1", intercept_target_msg(key, cname, bind_has(provh, key))),
+        skip_line(ts, i), true)
+    }
+    if (contains(icept, key)) {
+      return mk_provr(provs, setup, iso,
+        tagged("G1", intercept_twice_msg(key, cname)), skip_line(ts, i), true)
     }
     var k = i + 1
     while (k < end && !atk(ts, k, "{")) { k += 1 }
     if (atk(ts, k, "{")) {
       let ce = close_brace(ts, k)
       if (ce != 0 - 1) {
-        return p_comp_body(ts, ce, end, provh, provs, setup, iso, action)
+        return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
+                           icept.push(key), action)
       }
     }
-    return p_comp_body(ts, skip_line(ts, i), end, provh, provs, setup, iso, action)
+    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                       setup, iso, icept.push(key), action)
   }
   // `config { <field>: <Type> ... }` is a component-level declaration, not a
   // body action (the reference reads it off the component header, never the
@@ -742,14 +841,18 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   if (atw(ts, i, "config") && atk(ts, i + 1, "{")) {
     let ce = close_brace(ts, i + 1)
     if (ce != 0 - 1) {
-      return p_comp_body(ts, ce, end, provh, provs, setup, iso, action)
+      return p_comp_body(ts, ce, end, provh, reqh, cname, provs, setup, iso,
+                         icept, action)
     }
   }
-  // component setup: one statement run per line — G4/A1/G1 gate setup too, and
-  // the statement makes this an action (later prelude decls are refused).
-  let re = line_end(ts, i, end)
-  let ss = p_stmt_run(ts, i, re)
-  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss), iso, true)
+  // component setup: a statement run (item 168: ended at a structural boundary,
+  // not only a newline) — G4/A1/G1 gate setup too, and the statement makes this
+  // an action (later prelude decls are refused).
+  let le = line_end(ts, i, end)
+  let r = p_stmt_run(ts, i, le)
+  let nx = r.i > i ? r.i : le
+  return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
+                     append_stmts(setup, r.ss), iso, icept, true)
 }
 
 // The realm a component resolves `key` in: its isolate binding, else shared.
@@ -785,7 +888,7 @@ fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
     return { pg: bad_prog(pg, "unbalanced braces in component"),
              i: ts.length() }
   }
-  let body = p_comp_body(ts, j + 1, end - 1, provh, [], [], [], false)
+  let body = p_comp_body(ts, j + 1, end - 1, provh, reqs, nm, [], [], [], [], false)
   if (!body.ok) {
     return { pg: bad_prog(pg, "bad provide block in component ".concat(nm)),
              i: end }
@@ -1392,6 +1495,25 @@ fn setup_async_verdict(comp: CompD, sa: Ac, cx: Ctx) -> Str {
     .concat("` in a setup/activation body, which cannot suspend a fiber (A1)")
 }
 
+// The services-2.0 signature-parity verdict (lower.py's `method.async_ !=
+// decl.async_`): the `async` marker is part of the service interface, so an
+// `async fn` op must be implemented by an `async fn` method, and vice-versa.
+fn async_sig_msg(key: Str, mname: Str, svc: Str, mAsync: Bool,
+                 dAsync: Bool) -> Str {
+  return "method `".concat(mname).concat("` of provision `").concat(key)
+    .concat("` is ").concat(mAsync ? "async" : "not async")
+    .concat(" but service ").concat(svc).concat(" declares it ")
+    .concat(dAsync ? "async" : "not async")
+}
+
+// Whether a method body contains an `await` statement (the await-outside-body
+// A1 surface — the statement reader tags these `await`).
+fn has_await(ss: List[Stmt], i: Int) -> Bool {
+  if (i >= ss.length()) { return false }
+  if (ss[i].kind == "await") { return true }
+  return has_await(ss, i + 1)
+}
+
 // G4 + A1 over one component. "" = admitted, else a tagged refusal.
 fn check_component(comp: CompD, cx: Ctx) -> Str {
   // setup gets G4/A1/G1 too (an undeclared access or unmarked emission in
@@ -1408,8 +1530,22 @@ fn check_component(comp: CompD, cx: Ctx) -> Str {
     while (mi < pv.methods.length()) {
       let pm = pv.methods[mi]
       let decl = find_msig(dsvc, pm.name, 0)
+      // signature parity FIRST (lower.py `method.async_ != decl.async_`), before
+      // the body is walked: an `async fn` op must be implemented by an `async fn`
+      // method, and vice-versa.
+      if (decl.name != "" && pm.isAsync != decl.isAsync) {
+        return tagged("A1", async_sig_msg(pv.key, pm.name, pv.svcName,
+                                          pm.isAsync, decl.isAsync))
+      }
       let a = walk_stmts(pm.body, 0, pcx, empty_ac())
       if (a.msg != "") { return tagged(a.tag, a.msg) }
+      // `await` outside a component body (lower.py's method-lowering AwaitStmt
+      // check): an await in a SYNC provide method has no in-flight window; an
+      // async method (or an activation body) may await. Fires during body
+      // lowering, before the G4/A1 provider verdicts.
+      if (decl.name != "" && !decl.isAsync && has_await(pm.body, 0)) {
+        return tagged("A1", "`await` is only allowed in a component body")
+      }
       if (decl.name != "") {
         let g4 = g4_verdict(pv.svcName, pm.name, decl, a)
         if (g4 != "") { return tagged("G4", g4) }
@@ -1603,9 +1739,10 @@ pub fn admit_src(src: Str) -> Str {
   var ci = 0
   while (ci < pg.comps.length()) {
     let comp = pg.comps[ci]
-    // the PRELUDE rule is decided as the component body is scanned (before its
-    // provide methods are gated), so it is surfaced first, in composition order.
-    if (comp.refuse != "") { return tagged("PRELUDE", comp.refuse) }
+    // a body-scan refusal (the PRELUDE rule or `intercept` metadata validation)
+    // is decided before the provide methods are gated, so it is surfaced first,
+    // in composition order. `comp.refuse` is already the full "<TAG>|<message>".
+    if (comp.refuse != "") { return comp.refuse }
     let cx = ctx_for(base, comp)
     let v = check_component(comp, cx)
     if (v != "") { return v }
@@ -1654,8 +1791,13 @@ test "sync provide method reaching an async extern is refused (A1)" {
 }
 
 test "async-declared op admits the same async body" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = http_post(url, body) } }")
   assert v == ""
+}
+
+test "sync method implementing an async op is refused (signature parity)" {
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  assert v == "A1|method `post` of provision `http` is not async but service Http declares it async"
 }
 
 test "undeclared access is refused (G1), exact wording" {
