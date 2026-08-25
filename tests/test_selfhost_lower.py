@@ -12,8 +12,21 @@ spec; a disagreement is a real defect in one of them.
 The gate answers one question: admit, or refuse and name the guarantee. So the
 oracle compares the VERDICT:
   * accepted input -> both admit (reference raises nothing; selfhost returns "");
-  * refused input  -> both refuse with the SAME guarantee tag (G2 | G4 | A1)
-    AND, where the tag is one this slice spells fully, the SAME message text.
+  * refused input  -> both refuse with the SAME guarantee tag
+    (G1 | G2 | G3 | G4 | A1 | PRELUDE) AND, where the tag is one this slice
+    spells fully, the SAME message text.
+
+Slice 3 extends the check-parity for the non-spawn program surface with three
+more surfaces from lower.py, cross-checked here alongside slices 1+2:
+  * G1 bare-value resolution — an undeclared bare `Var` used as a value inside a
+    provide-method body (not only call/access heads), matching lower.py's
+    `_lower_component_pure_expr`/`ExprVar` `_plain_body` refusal.
+  * A1 first-class async value (`passed_async`) — an async extern/colored fn
+    referenced as a VALUE in a provide method (any method, sync or async).
+  * A1 setup/activation async-reach — a setup body that reaches an async
+    callable (by call or value), matching `_async_reached_outside_provide`.
+  * the realm PRELUDE rule — an `isolate`/`intercept` placed after an effect/
+    emit/await/provide is refused (lower.py `_lower_component`'s `action_seen`).
 
 The slice mirrors three guarantees, in the reference's own checking order
 (per-component G4 then A1 during lowering, then G2 at link):
@@ -84,8 +97,19 @@ def admit(ns):
 
 @pytest.fixture(scope="module")
 def admit_tag(ns):
-    """The coarse verdict: "" | "G2" | "G4" | "A1" | "BAD"."""
+    """The coarse verdict: "" | "G1" | "G2" | "G3" | "G4" | "A1" | "PRELUDE"
+    | "BAD"."""
     return ns["admit_tag"]
+
+
+def test_selfhosted_lower_in_file_tests_pass(ns):
+    """The .rvl file's own `test` blocks run under the python backend."""
+    tests = ns.get("REVL_TESTS")
+    assert tests and len(tests) >= 12, \
+        "expected the file's test blocks in REVL_TESTS"
+    for entry in tests:
+        fn = entry[-1] if isinstance(entry, tuple) else entry
+        fn()
 
 
 # ------------------------------------------------- reference classifier
@@ -105,6 +129,11 @@ def _classify(e: RevlError) -> str:
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
     if "(G3)" in m:
         return "G3"
+    # The realm PRELUDE rule (an `isolate`/`intercept` after an effect/emit/
+    # await/provide) sets no code either; its message is unambiguous. Slice 3
+    # mirrors it, so it is an in-slice tag rather than OUT.
+    if "must precede every effect, emit, await, and provide statement" in m:
+        return "PRELUDE"
     if "is not a declared requirement of" in m:
         return "G1"
     if ("declared plain, but this implementation reaches" in m
@@ -238,6 +267,50 @@ component C provides cache: Cache {
   }
 }
 """),
+    # G1 bare-value: a `config.<field>` read is a config access, not a bare
+    # undeclared `config`, so the method admits.
+    ("config field read is not a bare-value access", """
+service S { fn go() -> Int }
+component C provides s: S {
+  config { timeout: Int }
+  provide s { fn go() { let x = config.timeout   return x } }
+}
+"""),
+    # G1 bare-value: a module fn named as a first-class VALUE resolves as a
+    # callable (it is not an undeclared access).
+    ("a callable named as a value resolves", """
+fn helper(x: Int) -> Int { return x }
+service S { fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let f = helper   return 0 } }
+}
+"""),
+    # G1 bare-value: an arrow's own parameter is a declared name in its body —
+    # the bare-value check must see it, not refuse the arrow's `x`.
+    ("an arrow parameter is in scope in its body", """
+fn apply(f: (Int) -> Int, x: Int) -> Int { return f(x) }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s { fn go(n) { let r = apply(x => x, n)   return r } }
+}
+"""),
+    # G1 bare-value: a match arm's payload binding is a declared name in the arm.
+    ("a match-arm binding is in scope in the arm", """
+service S { fn go(o: Opt[Str]) -> Str }
+component C provides s: S {
+  provide s { fn go(o) { return match o { Some(v) => v, None => "x" } } }
+}
+"""),
+    # the PRELUDE rule admits an `isolate` that PRECEDES every action; `config`
+    # is a component-level declaration, not an action, so it may sit before it.
+    ("isolate before every action composes (prelude ok)", """
+service Kv { fn get(k: Str) -> Opt[Str] }
+component C requires kv: Kv {
+  config { tenant: Str }
+  isolate kv in realm("r1")
+  let probe = effect kv.get("boot") undo probe.drop()
+}
+"""),
 ]
 
 
@@ -289,6 +362,86 @@ component Logger provides log: Log {
     # per-realm G2: same key, SAME realm — a conflict, and the realm is named
     # (fixture).
     ("g2 same-realm conflict", _fixture("v2_same_realm_conflict"), "G2"),
+    # ---- slice 3 ---------------------------------------------------------
+    # G1 bare-value: an undeclared bare `Var` used as a value in a provide
+    # method body (not a call/access head) — the reference's `_plain_body`
+    # var-resolution refusal.
+    ("g1 undeclared bare value in method", """service S { fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let x = nope   return 0 } }
+}
+""", "G1"),
+    # G1 bare-value: a required key is the service path, never a bare value —
+    # using it bare is the same undeclared-access refusal.
+    ("g1 required key used as a bare value", """service D { fn q(s: Str) -> Int }
+service S { fn go() -> Int }
+component C requires d: D provides s: S {
+  provide s { fn go() { let x = d   return 0 } }
+}
+""", "G1"),
+    # A1 passed_async: an async extern referenced as a function value in a
+    # provide method — refused even when the method's op is declared `async`.
+    ("a1 async extern used as a value (async method)",
+     """extern emission async fn tick() -> Int = @py { return 1 }
+service S { emission async fn go() -> Int }
+component C provides s: S {
+  provide s { async fn go() { let f = tick   return 0 } }
+}
+""", "A1"),
+    # A1 passed_async: a transitively-colored fn referenced as a value.
+    ("a1 colored fn used as a value", """extern emission async fn tick() -> Int = @py { return 1 }
+fn helper() -> Int { return tick() }
+service S { emission fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let f = helper   return 0 } }
+}
+""", "A1"),
+    # A1 passed_async: an async callable handed in as a call ARGUMENT is a value
+    # use too.
+    ("a1 async extern passed as an argument", """extern emission async fn tick(n: Int) -> Int = @py { return n }
+service Db { emission fn exec(n: Int) -> Int }
+service S { emission fn go() -> Int }
+component C requires db: Db provides s: S {
+  provide s { fn go() { emit db.exec(tick)   return 0 } }
+}
+""", "A1"),
+    # A1 setup/activation async-reach: a setup body that reaches an async extern
+    # cannot suspend a fiber.
+    ("a1 setup body reaches an async extern", """extern emission async fn tick() -> Int = @py { return 1 }
+service S { fn go() -> Int }
+component C provides s: S {
+  emit tick()
+  provide s { fn go() { return 0 } }
+}
+""", "A1"),
+    # G4 first-class emission value: a plain provider that hands an emission
+    # callable off as a value reaches an emission (the value-use G4 evidence).
+    ("g4 emission callable passed as a value", """extern emission async fn tick() -> Int = @py { return 1 }
+service S { fn go() -> Int }
+component C provides s: S {
+  provide s { fn go() { let f = tick   return 0 } }
+}
+""", "G4"),
+    # PRELUDE: an `isolate` after a setup effect is refused (fixture).
+    ("prelude isolate after effect", _fixture("v2_isolate_after_effect"),
+     "PRELUDE"),
+    # PRELUDE: an `intercept` after a setup effect is refused.
+    ("prelude intercept after effect", """service D { fn q(s: Str) -> Int }
+service S { fn go() -> Int }
+component C requires d: D provides s: S {
+  let store = effect Map.new() undo store.drop()
+  intercept d with { retries: 3 }
+  provide s { fn go() { return 0 } }
+}
+""", "PRELUDE"),
+    # PRELUDE: an `isolate` after the `provide` block is refused too.
+    ("prelude isolate after provide", """service D { fn q(s: Str) -> Int }
+service S { fn go() -> Int }
+component C requires d: D provides s: S {
+  provide s { fn go() { return 0 } }
+  isolate d in realm("r1")
+}
+""", "PRELUDE"),
 ]
 
 
@@ -408,5 +561,66 @@ def test_generated_providers_agree(admit, seed):
         ref_tag, _ = _ref(src)
         # a provider over one emission op is admitted or refused by G4 only
         assert ref_tag in ("", "G4"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
+
+
+# ------------------------------------------------------------- prelude fuzz
+
+# A real differential over the realm PRELUDE rule: one component with a setup
+# effect and a single realm/metadata declaration (`isolate` or `intercept`)
+# placed either BEFORE the effect (admits) or AFTER it (refused). `config` is a
+# declaration, not an action, so it never shifts the boundary. The only two
+# outcomes are an admit and a PRELUDE refusal, so the two gates are each other's
+# oracle on the verdict AND the `<kw>`-specific wording.
+def _prelude(rng: random.Random) -> str:
+    after = rng.random() < 0.5
+    kw = rng.choice(["isolate", "intercept"])
+    decl = ('isolate d in realm("r1")' if kw == "isolate"
+            else "intercept d with { retries: 3 }")
+    effect = "let store = effect Map.new() undo store.drop()"
+    lines = ["service D { fn q(s: Str) -> Int }", "service S { fn go() -> Int }",
+             "component C requires d: D provides s: S {"]
+    lines += (["  " + effect, "  " + decl] if after
+              else ["  " + decl, "  " + effect])
+    lines += ["  provide s { fn go() { return 0 } }", "}"]
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_preludes_agree(admit, seed):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _prelude(rng)
+        ref_tag, _ = _ref(src)
+        # the generator can only produce an admit or a PRELUDE refusal
+        assert ref_tag in ("", "PRELUDE"), \
+            f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
+        _agree(admit, src)
+
+
+# ---------------------------------------------------------- G1 bare-value fuzz
+
+# The bare-value name-resolution differential: a provide method whose body reads
+# a single bare name in value position — either the method's own parameter (a
+# declared name, admits) or an undeclared identifier (the G1 access refusal).
+# The only two outcomes are an admit and a G1 refusal naming the culprit, so the
+# two gates agree on the verdict AND the "`<x>` is not a declared requirement"
+# wording.
+def _bare_value(rng: random.Random) -> str:
+    name = "p" if rng.random() < 0.5 else "ghost"
+    return ("service S { fn go(p: Str) -> Str }\n"
+            "component C provides s: S {\n"
+            f"  provide s {{ fn go(p) {{ let x = {name}   return p }} }}\n}}\n")
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_generated_bare_values_agree(admit, seed):
+    rng = random.Random(seed)
+    for _ in range(20):
+        src = _bare_value(rng)
+        ref_tag, _ = _ref(src)
+        # a lone bare-value read is admitted or refused by G1 only
+        assert ref_tag in ("", "G1"), \
             f"corpus bug: reference tag {ref_tag!r} for:\n{src}"
         _agree(admit, src)
