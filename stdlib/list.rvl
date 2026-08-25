@@ -1,0 +1,111 @@
+// The revl stdlib LIST module (roadmap item 194, docs/stdlib-list.md).
+//
+// A Path B enabler, kin to stdlib/value.rvl (180/188) and stdlib/str.rvl (193):
+// the small set-shaped list utilities a self-hosted emitter reaches for and
+// that the base List/Str stdlib does not ship. The reference emitters build
+// `uses` / `user_cases` as Python `set`s and then reach for `sorted(set)` and
+// `x in set`; revl has NEITHER a set type NOR list `sort`/`contains`. So the
+// first self-hosted py emitter (selfhost/emit_py.rvl, item 192) worked around
+// both:
+//   * `sorted(set)`  → a HARDCODED canonical order walked as a fixed sequence
+//                      over the finite import vocabulary (Frame, Job, Map, Pool,
+//                      schedule_after, schedule_every) — see `emit_src` there;
+//                      it does not generalise to an arbitrary type graph.
+//   * `x in set`     → a hand-rolled `str_in(xs: List[Str], s: Str) -> Bool`.
+// This module is those two, once, typed, and PORTABLE — so a self-hosted
+// emitter drops the hardcoding and the private `str_in` and `use`s these.
+//
+// ------------------------------------------------------------------ pure revl
+// Unlike stdlib/value.rvl (which must bridge the erased host value, so it is
+// `@py`), every function here is PURE revl built on the base List/Str surface
+// (`for … of`, `.push`, `.length()`, `.charCodeAt`). There is no `@py` block,
+// so — unlike value.rvl / str.rvl — there is NOTHING to defer per tier: the
+// module compiles and runs identically on EVERY backend (py/ts/rs/go/java/wasm)
+// the moment they emit the base List/Str builtins. The py tier is executed by
+// the test suite (tests/test_list_stdlib.py); the other tiers inherit for free.
+//
+// ------------------------------------------------------------------- ordering
+// `list_sort` is ascending lexicographic by UNICODE CODE POINT, byte-for-byte
+// identical to Python's `sorted()` on strings (pinned by a fuzz test against
+// `sorted()` in tests/test_list_stdlib.py). It is built on `str_lt`, a codepoint
+// comparator over `charCodeAt` — NOT the host's native `<` on strings — because
+// `charCodeAt` is the Unicode scalar on every tier (docs/strings.md) whereas a
+// host's native string `<` is UTF-16-code-unit order on some tiers (JS), which
+// would diverge for astral code points. Codepoint order is what `sorted()` uses,
+// so the emitter's `sorted(uses)` can drop its hardcoding and call `list_sort`.
+//
+// -------------------------------------------------------------- Str, not [T]
+// The functions are `Str`-specialised (as `value_*` was), because the kit's
+// anchor — `list_sort` — cannot be generic: the checker restricts `<`/`<=`/`>`
+// /`>=` to `Numeric | Str` (src/revl/typecheck.py `_binop_type`), so an
+// ordering over a bare type parameter `T` is refused (`` `<` cannot order `T`
+// values``). `list_contains` / `list_dedup` need only `==` and WOULD compile as
+// generic `[T]`, but shipping them `Str`-only keeps the module a coherent,
+// drop-in replacement for the emitters' `str_in(List[Str], Str)` and
+// `sorted(List[Str])` needs — one type surface, no mixed generality. A `Set[T]`
+// TYPE is out of scope (a language feature, not stdlib); see docs/stdlib-list.md.
+//
+// Import with a named `use`:
+//
+//     use "stdlib/list.rvl" { list_contains, list_sort, list_dedup }
+
+// ---------------------------------------------------------------- comparison
+// Lexicographic `a < b` by Unicode code point: compare code point by code point
+// and, on a shared prefix, the shorter string is the smaller. This is EXACTLY
+// Python's `<` on `str` (compare `ord` per position, shorter-prefix is less), so
+// a sort built on it matches `sorted()` byte-for-byte. Total: never faults.
+pub fn str_lt(a: Str, b: Str) -> Bool {
+  let la = a.length()
+  let lb = b.length()
+  var i = 0
+  while (i < la && i < lb) {
+    let ca = a.charCodeAt(i)
+    let cb = b.charCodeAt(i)
+    if (ca < cb) { return true }
+    if (ca > cb) { return false }
+    i += 1
+  }
+  return la < lb
+}
+
+// ---------------------------------------------------------------- membership
+// `x ∈ xs` — the `str_in` replacement. Total: an empty list answers `false`.
+pub fn list_contains(xs: List[Str], x: Str) -> Bool {
+  for (e of xs) { if (e == x) { return true } }
+  return false
+}
+
+// ---------------------------------------------------------------- sort
+// Ascending lexicographic (codepoint) sort — the `sorted(uses)` replacement.
+// Insertion by first-greater position: STABLE (an equal element is inserted
+// after the equal ones already placed) and TOTAL. Byte-for-byte identical to
+// Python `sorted()` on `List[Str]` (pinned by fuzz in tests/test_list_stdlib.py).
+pub fn list_sort(xs: List[Str]) -> List[Str] {
+  var out = []
+  for (x of xs) {
+    var res = []
+    var placed = false
+    for (y of out) {
+      if (!placed && str_lt(x, y)) {
+        res = res.push(x)
+        placed = true
+      }
+      res = res.push(y)
+    }
+    if (!placed) { res = res.push(x) }
+    out = res
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- dedup
+// Set-from-list: drop later duplicates, keeping FIRST-occurrence order (not
+// sorted — compose `list_sort(list_dedup(xs))` for the `sorted(set(xs))` shape).
+// Total: an empty list answers `[]`.
+pub fn list_dedup(xs: List[Str]) -> List[Str] {
+  var out = []
+  for (x of xs) {
+    if (!list_contains(out, x)) { out = out.push(x) }
+  }
+  return out
+}
