@@ -73,6 +73,65 @@ def admit(sources_json: str, manifest_json: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# admit_structured: the *machine-readable* refusal, for the evolve loop
+# (roadmap item 148). `admit` above returns the compiler's why-trace as a
+# human string in `diagnostic`; a code generator needs that same refusal as
+# fields it can branch on — which G-rule was violated (a stable machine key),
+# the offending subject/component, the call path, and the mapped fix. This is
+# exactly what `diagnostics.classify` already derives for the agent-facing
+# projection (`revl compile --json`), so the gate reuses it rather than
+# re-parsing its own prose. The verdict shape is `admit`'s plus one field:
+#
+#   admit_structured(sources_json, manifest_json) -> verdict_json
+#   verdict_json : {"ok", "diagnostic", "admitted", "manifest", "rejection"}
+#
+# `rejection` is `null` on an admit, and on a refusal is the payload
+# `evolve_loop.rejection_payload` documents (docs/evolve-loop.md): the same
+# `classify` record augmented with the `fix` hint. The existing `admit`
+# contract is left byte-for-byte unchanged so item 144's consumers and tests
+# are unaffected; evolve calls this richer entry point.
+# --------------------------------------------------------------------------
+
+def admit_structured(sources_json: str, manifest_json: str) -> str:
+    """Admit a candidate, returning the verdict with a structured `rejection`
+    payload (or `null`) alongside the human `diagnostic`. Reuses
+    `diagnostics.classify` so the machine key (the violated G-rule), the
+    offending subject, the call path (the why-trace steps) and the mapped fix
+    all cross to the generator without prose-parsing. Never raises across the
+    boundary — a refusal is a value, so the seam stays total."""
+    from revl.compiler import compile_files  # noqa: PLC0415 — the gate, in-process
+    from revl.errors import RevlError  # noqa: PLC0415
+    from revl import diagnostics  # noqa: PLC0415
+
+    sources = json.loads(sources_json) if sources_json else {}
+    running = json.loads(manifest_json) if manifest_json else None
+    paths = list(sources.keys())
+    try:
+        ir = compile_files(paths, manifest=running, sources=sources)
+    except RevlError as error:
+        record = diagnostics.classify(error)
+        code = record.get("code")
+        # the mapped one-line rewrite, kept beside the guarantee roster
+        explained = diagnostics.explain(code) if code else {}
+        if explained.get("ok") and explained.get("fix"):
+            record["fix"] = explained["fix"]
+        return json.dumps({
+            "ok": False,
+            "diagnostic": str(error),
+            "admitted": [],
+            "manifest": (running or {}).get("manifest", {}),
+            "rejection": record,
+        })
+    return json.dumps({
+        "ok": True,
+        "diagnostic": "",
+        "admitted": [c["name"] for c in ir.get("components") or []],
+        "manifest": ir.get("manifest") or {},
+        "rejection": None,
+    })
+
+
+# --------------------------------------------------------------------------
 # admit_case: a fixture-driven convenience for the *probe-driven* cross-tier
 # proof. A placement probe (src/revl/placement.py::_parse_probe,
 # backends/typescript/placement_runner.ts) admits only `key.method(literal,

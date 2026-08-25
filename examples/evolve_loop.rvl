@@ -1,0 +1,61 @@
+// The evolve feedback loop over the Gate service (roadmap item 148, Fuller
+// Path A). Item 144's `examples/gate_service.rvl` exposed one-shot admission as
+// a bridge service; this composition declares the LOOP on top of it: admit a
+// candidate, and on refusal hand the structured why-trace to a `propose` step
+// that returns a revised candidate, retrying to a budget.
+//
+// The `propose` step is an EXTERN seam, not an LLM: the real regeneration is
+// external (the automorph harness's generator, built separately), and this
+// composition only declares the seam and the orchestration. The py bodies bind
+// to src/revl/evolve_loop.py; the harness fills the generator at runtime via
+// evolve_loop.register_proposer. See docs/evolve-loop.md.
+//
+// Both operations are `async fn` with value-typed (Str/Int) parameters, so the
+// Evolve service is transport-safe for the same reason Gate.admit is — the loop
+// marshals candidates and verdicts as JSON strings across the seam.
+
+service Gate {
+  // The one-shot gate of item 144 (its machine-readable sibling `admit`),
+  // required by the loop: admit candidate files (a {path: source} JSON object)
+  // against a running manifest, returning a verdict JSON carrying the why-trace.
+  async fn admit(sourcesJson: Str, manifestJson: Str) -> Str
+}
+
+service Evolve {
+  // The loop: admit `candidateJson` ({"sources":..., "manifest":...}) through
+  // the Gate; on refusal feed the structured why-trace to `propose` and retry,
+  // up to `budget` admit attempts. Returns the EvolveResult JSON (admitted, the
+  // full attempt history, and — on give-up — the final why-trace).
+  async fn evolve(candidateJson: Str, budget: Int) -> Str
+}
+
+// The `propose` extern seam — (candidate JSON, why-trace JSON) -> revised
+// candidate JSON. `pure` because a regeneration is a function of its inputs,
+// which is what keeps it transport-safe. The harness fills the real generator
+// via register_proposer; propose_bridge dispatches to it.
+extern pure fn host_propose(candidateJson: Str, whyTraceJson: Str) -> Str
+= @py { from revl.evolve_loop import propose_bridge; return propose_bridge(candidateJson, whyTraceJson) }
+
+// The whole loop as one value-typed call — admit -> on-refusal propose -> retry.
+extern pure fn host_evolve(candidateJson: Str, budget: Int) -> Str
+= @py { from revl.evolve_loop import evolve_bridge; return evolve_bridge(candidateJson, budget) }
+
+// The provider: it requires the Gate (so a real admission seam exists) and
+// provides the Evolve loop over it.
+component EvolveProvider provides evolve: Evolve requires gate: Gate {
+  provide evolve {
+    async fn evolve(candidateJson, budget) = host_evolve(candidateJson, budget)
+  }
+}
+
+// The gate provider the loop admits through. Its @py body is the item-144 gate
+// (compile_files), reachable in-process here; a fuller placement would reach it
+// as a cross-tier bridge proxy exactly as gate_service.rvl does.
+extern pure fn host_gate_admit(sourcesJson: Str, manifestJson: Str) -> Str
+= @py { from revl.gate_service import admit; return admit(sourcesJson, manifestJson) }
+
+component GateProvider provides gate: Gate {
+  provide gate {
+    async fn admit(sourcesJson, manifestJson) = host_gate_admit(sourcesJson, manifestJson)
+  }
+}
