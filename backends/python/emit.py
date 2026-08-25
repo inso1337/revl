@@ -356,6 +356,75 @@ def _uses_float_interp(node) -> bool:
 # Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md). `repr`
 # gives the shortest round-trip digits; this reformats them into the ES
 # notation (integer/fraction/exponent thresholds, `-0` -> `"0"`).
+_REVL_ROUTER_SRC = '''class _RevlNoLiveWorker(RuntimeError):
+    """Every realm a routed require fans out to has withdrawn — no live leg
+    left to serve (a runtime pool exhaustion, not a link-time diagnostic)."""
+
+
+class _RevlRouter:
+    """Emitted realization of a routed require (item 162 `routes` IR), mirroring
+    src/revl/run.py::_Router. Re-resolves the live per-realm handle on every
+    call, so a withdrawn worker drops out and calls go to the survivors."""
+
+    def __init__(self, ctx, key, realms, strategy):
+        self._root = ctx.root
+        self._key = key
+        self._realms = list(realms)
+        self._strategy = strategy or "round_robin"
+        self._cursor = 0
+        self._served = {realm: 0 for realm in self._realms}
+
+    def _handle(self, realm):
+        scoped = self._root.isolate(self._key, realm_label(realm))
+        return scoped.reflect.get(self._key)
+
+    def _live(self):
+        out = []
+        for realm in self._realms:
+            handle = self._handle(realm)
+            if handle is not None:
+                out.append((realm, handle))
+        return out
+
+    def _select(self):
+        live = self._live()
+        if not live:
+            raise _RevlNoLiveWorker(
+                "revl: router for %r has no live worker: all %d realm(s) (%s) "
+                "have withdrawn" % (self._key, len(self._realms),
+                                    ", ".join(self._realms)))
+        if self._strategy == "least_loaded":
+            realm, handle = min(live, key=lambda rh: self._served[rh[0]])
+        else:  # round_robin — next live realm in declaration order
+            n = len(self._realms)
+            realm = handle = None
+            for offset in range(n):
+                cand = self._realms[(self._cursor + offset) % n]
+                match = next((rh for rh in live if rh[0] == cand), None)
+                if match is not None:
+                    self._cursor = (self._cursor + offset + 1) % n
+                    realm, handle = match
+                    break
+        self._served[realm] += 1
+        return realm, handle
+
+    def __getattr__(self, method):
+        # `_`-prefixed lookups are never routed service ops — refuse them so a
+        # traceable probe passes the proxy through raw.
+        if method.startswith("_"):
+            raise AttributeError(method)
+
+        def call(*args):
+            _realm, handle = self._select()
+            return getattr(handle, method)(*args)
+
+        return call
+
+
+def _revl_router(ctx, key, realms, strategy):
+    return _RevlRouter(ctx, key, realms, strategy)'''
+
+
 _REVL_FTOA_SRC = '''def _revl_ftoa(x):
     """Canonical Float -> Str: ECMAScript Number::toString (docs/strings.md)."""
     if x != x:
@@ -543,6 +612,17 @@ class _ComponentEmitter:
         # v2: realm placements and intercept metadata (docs/design-v2-realms.md)
         self.isolate = component.get("isolate") or {}
         self.intercept = component.get("intercept") or {}
+        # item 167: routed requires (item 162's `routes` IR) — a required key
+        # bound across N named realms with a strategy. The emitted body must
+        # fan out across those realms (mirror src/revl/run.py::_Router), not
+        # resolve a single-realm handle. A routed key is read through a
+        # `_revl_route_<key>` proxy the apply() builds, and is NOT in the
+        # fiber's inject gate (it has no single-realm provider — the workers
+        # live in the named realms — so injecting it would pend forever).
+        self.routes = component.get("routes") or {}
+        for key in self.routes:
+            if key not in self.requires:
+                raise EmitError(f"{self.name}: routed key {key!r} is not a requirement")
         for key in self.isolate:
             if key not in self.requires and key not in self.provides:
                 raise EmitError(f"{self.name}: isolate key {key!r} is not declared")
@@ -576,6 +656,12 @@ class _ComponentEmitter:
             name = expr.get("name")
             if name not in self.requires:
                 raise EmitError(f"{where}: req {name!r} is not declared in requires")
+            # item 167: a routed require reads through its router proxy, which
+            # re-resolves a live per-realm worker on every call (failover). The
+            # proxy is a local `_revl_route_<key>` the apply() builds before the
+            # body; a provide-method's `<key>.<op>(…)` closes over it.
+            if name in self.routes:
+                return f"_revl_route_{name}"
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
             return f"_revl_ctx.{name}"
@@ -1005,6 +1091,15 @@ class _ComponentEmitter:
 
         out.add(0, f"def _{self.snake}_apply(_revl_ctx, _revl_config):")
         out.add(1, f"_revl_frame = {_runtime_ref('Frame')}(_revl_ctx, {self.name!r})")
+        # item 167: build one router proxy per routed key before the body, so a
+        # provide-method reading `<key>` fans each call out across its worker
+        # realms (round-robin/least_loaded, re-resolving liveness per call).
+        for key in self.routes:
+            route = self.routes[key]
+            realms = list(route.get("realms") or [])
+            strategy = route.get("strategy")
+            out.add(1, f"_revl_route_{key} = _revl_router("
+                       f"_revl_ctx, {key!r}, {realms!r}, {strategy!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
         for step in self.ir.get("body") or []:
@@ -1016,13 +1111,17 @@ class _ComponentEmitter:
         out.add(0)
         out.add(0, f"{self.name} = {{")
         out.add(1, f"'name': {self.name!r},")
+        # item 167: routed keys never enter the inject gate — they have no
+        # single-realm provider, so a fiber waiting on one would pend forever.
+        # The router proxy resolves them lazily per call instead.
+        inject_keys = [key for key in self.requires if key not in self.routes]
         if self.intercept:
             # v2: dict-form inject — non-null values land in the fiber
             # context's intercept chain (the consumer-declared d(k))
-            inject = {key: self.intercept.get(key) for key in self.requires}
+            inject = {key: self.intercept.get(key) for key in inject_keys}
             out.add(1, f"'inject': {inject!r},")
         else:
-            out.add(1, f"'inject': {list(self.requires.keys())!r},")
+            out.add(1, f"'inject': {inject_keys!r},")
         out.add(1, f"'apply': _{self.snake}_apply,")
         if self.config_fields:
             # cordis-py reads Config off dict plugins via dict.get (fork
@@ -1990,6 +2089,9 @@ def emit(ir: dict) -> str:
         # clock coeffect, so `Clock` is imported (for `advance`/`reset`) only
         # then — a timer-free document's output is unchanged.
         | ({"Clock"} if any(_lifecycle_uses_clock(t) for t in lifecycle) else set())
+        # item 167: a routed require resolves its worker realms by label, so the
+        # emitted router needs the runtime's realm-label registry.
+        | ({"realm_label"} if any(c.get("routes") for c in components) else set())
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
@@ -2159,6 +2261,20 @@ def emit(ir: dict) -> str:
         out.add(3, "return await _r")
         out.add(2, "return _r")
         out.add(1, "return _g")
+        out.add(0)
+        out.add(0)
+    # item 167: the emitted realization of a routed require (item 162's `routes`
+    # IR), mirroring src/revl/run.py::_Router. A component that
+    # `requires <k> in realms("w1"…"wN") strategy(...)` provides `<k>` once
+    # downstream (G2) while fanning each call out across the worker realms. The
+    # proxy holds no worker handle — it re-resolves the live per-realm handle on
+    # every call off the same committed-view lookup a normal require uses
+    # (`root.isolate(k, realm(w)).reflect.get(k)`, None for a non-ACTIVE
+    # provider), so a withdrawn worker drops out and its calls go to survivors
+    # (reactive failover). Emitted only for a routed-require program.
+    if any(c.get("routes") for c in components):
+        for line in _REVL_ROUTER_SRC.splitlines():
+            out.add(0, line)
         out.add(0)
         out.add(0)
     for body in bodies:

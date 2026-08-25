@@ -1,0 +1,271 @@
+{
+  "ir_version": 2,
+  "services": {
+    "Worker": {
+      "methods": {
+        "call": {
+          "params": [
+            {
+              "name": "request",
+              "type": "Str"
+            }
+          ],
+          "returns": "Str",
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "W1",
+      "source": "../../../tmp/router_scenario.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "worker": "Worker"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "worker",
+          "service": "Worker",
+          "methods": [
+            {
+              "name": "call",
+              "params": [
+                "request"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "lit",
+                      "value": "w1:"
+                    },
+                    "right": {
+                      "kind": "name",
+                      "id": "request"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "isolate": {
+        "worker": "w1"
+      }
+    },
+    {
+      "name": "W2",
+      "source": "../../../tmp/router_scenario.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "worker": "Worker"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "worker",
+          "service": "Worker",
+          "methods": [
+            {
+              "name": "call",
+              "params": [
+                "request"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "lit",
+                      "value": "w2:"
+                    },
+                    "right": {
+                      "kind": "name",
+                      "id": "request"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "isolate": {
+        "worker": "w2"
+      }
+    },
+    {
+      "name": "W3",
+      "source": "../../../tmp/router_scenario.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "worker": "Worker"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "worker",
+          "service": "Worker",
+          "methods": [
+            {
+              "name": "call",
+              "params": [
+                "request"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "lit",
+                      "value": "w3:"
+                    },
+                    "right": {
+                      "kind": "name",
+                      "id": "request"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "isolate": {
+        "worker": "w3"
+      }
+    },
+    {
+      "name": "Router",
+      "source": "../../../tmp/router_scenario.rvl",
+      "config": [],
+      "requires": {
+        "worker": "Worker"
+      },
+      "provides": {
+        "worker": "Worker"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "worker",
+          "service": "Worker",
+          "methods": [
+            {
+              "name": "call",
+              "params": [
+                "request"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "call",
+                    "target": {
+                      "kind": "req",
+                      "name": "worker"
+                    },
+                    "method": "call",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "request"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "routes": {
+        "worker": {
+          "realms": [
+            "w1",
+            "w2",
+            "w3"
+          ],
+          "strategy": "round_robin"
+        }
+      }
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "W1",
+        "file": "../../../tmp/router_scenario.rvl",
+        "inject": [],
+        "provides": [
+          "worker"
+        ],
+        "isolate": {
+          "worker": "w1"
+        }
+      },
+      {
+        "name": "W2",
+        "file": "../../../tmp/router_scenario.rvl",
+        "inject": [],
+        "provides": [
+          "worker"
+        ],
+        "isolate": {
+          "worker": "w2"
+        }
+      },
+      {
+        "name": "W3",
+        "file": "../../../tmp/router_scenario.rvl",
+        "inject": [],
+        "provides": [
+          "worker"
+        ],
+        "isolate": {
+          "worker": "w3"
+        }
+      },
+      {
+        "name": "Router",
+        "file": "../../../tmp/router_scenario.rvl",
+        "inject": [
+          "worker"
+        ],
+        "provides": [
+          "worker"
+        ],
+        "routes": {
+          "worker": {
+            "realms": [
+              "w1",
+              "w2",
+              "w3"
+            ],
+            "strategy": "round_robin"
+          }
+        }
+      }
+    ],
+    "loadOrder": [
+      "W1",
+      "W2",
+      "W3",
+      "Router"
+    ]
+  }
+}
