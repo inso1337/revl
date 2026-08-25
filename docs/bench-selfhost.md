@@ -197,39 +197,92 @@ runtime tests use is green: `rust_runtime_reason()` returns `None`), and the
 backend's own scenario/router suites prove emitted rust builds and runs on this
 box. So this is **not** a toolchain skip.
 
-The number is nonetheless **unmeasured**, for a different and specific reason:
-the reference rust backend cannot yet **emit** any of the five self-host stages.
-Each stage is refused at emit time by a distinct, real limitation:
+Since item 270 landed (`_by_value_arg`/`_by_value_tail` clone-on-reuse) the
+**lexer** now emits, `cargo build --release`es, and runs on this box, so the
+lexer row is measured. The other four stages still do not build and stay
+unmeasured, each for a distinct, real reason:
 
-| stage    | cpython run ms | rust run ms | rust vs cpython | emit blocker (backends/rust/emit.py) |
-|----------|---------------:|------------:|----------------:|--------------------------------------|
-| lexer    | 20.55          | unmeasured  | unmeasured      | `unknown builtin method 'is_digit'`: the item-233 char-classification builtins (`is_digit`/`is_alnum`/`is_alpha`/`is_space`) are implemented on the py tier but not the rust tier |
-| parser   | 3.74           | unmeasured  | unmeasured      | `cannot infer Rust struct type for record literal with fields ['e', 'i']`: anonymous record literal not resolvable to a named struct |
-| checker  | 1.41           | unmeasured  | unmeasured      | `record field identifier collides with Rust/reserved name: 'ctx'`: a stage record field named `ctx` hits the emitter's reserved set |
-| lower    | 2.57           | unmeasured  | unmeasured      | `cannot infer Rust struct type for record literal with fields ['i', 'ok', 'xs']`: same anonymous-record class as parser |
+| stage    | cpython run ms | rust run ms | rust vs cpython | status (backends/rust/emit.py) |
+|----------|---------------:|------------:|----------------:|--------------------------------|
+| lexer    | 20.55          | **348.8**   | **0.06x (17x SLOWER)** | measured; the run is dominated by per-access string cost, not native speed (see item 277 below) |
+| parser   | 3.74           | unmeasured  | unmeasured      | `cargo build` fails: `E0072` recursive ADT needs `Box`, plus residual `E0382` move shapes (let-RHS / `Vec` `into_iter` twice) and `E0308`/`E0609`/`E0282` (item 278) |
+| checker  | 1.41           | unmeasured  | unmeasured      | same `E0072`/`E0382` build gaps as parser (item 278) |
+| lower    | 2.57           | unmeasured  | unmeasured      | same `E0072`/`E0382` build gaps as parser (item 278) |
 | emit_py  | 4.93           | unmeasured  | unmeasured      | `extern py_repr has no @rs body`: the stage depends on a CPython-only extern (`repr`), fundamentally not portable to a native tier |
 
-These are all inside `backends/rust/emit.py` (and, for emit_py, an intentionally
-py-only extern in `selfhost/emit_py.rvl`). Closing them is out of scope for this
-item; when they close, `tools/bench_selfhost_rust.py` fills the table with no
-further change. The harness is committed and verified end to end: a trivial
-emittable stage runs the full emit → assemble → `cargo build --release` → run →
-median path on this box, so the only missing piece is emitter coverage of the
-self-host source.
+The parser/checker/lower build gaps are item 278; the emit_py gap is an
+intentionally py-only extern in `selfhost/emit_py.rvl`. The harness is verified
+end to end: the lexer runs the full emit → assemble → `cargo build --release` →
+run → median path on this box (one-time build ~7s, reported as a note).
+
+### The lexer is 17x SLOWER than CPython, and per-function `Vec<char>` materialisation does not fix it (item 277)
+
+The measured lexer is **348.8 ms native vs 20.55 ms CPython** — the native tier
+is ~17x *slower*, not faster. Item 270's native run attributed this to `charAt`
+/`charCodeAt` lowering to `str::chars().nth(i)`, which re-walks the `String` from
+the front on every access: a Rust `String` has no O(1) codepoint index, so the
+lexer's positional per-character scan is O(n^2). The py tier does not share the
+bug (`s[i]` is O(1) under PEP 393), so it is rust-specific.
+
+Item 277 tried the established fix: materialise each positionally-indexed `Str`
+once per function as `let <name>_cs: Vec<char> = <name>.chars().collect();` and
+lower each `charAt(i)` to `<name>_cs[i as usize]` (O(1) after one O(n) collect),
+indexing by Unicode scalar to preserve `chars().nth` semantics. **It regressed
+the benchmark**, consistently and measurably:
+
+| lexer native run                          | ms     |
+|-------------------------------------------|-------:|
+| before (origin/main, `chars().nth`)       | 348.8  |
+| after (per-function `Vec<char>` shadow)   | 444.9  |
+| materialise only `step` (per-token)       | 422.0  |
+| materialise only `scan_word`              | 356.0  |
+
+The cause is the lexer's architecture, not the lowering. `selfhost/lexer.rvl`
+does not index one string in one loop in one function; it threads `source`
+(up to 16.8 KB in the corpus) as a parameter through a dozen per-token helpers
+(`step`, `scan_word`, `scan_digits`, `scan_string`, …). A *per-function* shadow
+therefore becomes a *per-call* `source.chars().collect()`: `step` alone is called
+once per token and collects the whole source every call, so the collect is
+O(tokens · n) ≈ O(n^2) of pure allocation and UTF-8 decoding that its short
+per-call scan never amortises. On this corpus size the allocation cost of the
+collect exceeds the iteration cost of `chars().nth`, so every subset regresses —
+even materialising only `scan_word` is +6 ms, and no subset is a net win. The
+per-function shadow that works for a single self-contained scan loop is the wrong
+shape for a scanner that hands its buffer down a call chain.
+
+The genuine fix is **interprocedural**: collect `source` into a `Vec<char>`
+*once* at the outermost owner and pass an indexable `&[char]` view down the scan
+helpers, so the O(n) collect is paid a single time per lex rather than per token.
+That is a call-site / signature transform (or a lexer change to thread the view),
+materially larger and riskier than the per-function shadow item 277 scoped — and
+it collides with `source`'s other uses (`slice`/`length`/equality/pass-through),
+which still need the `String`. It should be a separate, carefully-designed item;
+a public function cannot silently grow a synthetic `&[char]` parameter without
+breaking its callers. This item ships no emitter change: the per-function shadow
+is reverted so the lexer stays at 348.8 ms with byte-identical output, and the
+regression and its mechanism are recorded here rather than shipped.
+
+A second, open question this surfaces: 17x-slower is a large gap for a native
+tier, and the per-access `charAt` cost is only part of it. `selfhost/lexer.rvl`'s
+hot path also leans on `source.slice(..)` (another front-of-string char walk) and
+per-token record copies — the value-layer tax item 276 targets — so even a
+correct O(1) `charAt` may not by itself make the native lexer competitive. The
+honest status is that the native lexer is measured, slow, and not yet explained
+by `charAt` alone.
 
 ### Reading for item 231a
 
 Item 231a asks whether the lexer's residual py-tier overhead (4.9x → 4.4x after
 item 233's inline char classification) is a **py-only lever** or one a native
-tier would erase anyway. This run cannot answer that with a measured native
-number yet, and the reason is itself the finding: the rust tier does not
-implement the item-233 char-classification builtins at all, so it cannot even
-run the lexer's hot per-byte path, let alone show what a native version of it
-costs. Until `backends/rust/emit.py` grows those builtins (and the parser /
-checker / lower record and reserved-word gaps close), the native "after" for the
-lexer stays open, and the 4.4x should be read as a py-tier figure whose native
-counterpart is not yet observable. The honest status is "blocked on rust-emitter
-coverage", not a factor.
+tier would erase anyway. With the lexer now measured on the native tier (348.8 ms
+vs 20.55 ms CPython), the early read is the opposite of the hoped-for erasure:
+the native lexer is ~17x *slower*, because the per-access string cost the py tier
+hides (O(1) `s[i]`) is O(n) per access on a Rust `String` (`chars().nth`), which
+makes the positional scan O(n^2) (item 277). So the native tier does not erase
+the lexer's per-byte tax for free; it exposes a rust-specific one. Until a native
+`charAt` is genuinely O(1) end to end (the interprocedural view fix item 277
+scopes out) and the slice/value-layer tax (item 276) is addressed, the native
+lexer is not yet a fair "after" for the py-tier 4.4x.
 
 ## Reproducing
 
