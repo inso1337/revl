@@ -11,3 +11,8 @@ backends/typescript/_gen/
 
 # stray localhost access log (item 110a)
 .srv.log
+
+# scratch artifacts written by harness demos / generated tests
+*-note.txt
+resume-web.log
+backends/typescript/tests/generated/
