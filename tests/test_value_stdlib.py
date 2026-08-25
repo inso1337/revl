@@ -42,7 +42,7 @@ CONSUMER = """\
 use "stdlib/value.rvl" {
   value_kind, value_is_null, value_field, value_opt, value_has,
   value_list, value_at, value_children, value_len,
-  value_str, value_int, value_bool
+  value_str, value_int, value_bool, value_keys
 }
 
 // Render a `kind`-discriminated expression IR back to source — the shape a
@@ -86,6 +86,28 @@ fn has_op(node: Value) -> Bool { return value_has(node, "op") }
 fn item_at(node: Value, i: Int) -> Str {
   return value_str(value_field(value_at(value_field(node, "items"), i), "text"))
 }
+
+// ---- key enumeration (item 188): walk a keyed record in PURE revl ----------
+// A `services`-shaped doc: enumerate its service names in insertion order.
+fn service_names(comp: Value) -> List[Str] {
+  return value_keys(value_field(comp, "services"))
+}
+
+// value_keys + value_field IS the entries pattern: join "name=<kind>" per key,
+// in insertion order, using only the accessors (no @py of its own).
+fn service_kinds(comp: Value) -> Str {
+  var parts = []
+  for (k of value_keys(value_field(comp, "services"))) {
+    let svc = value_field(value_field(comp, "services"), k)
+    parts = parts.push(`${k}=${value_str(value_field(svc, "kind"))}`)
+  }
+  return parts.join(",")
+}
+
+// ---- totality: value_keys of a non-record is empty, never crashes ----------
+fn t_keys_of_scalar_empty() -> Int { return value_keys(node_of_int()).length() }
+fn t_keys_of_list_empty() -> Int { return value_keys([1, 2, 3]).length() }
+fn t_keys_of_null_empty() -> Int { return value_keys(value_field("s", "k")).length() }
 
 // ---- totality: every mismatch returns a typed default, never crashes -------
 fn t_str_of_missing() -> Str { return value_str(value_field("scalar", "nope")) }
@@ -133,13 +155,14 @@ def test_module_imports_and_externs_reach_the_ir(consumer_ir):
     expected = {
         "value_kind", "value_is_null", "value_field", "value_opt", "value_has",
         "value_list", "value_at", "value_children", "value_len",
-        "value_str", "value_int", "value_bool",
+        "value_str", "value_int", "value_bool", "value_keys",
     }
     assert set(names) == expected
     assert names["value_kind"]["returns"] == "Str"
     assert names["value_field"]["returns"] == "Value"
     assert names["value_list"]["returns"] == "List[Value]"
     assert names["value_opt"]["returns"] == "Opt[Value]"
+    assert names["value_keys"]["returns"] == "List[Str]"
     # py-tier is the shipped slice; the other five tiers are the documented
     # follow-up (docs/stdlib-value.md), so only @py bodies exist today.
     for e in consumer_ir["externs"]:
@@ -152,6 +175,7 @@ def test_module_file_is_the_documented_surface():
     assert "pub extern pure fn value_kind(v: Value) -> Str" in text
     assert "pub extern pure fn value_field(v: Value, name: Str) -> Value" in text
     assert "pub extern pure fn value_list(v: Value) -> List[Value]" in text
+    assert "pub extern pure fn value_keys(v: Value) -> List[Str]" in text
 
 
 def test_value_is_a_reserved_builtin_type(tmp_path):
@@ -222,3 +246,35 @@ def test_py_tier_accessors_are_total(consumer_ir):
     assert ns["t_at_out_of_range"]() is True
     assert ns["t_bool_of_str"]() is False
     assert ns["t_list_of_scalar_empty"]() == 0
+
+
+# ---------------------------------------------------------- key enumeration (188)
+
+# a component doc whose `services` record is keyed by name — the exact shape a
+# self-hosted emitter walks to build the SERVICES table / `inject` list. The
+# insertion order below (logger, db, cache) is the contract value_keys must
+# preserve, deliberately NOT alphabetical so a stray sort would be caught.
+COMP = {
+    "services": {
+        "logger": {"kind": "Logger"},
+        "db": {"kind": "Db"},
+        "cache": {"kind": "Cache"},
+    },
+    "order": [1, 2, 3],
+}
+
+
+def test_py_tier_value_keys_are_in_insertion_order(consumer_ir):
+    ns = _exec_python(consumer_ir)
+    # the KEY-enumeration proof: names come back in insertion order, not sorted
+    assert ns["service_names"](COMP) == ["logger", "db", "cache"]
+    # value_keys + value_field is the entries pattern, walked in PURE revl
+    assert ns["service_kinds"](COMP) == "logger=Logger,db=Db,cache=Cache"
+
+
+def test_py_tier_value_keys_is_total(consumer_ir):
+    ns = _exec_python(consumer_ir)
+    # a non-record receiver (scalar, list, null) yields [] — never crashes
+    assert ns["t_keys_of_scalar_empty"]() == 0
+    assert ns["t_keys_of_list_empty"]() == 0
+    assert ns["t_keys_of_null_empty"]() == 0

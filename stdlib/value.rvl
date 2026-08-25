@@ -85,6 +85,24 @@ pub extern pure fn value_has(v: Value, name: Str) -> Bool = @py {
     return isinstance(v, dict) and v.get(name) is not None
 }
 
+// A record's field NAMES, in the host dict's INSERTION order — the order the
+// document was built/parsed in, which for the backend-IR records `services` /
+// `requires` / `provides` is the order an emitter must walk (the SERVICES
+// table, the `inject` list). The KEY-enumeration companion to the value-side
+// accessors above: `value_field`/`value_children`/`value_at` reach a record's
+// VALUES but never its KEYS, so before this a self-hosted emitter bridged the
+// gap with its own private `@py` `record_keys` (selfhost/emit_py.rvl, item 185)
+// — every Path B emitter would re-derive it. Pair it with `value_field` for the
+// value: `for k in value_keys(v): … value_field(v, k) …` walks a keyed record
+// in PURE revl. Total: a non-record receiver (list, scalar, null) yields `[]`,
+// never crashes. Ordering contract: exactly `list(d.keys())` on the erased
+// host dict — Python dicts preserve insertion order, so keys come back in the
+// order they were inserted (NOT sorted; a caller that wants a canonical order
+// sorts the result itself).
+pub extern pure fn value_keys(v: Value) -> List[Str] = @py {
+    return list(v.keys()) if isinstance(v, dict) else []
+}
+
 // ---------------------------------------------------------------- list access
 // The elements of a list, each a `Value`. Total: a non-list receiver yields `[]`.
 pub extern pure fn value_list(v: Value) -> List[Value] = @py {
