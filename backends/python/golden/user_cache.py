@@ -27,11 +27,11 @@ _PG_DATABASE_CONFIG = ConfigSchema([
 ])
 
 
-def _pg_database_apply(ctx, config):
-    frame = Frame(ctx, 'PgDatabase')
+def _pg_database_apply(_revl_ctx, _revl_config):
+    _revl_frame = Frame(_revl_ctx, 'PgDatabase')
 
     def _body():
-        pool = Pool.open(config['url'], config['pool_size'])
+        pool = Pool.open(_revl_config['url'], _revl_config['pool_size'])
         yield lambda: pool.close()
 
         class _Db:
@@ -43,12 +43,12 @@ def _pg_database_apply(ctx, config):
             def execute(self, sql):
                 return pool.execute(sql)
 
-        yield ctx.provide('db')
-        ctx.set('db', _Db())
+        yield _revl_ctx.provide('db')
+        _revl_ctx.set('db', _Db())
 
-        yield frame.drain
+        yield _revl_frame.drain
 
-    frame.install(_body)
+    _revl_frame.install(_body)
 
 
 PgDatabase = {
@@ -59,8 +59,8 @@ PgDatabase = {
 }
 
 
-def _user_cache_apply(ctx, config):
-    frame = Frame(ctx, 'UserCache')
+def _user_cache_apply(_revl_ctx, _revl_config):
+    _revl_frame = Frame(_revl_ctx, 'UserCache')
 
     def _body():
         store = Map.new()
@@ -76,15 +76,15 @@ def _user_cache_apply(ctx, config):
                 def _effect_0():
                     store.insert(key, value)
                     yield lambda: store.remove(key)
-                frame.adopt(ctx.effect(_effect_0, 'UserCache.cache.put#1'))
-                ctx.db.execute(fmt('INSERT INTO cache_log VALUES ($0)', key))
+                _revl_frame.adopt(_revl_ctx.effect(_effect_0, 'UserCache.cache.put#1'))
+                _revl_ctx.db.execute(fmt('INSERT INTO cache_log VALUES ($0)', key))
 
-        yield ctx.provide('cache')
-        ctx.set('cache', _Cache())
+        yield _revl_ctx.provide('cache')
+        _revl_ctx.set('cache', _Cache())
 
-        yield frame.drain
+        yield _revl_frame.drain
 
-    frame.install(_body)
+    _revl_frame.install(_body)
 
 
 UserCache = {

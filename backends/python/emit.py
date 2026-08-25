@@ -6,16 +6,21 @@ the cordis-py runtime.
 
 Lowering scheme (see runtime.Frame for the R1 rationale):
 
-* the whole component body compiles to **one** ``ctx.effect(generator)``;
+The per-activation context handle, resolved config, and component Frame are
+bound in emitted body scope as ``_revl_ctx`` / ``_revl_config`` /
+``_revl_frame`` — the reserved ``_revl_*`` namespace no user identifier can
+enter — so a revl var named ``ctx`` no longer collides (item 156).
+
+* the whole component body compiles to **one** ``_revl_ctx.effect(generator)``;
   each ``let-effect`` / ``effect`` step yields its undo expression as the
   inverse, in step order, so the runtime's per-effect LIFO disposer is the
   component's accumulator;
-* ``provide`` steps yield the runtime's own ``ctx.provide`` effect into that
-  accumulator and populate it with ``ctx.set`` — the withdrawal inverse is
-  entirely runtime-derived (R5);
-* ``req`` expressions compile to ``ctx.<name>`` committed-view attribute
+* ``provide`` steps yield the runtime's own ``_revl_ctx.provide`` effect into
+  that accumulator and populate it with ``_revl_ctx.set`` — the withdrawal
+  inverse is entirely runtime-derived (R5);
+* ``req`` expressions compile to ``_revl_ctx.<name>`` committed-view attribute
   access, which stays readable during the component's own teardown (R3);
-* ``effect`` steps inside provide-method bodies compile to ``ctx.effect``
+* ``effect`` steps inside provide-method bodies compile to ``_revl_ctx.effect``
   calls adopted by the component's Frame, joining the accumulator (R1);
 * ``emit`` steps compile to plain calls — nothing accumulated.
 """
@@ -33,8 +38,19 @@ _HOST_ROOTS = {"Pool", "Map", "Job"}
 
 # names the emitted scaffolding owns; an IR identifier colliding with one of
 # these would capture the wrong binding, so the emitter rejects it (the IR
-# contract defines no identifier lexicon — see REPORT.md)
-_RESERVED = {"ctx", "config", "frame", "self", "fmt", "Pool", "Map", "ConfigSchema", "Frame"}
+# contract defines no identifier lexicon — see REPORT.md).
+#
+# The per-activation scaffolding locals the emitter injects into user body
+# scope — the context handle, the resolved config, and the component Frame —
+# are named in revl's reserved `_revl_*` namespace (`_revl_ctx`,
+# `_revl_config`, `_revl_frame`). Because `_ident` already forbids any user
+# identifier that starts with `_`, those names can never collide with an IR
+# identifier, so they are NOT reserved here: an ordinary revl var named `ctx`,
+# `config`, or `frame` now compiles and runs (roadmap item 156). The remaining
+# entries are the Python method receiver and the module-level `from runtime
+# import …` names, which live in a different namespace and are still rejected
+# (reported as a follow-up: they share this late-at-emit failure mode).
+_RESERVED = {"self", "fmt", "Pool", "Map", "ConfigSchema", "Frame"}
 
 # Members cordis-py's Context already owns. A provision key colliding with one
 # used to compile and then die at activation with `property "runtime" is
@@ -502,14 +518,14 @@ class _ComponentEmitter:
             field = expr.get("field")
             if not any(spec.get("name") == field for spec in self.config_fields):
                 raise EmitError(f"{where}: unknown config field {field!r}")
-            return f"config[{field!r}]"
+            return f"_revl_config[{field!r}]"
         if kind == "req":
             name = expr.get("name")
             if name not in self.requires:
                 raise EmitError(f"{where}: req {name!r} is not declared in requires")
             # committed-view access: resolves through the fiber's store, so it
             # stays readable during this component's own teardown (R3)
-            return f"ctx.{name}"
+            return f"_revl_ctx.{name}"
         if kind == "call":
             if "target" in expr:
                 target = self._expr(expr.get("target"), where)
@@ -659,7 +675,7 @@ class _ComponentEmitter:
             return f"(None if ({target}) is None else ({target}).{method}({args}))"
         if kind == "spawn":
             # instance-parametric components (docs/design-v2-instances.md):
-            # `spawn(ctx, <Component>, {config}, (realms,))` plugs a fresh child
+            # `spawn(_revl_ctx, <Component>, {config}, (realms,))` plugs a fresh child
             # instance, each provided key isolated into its own local realm. The
             # target is a module-level plugin dict emitted like any component.
             self.uses.add("spawn")
@@ -670,7 +686,7 @@ class _ComponentEmitter:
                 f"{k!r}: {self._expr(v, where)}"
                 for k, v in (expr.get("config") or {}).items()) + "}"
             realms = tuple(expr.get("realms") or ())
-            return f"spawn(ctx, {target}, {cfg}, {realms!r})"
+            return f"spawn(_revl_ctx, {target}, {cfg}, {realms!r})"
         if kind == "instance-get":
             # instance-parametric components (docs/design-v2-instances.md):
             # `s.<key>` reads a provision off a spawn handle. The handle
@@ -797,7 +813,7 @@ class _ComponentEmitter:
         if name in _CONTEXT_MEMBERS:
             raise EmitError(
                 f"{where}: provision key {name!r} collides with a cordis-py "
-                f"Context member — `ctx.{name}` already exists, so the "
+                f"Context member — `_revl_ctx.{name}` already exists, so the "
                 f"provision would fail at activation. Rename the key."
             )
         service = step.get("service")
@@ -816,9 +832,9 @@ class _ComponentEmitter:
             self._method(out, indent + 1, name, method, where)
         out.add(0)
         # runtime-derived revertible provision (R5): the withdrawal inverse is
-        # ctx.provide's own disposer, yielded into the component accumulator
-        out.add(indent, f"yield ctx.provide({name!r})")
-        out.add(indent, f"ctx.set({name!r}, {cls}())")
+        # _revl_ctx.provide's own disposer, yielded into the component accumulator
+        out.add(indent, f"yield _revl_ctx.provide({name!r})")
+        out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
         name = _ident(method.get("name"), f"{where}: method name")
@@ -879,14 +895,14 @@ class _ComponentEmitter:
             out.add(indent, f"def {fn}():")
             out.add(indent + 1, self._expr(step.get("acquire"), where))
             out.add(indent + 1, f"yield lambda: {self._expr(step.get('undo'), where)}")
-            out.add(indent, f"frame.adopt(ctx.effect({fn}, {self._label(label)!r}))")
+            out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
             bind = _ident(step.get("bind"), f"{where}: bind")
             acquire = self._expr(step.get("acquire"), where)
             undo = self._expr(step.get("undo"), where)
             out.add(
                 indent,
-                f"{bind} = frame.acquire({self._label(label)!r}, "
+                f"{bind} = _revl_frame.acquire({self._label(label)!r}, "
                 f"lambda: {acquire}, lambda {bind}: {undo})",
             )
         elif kind == "emit":
@@ -895,7 +911,7 @@ class _ComponentEmitter:
                 out.add(indent, f"def {fn}():")
                 out.add(indent + 1, self._expr(step.get("expr"), where))
                 out.add(indent + 1, f"yield lambda: {self._expr(step.get('compensate'), where)}")
-                out.add(indent, f"frame.adopt(ctx.effect({fn}, {self._label(label)!r}))")
+                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
             else:
                 out.add(indent, self._expr(step.get("expr"), where))
         elif kind == "return":
@@ -934,15 +950,15 @@ class _ComponentEmitter:
         # and the await as an in-flight iteration (paper §4.3.2-3)
         is_async = any(step.get("step") == "await" for step in self.ir.get("body") or [])
 
-        out.add(0, f"def _{self.snake}_apply(ctx, config):")
-        out.add(1, f"frame = Frame(ctx, {self.name!r})")
+        out.add(0, f"def _{self.snake}_apply(_revl_ctx, _revl_config):")
+        out.add(1, f"_revl_frame = Frame(_revl_ctx, {self.name!r})")
         out.add(0)
         out.add(1, f"{'async def' if is_async else 'def'} _body():")
         for step in self.ir.get("body") or []:
             self._body_step(out, 2, step, where)
-        out.add(2, "yield frame.drain")
+        out.add(2, "yield _revl_frame.drain")
         out.add(0)
-        out.add(1, "frame.install(_body)")
+        out.add(1, "_revl_frame.install(_body)")
         out.add(0)
         out.add(0)
         out.add(0, f"{self.name} = {{")

@@ -243,9 +243,9 @@ def test_r5_emitted_code_never_hand_rolls_provision_teardown(reference_ir):
     """R5: the emitted module installs provisions through the runtime's
     revertible provide/set and contains no withdrawal code of its own."""
     source = emit.emit(reference_ir)
-    assert "ctx.provide('db')" in source
-    assert "ctx.provide('cache')" in source
-    assert "ctx.set('db'" in source and "ctx.set('cache'" in source
+    assert "_revl_ctx.provide('db')" in source
+    assert "_revl_ctx.provide('cache')" in source
+    assert "_revl_ctx.set('db'" in source and "_revl_ctx.set('cache'" in source
     # nothing in the emitted module touches the service registry on the way out
     for forbidden in ("reflect.store", "notify", "del ", "pop(", "_isolate", "unregister"):
         assert forbidden not in source, f"hand-rolled teardown fragment: {forbidden!r}"

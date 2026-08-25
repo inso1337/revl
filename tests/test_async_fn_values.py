@@ -190,7 +190,7 @@ def test_py_emits_async_def_awaiting_the_callback():
     assert "async def agent_loop(current, complete):" in py
     assert "resp = (await complete(current))" in py
     # the async-op arrow is a tail call -> plain lambda returning the coroutine
-    assert "lambda msgs: ctx.model.complete(msgs)" in py
+    assert "lambda msgs: _revl_ctx.model.complete(msgs)" in py
     assert "(await agent_loop(prompt," in py
     # no wrapper needed for the tail-coroutine shape
     assert "_revl_as_async" not in py
