@@ -1,0 +1,29 @@
+// v3 typed-core: user variant `type` decls -> Go sealed interfaces + case
+// structs, ADT construction (nullary `TreeLeaf{}` and payload `TreeNode{Value:
+// arg}`), and `match` over user variants as a Go type switch (bound + nullary
+// patterns, the `_` wildcard vs the appended non-exhaustive panic). The built-in
+// Some/None/Ok/Err constructors are DEFERRED on the go tier (they pull the
+// Opt/Result preambles this slice omits), so no Opt/Result construction here.
+type Tree = Leaf | Node(Int)
+type Outcome = Success(Int) | Failure(Str)
+
+fn leaf() -> Tree { return Leaf }
+fn node(v: Int) -> Tree { return Node(v) }
+fn size(t: Tree) -> Int {
+  return match t {
+    Leaf => 0,
+    Node(v) => v,
+  }
+}
+fn describe(t: Tree) -> Str {
+  return match t {
+    Node(v) => "node",
+    _ => "leaf",
+  }
+}
+fn unpack(o: Outcome) -> Int {
+  return match o {
+    Success(v) => v,
+    Failure(m) => 0,
+  }
+}
