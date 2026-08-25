@@ -1,0 +1,19 @@
+// Composite service-interface signature types: List/Opt/Map/Result and a
+// function type, plus the declared-record `known_types` path (`List[Msg]` ->
+// `Msg[]`, resolving to the emitted `interface Msg`). Every op is present in the
+// interface; only `a` is actually called, which is enough to exercise every
+// composite spelling `_ts_type` renders.
+type Msg = { text: Str }
+
+service Bus {
+  fn a(xs: List[Int]) -> Int
+  fn b(s: Str) -> Opt[Int]
+  fn c(m: Map[Str, Int]) -> Bool
+  fn d(n: Int) -> Result[Int, Str]
+  fn e(f: (Int, Str) -> Bool) -> Bool
+  fn g(ms: List[Msg]) -> Int
+}
+
+component App requires bus: Bus {
+  effect bus.a([1]) undo bus.a([0])
+}
