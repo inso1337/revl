@@ -1,0 +1,20 @@
+// Async activation body (item 238): an `await` step between two effects colors
+// the plugin async — `apply(..) throws Exception`, the class implements
+// `AsyncPlugin`, and `AsyncPlugin` widens the core imports. The awaited value is
+// a host op (`Job.run`), joined by the emitted Job runtime's `.await()`. The
+// trivial `fn` forces ir_version 3.
+fn beat() -> Int {
+  return 1
+}
+
+service Kv {
+  fn set(k: Int, v: Int)
+}
+
+component Pulse requires kv: Kv {
+  effect kv.set(1, 11) undo kv.set(1, 0)
+
+  await Job.run("pulse")
+
+  effect kv.set(2, 22) undo kv.set(2, 0)
+}

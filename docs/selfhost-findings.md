@@ -1457,3 +1457,49 @@ arguments and keys emission off feature presence (never off an `ir_version`
 branch), a whole reference DISPATCH arm was covered for free. The reference's
 `emit()` needs an explicit `if version in (1, 2)` fork; the port did not, and was
 byte-identical anyway. (Do NOT change the reference — the fork is its right shape.)
+Item 234 flagged that "a component using only isolate/intercept compiles to irv2,
+which the port doesn't mirror" and kept its realm fixtures on the v3 path by adding
+a trivial top-level 2.0 `fn`. Slice 7 chased that flag down and found the mirror
+ALREADY HOLDS byte-for-byte, with NO emitter change: `emit_src` is
+version-agnostic, and for a component-only document `_emit_v1` and `_emit_v3` emit
+the identical byte stream (same header — a v1/v2 doc can carry no test, so no
+`vitest`/lifecycle branch fires; same `_revl_helpers`; same service interfaces —
+`_ts_type`'s `known_types` default is `frozenset()`, exactly what `_emit_v3` passes
+when `types` is empty; same `_context_augmentation`; same per-`_component` object).
+Three v1/v2-dispatch fixtures now pin it: `v1_component_body.rvl` (irv1: config +
+effect/undo + emit/compensate + provide-method ternary), `v2_isolate_only.rvl` and
+`v2_intercept_only.rvl` (irv2, the item-234 case with the trivial `fn` removed).
+All three == `backends/typescript/emit.py` to the last byte.
+
+### Finding (NOT a bug — a verification win): the version dispatch was a phantom gap
+The scoped hazard was that `_emit_v1` might diverge from the version-agnostic
+`emit_src` — a header conditional, a `known_types`-flavored signature, an
+ordering. None materialized: `_emit_v1` is a proper byte-subset of the
+`_emit_v3` assembly for a component-only input. The only real v1/v2 surface that
+DOES diverge is a ROUTED require (item 167), which also lowers to irv2 but needs
+machinery `emit_src` does not emit — so the "v1/v2 path" deferral was really a
+"routed-requires" deferral wearing the version label. Recording it so a later
+slice does not re-audit the whole dispatch when only the router is missing.
+
+### Finding (item 203-adjacent, blocks routed-requires): `_TS_ROUTER_SRC` is a `${…}`/backtick literal that cannot be embedded byte-exact
+Routed-requires is the clean remaining v2 sub-slice, but its runtime realization
+`_TS_ROUTER_SRC` is ~60 lines of verbatim TypeScript that itself contains JS
+template literals — `` `revl: router for ${JSON.stringify(key)} …` `` — i.e. both
+backticks AND `${…}`. In revl a backtick template interpolates `${…}`, and a plain
+string rejects a bare `$name` as would-be 1.x interpolation (item 203, logged
+thrice on the wasm slice). So there is no literal form that reproduces this blob
+byte-for-byte: a backtick template would try to evaluate its inner `${…}`, and a
+plain string trips the 1.x guard on the `$` in `${…}`/`$JSON`. A verbatim/raw
+string form (an `r"…"` with no interpolation and no 1.x check, or sourcing the blob
+through an `@py`-returned constant the way `newline()`/`template_text` already
+bridge host text) would unblock it. Symptom/repro: pasting the router source into
+an `.rvl` string, either flavor, fails to round-trip. Deferred, not fixed here.
+
+### Ergonomics (items 189/195): a zero-code slice — no kit gap, no threading tax
+This slice added no emitter logic (only fixtures + comments), so it surfaced no new
+item-189 kit gap and no item-195 state-threading friction. It is a small data
+point FOR the port's design: because `emit_src` threads its context as plain
+arguments and keys emission off feature presence (never off an `ir_version`
+branch), a whole reference DISPATCH arm was covered for free. The reference's
+`emit()` needs an explicit `if version in (1, 2)` fork; the port did not, and was
+byte-identical anyway. (Do NOT change the reference — the fork is its right shape.)
