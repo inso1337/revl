@@ -1793,9 +1793,10 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         if stmt.name in scope:
             raise RevlError(filename, stmt.line,
                             f"`{stmt.name}` is already declared in this function",
-                            hint="lets are function-scoped, not block-scoped — "
-                                 "sibling branches share one namespace; rename "
-                                 "or reuse the existing binding")
+                            hint="a `let` binds a name once per scope — rename this "
+                                 "binding, or use `=` to reassign an existing `var`. "
+                                 "(Disjoint sibling blocks — the two arms of an "
+                                 "if/else — may reuse a name, since only one is live.)")
         # host provenance: a let bound to a host constructor call carries
         # host-object methods, exempt from the stdlib method table
         if not stmt.mutable and _is_host_valued(stmt.value, scope):
@@ -1880,13 +1881,24 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
     elif isinstance(stmt, IfStmt):
         then: list[dict] = []
         _bool_cond(stmt.cond, type_env, types, filename, "if")
+        # Each arm is its own block: it snapshots the enclosing scope/type_env
+        # (as `while`/`for`/`match` arms already do) rather than sharing one flat
+        # dict. This block-scopes the arm's `let`s — they do not leak past the
+        # `if`, and the two arms cannot collide with each other, so disjoint
+        # sibling branches may reuse a name. A redeclaration *within* one arm, or
+        # in one straight-line scope, still hits the guard: the snapshot is
+        # mutated in sequence, so the second `let` sees the first.
+        then_scope = dict(scope)
+        then_type_env = dict(type_env)
         for s in stmt.then:
-            _lower_pure_stmt(s, scope, callables, alias_fns, then, filename, type_env, types, expected_return)
+            _lower_pure_stmt(s, then_scope, callables, alias_fns, then, filename, then_type_env, types, expected_return)
         otherwise = None
         if stmt.otherwise is not None:
             otherwise = []
+            else_scope = dict(scope)
+            else_type_env = dict(type_env)
             for s in stmt.otherwise:
-                _lower_pure_stmt(s, scope, callables, alias_fns, otherwise, filename, type_env, types, expected_return)
+                _lower_pure_stmt(s, else_scope, callables, alias_fns, otherwise, filename, else_type_env, types, expected_return)
         body.append({"step": "if", "cond": _lower_pure_expr(stmt.cond, scope, callables, alias_fns, filename, type_env, types),
                      "then": then, "else": otherwise})
     elif isinstance(stmt, WhileStmt):
@@ -1902,9 +1914,9 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         if stmt.bind in scope:
             raise RevlError(filename, stmt.line,
                             f"`{stmt.bind}` is already declared in this function",
-                            hint="bindings are function-scoped, not block-scoped — "
-                                 "sibling branches share one namespace; rename "
-                                 "or reuse the existing binding")
+                            hint="a loop binding shadows nothing already in scope — "
+                                 "rename it. (Disjoint sibling blocks may reuse a "
+                                 "name, since only one is live.)")
         iter_diag = infer_ast(stmt.iterable, type_env, types, filename)
         if iter_diag is not None and parse_type(iter_diag)[0] != "List":
             raise RevlError(filename, stmt.line,
@@ -1945,9 +1957,10 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             if name in scope:
                 raise RevlError(filename, stmt.line,
                                 f"`{name}` is already declared in this function",
-                                hint="lets are function-scoped, not block-scoped — "
-                                     "sibling branches share one namespace; rename "
-                                     "or reuse the existing binding")
+                                hint="a `let` binds a name once per scope — rename this "
+                                     "binding, or use `=` to reassign an existing `var`. "
+                                     "(Disjoint sibling blocks may reuse a name, since "
+                                     "only one is live.)")
         value_type = _expr_static_type(stmt.value, type_env, types)
         spec = types.get(value_type or "")
         if spec is not None:
@@ -1993,9 +2006,10 @@ def _lower_let_pattern_stmt(stmt: LetPatternStmt, scope: dict, callables: set, a
             if name in scope:
                 raise RevlError(filename, stmt.line,
                                 f"`{name}` is already declared in this function",
-                                hint="lets are function-scoped, not block-scoped — "
-                                     "sibling branches share one namespace; rename "
-                                     "or reuse the existing binding")
+                                hint="a `let` binds a name once per scope — rename this "
+                                     "binding, or use `=` to reassign an existing `var`. "
+                                     "(Disjoint sibling blocks may reuse a name, since "
+                                     "only one is live.)")
         value_type = _expr_static_type(stmt.value, type_env, types)
         if value_type is not None and parse_type(value_type)[0] != "List" and (
             types.get(value_type) is not None
@@ -2379,15 +2393,12 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                 "then": _lower_pure_expr(expr.then, scope, callables, alias_fns, filename, type_env, types),
                 "else": _lower_pure_expr(expr.otherwise, scope, callables, alias_fns, filename, type_env, types)}
     if isinstance(expr, ExprRecord):
-        for name, field_expr in expr.fields:
-            if isinstance(field_expr, ExprVar) and scope.get(field_expr.name) is True:
-                raise RevlError(
-                    filename,
-                    field_expr.line,
-                    f"`var` `{field_expr.name}` cannot be used in a record literal — "
-                    "a `var` never escapes its function (syntax-2.0 §3.5)",
-                    hint="copy its current value into a `let` first, or use it directly outside a record",
-                )
+        # A record is a value type (syntax-2.0 §3.5): a field is initialised by
+        # *copying* the initialiser's value into the record. Reading a `var`'s
+        # field into a record (`{ x: v.field }`) has always been allowed for
+        # exactly this reason, and a bare `var` read (`{ x: v }`) is the same
+        # copy — the value is taken, the mutable cell is not captured, so the
+        # `var` still never escapes its function. Both forms lower identically.
         return {"kind": "record",
                 "fields": [[name, _lower_pure_expr(e, scope, callables, alias_fns, filename, type_env, types)]
                            for name, e in expr.fields]}
