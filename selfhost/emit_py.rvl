@@ -33,16 +33,20 @@
 // below `emit_services_table`: `_emit_types` (record + variant declarations, the
 // `_py_type` map, forward-ref quoting), the built-in Result classes, the
 // canonical Float->Str `_revl_ftoa` helper, and host roots in fn/test bodies.
+// Slice 4 (item 206) adds externs (`_emit_externs`, the verbatim `@py` body via
+// stdlib/str.rvl::dedent — item 193), component `config`/`ConfigSchema`, and
+// method-body `effect`/saga `emit … compensate` (the `_revl_frame.adopt`
+// accumulator + the `_label`/`_effect_N`/`_emit_N` counter).
 //
 // ============================================================ WHAT IT DEFERS
-// Reported for a follow-on slice 4, deliberately OUT of this file:
-//   * externs (`_emit_externs`) — needs a faithful `textwrap.dedent` /
-//     `splitlines` of the verbatim `@py` body, a host-string dependency;
-//   * component `config`/`ConfigSchema`, and method-body `effect`/`let-effect`
-//     (the `_revl_frame.adopt`/`.acquire` accumulator + its `_label` counter);
-//   * async coloring (colored fns / async externs / awaited call sites), realm
-//     placements (`isolate`/`intercept`/`routes`/router), spawn/instances,
-//     in-file `test`/`fault_test`/`lifecycle test` emission, and the ABI;
+// Reported for a follow-on slice 5, deliberately OUT of this file:
+//   * async coloring (colored fns / async externs' await-seed / awaited call
+//     sites), realm placements (`isolate`/`intercept`/`routes`/router),
+//     spawn/instances, in-file `test`/`fault_test`/`lifecycle test` emission,
+//     `adt` construction (a user-variant constructor call), and the ABI;
+//   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
+//     yet cross-checked: the surface admits only a `spawn` acquire there, whose
+//     `cexpr` lands in slice 5;
 //   * `let_pattern` (record/list destructuring): the reference names its
 //     temporary `__revl_destructure_{id(node)}` from the Python object id, which
 //     a second implementation can never reproduce byte-for-byte (see the
@@ -72,6 +76,23 @@ use "../stdlib/value.rvl" {
   value_list, value_at, value_str, value_int, value_bool, value_children,
   value_keys
 }
+
+// ------------------------------------------------- str kit (items 193 / 189)
+// Slice 4's `_emit_externs` reproduces the reference's
+// `textwrap.dedent(bodies["py"].strip("\n"))`. `stdlib/str.rvl::dedent` (item
+// 193) is the verified byte-exact port of `textwrap.dedent`, so the verbatim
+// `@py` body is de-indented in PURE revl by `use`-ing it (`splitlines` / the
+// `"\n"`-strip stay local below, composed over the base `Str` surface).
+//
+// str.rvl's private helpers ride into the link with `dedent` (the compiler
+// emits an imported module's private fns so its own fns can call them), and a
+// linked module cannot define a name another linked module defines. So the four
+// string helpers slices 1-3 hand-rolled — `trim`/`lstrip`/`last_index_of`/
+// `ident_tokens` — that str.rvl now ships (its header names this exact
+// migration) are taken from it here rather than re-declared, and the local
+// copies (plus their private `is_alpha_us`/`is_word_ch`) are deleted. This is
+// the item-193 duplication cull the module was built for.
+use "../stdlib/str.rvl" { trim, lstrip, last_index_of, ident_tokens, dedent }
 
 // ------------------------------------------- NAVIGATION GAP CLOSED (item 188)
 // The ONE navigation primitive slices 1-2 could not express in pure revl was an
@@ -113,6 +134,9 @@ extern pure fn snake(name: Str) -> Str = @py {
 extern pure fn pascal(name: Str) -> Str = @py {
     return "".join(part[:1].upper() + part[1:] for part in name.split("_") if part)
 }
+// `str.upper()` verbatim — the reference names a component's config schema
+// `_<snake>.upper()>_CONFIG`; identifier CASING, kin to `snake`/`pascal`.
+extern pure fn upper(s: Str) -> Str = @py { return s.upper() }
 
 // ---------------------------------------------------------------- small utils
 fn node_kind(n: Any) -> Str { return value_str(value_field(n, "kind")) }
@@ -561,6 +585,72 @@ fn emit_functions(functions: List[Any]) -> List[Str] {
   return out
 }
 
+// =====================================================================
+// Path B slice 4 — externs (`_emit_externs`), byte-exact.
+// =====================================================================
+// The reference is `def <name>(<params>):` then, for the verbatim `@py`
+// body, `textwrap.dedent(bodies["py"].strip("\n")).splitlines()` (one indented
+// line each), or `pass` for an empty body. `dedent` is stdlib/str.rvl's verified
+// port (item 193); the two host-string steps it composes with — a `"\n"`-only
+// strip and `str.splitlines()` — are spelled here over the base `Str` surface.
+
+// `str.strip("\n")`: strip ONLY the newline char (U+000A) from both ends — NOT
+// other whitespace (unlike `trim`). The reference strips the leading/trailing
+// blank lines a `@py { … }` block carries before it dedents.
+fn strip_nl(s: Str) -> Str {
+  let n = newline()
+  var a = 0
+  var b = s.length()
+  while (a < b && s.slice(a, a + 1) == n) { a += 1 }
+  while (b > a && s.slice(b - 1, b) == n) { b -= 1 }
+  return s.slice(a, b)
+}
+
+// `str.splitlines()` for a `\n`-separated body (the only line boundary a normal
+// `@py` body carries): split on `\n`, but DROP the final empty segment a
+// trailing `\n` produces — the one place `splitlines()` differs from
+// `split("\n")` (`"a\n".splitlines()` == `["a"]`, not `["a", ""]`). A body
+// carrying `\r`/`\v`/`\f`/`\x1c…` line boundaries is out of this slice's scope
+// (see the findings note) — real py extern bodies are `\n`-separated.
+fn splitlines(s: Str) -> List[Str] {
+  let n = newline()
+  let parts = s.split(n)
+  var drop = false
+  if (s.length() > 0 && s.slice(s.length() - 1, s.length()) == n) { drop = true }
+  var out = []
+  var i = 0
+  let m = parts.length()
+  while (i < m) {
+    if (!(drop && i == m - 1)) { out = out.push(parts[i]) }
+    i += 1
+  }
+  return out
+}
+
+// `_emit_externs`: each extern as a Python `def`, its verbatim `@py` body
+// dedented + split into indented lines. An async extern's `async def` header is
+// reproduced faithfully; the await-seed / awaited call sites it needs are
+// DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
+fn emit_externs(externs: List[Any]) -> List[Str] {
+  var out = []
+  for (ext of externs) {
+    let name = mangle(value_str(value_field(ext, "name")))
+    var ps = []
+    for (p of value_list(value_field(ext, "params"))) { ps = ps.push(mangle(value_str(value_field(p, "name")))) }
+    var kw = "def"
+    if (value_bool(value_field(ext, "async"))) { kw = "async def" }
+    out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
+    let body = dedent(strip_nl(value_str(value_field(value_field(ext, "bodies"), "py"))))
+    if (body != "") {
+      for (ln of splitlines(body)) { out = out.push(line(1, ln)) }
+    } else {
+      out = out.push(line(1, "pass"))
+    }
+    out = out.push("")
+  }
+  return out
+}
+
 // --------------------------------------------------- conditional preludes
 fn i64_block() -> List[Str] {
   var o = []
@@ -635,14 +725,16 @@ fn comp_names(ir: Any) -> Str {
 // specialize arithmetic (no `_revl_i64`/`_revl_div`/widen wrapper; a component
 // `+` is a plain `(a + b)`). The two therefore cannot be shared.
 //
-// DEFERRED to slice 3 (a divergence, not a bug, if fed one): config
-// (`ConfigSchema`), async coloring (async methods / await bodies / the
-// await-seed), method-body `effect`/`let-effect` (the `_revl_frame.adopt` /
-// `.acquire` accumulator + its `_label`/`_effect_N` counter), a compensated
-// method `emit`, host roots (`Pool`/`Map`/`Job` in bodies -> the extra imports),
-// realm placements (`isolate`/`intercept`/`routes`/the router), spawn/instances,
-// lifecycle TESTS (the `plug`/`set_trace`/`Clock`/`asyncio` driver), and the
-// `adt`/`config`/`format`/`host`/`spawn`/`instance-get` cexpr kinds.
+// Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
+// method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
+// `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
+// threaded through provides/methods). STILL DEFERRED to slice 5 (a divergence,
+// not a bug, if fed one): async coloring (async methods / await bodies / the
+// await-seed), host roots (`Pool`/`Map`/`Job`) in COMPONENT bodies (fn/test
+// bodies already covered), realm placements (`isolate`/`intercept`/`routes`/the
+// router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
+// `asyncio` driver), and the `adt`/`format`/`host`/`spawn`/`instance-get` cexpr
+// kinds.
 
 // A body-emission result: the lines produced AND the running timer counter (the
 // reference's `self._counter`, threaded here since revl has no method state).
@@ -762,6 +854,10 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "name") { return mangle(value_str(value_field(node, "id"))) }
   if (kind == "req") { return "_revl_ctx.".concat(value_str(value_field(node, "name"))) }
+  // `config.<field>` (slice 4): a read of the resolved config dict. The field
+  // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring
+  // the reference `_expr` config branch exactly.
+  if (kind == "config") { return `_revl_config[${py_repr(value_field(node, "field"))}]` }
   if (kind == "call") {
     if (!value_is_null(value_field(node, "target"))) {
       let t = cexpr(value_field(node, "target"))
@@ -836,33 +932,67 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
   return out
 }
 
-// `_method_step` (subset: value bindings, plain `emit`, `return`).
-fn method_step(step: Any, indent: Int) -> List[Str] {
+// `_method_step`: one step inside a provide-method body. A method-body EFFECT
+// runs per request, so — unlike an activation-body effect (`body_step`, which
+// yields the inverse straight into the fiber) — it must JOIN the component's
+// accumulator through the Frame: `_revl_frame.adopt(_revl_ctx.effect(<fn>,
+// <label>))`. The label is `_label`: `{component}.{provide}.{method}#{counter}`
+// off the shared `_counter` (threaded here since revl has no method state), and
+// the effect-closure name uses the counter value BEFORE that increment
+// (`_effect_N` pairs with `#{N+1}`), exactly as the reference reads then bumps.
+// Slice 4 handles the non-async surface: value bindings, `effect`, method
+// `let-effect` (the spawn form — its `spawn` acquire cexpr lands in slice 5, so
+// it is implemented but not yet cross-checked), saga `emit ... compensate`,
+// plain `emit`, and `return`. (`await` stays slice 5.)
+fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int) -> Emit {
   let kind = value_str(value_field(step, "step"))
-  var out = []
   if (kind == "let" || kind == "assign") {
-    out = out.push(line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`))
-    return out
+    var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
+    return { lines: out, counter: counter }
+  }
+  if (kind == "effect") {
+    let fname = `_effect_${counter}`
+    var out = [line(indent, `def ${fname}():`)]
+    out = out.push(line(indent + 1, cexpr(value_field(step, "acquire"))))
+    out = out.push(line(indent + 1, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    let c = counter + 1
+    let label = `${comp_name}.${provide_name}.${method_name}#${c}`
+    out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
+    return { lines: out, counter: c }
+  }
+  if (kind == "let-effect") {
+    let bind = mangle(value_str(value_field(step, "bind")))
+    let acq = cexpr(value_field(step, "acquire"))
+    let inv = cexpr(value_field(step, "undo"))
+    let c = counter + 1
+    let label = `${comp_name}.${provide_name}.${method_name}#${c}`
+    var out = [line(indent, `${bind} = _revl_frame.acquire(${py_repr(label)}, lambda: ${acq}, lambda ${bind}: ${inv})`)]
+    return { lines: out, counter: c }
   }
   if (kind == "emit") {
     if (!value_is_null(value_field(step, "compensate"))) {
-      out = out.push(line(indent, `<<UNSUPPORTED-METHOD-COMPENSATE>>`))
-      return out
+      let fname = `_emit_${counter}`
+      var out = [line(indent, `def ${fname}():`)]
+      out = out.push(line(indent + 1, cexpr(value_field(step, "expr"))))
+      out = out.push(line(indent + 1, `yield lambda: ${cexpr(value_field(step, "compensate"))}`))
+      let c = counter + 1
+      let label = `${comp_name}.${provide_name}.${method_name}#${c}`
+      out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
+      return { lines: out, counter: c }
     }
-    out = out.push(line(indent, cexpr(value_field(step, "expr"))))
-    return out
+    var out = [line(indent, cexpr(value_field(step, "expr")))]
+    return { lines: out, counter: counter }
   }
   if (kind == "return") {
-    if (value_is_null(value_field(step, "expr"))) { out = out.push(line(indent, "return")) }
-    else { out = out.push(line(indent, `return ${cexpr(value_field(step, "expr"))}`)) }
-    return out
+    if (value_is_null(value_field(step, "expr"))) { return { lines: [line(indent, "return")], counter: counter } }
+    return { lines: [line(indent, `return ${cexpr(value_field(step, "expr"))}`)], counter: counter }
   }
-  out = out.push(line(indent, `<<UNSUPPORTED-METHODSTEP:${kind}>>`))
-  return out
+  return { lines: [line(indent, `<<UNSUPPORTED-METHODSTEP:${kind}>>`)], counter: counter }
 }
 
-// `_method`: one provide-method as a Python `def` (sync only in this slice).
-fn method_lines(m: Any, indent: Int) -> List[Str] {
+// `_method`: one provide-method as a Python `def` (sync only in this slice),
+// threading the shared timer/effect counter across its body steps.
+fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int) -> Emit {
   let name = mangle(value_str(value_field(m, "name")))
   var head = `def ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
@@ -870,14 +1000,20 @@ fn method_lines(m: Any, indent: Int) -> List[Str] {
   var out = []
   out = out.push(line(indent, head))
   let body = value_list(value_field(m, "body"))
-  if (body.length() == 0) { out = out.push(line(indent + 1, "pass")); return out }
-  for (s of body) { out = out.concat(method_step(s, indent + 1)) }
-  return out
+  if (body.length() == 0) { out = out.push(line(indent + 1, "pass")); return { lines: out, counter: counter } }
+  var c = counter
+  for (s of body) {
+    let se = method_step(s, indent + 1, provide_name, name, comp_name, c)
+    out = out.concat(se.lines)
+    c = se.counter
+  }
+  return { lines: out, counter: c }
 }
 
 // `_provide`: the provision class, its methods, and the runtime-derived
-// revertible provision (yield the disposer, then populate).
-fn provide_lines(step: Any, indent: Int) -> List[Str] {
+// revertible provision (yield the disposer, then populate). Threads the counter
+// across its methods (a method-body effect shares the component's counter).
+fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   let name = mangle(value_str(value_field(step, "name")))
   let svc = value_str(value_field(step, "service"))
   let cls = "_".concat(pascal(name))
@@ -886,14 +1022,17 @@ fn provide_lines(step: Any, indent: Int) -> List[Str] {
   out = out.push(line(indent + 1, `"""service ${svc}, provided at key "${name}"."""`))
   let methods = value_list(value_field(step, "methods"))
   if (methods.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+  var c = counter
   for (m of methods) {
     out = out.push("")
-    out = out.concat(method_lines(m, indent + 1))
+    let me = method_lines(m, indent + 1, name, comp_name, c)
+    out = out.concat(me.lines)
+    c = me.counter
   }
   out = out.push("")
   out = out.push(line(indent, `yield _revl_ctx.provide(${py_repr(name)})`))
   out = out.push(line(indent, `_revl_ctx.set(${py_repr(name)}, ${cls}())`))
-  return out
+  return { lines: out, counter: c }
 }
 
 // `_timer`: a revertible schedule — the firing closure, its handle, and the
@@ -918,7 +1057,7 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> Emit {
 
 // `_body_step`: one activation-body step -> its lines (with the reference's
 // trailing blank), threading the timer counter.
-fn body_step(step: Any, indent: Int, counter: Int) -> Emit {
+fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
     var out = []
@@ -952,13 +1091,13 @@ fn body_step(step: Any, indent: Int, counter: Int) -> Emit {
   if (kind == "if") {
     var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
     var c = counter
-    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, c)
+    let te = emit_body_steps(value_list(value_field(step, "then")), indent + 1, comp_name, c)
     out = out.concat(te.lines)
     c = te.counter
     let els = value_list(value_field(step, "else"))
     if (els.length() > 0) {
       out = out.push(line(indent, "else:"))
-      let ee = emit_body_steps(els, indent + 1, c)
+      let ee = emit_body_steps(els, indent + 1, comp_name, c)
       out = out.concat(ee.lines)
       c = ee.counter
     }
@@ -972,20 +1111,21 @@ fn body_step(step: Any, indent: Int, counter: Int) -> Emit {
     return { lines: out, counter: e.counter }
   }
   if (kind == "provide") {
-    var out = provide_lines(step, indent)
+    let pe = provide_lines(step, indent, comp_name, counter)
+    var out = pe.lines
     out = out.push("")
-    return { lines: out, counter: counter }
+    return { lines: out, counter: pe.counter }
   }
   var out = [line(indent, `<<UNSUPPORTED-BODYSTEP:${kind}>>`)]
   out = out.push("")
   return { lines: out, counter: counter }
 }
 
-fn emit_body_steps(steps: List[Any], indent: Int, counter: Int) -> Emit {
+fn emit_body_steps(steps: List[Any], indent: Int, comp_name: Str, counter: Int) -> Emit {
   var out = []
   var c = counter
   for (s of steps) {
-    let e = body_step(s, indent, c)
+    let e = body_step(s, indent, comp_name, c)
     out = out.concat(e.lines)
     c = e.counter
   }
@@ -1011,11 +1151,27 @@ fn component_body(comp: Any) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
+  // slice 4: the resolved-config schema, emitted BEFORE the apply closure and
+  // rehung on the plugin dict below. `_<SNAKE>_CONFIG = _revl_ConfigSchema([…])`
+  // — one `(field, type, default)` tuple per declared config field; the runtime
+  // validates/resolves it before apply runs. The field name is mangled (as the
+  // reference `_ident`s it); type/default are repr'd verbatim.
+  let config_fields = value_list(value_field(comp, "config"))
+  if (config_fields.length() > 0) {
+    out = out.push(`_${upper(sn)}_CONFIG = _revl_ConfigSchema([`)
+    for (spec of config_fields) {
+      let field = mangle(value_str(value_field(spec, "name")))
+      out = out.push(line(1, `(${py_repr(field)}, ${py_repr(value_field(spec, "type"))}, ${py_repr(value_field(spec, "default"))}),`))
+    }
+    out = out.push("])")
+    out = out.push("")
+    out = out.push("")
+  }
   out = out.push(`def _${sn}_apply(_revl_ctx, _revl_config):`)
   out = out.push(line(1, `_revl_frame = _revl_Frame(_revl_ctx, ${py_repr(name)})`))
   out = out.push("")
   out = out.push(line(1, "def _body():"))
-  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, 0)
+  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
   out = out.push("")
@@ -1028,6 +1184,9 @@ fn component_body(comp: Any) -> List[Str] {
   for (k of value_keys(value_field(comp, "requires"))) { inject = inject.push(mangle(k)) }
   out = out.push(line(1, `'inject': ${py_repr(inject)},`))
   out = out.push(line(1, `'apply': _${sn}_apply,`))
+  if (config_fields.length() > 0) {
+    out = out.push(line(1, `'Config': _${upper(sn)}_CONFIG,`))
+  }
   out = out.push("}")
   return out
 }
@@ -1074,85 +1233,21 @@ fn emit_services_table(services: Any) -> List[Str] {
 //   * host roots in fn/test bodies  — a `var` naming `Map`/`Pool`/`Job` pulls
 //     the name into the sorted `from runtime import` line (`_find_host_roots`).
 //
-// DEFERRED to a slice 4 (reported): externs (`_emit_externs` — needs a faithful
-// `textwrap.dedent`/`splitlines` of the verbatim `@py` body, a host-string
-// dependency), component `config`/`ConfigSchema`, method-body `effect`/
-// `let-effect` (the `_revl_frame.adopt`/`.acquire` accumulator + `_label`
-// counter), in-file `test`/`fault_test`/`lifecycle test` emission, async
+// LANDED in slice 4 (item 206): externs (`_emit_externs`, the verbatim `@py`
+// body via stdlib/str.rvl::dedent + local `splitlines`), component `config`/
+// `ConfigSchema`, and method-body `effect`/`let-effect`/compensated-`emit` (the
+// `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED
+// to slice 5: in-file `test`/`fault_test`/`lifecycle test` emission, async
 // coloring, realm placements, spawn/instances, and the canonical ABI.
 
 // -------------------------------------------------------------- string utils
-// The pure-revl string helpers `_emit_types` needs (the reference reaches for
-// `str.strip`/`in`/`rindex`/`re.findall`, all host string ops): mirror them
-// here in revl over `charAt`/`slice`, kin to selfhost/checker.rvl's `split_type`.
+// `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
+// stdlib/str.rvl (`use` above, item 193); only the helpers str.rvl does NOT
+// ship stay local: `str_in` (a List membership test) and `split_types` (the
+// comma-split whose per-part `trim` is now str.rvl's).
 fn str_in(xs: List[Str], s: Str) -> Bool {
   for (x of xs) { if (x == s) { return true } }
   return false
-}
-
-fn trim(s: Str) -> Str {
-  var a = 0
-  var b = s.length()
-  while (a < b && s.slice(a, a + 1) == " ") { a += 1 }
-  while (b > a && s.slice(b - 1, b) == " ") { b -= 1 }
-  return s.slice(a, b)
-}
-
-fn lstrip(s: Str) -> Str {
-  var a = 0
-  let b = s.length()
-  while (a < b && s.slice(a, a + 1) == " ") { a += 1 }
-  return s.slice(a, b)
-}
-
-fn last_index_of(s: Str, ch: Str) -> Int {
-  var r = 0 - 1
-  var i = 0
-  while (i < s.length()) {
-    if (s.slice(i, i + 1) == ch) { r = i }
-    i += 1
-  }
-  return r
-}
-
-fn is_alpha_us(c: Str) -> Bool {
-  let x = c.charCodeAt(0)
-  if (x >= 65 && x <= 90) { return true }
-  if (x >= 97 && x <= 122) { return true }
-  return x == 95
-}
-
-fn is_word_ch(c: Str) -> Bool {
-  if (is_alpha_us(c)) { return true }
-  let x = c.charCodeAt(0)
-  return x >= 48 && x <= 57
-}
-
-// The identifier tokens of a type spelling, mirroring the reference `_ann`'s
-// `re.findall(r"[A-Za-z_]\w*", ftype)`: each maximal run of word chars, from its
-// first alpha/underscore (a digit-led run starts its match at the first letter,
-// exactly as `findall` does).
-fn ident_tokens(s: Str) -> List[Str] {
-  var toks = []
-  var i = 0
-  let n = s.length()
-  while (i < n) {
-    if (is_word_ch(s.slice(i, i + 1))) {
-      let start = i
-      while (i < n && is_word_ch(s.slice(i, i + 1))) { i += 1 }
-      let run = s.slice(start, i)
-      var j = 0
-      var found = 0 - 1
-      while (j < run.length()) {
-        if (found < 0 && is_alpha_us(run.slice(j, j + 1))) { found = j }
-        j += 1
-      }
-      if (found >= 0) { toks = toks.push(run.slice(found, run.length())) }
-    } else {
-      i += 1
-    }
-  }
-  return toks
 }
 
 // `_split_types`: comma-split a bracket inner at depth zero, each part stripped.
@@ -1463,7 +1558,14 @@ pub fn emit_src(ir: Any) -> Str {
     if (body_has_timer(value_list(value_field(c, "body")), "every")) { need_every = true }
     if (body_has_timer(value_list(value_field(c, "body")), "after")) { need_after = true }
   }
+  var need_config = false
+  for (c of components) {
+    if (value_list(value_field(c, "config")).length() > 0) { need_config = true }
+  }
   var imports = []
+  // sorted(uses) puts `ConfigSchema` (C) before `Frame` (F) before the host
+  // roots (Job/Map/Pool) before the lower-case `schedule_*`.
+  if (need_config) { imports = imports.push("ConfigSchema as _revl_ConfigSchema") }
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
@@ -1496,6 +1598,10 @@ pub fn emit_src(ir: Any) -> Str {
   }
   let functions = value_list(value_field(ir, "functions"))
   if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
+  // non-empty extern list, between the functions and the SERVICES table.
+  let externs = value_list(value_field(ir, "externs"))
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
   out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")
@@ -1563,6 +1669,26 @@ test "split_fn_type recognises a function type" {
   assert f.params[0] == "Int"
   assert f.ret == "Str"
   assert !split_fn_type("List[Int]").ok
+}
+
+// --------------------------------------------------------------- slice-4 units
+// In-file tests cannot call the file's own externs directly (test scope is
+// `_HOST_CALLABLES` + module fns, not externs), so the newline char is sourced
+// as a backtick literal (as stdlib/str.rvl's `nl` does), never via `newline()`.
+// `upper` is exercised byte-exactly by the services_config corpus fixture.
+test "splitlines matches str.splitlines (drops the trailing-newline empty)" {
+  let nlc = `
+`
+  assert splitlines("a".concat(nlc).concat("b")).length() == 2
+  assert splitlines("a".concat(nlc)).length() == 1
+  assert splitlines("a".concat(nlc).concat(nlc).concat("b")).length() == 3
+}
+
+test "strip_nl strips only newline chars, not other whitespace" {
+  let nlc = `
+`
+  assert strip_nl(nlc.concat("x").concat(nlc)) == "x"
+  assert strip_nl("  y  ") == "  y  "
 }
 
 // --------------------------------------------------------------- component wrap

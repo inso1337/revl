@@ -43,15 +43,34 @@ Covered subset (what emits byte-identical):
     (``Map``/``Pool``/``Job``) in fn/test bodies pulled into the sorted
     ``from runtime import``.
 
-Deliberately OUT (excluded from the corpus, deferred to Path B slice 4+):
-externs (``_emit_externs`` — a faithful ``textwrap.dedent``/``splitlines`` of the
-verbatim ``@py`` body, a host-string dependency), in-file ``test``/``fault_test``
-and ``lifecycle test`` emission, component ``config`` (``ConfigSchema``), async
-coloring (async methods / ``await`` bodies / the await-seed), method-body
-``effect``/``let-effect``, realm placements (``isolate``/``intercept``/``routes``),
-spawn/instances, and the canonical ABI. ``let_pattern`` (destructuring) is a
-permanent exclusion for a byte oracle: the reference names its temporary from
-``id(node)``, which a second implementation cannot reproduce.
+Slice 4 (item 206) adds three more byte-identical forms:
+  * externs (``_emit_externs``) — ``def <name>(...)`` plus the verbatim ``@py``
+    body run through stdlib/str.rvl's ``dedent`` (item 193's verified
+    ``textwrap.dedent`` port) and a faithful ``str.splitlines()`` (the local
+    ``splitlines`` drops the trailing empty a trailing ``\\n`` yields). This is
+    also the item-193 duplication cull: the four string helpers slices 1-3
+    hand-rolled (``trim``/``lstrip``/``last_index_of``/``ident_tokens``) are now
+    ``use``d from str.rvl, and the slice-1-3 corpus staying byte-identical is the
+    refactor's proof;
+  * component ``config`` (``ConfigSchema``) — the ``_<SNAKE>_CONFIG =
+    ConfigSchema([...])`` schema block, the ``ConfigSchema``-first sorted
+    ``from runtime import``, the plugin dict ``'Config'`` key, and a
+    ``config.<field>`` read lowering to ``_revl_config['field']``;
+  * method-body ``effect`` / saga ``emit ... compensate`` — the per-request
+    accumulator join ``_revl_frame.adopt(_revl_ctx.effect(<fn>, <label>))`` with
+    the shared ``_counter`` threaded through the whole component (the
+    ``_effect_N`` / ``_emit_N`` closure names and the ``{comp}.{provide}.{method}
+    #{n}`` ``_label``).
+
+Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
+in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
+(async methods / async externs' await-seed / ``await`` bodies), realm placements
+(``isolate``/``intercept``/``routes``), spawn/instances, ``adt`` construction, and
+the canonical ABI. Method-body ``let-effect`` is emitted (the
+``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
+only a ``spawn`` acquire there, whose ``cexpr`` lands in slice 5. ``let_pattern``
+(destructuring) is a permanent exclusion for a byte oracle: the reference names
+its temporary from ``id(node)``, which a second implementation cannot reproduce.
 """
 
 import importlib.util
@@ -86,6 +105,10 @@ CORPUS = [
     "result.rvl",      # built-in Result (Ok/Err) classes, gated by a match on Ok/Err
     "floats.rvl",      # `_revl_ftoa` canonical Float->Str, gated by a float `${…}` interpolation
     "hostroots.rvl",   # host roots (Map/Pool/Job) in a fn body -> the sorted `from runtime import`
+    # externs / config / method-body effects (slice 4, item 206)
+    "externs.rvl",              # `_emit_externs`: verbatim `@py` body via stdlib/str.rvl::dedent (item 193) + splitlines
+    "services_config.rvl",      # component `config`/`ConfigSchema`: schema block, ConfigSchema-first import, `Config` key, `config.<field>` read
+    "services_method_effects.rvl",  # method-body `effect` + saga `emit ... compensate`: the `_revl_frame.adopt` accumulator + `_label`/`_effect_N`/`_emit_N` counter
 ]
 
 
