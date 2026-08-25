@@ -19,14 +19,17 @@
 // the remaining tiers):
 //   * py — `json.loads` / `json.dumps`; executed by the test suite.
 //   * ts — `JSON.parse` / `JSON.stringify`; emitted by the test suite.
-//   * rs — an `Any` extern return type-erases to `cordis::Value` on this
-//     tier, so a parsed record cannot be read back (no field access); the
-//     module ships no @rs body until the emitter types Any-typed bindings
-//     by their declared type. Refused with the honest "no @rs body" message.
+//   * rs — `Any` erases to `cordis::Value`; the @rs body boxes a parsed
+//     `serde_json::Value` into it and recovers it to re-encode (serde_json
+//     is already pinned in the emitted crate). A structured document
+//     survives `stringify∘parse`; a parsed value flowing into a typed
+//     binding for field access is still the erased-Value boundary, so the
+//     harness reads it back through this round-trip, not `tc.name` (item 140).
 //   * java — where a provider's Jackson/Gson plugs in; no JDK JSON API, so
 //     none until a provider is on the `javac` classpath.
-//   * go — needs the emitter to add `encoding/json` to the module's
-//     imports for verbatim extern bodies (not yet wired); same refusal.
+//   * go — `Any` erases to Go's `any`; the @go body reaches `encoding/json`
+//     through a `//revl:import encoding/json` directive the emitter hoists
+//     into the module's import block (item 140).
 //   * wasm — the substrate value model (Int/Bool/Str/List) cannot hold
 //     Float/Map/records, so a JSON value has no representation there.
 //
@@ -37,7 +40,20 @@
 pub extern pure fn json_parse(s: Str) -> Any
   = @py { import json; return json.loads(s) }
   = @ts { return JSON.parse(s) }
+  = @rs { Value::new(serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)) }
+  = @go {
+    //revl:import encoding/json
+    var v any
+    _ = json.Unmarshal([]byte(s), &v)
+    return v
+  }
 
 pub extern pure fn json_stringify(v: Any) -> Str
   = @py { import json; return json.dumps(v) }
   = @ts { return JSON.stringify(v) }
+  = @rs { v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() }
+  = @go {
+    //revl:import encoding/json
+    b, _ := json.Marshal(v)
+    return string(b)
+  }

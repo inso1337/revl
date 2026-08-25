@@ -63,6 +63,31 @@ def test_user_cache_golden_byte_equality():
     assert src == golden
 
 
+# ---------------------------------------------------------------------------
+# stdlib JSON wire protocol crosses to rust (roadmap item 140).
+#
+# The `Any` return of json_parse/json_stringify erases to `cordis::Value`; the
+# @rs bodies box a parsed `serde_json::Value` into that erased value and recover
+# it to re-encode, so a structured document survives stringify∘parse. Before
+# item 140 the module shipped no @rs body and the emitter refused it.
+
+_JSONWIRE_RVL = Path(__file__).parent / "scenarios" / "jsonwire.rvl"
+
+
+def test_jsonwire_scenario_emits_serde_backed_bodies():
+    src = emit.emit(compile_files([str(_JSONWIRE_RVL)]))
+    assert "fn json_parse(s: String) -> Value" in src
+    assert "serde_json::from_str::<serde_json::Value>(&s)" in src
+    assert "fn json_stringify(v: Value) -> String" in src
+    assert "v.downcast::<serde_json::Value>()" in src
+
+
+def test_jsonwire_golden_byte_equality():
+    src = emit.emit(compile_files([str(_JSONWIRE_RVL)]))
+    golden = (Path(__file__).parent / "golden" / "jsonwire.rs").read_text(encoding="utf-8")
+    assert src == golden
+
+
 def test_string_literals_emit_printable_non_ascii_literally():
     """`_string` escapes control chars / quotes / backslashes, but emits a
     printable non-ASCII scalar *literally* as UTF-8 — Rust source is UTF-8, so
@@ -428,6 +453,22 @@ def test_cargo_check_compiles_non_ascii_in_format_position(tmp_path):
     result = _cargo_check(tmp_path, src, "--tests")
     assert result.returncode == 0, result.stderr
     assert "positional argument" not in result.stderr, result.stderr
+
+
+@needs_cargo
+def test_cargo_test_runs_the_json_wire_roundtrip(tmp_path):
+    """Item 140: the emitted @rs bodies must not merely typecheck — the JSON
+    round-trip has to RUN. This builds the jsonwire scenario into a crate and
+    runs `cargo test`, executing the `#[test]` that asserts
+    `json_stringify(json_parse(doc)) == doc` for a structured document."""
+    src = emit.emit(compile_files([str(_JSONWIRE_RVL)]))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_jsonwire"), encoding="utf-8")
+    result = _cargo("test", tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test result: ok" in result.stdout, result.stdout
+    assert "1 passed" in result.stdout, result.stdout
 
 
 @needs_cargo

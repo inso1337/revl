@@ -1,0 +1,125 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "functions": [
+    {
+      "name": "roundtrip",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "json_stringify"
+            },
+            "args": [
+              {
+                "kind": "call",
+                "callee": {
+                  "kind": "var",
+                  "name": "json_parse"
+                },
+                "args": [
+                  {
+                    "kind": "var",
+                    "name": "s"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "json_parse",
+      "class": "pure",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Any",
+      "bodies": {
+        "py": " import json; return json.loads(s) ",
+        "ts": " return JSON.parse(s) ",
+        "rs": " Value::new(serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)) ",
+        "go": "\n    //revl:import encoding/json\n    var v any\n    _ = json.Unmarshal([]byte(s), &v)\n    return v\n  "
+      }
+    },
+    {
+      "name": "json_stringify",
+      "class": "pure",
+      "params": [
+        {
+          "name": "v",
+          "type": "Any"
+        }
+      ],
+      "returns": "Str",
+      "bodies": {
+        "py": " import json; return json.dumps(v) ",
+        "ts": " return JSON.stringify(v) ",
+        "rs": " v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() ",
+        "go": "\n    //revl:import encoding/json\n    b, _ := json.Marshal(v)\n    return string(b)\n  "
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "the JSON wire protocol round-trips a structured value on go",
+      "body": [
+        {
+          "step": "let",
+          "name": "wire",
+          "value": {
+            "kind": "lit",
+            "value": "{\"args\":[\"london\",\"paris\"],\"meta\":{\"n\":2},\"name\":\"get_weather\"}"
+          },
+          "mutable": false
+        },
+        {
+          "step": "assert",
+          "expr": {
+            "kind": "bin",
+            "op": "==",
+            "left": {
+              "kind": "call",
+              "callee": {
+                "kind": "var",
+                "name": "roundtrip"
+              },
+              "args": [
+                {
+                  "kind": "var",
+                  "name": "wire"
+                }
+              ]
+            },
+            "right": {
+              "kind": "var",
+              "name": "wire"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

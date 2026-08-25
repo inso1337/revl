@@ -71,9 +71,10 @@ def test_module_imports_and_externs_reach_the_ir(consumer_ir):
     assert set(names) == {"json_parse", "json_stringify"}
     assert names["json_parse"]["returns"] == "Any"
     assert names["json_stringify"]["returns"] == "Str"
-    # the module ships @py and @ts bodies; the other tiers are documented
-    # refusals (docs/stdlib-json.md)
-    assert set(names["json_parse"]["bodies"]) == {"py", "ts"}
+    # the module ships @py, @ts, @rs and @go bodies (item 140); java and wasm
+    # remain documented refusals (docs/stdlib-json.md)
+    assert set(names["json_parse"]["bodies"]) == {"py", "ts", "rs", "go"}
+    assert set(names["json_stringify"]["bodies"]) == {"py", "ts", "rs", "go"}
     assert consumer_ir["ir_version"] == 3
 
 
@@ -149,13 +150,17 @@ def test_ts_tier_emits_builtin_json(consumer_ir):
     assert "JSON.stringify(v)" in out
 
 
-def test_rust_tier_refuses_with_the_honest_message(consumer_ir):
-    # an Any extern return type-erases to cordis::Value on rust, so a parsed
-    # record cannot be read back there (docs/stdlib-json.md); the module
-    # ships no @rs body until the emitter types Any-typed bindings by their
-    # declared type
-    with pytest.raises(Exception, match="no @rs body"):
-        _emit_with("rust", consumer_ir)
+def test_rust_tier_emits_json_bodies(consumer_ir):
+    # item 140: `Any` erases to `cordis::Value`, and the runtime already
+    # carries `serde_json` — so json_parse boxes a parsed `serde_json::Value`
+    # into a `cordis::Value` and json_stringify recovers and serialises it.
+    # (The executable round-trip proof runs under cargo in
+    # backends/rust/test_emit_rust.py.)
+    out = _emit_with("rust", consumer_ir)
+    assert "fn json_parse(s: String) -> Value" in out
+    assert "serde_json::from_str::<serde_json::Value>(&s)" in out
+    assert "fn json_stringify(v: Value) -> String" in out
+    assert "v.downcast::<serde_json::Value>()" in out
 
 
 def test_java_tier_refuses_with_the_honest_message(consumer_ir):
@@ -163,9 +168,20 @@ def test_java_tier_refuses_with_the_honest_message(consumer_ir):
         _emit_with("java", consumer_ir)
 
 
-def test_go_tier_refuses_with_the_honest_message(consumer_ir):
-    with pytest.raises(Exception, match="no @go body"):
-        _emit_with("go", consumer_ir)
+def test_go_tier_emits_json_bodies_and_hoists_encoding_json(consumer_ir):
+    # item 140: revl `Any` erases to Go `any`, and the `//revl:import
+    # encoding/json` directive in the @go body is hoisted to the module's
+    # import block (a verbatim extern body cannot spell its own `import`).
+    # (The executable round-trip proof runs under `go test` in
+    # backends/go/scenarios/emitted/jsonwire/.)
+    out = _emit_with("go", consumer_ir)
+    assert "func json_parse(s string) any" in out
+    assert "func json_stringify(v any) string" in out
+    assert "json.Unmarshal([]byte(s), &v)" in out
+    assert "json.Marshal(v)" in out
+    # the directive is hoisted, not left dangling in the body
+    assert '"encoding/json"' in out
+    assert "//revl:import" not in out
 
 
 def test_wasm_tier_refuses_extern_without_body(consumer_ir):
