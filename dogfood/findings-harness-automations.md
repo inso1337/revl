@@ -1,6 +1,6 @@
 # Findings — scheduled automations that RUN the agent (harness milestone 60, roadmap item 170)
 
-Probe: revl-harness milestone 60 builds product-side scheduled automations
+Probe: revl-harness milestone 60 builds host-side scheduled automations
 (create/list/cancel an automation {cadence, prompt, session}; the agent
 runs on schedule, approval-gated, persisted across restarts). The driver
 is HOST-side (`_start_automations` in `tools/web_server.py`) because the
@@ -26,7 +26,7 @@ colour today. So `every 60s { emit agent.run_in("cron", brief) }` is
 unexpressible; the harness's scheduled automations run the agent from a
 host loop on the session's event loop instead.
 
-## The product's honest workaround (milestone 60)
+## The workload's honest workaround (milestone 60)
 
 - `/api/schedule/automations` — create/list/cancel; each automation is
   `{name, every_ms, prompt, session}`.
@@ -49,4 +49,4 @@ grows a configurable scheduled-agent-run automation (cadence + prompt +
 session in config), `src/timer_tests.rvl` proves it fires on
 `Clock.advance`, and the M52 `cron()` slice returns the scheduled agent's
 replies instead of a hardcoded tick. The host-side driver stays as the
-product's persistence layer either way.
+workload's persistence layer either way.
