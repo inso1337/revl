@@ -1337,6 +1337,78 @@ record-update literal" friction the async slice-5 note logged: adding one field 
 `Scope` meant editing every `{ slots:…, types:…, strs:… }` construction site
 (here only `scope_bind` and the `emit_function` seed) by hand.
 
+---
+
+## `emit_wasm.rvl` slice 4 — tagged cells + reads + the preamble builtin surface (item 239)
+
+Extended the wasm self-host emitter past the write-only value ABI of slice 3 to
+the READ and tagged-CONSTRUCTION surface, byte-identical to
+`backends/wasm/emit.py` over four new corpus fixtures (`reads.rvl`,
+`variants.rvl`, `forloop.rvl`, `builtins.rvl`) plus the four prior ones, all
+still green:
+
+- **field/index reads + `len`** — `_slot_load` (the read twin of `_slot_store`:
+  an `Int` is the i64, everything narrower is `i32.wrap_i64`'d back out), a
+  record field at `8*declared_position`, a list index with the constant-fold /
+  variable-address split, and `x.length` (the `len` node) counting code points
+  for a Str and the u32 prefix for a List.
+- **tagged unions** — `_make_tagged` / `_tagged_layout` / `_tag_of` for the
+  `[u32 tag][pad][slot payload]` cell: the built-in `Opt`/`Result` (parsed from
+  the type spelling) and user `variant`s (from the type table), nullary vs
+  payload cases, nested cells + lists of cells, riding the same depth-indexed
+  scratch as records/lists.
+- **the `for (x of xs)` list walk** — the `for_ptr`/`for_cnt`/`for_idx` cursor
+  triple, declared in the header in pre-order loop-id order.
+- **the `builtin`/`len` method surface** — the subset whose runtime helpers all
+  live in the always-emitted preamble.
+
+### Finding (item 179 class, AVOIDED): the reference's mutable `_loop_counter` / `_lid` is emit-time state
+`backends/wasm/emit.py` numbers `for` loops by MUTATING the IR: `_collect_locals`
+walks the body, does `self._loop_counter += 1` at each `for`, and writes the id
+back onto the node (`stmt["_lid"] = …`) plus appends `for_ptr_N`/`for_cnt_N`/
+`for_idx_N` to `self._for_temps`; `_emit_for` later reads `stmt["_lid"]`. That is
+exactly the "non-reproducible emit-time state" shape item 179 warned about — a
+pure re-run can't mutate the shared IR. It was reproducible here *only because*
+the numbering is a deterministic function of position: the Nth `for` in
+document pre-order gets id N, and the header's `_for_temps` is that same order.
+So the self-host mirrors it with (a) a `count_fors` pass for the header's
+`1..N` cursor run and (b) a `loop: Int` counter threaded in and out of
+`emit_stmts`/`emit_stmt` (added to `Sout`), incremented at each `for` before
+recursing its body — a pure fold that lands the same ids without touching the
+IR. Had the reference instead numbered loops by, say, first-visit into a hash of
+node identity, this slice would have STOP-reported it.
+
+### Finding (item 203, still biting): every helper mnemonic is a `$ident` plain string
+The papercut logged twice in slice 3 hit ~14 more times here: the builtin
+lowerings pick a runtime helper by name (`var helper = "$str_concat"`,
+`"$list_slice"`, `"$int_div_floor"`, …), and each such plain string is REJECTED
+as would-be 1.x interpolation (`RevlError: `$list_concat` in a plain string`).
+The parallel agent's 203 fix (lexer + fmt) was not yet in this worktree, so the
+workaround was to wrap each helper-name literal in `"""…"""` (a triple-quoted
+verbatim string, where a bare `$name` is literal) rather than a backtick — a
+plain assignment `helper = """$str_concat"""` reads better than a template for a
+constant. Symptom/repro unchanged from the slice-3 note; still do NOT fix here.
+
+### Ergonomics: `Str` `[i]` indexing is a frontend refusal, so `_index_expr`'s Str arm is dead
+`_index_expr` in the reference handles a `Str` target (`$str_char_at`), but the
+frontend typechecker rejects `s[i]` on a `Str` outright (`` `Str` has no index
+operator ``, steering to `s.charAt(i)`), so that arm is never reached from real
+source. The self-host mirrors it for faithfulness but the corpus can't exercise
+it — `charAt`/`charCodeAt`/`slice` cover the Str-read surface instead. Not a
+defect, just a reference branch that no `.rvl` input can reach.
+
+### Scope note: reading a tagged cell (`match`/`??`) is the natural next slice
+Slice 4 constructs tagged cells but does not read them. `_match_expr` mints a
+per-match scrutinee scratch plus one `l_<bind>` per arm, and `_nullish_expr`
+(`??`) an Opt-cell scratch and a `(if (result …))` payload branch — both add
+header-ordered locals (`match_binds` / `match_scruts`, sorted, slotted between
+the `l_` locals and the `for_temps`) that this slice's `emit_function` ordering
+does not yet reproduce. They are the clean unit for slice 5, alongside the
+demand-pulled reader helpers (`indexOf`/`split`/`join`) that would need the
+preamble to become demand-driven rather than a fixed verbatim block.
+
+---
+
 ## ts Path B slice 7 — the v1/v2 `_emit_v1` DISPATCH path (`emit_ts.rvl`, item 240)
 
 Item 234 flagged that "a component using only isolate/intercept compiles to irv2,

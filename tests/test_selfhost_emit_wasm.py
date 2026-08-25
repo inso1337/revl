@@ -54,10 +54,31 @@ declared-order-field-slot layouts, ``_slot_store`` widening, the nesting-depth
 scratch pointer (``_acquire_tmp`` -> ``__revl_tmp`` / ``__revl_tmp_n1`` …, with
 ``_tmp_extra`` reconstructed from the max allocation depth), and the
 ``_type_comments`` layout block. Elements/fields are scalars or ASCII ``Str``
-literals; still OUT are non-ASCII ``Str`` content (needs item 221's
-``str_utf8_bytes``), tagged Opt/Result/variant cells (``_make_tagged``), the
-``for`` walk, field/index READS, ``builtin``/``len``, Map, and anonymous records
-reached with no expected type (the ``_anon`` counter path)."""
+literals.
+
+Slice 4 adds the READ and tagged-CONSTRUCTION surface: ``reads.rvl`` the field
+(``_field_expr``) and index (``_index_expr``) reads plus ``x.length`` (the
+``len`` node) via ``_slot_load``; ``variants.rvl`` the ``[u32 tag][pad][slot]``
+tagged cell (``_make_tagged`` / ``_tagged_layout`` / ``_tag_of``) for the
+built-in ``Opt``/``Result`` and user ``variant``s, nullary and payload cases,
+nested cells, and the ``@variant`` layout comments; ``forloop.rvl`` the ``for
+(x of xs)`` list walk (the ``for_ptr``/``for_cnt``/``for_idx`` cursor triple in
+pre-order loop-id order); and ``builtins.rvl`` the ``builtin`` method surface
+whose helpers all live in the always-emitted preamble (``length``, the
+``to_int``/``to_int32`` widths, the four integer divisions, ``to_str`` /
+``Str.to_int``, and ``push``/``concat``/``slice``/``charAt``/``charCodeAt``/
+``startsWith``/``endsWith`` over Str and List).
+
+Still OUT after slice 4: non-ASCII ``Str`` content (needs item 221's
+``str_utf8_bytes``); READING a tagged cell — ``match`` and ``??`` (their
+scrutinee/arm-bind locals and payload branches carry their own header ordering);
+the demand-pulled reader helpers ``indexOf``/``split``/``join`` and Float
+interpolation (``$str_index_of``/``$str_split``/``$str_join``/``$f64_to_str`` are
+not in the fixed preamble); the checked-division total forms (their per-node
+``cdiv_*`` Int scratch locals); the ``Map`` value type (a named refusal);
+components/services; arrow values; ``@wasm`` externs; anonymous records reached
+with no expected type (the ``_anon`` counter path); and in-file ``test``/
+lifecycle-test emission."""
 
 import importlib.util
 import sys
@@ -83,6 +104,20 @@ CORPUS = [
     "recmem.rvl",   # slice 3b: the record value ABI — declared-order 8-byte-slot
                     # fields, nested record/list fields on deeper scratch, the
                     # _type_comments layout block, field-set-match let inference
+    "reads.rvl",    # slice 4a: field access + index READS — slot_load, declared
+                    # field offsets, constant/variable list index, `x.length`
+                    # (the len node), reads composed on reads
+    "variants.rvl", # slice 4b: tagged-union CONSTRUCTION — the [u32 tag][pad]
+                    # [slot payload] cell, Opt/Result built-ins + user variants,
+                    # nullary vs payload cases, nested cells + lists of cells,
+                    # the @variant layout comments
+    "forloop.rvl",  # slice 4c: the `for (x of xs)` list walk — for_ptr/cnt/idx
+                    # cursor locals, pre-order loop-id numbering (siblings,
+                    # nested, in-if), the element slot_load at the bind's width
+    "builtins.rvl", # slice 4d: the preamble-backed builtin/len surface — length,
+                    # to_int/to_int32 widths, the four int divisions, to_str /
+                    # Str.to_int, push/concat/slice/charAt/charCodeAt/startsWith/
+                    # endsWith over Str and List
 ]
 
 
