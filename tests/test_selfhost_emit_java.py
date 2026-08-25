@@ -17,42 +17,52 @@ corner of the reference's v3 path (``_emit_v3`` -> ``_emit_v3_functions`` ->
 and the free-function bodies.
 
 Covered subset (what emits byte-identical):
-  * the module scaffold — the two banner comments, ``package revl;``, the five
-    unconditional ``import io.cordis4j.core.*;`` lines, and the
-    ``public final class Components { private Components() {} }`` wrapper;
-  * ``_emit_v3_functions`` — each module fn as a ``public static`` method with
-    ``_java_v3_type`` for scalar / ``List`` / ``Opt`` / ``Map`` / ``Result``
-    parameter and return types (boxed in type-argument position), ``_fn_name``
-    keyword renaming, and ``// (empty body)`` for an empty body;
-  * ``_v3_stmt`` — let/assign (with the ``_let_keyword`` ``final var`` / ``var``
-    / bare ``java.util.List`` choice), return, if/while/for, the bare-expr
-    statement, and assert;
-  * ``_expr`` — lit, name, var (incl the ``None`` -> ``Optional.empty()``
-    reference), bin (``??`` via ``.orElseGet``, ``==``/``!=`` via
-    ``java.util.Objects.equals``, the trapping ``Math.addExact/subtractExact/
-    multiplyExact`` for Int/Int32, ``/``, ``%``, comparisons, ``&&``/``||``,
-    native string ``+``), un (incl ``Math.negateExact``), the 2.0
-    ``callee``/``args`` call and the ``fn`` call with the ``Some``/``None``
-    constructors, the ``widen`` markers, field, index, ternary-if, list, the
-    empty map literal, and non-float ``${..}`` interpolation via
-    ``String.valueOf``.
+  * slice 1 — the module scaffold (banner comments, ``package revl;``, the five
+    unconditional ``import io.cordis4j.core.*;`` lines, the
+    ``public final class Components { private Components() {} }`` wrapper);
+    ``_emit_v3_functions`` (each fn a ``public static`` method, ``_java_v3_type``
+    for scalar/``List``/``Opt``/``Map``/``Result`` types, ``_fn_name`` renaming,
+    ``// (empty body)``); ``_v3_stmt`` (let/assign, return, if/while/for,
+    bare-expr, assert); and the base ``_expr`` algebra (lit, name, var incl
+    ``None`` -> ``Optional.empty()``, bin incl ``??``/``==``/exact-arith/``/``/
+    comparisons/``&&``, un incl ``Math.negateExact``, the 2.0 call and the
+    ``fn`` call with ``Some``/``None``, the ``widen`` markers, field, index,
+    ternary, list, empty ``maplit``, non-float ``${..}`` interpolation).
+  * slice 2 (item 210) — the v3 TYPED-CORE: ``_emit_v3_types`` (a ``record`` type
+    as a ``public static final class`` with public final fields + a canonical
+    ctor; a ``variant`` type as a ``public sealed interface … permits …`` with a
+    ``final class … implements`` per case, nullary or single-``value`` payload);
+    the ``_V3Ctx`` type-table inference (``case_owners``, has-payload,
+    ``record_by_fields``, and each variant's full case set); ADT construction
+    (the ``adt`` node AND a ``call``/``var`` naming a user case, both
+    ``new Owner.Case(args)``); the ``_adt_binding_type`` ``let`` (``final Owner
+    o``); record LITERALS (``new Type(args)`` with the argument order taken from
+    the DECLARED field order); ``match`` over user variants (the pattern
+    ``switch`` with the document-wide ``__revl_case_N`` / ``__revl_ignored_N``
+    temp numbering threaded as an Int counter, the ``.value`` unpack, and the
+    ``_covers_variant`` omission of the ``default`` throw for a total match); and
+    the built-in Opt ``Some``/``None`` match (``.map(..).orElseGet(..)``).
 
-Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 2+):
-components/services entirely (``_emit_component*``, service interfaces, plugin
-ctors, ``provide``/``req``/``config``, the component-dialect expression kinds,
-and the ``_core_imports`` growth they drive); the v3 typed-core (user ``type``
-decls, record literals / functional update, ADT construction and ``match`` over
-user variants); the HOST Map/generics surface (``_emit_host_stubs``'
-``HashMap<String,V>`` with per-site value-type inference — the plain ``maplit``
-and ``Map[K,V]`` type lowering ARE covered); the stdlib surface (every
-``builtin``/``len`` node and ``_emit_stdlib_helpers``); the built-in Result
-surface (``Ok``/``Err`` and ``_emit_result_type``, plus ``_emit_checked_div_
-helpers``); async coloring / spawn / instances / externs / in-file ``test`` /
-lifecycle-test emission; the canonical Float->Str ``revlFtoa`` (so float
-interpolation is excluded); the ``_reject_fn_type`` refusal; local ``let``-bound
-arrows and their ``_inline_arrow`` beta-reduction; and ``let_pattern`` (its temp
-name is ``__revl_destructure_{id(node)}``, a host-object identity no port can
-reproduce).
+Deliberately OUT (excluded from the corpus, deferred to Java Path B slice 3+):
+  * COMPONENTS / SERVICES entirely, deferred AS ONE UNIT — a lone service drags
+    in a very large, bridge-entangled block (``_emit_service_interfaces_v3``,
+    ``_emit_plugin_ctors``, ``provide``/``req``/``config``, the component-dialect
+    expression kinds, the modern-vs-legacy ``_emit_component`` split, AND the
+    host-stub ``HashMap<String,V>`` per-site value-type inference
+    (``_map_value_expr_type``)), far bigger than the typed-core;
+  * the HOST Map/generics surface (``_emit_host_stubs``, component territory —
+    the plain ``maplit`` and ``Map[K,V]`` type lowering ARE covered);
+  * the stdlib surface (every ``builtin``/``len`` node and
+    ``_emit_stdlib_helpers``); the built-in Result surface (``Ok``/``Err`` ctor
+    and ``match``, ``_emit_result_type``, ``_emit_checked_div_helpers``);
+  * functional record-update ``{r | f = e}`` (the Java reference itself RAISES on
+    ``record_update`` — a structural exclusion);
+  * async coloring / spawn / instances / externs / in-file ``test`` /
+    lifecycle-test emission; the canonical Float->Str ``revlFtoa`` (float
+    interpolation excluded); the ``_reject_fn_type`` refusal; local ``let``-bound
+    arrows and their ``_inline_arrow`` beta-reduction; and ``let_pattern`` (its
+    temp name ``__revl_destructure_{id(node)}`` is a host identity no port can
+    reproduce).
 """
 
 import importlib.util
@@ -69,12 +79,18 @@ from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_java_corpus"
 CORPUS = [
+    # slice 1 (item 199) — functions-only base surface
     "arith.rvl",     # bounded int/int32, /, %, comparisons, ==/!=, unary, ??
     "control.rvl",   # let/var/assign, if/else, while, for, bare-expr, assert
     "calls.rvl",     # free-function calls
     "strings.rvl",   # string `+`, `${..}` interpolation, literals
     "lists.rvl",     # list literal, index, nested list types
     "maps.rvl",      # the empty map literal and the Map/List generic type lowering
+    # slice 2 (item 210) — the v3 typed-core
+    "records.rvl",   # record decls, out-of-order literals, field access, nesting
+    "adts.rvl",      # sealed-interface variants, `adt` ctors, `match` (exhaustive/
+                     # wildcard/partial-default/nested), the `final Owner` let
+    "optmatch.rvl",  # the built-in Opt Some/None match (.map/.orElseGet)
 ]
 
 
