@@ -1,0 +1,17 @@
+// Composite signature types on a PROVIDED service: the provide-method param
+// types come from the service declaration, so `_provide_impl` renders them
+// through the same `_ts_type` — a declared-record `List[Row]` -> `Row[]` and a
+// `Map[Str, Int]` param, byte-identical to the interface it `satisfies`.
+type Row = { id: Int }
+
+service Store {
+  fn put(rows: List[Row]) -> Int
+  fn tag(name: Str, ids: Map[Str, Int]) -> Str
+}
+
+component Db provides store: Store {
+  provide store {
+    fn put(rows) = rows.length()
+    fn tag(name, ids) = name
+  }
+}

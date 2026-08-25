@@ -418,6 +418,84 @@ counters, i64-helper gating). Each `emit_src(ir) == backends/typescript/emit.py
 emit(ir)` byte-for-byte. Deferred features (async, timer/await, spawn, realms,
 v1/v2, composite signature types) are EXCLUDED from the corpus, not approximated.
 
+## emit_ts.rvl slice 3 (item 208): composite signatures + host/format/fn/adt
+Extended the TS self-host to the COMPOSITE service/provide-method signature types
+(List/Opt/Map/Result/fn-type + the declared-record `known_types` path in
+`ts_type_v1`), the RECORD half of `_emit_ts_types`, and the four remaining
+component-dialect expr kinds `host`/`format`/`fn`/`adt`. Async coloring, the
+variant half of `_emit_ts_types`, spawn/instances, realms, the v1/v2 path, and
+the component-body `await`/`timer` steps stay deferred and EXCLUDED from the
+corpus (a divergence if fed one, not a bug).
+
+### Reference asymmetry: the v1 fn-type return uses `.lstrip()` where v3 assumes `)->`
+The single non-trivial defect surfaced porting the fn-type branch of the v1
+`_ts_type`. The reference v3 renderer (`_ts_v3_type`) and the reference v1
+renderer (`_ts_type`) both recover a function type's return, but by DIFFERENT
+means: v3 was mirrored in `ts_type` here as `slice(arrow + 3, n)` (assumes the
+IR spells the arrow `)->` with no space), whereas the reference v1 path goes
+through `_split_fn_type`, which does `name[i+1:].lstrip()` then `rest[2:].strip()`
+— tolerant of the space the IR ACTUALLY carries (`(Int, Str) -> Bool`). Symptom:
+the first `services_composite` run rendered `((a0: bigint, a1: string) => unknown)`
+(the return parsed as `> Bool` -> `unknown`) against the reference's `=> boolean`.
+Repro: any service op with a function-type parameter (`fn e(f: (Int, Str) -> Bool)`).
+Fix applied HERE (in `ts_type_v1`): recover the return with the `_split_fn_type`
+spelling (`py_strip(slice(arrow+1))` then drop the `->`), not the v3 `arrow+3`.
+NOTE for a future maintainer: the v3 `ts_type` fn-type branch (line ~245) still
+uses `slice(arrow + 3, n)` and is UNEXERCISED by any v3 fixture — if a v3 fn body
+ever annotates a spaced function type, it will mis-render the same way. Not fixed
+(out of this slice's file-touch scope for the v3 path's own corpus; flagged).
+
+### Counter-threading tax recurs — now compounded by a `known_types`-threading tax (LOW)
+Item 195's `Sout`/counter tax (also noted in slice 2 above) recurred verbatim, and
+slice 3 added a second parameter that must be plumbed through the SAME call chain
+for the SAME structural reason: `known_types` (the document's declared type names)
+is read once at the top of `emit_component_tail` and threaded down through
+`service_interfaces`, `component_lines`, `component_step` (incl. its own `if`
+recursion), and `provide_impl` purely to reach `ts_type_v1` at the leaves. The
+reference carries it as `ctx.types` on the single mutable `_Ctx`, so no reference
+call site names it; the pure-functional port has to widen five signatures. Repro:
+adding any new document-scoped read (types, async_ops, function_names) to a leaf
+renderer forces a full-chain signature edit. Not a bug — the inherent cost of
+`_Ctx` being a bag of document context that a pure port must destructure — but it
+is the same friction item 195 flagged, now with a concrete second instance. A
+`_Ctx`-shaped record threaded ONCE (one `type DocCtx = {known_types, counter, …}`
+argument instead of N loose ones) would collapse both taxes; worth considering for
+the emitter-guide pattern. Flagged only; not fixed.
+
+### Kit ergonomics (item 189): the format scanner wanted a char-class the kit hides
+`render_format` re-implements the reference's `re.finditer(r"\$\$|\$(\d+)")` scan
+by hand (revl has no host regex in the emitter). That needed `is_digit` and a
+digit-run integer parse — both trivially writable, but `stdlib/str.rvl` ALREADY
+defines `is_word_ch`/`is_alpha_us` (the `\w`/`[A-Za-z_]` classes) and they are
+NOT `pub`, so a self-host emitter cannot import them and re-derives its own
+`is_word_ch`/`is_digit`. Symptom: two tiny char-class helpers duplicated between
+`stdlib/str.rvl` (private) and this file. Not a blocker (the copies are 4 lines),
+but it is the same DISCOVERY-vs-GAP friction the slice-2 `list_contains` near-miss
+named: the classes exist, they are just not reachable. Informs item 189 — either
+`pub`-export the `str.rvl` character classes or document that emitters roll their
+own. Not fixed (would edit `stdlib/str.rvl`, out of this slice's scope).
+
+### Positive: the single-`_expr` dispatch absorbed all four new kinds unchanged
+As in slice 2, the reference's one-renderer discipline ported with no dialect
+fork: `fn`/`adt` (shared kinds) and `host`/`format` (component-only) were four
+independent `if (kind == …)` branches in `expr_inner` reusing the existing
+`commajoin`/`expr` threading, plus one `render_format` helper. No existing branch
+changed. `adt` reuses `json_dumps` for the case tag exactly as the reference
+reuses `_string`; `host` renders its dotted `fn` VERBATIM (not through `ident`),
+matching the reference's IDENT_RE-validated-upstream contract. Record-type
+emission (`emit_ts_types`) was 12 lines reusing `value_keys`/`ts_type` — the same
+zero-new-bridge story the kit keeps delivering for name-keyed IR sections.
+
+### How it is checked (slice 3)
+`tests/fixtures/emit_ts_corpus/`: `services_composite` (List/Opt/Map/Result/
+fn-type interface signatures + the declared-record `List[Msg]` -> `Msg[]` path,
+with `interface Msg` emitted), `services_composite_provide` (composite
+provide-method params `Row[]`/`Map<…>` via the same `ts_type_v1`), and
+`component_exprs` (`host.Job.run`, a `` `…${config.count}` `` format literal, a
+`tag(...)` top-level `fn` call, and an `Ok(x)` -> `{ kind: "Ok", value: x }` adt).
+Each `emit_src(ir) == backends/typescript/emit.py emit(ir)` byte-for-byte; the
+deferred features are excluded from the corpus, not approximated.
+
 ## Go emitter — Path B slice 2 (v3 typed-core, item 209)
 
 `selfhost/emit_go.rvl` now mirrors the go PURE typed-core byte-for-byte: user
