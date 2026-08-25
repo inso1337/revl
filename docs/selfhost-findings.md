@@ -495,3 +495,54 @@ provide-method params `Row[]`/`Map<…>` via the same `ts_type_v1`), and
 `tag(...)` top-level `fn` call, and an `Ok(x)` -> `{ kind: "Ok", value: x }` adt).
 Each `emit_src(ir) == backends/typescript/emit.py emit(ir)` byte-for-byte; the
 deferred features are excluded from the corpus, not approximated.
+
+## Go emitter — Path B slice 2 (v3 typed-core, item 209)
+
+`selfhost/emit_go.rvl` now mirrors the go PURE typed-core byte-for-byte: user
+`type` decls (`_emit_v3_go_types` — record -> Go `struct` with unexported
+source-spelled fields, no json tags on the pure tier; variant -> sealed interface
++ per-case struct + seal method), record literals + field access, ADT
+construction (nullary `<Variant><Case>{}` / payload `{Value: arg}`), `match` over
+user variants as a Go type-switch IIFE, and user type names in `go_type`. New
+fixtures `records.rvl` / `variants.rvl` cross-check `emit_src(ir) ==
+backends/go/emit.py emit(ir)` to the last byte; slice-1 fixtures stay green.
+Deferred (excluded, not approximated): functional record-update (the go reference
+RAISES on it — python/ts only), the built-in Opt/Result/Map surface and its
+preambles, stdlib builtins, and the live-component world.
+
+### Friction: 8-field threaded Ctx, no record-update to spread it (LOW)
+The lowering ctx grew from 4 fields to 8 (`vt fr er ca cp rbf rf rt`) to carry the
+user-type tables. Because the self-host emitters avoid functional record-update
+by convention (the same `{r | f = e}` the go tier itself defers), `set_vt` has to
+respell ALL EIGHT fields to update ONE (`vt`), and every ctx-construction site
+(`emit_functions`, the in-file `typed_ctx` test helper, the per-arm `set_vt` in
+`render_match`) does the same. Repro: add a field to `type Ctx` and every literal
+must be hand-edited in lockstep; a dropped field is a compile error (good) but the
+mechanical tax is real and grows with the table count. Symptom is identical to the
+ts slice's "counter threading" note but for a WIDER record. A single-field
+`with`-style update in the language (even restricted to the tiers that already
+emit `record_update`) would collapse `set_vt` to one line. Not a bug — the pure
+port pays this for the reference's in-place `ctx.var_types[k] = v`; flagged for the
+emitter guide / a future record-update-in-selfhost decision. (Not fixed.)
+
+### Observation: `use { … }` brace list appears non-enforcing (LOW)
+`value_children` (from `stdlib/value.rvl`) is used in `emit_go.rvl` (`flag_walk`,
+`arrow_param_hint`) but was NOT in that file's `use "../stdlib/value.rvl" { … }`
+brace list, yet the file compiled and ran green before this slice — i.e. a pub
+symbol resolves whether or not it is named in the selective-import list. If that
+is intended (brace list is advisory / all pub symbols import), the guide should
+say so; if selective import is meant to be enforced, an unlisted-symbol use is a
+silently-missed check (and a typo'd name would resolve to the wrong module's
+export under shadowing). I ADDED `value_keys` to the list for this slice to be
+explicit, but did not rely on enforcement. Repro: remove any imported name from a
+`use { … }` list while still using it; observe it still compiles. Kit-ergonomics
+(item 189) note only — not fixed, flagged for the import-semantics owner.
+
+### Positive: `go_type` needed ZERO change for user type names
+The reference `_go_v3_type` maps a user record/variant name and an UNKNOWN named
+type to the SAME `_v3_ident(t)` passthrough (the `t in types` branch and the
+fallthrough are byte-identical), so `emit_go.rvl`'s existing `go_type` fallback
+`return v3_ident(t)` already emitted `Point` / `[]Point` / `RevlOpt[Point]`
+correctly — no `types`-table parameter had to be threaded into `go_type` at all,
+unlike the rust port's `rust_type_t(t, tnames)`. The go tier's decision to not
+special-case the known-vs-unknown named type paid off directly in the self-host.
