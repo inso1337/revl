@@ -11,6 +11,9 @@
 //     back and watch the pane rebuild
 //   · withdraw EditorPane — this editor disappears (the ◐ dock, bottom-right,
 //     is the way back)
+//   · ship v2 of the style: in StyleV1 below, change BOTH v1s to v2 (the
+//     component name and the theme it mounts) and press ⇄ Swap — the graph
+//     shows StyleV2 replace StyleV1, and the page reskins itself under you
 //   · rename a tab label, delete a view — press ⇄ Swap: your edit is
 //     re-admitted against the RUNNING page and hot-swapped in
 //   · press ■ Unload — the page tears itself down, LIFO, and the residue
@@ -47,6 +50,14 @@ component StatusBar {
 
 component SystemPanel {
   let slot = effect ui_mount_region("system") undo ui_unmount_region("system")
+}
+
+// The page's look, as a versioned component. v1 is the teal build; change
+// both v1s to v2 and ⇄ Swap to ship the violet build of the same page.
+// Withdraw it (✕) and the page falls back to its unthemed look — the theme
+// leaves no residue because mounting it declared how it comes off.
+component StyleV1 {
+  let skin = effect ui_theme("v1") undo ui_theme_reset()
 }
 
 // ---------- the result tabs
@@ -97,6 +108,12 @@ extern pure fn ui_unmount_region(id: Str) -> Int
 
 extern acquire fn ui_mount_region(id: Str) -> Int undo ui_unmount_region("")
   = @py { import playground_host; return playground_host.mount_region(id) }
+
+extern pure fn ui_theme_reset() -> Int
+  = @py { import playground_host; return playground_host.theme_reset() }
+
+extern acquire fn ui_theme(name: Str) -> Int undo ui_theme_reset()
+  = @py { import playground_host; return playground_host.theme(name) }
 
 extern emission fn ui_select(id: Str)
   = @py { import playground_host; playground_host.select(id) }
