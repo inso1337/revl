@@ -1,0 +1,23 @@
+// item 140 proof (rust tier): the stdlib JSON wire protocol crosses to rust.
+//
+// `json_stringify(json_parse(s))` round-trips a structured document — a
+// record-shaped object carrying a nested list and a nested map. On rust the
+// `Any` return type-erases to `cordis::Value`; the @rs bodies box a parsed
+// `serde_json::Value` into that `cordis::Value` and recover it to re-encode,
+// so the structured value survives the crossing (serde_json is already pinned
+// in the emitted crate's Cargo.toml). The emitted module carries a `#[test]`
+// that RUNS the round-trip under `cargo test`
+// (backends/rust/test_emit_rust.py::test_cargo_test_runs_the_json_wire_roundtrip).
+//
+// Golden: backends/rust/golden/jsonwire.rs (byte-pinned by
+// test_jsonwire_golden_byte_equality).
+use "../../../stdlib/json.rvl" { json_parse, json_stringify }
+
+fn roundtrip(s: Str) -> Str { return json_stringify(json_parse(s)) }
+
+test "the JSON wire protocol round-trips a structured value on rust" {
+  // canonical (sorted keys) + compact form, so serde_json's deterministic
+  // re-encoding reproduces the input exactly.
+  let wire = """{"args":["london","paris"],"meta":{"n":2},"name":"get_weather"}"""
+  assert roundtrip(wire) == wire
+}

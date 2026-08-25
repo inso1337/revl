@@ -51,36 +51,49 @@ each emitter refuses an extern that has no body for its tier):
 |---|---|---|---|
 | py | `json.loads(s)` | `json.dumps(v)` | **executed by tests** (stdlib) |
 | ts | `JSON.parse(s)` | `JSON.stringify(v)` | emitted by tests (builtin) |
-| rs | — | — | an `Any` extern return type-erases to `cordis::Value` on this tier (a cloneable `Arc<dyn Any>`), so a parsed record cannot be read back (`tc.name` has no field on `Value`); the module ships no `@rs` body until the emitter types an `Any`-typed binding by its declared type. The tier refuses with `extern `json_parse` has no @rs body — not portable to this backend` |
+| rs | `Value::new(serde_json::from_str(&s))` | `serde_json::to_string(v.downcast())` | **runs** (item 140): `Any` erases to `cordis::Value` (a cloneable `Arc<dyn Any>`); the body boxes a parsed `serde_json::Value` into it and recovers it to re-encode (`serde_json` is already pinned in the emitted crate). A structured document survives `stringify∘parse`; `cargo test` runs the round-trip (backends/rust/scenarios/jsonwire.rvl → golden jsonwire.rs). Reading a parsed value into a typed binding for field access is still the erased-`Value` boundary. |
 | java | — | — | the tier refuses with `extern `json_parse` has no @java body — not portable to this backend`; a provider's Jackson/Gson plugs in here when one is on the `javac` classpath |
-| go | — | — | same refusal; the go emitter adds imports for builtins, not for verbatim extern bodies, so `encoding/json` cannot reach the module yet |
+| go | `json.Unmarshal([]byte(s), &v)` | `json.Marshal(v)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through a `//revl:import encoding/json` directive the emitter hoists into the module's import block. `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). |
 | wasm | — | — | the substrate value model (Int/Bool/Str/List) cannot hold Float/Map/records, so a JSON value has no representation there |
 
 The refusal message is the built-in honesty gate, the same shape the
 conformance corpus's three bodyless externs already ride (docs/conformance.md):
 a tier that cannot run the module says so at emit time, never silently.
 
-## What is left (the path to the other tiers)
+## Crossing to rust and go (item 140)
 
-1. **rust**: an `Any` extern return is a `cordis::Value` (type-erased
-   `Arc<dyn Any + Send + Sync>`) on this tier, and the emitter types a
-   binding by the extern's return, not by its declared annotation — so the
-   harness's core pattern (`let tc: ToolCall = json_parse(s); tc.name`)
-   cannot compile. The fix is an emitter/type-flow feature: when a binding
-   has an explicit declared type, type it by that (the checker already
-   admits it), and only then add `@rs` bodies (`serde_json` is already a
-   dependency of the emitted crate).
-2. **go**: teach the go emitter to add `encoding/json` (and any import an
-   extern body needs) to the module's import block, then add `@go` bodies.
-   The parse semantics must map JSON values onto the tier's representations
-   (`map[string]any`, `[]any`, `string`, `float64`, `bool`, `nil`).
-3. **java**: no JDK JSON API; add `@java` bodies against a provider jar
+`json_parse`/`json_stringify` now ship `@rs` and `@go` bodies, so a
+composition that carries structured data over JSON crosses to four tiers, and
+the executable round-trip is pinned per tier (`cargo test` / `go test`):
+
+- **rust** — `Any` erases to `cordis::Value`, a cloneable `Arc<dyn Any + Send
+  + Sync>`. The @rs body parses with `serde_json::from_str::<serde_json::
+  Value>` and boxes the result with `Value::new(..)`; `json_stringify`
+  recovers it with `v.downcast::<serde_json::Value>()` and re-encodes with
+  `serde_json::to_string`. `serde_json` is already pinned in the emitted
+  crate's Cargo.toml, so no new dependency is introduced. The value stays
+  opaque at the type level — a parsed value read into a typed binding for
+  field access (`let tc: ToolCall = json_parse(s); tc.name`) is still the
+  erased-`Value` boundary — but a structured document survives
+  `stringify∘parse`, which is what a wire protocol needs.
+- **go** — `Any` erases to Go's `any` (`interface{}`), exactly the shape
+  `encoding/json` decodes into (`map[string]any`, `[]any`, `string`,
+  `float64`, `bool`, `nil`). A verbatim extern body cannot spell its own
+  `import`, so the @go body carries a **`//revl:import encoding/json`**
+  directive on its own line; the emitter lifts the package to the module's
+  import block and drops the directive from the emitted function body. This
+  is the general seam — any `//revl:import <path>` in a @go body is hoisted —
+  kept minimal rather than special-cased to `encoding/json`.
+
+What is still left:
+
+1. **java**: no JDK JSON API; add `@java` bodies against a provider jar
    (gson/jackson) and extend the run/test classpath to include it.
-4. **wasm**: needs a richer value model (Float, Map, records) on the
+2. **wasm**: needs a richer value model (Float, Map, records) on the
    substrate tier — the same prerequisite FR-4/FR-11 raise; documented as a
    deliberate tier refusal until then.
 
-## The multi-tier tradeoff (decision recorded, roadmap item 81)
+## The multi-tier tradeoff (recorded item 81, closed for rust/go by item 140)
 
 This module's per-tier scope is not a private stdlib detail — it decides how
 wide a *composition that carries structured data* can run. The harness made
@@ -89,42 +102,29 @@ that concrete. Its milestone-2 switch from a string wire protocol
 parsed by `json_parse`) moved the composition's reach from **"runs on
 py/ts/rust/go" to "runs on py/ts"** — because the moment the wire format is
 JSON, every tier in the composition must be able to parse JSON, and only py
-and ts have `@py`/`@ts` bodies for it.
+and ts had `@py`/`@ts` bodies for it. Item 81 recorded that narrowing (the
+honesty gate working: no body means an emit-time refusal, never a silent
+mis-emit) and named the two structural blockers.
 
-The narrowing is not a bug; it is the honesty gate working. `json_parse` ships
-no `@rs`/`@go` body (the FR-3 scope above), so rust and go refuse at emit time
-rather than shipping something broken. The exact message a user sees on the
-rust tier is:
+**Item 140 removed both**, so the JSON wire protocol now crosses to rust and
+go as well (see "Crossing to rust and go" above):
 
-```
-extern `json_parse` has no @rs body — not portable to this backend (available: py, ts)
-```
+- **rust** — the `Any` return still erases to `cordis::Value`, but that is
+  enough for a wire protocol: the @rs body boxes a parsed `serde_json::Value`
+  into the erased value and recovers it to re-encode, so a structured document
+  survives `stringify∘parse`. (Reading a parsed value into a typed binding for
+  field access — `let tc: ToolCall = json_parse(s); tc.name` — remains the
+  erased-`Value` boundary, a narrower gap than "no body at all".)
+- **go** — the `//revl:import` hoist lets the @go body reach `encoding/json`,
+  and `Any` erases to Go's `any`, the shape `encoding/json` decodes into.
 
-and identically on go (`no @go body … (available: py, ts)`). Two independent
-reasons keep those bodies off today, both structural rather than incidental:
-
-- **rust** — an `Any` extern return type-erases to `cordis::Value` (a
-  cloneable `Arc<dyn Any + Send + Sync>`), and the emitter types a binding by
-  the extern's *return*, not by its declared annotation. So even with a
-  `serde_json` body, the harness's core pattern
-  (`let tc: ToolCall = json_parse(s); tc.name`) could not read a field back —
-  the parsed value is opaque at the type level.
-- **go** — the go emitter adds imports for *builtins*, not for verbatim extern
-  bodies, so a `@go` body cannot reach `encoding/json`. The import machinery
-  has to learn to pull in what an extern body names before any body can run.
-
-**The decision:** structured args on all six tiers needs the JSON module to
-gain `@rs`/`@go` bodies — on rust, type an `Any`-binding by its declared type
-(then `serde_json`); on go, wire `encoding/json` into the module's import
-block (see "What is left" above for the full per-tier path) — *or* a per-tier
-wire protocol negotiated at the seam. Until then, **the string protocol
-remains the full-tier fallback**: a composition that flattens its wire format
-to `name arg1 arg2` runs on py/ts/rust/go/java/wasm, and the price is that the
-args are positional strings rather than a structured document. A composition
-that wants structured args over JSON is a py/ts composition today — and even
-the ts half carries its own residual blocker for a *real* provider (item 80,
-async extern bodies: an HTTP call is a `Promise`, and extern bodies cannot yet
-`await`).
+Java and wasm still refuse at emit time (no JDK JSON API on the run classpath;
+no rich-enough value model on the substrate). For those two tiers **the string
+protocol remains the full-tier fallback**: a composition that flattens its
+wire format to `name arg1 arg2` runs on all six tiers, at the price of
+positional strings rather than a structured document. The ts tier also still
+carries a residual blocker for a *real* provider (item 80, async extern
+bodies: an HTTP call is a `Promise`, and extern bodies cannot yet `await`).
 
 ## Why externs, not builtins
 

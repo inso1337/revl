@@ -716,3 +716,63 @@ def _compile(source: str) -> dict:
     sys.path.insert(0, str(ROOT / "src"))
     from revl import compile_source
     return compile_source(source)
+
+
+# ---------------------------------------------------------------------------
+# extern @go bodies: `//revl:import` hoist + revl `Any` -> Go `any` (item 140).
+# A verbatim extern body cannot spell its own `import`, so the @go body places
+# a `//revl:import <path>` directive that the emitter lifts to the module's
+# import block and drops from the function body.
+
+def _extern_ir(go_body: str, *, returns="Any", params=None) -> dict:
+    return {
+        "ir_version": 3, "types": {}, "functions": [],
+        "externs": [{
+            "name": "probe", "class": "pure",
+            "params": params or [{"name": "s", "type": "Str"}],
+            "returns": returns, "bodies": {"go": go_body},
+        }],
+        "tests": [],
+    }
+
+
+def test_extern_go_body_hoists_revl_import_directive():
+    ir = _extern_ir(
+        "//revl:import encoding/json\n"
+        "var v any\n"
+        "_ = json.Unmarshal([]byte(s), &v)\n"
+        "return v"
+    )
+    src = emit.emit(ir, package="p")
+    # the package is hoisted into the module import block...
+    assert '"encoding/json"' in src
+    assert "import (" in src
+    # ...and the directive line itself never survives in the emitted body
+    assert "//revl:import" not in src
+    assert "json.Unmarshal([]byte(s), &v)" in src
+
+
+def test_extern_go_body_hoists_quoted_import_path():
+    # the path may be written quoted, exactly as Go spells an import
+    src = emit.emit(_extern_ir('//revl:import "encoding/json"\nreturn nil',
+                               returns="Any"), package="p")
+    assert '"encoding/json"' in src
+    assert '""encoding/json""' not in src  # not double-quoted
+
+
+def test_revl_any_maps_to_go_any():
+    src = emit.emit(_extern_ir("return s", returns="Any"), package="p")
+    assert "func probe(s string) any {" in src
+
+
+def test_jsonwire_scenario_ir_emits_encoding_json_backed_bodies():
+    """The checked-in item-140 proof IR emits the two JSON bodies with the
+    hoisted `encoding/json` import (the executable proof runs under `go test`
+    in scenarios/emitted/jsonwire/)."""
+    ir = _load(HERE / "scenarios" / "emitted" / "jsonwire" / "jsonwire.ir.json")
+    src = emit.emit(ir, package="jsonwire")
+    assert "func json_parse(s string) any {" in src
+    assert "func json_stringify(v any) string {" in src
+    assert "json.Unmarshal([]byte(s), &v)" in src
+    assert "json.Marshal(v)" in src
+    assert '"encoding/json"' in src

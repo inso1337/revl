@@ -76,6 +76,16 @@ python3 "$here/emit.py" "$here/scenarios/emitted/advance/advance.ir.json" advanc
 python3 "$here/emit.py" "$here/scenarios/emitted/records/records.ir.json" records \
   > "$here/scenarios/emitted/records/gen_records_test.go"
 
+# --- stdlib JSON wire protocol crosses to go (item 140) ---------------------
+# jsonwire.ir.json is compiled from scenarios/emitted/jsonwire/jsonwire.rvl by
+# the frozen frontend (`revl compile`). The @go bodies of stdlib/json.rvl reach
+# `encoding/json` through the `//revl:import encoding/json` hoist directive, and
+# revl `Any` erases to Go `any` — before item 140 the go emitter refused the
+# module ("no @go body"). The emitted file IS the proof: a `*_test.go` whose
+# `Test…` func RUNS json_stringify∘json_parse on a structured document.
+python3 "$here/emit.py" "$here/scenarios/emitted/jsonwire/jsonwire.ir.json" jsonwire \
+  > "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -99,6 +109,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/timer/gen.go" \
            "$here/scenarios/emitted/advance/gen_advance_test.go" \
            "$here/scenarios/emitted/records/gen_records_test.go" \
+           "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"
