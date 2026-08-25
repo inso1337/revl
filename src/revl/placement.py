@@ -50,6 +50,7 @@ Backends and their runners:
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -895,15 +896,31 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                         "set generate_test_certs = true for loopback test certs")
                 certs[p] = explicit_tls[p]
 
+    def _sni(host: str, tls: dict) -> str:
+        # SNI (TLS servername) must be a DNS name: node — and RFC 6066 — refuse
+        # an IP literal as a servername even when the leaf carries it as an IP
+        # SAN, so a loopback address handed through raw fails the handshake
+        # (item 152; the same trap the [remotes] path already dodges). An
+        # explicit [tls] server_hostname wins; else an IP host names the DNS SAN
+        # the minted certs always carry ("localhost"); a real DNS host is used
+        # as-is.
+        if tls.get("server_hostname"):
+            return str(tls["server_hostname"])
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return host
+        return "localhost"
+
     def _serve_endpoint(pname: str) -> dict:
         host, port, _ = addresses[pname]
         return {"host": host, "port": port,
-                "tls": {**certs[pname], "server_hostname": host}}
+                "tls": {**certs[pname], "server_hostname": _sni(host, certs[pname])}}
 
     def _proxy_endpoint(consumer: str, host_proc: str) -> tuple[dict, float | None]:
         host, port, rtt = addresses[host_proc]
         return ({"host": host, "port": port,
-                 "tls": {**certs[consumer], "server_hostname": host}}, rtt)
+                 "tls": {**certs[consumer], "server_hostname": _sni(host, certs[consumer])}}, rtt)
 
     # (consumer, key, host, port, configured_rtt) for the latency report below
     net_seams: list[tuple[str, str, str, int, float | None]] = []

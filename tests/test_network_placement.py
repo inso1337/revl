@@ -427,7 +427,10 @@ def test_placement_parses_a_network_address_into_a_tcp_mtls_seam(tmp_path, monke
     assert ep["host"] == "127.0.0.1" and ep["port"] == 39555
     # it presents the *consumer's* identity (mTLS: the client's own cert) ...
     assert ep["tls"]["identity"] == "consumer"
-    assert ep["tls"]["server_hostname"] == "127.0.0.1"
+    # SNI is the cert's DNS SAN, not the raw IP host — an IP literal is not a
+    # legal TLS servername (node/RFC 6066 refuse it), so a loopback address
+    # dials under "localhost" (item 152).
+    assert ep["tls"]["server_hostname"] == "localhost"
     # the minted cert/key/ca paths are wired in (they live under the run's
     # 0700 tmpdir and are torn down with it when the run ends)
     for k in ("cert", "key", "ca"):
