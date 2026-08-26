@@ -647,24 +647,27 @@ def _write_readme(*, check_only: bool) -> int:
     report = run()
     selfhost = selfhost_column()
     block = readme_block(report, selfhost)
-    readme = ROOT / "README.md"
-    text = readme.read_text(encoding="utf-8")
+    # The full construct matrix lives in docs/conformance.md, not the README —
+    # the README carries only a short qualitative summary, so the front page
+    # stays a front page. This block is still generated + gated, never authored.
+    doc = ROOT / "docs" / "conformance.md"
+    text = doc.read_text(encoding="utf-8")
     updated = _splice_readme(text, block)
 
     if check_only:
         if updated == text:
-            print("README conformance matrix is up to date.")
+            print("docs/conformance.md matrix is up to date.")
             return 0
-        print("README conformance matrix is STALE — regenerate it with "
+        print("docs/conformance.md matrix is STALE — regenerate it with "
               "`python3 tools/conformance.py --write-readme` (or `make matrix`) "
               "and commit the result.", file=sys.stderr)
         return 1
 
     if updated == text:
-        print("README conformance matrix already up to date.")
+        print("docs/conformance.md matrix already up to date.")
     else:
-        readme.write_text(updated, encoding="utf-8")
-        print("README conformance matrix regenerated.")
+        doc.write_text(updated, encoding="utf-8")
+        print("docs/conformance.md matrix regenerated.")
     return 0
 
 
