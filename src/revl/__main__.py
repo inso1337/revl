@@ -522,6 +522,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "truc":
         from .truc import main as _truc_main  # noqa: PLC0415 — lazy, pulls cordis
         return _truc_main(args.truc_args)
+    if args.command == "bundle":
+        from .bundle import run_bundle  # noqa: PLC0415 — lazy, pulls the compiler
+        return run_bundle(args)
+    if args.command == "verify":
+        from .bundle import run_verify  # noqa: PLC0415 — lazy
+        return run_verify(args)
     if args.command == "explain":
         return _run_explain(args)
     if args.command == "doctor":
