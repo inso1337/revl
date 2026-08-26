@@ -173,6 +173,11 @@ CORPUS = [
                             # `Map<V>` runtime (`_emit_host_stubs`), per-site
                             # `_map_value_expr_type` value inference (`Map<java.lang.Long>`),
                             # and the `Map<V>` provider field/ctor/apply-local declarations
+    "comp_host_map_generic.rvl",  # the SAME host-Map path with a NESTED-generic value type
+                            # (`Map[Str, List[Msg]]` -> `Map<java.util.List<Msg>>`): the
+                            # item-77 follow-up shape item 275 tracked — the reference emits
+                            # `Map<V>` per site, the old mirror left `Map` raw. Pins the
+                            # generic-`Map` drift in the byte-identity oracle on every run.
     "comp_fail.rvl",        # an `if (..) { fail ".." }` activation guard: the `fail` ->
                             # `throw new CordisException(String.valueOf(..))` lowering, the
                             # `CordisException` import widening, a body-level `if`, and a
