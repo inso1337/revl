@@ -52,11 +52,53 @@ describe('item 281 json_stringify serializes an Int (bigint) field, not throws',
     expect(() => dump_large()).not.toThrow()
   })
 
-  it('the no-bigint fast path is unchanged (parse then stringify)', () => {
-    // json_parse maps JSON numbers to JS `number`, so this exercises the
-    // marks.length === 0 fast path identical to the old builtin behavior.
+  it('an ordinary tool-call shape round-trips unchanged', () => {
+    // `count` decodes to a bigint (item 311's bigint-aware parse), which
+    // json_stringify renders back as the bare number 2 — the string is
+    // byte-identical to the input, matching the py tier.
     expect(roundtrip('{"name":"get_weather","count":2}')).toBe(
       '{"name":"get_weather","count":2}',
+    )
+  })
+})
+
+// Roadmap item 311 (found by item 281): the PARSE direction. The builtin
+// `JSON.parse` decodes every JSON number to a JS `number` (f64), so an integer
+// past 2^53 came back rounded on the ts tier while the py tier (`json.loads` ->
+// Python int) kept it exact — a silent cross-tier value divergence. The @ts
+// `json_parse` (stdlib/json.rvl) is now a number-preserving recursive-descent
+// parse: a JSON integer literal decodes to a JS `bigint` (revl `Int`, full i64
+// precision) and a float to a JS `number` (revl `Float`), matching py.
+//
+// `roundtrip` is json_stringify(json_parse(s)); a lossy parse would surface as
+// changed digits after the round-trip. These EXPECTED strings are the py tier's
+// own compacted output for the same documents, cross-checked against the py
+// tier in tests/test_json_stdlib.py::test_ts_parse_roundtrip_matches_py_tier.
+describe('item 311 json_parse decodes a large integer without losing precision', () => {
+  it('a bare integer past 2^53 survives stringify∘parse exactly (== py)', () => {
+    // 2^53 + 1: the builtin JSON.parse would round this to ...992.
+    expect(roundtrip('9007199254740993')).toBe('9007199254740993')
+  })
+
+  it('i64 max and i64 min survive exactly (== py)', () => {
+    expect(roundtrip('9223372036854775807')).toBe('9223372036854775807')
+    expect(roundtrip('-9223372036854775808')).toBe('-9223372036854775808')
+  })
+
+  it('large Int fields inside an object keep full i64 precision (== py)', () => {
+    expect(
+      roundtrip(
+        '{"input_tokens":9007199254740993,"output_tokens":9223372036854775807}',
+      ),
+    ).toBe('{"input_tokens":9007199254740993,"output_tokens":9223372036854775807}')
+  })
+
+  it('negative integers, floats, and nested mixes round-trip (== py)', () => {
+    expect(roundtrip('-7')).toBe('-7')
+    // a float literal stays a JS number (revl Float), not a bigint
+    expect(roundtrip('2.5')).toBe('2.5')
+    expect(roundtrip('{"a":[1,2.5,true,null,"x"]}')).toBe(
+      '{"a":[1,2.5,true,null,"x"]}',
     )
   })
 })
