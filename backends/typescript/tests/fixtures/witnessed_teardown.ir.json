@@ -1,0 +1,220 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [
+    {
+      "name": "WorkflowCommit",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "wit_stash",
+            "args": []
+          }
+        },
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "ledger_insert",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "row"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "fn",
+            "name": "ledger_remove",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "row"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "WorkflowAbort",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "let-effect",
+          "bind": "store",
+          "acquire": {
+            "kind": "host",
+            "fn": "Map.new",
+            "args": []
+          },
+          "undo": {
+            "kind": "call",
+            "target": {
+              "kind": "name",
+              "id": "store"
+            },
+            "method": "drop",
+            "args": []
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "wit_stash",
+            "args": []
+          }
+        },
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "ledger_insert",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "row"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "fn",
+            "name": "ledger_remove",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "row"
+              }
+            ]
+          }
+        },
+        {
+          "step": "fail",
+          "message": {
+            "kind": "lit",
+            "value": "boom"
+          }
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "types": {
+    "StashWitness": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "was": "Str"
+      }
+    },
+    "StashError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "reason": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "wit_unstash",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "StashWitness"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const box = (globalThis as any).__revlWitnessBox\n  box.value = w.was\n  record('wit_unstash was=' + w.was)\n"
+      }
+    },
+    {
+      "name": "wit_stash",
+      "class": "witnessed",
+      "params": [],
+      "returns": "Result[StashWitness, StashError]",
+      "bodies": {
+        "ts": "\n  const box = (globalThis as any).__revlWitnessBox\n  const was = box.value\n  box.value = 'STASHED'\n  record('wit_stash was=' + was)\n  return { kind: 'Ok', value: { was } }\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "StashWitness",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "wit_unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ledger_insert",
+      "class": "emission",
+      "params": [
+        {
+          "name": "row",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const ledger = (globalThis as any).__revlLedger\n  ledger.push(row)\n  record('ledger.insert ' + row)\n"
+      }
+    },
+    {
+      "name": "ledger_remove",
+      "class": "pure",
+      "params": [
+        {
+          "name": "row",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  const ledger = (globalThis as any).__revlLedger\n  const at = ledger.indexOf(row)\n  if (at >= 0) ledger.splice(at, 1)\n  record('ledger.remove ' + row)\n"
+      }
+    }
+  ]
+}
