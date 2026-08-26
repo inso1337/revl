@@ -1,0 +1,21 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Sum {
+  fn digest(s: Str) -> Str
+}
+
+extern pure fn sha256(data: Str) -> Str
+  = @ts { return require("crypto").createHash("sha256").update(data).digest("hex") }
+  = @py { import hashlib; return hashlib.sha256(data.encode()).hexdigest() }
+
+component ChecksumLog requires db: Database provides sum: Sum {
+  // Activation: log that the digest service is online
+  emit db.execute(`INSERT INTO service_log (service, status) VALUES ('digest', 'online')`)
+
+  provide sum {
+    fn digest(s: Str) = sha256(s)
+  }
+}

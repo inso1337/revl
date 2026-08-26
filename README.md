@@ -452,6 +452,34 @@ prompts did not mention and now do.
 **A fresh model run is what would move these numbers, and it has not been
 done since the rule landed.** Treat the re-score as a regression measurement
 of the corpus, not as a current model capability figure.
+
+**Fresh run: gpt-oss-20b, local, free, one-shot (2026-08-26).** `bench/run.py`
+gained a `local` runner (`--runner local`, stdlib `urllib` only, no new
+dependency) that posts straight to an OpenAI-compatible `/chat/completions`
+endpoint, for benchmarking local models without a paid provider or the cline
+CLI. This run used LM Studio serving `openai/gpt-oss-20b` at
+`http://localhost:1234/v1`, all 30 specs, all 3 variants, `--max-iters 1`
+(one shot, no retry loop), compiler at `c78f2bc`:
+`bench/results/gpt-oss-20b-oneshot/`.
+
+| variant | specs | first-pass compile |
+|---|---|---|
+| v1 | 30 | 24/30 (80%) |
+| v2 | 30 | 24/30 (80%) |
+| v2host | 30 | 18/30 (60%) |
+
+All 90 cells got a real response from the model (0 runner errors); every
+failure is a genuine compiler rejection, in
+`bench/results/gpt-oss-20b-oneshot/results.jsonl` alongside the extracted
+`.rvl` per cell.
+
+For comparison, DeepSeek V4 Pro's first-pass rate on the same metric, specs
+01-24 (`bench/results/rerun-deepseek-v4-pro-20260826/`): v1 96%, v2 96%,
+v2host 92%. gpt-oss-20b is a 20B local model against a much larger hosted
+one, and this run gave it zero retries, so the gap is expected; what carries
+over is the shape, not the level. v2host takes the largest first-pass hit in
+both runs, the extra host-block surface costs compiles independent of model
+size.
 <!-- BENCH-RESULTS:END -->
 
 ## Documentation

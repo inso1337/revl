@@ -1,0 +1,12 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Outbox requires db: Database {
+  emit db.execute(`INSERT INTO outbox (status) VALUES ('pending')`)
+    compensate db.execute(`DELETE FROM outbox WHERE status = 'pending'`)
+
+  emit db.execute(`INSERT INTO outbox (status) VALUES ('dispatched')`)
+    compensate db.execute(`DELETE FROM outbox WHERE status = 'dispatched'`)
+}
