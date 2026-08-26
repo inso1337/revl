@@ -1,0 +1,43 @@
+// Regression fixtures for roadmap item 302: the go-emitter Result-constructor
+// and empty-list SILENT value divergence (the value-level sibling of item 280),
+// reproduced on plain fns. revlEq on the go tier is reflect.DeepEqual, which is
+// FALSE across two different generic instantiations. A bare `Ok(x)` / `Err(x)` /
+// `[]` on one side of an equality erases to RevlOk/RevlErr[..any..] / []any and
+// used to compare UNEQUAL to the other side's concrete instantiation even though
+// the two values are equal on the py reference. Each fn/test pins one case: the
+// return-typed side is fully concrete, the bare-construction side must recover
+// the same concrete element types so equal values emit the identical go type.
+
+fn ok_int() -> Result[Int, Str] { return Ok(1) }
+fn err_on_int() -> Result[Int, Str] { return Err("boom") }
+fn ok_float() -> Result[Float, Str] { return Ok(1.5) }
+fn err_on_float() -> Result[Float, Str] { return Err("bad") }
+fn empty_strs() -> List[Str] { return [] }
+fn empty_ints() -> List[Int] { return [] }
+
+// case A: `Ok(literal)` on Result[Int, Str]. The bare `Ok(1)` on the RHS must
+// recover BOTH type params (int64, string) from the concrete LHS, not erase the
+// err side to `any`, or revlEq(RevlOk[int64, string], RevlOk[int64, any]) is
+// false on go while py agrees.
+test "Ok(literal) equals a bare Ok on the other side" {
+  assert ok_int() == Ok(1)
+}
+
+// case B: `Err(literal)` on Result[Int, Str]. The bare `Err("boom")` recovers
+// the ok side (int64) it cannot see from its own argument.
+test "Err(literal) equals a bare Err on the other side" {
+  assert err_on_int() == Err("boom")
+}
+
+// case C: the same two over Result[Float, Str] — floats take the widen path.
+test "Ok/Err equality holds over a Float result" {
+  assert ok_float() == Ok(1.5)
+  assert err_on_float() == Err("bad")
+}
+
+// case D: empty-list equality. A bare `[]` erases to `[]any{}` and used to
+// compare unequal to the concrete `[]string{}` / `[]int64{}` returned value.
+test "an empty list equals a bare empty list of the same element type" {
+  assert empty_strs() == []
+  assert empty_ints() == []
+}
