@@ -42,7 +42,16 @@ export function json_parse(s: string): any {
 }
 
 export function json_stringify(v: any): string {
-  return JSON.stringify(v) 
+  // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses
+  // ("Do not know how to serialize a BigInt"). A replacer parks each bigint
+  // behind a quoted sentinel carrying its exact decimal digits, then the
+  // quotes are stripped so those digits land as a BARE JSON number - full
+  // i64 precision (a plain Number() cast would lose it past 2^53), matching
+  // the py tier `json.dumps`. With no bigint present the fast path returns
+  // the builtin result unchanged.
+  const marks: string[] = [];
+  const wire = JSON.stringify(v, (_k, x) => typeof x === "bigint" ? "@@revlBigInt:" + (marks.push(x.toString()) - 1) + "@@" : x);
+  return marks.length === 0 ? wire : wire.replace(/"@@revlBigInt:(\d+)@@"/g, (_m, i) => marks[Number(i)]);
 }
 
 export function tool_name(s: string): string {

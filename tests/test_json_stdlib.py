@@ -17,6 +17,7 @@ Checked here:
 """
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -130,6 +131,53 @@ def test_py_tier_stringify_then_parse_is_identity(consumer_ir):
         assert ns["roundtrip"](doc) == ns["roundtrip"](ns["roundtrip"](doc))
 
 
+# ---------------------------------------------- item 281: ts Int == py tier
+
+# The ts-tier runtime proof runs under vitest
+# (backends/typescript/tests/fr3_json_int.test.ts) with these SAME expected
+# strings. Here the PY tier is executed on the SAME committed fixture, and its
+# output — compacted to JSON's canonical form — must equal them. That closes
+# the cross-tier claim: the ts bigint replacer produces exactly the py tier's
+# JSON (a bare number, at full i64 precision), the only residual difference
+# being the insignificant whitespace `json.dumps` inserts by default.
+_INT_FIXTURE = ROOT / "backends" / "typescript" / "tests" / "fixtures" / \
+    "fr3_json_int.ir.json"
+
+#: the compact JSON the ts tier emits, keyed by fixture fn — mirrored verbatim
+#: by fr3_json_int.test.ts
+_TS_EXPECTED = {
+    "dump_small": '{"input_tokens":7,"output_tokens":12}',
+    "dump_negative": '{"input_tokens":-3,"output_tokens":0}',
+    "dump_large":
+        '{"input_tokens":9007199254740993,"output_tokens":9223372036854775807}',
+    "dump_bare_int": "9223372036854775807",
+}
+
+
+def _compact(doc: str) -> str:
+    return json.dumps(json.loads(doc), separators=(",", ":"))
+
+
+def test_ts_int_serialization_matches_py_tier():
+    """The py tier serializes each Int-field record; compacted, it equals the
+    exact string the ts tier produces (asserted in vitest). Proves ts == py
+    for the Int/bigint case the builtin `JSON.stringify` used to throw on."""
+    ir = json.loads(_INT_FIXTURE.read_text(encoding="utf-8"))
+    ns = _exec_python(ir)
+    for fn, ts_out in _TS_EXPECTED.items():
+        py_out = ns[fn]()
+        # the py tier does not throw and produces the same JSON value...
+        assert json.loads(py_out) == json.loads(ts_out), fn
+        # ...and byte-equal to the ts tier once whitespace is normalized
+        assert _compact(py_out) == ts_out, fn
+
+    # the large-int digits survive EXACTLY on the py reference (a `Number()`
+    # cast in the ts replacer would have rounded these — the bug we avoided)
+    big = ns["dump_large"]()
+    assert "9007199254740993" in big  # 2^53 + 1, not ...992
+    assert "9223372036854775807" in big  # i64 max, not ...5808000
+
+
 # ---------------------------------------------------------------- tier gates
 
 def _emit_with(backend: str, ir: dict):
@@ -147,7 +195,11 @@ def _emit_with(backend: str, ir: dict):
 def test_ts_tier_emits_builtin_json(consumer_ir):
     out = _emit_with("typescript", consumer_ir)
     assert "JSON.parse(s)" in out
-    assert "JSON.stringify(v)" in out
+    # item 281: json_stringify wraps JSON.stringify in a bigint replacer (an
+    # `Int` field is JS `bigint`, which the builtin throws on) rather than
+    # returning the builtin result bare.
+    assert "JSON.stringify(v, (_k, x) =>" in out
+    assert '"@@revlBigInt:"' in out
 
 
 def test_rust_tier_emits_json_bodies(consumer_ir):
