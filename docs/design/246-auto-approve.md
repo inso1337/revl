@@ -1,7 +1,8 @@
 # Design: auto-approve-unless-irreversible, the permission policy as a type judgment (item 246)
 
-Status: design proposed. The policy decision table, the operator-layer
-decision point, the per-call approval two-step, the typed approval surface
+Status: design proposed, revised after review. The policy decision table,
+the decision chokepoint in `Session.call`, the activation gate on the
+mutating verbs, the per-call approval two-step, the typed approval surface
 with its five invariants, and the metrics are decided here. Item 246 needs
 245 (landed 2026-08-26: the session owner, the commit manifest, the
 hash-bound two-step, the class tags on the crossing surface). After 246 the
@@ -36,6 +37,16 @@ the same bind-to-hash shape 245 Decision 4 built for the commit
 (`revl_commit` enumerates, `revl_commit_confirm(hash)` fires, drift
 refuses); 246 inherits it rather than inventing a second consent mechanism.
 
+And the structural corollary the review sharpened: **the gate must sit
+where the crossings actually happen, not where the tool names suggest they
+do.** Class-(c) emissions fire from `revl_call`, from `revl_replay_forward`
+re-invoking the same calls, and from activation bodies at every mutating
+verb. A gate keyed on one tool name, or one that classifies only
+provide-methods, is a policy with two open doors. Decision 2 fixes both:
+the decision runs inside `Session.call` (the single chokepoint), and the
+class map classifies activation reach so load and swap answer for their
+own crossings.
+
 ## What already exists (the landed foundation this reads)
 
 - **The three action classes, checked.** 245 Decision 2 fixed the class of
@@ -50,21 +61,33 @@ refuses); 246 inherits it rather than inventing a second consent mechanism.
   visible to the capability fixed point (src/revl/emission_analysis.py
   seeds `witnessed` externs into `_emitting_capabilities`) but not yet
   tagged `actionClass: "a"` on that aggregation.
-- **The checked effect type at admission.** `audit_diff.audit_report(ir)`
-  builds the G8 surface from a compiled ir with no runtime; the MCP session
-  already evaluates the item-33 sandbox over it before anything boots
-  (src/revl/mcp/session.py, `_enforce_sandbox`). Per provide-method, the
-  MCP schema derives the observed reach from the checker
-  (src/revl/mcp/schema.py, `_method_effects`: `reachesEmission`,
-  `reachesHostCode`, `reachesCapabilities`), which is exactly the
-  granularity a per-call decision needs.
+- **The checked effect type at admission, at the right granularity.**
+  `audit_diff.audit_report(ir)` builds the G8 surface from a compiled ir
+  with no runtime; the MCP session already evaluates the item-33 sandbox
+  over it before anything boots (src/revl/mcp/session.py,
+  `_enforce_sandbox`). The per-scope granularity a per-call decision needs
+  is in `query.Composition`: each component splits into its activation
+  body and each provide-method (src/revl/query.py,
+  `_scopes_of_component`), and every scope carries its emission and extern
+  facts with `class` and `deferred`. That is the surface `_crossings`
+  aggregates and `revl audit` prints. The MCP schema also derives a
+  per-method reach (src/revl/mcp/schema.py, `_method_effects`:
+  `reachesEmission`, `reachesHostCode`, `reachesCapabilities`), but that
+  walk is advisory: it lacks the `*` first-class-value widening the
+  `_emitting_capabilities` fixed point applies (emission_analysis.py
+  widens a first-class reference to an emitting callable to `*`), so a
+  callback-smuggled emission is visible to the fixed point and invisible
+  to the schema walk. The class map below reads the checked surface, and
+  `_method_effects` should converge on it, not the reverse (Decision 2).
 - **The operator layer.** `operator.decide(session, tool_name, arguments)`
   gates every mutating management verb at the one dispatch point
   (src/revl/mcp/server.py, `handle`, before the handler runs), keyed by
   `TOOL_VERB`, refusing with a policy-style why-trace. `revl_call` is not
   in `TOOL_VERB`: driving the composition is ungated today. The item-55
-  contract is back-compatibility by absence (no profile, no gate), and 246
-  keeps that shape.
+  contract is back-compatibility by absence (no profile, no gate:
+  `decide` returns ungated when no operator is bound, operator.py), and
+  246 keeps that shape for the management verbs while Decision 4 names
+  the one place absence-of-profile undermines this item.
 - **The commit machinery 246 composes with.** `SessionOwner`
   (backends/python/runtime.py) holds the deferral queue, the discharge
   escrow, the live-frame registry, the hash-bound `manifest()` /
@@ -107,6 +130,10 @@ Three rows the table refuses to need:
   class (c) with no narrowing: a boundary that cannot be named cannot be
   proven reversible, so it can never be auto-approved. This is the same
   stance the item-33 allow-lists take (`*` never satisfies a named allow).
+  It also cannot be approved into: no policy rule can spell
+  `capability * requires approval`'s inverse, no `await approval["*"]`
+  exists, and the ticket for a `*` reach says so; the only yes a `*`
+  crossing can receive is the per-call ticket, every time (exit test 17).
 - **A failed inverse escalates after the fact.** Class (a) is
   auto-approved on the strength of the inverse; when an abort's `restore`
   itself fails, the restore-residue surfaces a prompt and increments
@@ -114,28 +141,72 @@ Three rows the table refuses to need:
   auto-approval was still honest: the prompt happens exactly when the
   proof stopped holding, and says so.
 
-## Decision 2: the decision point in operator.py
+## Decision 2: the decision chokepoint and the gates around it
 
-**The class map: computed at admission, cached per generation.** At `load`
-and `swap`, alongside `_enforce_sandbox`, the session builds a call
-classifier: `(key, method) -> {class, capabilities, crossings}` for every
-provided operation, derived from the same scope facts `_method_effects`
-reads (the reached service emissions, the reached externs with their
-`class` and `deferred` flags). The per-call decision is then a dictionary
-lookup; nothing is compiled, walked, or re-derived on the hot path. A new
-generation replaces the map atomically with the swap, so a call decided
-against a stale map is impossible (the map and the composition change
-together, under the same verb).
+**The class map: computed at admission, cached per generation, activation
+scopes included.** At `load` and `swap`, alongside `_enforce_sandbox`, the
+session builds a call classifier over EVERY scope of every component: each
+provide-method AND each activation body, `(scope) -> {class, capabilities,
+crossings}`. The derivation reads `query.Composition`'s per-scope facts
+and the `_emitting_capabilities` fixed point over them (the reached
+externs with their `class` and `deferred` flags, service emissions, and
+the `*` widening for first-class function values): the same checked
+surface `_crossings` aggregates and `revl audit` prints, so the map can
+never disagree with the audit. It deliberately does NOT read the MCP
+schema's `_method_effects`: that walk is advisory and misses the
+first-class-value widening, so deriving the gate from it would let a
+callback-carried emission through unclassified; `_method_effects` should
+converge on the map's answer, not the reverse. The per-call decision is
+then a dictionary lookup; nothing is compiled, walked, or re-derived on
+the hot path. A new generation replaces the map atomically with the swap,
+so a call decided against a stale map is impossible (the map and the
+composition change together, under the same verb).
 
-**Where the gate runs: the same dispatch point as item 55, as a second,
-orthogonal gate.** `operator.decide` answers *who may drive this verb*;
-the new `operator.approve_call(session, name, arguments)` answers *may
-this specific call proceed without a human*. Both run in
-`server.handle` before the handler, operator first (an operator who may
-not act at all never sees an approval ticket). `revl_call` stays out of
-`TOOL_VERB`: the management plane and the boundary plane are different
-axes, and conflating them would let a `may call` grant leak management
-authority or vice versa. `approve_call` reads the class map:
+**The activation gate: load and swap are boundary calls too.** Class-(c)
+emissions do not fire only from `revl_call`. An activation body runs its
+effects at every verb that boots or reboots a generation: `revl_load`,
+`revl_swap`, and the re-admitting verbs (`revl_edit`, `revl_undo`,
+`revl_restore`), and today those verbs are gated only by operator
+identity (`operator.decide`), never by effect class. Without this gate
+the per-call prompt has a one-line bypass: move the emission into the
+activation body of the component being swapped in, and the swap fires it
+with no ticket ever issued. So under an enabled policy the class map's
+activation-scope entries gate the mutating verbs themselves. A candidate
+whose activation reach is class (c) does not boot: the load/swap response
+becomes the same ticket two-step as a call, `{ok: false,
+approvalRequired: true, ticket: {...}}` returned BEFORE any activation
+body runs, the ticket naming the activation crossing; the approved
+re-issue boots and the spend is consumed at the activation crossing
+exactly as at a call crossing. A policy may instead refuse such a
+candidate outright at admission, naming the crossing, for deployments
+where activation-time class-(c) is never acceptable; either way nothing
+fires before the answer. Class (a)/(b) activation reach follows the
+table: (a) proceeds and counts, (b) enqueues, which is already
+activation-safe under 245 (the enqueue is the only mid-session effect).
+Exit test 12 pins the bypass shut.
+
+**Where the gate runs: inside `Session.call`, not on a tool name.**
+`operator.decide` answers *who may drive this verb* and stays at the
+`server.handle` dispatch point, operator first: an operator who may not
+act at all never sees an approval ticket. The new decision, *may this
+specific call proceed without a human*, runs INSIDE `Session.call`, after
+the target resolves and before `invoke()` runs. The placement closes a
+real bypass: `Session.replay_forward` re-invokes `self.call(...)` for
+every replayed call step (session.py), and a gate keyed on the tool name
+`revl_call` at dispatch would never see those re-fired crossings, because
+`revl_replay_forward` is not `revl_call`. With the decision in
+`Session.call` there is exactly one chokepoint and every internal
+re-invocation, present and future, passes through it. server.py still
+carries a small hook so a refusal can shape the MCP response (the ticket
+payload rides the tool result); if that hook is keyed by name it must
+enumerate `BOUNDARY_TOOLS = {"revl_call", "revl_replay_forward"}`, and
+the chokepoint in `Session.call` is the variant that stays correct as
+internal callers are added, so the name set is a response-shaping detail
+and never the gate itself. Exit test 13 covers the replay path.
+`revl_call` stays out of `TOOL_VERB`: the management plane and the
+boundary plane are different axes, and conflating them would let a
+`may call` grant leak management authority or vice versa. The decision
+reads the class map:
 
 - class none / (a): proceed, count silently.
 - class (b): proceed, count; the crossing surfaces at commit (the enqueue
@@ -152,8 +223,9 @@ prompt is the 245 shape, per call:
 1. `revl_call` on an unapproved class-(c) target returns
    `{ok: false, approvalRequired: true, ticket: {...}}`. The ticket names
    what a yes would mean: component, key, method, an args digest, the
-   capabilities reached, the crossing list, the generation's candidate
-   hash, and `hash`, a sha256 over the canonical JSON of all of it.
+   capabilities reached, the crossing list, the candidate hash of the
+   call's reach closure (Decision 3's one definition), and `hash`, a
+   sha256 over the canonical JSON of all of it.
 2. The harness relays the ticket to the human. `revl_approve(hash)` mints
    a ledger entry bound to that hash (Decision 3's binding, all five
    invariants). `revl_approve` joins `TOOL_VERB` under a new verb
@@ -166,14 +238,55 @@ prompt is the 245 shape, per call:
    what fires, never a superset. This is hash-binding doing the work
    revocation lists would otherwise do.
 
+**The outstanding-ticket table.** `revl_approve(hash)` presents a bare
+sha256; the capability, the component, the candidate hash, and the fields
+the human saw are not recoverable from it. So the server retains every
+ticket it issues, keyed by `hash`, and `revl_approve` REFUSES a hash it
+did not issue: an approval can only be minted for a question the server
+actually asked. Ticket lifetime follows the class map's: the table is
+replaced atomically with the map at swap (the map and the composition
+change together, under the same verb), so a ticket issued against a
+previous generation is gone, not stale; the presented hash gets the
+unknown-hash refusal and the caller re-issues the call for a fresh
+ticket.
+
+**The `approve` verb needs its own `_targets` branch.** `_targets` in
+operator.py routes any verb without an explicit branch to
+`_live_targets(ir)`, the whole live composition, and the authority check
+is all-or-nothing over the targets. Left there, a subject-scoped grant
+(`may approve on payments`) would be refused whenever ANY other component
+is live, which makes scoped approval authority unusable in exactly the
+multi-component sessions that need it. The branch resolves the presented
+hash against the outstanding-ticket table to the ticket's component and
+its realm labels, the same resolve-without-running pattern the `restore`
+branch uses on the snapshot manifest (`_snapshot_targets`), and refuses
+an unknown hash before the authority check runs.
+
 **Back-compatibility, the item-55 clause.** With no approval policy
-configured, `approve_call` returns ungated and every call proceeds:
-today's behavior, byte for byte, every existing test green. The policy is
-enabled at serve time (`revl mcp serve --approval-policy auto`, or a
-policy file that names approval-required capabilities, Decision 3) and is
-the intended default posture for agent sessions once 248's dogfood has
-measured it; flipping the default is 248's call to propose, not this
+configured, the decision in `Session.call` returns ungated and every call
+proceeds: today's behavior, byte for byte, every existing test green. The
+policy is enabled at serve time (`revl mcp serve --approval-policy auto`,
+or a policy file that names approval-required capabilities, Decision 3)
+and is the intended default posture for agent sessions once 248's dogfood
+has measured it; flipping the default is 248's call to propose, not this
 item's to assume.
+
+**An enabled policy requires recording.** A session has a WAL only when
+it was loaded with `record: true`: `Session.load` constructs the
+`Recorder` then or never (session.py), and the `SessionOwner`'s
+`wal_getter` returns None without it. Without a WAL there is no
+`approval-granted` record, no durable ticket spend (Decision 3's
+consume-before-fire), and no answer to "which human decision authorized
+this crossing"; a policy whose approvals evaporate is worse than none,
+because it looks like one. So enabling the approval policy REQUIRES
+recording: `revl mcp serve --approval-policy ...` refuses a `revl_load`
+without `record: true`, and a policy file with a `requires approval` rule
+admitted over a non-recording session refuses at load, each with a
+diagnostic naming the requirement. Refuse, don't degrade: no in-memory
+approval mode ships. Hash-binding and expiry would survive such a mode;
+atomic consumption across a crash and the audit join would not, and a
+mode that silently weakens invariant 5 is exactly what the
+refuse-don't-degrade stance forbids.
 
 **Unattended sessions.** Silence never approves (245 Decision 1). A
 class-(c) call in a session with no one to relay the ticket to fails
@@ -242,7 +355,9 @@ the new work is an intersection with the approval-required set):
    checks at the crossing site and the type system carries the rest. A
    component reaching `C` with no approval edge anywhere is refused at
    admission (the policy evaluation over the audit graph, the same place
-   the sandbox refuses today), before any runtime is touched.
+   the sandbox refuses today), before any runtime is touched. One edge of
+   this rule, the service-mediated case, is deliberately deferred to open
+   question 3 and fails closed meanwhile; see there.
 3. `Approval[C]` is not storable across the session boundary: it may not
    appear in a snapshot, a handoff shape, or a spawn config (the runtime
    binding below makes a smuggled one worthless anyway, but the checker
@@ -256,23 +371,59 @@ record (`approval-granted`):
       "requestId": ...,
       "capability": "production.payment",
       "component": <the crossing component's name>,
-      "candidateHash": sha256(canonical JSON of the component's semantic IR),
+      "candidateHash": <the reach-closure hash, below>,
       "session": <session identity>,
       "fields": {...},           # amount, reason: what the human saw
       "grantedAt": ..., "expiresAt": ...,
       "consumed": false
     }
 
-`candidateHash` reuses the provenance-free comparison the operator layer
-already has (`operator._semantic`: the IR entry minus `source`, exactly
-the equality `_changed_targets` uses to decide what a swap touched). At
-the crossing, the frame checks the token before the extern body runs:
+**`candidateHash` covers the reach closure, not one component.** A
+component-scoped hash (sha256 of the crossing component's own semantic
+entry) under-covers what the human approved: the behavior of the call
+includes every provider it transitively reaches, and a swap of one of
+THOSE providers (changed behavior, same names, caller untouched) would
+leave every standing token for the caller alive. So `candidateHash` is a
+sha256 over the canonical JSON of the semantic entries of the call's
+REACH CLOSURE: the target's provider plus the providers of every required
+service on the checked reach path of the call. Each entry is
+`operator._semantic` (the IR entry minus `source`, exactly the
+per-component equality `_changed_targets` uses to decide what a swap
+touched), so the closure hash is a fold of comparisons the operator layer
+already performs, over closure membership the class map's crossing facts
+already name. The sound coarser fallback is the semantic hash of the
+whole composition: it never misses a swap, at the cost of invalidating
+tokens on swaps that could not affect the call; v1 may ship the fallback
+first, but may not ship the component-scoped version. Decision 2's ticket
+names this same hash and no other: one definition, both entry points.
+
+At the crossing, the frame checks the token before the extern body runs:
 unexpired, unconsumed, component matches the crossing frame, candidate
-hash matches the live generation's semantic entry, session matches.
-Consumption is marked atomically with the crossing's WAL record, which
-also names the `requestId`: the audit surface can answer "which human
-decision authorized this crossing" for every class-(c) crossing that
-needed one. That ledger is 248's measurement substrate and 251's input.
+hash matches the live generation's reach-closure hash, session matches.
+
+**Consume before fire, durably.** The ordering matters, and it is the
+opposite of 245's flush bookkeeping. 245 records outcomes AFTER the fire
+(`_flush` in backends/python/runtime.py: `d.fire()`, then
+`wal.record_flushed(d.seq)`), and that is right for the deferral queue: a
+flushed record before the fire would claim a crossing that may not have
+happened, and the commit verdict, not a per-fire token, is the authority.
+A single-use token inverts the stakes. If consumption rides the emission
+record, a crash between the extern body and that record leaves the token
+still valid on recover AND the emission already out; the retry fires
+again on the same yes, and single-use was a lie exactly once. So the
+spend is durable FIRST: an `approval-consumed` WAL record naming the
+`requestId` is written and flushed before the extern body runs, then the
+body fires, then the existing emission record is written naming the same
+`requestId`. A crash between spend and fire leaves consumed-but-unfired:
+an owed action that needs a FRESH approval, which is fail-closed (a human
+is asked again; the world saw at most one fire on this yes). `revl
+recover` reports a spend with no matching emission record in the 245
+Decision 3 verdict shape: approval consumed, crossing unverified, owed.
+The emission record still answers "which human decision authorized this
+crossing" for every class-(c) crossing that needed one; the audit joins
+the spend and the emission on `requestId`. That ledger is 248's
+measurement substrate and 251's input. Exit test 14 cuts the WAL on both
+sides of the spend.
 
 **The five invariants, each with its mechanism:**
 
@@ -281,23 +432,31 @@ needed one. That ledger is 248's measurement substrate and 251's input.
    `await approval` produces, and admission refuses a component with no
    approval edge on the path. Runtime, defense in depth: the frame check
    refuses the crossing without a valid token, so a hand-built IR or a
-   backend bug still cannot cross silently.
-2. **Hash-bound.** The token names `candidateHash`; the grant is computed
-   against the live generation at mint time. The human approved this
-   code, not this component name.
+   backend bug still cannot cross silently (exit test 15 drives this half
+   on its own).
+2. **Hash-bound.** The token names `candidateHash`, computed over the
+   call's reach closure against the live generation at mint time. The
+   human approved this code and everything it reaches, not a component
+   name.
 3. **Expiring.** `expiresAt`, defaulted from the policy rule
    (`ttl 10m`; session-end at the latest, since `Approval` cannot be
    persisted). Checked at the crossing, not at mint, so a token that ages
    out mid-session refuses with a why-trace naming the expiry.
-4. **Candidate-invalidates.** A swap, edit, or undo changes the semantic
-   entry, so every standing token for that component fails the hash
-   check. No revocation bookkeeping exists to forget: the binding does
-   the invalidating, the same trick as 245's stale-manifest refusal.
+4. **Candidate-invalidates.** A swap, edit, or undo that changes ANY
+   semantic entry in the closure changes the hash, so every standing
+   token whose closure includes the changed provider fails the check,
+   including a token held by an untouched caller whose transitively
+   reached provider changed. No revocation bookkeeping exists to forget:
+   the binding does the invalidating, the same trick as 245's
+   stale-manifest refusal.
 5. **Non-replayable.** The token names the component and the session, and
-   is consumed at first crossing (single-use in v1). A deputy component
-   presenting a token minted for another component is refused; so is the
-   same component replaying a consumed token, and so is any token from
-   another session. The refusal why-trace names which binding failed.
+   is consumed at first crossing (single-use in v1), with the spend made
+   durable before the fire (the ordering above), so not even a crash
+   window exists in which a consumed token reads as fresh. A deputy
+   component presenting a token minted for another component is refused;
+   so is the same component replaying a consumed token, and so is any
+   token from another session, including a later session over the same
+   workspace and WAL. The refusal why-trace names which binding failed.
 
 **The MCP seam for `await approval`.** The session drives the loop per
 call (session.py: between tool calls the composition is idle), so a call
@@ -317,15 +476,31 @@ Four gates, four questions, no overlap:
 |---|---|---|---|
 | boundary policy (33) | may anything here ever reach C? | admission | refuses admission |
 | operator capabilities (55) | may this operator drive this verb on this target? | verb dispatch | refuses the verb |
-| **auto-approve policy (246)** | is this call reversible enough to proceed without a human? | per call, after 55 | returns the ticket |
+| **auto-approve policy (246)** | is this call reversible enough to proceed without a human? | per call, in `Session.call`, after 55 | returns the ticket |
 | **typed approval (246)** | did a human say yes to this candidate for this crossing? | at the crossing | refuses the crossing |
 
 Evaluation order per `revl_call`: operator gate, then class derivation,
 then approval. Each refusal is a policy-style why-trace (revl.why), and
 each is all-or-nothing over the call. `revl_approve` is itself gated by
-55 (verb `approve`), so "who may say yes" is scoped in the same profile
-grammar as "who may commit", and an operator without `approve` cannot
-launder authority through the prompt.
+55 (verb `approve`, with the `_targets` branch of Decision 2), so "who
+may say yes" is scoped in the same profile grammar as "who may commit",
+and an operator without `approve` cannot launder authority through the
+prompt.
+
+**Self-approval is the default identity model's hole.** With no operator
+profile bound, EVERY verb is ungated: `operator.decide` returns ungated
+whenever no operator is on the session (operator.py, the
+`operator is None` early return), and that includes the new `approve`.
+In that configuration the agent that received the ticket answers its own
+ticket, and the class-(c) prompt is advisory, not a gate. Enabling the
+approval policy is therefore only meaningful alongside an operator
+profile that WITHHOLDS `approve` from the calling identity and grants it
+to the human's; `revl mcp serve` with the policy enabled and no such
+profile warns at startup naming the hole, and refusing outright is the
+right default for agent-facing deployments (the warn-or-refuse choice is
+a serve flag, the diagnostic is not optional). The `revl run` tty path is
+exempt: its prompt is answered on the terminal, which is structurally a
+human, not a verb the calling process can drive.
 
 ## Decision 5: the differentiating claim, stated carefully
 
@@ -342,8 +517,11 @@ verbatim):
    surface enumerates every reached extern per component;
 2. a class-(b) call has exactly one lowering, the enqueue, so the queue is
    the set of irreversible crossings the commit will cause;
-3. class-(c) crossings are WAL-logged at fire, and under this item each
-   carries the `requestId` of the approval that authorized it.
+3. class-(c) crossings are bracketed in the WAL (the `approval-consumed`
+   spend before the fire, the emission record after, joined on
+   `requestId`), so under this item every class-(c) crossing that needed
+   an approval names the human decision that authorized it, and a spend
+   with no emission record is a visible owed action, never a silent gap.
 
 An action missing from the enumeration is a compiler bug, not a policy
 gap. The honest caveats, so the paper claim survives review: reversal
@@ -385,25 +563,36 @@ the counters, 248 ships the evaluation.
 
 - **Slice 0: this doc.**
 - **Slice 1: the operator-layer policy (py, MCP).** The per-generation
-  class map built at load/swap; `operator.approve_call` and the
-  `BOUNDARY_TOOLS` dispatch hook in server.py; the class-(c) ticket and
-  `revl_approve` (verb `approve` in `TOOL_VERB`); the approval ledger on
-  `SessionOwner` with the five binding checks; the `approval-granted` WAL
-  record and the `requestId` on emission records; the counters and the
-  manifest's `fired`; `actionClass: "a"` for witnessed externs on the
-  erase_report crossing aggregation (closing the noted gap). Off by
-  default; the whole existing suite stays green with no policy configured.
+  class map built at load/swap from the query scope facts, activation
+  scopes included; the approval decision inside `Session.call` plus the
+  `BOUNDARY_TOOLS` response-shaping hook in server.py; the activation
+  gate on the mutating verbs (the load/swap ticket two-step before boot);
+  the class-(c) ticket, the outstanding-ticket table, and `revl_approve`
+  (verb `approve` in `TOOL_VERB`, with its `_targets` branch resolving
+  the ticket table); the approval ledger on `SessionOwner` with the five
+  binding checks and the reach-closure hash; the `approval-granted` and
+  `approval-consumed` WAL records and the `requestId` on emission
+  records, in the consume-before-fire order; the
+  enabled-policy-requires-recording refusal and the missing-`approve`
+  profile warning at serve; the counters and the manifest's `fired`;
+  `actionClass: "a"` for witnessed externs on the erase_report crossing
+  aggregation (closing the noted gap). Off by default; the whole existing
+  suite stays green with no policy configured.
 - **Slice 2: the policy-owned requirement.** `capability C requires
   approval [ttl D]` in revl.policy (DSL and JSON), evaluated at admission
   beside the sandbox; the admission refusal for a component reaching an
-  approval-required capability with no approval edge.
+  approval-required capability with no approval edge; the load-time
+  refusal when such a policy meets a non-recording session.
 - **Slice 3: the language surface (py tier).** `Approval[C]`,
   `await approval[C] { fields }` on the async-extern suspension seam, the
   `with` clause, the checker obligation in `_lower_provide`, the
-  no-persistence rule, the frame-level crossing check. Ownerless tiers
-  refuse `await approval` at emit with a 245-style tier-gate diagnostic
-  (the suspension needs a session owner to route the request to); the
-  static obligation checks on every tier.
+  no-persistence rule, the frame-level crossing check with the durable
+  spend. Ownerless tiers refuse `await approval` at emit with a 245-style
+  tier-gate diagnostic (the suspension needs a session owner to route the
+  request to); the static obligation checks on every tier. The
+  service-mediated obligation edge is open question 3; the implementer
+  should expect the fail-closed refusal described there and point the
+  diagnostic at it.
 - **Slice 4: 248 consumes.** The dogfood measurement; no new surface here.
 
 ## Exit tests
@@ -423,26 +612,67 @@ the counters, 248 ships the evaluation.
 4. A compensated emission still prompts (class (c) unchanged by 247).
 5. Hash-binding: an approval bound to ticket hash H is refused for hash
    H' (drifted args, different method, or a swap between mint and use,
-   each covered).
+   each covered); `revl_approve` on a hash the server never issued is
+   refused by the outstanding-ticket table, and a ticket from a previous
+   generation is unknown after the swap replaces the table.
 6. An approval bound to candidate hash H is refused after a swap changes
    the component's semantic entry to H', with a why-trace naming the
-   candidate-invalidates check.
+   candidate-invalidates check; the same refusal when the swap changes a
+   transitively reached PROVIDER on the call's checked reach path while
+   the named component is untouched (the reach-closure hash, Decision 3).
 7. Expiry: a token past `expiresAt` refuses the crossing (clock
    injected); non-replay: a token minted for component X presented by a
-   deputy Y is refused, and a consumed token is refused on reuse.
-8. Unreachable-without: a component reaching a policy-declared
-   approval-required capability with no `with` edge is refused at
-   admission before any runtime boots; the declaration-owned spelling
-   refuses at lowering the same way.
+   deputy Y is refused, a consumed token is refused on reuse, and a token
+   minted in one session is refused in a later session over the same
+   workspace and WAL (cross-session replay).
+8. Unreachable-without, static half: a component reaching a
+   policy-declared approval-required capability with no `with` edge is
+   refused at admission before any runtime boots; the declaration-owned
+   spelling refuses at lowering the same way.
 9. Operator composition: an operator whose profile lacks `approve`
    cannot mint an approval (the item-55 refusal shape); one with it can,
-   and the granted crossing's WAL record names the `requestId`.
+   and the granted crossing's WAL records name the `requestId`; a
+   subject-scoped grant (`may approve on payments`) mints for a payments
+   ticket while other components are live, and is refused for a ticket
+   whose component sits outside the grant (the `_targets` approve
+   branch).
 10. No approval policy configured: byte-identical behavior to today,
     the whole existing suite plus the per-backend goldens green.
 11. Restore-residue escalation: an abort whose witnessed inverse fails
     surfaces a residue prompt counted in `prompts.residue` (243 rule 6),
     so "auto-approved because revertible" never silently degrades to
     best-effort.
+12. Activation gate: a swap candidate whose ACTIVATION body reaches a
+    class-(c) emission returns `approvalRequired` with the ticket and
+    does not boot (no activation effect runs); the approved re-issue
+    boots and fires exactly once; the same emission moved from a
+    provide-method into the activation body must not dodge the prompt,
+    which is the bypass this test exists to keep shut.
+13. Replay chokepoint: with the policy enabled, `revl_replay_forward`
+    over a recorded class-(c) call is refused at the re-fired crossing
+    with a ticket (the decision inside `Session.call` sees it even though
+    the tool is not `revl_call`); the class-(a)/(b) steps of the same
+    plan replay unhindered.
+14. Crash-cut pair (the style of 245's test 5): cut the WAL after
+    `approval-consumed` and before the emission record; recover reports
+    the token spent and the crossing owed/unverified, and the retry
+    demands a fresh approval, so no cut position exists where the token
+    is valid while the emission is out. Cut before `approval-consumed`:
+    the token is intact and nothing fired.
+15. Unreachable-without, runtime half: a hand-built IR (no checker run)
+    reaching an approval-required capability with no token is refused AT
+    THE CROSSING by the frame check, independent of the static
+    obligation.
+16. Non-persistence: `Approval[C]` in a snapshot shape, a handoff shape,
+    or a spawn config is refused by the checker; a value smuggled past it
+    in a hand-built IR fails the session binding at the crossing.
+17. The `*` row: a bare `emission` reach prompts as class (c), and no
+    approval shape can name it: no policy rule grants it, no
+    `await approval` form produces `Approval[*]`, and the per-call ticket
+    is the only yes it can ever receive.
+18. Recording required: enabling the approval policy over a session
+    without `record: true` refuses at serve/load with the diagnostic
+    naming the requirement; no in-memory ledger is silently substituted.
 
 ## Open questions (left deliberately)
 
@@ -455,12 +685,22 @@ the counters, 248 ships the evaluation.
    `uses: n` bindings are expressible in the ledger entry but not
    designed here; single-use, exact-hash is v1. Widening a binding is a
    251-shaped decision because it is policy, not consent.
-3. **Cross-component approval flow.** v1 refuses a token across
-   components by construction (invariant 5). A workflow where component X
-   legitimately brokers an approval for component Y is not supported;
-   whether it should be a first-class delegation (with its own binding)
-   or two approvals is open, and the confused-deputy default is the safe
-   one.
+3. **Cross-component and service-mediated approval flow.** v1 refuses a
+   token across components by construction (invariant 5). A workflow
+   where component X legitimately brokers an approval for component Y is
+   not supported; whether it should be a first-class delegation (with its
+   own binding) or two approvals is open, and the confused-deputy default
+   is the safe one. The typed surface meets the same question in
+   service-mediated form: when an approval-required capability sits
+   BEHIND a required service (the caller emits on `S`, and `S`'s provider
+   performs the crossing), the `with` edge cannot thread across the
+   interface unless the service method's signature itself carries
+   `Approval[C]` as a parameter type, which v1 does not add. The checker
+   obligation then refuses the provider at admission (it reaches `C` with
+   no approval edge), so the gap is fail-closed either way: refused, not
+   silently crossed. The Slice-3 implementer should expect exactly that
+   refusal in the service-mediated case and point its diagnostic at this
+   question.
 4. **The ttl default.** 10 minutes is a placeholder; 248's dogfood
    should pick the number from real session lengths rather than this doc
    guessing it.
