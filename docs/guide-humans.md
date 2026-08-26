@@ -247,12 +247,16 @@ the fix ([DESIGN.md](../DESIGN.md) §4):
 
 The complete subcommand index, every command wired in `src/revl/__main__.py`,
 one line each with the doc that details it. The flags and worked examples follow
-below.
+below; the exhaustive per-command flag reference is
+[commands-reference.md](commands-reference.md), and the MCP verbs are in
+[mcp-reference.md](mcp-reference.md).
 
 | command | what it does | docs |
 |---|---|---|
-| `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [backend-ir-v1.md](backend-ir-v1.md) |
-| `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [why-traces.md](why-traces.md) |
+| `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [commands-reference.md](commands-reference.md#revl-compile) · [backend-ir-v1.md](backend-ir-v1.md) |
+| `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [commands-reference.md](commands-reference.md#revl-explain) · [why-traces.md](why-traces.md) |
+| `revl doctor` | diagnose each backend tier, runtime and dependency (OK/WARN/MISSING + version), then smoke-test every available tier (`--json`, `--no-smoke`, `--smoke-timeout`) | [commands-reference.md](commands-reference.md#revl-doctor) |
+| `revl scaffold --service NAME` | generate a typed, holed composition skeleton from a spec (`--requires`/`--capabilities`/`--method`/`--emits`/`--config`, `-o`, `--json`) | [scaffold.md](scaffold.md) |
 | `revl audit FILES` | manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate, `--accept`/`--accept-all` acknowledge added crossings | [interchange-format.md](interchange-format.md) · [audit-diff.md](audit-diff.md) |
 | `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](revl-diff.md) |
 | `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](derived-versioning.md) |
@@ -282,7 +286,7 @@ below.
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
 | `revl import wit\|openapi\|cordis FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
-| `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`, tail passed through unchanged | [truc.md](truc.md) |
+| `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, tail passed through unchanged | [truc.md](truc.md) |
 
 Two module entry points sit outside the `revl` subcommand tree. `python -m
 revl.lsp` runs the human-facing language server over stdio, so an editor gets
