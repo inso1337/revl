@@ -206,6 +206,50 @@ to add one — this section is the STARTING INDEX such a host would build
 against, not a claim of durability the substrate does not carry.
 `backends/wasm/lifecycle.py`'s `parse_teardown_descriptor` reads it back.
 
+### Provide-method witnessed effects, per tool call (item 324)
+
+The accumulator above is fixed at compile time — it indexes exactly the
+`witnessed`/`emit … compensate` steps the ACTIVATION body spells out. Item 318's
+H1 gate is the agent case, where a `witnessed` fs mutation instead fires from a
+PROVIDE-METHOD body, once per tool call, an unbounded number of times only known
+at runtime. The wasm tier admits that position now, with a **runtime**
+accumulator alongside the static one:
+
+- each Ok mutation in a method body `$alloc`s a 24-byte cell — `[witness:8]
+  [undo_id:8][next:8]` — and pushes it onto `$__mw_head`, a newest-first linked
+  list, incrementing `$__mw_count`. The witness is the exact Ok payload, copied
+  out of the transient Result before the next call reuses it.
+- the list is drained ONLY by `deactivate`/`deactivate_step`, gated on
+  `$__committed`, one cell per call (the same one-entry-per-call idiom the static
+  chain uses), newest-first — so method inverses (the newer ones) replay ahead of
+  the activation-body chain, the component-level LIFO the contract asks for. A
+  clean unload never walks the list (discharge: the mutation persists, witness GC
+  by the cell going out of scope with the instance); an abort replays each cell's
+  declared inverse, dispatched by its `undo_id`.
+- **the disposal-ordering hazard** (item 318 found it on py, checked here): a
+  per-call disposal at method return would observe `$__committed == 0` while the
+  session is still live and WRONGLY revert the deliverable. Parking the entry and
+  draining it only at teardown, where the commit/abort bit is settled, is this
+  tier's park-for-drain. This is consistent with the per-tier preemption row
+  below (`activation-registered-only`): `$__mw_head` is component-instance state,
+  drained by the component's own teardown, never a per-call epoch that could tear
+  it down early.
+
+Two exports appear, present ONLY when a component actually has a method-body
+witnessed effect (gated on that, not on the broader teardown scaffold — a
+non-method-witnessed program's output is byte-identical):
+
+| export | purpose |
+|---|---|
+| `abort()` | flips an already-cleanly-activated component back to not-committed, so its next `deactivate` reverts the per-tool-call mutations instead of committing them — item 245's session-reject seam (py's `Frame.abort()`) |
+| `mw_live() -> i32` | the count of outstanding per-tool-call crossings — the wasm analogue of reading the WAL discharge descriptors; rises as calls register, falls to 0 as an abort drain replays them |
+
+Only the witnessed position is lifted. A non-witnessed method effect, a method
+`let-effect`, and method-time compensation all stay the hard `EmitError`s they
+were. Cross-tier design lives in the shared docs/design/243-witnessed-externs.md
+(item 318) and docs/design/teardown-contract.md; this section is the wasm-tier
+realization, proven by `backends/wasm/test_provide_method_witnessed.py`.
+
 ## Lifecycle tests on the substrate (item 142)
 
 A `lifecycle test` (docs/syntax-2.0.md §7.1) *runs* on the wasm tier when every
