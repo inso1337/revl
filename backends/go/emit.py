@@ -948,6 +948,10 @@ _COMP_NEEDS_TEARDOWN = False
 _COMP_NEEDS_METHOD_WITNESSED = False
 # Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
 _WITNESSED_COUNTER = 0
+# item 322 Slice 1: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the go WAL sink (revlRecordTransactional)
+# and the recording preamble is emitted. Default False -> byte-identical output.
+_RECORD_MODE = False
 
 
 def _comp_builtin(method, recv_surface, target, args):
@@ -1855,6 +1859,14 @@ def _emit_witnessed_step(out, pad, step, ext, env, bind: Optional[str]) -> None:
                (inner, ok_var, isok_var, result_var, ok_t_full, isok_var))
     out.append("%sresult := %s.Value" % (inner2, ok_var))
     out.append("%s_ = result" % inner2)
+    if _RECORD_MODE:
+        # item 322 Slice 1: the durable exit. At REGISTRATION (this closure runs
+        # during Apply, when the mutation happens) write the discharge-descriptor
+        # — the re-issuable named call recover replays LIFO to undo the mutation
+        # — and fsync it, so a crash BEFORE commit is still recoverable from the
+        # log alone. The witness is stringified as the referent argument.
+        out.append('%srevlRecordTransactional(%s, %s, []string{fmt.Sprintf("%%v", result)})'
+                   % (inner2, _go_string(ext_name), _go_string(undo_name)))
     out.append("%sreturn func() (_revlErr error) {" % inner2)
     out.append("%sif _revlFrame.committed {" % inner3)
     out.append("%s\t// item 243 a5a: discharge — the mutation is the" % inner3)
@@ -4473,6 +4485,127 @@ func (f *RevlFrame) registerMethodWitnessed(run func() error) {
 }'''
 
 
+# item 322 Slice 1: the go host recording channel. A durable, fsync'd JSON-Lines
+# WAL sink whose records the tier-agnostic recovery core (src/revl/wal.py +
+# src/revl/recovery.py) reads back to roll a crashed session back. Self-contained
+# (os + encoding/json + sync, all already or additionally imported in record
+# mode); emitted only when `record=True`, so a non-recording program never
+# carries it and stays byte-identical. Opened from the REVL_WAL env var at
+# process start; if that is unset the sink is nil and every record call is a
+# no-op, so a record-mode binary run without REVL_WAL behaves exactly as a
+# non-recording one. The record shapes match the py writer (backends/python/
+# replay.py) field-for-field: `discharge-descriptor` (the re-issuable named call
+# for one transactional inverse), `discharge` (the commit-path proof recover
+# skips), and the terminal `activation-complete` marker.
+_RECORD_PREAMBLE = '''// ---- durable WAL recording sink (item 322 Slice 1, the go host recording channel) ----
+
+const revlWALGuarantee = "the WAL records each committed effect's step identity, boundary " +
+	"classification and inverse DESCRIPTOR (not its closure). On restart, " +
+	"recovery runs the reconstructible boundary inverses newest-first (LIFO); " +
+	"in-process inverses are moot (their captured memory died with the " +
+	"process) and closure-only boundary inverses are reported as residue, " +
+	"never silently claimed to have run."
+
+// revlWAL is the process's durable append-only log. One line per record, JSON,
+// flushed + fsync'd before the call that wrote it returns — the write-ahead
+// discipline the py tier uses, so a record a caller saw acknowledged is on disk
+// before the effect it describes is allowed to matter.
+type revlWAL struct {
+	mu   sync.Mutex
+	f    *os.File
+	seq  int
+	seqs []int
+}
+
+var revlWALSink *revlWAL
+
+// revlWALOpen wires the sink to REVL_WAL (unset -> no-op recording) and stamps
+// the header. Called once from this package's init.
+func revlWALOpen() {
+	path := os.Getenv("REVL_WAL")
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	revlWALSink = &revlWAL{f: f}
+	revlWALSink.write(map[string]any{
+		"record": "header", "walVersion": 1, "generation": 1,
+		"guarantee": revlWALGuarantee,
+	})
+}
+
+func init() { revlWALOpen() }
+
+func (w *revlWAL) write(rec map[string]any) {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	_, _ = w.f.Write(append(line, '\\n'))
+	_ = w.f.Sync()
+}
+
+// revlRecordTransactional appends the discharge-descriptor for one witnessed
+// transactional inverse: the re-issuable named call {receiver, method, args}
+// recover replays LIFO to undo the mutation, plus the forward `origin` it
+// reverses. Fsync'd before it returns, so a crash after this call still leaves
+// the inverse re-issuable from the log alone.
+func revlRecordTransactional(receiver, method string, args []string) {
+	if revlWALSink == nil {
+		return
+	}
+	w := revlWALSink
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	seq := w.seq
+	w.seq++
+	w.seqs = append(w.seqs, seq)
+	ia := make([]any, len(args))
+	for i, a := range args {
+		ia[i] = a
+	}
+	call := map[string]any{"receiver": receiver, "method": method, "args": ia}
+	w.write(map[string]any{
+		"record": "discharge-descriptor", "seq": seq, "entry": "transactional",
+		"call": call, "origin": call, "witness": nil, "idempotency": nil,
+	})
+}
+
+// revlRecordDischarge writes the commit-path proof that every recorded
+// transactional seq COMMITTED, so recover SKIPS it — a committed transaction is
+// never rolled back. Called on a clean unload, never on a crash.
+func revlRecordDischarge() {
+	if revlWALSink == nil {
+		return
+	}
+	w := revlWALSink
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ia := make([]any, len(w.seqs))
+	for i, s := range w.seqs {
+		ia[i] = s
+	}
+	w.write(map[string]any{"record": "discharge", "discharged": ia})
+}
+
+// revlRecordActivationComplete stamps the terminal marker: its presence is the
+// whole roll-forward decision, its absence (a crash) is roll-back. Written only
+// after a clean unload.
+func revlRecordActivationComplete() {
+	if revlWALSink == nil {
+		return
+	}
+	w := revlWALSink
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.write(map[string]any{"record": "activation-complete", "generation": 1, "components": []any{}})
+}
+'''
+
+
 def _teardown_preamble(method_witnessed: bool) -> str:
     """The teardown accumulator preamble. Byte-identical to the base
     `_TEARDOWN_PREAMBLE` unless a provide-method registers a witnessed effect,
@@ -5247,11 +5380,20 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict, package: str = "emitted", package_name: str | None = None) -> str:
+def emit(ir: dict, package: str = "emitted", package_name: str | None = None,
+         record: bool = False) -> str:
     # `package_name` is the conformance harness's per-case naming kwarg (the
     # same one the java tier takes); accept it as an alias for `package`.
     if package_name is not None:
         package = package_name
+    # item 322 Slice 1: `record=True` wires the witnessed teardown to a durable
+    # WAL sink (the go host recording channel) so a crash BEFORE commit is
+    # recoverable by `revl recover`. It is OFF by default and gated everywhere
+    # it touches emission, so a non-recording program (every existing golden)
+    # emits byte-identically; only a program emitted in record mode carries the
+    # recording preamble and the per-descriptor `revlRecordTransactional` calls.
+    global _RECORD_MODE
+    _RECORD_MODE = record
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
@@ -5415,6 +5557,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
             out.append('\t"time"')
         out.append('\t"os"')
         out.append('\t"strconv"')
+    if _RECORD_MODE and _COMP_NEEDS_TEARDOWN:
+        # item 322 Slice 1: the durable WAL sink marshals records with
+        # encoding/json ("os" is already pulled in by the teardown block above).
+        out.append('\t"encoding/json"')
     out.append("")
     out.append('\tstc "github.com/0xdenny218/stc-go"')
     out.append(")")
@@ -5436,6 +5582,8 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         out.append(_V3_RESULT_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _RECORD_MODE:
+            out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
 
@@ -6212,13 +6360,18 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
 
 
 def main(argv):
-    if len(argv) < 2:
-        print("usage: emit.py <ir.json> [package]", file=sys.stderr)
+    # `--record` (item 322 Slice 1) wires the witnessed teardown to a durable
+    # WAL sink for crash recovery; off by default so ordinary emission is
+    # byte-identical.
+    args = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if not args:
+        print("usage: emit.py <ir.json> [package] [--record]", file=sys.stderr)
         return 2
-    package = argv[2] if len(argv) > 2 else "emitted"
-    with open(argv[1], encoding="utf-8") as f:
+    package = args[1] if len(args) > 1 else "emitted"
+    with open(args[0], encoding="utf-8") as f:
         ir = json.load(f)
-    sys.stdout.write(emit(ir, package))
+    sys.stdout.write(emit(ir, package, record=record))
     return 0
 
 

@@ -171,11 +171,17 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     (this composes with it; it does not reimplement admission). For a roll-back,
     reconstructible boundary inverses are run LIFO against ``world`` (a
     :class:`DictWorld` by default).
+
+    The WAL is read through the tier-agnostic core (:func:`revl.wal.read_wal`),
+    NOT the py backend: item 322 factored the reader out of
+    ``backends/python/replay.py`` so recover reads a WAL produced by any tier's
+    runtime — the py in-process driver or a non-py (go/rust/java/wasm)
+    subprocess — with no backend on the path.
     """
-    from replay import WriteAheadLog  # noqa: PLC0415 — backend module, lazy
+    from .wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
 
     try:
-        wal = WriteAheadLog.read(wal_path)
+        wal = read_wal(wal_path)
     except OSError as error:
         raise RecoveryError(f"cannot read WAL {wal_path}: {error}") from None
 
@@ -622,7 +628,7 @@ def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
 
 
 def _guarantee() -> str:
-    from replay import WAL_GUARANTEE  # noqa: PLC0415
+    from .wal import WAL_GUARANTEE  # noqa: PLC0415 — tier-agnostic core
     return WAL_GUARANTEE
 
 
