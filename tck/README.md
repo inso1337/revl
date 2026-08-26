@@ -23,7 +23,8 @@ green TCK report instead of a first-party integration wave.
 | **R4** | `r4_no_residue` | After unloading everything, the host holds no bindings, listeners, or effects. | backend-ir.md |
 | **R5** | `r5_derived_withdrawal` | Disposing a provider withdraws its provision and deactivates dependents purely through the runtime's revertible provide/set. | backend-ir.md |
 | **A1** | `a1_divert_at_boundary` | A divert during a component `await` skips every later step; the accumulated inverse still runs. | contract-errata.md |
-| **A5** | `a5_compensate_lifo` | An `emit`'s `compensate` reverts in LIFO order with the activation inverses. | contract-errata.md |
+| **A5** | `a5a_compensate_discharged` | A clean unload DISCHARGES an `emit`'s `compensate`: it never runs, the forward emission survives, only the bracket inverse replays. | contract-errata.md |
+| **A5** | `a5b_two_phase_abort` | On an abort, Phase 1 replays proof inverses LIFO to completion, THEN Phase 2 runs compensations LIFO — the `compensate` DELETE fires after the earlier bracket unlock. | contract-errata.md |
 | **A8** | `a8_sync_failure_contained` | A mid-body acquire failure reverts accumulated effects, lands the fiber FAILED, leaves siblings unaffected (L-Raise). | contract-errata.md |
 | **A8** | `a8_async_body_failure` | The same containment for an `await`-containing (async) body: inverses run LIFO, no residue, fiber lands FAILED. | contract-errata.md |
 | **G7** | `g7_lifo_complete_teardown` | Provisions + method-time effects + activation inverses recover newest-first in one drain; every dependent inverse precedes the provider's close. | contract-errata.md |
