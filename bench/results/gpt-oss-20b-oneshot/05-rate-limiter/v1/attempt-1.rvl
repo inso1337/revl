@@ -1,0 +1,17 @@
+service Limiter {
+  fn allow(key: Str) -> Opt[Str]
+  fn record(key: Str)
+}
+
+component RateLimiter provides limiter: Limiter {
+  let store = effect Map.new() undo store.drop()
+
+  provide limiter {
+    fn allow(key) = store.get(key)
+
+    fn record(key) {
+      effect store.insert(key, "1")
+      undo   store.remove(key)
+    }
+  }
+}

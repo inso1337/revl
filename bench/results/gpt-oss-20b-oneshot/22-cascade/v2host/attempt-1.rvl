@@ -1,0 +1,66 @@
+// Types
+type Row = { id: Int, name: Str, active: Bool }
+
+// Service interfaces (verbatim)
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  emission fn put(key: Str, value: Str)
+}
+
+service Api {
+  fn fetch(user: Str) -> Opt[Str]
+}
+
+// Component PgDatabase
+component PgDatabase provides db: Database {
+  config { url: Str = "postgres://localhost", size: Int = 4 }
+
+  // Acquire a connection pool
+  let conn = effect {
+    let url = config.url
+    Pool.open(url, config.size)
+  } undo conn.close()
+
+  provide db {
+    fn query(sql) = conn.query(sql)
+
+    // Emission operation: we emit to the host's execute
+    emission fn execute(sql) {
+      // The runtime will treat this as an irreversible effect.
+      emit conn.execute(sql)
+    }
+  }
+}
+
+// Component UserCache
+component UserCache requires db: Database provides cache: Cache {
+  config { ttl: Int = 300 }
+
+  // Map-backed store
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key) = store.get(key)
+
+    emission fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+
+      // Audit emission on put
+      emit db.execute(`INSERT INTO cache_log VALUES (${key})`)
+           compensate db.execute(`DELETE FROM cache_log WHERE k = ${key}`)
+    }
+  }
+}
+
+// Component ApiFront
+component ApiFront requires cache: Cache provides api: Api {
+  provide api {
+    fn fetch(user) = cache.get(user)
+  }
+}

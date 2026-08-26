@@ -1,0 +1,28 @@
+extern pure fn normalize(key: Str) -> Str
+  = @ts { return key.trim().slice(0,8); }
+  = @py { return key.strip()[:8]; }
+
+extern acquire fn Map.new() -> Map undo drop(map)
+  = @ts { return new Map(); }
+  = @py { return {}; }
+
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+component NormCache provides cache: Cache {
+  let store = effect Map.new() undo drop(store)
+
+  provide cache {
+    fn get(key) =
+      let nkey = normalize(key)
+      store.get(nkey)
+
+    fn put(key, value) {
+      let nkey = normalize(key)
+      effect store.set(nkey, value)
+      undo   store.delete(nkey)
+    }
+  }
+}
