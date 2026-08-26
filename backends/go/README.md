@@ -76,6 +76,38 @@ name. This is the Go analog of the Rust backend's `_revl_realm` fix.
   `undo w.dispose()` is a harmless no-op once the instance is gone and a
   safety net otherwise (an un-disposed instance cannot outlive its spawner).
   Proven on the real stc-go runtime by `scenarios/emitted/spawn/`.
+- **Witnessed-effect teardown** (items 243/247, docs/design/243-witnessed-externs.md,
+  docs/design/teardown-contract.md): a `witnessed[caps]` effect and an
+  `emit ... compensate ...` join a per-activation `RevlFrame` accumulator (the
+  go mirror of the py tier's `Frame`). A `witnessed` effect DISCHARGES on a
+  clean commit (the mutation is the deliverable and persists) and REPLAYS its
+  declared inverse against the captured witness on an abort; a compensation
+  runs only in Phase 2 of an abort, best-effort and bounded (goroutine
+  abandon-the-wait — go's per-tier preemption obligation). The commit marker is
+  Apply's own returned inverse (last-registered, so stc-go runs it FIRST on
+  unwind), flipping `committed` before any body inverse runs. Proven by
+  `scenarios/emitted/witnessed_teardown/`.
+- **Per-tool-call H1: witnessed effect in a provide METHOD** (item 318, the real
+  agent gate): a witnessed fs mutation that fires from a provide-method PER TOOL
+  CALL, after activation. Each call parks its inverse on the component's
+  activation frame via `RevlFrame.registerMethodWitnessed` (the go mirror of
+  `Frame.transactional_method` / `_deferred_transactional`); the mutation
+  PERSISTS on a clean unload and REVERTS on `RevlFrame.Abort()` (item 245's
+  reject seam). Disposal-ordering hazard, checked and avoided on go: a method
+  body has no activation-body generator to yield the disposer into, and
+  registering it as a sibling `ctx.Effect` after activation would land it LATER
+  in stc-go's LIFO stack than the commit marker — so on a clean unload it would
+  run BEFORE `commit()` flips `committed`, observe `committed == false`, and
+  WRONGLY REVERT THE DELIVERABLE (the same unsoundness item 318 found on py with
+  cordis's adopt-and-dispose-before-drain). The fix: the entry is NOT an stc-go
+  disposer — it is parked on the frame and disposed by `commit()` itself, after
+  the commit-vs-abort bit is settled, the go analog of py's park-for-drain.
+  Gated so non-witnessed / non-method-witnessed programs emit byte-identically
+  (the frame's `deferred`/`aborting` state and the `Abort`/registry helpers
+  appear only in the extended teardown preamble). Proven by
+  `scenarios/emitted/provide_method_witnessed/` (per-call persist, abort revert,
+  all-or-nothing, enumerable) against real files on disk — the go mirror of
+  `tests/test_provide_method_witnessed.py`.
 - **Out of scope** (rejected with a clear `EmitError`): ir_version 3 pure
   functions/records/variants/match.
 

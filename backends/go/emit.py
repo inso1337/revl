@@ -939,6 +939,13 @@ _WITNESSED_EXTERNS: dict = {}
 # Flags `_TEARDOWN_PREAMBLE` + the `time`/`os`/`strconv` imports into the
 # module; a document that uses neither stays byte-identical to before.
 _COMP_NEEDS_TEARDOWN = False
+# item 318: whether some provide-METHOD body registers a witnessed effect into
+# its component's activation frame (the per-tool-call H1 seam). When set, the
+# extended teardown preamble is emitted (the `deferred`/`aborting` frame state,
+# the `Abort`/`registerMethodWitnessed` methods, the frame registry). A document
+# with only activation-body witnessed effects / compensations leaves this False
+# and emits the base preamble byte-identically.
+_COMP_NEEDS_METHOD_WITNESSED = False
 # Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
 _WITNESSED_COUNTER = 0
 
@@ -1184,9 +1191,17 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
     svc = services.get(service_name, {})
     svc_methods = svc.get("methods", {})
 
+    # item 318: a provide block whose method registers a witnessed effect holds
+    # the enclosing component's activation frame, so the per-tool-call inverse
+    # can be parked on it (`registerMethodWitnessed`). Only such a block gains
+    # the field, so every other provide impl stays byte-identical.
+    has_method_witnessed = any(_method_body_has_witnessed(m.get("body")) for m in methods)
+
     # struct fields: ctx + config + every bind + every req (over-capture ok).
     out.append("type %s struct {" % struct)
     out.append("\tctx *stc.Context")
+    if has_method_witnessed:
+        out.append("\trevlFrame *RevlFrame")
     if has_config:
         out.append("\tcfg %sConfig" % _camel(comp_name))
     for b in binds:
@@ -1248,7 +1263,13 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                                       _expr(step["value"], env,
                                             env.var_types.get(step["name"]))))
         elif s == "effect":
-            _emit_effect_step(step, env, out, indent)
+            wit = _witnessed_extern(step.get("acquire"))
+            if wit is not None:
+                # item 318: a witnessed crossing PER TOOL CALL — park its
+                # inverse on the component's activation frame, not as a bracket.
+                _emit_method_witnessed_step(out, pad, step, wit, env)
+            else:
+                _emit_effect_step(step, env, out, indent)
         elif s == "emit":
             out.append("%s%s" % (pad, _expr(step["expr"], env)))
         elif s == "let-effect":
@@ -1653,16 +1674,38 @@ def _witnessed_extern(acquire):
     return _WITNESSED_EXTERNS.get(acquire.get("name"))
 
 
+def _method_body_has_witnessed(body) -> bool:
+    """True iff a provide-METHOD body (a flat step list) carries a witnessed
+    `effect` step (item 318). `let-effect` is not allowed inside a method, so a
+    witnessed crossing there is always a bare `effect` step calling a witnessed
+    extern."""
+    for step in body or []:
+        if step.get("step") == "effect" and _witnessed_extern(step.get("acquire")) is not None:
+            return True
+    return False
+
+
+def _provide_has_method_witnessed(provide_step) -> bool:
+    """True iff any method of a `provide` step registers a witnessed effect
+    (item 318): the provide block whose impl struct needs a `revlFrame` field
+    and whose method bodies register into the component's activation frame."""
+    return any(_method_body_has_witnessed(m.get("body"))
+               for m in provide_step.get("methods", []) or [])
+
+
 def _body_needs_frame(steps) -> bool:
     """True iff some step in `steps` (recursing into `if`/`then`/`else`) is a
-    witnessed effect or an `emit ... compensate ...` — i.e. this component's
-    Apply needs the `RevlFrame` teardown accumulator. A component using
-    neither gets no frame and emits byte-identically to before."""
+    witnessed effect or an `emit ... compensate ...`, OR a `provide` block whose
+    method registers a witnessed effect (item 318) — i.e. this component's Apply
+    needs the `RevlFrame` teardown accumulator. A component using none of these
+    gets no frame and emits byte-identically to before."""
     for step in steps or []:
         kind = step.get("step")
         if kind in ("let-effect", "effect") and _witnessed_extern(step.get("acquire")) is not None:
             return True
         if kind == "emit" and step.get("compensate") is not None:
+            return True
+        if kind == "provide" and _provide_has_method_witnessed(step):
             return True
         if kind == "if":
             if _body_needs_frame(step.get("then")) or _body_needs_frame(step.get("else")):
@@ -1788,6 +1831,85 @@ def _emit_witnessed_step(out, pad, step, ext, env, bind: Optional[str]) -> None:
         out.append("%s%s = %s" % (pad, bind, result_var))
     global _COMP_NEEDS_TEARDOWN
     _COMP_NEEDS_TEARDOWN = True
+
+
+def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
+    """Emit a witnessed effect inside a PROVIDE-METHOD body (item 318): the
+    per-tool-call H1 seam, the go mirror of backends/python/emit.py's
+    `_method_witnessed_step` + `Frame.transactional_method`.
+
+    Run the forward mutation INLINE in the method (not inside a `ctx.Effect` —
+    the activation-body path uses `ctx.Effect` because stc-go yields its inverse
+    into the LIFO teardown stack, but a method body runs AFTER activation, so a
+    `ctx.Effect` registered here would land LATER in that stack than the
+    activation's commit marker and therefore run BEFORE it on a clean unload —
+    reading `committed` still false and WRONGLY REVERTING THE DELIVERABLE, the
+    exact disposal-ordering hazard item 318 found on py). Instead, on the `Ok`
+    branch the extern's DECLARED inverse is PARKED on the component's activation
+    frame via `registerMethodWitnessed`; the commit marker (`commit()`) disposes
+    it once the commit-vs-abort bit is settled — discharge (no-op, the mutation
+    persists) on a clean commit, replay against the captured witness on an abort.
+    On `Err` nothing is parked (Ok-conditional): a failed mutation touched
+    nothing, so it schedules no rollback.
+
+    A panicking inverse is caught and recorded as `restore-residue` (243 rule 6),
+    never propagated — the same continue-and-record discipline as the
+    activation-body path."""
+    global _WITNESSED_COUNTER, _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+    _WITNESSED_COUNTER += 1
+    n = _WITNESSED_COUNTER
+    inner = pad + "\t"
+    inner2 = inner + "\t"
+
+    acquire = _expr(step["acquire"], env)
+    ok_t, err_t = _witnessed_result_types(ext.get("returns"))
+    result_t = "RevlResult[%s, %s]" % (ok_t, err_t)
+    ok_t_full = "RevlOk[%s, %s]" % (ok_t, err_t)
+    result_var = "_revlWit%d" % n
+    ok_var = "_revlOk%d" % n
+    isok_var = "_revlIsOk%d" % n
+
+    ext_name = str(ext.get("name"))
+    undo_node = ext.get("undo") or {}
+    undo_callee = undo_node.get("callee") or {}
+    undo_name = str(undo_callee.get("name") or undo_callee.get("id") or "undo")
+    undo_expr = _expr(undo_node, env)
+    # the enclosing component's activation frame, held as an impl-struct field
+    # (`revlSelf.revlFrame`), wired at `provide` construction time.
+    frame = "%s.revlFrame" % env.receiver
+
+    out.append("%svar %s %s" % (pad, result_var, result_t))
+    out.append("%s%s = %s" % (pad, result_var, acquire))
+    out.append("%sif %s, %s := %s.(%s); %s {" %
+               (pad, ok_var, isok_var, result_var, ok_t_full, isok_var))
+    out.append("%sresult := %s.Value" % (inner, ok_var))
+    out.append("%s_ = result" % inner)
+    out.append("%s%s.registerMethodWitnessed(func() (_revlErr error) {" % (inner, frame))
+    out.append("%sif %s.committed {" % (inner2, frame))
+    out.append("%s\t// item 318 a5a: discharge — the mutation is the deliverable" % inner2)
+    out.append("%s\t// and persists; witness GC'd (out of scope)." % inner2)
+    out.append("%s\treturn nil" % inner2)
+    out.append("%s}" % inner2)
+    out.append("%sdefer func() {" % inner2)
+    out.append("%s\tif r := recover(); r != nil {" % inner2)
+    out.append("%s\t\t%s.recordResidue(RevlTeardownRecord{" % (inner2, frame))
+    out.append("%s\t\t\tKind: %s, CrossingKey: %s, CrossingMethod: %s," %
+               (inner2, _go_string("restore-residue"), _go_string(ext_name), _go_string(undo_name)))
+    out.append("%s\t\t\tAttemptedCall: %s, AttemptedPhase: 1," % (inner2, _go_string(undo_name)))
+    out.append("%s\t\t\tErrorType: %s, ErrorMessage: fmt.Sprint(r)," % (inner2, _go_string("panic")))
+    out.append("%s\t\t\tOutcome: %s, Referent: %s," % (inner2, _go_string("failed"), _go_string(ext_name)))
+    out.append("%s\t\t\tHint: %s + %s + %s," %
+               (inner2, _go_string("the witnessed inverse "), _go_string(undo_name),
+                _go_string(" panicked during abort replay; verify and finish by hand")))
+    out.append("%s\t\t})" % inner2)
+    out.append("%s\t}" % inner2)
+    out.append("%s}()" % inner2)
+    out.append("%s%s" % (inner2, undo_expr))
+    out.append("%sreturn nil" % inner2)
+    out.append("%s})" % inner)
+    out.append("%s}" % pad)
+    _COMP_NEEDS_TEARDOWN = True
+    _COMP_NEEDS_METHOD_WITNESSED = True
 
 
 def _host_type_of_acquire(acquire):
@@ -1950,6 +2072,11 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             m["_ret"] = decl.get("returns")
         # build the impl value, wiring ctx + config + binds + reqs
         fields = ["ctx: ctx"]
+        # item 318: hand the frame to a provide block whose method registers a
+        # witnessed effect (the `_revlFrame` local exists — a method-witnessed
+        # component always needs the frame, see `_body_needs_frame`).
+        if _provide_has_method_witnessed(step):
+            fields.append("revlFrame: _revlFrame")
         if comp.get("config"):
             fields.append("cfg: cfg")
         for b in [x["bind"] for x in comp.get("body", []) if x.get("step") == "let-effect"]:
@@ -4145,6 +4272,156 @@ func (f *RevlFrame) runOneCompensation(entry revlCompEntry, bound time.Duration)
 }
 '''
 
+
+# item 318: the extended teardown accumulator, emitted in place of the base
+# preamble when some provide-METHOD registers a witnessed effect (per-tool-call
+# H1). It adds, to the base `RevlFrame`, exactly the state the py reference tier
+# carries in `Frame._deferred_transactional`/`_aborting` and disposes in
+# `Frame.drain`:
+#
+#   * `aborting` — the session-level abort discriminator (item 245's reject
+#     seam). A component that activated cleanly reaches `commit()` on ANY later
+#     unload and would implicitly commit every parked inverse; `Abort()` sets
+#     this first so `commit()` leaves `committed` false and each parked inverse
+#     replays instead.
+#   * `deferred` — the parked provide-method witnessed inverses. They are NOT
+#     stc-go disposers (registering one as a sibling `ctx.Effect` after
+#     activation lands it LATER in the LIFO stack than the commit marker, so a
+#     clean unload runs it with `committed` still false and wrongly reverts the
+#     deliverable — the disposal-ordering hazard). `commit()` (the commit
+#     marker, which stc-go runs FIRST on unwind because it is registered LAST)
+#     disposes them AFTER settling `committed`, the go mirror of `Frame.drain`
+#     disposing `_deferred_transactional`.
+#   * a package-level frame registry — the go mirror of the py tier's
+#     `_frame_for_ctx`, the seam a session/test reaches a live frame through to
+#     `Abort()` it before unload.
+#
+# The two field additions and the `commit()` rewrite mean the base preamble text
+# cannot be reused verbatim; the injections below are exact-string replacements
+# on the base so any drift in the base fails loudly at emit time.
+_METHOD_WITNESSED_STRUCT_BASE = '''type RevlFrame struct {
+	committed bool // see the package-level note above: single-writer, no lock
+	mu        sync.Mutex
+	pending   []revlCompEntry
+	residue   []RevlTeardownRecord
+}'''
+
+_METHOD_WITNESSED_STRUCT_EXT = '''type RevlFrame struct {
+	committed bool // see the package-level note above: single-writer, no lock
+	aborting  bool // item 318: session-level abort seam — see (*RevlFrame).Abort
+	mu        sync.Mutex
+	pending   []revlCompEntry
+	residue   []RevlTeardownRecord
+	deferred  []func() error // item 318: parked provide-method witnessed inverses
+}'''
+
+_METHOD_WITNESSED_COMMIT_BASE = '''func (f *RevlFrame) commit() {
+	f.committed = true
+}'''
+
+_METHOD_WITNESSED_COMMIT_EXT = '''func (f *RevlFrame) commit() {
+	// item 318: an Abort() may have requested revert of already-applied
+	// per-tool-call work; honour it before flipping the bit every parked and
+	// activation-body inverse reads.
+	if !f.aborting {
+		f.committed = true
+	}
+	// Dispose the parked provide-method witnessed inverses HERE, now that the
+	// commit-vs-abort bit is settled (the go mirror of Frame.drain disposing
+	// `_deferred_transactional`): on a commit each discharges (mutation
+	// persists, witness GC'd), on an abort each replays (reverts). They are not
+	// stc-go disposers, so this is their sole disposal — no double-free with the
+	// fiber's own unwind. commit() is the LAST-registered inverse, hence stc-go
+	// runs it FIRST on unwind, so this is ordered before any body inverse runs.
+	f.mu.Lock()
+	deferred := f.deferred
+	f.deferred = nil
+	f.mu.Unlock()
+	for _, d := range deferred {
+		_ = d()
+	}
+}'''
+
+_METHOD_WITNESSED_NEWFRAME_BASE = '''func newRevlFrame() *RevlFrame {
+	return &RevlFrame{}
+}'''
+
+_METHOD_WITNESSED_NEWFRAME_EXT = '''// item 318: a package-level registry of every activation frame created, the go
+// mirror of the py reference tier's `_frame_for_ctx` — the seam a session/test
+// reaches a live frame through to Abort() it before unload (item 245's reject
+// UX will drive this in production; the H1 exec test drives it directly).
+var (
+	_revlFrameRegMu sync.Mutex
+	_revlFrameReg   []*RevlFrame
+)
+
+func newRevlFrame() *RevlFrame {
+	f := &RevlFrame{}
+	_revlFrameRegMu.Lock()
+	_revlFrameReg = append(_revlFrameReg, f)
+	_revlFrameRegMu.Unlock()
+	return f
+}
+
+// RevlFrames returns a snapshot of every activation frame created since the
+// last RevlResetFrames — the seam for reaching a live frame to Abort it.
+func RevlFrames() []*RevlFrame {
+	_revlFrameRegMu.Lock()
+	defer _revlFrameRegMu.Unlock()
+	out := make([]*RevlFrame, len(_revlFrameReg))
+	copy(out, _revlFrameReg)
+	return out
+}
+
+// RevlResetFrames clears the frame registry (call between scenarios, like
+// HostReset), so a test can find its own activation's sole frame.
+func RevlResetFrames() {
+	_revlFrameRegMu.Lock()
+	_revlFrameReg = nil
+	_revlFrameRegMu.Unlock()
+}
+
+// Abort marks this activation as ABORTING (item 318, the go mirror of
+// Frame.abort): its next teardown replays every parked per-tool-call witnessed
+// inverse instead of committing it. Idempotent; a plain unload never calls it,
+// so a commit stays a commit.
+func (f *RevlFrame) Abort() {
+	f.aborting = true
+}
+
+// registerMethodWitnessed parks one provide-method witnessed inverse (item
+// 318): a per-tool-call mutation whose rollback must outlive the method call
+// and survive until the component/session commits or aborts. It is NOT a
+// stc-go disposer (see commit() for why); commit() disposes it once the
+// commit-vs-abort bit is settled.
+func (f *RevlFrame) registerMethodWitnessed(run func() error) {
+	f.mu.Lock()
+	f.deferred = append(f.deferred, run)
+	f.mu.Unlock()
+}'''
+
+
+def _teardown_preamble(method_witnessed: bool) -> str:
+    """The teardown accumulator preamble. Byte-identical to the base
+    `_TEARDOWN_PREAMBLE` unless a provide-method registers a witnessed effect,
+    in which case the frame gains the item-318 deferred/abort state (see the
+    injection constants above)."""
+    if not method_witnessed:
+        return _TEARDOWN_PREAMBLE
+    s = _TEARDOWN_PREAMBLE
+    for base, ext in (
+        (_METHOD_WITNESSED_STRUCT_BASE, _METHOD_WITNESSED_STRUCT_EXT),
+        (_METHOD_WITNESSED_COMMIT_BASE, _METHOD_WITNESSED_COMMIT_EXT),
+        (_METHOD_WITNESSED_NEWFRAME_BASE, _METHOD_WITNESSED_NEWFRAME_EXT),
+    ):
+        if base not in s:
+            raise EmitError(
+                "item 318: teardown preamble drifted — cannot inject the "
+                "method-witnessed extension (base fragment not found)")
+        s = s.replace(base, ext, 1)
+    return s
+
+
 # The clock coeffect + timer scheduler (item 57), the go mirror of
 # backends/python/runtime.py's Clock/TimerHandle — deterministic tick-for-tick.
 # Time advances only when RevlClockAdvance is called; a firing is a step in the
@@ -4921,6 +5198,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
+    global _COMP_NEEDS_METHOD_WITNESSED
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     # item 243/247: witnessed externs by name, for this document's component
@@ -4931,6 +5209,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         if ext.get("class") == "witnessed"
     }
     _COMP_NEEDS_TEARDOWN = False
+    _COMP_NEEDS_METHOD_WITNESSED = False
     _WITNESSED_COUNTER = 0
     # item 102: a lifecycle test's `advance` step drives the clock coeffect
     # (RevlClockAdvance / RevlClockReset), which lives in the timer preamble.
@@ -5047,7 +5326,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     if needs_result_preamble:
         out.append(_V3_RESULT_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
-        out.append(_TEARDOWN_PREAMBLE)
+        out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
 
