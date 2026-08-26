@@ -26,7 +26,7 @@ def _line(r: CaseResult) -> str:
 
 def to_text(report: Report) -> str:
     lines: list[str] = []
-    lines.append(f"revl runtime TCK — conformance report")
+    lines.append("revl runtime TCK — conformance report")
     lines.append(f"runtime : {report.adapter_name} ({report.runtime_version})")
     counts = report.counts()
     lines.append(

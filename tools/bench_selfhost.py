@@ -546,7 +546,6 @@ def _gate_lower(sh_admit):
     for src in LOWER_PROGRAMS:
         want = _reference_admit(src)
         got = sh_admit(src)
-        got_tag = got.split("|", 1)[0] if got else ""
         assert (want == "") == (got == ""), \
             f"lower diverged (admit verdict): ref={want!r} self={got!r}"
 

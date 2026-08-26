@@ -358,7 +358,7 @@ def import_tools(manifest: dict, *, service: str = "Imported",
         if doc:
             ops.append(f"  // {doc[0][:78]}")
         if not read_only:
-            ops.append(f"  // imported without a verifiable read-only claim")
+            ops.append("  // imported without a verifiable read-only claim")
         ops.append(f"  {'' if read_only else 'emission '}fn {op}({sig}) -> {returns}")
 
         extern_name = f"mcp_{op}"

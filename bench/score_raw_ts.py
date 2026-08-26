@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent

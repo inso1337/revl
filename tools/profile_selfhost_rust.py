@@ -45,7 +45,6 @@ from __future__ import annotations
 import importlib.util
 import platform
 import re
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -514,7 +513,7 @@ def micro_bench(vals, stage, workroot: Path):
     print(f"  (A) charAt front-walk  chars().nth(i).to_string()  "
           f"x{big_charat:,} @ avg depth {avg_depth:,}")
     print(f"      -> {got.get('MICRO_CHARAT_NTH_MS', float('nan')):8.2f} ms / pass")
-    print(f"  (B) same accesses vs a Vec<char> O(1) index (item-282 shape)")
+    print("  (B) same accesses vs a Vec<char> O(1) index (item-282 shape)")
     print(f"      -> {got.get('MICRO_CHARAT_VECIDX_MS', float('nan')):8.2f} ms / pass")
     print(f"  (C) full-source String::clone  x{srcclone_n:,}")
     print(f"      -> {got.get('MICRO_SRCCLONE_MS', float('nan')):8.2f} ms / pass")

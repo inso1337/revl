@@ -1001,7 +1001,7 @@ class _Generator:
             "// The extern bodies are stubs: the typed boundary is generated, the host",
             "// call is not. Fill each one in, then `revl audit` shows the surface.",
             "//",
-            f"// Number mapping is lossy in one direction: WIT `u64`/`s64` become revl",
+            "// Number mapping is lossy in one direction: WIT `u64`/`s64` become revl",
             "// `Int`, so a u64 above 2^63-1 does not survive the trip; `char` widens",
             "// to `Str` (revl has no character type).",
         ]

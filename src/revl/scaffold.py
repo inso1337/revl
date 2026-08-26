@@ -256,7 +256,7 @@ def build_skeleton(spec: Spec) -> str:
 
     if spec.effect:
         lines.append("")
-        lines.append(f"  // The acquire/undo scaffolding is real; the resource"
+        lines.append("  // The acquire/undo scaffolding is real; the resource"
                      " it yields is an obligation.")
         lines.append(f"  let resource = effect hole[{spec.resource_type}] "
                      f"\"acquire the resource {spec.component} manages; the undo"

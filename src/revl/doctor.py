@@ -208,7 +208,7 @@ def revl_version() -> str:
     """The installed revl version, or a best-effort read from the source tree
     when running uninstalled (no metadata)."""
     try:
-        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        from importlib.metadata import version  # noqa: PLC0415
         return version("revl")
     except Exception:  # noqa: BLE001 — any metadata failure falls back
         pass
@@ -537,7 +537,6 @@ def _default_smoke_runner(tier: str, timeout: int) -> ProbeResult:
     subprocess, under this same interpreter. Success is exit 0 — the driver
     exits nonzero on a residue failure or a skip-with-reason, so the exit code
     is the honest signal without parsing markers."""
-    import os  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
 
     prober = Prober()

@@ -11,6 +11,20 @@ on:
   workflow_call:
 
 jobs:
+  # roadmap 110d: lint gate. The repo's `# noqa` discipline is F-level
+  # (Pyflakes: unused imports/locals, undefined names, empty f-strings) but no
+  # job enforced it. Config lives in pyproject [tool.ruff]; ruff is version-
+  # pinned so the finding set is reproducible across runs.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.16.4
+      - run: ruff check
+
   frontend:
     runs-on: ubuntu-latest
     strategy:
@@ -35,6 +49,12 @@ jobs:
       # the other generated-artifact gates. Emit-only + self-host are pure
       # Python, so this needs no backend toolchain and runs here.
       - run: python3 tools/conformance.py --check-readme
+      # roadmap 110c: the playground/site load the compiler from a wheel built
+      # out of src/revl by playground/build_wheel.py (site/build.py drives it).
+      # Nothing rebuilds that wheel on a source change, so the committed copy
+      # rots silently. Same contract as --check-readme: a fresh build must match
+      # the committed artifact, content-wise (zip timestamps ignored), or fail.
+      - run: python3 tools/check_site_wheel.py
       # the frontend suite includes the pure-Python halves of all three
       # backends (emitter goldens, IR contract, manifest/admission, audit);
       # runtime-integration tests skip cleanly when their host runtime is

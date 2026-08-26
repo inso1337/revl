@@ -972,7 +972,6 @@ class Parser:
         # program that used `witnessed` as an ordinary name is broken.
         if self.peek().value not in ("pure", "acquire", "emission", "witnessed") \
                 or (not self.at("kw") and not self.at("ident", "witnessed")):
-            tok = self.peek()
             raise self.err(
                 line,
                 "unclassified extern — expected `pure`, `acquire`, `emission`, or "
