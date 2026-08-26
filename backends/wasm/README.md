@@ -104,6 +104,30 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   signature, now a thin loop over `deactivate_step`. See
   docs/wasm-capabilities.md §Witnessed-effects teardown and
   `test_witnessed_teardown.py`.
+- **provide-method witnessed effects, per tool call (item 324)** — the H1 gate.
+  A `witnessed` extern is now valid in a PROVIDE-METHOD body, not just the
+  activation body: it is the agent case (an fs mutation firing per tool call,
+  after activation). Because the number of calls is only known at runtime, the
+  inverse cannot live in the compile-time-static accumulator above — it goes
+  into a RUNTIME accumulator, a newest-first linked list in linear memory
+  (`$__mw_head`, one `$alloc(24)` cell per Ok mutation, carrying the witness,
+  an `undo_id`, and the next pointer). The list is drained ONLY by
+  `deactivate`/`deactivate_step`, gated on `$__committed`: a clean unload
+  DISCHARGES every entry (the mutation is the deliverable, it persists), an
+  abort REPLAYS each declared inverse newest-first (all-or-nothing). Draining
+  at method return would instead see not-committed and wrongly revert a live
+  deliverable — the park-for-drain hazard item 318 found on py, avoided here
+  the same way. New exports, present ONLY when a component actually has a
+  method-body witnessed effect (byte-identical otherwise, gated strictly — the
+  same tight discipline as Slice-2b, not the whole-teardown scaffold gate):
+  `abort()` (flips an already-committed activation back to reverting — item
+  245's session-reject seam) and `mw_live() -> i32` (the outstanding-crossing
+  count, this tier's enumeration surface where py has WAL discharge
+  descriptors). Only the witnessed method position is lifted; a non-witnessed
+  method effect, a method `let-effect`, and method-time compensation all stay
+  refused. Consistent with the contract's `activation-registered-only` wasm
+  preemption row: the accumulator is component-instance state torn down with
+  the instance, never a per-call epoch. See `test_provide_method_witnessed.py`.
 
 ## Widths: `Int` is i64, addresses are i32
 
