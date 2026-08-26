@@ -199,6 +199,45 @@ def test_witnessed_effect_routes_through_revl_frame_transactional():
     assert "frame.bracket(" not in out
 
 
+def test_method_body_witnessed_routes_through_transactional_method():
+    """item 318 (the per-tool-call H1 seam): a witnessed effect inside a
+    PROVIDE-METHOD body registers the extern's DECLARED inverse into the
+    ENCLOSING COMPONENT's activation frame via `transactionalMethod` — the
+    entry is tracked on the provider struct's activation-scope `fx`/`frame`
+    (`this.fx`/`this.frame`), so it outlives the method call and is disposed by
+    the component's own unload, not at method-return."""
+    ir = compile_files([str(HERE / "scenarios" / "method_witnessed.rvl")])
+    out = emit.emit(ir)
+    # the method routes through transactionalMethod, Ok-conditional, no bracket
+    assert 'frame.transactionalMethod("stash_path", "unstash", () -> unstash(result))' in out
+    assert "instanceof RevlResult.Ok<?, ?>" in out
+    assert "frame.bracket(" not in out
+    # the frame-bearing apply returns the reject-reachable RevlActivation, whose
+    # abort() flips the commit discriminator so the next unload reverts
+    assert "public static final class RevlActivation implements Disposable" in out
+    assert "return new RevlActivation(fx, frame);" in out
+    assert "void abort() {" in out
+    # the provider struct holds the component activation scope + frame
+    assert "AgentOps(Context ctx, Context.EffectScope fx, RevlFrame frame)" in out
+
+
+def test_method_body_witnessed_does_not_perturb_non_witnessed_output():
+    """Byte-identity gate (docs/design/243-witnessed-externs.md 'Slice 1 as
+    implemented' #3): the item-318 method-witnessed wiring is inert for any
+    program that registers no witnessed method effect — no RevlFrame, no
+    RevlActivation, plain `return fx;`."""
+    src = (
+        "service Ops { fn ping() -> Int }\n"
+        "component C provides ops: Ops {\n"
+        "  provide ops { fn ping() { return 1 } }\n"
+        "}\n"
+    )
+    out = emit.emit(compile_source(src))
+    assert "RevlFrame" not in out
+    assert "RevlActivation" not in out
+    assert "transactionalMethod" not in out
+
+
 def test_version_gate_accepts_ir_1_2_3():
     v1 = {
         "ir_version": 1,
@@ -758,6 +797,38 @@ def test_java_runs_runtime_values_on_stub_runtime(tmp_path):
     )
     assert run.returncode == 0, run.stderr + run.stdout
     assert "RUNTIME_VALUES_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_method_witnessed_h1_on_stub_runtime(tmp_path):
+    """item 318 — the per-tool-call H1 gate, proven at RUNTIME against REAL
+    files on the JVM (stub EffectScope; provide/get/effect are the whole seam
+    this proof needs). Mirrors tests/test_provide_method_witnessed.py:
+
+      * a provide-method does a witnessed fs mutation, called PER TOOL CALL;
+      * each call registers a transactional inverse into the component's
+        activation frame (RevlFrame.transactionalMethod);
+      * a clean unload COMMITS — every per-call mutation PERSISTS (deliverable);
+      * an abort (RevlActivation.abort() — item 245's reject seam) REVERTS every
+        per-call mutation, residue-free (the world is pristine on every path).
+
+    Harness: scenarios/RunMethodWitnessedH1.java; fixture:
+    scenarios/method_witnessed.rvl (java-owned)."""
+    fixture = HERE / "scenarios" / "method_witnessed.rvl"
+    ir = compile_files([str(fixture)])
+    out = _javac_compile(tmp_path, emit.emit(ir))
+    harness = HERE / "scenarios" / "RunMethodWitnessedH1.java"
+    compile_harness = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(harness)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_harness.returncode == 0, compile_harness.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "RunMethodWitnessedH1"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "METHOD_WITNESSED_H1_OK" in run.stdout
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")

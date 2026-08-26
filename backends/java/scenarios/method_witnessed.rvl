@@ -1,0 +1,59 @@
+// item 318 — the per-tool-call H1 gate on the java tier (java-owned fixture).
+//
+// A component provides a service whose method does a WITNESSED fs mutation,
+// fired PER TOOL CALL (per `touch` invocation), after activation. Each call
+// registers a transactional inverse into the component's activation frame
+// (RevlFrame.transactionalMethod), so on a clean unload the mutations PERSIST
+// (the deliverable) and on an abort every per-call mutation REVERTS residue-
+// free. Mirrors tests/test_provide_method_witnessed.py (the py reference).
+//
+// The witnessed extern renames the passed path -> path.bak (its data witness
+// carries both paths); the declared inverse renames it back (idempotent). The
+// path is a PARAMETER, so each per-call invocation mutates a distinct file —
+// the shape of an agent calling one fs tool repeatedly.
+
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+
+extern pure fn unstash(w: Stash) -> Unit = @java {
+    try {
+        java.nio.file.Path bak = java.nio.file.Path.of(w.bak);
+        if (java.nio.file.Files.exists(bak)) {
+            java.nio.file.Files.move(bak, java.nio.file.Path.of(w.path),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+    } catch (java.io.IOException e) { throw new RuntimeException(e); }
+    return;
+} = @py {
+    import os
+    if os.path.exists(w['bak']):
+        os.replace(w['bak'], w['path'])
+    return
+}
+
+extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError]
+    undo unstash(result) = @java {
+    try {
+        java.nio.file.Path src = java.nio.file.Path.of(p);
+        java.nio.file.Path bak = java.nio.file.Path.of(p + ".bak");
+        java.nio.file.Files.move(src, bak, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        return new RevlResult.Ok<>(new Stash(p, p + ".bak"));
+    } catch (java.io.IOException e) {
+        return new RevlResult.Err<>(new FsError(String.valueOf(e)));
+    }
+} = @py {
+    import os
+    bak = p + '.bak'
+    os.replace(p, bak)
+    return Ok({'path': p, 'bak': bak})
+}
+
+service Ops { emission fn touch(p: Str) }
+
+component Agent provides ops: Ops {
+  provide ops {
+    fn touch(p) {
+      effect stash_path(p)
+    }
+  }
+}
