@@ -735,6 +735,30 @@ class Frame:
         # introspection (fault/residue proofs); the disposer reads `_committed`.
         self._transactional: list = []
         self._committed: bool = False
+        # item 318 (docs/design/243-witnessed-externs.md): the transactional
+        # entries a PROVIDE-METHOD registered (a per-tool-call witnessed fs
+        # mutation), as opposed to the activation body's own. A method body has
+        # no body generator to `yield` a disposer into, and adopting it as a
+        # sibling `ctx.effect` is UNSOUND: cordis disposes an adopted effect
+        # BEFORE the body effect's final `yield _revl_frame.drain` runs, so the
+        # disposer would observe `_committed` still False on a CLEAN unload and
+        # wrongly replay (revert) the deliverable. So a method-registered
+        # transactional entry is NOT a cordis disposer; it is parked here and
+        # disposed by `drain` itself, once `_committed`/`_aborting` are settled,
+        # so it observes the correct commit-vs-abort bit by construction. Each
+        # entry is also appended to `_transactional` above so the WAL discharge
+        # record (`drain`) and fault/residue introspection cover it uniformly.
+        self._deferred_transactional: list = []
+        # item 318: the abort discriminator for a component that already
+        # activated cleanly. `_committed` (flipped by `drain`) answers "did the
+        # ACTIVATION body complete"; a per-tool-call mutation runs AFTER
+        # activation, so on any later teardown `drain` runs and would always
+        # commit it. A session-level reject (item 245's explicit commit/abort
+        # UX drives this) sets `_aborting` BEFORE teardown; `drain` then leaves
+        # `_committed` False, so both the activation-body transactional entries
+        # (cordis disposers reading `_committed`) and the method-registered
+        # deferred entries replay and the mutations revert, residue-free.
+        self._aborting: bool = False
         # item 247 (docs/design/teardown-contract.md): the compensation
         # entries this activation registered, in registration order — kept
         # for introspection, same role as `_transactional` above. The actual
@@ -966,6 +990,62 @@ class Frame:
             entry.seq = record["seq"]
         return entry
 
+    def transactional_method(self, undo: Callable[[Any], Any], witness: Any) -> "_Transactional":
+        """Register a PROVIDE-METHOD witnessed effect's declared inverse as a
+        transactional entry on THIS component's activation frame (item 318,
+        docs/design/243-witnessed-externs.md). This is the per-tool-call H1
+        seam: an agent's fs mutation fires from a provide-method (per request),
+        and its inverse must outlive the method call — the method returns, but
+        the mutation's rollback must survive until the component/session
+        commits or aborts. The enclosing component's activation frame is that
+        accumulator: it is component-long, and its commit/abort already drives
+        `_Transactional` discharge/replay (Slice 2a).
+
+        Unlike `transactional` (yielded by the activation body's generator into
+        cordis's LIFO disposer stack), a method body has no generator to yield
+        into. Adopting the entry as a sibling `ctx.effect` is unsound — cordis
+        disposes an adopted effect BEFORE the body's `drain`, so on a clean
+        unload the disposer would see `_committed` still False and wrongly
+        revert the deliverable. So the entry is parked in
+        `_deferred_transactional` and disposed by `drain` (commit) or the
+        aborting `drain` pass (abort), where `_committed` is already settled.
+        The entry still joins `_transactional` so the WAL discharge record and
+        residue introspection cover it exactly like an activation-body one.
+
+        Registration is unconditional here; the emitted call site calls this
+        only on the `Ok` branch (Ok-conditional), so a failed mutation that
+        touched nothing schedules no rollback. Bridge slice: the WAL
+        discharge-descriptor is written at registration, durably ahead of the
+        commit-vs-abort decision, so a crash before it lets `revl recover`
+        reconstruct and replay the inverse (item 243 rule 4)."""
+        entry = _Transactional(self, undo, witness)
+        self._transactional.append(entry)
+        self._deferred_transactional.append(entry)
+        wal = self._wal()
+        if wal is not None:
+            record = wal.record_discharge_descriptor(
+                "transactional",
+                receiver=self.name,
+                method=_named_call_method(undo),
+                args=[witness],
+                origin={"phase": "call", "key": self.name},
+                witness=witness,
+            )
+            entry.seq = record["seq"]
+        return entry
+
+    def abort(self) -> None:
+        """Mark this activation as ABORTING so its next teardown reverts rather
+        than commits (item 318). A component that activated cleanly reaches its
+        final `yield _revl_frame.drain`, so any later `fiber.dispose()` runs
+        `drain` and would implicitly commit every accumulated transactional
+        entry. A session-level reject of the work (item 245's explicit
+        commit/abort UX is the eventual driver) calls this first: `drain` then
+        leaves `_committed` False, so the activation-body transactional entries
+        AND the per-tool-call deferred entries all replay their inverses and the
+        mutations revert, residue-free. Idempotent."""
+        self._aborting = True
+
     def compensation(self, fn: Callable[[], Any]) -> "_Compensation":
         """Register an `emit ... compensate ...` step's offsetting call as a
         COMPENSATION entry on the SAME per-activation LIFO disposer stack as
@@ -1039,13 +1119,33 @@ class Frame:
         same durable discharge record — a compensation is never owed on a
         clean unload (teardown-contract.md's "Commit path"), so its seq joins
         the transactional seqs in the one discharge record written here."""
-        self._committed = True
+        # item 318: `_aborting` is the reject signal for an already-activated
+        # component (a session-level abort of per-tool-call work). When set,
+        # `drain` runs but does NOT commit: `_committed` stays False, so every
+        # transactional entry — the activation body's cordis-yielded ones AND
+        # the method-registered deferred ones below — replays its inverse and
+        # the mutations revert. A plain unload does not set it, so this is
+        # byte-identical to the previous unconditional commit for every
+        # existing activation-body-only program.
+        if not self._aborting:
+            self._committed = True
         wal = self._wal()
-        if wal is not None:
+        # The discharge record is the COMMIT proof; it must not be written for
+        # an aborting teardown, where the inverses are being replayed, not
+        # committed (item 318).
+        if self._committed and wal is not None:
             seqs = [entry.seq for entry in self._transactional if entry.seq is not None]
             seqs += [entry.seq for entry in self._compensations if entry.seq is not None]
             if seqs:
                 wal.record_discharge(seqs)
+        # Dispose the method-registered transactional entries HERE, now that the
+        # commit-vs-abort bit is settled (item 318): on a commit each discharges
+        # (mutation persists, witness GC'd); on an abort each replays (reverts).
+        # They are not cordis disposers, so this is their sole disposal — no
+        # double-free with the fiber's own unwind.
+        deferred, self._deferred_transactional = self._deferred_transactional, []
+        for entry in deferred:
+            entry()
         adopted, self._adopted = self._adopted, []
         if not adopted:
             return None
