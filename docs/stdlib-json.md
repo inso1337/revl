@@ -50,7 +50,7 @@ each emitter refuses an extern that has no body for its tier):
 | tier | parse | stringify | status |
 |---|---|---|---|
 | py | `json.loads(s)` | `json.dumps(v)` | **executed by tests** (stdlib) |
-| ts | `JSON.parse(s)` | `JSON.stringify(v)` | emitted by tests (builtin) |
+| ts | `JSON.parse(s)` | `JSON.stringify(v, replacer)` | emitted by tests; the stringify body wraps `JSON.stringify` in a bigint replacer (see the `Int` note below) |
 | rs | `Value::new(serde_json::from_str(&s))` | `serde_json::to_string(v.downcast())` | **runs** (item 140): `Any` erases to `cordis::Value` (a cloneable `Arc<dyn Any>`); the body boxes a parsed `serde_json::Value` into it and recovers it to re-encode (`serde_json` is already pinned in the emitted crate). A structured document survives `stringify∘parse`; `cargo test` runs the round-trip (backends/rust/scenarios/jsonwire.rvl → golden jsonwire.rs). Reading a parsed value into a typed binding for field access is still the erased-`Value` boundary. |
 | java | — | — | the tier refuses with `extern `json_parse` has no @java body — not portable to this backend`; a provider's Jackson/Gson plugs in here when one is on the `javac` classpath |
 | go | `json.Unmarshal([]byte(s), &v)` | `json.Marshal(v)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through a `//revl:import encoding/json` directive the emitter hoists into the module's import block. `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). |
@@ -59,6 +59,41 @@ each emitter refuses an extern that has no body for its tier):
 The refusal message is the built-in honesty gate, the same shape the
 conformance corpus's three bodyless externs already ride (docs/conformance.md):
 a tier that cannot run the module says so at emit time, never silently.
+
+## `Int` fields on the ts tier: bigint, not a throw (item 281)
+
+The ts backend maps revl `Int` to JS `bigint` (`backends/typescript/emit.py`
+TYPE_MAP), for exact 64-bit two's-complement fidelity. The builtin
+`JSON.stringify` throws `TypeError: Do not know how to serialize a BigInt` on
+any bigint, so before item 281 `json_stringify` of *any* record carrying an
+`Int` field (a token count, an id, a timestamp, an `max_tokens`) type-checked
+and emitted clean, then died at runtime on the ts tier only (the py tier
+serialized it fine). That is a compiles-implies-runs divergence, found in the
+lighthouse workload's provider layer.
+
+The `@ts` stringify body now passes a replacer to `JSON.stringify` that renders
+each `bigint` as a **bare JSON number** carrying its exact decimal digits, so
+the ts wire matches the py tier's `json.dumps` (a bare number, e.g.
+`{"n":7}`, never `{"n":"7"}`, never a throw). The digits are emitted directly
+from `bigint.toString()`, **not** via a `Number()` cast: a cast would silently
+round any value past `Number.MAX_SAFE_INTEGER` (2^53), and revl `Int` is i64, so
+values up to `9223372036854775807` are in range and must round-trip exactly.
+Mechanically, the replacer parks each bigint behind a quoted sentinel
+(`"@@revlBigInt:<n>@@"`) and the enclosing body then strips those quotes, which
+is how the digits land unquoted; with no bigint in the value the body returns
+the builtin result unchanged. Regression: `backends/typescript/tests/
+fr3_json_int.test.ts` (runtime, under vitest) cross-checked against the py tier
+in `tests/test_json_stdlib.py::test_ts_int_serialization_matches_py_tier`,
+covering a small, a negative, and a beyond-2^53 `Int`.
+
+Two residual, out-of-scope notes. (1) `json_parse` on the ts tier uses the
+builtin `JSON.parse`, which decodes JSON numbers to JS `number`, so a JSON
+integer beyond 2^53 loses precision on *parse* (a `JSON.parse` limitation, not a
+`json_stringify` one); the stringify round-trip preserves large ints only for
+values that entered as a `bigint`, not ones recovered through `JSON.parse`.
+(2) The py tier's `json.dumps` inserts insignificant whitespace after `:`/`,`
+by default while `JSON.stringify` is compact; the two are byte-equal after that
+whitespace is normalized, and identical under `json_parse`.
 
 ## Crossing to rust and go (item 140)
 

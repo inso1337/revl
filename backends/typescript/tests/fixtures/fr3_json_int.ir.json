@@ -1,0 +1,268 @@
+{
+ "ir_version": 3,
+ "services": {},
+ "components": [],
+ "manifest": {
+  "components": [],
+  "loadOrder": []
+ },
+ "types": {
+  "Usage": {
+   "params": [],
+   "kind": "record",
+   "fields": {
+    "input_tokens": "Int",
+    "output_tokens": "Int"
+   }
+  }
+ },
+ "functions": [
+  {
+   "name": "dump_small",
+   "params": [],
+   "returns": "Str",
+   "public": false,
+   "body": [
+    {
+     "step": "let",
+     "name": "u",
+     "value": {
+      "kind": "record",
+      "fields": [
+       [
+        "input_tokens",
+        {
+         "kind": "lit",
+         "value": 7
+        }
+       ],
+       [
+        "output_tokens",
+        {
+         "kind": "lit",
+         "value": 12
+        }
+       ]
+      ]
+     },
+     "mutable": false
+    },
+    {
+     "step": "return",
+     "expr": {
+      "kind": "call",
+      "callee": {
+       "kind": "var",
+       "name": "json_stringify"
+      },
+      "args": [
+       {
+        "kind": "var",
+        "name": "u"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "dump_negative",
+   "params": [],
+   "returns": "Str",
+   "public": false,
+   "body": [
+    {
+     "step": "let",
+     "name": "u",
+     "value": {
+      "kind": "record",
+      "fields": [
+       [
+        "input_tokens",
+        {
+         "kind": "un",
+         "op": "-",
+         "operand": {
+          "kind": "lit",
+          "value": 3
+         },
+         "operands": "Int"
+        }
+       ],
+       [
+        "output_tokens",
+        {
+         "kind": "lit",
+         "value": 0
+        }
+       ]
+      ]
+     },
+     "mutable": false
+    },
+    {
+     "step": "return",
+     "expr": {
+      "kind": "call",
+      "callee": {
+       "kind": "var",
+       "name": "json_stringify"
+      },
+      "args": [
+       {
+        "kind": "var",
+        "name": "u"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "dump_large",
+   "params": [],
+   "returns": "Str",
+   "public": false,
+   "body": [
+    {
+     "step": "let",
+     "name": "u",
+     "value": {
+      "kind": "record",
+      "fields": [
+       [
+        "input_tokens",
+        {
+         "kind": "lit",
+         "value": 9007199254740993
+        }
+       ],
+       [
+        "output_tokens",
+        {
+         "kind": "lit",
+         "value": 9223372036854775807
+        }
+       ]
+      ]
+     },
+     "mutable": false
+    },
+    {
+     "step": "return",
+     "expr": {
+      "kind": "call",
+      "callee": {
+       "kind": "var",
+       "name": "json_stringify"
+      },
+      "args": [
+       {
+        "kind": "var",
+        "name": "u"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "dump_bare_int",
+   "params": [],
+   "returns": "Str",
+   "public": false,
+   "body": [
+    {
+     "step": "return",
+     "expr": {
+      "kind": "call",
+      "callee": {
+       "kind": "var",
+       "name": "json_stringify"
+      },
+      "args": [
+       {
+        "kind": "lit",
+        "value": 9223372036854775807
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "roundtrip",
+   "params": [
+    {
+     "name": "s",
+     "type": "Str"
+    }
+   ],
+   "returns": "Str",
+   "public": false,
+   "body": [
+    {
+     "step": "return",
+     "expr": {
+      "kind": "call",
+      "callee": {
+       "kind": "var",
+       "name": "json_stringify"
+      },
+      "args": [
+       {
+        "kind": "call",
+        "callee": {
+         "kind": "var",
+         "name": "json_parse"
+        },
+        "args": [
+         {
+          "kind": "var",
+          "name": "s"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ],
+ "externs": [
+  {
+   "name": "json_parse",
+   "class": "pure",
+   "params": [
+    {
+     "name": "s",
+     "type": "Str"
+    }
+   ],
+   "returns": "Any",
+   "bodies": {
+    "py": " import json; return json.loads(s) ",
+    "ts": " return JSON.parse(s) ",
+    "rs": " Value::new(serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::Null)) ",
+    "go": "\n    //revl:import encoding/json\n    var v any\n    _ = json.Unmarshal([]byte(s), &v)\n    return v\n  "
+   }
+  },
+  {
+   "name": "json_stringify",
+   "class": "pure",
+   "params": [
+    {
+     "name": "v",
+     "type": "Any"
+    }
+   ],
+   "returns": "Str",
+   "bodies": {
+    "py": " import json; return json.dumps(v) ",
+    "ts": "\n    // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses\n    // (\"Do not know how to serialize a BigInt\"). A replacer parks each bigint\n    // behind a quoted sentinel carrying its exact decimal digits, then the\n    // quotes are stripped so those digits land as a BARE JSON number - full\n    // i64 precision (a plain Number() cast would lose it past 2^53), matching\n    // the py tier `json.dumps`. With no bigint present the fast path returns\n    // the builtin result unchanged.\n    const marks: string[] = [];\n    const wire = JSON.stringify(v, (_k, x) => typeof x === \"bigint\" ? \"@@revlBigInt:\" + (marks.push(x.toString()) - 1) + \"@@\" : x);\n    return marks.length === 0 ? wire : wire.replace(/\"@@revlBigInt:(\\d+)@@\"/g, (_m, i) => marks[Number(i)]);\n  ",
+    "rs": " v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() ",
+    "go": "\n    //revl:import encoding/json\n    b, _ := json.Marshal(v)\n    return string(b)\n  "
+   }
+  }
+ ]
+}
