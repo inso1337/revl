@@ -161,14 +161,27 @@ CORPUS = [
     # of the old unconditional `fx.track(Disposables.of(() -> ..))` shape this
     # corpus entry's covered-subset note above still describes. Porting
     # RevlFrame + the witnessed/transactional entry kind into
-    # selfhost/emit_java.rvl is its own item-199 slice, out of Slice 2b's
-    # scope (`backends/java/emit.py` + java coverage, not the self-hosted
-    # mirror). Marked `strict` so the xfail must be removed, not widened, the
-    # day that port lands.
+    # selfhost/emit_java.rvl is its own item-199 slice (tracked by item 321),
+    # out of scope here (`backends/java/emit.py` + java coverage, not the
+    # self-hosted mirror). Marked `strict` so the xfail must be removed, not
+    # widened, the day that port lands.
+    #
+    # item 318 addendum: the reference emitter now ALSO emits, for a
+    # frame-bearing component, `RevlFrame.abort()` and
+    # `RevlFrame.transactionalMethod()`, a `RevlActivation` Disposable wrapper,
+    # a frame-bearing `apply()` return (`return new RevlActivation(fx, frame);`
+    # instead of `return fx;`), and method-body witnessed detection in
+    # `_method_body_lines` (an `effect`/`let-effect` whose acquire names a
+    # witnessed extern -> `fx.track(frame.transactionalMethod(...))`). Item 321
+    # must port ALL of that surface into selfhost/emit_java.rvl alongside the
+    # RevlFrame two-phase loop; comp_multi_effect.rvl does not exercise a
+    # method-body witnessed effect, so this xfail's shape is unchanged (still
+    # the compensate/bracket divergence), but the 199/321 port is now larger.
     pytest.param("comp_multi_effect.rvl", marks=pytest.mark.xfail(
         reason="selfhost/emit_java.rvl does not yet port the item-243-Slice-2b "
                "RevlFrame two-phase teardown loop (compensate/bracket-in-same-"
-               "component shape) — see the corpus comment above",
+               "component shape), nor the item-318 method-witnessed/RevlActivation "
+               "surface — see the corpus comment above (item 321)",
         strict=True,
     )),
     # slice 4 (item 235) — REALM placements (isolate/intercept) on the modern path
