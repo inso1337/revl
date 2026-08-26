@@ -1089,7 +1089,15 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int) -> Emit {
   if (kind == "emit") {
     var out = [line(indent, cexpr(value_field(step, "expr")))]
     if (!value_is_null(value_field(step, "compensate"))) {
-      out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "compensate"))}`))
+      // item 247 (docs/design/teardown-contract.md): a compensation is a
+      // first-class COMPENSATION entry on the frame's shared per-activation
+      // LIFO stack, not a bare disposer — it discharges (never runs) on a
+      // clean commit and runs best-effort in PHASE 2 of an abort, only after
+      // every proof inverse (bracket + transactional) in this activation has
+      // completed. This is the two-phase model, not the old
+      // single-interleaved-LIFO ordering (docs/contract-errata.md TCK A5
+      // respec, a5a/a5b); it is compensation, not inversion (§6.1).
+      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))})`))
     }
     out = out.push("")
     return { lines: out, counter: counter }
