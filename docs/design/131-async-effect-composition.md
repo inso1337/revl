@@ -83,7 +83,7 @@ Three spellings, all in activation-body statement position, all with the
 divert-boundary reading of `await` that is exclusive to activation bodies
 (docs/syntax-2.0.md §5, §7.1):
 
-```revl fragment
+```revl sketch
 component PgDatabase provides db: Database {
   config { url: Str }
 
