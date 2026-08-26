@@ -1,0 +1,16 @@
+// item 217: a components-ONLY document (no functions, no types) — it lowers to
+// `ir_version 1`, NOT v3, so it forces the self-host emitter's v1 front-door.
+// The reference dispatches this to `_emit_v1`, whose module header names version
+// 1 and carries the SHORT `#![allow(dead_code, unused_variables)]` line; the
+// covered service/comp body (a service trait, a simple pure provider, the
+// `_emit_bridge` erasure block) is byte-identical to the v3 path. Same shape as
+// service.rvl MINUS the trivial `fn` that file adds only to force v3.
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) = "hi"
+  }
+}

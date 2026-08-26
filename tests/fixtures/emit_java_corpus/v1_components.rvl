@@ -1,0 +1,18 @@
+// item 217: a components-ONLY document (no functions, no types) — it lowers to
+// `ir_version 1`, NOT v3, so it forces the self-host emitter's v1 front-door.
+// The reference dispatches this to `_emit_v1`, whose banner names version 1; the
+// covered SCALAR service/comp body (an empty pure provider, one inline
+// `return <lit>` method, the `<Comp>Plugin` provisioning) is byte-identical to
+// the v3 path. Same shape as service.rvl MINUS the trivial `fn` that file adds
+// only to force v3. (Signatures stay scalar: a v1 doc whose generics box to the
+// SHORT `Long`/`Integer` form differs from v3's fully-qualified `java.lang.Long`,
+// which the v3-typed self-host path does not yet reproduce — deferred.)
+service Greeter {
+  fn greet(who: Str) -> Str
+}
+
+component Hello provides greeting: Greeter {
+  provide greeting {
+    fn greet(who) = "hi"
+  }
+}
