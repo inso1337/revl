@@ -226,6 +226,7 @@ func unwrapOr(o RevlOpt[int64], d int64) int64 {
 		switch _m := o.(type) {
 		case RevlSome[int64]:
 			v := _m.Value
+			_ = v
 			return v
 		case RevlNone[int64]:
 			_ = _m
@@ -254,9 +255,11 @@ func resultFold(r RevlResult[int64, string]) int64 {
 		switch _m := r.(type) {
 		case RevlOk[int64, string]:
 			v := _m.Value
+			_ = v
 			return v
 		case RevlErr[int64, string]:
 			e := _m.Value
+			_ = e
 			return (-revlStrLen(e))
 		default:
 			_ = _m
