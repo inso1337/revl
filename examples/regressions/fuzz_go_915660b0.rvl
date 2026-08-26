@@ -1,0 +1,3 @@
+pub fn probe() -> Opt[Str] { return None }
+
+test "cross_tier_probe" { assert probe() == None }
