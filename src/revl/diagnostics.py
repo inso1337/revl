@@ -116,6 +116,12 @@ _PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"acquisition after `provide`"), "A2", "ordering"),
     (re.compile(r"no builtin method"), "T1", "stdlib"),
     (re.compile(r"verified fn .* is not total"), "G7", "totality"),
+    # witnessed-inverse externs (item 243, docs/design/243-witnessed-externs.md).
+    # These raises carry explicit codes, but the shapes are classified here too
+    # so a message-only path still resolves to the `witnessed` category.
+    (re.compile(r"witnessed extern .* cannot be called in "), "G4", "witnessed"),
+    (re.compile(r"inverse of witnessed extern|witnessed extern .* must (return|declare)"
+                r"|witness .* is a host object"), "G4", "witnessed"),
     (re.compile(r"unclassified extern"), "G8", "boundary"),
     (re.compile(r"expected .*, found "), "SYNTAX", "parse"),
     (re.compile(r"unexpected character|unterminated string"), "SYNTAX", "lex"),

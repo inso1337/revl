@@ -78,6 +78,35 @@ extern witnessed[fs] fn rm(path: Str) -> Result[FsWitness, FsError]
   accumulator entry kind in the IR with Ok-conditional auto-registration. Additive:
   no existing program uses `witnessed`, so the backends are untouched and stay green.
   Tested at the parse/check/IR level.
+### Slice 1 as implemented (refinements)
+
+Three decisions were refined against the actual code while landing Slice 1;
+recorded here so Slice 2 builds on the real contract.
+
+1. **`undo` reuses the acquire slot; `result` binds the `Ok` witness.** The
+   surface above writes `undo restore(w: FsWitness)`, but the extern `undo` slot
+   is an ordinary pure-expression call (`_check_extern_undo`), and acquire
+   already binds the return as the implicit `result`. So the spelling is
+   `undo restore(result)`, and for a `witnessed` extern `result` is typed as the
+   **`Ok` payload** `W` (not the whole `Result[W,E]`), exactly the value the
+   auto-registered inverse receives on abort. No new typed-binder grammar.
+2. **`witnessed` is a CONTEXTUAL keyword.** It is recognised only in the extern
+   classification slot, not added to the lexer `KEYWORDS`. This keeps the
+   self-hosted lexer's keyword set in parity (its differential oracle asserts
+   set equality) with no `selfhost/*` change, and never breaks a program that
+   used `witnessed` as an ordinary identifier.
+3. **The `transactional` entry kind is an IR descriptor on the extern node.**
+   Slice 1 is "frontend + IR correctness core"; the per-call-site accumulator
+   wiring is the Slice-2 runtime seam. So the second entry kind lands as a
+   descriptor the runtime loop reads: a `witnessed` extern's IR node carries
+   `class: "witnessed"`, `entry_kind: "transactional"`, `revertible: true`,
+   `ok_conditional: true`, `witness: <W>`, `capabilities: [...]`, and the lowered
+   `undo`. An `acquire` node carries `undo` but **no** `entry_kind` (its effect
+   step is the existing bracket), which is the checked distinction. Rule 1's
+   "refused outside effect position" is enforced as a refusal of any witnessed
+   call in a `fn`/`test` body (no accumulator there); the positive effect-position
+   call site is enabled with the runtime seam in Slice 2.
+
 - **Slice 2: six-tier runtime seam.** Each backend's emit + runtime teardown loop
   consumes the declared inverse, auto-registers it, and implements the
   `transactional` entry kind (abort-only replay + commit discharge + witness GC),

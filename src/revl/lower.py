@@ -1451,9 +1451,115 @@ def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
               f"{slot} of extern `{decl_name}`")
 
 
+def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
+    """Rule 3 (docs/design/243-witnessed-externs.md): a witnessed extern's
+    declared inverse must be classified **non-emission AND non-witnessed**.
+
+    An emission inverse would cross a one-way boundary during teardown — the
+    exact thing G5's no-emission-in-undo forbids, and it degrades a proof-grade
+    rollback into best-effort residue. A witnessed inverse is infinite regress:
+    its own inverse would need registering, and so on. The declared inverse is
+    a host-LOCAL restore, so only `pure`/`acquire` callees are admissible.
+
+    `undo some_emission(result)` passes `_check_extern_undo` today (the shared
+    `mode="undo"` machinery only checks the callee is *declared*), so this walk
+    is the explicit close: every extern a witnessed `undo` calls is held to the
+    rule, which also fences the latent acquire hole the same expression opens.
+    """
+    from .parser import ExprCall, ExprVar
+
+    def _walk(e):
+        if isinstance(e, ExprCall):
+            if isinstance(e.callee, ExprVar):
+                name = e.callee.name
+                bad = extern_class.get(name)
+                if bad in ("emission", "witnessed"):
+                    kind = ("an emission" if bad == "emission"
+                            else "itself witnessed")
+                    why = ("emissions are one-way boundary crossings and may not "
+                           "run in teardown (G5)" if bad == "emission"
+                           else "a witnessed inverse would need its own inverse "
+                                "registered — infinite regress")
+                    raise RevlError(
+                        filename, e.line,
+                        f"the inverse of witnessed extern `{decl.name}` calls "
+                        f"`{name}`, which is {kind} — a witnessed inverse must be "
+                        f"a host-local restore (G5)",
+                        hint=f"{why}; declare the inverse `pure` or `acquire` "
+                             f"(docs/design/243-witnessed-externs.md)",
+                        code="G5", category="witnessed",
+                    )
+            for a in e.args:
+                _walk(a)
+            return
+        for f in type(e).__dataclass_fields__:
+            v = getattr(e, f)
+            if hasattr(v, "__dataclass_fields__"):
+                _walk(v)
+            elif isinstance(v, (list, tuple)):
+                for x in v:
+                    if hasattr(x, "__dataclass_fields__"):
+                        _walk(x)
+
+    _walk(decl.undo)
+
+
+def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -> None:
+    """Rule 1 (docs/design/243-witnessed-externs.md): a witnessed extern is
+    refused outside effect position — no bare call from a plain `fn`/`test`
+    body.
+
+    A witnessed mutation is reversible only because the teardown accumulator
+    auto-registers its declared inverse. A `fn`/`test` body has no accumulator,
+    so a call there would mutate the host with the inverse dropped on the floor
+    — silently irreversible, the one outcome the classification exists to
+    prevent. Every extern is otherwise callable from a fn/test body (they seed
+    the `callables` set), so this is an explicit refusal, checked over the
+    author's AST where the call site still has a line."""
+    from .parser import ExprCall, ExprVar
+
+    witnessed = {ext.name for ext in program.externs
+                 if ext.classification == "witnessed"}
+    if not witnessed:
+        return
+
+    def _walk(node, where: str):
+        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar) \
+                and node.callee.name in witnessed:
+            raise RevlError(
+                filename, node.line,
+                f"witnessed extern `{node.callee.name}` cannot be called in {where} "
+                f"— a witnessed mutation is only valid in effect position (G4)",
+                hint="its declared inverse is auto-registered by the teardown "
+                     "accumulator, which exists only in a component activation; a "
+                     "fn/test body has none, so the mutation would be irreversible "
+                     "(docs/design/243-witnessed-externs.md)",
+                code="G4", category="witnessed",
+            )
+        if hasattr(node, "__dataclass_fields__"):
+            for f in type(node).__dataclass_fields__:
+                _walk(getattr(node, f), where)
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                _walk(x, where)
+
+    for fn in program.fn_decls:
+        for stmt in fn.body:
+            _walk(stmt, f"the body of fn `{fn.name}`")
+    for test in program.tests:
+        for stmt in test.body:
+            _walk(stmt, f"the body of test `{test.name}`")
+
+
 def _lower_externs(program: Program, filename: str, types: dict) -> list:
     externs: list[dict] = []
     seen: set[str] = set()
+    # classification of every extern by name, so a declared inverse can be held
+    # to the "non-emission AND non-witnessed" rule (docs/design/243 rule 3): an
+    # inverse that itself emits crosses a one-way boundary in teardown (G5), and
+    # a witnessed inverse is infinite regress. Built before the loop so an
+    # inverse may name an extern declared later in the file.
+    extern_class = {d.name: d.classification for d in program.externs}
     for decl in program.externs:
         if decl.name in seen:
             raise RevlError(filename, decl.line, f"duplicate extern `{decl.name}`")
@@ -1476,6 +1582,61 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                 f"emission extern `{decl.name}` cannot declare `undo`",
                 hint="emissions are one-way boundary crossings; use `compensate` for a best-effort cleanup",
             )
+        # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
+        # witnessed mutation is a transaction, not a bracket: its declared `undo`
+        # is auto-registered by the accumulator and replays on abort only. The
+        # correctness envelope is checked here, before the descriptor reaches the
+        # IR — the Slice-2 runtime seam trusts these invariants.
+        witness_type: str | None = None
+        if decl.classification == "witnessed":
+            if decl.compensate is not None:
+                raise RevlError(
+                    filename, decl.line,
+                    f"witnessed extern `{decl.name}` cannot declare `compensate`",
+                    hint="a witnessed mutation carries a proof-grade `undo`; "
+                         "`compensate` is the best-effort form for one-way emissions",
+                    code="G5", category="witnessed",
+                )
+            if decl.undo is None:
+                raise RevlError(
+                    filename, decl.line,
+                    f"witnessed extern `{decl.name}` must declare `undo` (G4)",
+                    hint="a witnessed mutation is reversible only because it names the "
+                         "inverse the accumulator auto-registers; declare "
+                         "`undo <inverse>(result)`",
+                    code="G4", category="witnessed",
+                )
+            # The witness is the return value, and it must be a `Result[W, E]` so
+            # the inverse registers on `Ok` only (a failed mutation touched
+            # nothing): rule "registered only on Ok" (docs/design/243).
+            head, args = parse_type(decl.returns)
+            if head != "Result" or len(args) != 2:
+                raise RevlError(
+                    filename, decl.line,
+                    f"witnessed extern `{decl.name}` must return "
+                    f"`Result[Witness, Error]` — the fallible witness the inverse "
+                    f"binds (G4)",
+                    hint="every host mutation can fail (ENOENT/EPERM/disk-full); the "
+                         "inverse is auto-registered on the `Ok` branch only, so the "
+                         "return must be a `Result`",
+                    code="G4", category="witnessed",
+                )
+            witness_type = args[0]
+            # The witness must be WAL-serializable DATA, not a host handle: a
+            # crash leaves only the write-ahead log, and an inverse closing over
+            # an in-process object is residue, not recovery (recovery.py). A host
+            # object type (Map/Pool/Job) cannot be reconstructed from the WAL.
+            wt_head, _ = parse_type(witness_type)
+            if wt_head in _HOST_CALLABLES:
+                raise RevlError(
+                    filename, decl.line,
+                    f"witnessed extern `{decl.name}` witness `{witness_type}` is a "
+                    f"host object — the witness must be WAL-serializable data (G8)",
+                    hint="a host handle dies with the process; after a crash only the "
+                         "write-ahead log survives, so the witness must be durable data "
+                         "(paths, refs, a record) the inverse can be rebuilt from",
+                    code="G8", category="witnessed",
+                )
         # `async` validity (docs/design/async-extern.md §1): the modifier is
         # legal only on `emission` externs, and an async extern may not declare
         # `compensate` in v1 (the compensation seam is synchronous on every
@@ -1497,6 +1658,14 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                     f"acquire's `undo` runs on the synchronous teardown/unwind path",
                     hint="classify it `emission`, or file the need if an awaited "
                          "teardown ever becomes real",
+                )
+            if decl.classification == "witnessed":
+                raise RevlError(
+                    filename, decl.line,
+                    f"`witnessed` extern `{decl.name}` cannot be `async` yet — its "
+                    f"declared inverse replays on the synchronous abort/teardown path",
+                    hint="classify it `emission`, or file the need if an awaited "
+                         "rollback ever becomes real",
                 )
             if decl.compensate is not None:
                 raise RevlError(
@@ -1521,11 +1690,33 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # `ir_version` stays 3 (confirmed human decision, §4).
             **({"async": True} if decl.async_ else {}),
         }
+        if decl.classification == "witnessed":
+            # The witnessed descriptor the Slice-2 runtime teardown loop reads
+            # (docs/design/243-witnessed-externs.md). `entry_kind: "transactional"`
+            # is the SECOND accumulator entry kind — distinct from an acquire's
+            # bracket: it replays on abort ONLY and is discharged (+ its witness
+            # GC'd) on commit, where a bracket also replays on clean unload.
+            # `ok_conditional` records that the inverse auto-registers on the
+            # Result's `Ok` branch only; `witness` is the WAL-serializable data
+            # type the inverse is reconstructed from.
+            entry["entry_kind"] = "transactional"
+            entry["revertible"] = True
+            entry["ok_conditional"] = True
+            entry["witness"] = witness_type
+            if decl.capabilities:
+                entry["capabilities"] = list(decl.capabilities)
         if decl.undo is not None:
-            # only an acquire reaches here with `undo` (pure/emission are
-            # refused above); its declared return, if any, binds `result`
+            # An acquire binds its declared return as `result`; a witnessed
+            # extern binds the `Ok` witness (the Result's success payload), which
+            # is exactly what the auto-registered inverse receives on abort.
+            undo_result_type = (witness_type if decl.classification == "witnessed"
+                                else decl.returns)
+            # Classification of the inverse before its arg types: a witnessed or
+            # emission inverse is refused on principle, whatever it is applied to.
+            if decl.classification == "witnessed":
+                _check_witnessed_inverse(decl, extern_class, filename)
             _check_extern_undo(decl.undo, decl.name, "undo", types, filename,
-                               result_type=decl.returns)
+                               result_type=undo_result_type)
             entry["undo"] = _lower_extern_expr(decl.undo, filename)
         if decl.compensate is not None:
             _check_extern_undo(decl.compensate, decl.name, "compensate",
@@ -2733,6 +2924,10 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename, types)
+    # witnessed externs are refused outside effect position (item 243 rule 1):
+    # a fn/test body has no teardown accumulator, so the auto-registered inverse
+    # would be dropped and the mutation would be silently irreversible.
+    _refuse_witnessed_outside_effect_position(program, program.filename)
     # One fixed point, two consumers: `emitting_caps` is what it computes
     # (docs/capabilities.md), `witness` is why (why.py). Evidence never
     # decides a rejection, it only explains one.
