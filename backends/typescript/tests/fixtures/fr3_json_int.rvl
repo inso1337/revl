@@ -1,0 +1,33 @@
+// Regression for roadmap item 281: `json_stringify` of a record carrying an
+// `Int` field. `Int` maps to JS `bigint` on the ts tier (emit.py TYPE_MAP),
+// and the builtin `JSON.stringify` THROWS on a bigint. These fns exercise the
+// @ts extern body's bigint replacer (stdlib/json.rvl): each must produce a
+// BARE JSON number equal to the py tier's `json.dumps`, at full i64 precision.
+use "stdlib/json.rvl" { json_parse, json_stringify }
+
+type Usage = { input_tokens: Int, output_tokens: Int }
+
+// a small positive Int field (the token-count / id / max_tokens case)
+fn dump_small() -> Str {
+  let u: Usage = { input_tokens: 7, output_tokens: 12 }
+  return json_stringify(u)
+}
+
+// a negative Int field
+fn dump_negative() -> Str {
+  let u: Usage = { input_tokens: -3, output_tokens: 0 }
+  return json_stringify(u)
+}
+
+// Int fields BEYOND 2^53: 9007199254740993 = 2^53 + 1, and i64 max. A plain
+// Number() cast would round these; the digits must survive exactly.
+fn dump_large() -> Str {
+  let u: Usage = { input_tokens: 9007199254740993, output_tokens: 9223372036854775807 }
+  return json_stringify(u)
+}
+
+// a bare top-level Int (the replacer fires at the document root too)
+fn dump_bare_int() -> Str { return json_stringify(9223372036854775807) }
+
+// no-Int fast path: parse a plain document then stringify it (no regression)
+fn roundtrip(s: Str) -> Str { return json_stringify(json_parse(s)) }

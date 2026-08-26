@@ -46,6 +46,9 @@ export function emitFixtures(): void {
   // item 279: a reserved-word JSON field on a DYNAMIC (json_parse/Any) value
   // stays reachable via the raw key (`tc["function"]`), matching the py tier
   emitFixture('dynamic_reserved_key.ir.json', 'dynamic_reserved_key.ts')
+  // item 281: json_stringify of a record carrying an `Int` (JS bigint) field
+  // must render a bare JSON number, not throw — the @ts bigint replacer.
+  emitFixture('fr3_json_int.ir.json', 'fr3_json_int.ts')
   // item 167: the routed-require scenario for router.test.ts. Generated here at
   // setup (so the test's static import resolves) but deliberately NOT checked in
   // and NOT enumerated as a checked-in fixture pair: it carries no `test`
