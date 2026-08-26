@@ -292,9 +292,12 @@ def _run_recover(args) -> int:
     persisted generation (roll-forward), and prints a checked verdict with a
     residue proof. Exit status follows the residue: 0 when clean, 1 when honest
     residue remains."""
-    # the recovery module reads `replay.WriteAheadLog`, a backend module — put
-    # backends/python on the path exactly as `run` does, but *without* needing a
-    # cordis runtime (recovery works from the durable log, the process is dead).
+    # The recovery core reads the WAL through the tier-agnostic `revl.wal`
+    # reader (item 322), so recover itself needs NO backend — it works from the
+    # durable log alone, for a py OR a non-py (go/rust/java/wasm) tier's WAL.
+    # backends/python is still put on the path for the `--restore` roll-forward
+    # path, which re-admits the persisted generation through a real cordis
+    # runtime; the core roll-back/roll-forward decision never touches it.
     backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
