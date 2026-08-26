@@ -46,10 +46,43 @@ def _log(name: str, channel: str, subject: str, detail: str = "") -> None:
     print(f"[{name}] {channel:<6}| {subject:<16}| {detail}".rstrip(), flush=True)
 
 
+def _read_wasm_str(memory, store, ptr: int) -> str:
+    """Decode a canonical-ABI Str (`[u32 byte_len][utf8 bytes]`) at ``ptr`` from
+    a plugged module's exported memory — the wasm tier's string layout
+    (backends/wasm/emit.py). Kept revl-free (json + the runtime only), like the
+    rest of this harness."""
+    length = int.from_bytes(memory.read(store, ptr, ptr + 4), "little")
+    return memory.read(store, ptr + 4, ptr + 4 + length).decode("utf-8")
+
+
+def _install_wal_channel(rt) -> None:
+    """Bind the item 322 Slice 2 record channel: the host half of a record-mode
+    module's ``coeffect:revl:wal.record`` import. At each witnessed transactional
+    registration the module calls it with (seq, receiver_ptr, method_ptr,
+    witness_ptr); this reads the three Str pointers back out of the calling
+    fiber's memory and RELAYS one ``[wal] {…}`` frame per registration to stdout.
+    The driver (:mod:`revl.run_wasm`) drains those frames into the durable host
+    WAL — the wasm mirror of the go tier's direct ``revlRecordTransactional``
+    fsync, split across the sandbox boundary the substrate enforces."""
+    def record(fiber, seq, receiver_ptr, method_ptr, witness_ptr):
+        memory = fiber.instance.exports(fiber.store)["memory"]
+        store = fiber.store
+        frame = {
+            "seq": int(seq),
+            "receiver": _read_wasm_str(memory, store, receiver_ptr),
+            "method": _read_wasm_str(memory, store, method_ptr),
+            "witness": _read_wasm_str(memory, store, witness_ptr),
+        }
+        print("[wal] " + json.dumps(frame), flush=True)
+
+    rt.host_provide("revl:wal", {"record": record})
+
+
 def main() -> int:
     spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
     name = spec.get("name", "run")
     once = bool(spec.get("once", False))
+    record = bool(spec.get("record", False))
     order = spec.get("order") or list((spec.get("modules") or {}).keys())
     modules = spec.get("modules") or {}
 
@@ -58,6 +91,11 @@ def main() -> int:
     from runtime import Runtime, State  # noqa: PLC0415 — cordis-wasm, wasmtime-backed
 
     rt = Runtime()
+    # item 322 Slice 2: with record mode on, seed the durable-WAL channel BEFORE
+    # plugging, so a record-mode module's `coeffect:revl:wal` import resolves at
+    # activation and its framing calls relay while the mutation registers.
+    if record:
+        _install_wal_channel(rt)
     fibers = []
     for cname in order:
         fiber = rt.plug(cname, modules[cname])
@@ -67,7 +105,10 @@ def main() -> int:
     # every fiber the composition placed must be ACTIVE for the mesh to be up
     # (a consumer left INACTIVE means its coeffect never resolved)
     all_active = all(f.state is State.ACTIVE for _, f in fibers)
-    provided = sorted(rt.table)
+    # the composition's own provisions — never the host-provided record channel
+    # (item 322 Slice 2's `revl:wal`), which is the host's, not a placed key.
+    host_keys = getattr(rt, "host_keys", set())
+    provided = sorted(k for k in rt.table if k not in host_keys)
     _log(name, "provide", "keys", ", ".join(provided) or "-")
     if not all_active:
         stuck = ", ".join(c for c, f in fibers if f.state is not State.ACTIVE)
@@ -81,7 +122,12 @@ def main() -> int:
 
     if once:
         live_fibers = len(rt.fibers)
-        live_services = len(rt.table)
+        # exclude host-provided provisions (item 322 Slice 2's `revl:wal` record
+        # channel) from Σ residue — they are the host's, torn down with the
+        # process, never a composition-left residue (host_provide seeds them and
+        # `unplug` never withdraws them).
+        host_keys = getattr(rt, "host_keys", set())
+        live_services = sum(1 for k in rt.table if k not in host_keys)
         _log(name, "residue", "registry", f"{live_fibers} live plugin(s)")
         _log(name, "residue", "provisions", f"{live_services} service(s) provided")
         if live_fibers == 0 and live_services == 0:
