@@ -223,6 +223,8 @@ def test_initialize_and_tools_list():
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",
+                          # the auto-approve policy (docs/design/246-auto-approve.md)
+                          "revl_approve",
                           # generation history + operator undo (docs/generation-history.md)
                           "revl_undo",
                           # component leases: the multi-agent workspace (item 61)
