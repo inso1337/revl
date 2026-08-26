@@ -950,11 +950,30 @@ def _method_bodies_have_compensation(component: dict) -> bool:
     return False
 
 
+def _method_bodies_have_witnessed(component: dict, witnessed: dict) -> bool:
+    """item 324: does any PROVIDE-METHOD body carry a witnessed effect (a
+    per-tool-call fs mutation)? The per-tool-call H1 gate: unlike a witnessed
+    effect in the ACTIVATION body (which `revl_teardown_begin` already sees),
+    one that fires from a method registers its transactional inverse into the
+    enclosing component's activation frame LATER, per request — the component
+    still needs the `RevlTeardown` accumulator built at activation so
+    `revl_teardown_of` can recover it. Mirrors `_method_bodies_have_compensation`
+    above (the method-body compensation case Slice 2b already handled)."""
+    for step in component.get("body") or []:
+        if step.get("step") != "provide":
+            continue
+        for method in step.get("methods") or []:
+            if _body_has_witnessed(method.get("body"), witnessed):
+                return True
+    return False
+
+
 def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
     body = component.get("body") or []
     return (_body_has_witnessed(body, witnessed)
             or _body_has_compensation(body)
-            or _method_bodies_have_compensation(component))
+            or _method_bodies_have_compensation(component)
+            or _method_bodies_have_witnessed(component, witnessed))
 
 
 def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
@@ -2016,6 +2035,17 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             else:
                 out.append(f"{pad}return {_expr(step['expr'], env, rename)};")
         elif kind == "effect":
+            wit = _witnessed_extern_for(env, step.get("acquire"))
+            if wit is not None:
+                # item 324: a witnessed effect in a provide-method body — the
+                # per-tool-call H1 gate. Register the extern's DECLARED inverse
+                # as a `transactional` entry on the enclosing component's
+                # activation frame (via `revl_teardown_of(&self.ctx)`), NOT as a
+                # plain always-replaying bracket. See `_emit_method_witnessed_step`
+                # for the disposal-ordering analysis (rust's eager commit means
+                # no park-for-drain is needed, unlike py).
+                _emit_method_witnessed_step(env, method, step, wit, out, indent)
+                continue
             # bracket (acquire): unchanged by item 243/247 — replays on every
             # teardown, clean unload and abort alike (docs/design/
             # teardown-contract.md's "bracket... unchanged" row).
@@ -2643,6 +2673,64 @@ def _emit_witnessed_step(env: "_Env", step: dict, ext: dict, out: list[str],
     out.append(f"{pad}}}")
     if bind is not None:
         out.append(f"{pad}let {bind} = {tmp};")
+
+
+def _emit_method_witnessed_step(env: "_Env", method: dict, step: dict, ext: dict,
+                                out: list[str], indent: int) -> None:
+    """Emit a witnessed effect inside a PROVIDE-METHOD body — item 324, THE
+    per-tool-call H1 gate (docs/design/243-witnessed-externs.md,
+    docs/design/teardown-contract.md). Mirrors backends/python/emit.py's
+    `_method_witnessed_step` / `Frame.transactional_method`: run the per-call
+    mutation, and on `Ok` register the extern's DECLARED inverse as a
+    `transactional` entry on the ENCLOSING COMPONENT's activation frame,
+    recovered through `self.ctx` (the SAME fiber `revl_teardown_begin` extended
+    at activation — `revl_teardown_of` reads the metadata stored there). The
+    method returns, but the inverse must outlive the call: it survives on the
+    component-long activation frame until the component/session commits or
+    aborts.
+
+    THE SOUNDNESS HAZARD, and why rust does NOT have it. On cordis-py the
+    obvious "adopt the entry as a sibling effect" is unsound: py flips
+    `_committed` LAZILY, inside `Frame.drain` at teardown, and cordis-py
+    disposes an adopted sibling effect BEFORE that drain — so on a clean unload
+    the disposer would observe `_committed` still False and wrongly revert the
+    deliverable. py's fix PARKS the entry (`_deferred_transactional`) for `drain`
+    to dispose after the commit bit is settled. The rust tier flips `committed`
+    EAGERLY, at activation-end (`_emit_teardown_commit`, the same instant py's
+    drain would). By the time a per-tool-call method runs and registers this
+    sibling `self.ctx.effect` disposer, `committed` is ALREADY settled (True on
+    a live activation), and cordis-rs disposes it in the fiber's single LIFO
+    unload pass where it reads that settled bit by construction — discharge
+    (drop the witness, do nothing) on a clean commit, replay the declared
+    inverse on abort (`revl_abort` cleared `committed` before unload). No
+    park-for-drain discipline is needed: eager commit sidesteps the premature-
+    disposal window entirely. Registration is fire-and-forget (`let _ =
+    self.ctx.effect(...)`) — a non-`Result` method signature cannot `?`-propagate
+    — matching every other method-body registration, and unconditional over the
+    `Ok` branch (an `Err` mutation touched nothing, so it schedules no
+    rollback: 243's Ok-conditional rule)."""
+    pad = "    " * indent
+    n = env.wit_counter
+    env.wit_counter += 1
+    tmp = f"_revl_wit{n}"
+    witv = f"_revl_witv{n}"
+    # The shared expression renderer already clones a typed non-Copy param used
+    # by value as a call argument (`_by_value_arg`), so the acquire needs only
+    # the component-scope rename — no extra param `.clone()` (that would double).
+    out.append(f"{pad}let {tmp} = {_expr(step.get('acquire'), env, _method_scope_rename(env))};")
+    witness_ty = _rust_type(ext.get("witness"), env.types)
+    label = _string(f"{env.name}.{method.get('name')}.witnessed")
+    undo = _expr(ext["undo"], env)
+    out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
+    out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    out.append(f"{pad}    let _revl_state = revl_teardown_of(&self.ctx);")
+    out.append(f"{pad}    let _ = self.ctx.effect({label}, move || {{")
+    out.append(f"{pad}        if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{")
+    out.append(f"{pad}            let _ = {undo};")
+    out.append(f"{pad}        }}")
+    out.append(f"{pad}        Ok(())")
+    out.append(f"{pad}    }});")
+    out.append(f"{pad}}}")
 
 
 def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_text: str,
@@ -5017,6 +5105,49 @@ def _revl_teardown_preamble() -> list[str]:
         "        .unwrap_or(1000)",
         "}",
         "",
+        "/// item 324: the out-of-band abort registry — the faithful mirror of the",
+        "/// py runtime's `_FRAME_BY_CTX` + `_sole_frame`. A session-level reject",
+        "/// (item 245's explicit commit/abort UX) runs OUTSIDE the fiber and must",
+        "/// reach an already-activated component's `RevlTeardown` to clear",
+        "/// `committed`, so its next unload REPLAYS the per-tool-call (and",
+        "/// activation-body) transactional inverses instead of discharging them.",
+        "/// The state itself lives on the fiber's (private) extended context, which",
+        "/// no out-of-fiber caller can reach — cordis-rs's `Context::extend` derives",
+        "/// a child whose metadata the parent/fiber context cannot see — so this",
+        "/// weak, label-keyed registry is the reach-in seam. Weak so a disposed",
+        "/// activation's teardown is collected normally; the registry never keeps",
+        "/// one alive.",
+        "#[allow(clippy::type_complexity)]",
+        "static REVL_TEARDOWN_REGISTRY: std::sync::OnceLock<",
+        "    std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>>>",
+        "    = std::sync::OnceLock::new();",
+        "",
+        "fn revl_teardown_registry()",
+        "    -> &'static std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>> {",
+        "    REVL_TEARDOWN_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))",
+        "}",
+        "",
+        "fn revl_teardown_remember(label: &str, state: &std::sync::Arc<RevlTeardown>) {",
+        "    revl_teardown_registry().lock().unwrap()",
+        "        .push((label.to_string(), std::sync::Arc::downgrade(state)));",
+        "}",
+        "",
+        "/// Abort every live activation registered under `label`: clear `committed`",
+        "/// so the next teardown REPLAYS its transactional inverses (py's",
+        "/// `Frame.abort`). Idempotent; skips dead weak entries. The driver/harness",
+        "/// calls this before unloading the fiber to reject the session's work.",
+        "#[allow(dead_code)]",
+        "fn revl_abort(label: &str) {",
+        "    let registry = revl_teardown_registry().lock().unwrap();",
+        "    for (entry_label, weak) in registry.iter() {",
+        "        if entry_label == label {",
+        "            if let Some(state) = weak.upgrade() {",
+        "                state.committed.store(false, std::sync::atomic::Ordering::Release);",
+        "            }",
+        "        }",
+        "    }",
+        "}",
+        "",
         "/// Register the phase-2 drain hook FIRST — so cordis-rs's LIFO dispose",
         "/// runs it LAST, after every bracket/transactional inverse — and return",
         "/// the shared accumulator plus a `Context` extended to carry it, so a",
@@ -5031,6 +5162,7 @@ def _revl_teardown_preamble() -> list[str]:
         "        per_call_ms: revl_compensation_per_call_ms(),",
         "    });",
         '    let ctx = ctx.extend("_revl_teardown", state.clone());',
+        "    revl_teardown_remember(label, &state);  // item 324: out-of-band abort reach-in",
         "    let sentinel = state.clone();",
         "    ctx.effect(label.to_string(), move || {",
         "        if !sentinel.committed.load(std::sync::atomic::Ordering::Acquire) {",
