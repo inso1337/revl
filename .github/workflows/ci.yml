@@ -29,6 +29,12 @@ jobs:
         with:
           go-version: "1.26"
       - run: pip install -e ".[test]"
+      # roadmap 328: the README conformance + performance matrix is generated
+      # from real emitter output, never authored. Fail the build if the
+      # committed block drifts from a fresh generation — the same contract as
+      # the other generated-artifact gates. Emit-only + self-host are pure
+      # Python, so this needs no backend toolchain and runs here.
+      - run: python3 tools/conformance.py --check-readme
       # the frontend suite includes the pure-Python halves of all three
       # backends (emitter goldens, IR contract, manifest/admission, audit);
       # runtime-integration tests skip cleanly when their host runtime is
