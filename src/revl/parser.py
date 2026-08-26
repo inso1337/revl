@@ -2769,7 +2769,7 @@ class Parser:
             self.next()
             if self.at("=>"):
                 self.next()
-                return ExprArrow([tok.value], self.pure_expr(), tok.line, [None])
+                return ExprArrow([tok.value], self._arrow_body(), tok.line, [None])
             return ExprVar(tok.value, tok.line)
         if tok.kind == "kw" and tok.value == "hole":
             return self._hole_expr()
@@ -2798,7 +2798,7 @@ class Parser:
                         self.next()
                 self.expect(")")
                 self.expect("=>")
-                return ExprArrow(params, self.pure_expr(), tok.line, param_types)
+                return ExprArrow(params, self._arrow_body(), tok.line, param_types)
             self.next()
             node = self.pure_expr()
             self.expect(")")
@@ -2848,6 +2848,44 @@ class Parser:
         if tok.kind == "kw" and tok.value == "if":
             return self._if_expr()
         raise self.err(tok.line, f"expected an expression, found {tok.value!r}")
+
+    def _arrow_body(self):
+        """The body of an arrow `=> …`. A closure body is a single pure
+        *expression*; revl has no statement-block arrow, so a value returned
+        by a closure is computed, never assigned into an enclosing cell.
+
+        The one shape that reads as an *attempt* at reference capture —
+        `(…) => { name = … }`, a closure writing a name bound in an enclosing
+        scope — is refused here with an explicit diagnostic (roadmap item 129,
+        docs/closures.md) instead of the incidental record-literal parse error
+        (`{ name =` is not a record: records key with `:`, updates with `|`).
+
+        revl closures capture strictly BY VALUE (syntax-2.0 §3.5): they
+        snapshot the values they read. That is not an ergonomic choice — it is
+        what keeps the value-semantic equality the derived LIFO teardown (G7)
+        and no-residue containment (A8) rest on. An inverse the teardown
+        accumulator holds closes over the *values* the forward effect used; a
+        closure that could write a live mutable cell would let those values
+        shift out from under the inverse, and the recovery-exactness proof
+        would lose its subject. So there is no shared mutable environment to
+        write through, and the write form is rejected rather than snapshotted."""
+        if self.at("{"):
+            nxt = self.toks[self.pos + 1]
+            after = self.toks[self.pos + 2]
+            compound = (after.kind in ("+", "-", "*", "/", "%")
+                        and self.toks[self.pos + 3].kind == "=")
+            if self._is_name_tok(nxt) and (after.kind == "=" or compound):
+                raise self.err(
+                    nxt.line,
+                    f"a closure cannot assign to `{nxt.value}`: captures are "
+                    "by value, not by reference (G6)",
+                    hint="a revl closure snapshots the values it reads "
+                         "(syntax-2.0 §3.5, docs/closures.md) — there is no "
+                         "shared mutable cell to write through. Return the "
+                         f"computed value, or mutate the `var` `{nxt.value}` in "
+                         "the enclosing `fn` body, not inside the closure.",
+                )
+        return self.pure_expr()
 
     def _arrow_params_ahead(self) -> bool:
         """Current token is `(` — is this `(a, b) => …` / `(a: Int) => …`

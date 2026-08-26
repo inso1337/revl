@@ -155,6 +155,11 @@ REJECTIONS = {
     # `KeyError` in `_is_emission_call`).
     "g4_unmarked_handle_emission.rvl": "call to emission `w.task.run` must be marked `emit` (G4)",
     "g6_impure_statement.rvl": "plain expressions have no effect to record (G6)",
+    # roadmap item 129: closures capture BY VALUE (syntax-2.0 §3.5). A closure
+    # that ASSIGNS to a captured binding is reference capture, which would break
+    # the value-semantic equality the derived LIFO teardown (G7/A8) rests on, so
+    # it is refused with an explicit diagnostic (docs/closures.md).
+    "g6_closure_mutates_capture.rvl": "a closure cannot assign to `n`: captures are by value, not by reference (G6)",
     "a2_acquire_after_provide.rvl": "acquisition after `provide`",
     "a6_method_not_in_service.rvl": "`db.execute` is not a method of service Database",
     # item 153: a provide block keyed on something the `provides` clause never
