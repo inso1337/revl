@@ -57,6 +57,9 @@ export function emitFixtures(): void {
   // run, cold clone included. The alias keeps the pair off that gate's scan.
   const emitRouterModule = emitFixture
   emitRouterModule('router.ir.json', 'router.ts')
+  // item 243 Slice 2b: the three-entry-kind teardown loop (bracket +
+  // transactional + compensation on one LIFO stack, two-phase abort).
+  emitFixture('witnessed_teardown.ir.json', 'witnessed_teardown.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

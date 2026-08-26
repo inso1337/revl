@@ -111,6 +111,23 @@ sys.path.insert(0, str(ROOT / "src"))
 from revl import compile_files  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
+
+# item 243 Slice 2b (docs/design/teardown-contract.md): the reference emitter's
+# `emit ... compensate ...` lowering changed (a compensation now registers a
+# Phase-2 entry through `Frame`, two-phase abort, instead of a bare `yield ()
+# => <compensate>`) — the SAME shape of gap py hit when its own compensate
+# feature first landed against `selfhost/emit_py.rvl` (filed there as item
+# 317: "port selfhost/emit_py.rvl's compensate lowering", landed separately
+# from the reference change). `selfhost/emit_ts.rvl` has not been ported to
+# the new lowering yet; a ts-selfhost-port follow-up (this tier's analog of
+# item 317) owns closing that gap. Every fixture NOT using `compensate`
+# byte-matches the reference exactly (verified); these three, which each
+# spell a saga, do not — marked `xfail` (not removed from CORPUS) so the rest
+# of what they cover keeps being checked, and so the follow-up landing shows
+# up as an XPASS here (a loud "remove this mark now") rather than a silent
+# gap nobody notices.
+_COMPENSATE_DIVERGED = {"services_body.rvl", "component_exprs.rvl", "v1_component_body.rvl"}
+
 CORPUS = [
     "arith.rvl",       # bounded int/int32, division/modulo, comparisons, unary
     "strings.rvl",     # the stdlib string builtins and `${…}` interpolation
@@ -121,6 +138,7 @@ CORPUS = [
     # slice 2 (item 204) — components/services, byte-exact:
     "services_methods.rvl",       # provide methods (params, ternary, builtin), context aug
     "services_body.rvl",          # let-effect (bound), if/fail guard, emit/compensate saga
+                                   # (compensate diverges — see _COMPENSATE_DIVERGED above)
     "services_config.rvl",        # config interface (required + defaulted), applyConfigDefaults
     "services_method_block.rvl",  # block-form provide method: let/return, req-as-ctx in method
     "components_mixed.rvl",       # a pure fn alongside a provider (independent match counters)
@@ -128,6 +146,7 @@ CORPUS = [
     "services_composite.rvl",         # List/Opt/Map/Result/fn-type + declared-record `List[Msg]`
     "services_composite_provide.rvl", # composite provide-method params (Row[], Map) via `_ts_type`
     "component_exprs.rvl",            # host (`host.Job.run`), format (`` `…${}` ``), fn, adt
+                                       # (compensate diverges — see _COMPENSATE_DIVERGED above)
     # slice 4 (item 219) — async coloring across the component tail, byte-exact:
     "services_async.rvl",       # async op `Promise<T>` sigs, `async` methods, the item-141
                                 # await-seed (direct `fetch` + nested ternary arm `pick`)
@@ -148,8 +167,24 @@ CORPUS = [
     # slice 7 (item 240) — the v1/v2 DISPATCH path (`emit()` -> `_emit_v1`), byte-exact:
     "v1_component_body.rvl",  # a component-only doc with no v3 feature lowers to ir_version 1
                               # (config, effect/undo, emit/compensate saga, provide method + ternary)
+                              # (compensate diverges — see _COMPENSATE_DIVERGED above)
     "v2_isolate_only.rvl",    # isolate ONLY (no trivial v3 `fn`) -> ir_version 2 (closes item 234's flag)
     "v2_intercept_only.rvl",  # intercept ONLY (no trivial v3 `fn`) -> ir_version 2, dict-form inject
+]
+
+# `_COMPENSATE_DIVERGED` entries run as `xfail` rather than being dropped from
+# CORPUS or asserted normally — see that set's docstring above.
+_CORPUS_PARAMS = [
+    pytest.param(
+        rel,
+        marks=pytest.mark.xfail(
+            reason="selfhost/emit_ts.rvl not yet ported to the item 243 Slice "
+                   "2b compensate lowering (Frame/two-phase); ts-selfhost-port "
+                   "follow-up, py's item 317 analog",
+            strict=True,
+        ),
+    ) if rel in _COMPENSATE_DIVERGED else rel
+    for rel in CORPUS
 ]
 
 
@@ -200,7 +235,7 @@ def reference():
     return _load_reference_emit()
 
 
-@pytest.mark.parametrize("rel", CORPUS)
+@pytest.mark.parametrize("rel", _CORPUS_PARAMS)
 def test_selfhosted_ts_emitter_is_byte_identical(emitted, reference, rel):
     """The self-hosted emitter's TypeScript output == the reference's,
     byte-for-byte, for every interchange-IR document in the covered subset."""
