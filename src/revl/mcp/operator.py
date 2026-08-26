@@ -415,11 +415,25 @@ def decide(session, tool_name: str, arguments: dict) -> Decision:
     verb is read-only, ``gated`` is False and the call proceeds unchanged —
     today's behaviour. Otherwise the operator must be authorized for the verb
     on *every* component the action touches, or the whole action is refused
-    with a policy-style why-trace (all-or-nothing, like admission)."""
+    with a policy-style why-trace (all-or-nothing, like admission).
+
+    Exception: the **initial cold** ``revl_load`` is ungated (roadmap item
+    300). A cold load boots a candidate into an empty session so it can be
+    inspected and gauntleted; nothing is live, activated, or swapped by it, so
+    it is not yet a privileged mutation and the authority gate does not belong
+    on it. ``session.ir is None`` is exactly "nothing live yet": the field is
+    None until :meth:`Session.load` sets it, and a subsequent ``revl_load``
+    against a running composition is refused by the handler outright (`load`
+    never replaces or activates a live composition). The gate is kept for that
+    already-live case, and for every state-changing verb (swap/edit/unload/
+    restore/undo)."""
     verb = TOOL_VERB.get(tool_name)
     operator = getattr(session, "operator", None)
     if verb is None or operator is None:
         return Decision(gated=False)
+
+    if verb == "load" and session.ir is None:
+        return Decision(gated=False)  # cold load: not yet a privileged mutation
 
     targets = _targets(verb, session, arguments)
     if targets is None:
