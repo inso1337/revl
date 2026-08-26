@@ -89,6 +89,21 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   `revl export wit` (slice-1). Records/lists/variants at the canonical boundary
   are the remaining follow-on. See `test_canonical_abi.py` (builds + runs it
   under wasmtime's component model) and docs/wit-bridge.md §5.
+- **witnessed-effects teardown (item 243 Slice 2b)** — the compiled
+  accumulator carries three entry kinds now (`bracket`/`transactional`/
+  `compensation`) and a two-phase abort, over ACTIVATION-REGISTERED entries
+  only (the state-machine restriction above is unchanged: method-time
+  compensation still refuses). ADDITIVE: a component with no `witnessed`
+  extern and no `emit ... compensate ...` step emits `deactivate` in its
+  pre-Slice-2b single-pass shape, byte-identical, with none of the new
+  machinery. On a component that does register one, new exports appear:
+  `committed()` (the abort-vs-commit discriminator) and `deactivate_step()`
+  (one entry per call, so a first-party host can catch a trap per entry and
+  bound a Phase-2 compensation's epoch/fuel individually — `lifecycle.py`'s
+  `drive_teardown`, no cordis-wasm needed); `deactivate()` keeps its old
+  signature, now a thin loop over `deactivate_step`. See
+  docs/wasm-capabilities.md §Witnessed-effects teardown and
+  `test_witnessed_teardown.py`.
 
 ## Widths: `Int` is i64, addresses are i32
 

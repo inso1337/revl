@@ -242,6 +242,76 @@ each is a sentence the tier's loop is built against, not a new decision):
   claiming guest-code preemption; until that wiring lands, wasm is in
   practice a between-compensation-check-only tier.
 
+### wasm Slice 2b as implemented
+
+Landed in `backends/wasm/emit.py` (the compiled accumulator) and
+`backends/wasm/lifecycle.py` (the first-party wasmtime driver;
+`test_witnessed_teardown.py` proves it against a live module).
+
+1. **The abort-vs-commit discriminator is "did the body run to every
+   segment."** `activate_step` flips a new `$__committed` global the moment
+   the LAST segment completes without trapping — a mid-activation trap never
+   reaches that line, so an abort leaves it at its default 0. A new
+   `committed()` export reads it back, the wasm analogue of the py reference
+   tier's `Frame._committed` ("did `drain` run").
+2. **Additive: the whole scaffold is gated on actually needing it.** A
+   component with no `witnessed` extern and no `emit ... compensate ...`
+   step registers only `bracket` entries, which replay on commit AND abort
+   alike — nothing for a commit/abort split to distinguish. `_module`
+   computes `needs_teardown_scaffold` (any `transactional`/`compensation`
+   entry present) and, when false, renders `deactivate` in the EXACT
+   pre-Slice-2b single-pass shape (no `$__committed`/`$__dstep` globals, no
+   `committed()`/`deactivate_step()` exports) — byte-identical emission for
+   every program that does not use the feature, mirroring the go tier's
+   `_COMP_NEEDS_TEARDOWN` and the rust tier's `_body_has_witnessed`/
+   `_body_has_compensate` gates. Verified against `origin/main`: Beacon,
+   Auditor, Pulse and canonical_service's goldens are byte-identical.
+3. **Three entry kinds, one LIFO stack, no second list** — carried exactly as
+   the shared table above specifies. A witnessed acquisition's registration
+   is genuinely Ok-conditional at RUNTIME (not just compile time): two
+   globals per entry (`$g_wit_val_<n>`, `$g_wit_flag_<n>`) hold the extracted
+   Ok payload and whether Ok was actually returned, since the wasm state
+   machine has no other way to carry a value across the `activate_step`/
+   `deactivate` call boundary (a wasm `local` does not survive between
+   exported-function calls). `_witnessed_effect_step` (`emit.py`) is the
+   codegen.
+4. **The two-phase abort is a compiled dispatch chain, not a single pass.**
+   `deactivate_step() -> i32` processes exactly one accumulator entry per
+   call — the same per-call idiom `activate_step` already used for the
+   forward path — with `$__dstep` advanced BEFORE the entry's own
+   inverse/compensate runs, so a trap inside one entry leaves the cursor
+   already past it. `deactivate()` keeps its old signature (a host like
+   cordis-wasm's `Runtime.unplug` needs no changes) and is now a thin loop
+   calling `deactivate_step` to completion in one call — same all-or-nothing
+   trap behavior as before this slice for that path, since core wasm still
+   has no catch/continue across an internal `call`; genuine per-entry
+   continue-and-record needs the caller driving `deactivate_step` itself,
+   which is exactly what `lifecycle.drive_teardown` does.
+5. **Epoch/fuel is wired first-party, at the per-entry granularity the
+   compiled dispatch makes possible**, closing the open capability gap the
+   paragraph above named: `lifecycle.drive_teardown` arms a wasmtime epoch
+   deadline around each Phase-2 (compensation) call individually — real
+   in-call guest-code preemption, verified against a live spin-loop
+   compensation (`test_epoch_deadline_bounds_a_hung_compensation`), not
+   merely the between-compensation check. The honest limitation stands as
+   specced: a compensation blocking entirely inside a host import (a `req`
+   call) is not preemptible this way, because wasmtime only checks the
+   deadline in guest code.
+6. **The WAL descriptor is a static compile-time index, not a runtime log.**
+   `_teardown_section` emits a `revl:teardown` custom section (seq, kind,
+   `deactivate_step` dispatch position per transactional/compensation entry)
+   — the honest ceiling on a tier whose teardown loop is compiled state with
+   zero host bookkeeping (backends/wasm/README.md): runtime witness/argument
+   VALUES live in the component's own linear memory, and nothing here claims
+   to persist them durably. A host wanting genuine crash recovery on this
+   tier builds its own WAL against this section as a starting index; this
+   slice does not claim recovery itself.
+7. **Not done in this slice, scoped elsewhere:** the cross-tier a5
+   respec/exit-test sweep (exit tests 1-2 above) is sequenced with the py
+   tier and the other Slice-2b tiers, not owned by the wasm landing alone;
+   method-time compensation stays refused (its own item, not Slice 2b); the
+   `revl:teardown` section carries no witness/argument VALUES, by design (6).
+
 Budget values (Phase-2 total and per-call) are host configuration with
 tier-uniform defaults; the contract fixes the check points and the residue
 records, not the numbers. The config SURFACE is pinned now, so six tiers do
