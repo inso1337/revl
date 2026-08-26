@@ -519,6 +519,50 @@ def disarm_fault_probe() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _Transactional:
+    """The disposer for one witnessed (transactional) effect (item 243).
+
+    A bracket disposer replays its inverse on every teardown — clean unload and
+    abort alike — because releasing an acquired handle is always right. A
+    transactional disposer is different: the mutation IS the deliverable, so on
+    a clean COMMIT (the activation completed and is now unloading cleanly) the
+    inverse must NOT run and the witness is dropped; only an ABORT (a
+    mid-activation failure that unwinds before the activation ever committed)
+    replays it. Both branches drop the inverse and witness references so a
+    discharged transaction leaves no rollback state alive (witness GC).
+
+    The commit signal is read from the owning frame at disposal time, not
+    captured at registration, because whether the activation commits is not yet
+    known when the effect runs — it depends on whether a LATER step aborts."""
+
+    __slots__ = ("frame", "witness", "_undo", "discharged", "replayed")
+
+    def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any) -> None:
+        self.frame = frame
+        self._undo = undo
+        self.witness = witness
+        self.discharged = False   # committed: inverse skipped, mutation persists
+        self.replayed = False     # aborted: inverse ran, mutation reverted
+
+    def __call__(self) -> Any:
+        if self.frame._committed:
+            # commit: discharge. The mutation stays; drop the inverse + witness
+            # so no rollback state survives a committed transaction (GC).
+            self.discharged = True
+            self._undo = None
+            self.witness = None
+            return None
+        # abort: replay the declared inverse against the captured witness, then
+        # drop both references (idempotent single-shot, so a re-entrant unwind
+        # or a `revl recover` pass does not run it twice).
+        self.replayed = True
+        undo, self._undo = self._undo, None
+        witness, self.witness = self.witness, None
+        if undo is None:  # pragma: no cover — single-flight guard
+            return None
+        return undo(witness)
+
+
 class Frame:
     """One component activation's effect accumulator.
 
@@ -547,6 +591,19 @@ class Frame:
         self.ctx = ctx
         self.name = name
         self._adopted: list = []
+        # item 243 (docs/design/243-witnessed-externs.md): the transactional
+        # entries this activation registered, in registration order. A witnessed
+        # effect is NOT a bracket — its inverse replays on ABORT ONLY and is
+        # DISCHARGED (skipped, witness GC'd) on a clean successful unload, where
+        # the mutation itself is the deliverable and must persist. `_committed`
+        # is the abort-vs-commit discriminator: it flips True the moment `drain`
+        # runs, and `drain` runs iff the body reached its final `yield` (a clean
+        # unload). A mid-activation abort never yields `drain`, so cordis unwinds
+        # the already-collected disposers with `_committed` still False and the
+        # transactional inverse replays exactly like a bracket. Kept for
+        # introspection (fault/residue proofs); the disposer reads `_committed`.
+        self._transactional: list = []
+        self._committed: bool = False
         # stateful host resources this activation acquires (`Map.new()`, …), in
         # acquisition order — the instance's migratable state for a hot-swap
         # (see the state-migration section above). Populated by
@@ -626,9 +683,37 @@ class Frame:
         self.adopt(self.ctx.effect(_setup, label))
         return holder[0]
 
+    def transactional(self, undo: Callable[[Any], Any], witness: Any) -> "_Transactional":
+        """Register a witnessed effect's declared inverse as a TRANSACTIONAL
+        entry, carrying its `witness` (item 243). Returns the disposer the
+        emitted body yields into the accumulator, so it sits in the same LIFO
+        disposer stack as every bracket inverse and unwinds in exact reverse
+        order alongside them.
+
+        The distinction from `acquire` lives entirely in the returned disposer
+        (:class:`_Transactional`): on teardown it replays `undo(witness)` iff
+        this activation did NOT commit (an abort — `drain` never ran), and on a
+        clean committed unload it DISCHARGES — the inverse is skipped and the
+        witness dropped, because the mutation is the deliverable and must
+        persist. Registration itself is unconditional here; the emitted call
+        site yields this only on the `Ok` branch (Ok-conditional), so a failed
+        mutation that touched nothing schedules no rollback."""
+        entry = _Transactional(self, undo, witness)
+        self._transactional.append(entry)
+        return entry
+
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
-        emitted body, so the runtime runs it first on unload)."""
+        emitted body, so the runtime runs it first on unload).
+
+        item 243: reaching `drain` at teardown is the proof that the body ran to
+        its final `yield` — i.e. activation completed and this unload is a clean
+        one, an implicit commit. Flip `_committed` first, synchronously, before
+        disposing anything: `drain` is yielded last so cordis disposes it FIRST
+        (LIFO), which means every transactional inverse collected earlier runs
+        AFTER this line and observes the commit. An abort never yields `drain`,
+        so this never runs and the transactional inverses replay."""
+        self._committed = True
         adopted, self._adopted = self._adopted, []
         if not adopted:
             return None

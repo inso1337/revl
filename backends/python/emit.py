@@ -31,7 +31,7 @@ import copy
 import keyword
 import re
 import textwrap
-from typing import Any
+from typing import Any, Optional
 
 IR_VERSION = 1
 
@@ -618,9 +618,18 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
 
 
 class _ComponentEmitter:
-    def __init__(self, component: dict, services: dict) -> None:
+    def __init__(self, component: dict, services: dict, externs: list | None = None) -> None:
         self.ir = component
         self.services = services
+        # item 243 (docs/design/243-witnessed-externs.md): witnessed externs by
+        # name, so a call site can be recognised as a transactional effect and
+        # register its DECLARED inverse (not a site-spelled one) into the
+        # accumulator. Absent/empty for every program that uses no witnessed
+        # extern, so their emission stays byte-identical.
+        self.witnessed = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "witnessed"
+        }
         self.name = _ident(component.get("name"), "component name")
         self.requires = {
             _ident(local, "requires key"): service
@@ -915,15 +924,24 @@ class _ComponentEmitter:
             if step.get("setup"):
                 for setup in step["setup"]:
                     self._setup_step(out, indent, setup, where)
-            bind = _ident(step.get("bind"), f"{where}: bind")
-            out.add(indent, f"{bind} = {self._expr(step.get('acquire'), where)}")
-            out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
+            wit = self._witnessed_extern(step.get("acquire"))
+            if wit is not None:
+                self._witnessed_step(out, indent, step, wit, where,
+                                     bind=_ident(step.get("bind"), f"{where}: bind"))
+            else:
+                bind = _ident(step.get("bind"), f"{where}: bind")
+                out.add(indent, f"{bind} = {self._expr(step.get('acquire'), where)}")
+                out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "effect":
             if step.get("setup"):
                 for setup in step["setup"]:
                     self._setup_step(out, indent, setup, where)
-            out.add(indent, self._expr(step.get("acquire"), where))
-            out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
+            wit = self._witnessed_extern(step.get("acquire"))
+            if wit is not None:
+                self._witnessed_step(out, indent, step, wit, where, bind=None)
+            else:
+                out.add(indent, self._expr(step.get("acquire"), where))
+                out.add(indent, f"yield lambda: {self._expr(step.get('undo'), where)}")
         elif kind == "fail":
             out.add(indent, f"raise RuntimeError({self._expr(step.get('message'), where)})")
         elif kind == "if":
@@ -955,6 +973,44 @@ class _ComponentEmitter:
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
         out.add(0)
+
+    def _witnessed_extern(self, acquire: Any) -> Optional[dict]:
+        """The witnessed extern descriptor a step's acquisition calls, or None.
+
+        A witnessed effect (item 243) is spelled as an effect-position call to a
+        `witnessed` extern; a component step call renders as an IR `fn` node, so
+        matching its name against the witnessed table is how the emitter tells a
+        transaction from an ordinary bracket. Returns None for every other
+        acquisition, so non-witnessed effects emit byte-identically to before."""
+        if not self.witnessed or not isinstance(acquire, dict):
+            return None
+        if acquire.get("kind") != "fn":
+            return None
+        return self.witnessed.get(acquire.get("name"))
+
+    def _witnessed_step(self, out: _Lines, indent: int, step: dict, ext: dict,
+                        where: str, bind: Optional[str]) -> None:
+        """Emit a witnessed effect (item 243): run the mutation, and on `Ok`
+        register the extern's DECLARED inverse into the accumulator as a
+        TRANSACTIONAL entry carrying the `Ok` witness.
+
+        Unlike a bracket (`yield lambda: <undo>`, replays on every teardown),
+        this yields a transactional disposer that replays ONLY on abort and is
+        discharged on a clean commit (`Frame.transactional` / `_Transactional`).
+        The inverse is the extern's own `undo` — no site-spelled undo; the
+        accumulator owns it — and it binds the `Ok` payload as `result` (the
+        implicit witness binder, docs/design/243 'Slice 1 as implemented' #1).
+        On `Err` nothing is registered: a failed mutation touched nothing, so it
+        must not schedule a rollback (Ok-conditional)."""
+        self._counter += 1
+        tmp = f"_revl_wit{self._counter}"
+        undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
+        out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
+        out.add(indent, f"if isinstance({tmp}, Ok):")
+        out.add(indent + 1,
+                f"yield _revl_frame.transactional((lambda result: {undo}), {tmp}.value)")
+        if bind is not None:
+            out.add(indent, f"{bind} = {tmp}")
 
     def _timer(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         """A `timer` body step (item 57): a revertible schedule.
@@ -2127,6 +2183,12 @@ def _uses_builtin_result(ir: dict) -> bool:
             return any(walk(v) for v in node)
         return False
 
+    # item 243: a witnessed extern returns `Result[Witness, Error]` and its
+    # emitted call site branches on `Ok` to register the transactional inverse,
+    # so the Result classes must be present even if no surface `match`/`adt`
+    # names them. Any witnessed extern is enough to require them.
+    if any(ext.get("class") == "witnessed" for ext in ir.get("externs") or []):
+        return True
     return walk(ir.get("components")) or walk(ir.get("functions")) or walk(ir.get("tests"))
 
 
@@ -2505,7 +2567,7 @@ def emit(ir: dict) -> str:
     }
     _PY_USES_AS_ASYNC = False
 
-    emitters = [_ComponentEmitter(component, services) for component in components]
+    emitters = [_ComponentEmitter(component, services, externs) for component in components]
     bodies = [emitter.emit() for emitter in emitters]
 
     names = [emitter.name for emitter in emitters]

@@ -112,5 +112,48 @@ recorded here so Slice 2 builds on the real contract.
   `transactional` entry kind (abort-only replay + commit discharge + witness GC),
   plus WAL descriptor emission. Async-extern-scale (items 80/115). Rust part waits
   for item 278.
+### Slice 2a as implemented (py reference-tier runtime seam)
+
+The py teardown seam is landed in `backends/python/{emit,runtime}.py`; the other
+tiers (Slice 2b) follow this contract.
+
+1. **The abort-vs-commit discriminator is "did `drain` run".** The emitted body
+   is one cordis effect whose yielded disposers cordis unwinds LIFO. A clean
+   activation runs to its final `yield _revl_frame.drain`, so on unload `drain`
+   is disposed FIRST and every earlier disposer runs after it; a mid-activation
+   failure raises before that `yield`, so cordis's setup-failure unwind replays
+   the already-collected disposers and `drain` never runs. `Frame.drain` flips
+   `Frame._committed = True` synchronously at entry, so a transactional disposer
+   reads `_committed == True` on a clean commit and `False` on an abort. This
+   needs no new cordis signal and no lowerer change.
+
+2. **The transactional entry is a distinct disposer, not a distinct list.**
+   `Frame.transactional(undo, witness)` returns a `_Transactional` disposer that
+   joins the same LIFO disposer stack as every bracket inverse (so mixed-entry
+   LIFO is preserved for free) and, at disposal time, replays `undo(witness)`
+   iff `not frame._committed` (abort) and otherwise discharges — dropping both
+   the inverse and the witness references (witness GC). A bracket (`acquire`)
+   still `yield lambda: <undo>`s and replays unconditionally: the two entry
+   kinds are now observably distinct at runtime (clean unload reverts the
+   bracket, persists the witnessed mutation).
+
+3. **Registration is Ok-conditional and uses the DECLARED inverse.** The emitted
+   call site runs the mutation, and on the `Ok` branch (`isinstance(x, Ok)`)
+   yields `_revl_frame.transactional((lambda result: <declared undo>), x.value)`
+   — the extern's own `undo` with the `Ok` payload bound as `result`; on `Err`
+   it registers nothing. There is no site-spelled undo; the accumulator owns it.
+   emit keys this off the acquisition calling a `witnessed` extern (the externs
+   table), so no new IR step field is required and every non-witnessed program
+   emits byte-identically.
+
+4. **Deferred: the effect-position call-site SURFACE.** Slice 2a is the backend
+   consuming the IR; it did NOT touch `src/revl/lower.py`. A witnessed call in
+   effect position without a site undo (`effect rm(p)`) is still refused by the
+   lowerer — enabling that surface (auto-attaching the declared undo, stamping
+   the step) is a lower.py slice that belongs with 245's commit UX, kept out of
+   Slice 2a to avoid colliding with item 312's live lower/main work. The runtime
+   seam is proven against the IR the future lowerer will emit (a standard
+   `effect`/`let-effect` step whose acquisition calls a witnessed extern), which
+   is exactly the shape emit already handles.
 - **Slice 3: item 244 `stdlib/fs.rvl`.** The per-tier witness bodies (APFS
   clonefile / copy fallback / rename-to-garbage). First visible H1 proof.
