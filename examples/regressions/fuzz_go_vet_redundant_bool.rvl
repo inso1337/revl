@@ -1,0 +1,2 @@
+pub fn probe() -> Bool { return (false || false) }
+test "cross_tier_probe" { assert probe() == false }

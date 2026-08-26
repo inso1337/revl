@@ -1,0 +1,2 @@
+pub fn probe() -> Int { return match Ok(1) { Ok(o) => o, Err(e) => 0 } }
+test "cross_tier_probe" { assert probe() == 1 }
