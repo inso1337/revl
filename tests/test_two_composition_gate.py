@@ -55,6 +55,37 @@ SERVERNAME = "localhost"  # the cert carries SAN DNS:localhost + IP:127.0.0.1
 COMPILER_SYMBOLS = ("host_gate_admit", "host_gate_admit_case", "compile_files")
 
 
+def _ts_gate_client_skip_reason() -> str | None:
+    """Why the ts gate client cannot run here, or None when it can.
+
+    The two-composition transport tests drive the production client by spawning
+    `node <_net_gate_client.ts>`. Some node builds load a bare `.ts` entry point
+    as CommonJS (nothing marks the tree as an ES module), so the client's
+    top-level `import` raises "Cannot use import statement outside a module" and
+    the ts tier runtime is unusable on this box. Probe it once by loading the
+    real client: on that failure skip with a reason rather than report a
+    spurious failure; a healthy runtime loads the module cleanly (then exits on
+    the missing config argument), which counts as runnable.
+    """
+    node = shutil.which("node")
+    if node is None:
+        return "node not on PATH for the ts client"
+    try:
+        probe = subprocess.run([node, str(CLIENT)],
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not probe the ts gate client with node: {exc}"
+    combined = probe.stdout + probe.stderr
+    if ("Cannot use import statement outside a module" in combined
+            or "Failed to load the ES module" in combined):
+        return (f"node ({node}) cannot load the .ts gate client as an ES module "
+                "here, so the ts tier runtime is unusable on this box")
+    return None
+
+
+_TS_CLIENT_SKIP = _ts_gate_client_skip_reason()
+
+
 # ---------------------------------------------------------------------------
 # 1. the decoupling itself: the consumer composition, compiled INDEPENDENTLY,
 #    carries no compiler extern anywhere in its IR. No runtime needed.
@@ -115,8 +146,8 @@ def test_consumer_module_emits_without_the_compiler_extern():
 # ---------------------------------------------------------------------------
 
 pytestmark_net = pytest.mark.skipif(
-    shutil.which("openssl") is None or shutil.which("node") is None,
-    reason="needs openssl (cert minting) and node (the ts client)")
+    shutil.which("openssl") is None or _TS_CLIENT_SKIP is not None,
+    reason=_TS_CLIENT_SKIP or "needs openssl (cert minting) and node (the ts client)")
 
 
 @pytest.fixture(scope="module")
