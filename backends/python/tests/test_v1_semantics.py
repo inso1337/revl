@@ -78,10 +78,19 @@ def _module():
 
 
 # ---------------------------------------------------------------------------
-# A5 — compensation joins the accumulator (LIFO with the inverses)
+# A5 — two-phase teardown: compensation is discharged on a clean unload
 # ---------------------------------------------------------------------------
+# A5 respec (2026-08-26; items 247/316, docs/contract-errata.md). The old
+# "compensation joins the single accumulator and reverts interleaved with the
+# inverses on every teardown" was the v0 placeholder. Under the two-phase
+# contract (docs/design/247-compensate.md) a compensation is DISCHARGED on a
+# clean unload/commit — it never runs, and the forward emission it would offset
+# stands as the deliverable; only the bracket inverse (advisory unlock) replays.
+# The a5b abort path (compensation runs in Phase 2, LIFO within its class,
+# AFTER the earlier bracket unlock) is owed by item 316's TCK respec.
 
-async def test_a5_compensation_runs_lifo_on_unload(trace):
+
+async def test_a5a_compensation_discharged_on_clean_unload(trace):
     module = _module()
     root = Context()
     db = root.plugin(module.Db)
@@ -96,9 +105,13 @@ async def test_a5_compensation_runs_lifo_on_unload(trace):
     await flush()
 
     events = ops(trace)
-    delete = events.index("pool.execute DELETE FROM migration_log WHERE id = 42")
-    unlock = events.index("pool.query SELECT pg_advisory_unlock(42)")
-    assert delete < unlock, "compensation must run before earlier inverses (LIFO)"
+    assert "pool.execute DELETE FROM migration_log WHERE id = 42" not in events, \
+        "a compensation is discharged on a clean unload, never run (a5a)"
+    assert "pool.query SELECT pg_advisory_unlock(42)" in events, \
+        "the bracket inverse still replays on a clean unload"
+    # the INSERT the compensation would have offset stands as the deliverable
+    assert [e for e in ops(trace) if "pool.execute" in e] == \
+        ["pool.execute INSERT INTO migration_log VALUES (42)"]
     assert db.state is FiberState.ACTIVE
 
 
