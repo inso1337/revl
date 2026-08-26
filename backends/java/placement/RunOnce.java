@@ -109,12 +109,35 @@ public final class RunOnce {
         }
         log("residue", "provisions", live + " service(s) still provided");
         if (live == 0) {
+            // item 322 Slice 2: a clean unload. Under REVL_WAL, stamp the WAL's
+            // discharge + terminal marker so `revl recover` rolls this activation
+            // FORWARD (a crash before this point leaves no marker -> roll-back).
+            recordCleanUnload(container);
             System.out.println("[" + name + "] NO-RESIDUE — the composition left nothing behind");
         } else {
             System.out.println("[" + name + "] RESIDUE-LEFT — see the residue lines above");
         }
         System.out.println("[" + name + "] DOWN");
         System.out.flush();
+    }
+
+    // Stamp the WAL commit-path proof + terminal marker via the emitted recording
+    // sink, reflectively so this runner still compiles against a Components
+    // emitted WITHOUT --record (no sink present) and no-ops when REVL_WAL is
+    // unset. The java mirror of go's crash producer calling revlRecordDischarge /
+    // revlRecordActivationComplete on a clean dispose.
+    static void recordCleanUnload(String container) {
+        String wal = System.getenv("REVL_WAL");
+        if (wal == null || wal.isEmpty()) {
+            return;
+        }
+        try {
+            Class<?> comp = Class.forName(container);
+            comp.getMethod("revlRecordDischarge").invoke(null);
+            comp.getMethod("revlRecordActivationComplete").invoke(null);
+        } catch (ReflectiveOperationException absent) {
+            // Components was emitted without --record (no sink): nothing to stamp.
+        }
     }
 
     static String simple(String binaryName) {

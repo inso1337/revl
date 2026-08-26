@@ -48,6 +48,14 @@ __all__ = ["emit", "EmitError"]
 
 CRATE = "cordis4j"
 
+# item 322 Slice 2: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the java WAL sink
+# (`revlRecordTransactional`) and the recording preamble (the FileChannel.force
+# fsync sink) is emitted. Default False -> byte-identical output (the java
+# golden oracle + the selfhost mirror both run with record off, so neither
+# shifts). Mirrors backends/go/emit.py's `_RECORD_MODE`.
+_RECORD_MODE = False
+
 TYPE_MAP = {
     "Str": "String",
     "Int": "long",
@@ -2750,15 +2758,15 @@ def _emit_revl_frame_runtime() -> list[str]:
     caveat then applies on java too (Phase-2 start order is pinned LIFO, but
     two compensations may run concurrently once one has been abandoned).
 
-    Not implemented here: the WAL discharge-descriptor. `revl run --record`/
-    `--wal` only wires a `WriteAheadLog` through the in-process py driver
-    (src/revl/run.py); `run_java.py` spawns a separate JVM subprocess with no
-    such channel, so there is no host-side recording surface for this tier to
-    write into today (py's WAL/recover machinery is the sole owned
-    deliverable per docs/design/teardown-contract.md, 'Owned deliverable').
-    `residue` below is the in-process record shape the contract specifies,
-    kept internal (proven by observable ordering in the scenario harnesses)
-    until a java-side recording channel exists to surface it through."""
+    The durable WAL discharge-descriptor is emitted SEPARATELY, only under
+    `--record` (item 322 Slice 2, `_emit_record_sink`): the recording sink and
+    the per-descriptor `revlRecordTransactional` calls ride alongside this frame
+    but never appear in the default (byte-identical) output, so this loop itself
+    is unchanged whether or not a WAL is being written. `residue` below is the
+    in-process record shape the contract specifies, still surfaced by observable
+    ordering in the scenario harnesses; the WAL is the crash-durable channel that
+    outlives the process (a JVM subprocess writes it to `$REVL_WAL` and fsyncs
+    per record), which `revl recover` reads tier-agnostically."""
     return [
         "// docs/design/teardown-contract.md: the shared bracket/transactional/",
         "// compensation two-phase teardown loop (item 243 Slice 2b, item 247).",
@@ -2979,6 +2987,180 @@ def _emit_revl_frame_runtime() -> list[str]:
         "}",
         "",
     ]
+
+
+# item 322 Slice 2: the durable WAL recording sink emitted into Components when
+# `--record` is set and the document carries a teardown frame. The java mirror of
+# backends/go/emit.py's `_RECORD_PREAMBLE`: one JSON line per record, fsync'd via
+# `FileChannel.force(true)` before the call that wrote it returns, opened from
+# `REVL_WAL` (unset -> every record is a no-op, so a non-record composition that
+# happens to compile this in is inert). The py JSONL schema, field-for-field:
+# `header`, `discharge-descriptor {seq, entry, call:{receiver,method,args},
+# origin, witness, idempotency}`, `discharge`, `activation-complete`. Written by
+# hand (no JSON dependency); the reader (`revl.wal.read_wal`) parses per line, so
+# object field ORDER is irrelevant — only the names/values must match. The three
+# `revlRecord*` methods are `public static` so a driver (the crash producer, and
+# the stub/real runners on a clean unload) can stamp discharge / the terminal
+# marker from outside Components. WAL_GUARANTEE is byte-identical to
+# src/revl/wal.py's constant (a header a py tool reads must agree on it).
+_RECORD_SINK_SOURCE = r'''
+// ---- durable WAL recording sink (item 322 Slice 2, the java host recording channel) ----
+
+private static final String REVL_WAL_GUARANTEE =
+        "the WAL records each committed effect's step identity, boundary "
+        + "classification and inverse DESCRIPTOR (not its closure). On restart, "
+        + "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+        + "in-process inverses are moot (their captured memory died with the "
+        + "process) and closure-only boundary inverses are reported as residue, "
+        + "never silently claimed to have run.";
+
+private static java.io.FileOutputStream revlWalOut;
+private static java.nio.channels.FileChannel revlWalChannel;
+private static int revlWalSeq = 0;
+private static final java.util.List<Integer> revlWalSeqs = new java.util.ArrayList<>();
+private static final Object revlWalLock = new Object();
+
+static {
+    revlWalOpen();
+}
+
+// Wire the sink to REVL_WAL (unset -> no-op recording) and stamp the header.
+// Runs once at class load. A failed open leaves the sink null (recording is
+// silently off) rather than crashing a composition that only wanted to run.
+private static void revlWalOpen() {
+    String path = System.getenv("REVL_WAL");
+    if (path == null || path.isEmpty()) {
+        return;
+    }
+    try {
+        revlWalOut = new java.io.FileOutputStream(path, true);
+        revlWalChannel = revlWalOut.getChannel();
+    } catch (java.io.IOException open) {
+        revlWalOut = null;
+        revlWalChannel = null;
+        return;
+    }
+    revlWalWrite("{\"record\":\"header\",\"walVersion\":1,\"generation\":1,\"guarantee\":"
+            + revlWalStr(REVL_WAL_GUARANTEE) + "}");
+}
+
+// One durable JSON line: write, flush, and fsync (FileChannel.force(true))
+// before returning — the write-ahead discipline the py tier uses, so a record a
+// caller saw acknowledged is on disk before the effect it describes may matter.
+private static void revlWalWrite(String json) {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        try {
+            revlWalOut.write((json + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            revlWalOut.flush();
+            revlWalChannel.force(true);
+        } catch (java.io.IOException ignored) {
+        }
+    }
+}
+
+// revlRecordTransactional appends the discharge-descriptor for one witnessed
+// transactional inverse: the re-issuable named call {receiver, method, args}
+// recover replays LIFO to undo the mutation, plus the forward `origin` it
+// reverses. Fsync'd before it returns, so a crash after this call still leaves
+// the inverse re-issuable from the log alone.
+public static void revlRecordTransactional(String receiver, String method, String[] args) {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        int seq = revlWalSeq++;
+        revlWalSeqs.add(seq);
+        String call = revlWalCall(receiver, method, args);
+        revlWalWrite("{\"record\":\"discharge-descriptor\",\"seq\":" + seq
+                + ",\"entry\":\"transactional\",\"call\":" + call
+                + ",\"origin\":" + call
+                + ",\"witness\":null,\"idempotency\":null}");
+    }
+}
+
+// revlRecordDischarge writes the commit-path proof that every recorded
+// transactional seq COMMITTED, so recover SKIPS it — a committed transaction is
+// never rolled back. Called on a clean unload, never on a crash.
+public static void revlRecordDischarge() {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        StringBuilder discharged = new StringBuilder("[");
+        for (int i = 0; i < revlWalSeqs.size(); i++) {
+            if (i > 0) {
+                discharged.append(',');
+            }
+            discharged.append(revlWalSeqs.get(i));
+        }
+        discharged.append(']');
+        revlWalWrite("{\"record\":\"discharge\",\"discharged\":" + discharged + "}");
+    }
+}
+
+// revlRecordActivationComplete stamps the terminal marker: its presence is the
+// whole roll-forward decision, its absence (a crash) is roll-back. Written only
+// after a clean unload.
+public static void revlRecordActivationComplete() {
+    if (revlWalOut == null) {
+        return;
+    }
+    synchronized (revlWalLock) {
+        revlWalWrite("{\"record\":\"activation-complete\",\"generation\":1,\"components\":[]}");
+    }
+}
+
+private static String revlWalCall(String receiver, String method, String[] args) {
+    StringBuilder call = new StringBuilder("{\"receiver\":");
+    call.append(revlWalStr(receiver)).append(",\"method\":").append(revlWalStr(method))
+            .append(",\"args\":[");
+    for (int i = 0; i < args.length; i++) {
+        if (i > 0) {
+            call.append(',');
+        }
+        call.append(revlWalStr(args[i]));
+    }
+    call.append("]}");
+    return call.toString();
+}
+
+// Minimal JSON string escaper (quote/backslash/control chars) — enough for the
+// identifiers and stringified witnesses this schema carries, and it never
+// depends on a JSON library the emitted module would otherwise not need.
+private static String revlWalStr(String value) {
+    StringBuilder out = new StringBuilder("\"");
+    for (int i = 0; i < value.length(); i++) {
+        char c = value.charAt(i);
+        switch (c) {
+            case '"' -> out.append("\\\"");
+            case '\\' -> out.append("\\\\");
+            case '\n' -> out.append("\\n");
+            case '\r' -> out.append("\\r");
+            case '\t' -> out.append("\\t");
+            default -> {
+                if (c < 0x20) {
+                    out.append(String.format("\\u%04x", (int) c));
+                } else {
+                    out.append(c);
+                }
+            }
+        }
+    }
+    out.append('"');
+    return out.toString();
+}
+'''
+
+
+def _emit_record_sink() -> list[str]:
+    """The durable WAL recording sink (item 322 Slice 2), emitted into Components
+    only in record mode (`--record`) when the document carries a teardown frame.
+    Byte-identical default output is preserved by never emitting this otherwise —
+    the golden oracle and the selfhost mirror both run with record off."""
+    return _RECORD_SINK_SOURCE.strip("\n").split("\n")
 
 
 def _body_contains_step(node: object, target: str) -> bool:
@@ -3254,6 +3436,21 @@ def _emit_witnessed_step(
     out.append(f"{pad}var {result_var} = {_expr(step['acquire'], v3_ctx, rename, env)};")
     out.append(f"{pad}if ({result_var} instanceof RevlResult.Ok<?, ?> {ok_var}) {{")
     out.append(f"{pad}    {witness_type} result = ({witness_type}) {ok_var}.value();")
+    if _RECORD_MODE:
+        # item 322 Slice 2: the durable exit. At REGISTRATION (this Ok branch
+        # runs during apply(), when the mutation happened) write the
+        # discharge-descriptor — the re-issuable named call `recover` replays
+        # LIFO to undo the mutation — and fsync it, so a crash BEFORE commit is
+        # still recoverable from the log alone. `receiver` is the witnessed
+        # extern, `method` its declared inverse, and the stringified witness is
+        # the referent argument (the go mirror stringifies `result` the same
+        # way). Byte-identical default output: emitted only under `--record`.
+        receiver = _string(_call_label(step["acquire"]))
+        method = _string(_call_label(ext["undo"]))
+        out.append(
+            f"{pad}    revlRecordTransactional({receiver}, {method}, "
+            f"new String[]{{String.valueOf(result)}});"
+        )
     out.append(
         f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
         f"() -> {undo_expr}));"
@@ -3921,6 +4118,11 @@ def _emit_v3(ir: dict, package_name: str) -> str:
                     for line in _emit_spawn_handle(with_get=_uses_instance_get(ir))])
     if _uses_revl_frame(ir):
         out.extend(["    " + line if line else line for line in _emit_revl_frame_runtime()])
+        # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+        # frame, but ONLY under `--record` — off, this whole block is absent and
+        # the output is byte-identical (the golden oracle + selfhost gate).
+        if _RECORD_MODE:
+            out.extend(["    " + line if line else line for line in _emit_record_sink()])
     for component in components:
         out.extend(["    " + line if line else line for line in _emit_component(
             component, services, types, functions, externs, components,
@@ -4029,8 +4231,14 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict, package_name: str = "revl") -> str:
-    """Emit one Java source file for an IR document (ir_version 1, 2, or 3)."""
+def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
+    """Emit one Java source file for an IR document (ir_version 1, 2, or 3).
+
+    `record` (item 322 Slice 2) additionally emits the durable WAL recording
+    sink and the per-descriptor `revlRecordTransactional` calls at each witnessed
+    transactional registration. Default False -> byte-identical to the pre-feature
+    output, so the golden oracle and the selfhost mirror (both record off) are
+    unaffected. Mirrors backends/go/emit.py's `--record`."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
@@ -4039,33 +4247,44 @@ def emit(ir: dict, package_name: str = "revl") -> str:
     _refuse_fault_tests(ir)
 
     _refuse_lifecycle_tests(ir.get("tests") or [])
-    version = ir.get("ir_version")
-    if version == 1:
-        return _emit_v1(ir, package_name)
-    if version == 2:
-        return _emit_v2(ir, package_name)
-    if version == 3:
-        return _emit_v3(ir, package_name)
-    raise EmitError(
-        f"unsupported ir_version: {version!r} — the Java backend targets "
-        f"ir_version 1, 2, and 3"
-    )
+    global _RECORD_MODE
+    saved = _RECORD_MODE
+    _RECORD_MODE = record
+    try:
+        version = ir.get("ir_version")
+        if version == 1:
+            return _emit_v1(ir, package_name)
+        if version == 2:
+            return _emit_v2(ir, package_name)
+        if version == 3:
+            return _emit_v3(ir, package_name)
+        raise EmitError(
+            f"unsupported ir_version: {version!r} — the Java backend targets "
+            f"ir_version 1, 2, and 3"
+        )
+    finally:
+        _RECORD_MODE = saved
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
+    # `--record` (item 322 Slice 2) wires the witnessed teardown to a durable
+    # WAL sink; an optional package name follows the IR path (default `revl`).
+    rest = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if len(rest) not in (1, 2):
+        print("usage: python3 emit.py <ir.json|-> [package] [--record]", file=sys.stderr)
         return 2
     # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
     # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
     # such device or address` — the emitted-code tests were red in CI for that
     # reason alone.
-    if argv[1] == "-":
+    if rest[0] == "-":
         ir = json.load(sys.stdin)
     else:
-        with open(argv[1], "r", encoding="utf-8") as handle:
+        with open(rest[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir))
+    package = rest[1] if len(rest) == 2 else "revl"
+    sys.stdout.write(emit(ir, package, record=record))
     return 0
 
 
