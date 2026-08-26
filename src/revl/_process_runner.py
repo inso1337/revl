@@ -77,7 +77,7 @@ def _eval_probe(expr: str, namespace: dict):
 
 def _load_module(files: list[str]) -> types.ModuleType:
     from revl.compiler import compile_files  # noqa: PLC0415
-    import emit  # noqa: PLC0415; backend dir already on sys.path
+    import emit  # noqa: PLC0415  backend dir already on sys.path
 
     source = emit.emit(compile_files(files))
     module = types.ModuleType("revl_proc_mod")
@@ -243,7 +243,7 @@ async def run(spec: dict) -> None:
         try:
             await fiber.dispose()
             await _flush()
-        except Exception:  # noqa: BLE001; teardown is best-effort
+        except Exception:  # noqa: BLE001  teardown is best-effort
             pass
 
     await teardown_lifo(fibers, _dispose)

@@ -13,7 +13,6 @@ Set up the runtime with `sh backends/python/setup.sh`.
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -88,8 +87,6 @@ def test_add_then_assemble_is_admitted_and_composed(tmp_path):
     # the assembled composition IR is written
     assembly = json.loads((proj / "build" / "assembly.json").read_text())
     assert "user_cache".lower() or assembly  # non-empty document
-    load_order = (assembly.get("manifest") or assembly).get("loadOrder") \
-        or assembly.get("loadOrder")
     assert "UserCache" in json.dumps(assembly) and "PgDatabase" in json.dumps(assembly)
 
 

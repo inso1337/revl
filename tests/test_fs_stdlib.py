@@ -50,7 +50,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 import replay  # noqa: E402
 import revl_fs_workspace as ws  # noqa: E402  (the confinement helper under test)
-from revl.recovery import DictWorld, recover  # noqa: E402
+from revl.recovery import recover  # noqa: E402
 
 needs_cordis = pytest.mark.skipif(
     importlib.util.find_spec("cordis") is None,

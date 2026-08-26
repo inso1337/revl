@@ -12,7 +12,6 @@ Set up the runtime with `sh backends/python/setup.sh`; without it these skip
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest

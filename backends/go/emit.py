@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from typing import Optional
 
 
 class EmitError(ValueError):
@@ -489,10 +490,10 @@ def _expr(node, env: _Env, expected=None) -> str:
         # record type for its field set (the v1/v2 tier carries none).
         if not (_V3_MODE and _V3_TYPED_COMPONENTS and _V3_TYPES):
             raise EmitError(
-                f"record is not lowerable in the stc-go component world "
-                f"(ir_version 1/2 documents carry no record/ADT types, and this "
-                f"tier has no record lowering in component bodies) - "
-                f"lift it into a helper fn instead")
+                "record is not lowerable in the stc-go component world "
+                "(ir_version 1/2 documents carry no record/ADT types, and this "
+                "tier has no record lowering in component bodies) - "
+                "lift it into a helper fn instead")
         fields = node.get("fields") or []
         tname = _v3_record_type_for_fields([k for k, _ in fields])
         body = ", ".join(
@@ -512,10 +513,10 @@ def _expr(node, env: _Env, expected=None) -> str:
             # against the tuple convention and work in any v3 component.
             return _go_comp_match(node, env, expected)
         raise EmitError(
-            f"match is not lowerable in the stc-go component world yet "
-            f"(ir_version 1/2 documents carry no record/ADT types, and this "
-            f"tier has no match lowering in component bodies) - "
-            f"lift it into a helper fn instead")
+            "match is not lowerable in the stc-go component world yet "
+            "(ir_version 1/2 documents carry no record/ADT types, and this "
+            "tier has no match lowering in component bodies) - "
+            "lift it into a helper fn instead")
     if kind in ("arrow", "optfield", "optcall"):
         raise EmitError(
             f"{kind} is not lowerable in the stc-go component world yet "
@@ -2212,8 +2213,6 @@ def _emit_load_helpers(ir, out):
         isolate = comp.get("isolate") or {}
         intercept = comp.get("intercept") or {}
         has_config = bool(comp.get("config"))
-        sig_arg = "target *stc.Context"
-        call_arg = "cfg"
         if has_config:
             out.append("// Load%s isolates the load-target per the component's realm"
                        " placement, then loads it." % cname)
@@ -3733,8 +3732,8 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
                     "checked_div_euclid": "revlDivEuclid(_a, _b)",
                     "checked_mod": "revlMod(_a, _b)"}[method]
         overflow_err = "" if method == "checked_mod" else (
-            f'if _a == (-9223372036854775807 - 1) && _b == -1 {{ '
-            f'return RevlErr[int64, string]{{Value: "revl: Int overflow"}} }}; ')
+            'if _a == (-9223372036854775807 - 1) && _b == -1 { '
+            'return RevlErr[int64, string]{Value: "revl: Int overflow"} }; ')
         return (f'func(_a, _b int64) RevlResult[int64, string] {{ '
                 f'if _b == 0 {{ return RevlErr[int64, string]'
                 f'{{Value: "{_GO_DIV_ZERO_MSG}"}} }}; '

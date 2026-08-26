@@ -39,7 +39,7 @@ from revl.compiler import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 from revl.mcp import persist  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
-from revl.mcp.session import HISTORY_LIMIT, Session  # noqa: E402
+from revl.mcp.session import Session  # noqa: E402
 
 # a small composition that crosses the boundary (emits), so an undo has an
 # authority surface to enumerate. Db provides an `emission` service PgCache

@@ -29,7 +29,7 @@ from revl import compile_source  # noqa: E402
 from revl.__main__ import main  # noqa: E402
 from revl.audit_diff import audit_report  # noqa: E402
 from revl.policy import (  # noqa: E402
-    Policy, PolicyError, evaluate, load_policy, parse_policy, render_report,
+    Policy, PolicyError, evaluate, load_policy, parse_policy,
 )
 
 FIXTURES = ROOT / "tests" / "fixtures"
