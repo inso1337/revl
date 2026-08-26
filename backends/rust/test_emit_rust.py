@@ -63,6 +63,34 @@ def test_user_cache_golden_byte_equality():
     assert src == golden
 
 
+_CRASHPROOF = Path(__file__).resolve().parent / "scenarios" / "crashproof"
+
+
+def test_record_mode_off_is_byte_identical_and_on_adds_the_wal_sink():
+    """item 322 Slice 2: the `record` emit flag is gated. Off (the default) is
+    byte-identical to before this slice — no WAL sink, no per-descriptor call —
+    and the committed crashproof `lib.rs` is exactly the record-ON emission
+    (`emit.py --record`), so the crash-recovery proof's producer never drifts
+    from the emitter."""
+    ir = json.loads((_CRASHPROOF / "crashproof.ir.json").read_text(encoding="utf-8"))
+
+    off = emit.emit(ir)
+    assert off == emit.emit(ir, record=False)  # default is record-off
+    assert "revl_record_transactional" not in off
+    assert "REVL_WAL" not in off
+    assert "discharge-descriptor" not in off
+
+    on = emit.emit(ir, record=True)
+    assert on != off
+    assert 'revl_record_transactional("beginRow", "deleteRow", vec![format!("{}", result)]);' in on
+    assert "self.file.sync_all()" in on            # fsync per record
+    assert '"record": "discharge-descriptor"' in on
+    assert 'std::env::var("REVL_WAL")' in on
+
+    golden = (_CRASHPROOF / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert on == golden
+
+
 # ---------------------------------------------------------------------------
 # stdlib JSON wire protocol crosses to rust (roadmap item 140).
 #

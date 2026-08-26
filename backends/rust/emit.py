@@ -976,6 +976,14 @@ def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
             or _method_bodies_have_witnessed(component, witnessed))
 
 
+# item 322 Slice 2: record mode. When True, a witnessed transactional step also
+# writes a durable discharge-descriptor to the rust WAL sink
+# (revl_record_transactional) and the recording preamble is emitted. Default
+# False -> byte-identical output (every existing golden is the guard). Mirrors
+# backends/go/emit.py's `_RECORD_MODE`.
+_RECORD_MODE = False
+
+
 def _witnessed_extern_for(env: "_Env", acquire: object) -> dict | None:
     """The witnessed extern descriptor a step's acquisition calls, or None.
     Mirrors `backends/python/emit.py::_ComponentEmitter._witnessed_extern`."""
@@ -2662,6 +2670,20 @@ def _emit_witnessed_step(env: "_Env", step: dict, ext: dict, out: list[str],
     label = _string(env.name + "." + (step.get("bind") or "effect") + ".witnessed")
     out.append(f"{pad}if let Ok(ref {witv}) = {tmp} {{")
     out.append(f"{pad}    let result: {witness_ty} = {witv}.clone();")
+    if _RECORD_MODE:
+        # item 322 Slice 2: the durable exit. At REGISTRATION (this branch runs
+        # during activation, when the mutation happened) write the
+        # discharge-descriptor — the re-issuable named call recover replays LIFO
+        # to undo the mutation — and fsync it, so a crash BEFORE commit is still
+        # recoverable from the log alone. `result` (the Ok witness) is
+        # stringified as the referent argument; the borrow ends before `result`
+        # moves into the disposer closure below. Mirrors the go tier's
+        # `revlRecordTransactional` call at the same point.
+        undo_callee = (ext.get("undo") or {}).get("callee") or {}
+        undo_name = str(undo_callee.get("name") or undo_callee.get("id") or "undo")
+        out.append(
+            f'{pad}    revl_record_transactional({_string(ext.get("name"))}, '
+            f'{_string(undo_name)}, vec![format!("{{}}", result)]);')
     out.append(f"{pad}    let _revl_state = _revl_teardown.clone();")
     undo = _expr(ext["undo"], env)
     out.append(f"{pad}    ctx.effect({label}, move || {{")
@@ -5222,6 +5244,141 @@ def _revl_teardown_preamble() -> list[str]:
     ]
 
 
+def _revl_record_preamble() -> list[str]:
+    """item 322 Slice 2: the durable WAL recording sink — the rust host
+    recording channel, the faithful mirror of backends/go/emit.py's
+    `_RECORD_PREAMBLE`.
+
+    A witnessed transactional step, in record mode, writes the re-issuable
+    inverse's discharge-descriptor to a host-visible WAL file (`$REVL_WAL`) and
+    fsyncs it (`File::sync_all`) BEFORE the emitting call returns, so a crash
+    before commit still leaves the inverse re-issuable from the log alone —
+    exactly the write-ahead discipline the py tier uses and the go tier
+    mirrors. The JSONL schema is byte-for-byte the py one src/revl/wal.py
+    documents (`header` / `discharge-descriptor` / `discharge` /
+    `activation-complete`), read back by the tier-agnostic core with no py
+    backend on the path.
+
+    Gated: emitted only in record mode (`emit(ir, record=True)` /
+    `emit.py --record`). Unset `REVL_WAL` makes every recording call a no-op, so
+    the runtime is inert unless a host opts in; the whole preamble is absent when
+    record mode is off, so every existing golden emits byte-identically.
+
+    Direct-file-write, same mechanism as go (rust has a real filesystem). The
+    sink is a process-global opened once (`OnceLock`) from `REVL_WAL`, stamping
+    the header at open; the seq counter and committed-seq list live on it behind
+    a `Mutex`, matching go's `revlWAL{mu, f, seq, seqs}`."""
+    guarantee = (
+        "the WAL records each committed effect's step identity, boundary "
+        "classification and inverse DESCRIPTOR (not its closure). On restart, "
+        "recovery runs the reconstructible boundary inverses newest-first (LIFO); "
+        "in-process inverses are moot (their captured memory died with the "
+        "process) and closure-only boundary inverses are reported as residue, "
+        "never silently claimed to have run."
+    )
+    return [
+        "// ---- durable WAL recording sink (item 322 Slice 2, the rust host recording channel) ----",
+        "",
+        "/// The single sentence recovery is allowed to claim, written verbatim into",
+        "/// every WAL header — byte-identical to src/revl/wal.py's `WAL_GUARANTEE`.",
+        f"const REVL_WAL_GUARANTEE: &str = {_string(guarantee)};",
+        "",
+        "/// The process's durable append-only log. One line per record, JSON,",
+        "/// flushed + fsync'd (`sync_all`) before the call that wrote it returns —",
+        "/// the write-ahead discipline the py tier uses, so a record a caller saw",
+        "/// acknowledged is on disk before the effect it describes is allowed to",
+        "/// matter. Mirrors the go tier's `revlWAL`.",
+        "struct RevlWal {",
+        "    file: std::fs::File,",
+        "    seq: u64,",
+        "    seqs: Vec<u64>,",
+        "}",
+        "",
+        "impl RevlWal {",
+        "    fn write(&mut self, rec: &serde_json::Value) {",
+        "        use std::io::Write;",
+        "        if let Ok(mut line) = serde_json::to_string(rec) {",
+        "            line.push('\\n');",
+        "            let _ = self.file.write_all(line.as_bytes());",
+        "            let _ = self.file.sync_all(); // fsync per record",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "static REVL_WAL_SINK: std::sync::OnceLock<Option<std::sync::Mutex<RevlWal>>>",
+        "    = std::sync::OnceLock::new();",
+        "",
+        "/// Wire the sink to `REVL_WAL` (unset -> no-op recording) and stamp the",
+        "/// header the first time it is touched. Opened append-only so a producer",
+        "/// process writes one continuous log.",
+        "fn revl_wal_sink() -> Option<&'static std::sync::Mutex<RevlWal>> {",
+        "    REVL_WAL_SINK",
+        "        .get_or_init(|| {",
+        '            let path = match std::env::var("REVL_WAL") {',
+        "                Ok(p) if !p.is_empty() => p,",
+        "                _ => return None,",
+        "            };",
+        "            let file = match std::fs::OpenOptions::new()",
+        "                .create(true).write(true).append(true).open(&path)",
+        "            {",
+        "                Ok(f) => f,",
+        "                Err(_) => return None,",
+        "            };",
+        "            let mut wal = RevlWal { file, seq: 0, seqs: Vec::new() };",
+        "            wal.write(&serde_json::json!({",
+        '                "record": "header", "walVersion": 1, "generation": 1,',
+        '                "guarantee": REVL_WAL_GUARANTEE,',
+        "            }));",
+        "            Some(std::sync::Mutex::new(wal))",
+        "        })",
+        "        .as_ref()",
+        "}",
+        "",
+        "/// Append one witnessed transactional inverse's discharge-descriptor: the",
+        "/// re-issuable named call `{receiver, method, args}` recover replays LIFO to",
+        "/// undo the mutation, plus the forward `origin` it reverses. Fsync'd before",
+        "/// it returns, so a crash after this call still leaves the inverse",
+        "/// re-issuable from the log alone. No-op when `REVL_WAL` is unset.",
+        "pub fn revl_record_transactional(receiver: &str, method: &str, args: Vec<String>) {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        let seq = wal.seq;",
+        "        wal.seq += 1;",
+        "        wal.seqs.push(seq);",
+        '        let call = serde_json::json!({ "receiver": receiver, "method": method, "args": args });',
+        "        wal.write(&serde_json::json!({",
+        '            "record": "discharge-descriptor", "seq": seq, "entry": "transactional",',
+        '            "call": call, "origin": call, "witness": serde_json::Value::Null,',
+        '            "idempotency": serde_json::Value::Null,',
+        "        }));",
+        "    }",
+        "}",
+        "",
+        "/// The commit-path proof that every recorded transactional seq COMMITTED,",
+        "/// so recover SKIPS it — a committed transaction is never rolled back.",
+        "/// Called on a clean unload, never on a crash.",
+        "pub fn revl_record_discharge() {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        let seqs = wal.seqs.clone();",
+        '        wal.write(&serde_json::json!({ "record": "discharge", "discharged": seqs }));',
+        "    }",
+        "}",
+        "",
+        "/// The terminal marker: its PRESENCE is the whole roll-forward decision,",
+        "/// its ABSENCE (a crash) is roll-back. Written only after a clean unload.",
+        "pub fn revl_record_activation_complete() {",
+        "    if let Some(sink) = revl_wal_sink() {",
+        "        let mut wal = sink.lock().unwrap();",
+        "        wal.write(&serde_json::json!({",
+        '            "record": "activation-complete", "generation": 1, "components": []',
+        "        }));",
+        "    }",
+        "}",
+        "",
+    ]
+
+
 def _uses_stdlib(ir: dict) -> bool:
     """True when any builtin/len node appears anywhere in the document."""
     found = False
@@ -5680,6 +5837,11 @@ def _emit_components(ir: dict, components: list) -> list[str]:
         out.extend(_revl_spawn_handle())
     if _uses_teardown(components, ir.get("externs") or []):
         out.extend(_revl_teardown_preamble())
+        if _RECORD_MODE:
+            # item 322 Slice 2: the durable WAL sink rides alongside the teardown
+            # accumulator (a witnessed transactional step needs both). Gated so a
+            # non-record emission — every existing golden — is byte-identical.
+            out.extend(_revl_record_preamble())
     for component in components:
         out.extend(_emit_component_auto(component, ir.get("services") or {}, ir))
     out.extend(_emit_bridge(ir))
@@ -5812,8 +5974,19 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict) -> str:
-    """Emit one Rust module (crate root) for an IR document."""
+def emit(ir: dict, record: bool = False) -> str:
+    """Emit one Rust module (crate root) for an IR document.
+
+    `record=True` (item 322 Slice 2) wires the witnessed teardown to a durable
+    WAL sink (the rust host recording channel) so a crash BEFORE commit is
+    recoverable by `revl recover`. It is OFF by default and gated everywhere it
+    touches emission, so a non-recording program — every existing golden — emits
+    byte-identically; only a program emitted in record mode carries the
+    recording preamble and the per-descriptor `revl_record_transactional` calls.
+    Mirrors backends/go/emit.py's `emit(..., record=...)`.
+    """
+    global _RECORD_MODE
+    _RECORD_MODE = record
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
@@ -5850,19 +6023,23 @@ def cargo_toml(name: str = "revl_components") -> str:
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("usage: python3 emit.py <ir.json|->", file=sys.stderr)
+    # item 322 Slice 2: `--record` wires the witnessed teardown to a durable WAL
+    # sink (mirrors backends/go/emit.py's flag). Off by default -> byte-identical.
+    args = [a for a in argv[1:] if a != "--record"]
+    record = "--record" in argv[1:]
+    if len(args) != 1:
+        print("usage: python3 emit.py <ir.json|-> [--record]", file=sys.stderr)
         return 2
     # `-` reads the IR from stdin. Callers used to pass `/dev/stdin`, which
     # works on macOS and fails on a GitHub runner with `OSError: [Errno 6] No
     # such device or address` — the emitted-code tests were red in CI for that
     # reason alone.
-    if argv[1] == "-":
+    if args[0] == "-":
         ir = json.load(sys.stdin)
     else:
-        with open(argv[1], "r", encoding="utf-8") as handle:
+        with open(args[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir))
+    sys.stdout.write(emit(ir, record=record))
     return 0
 
 
