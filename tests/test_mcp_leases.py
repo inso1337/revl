@@ -24,7 +24,7 @@ from revl import compile_source  # noqa: E402
 from revl.mcp import leases as L  # noqa: E402
 from revl.mcp import server  # noqa: E402
 from revl.mcp.leases import LeaseBook, LeaseError  # noqa: E402
-from revl.mcp.operator import Operator  # noqa: E402
+from revl.mcp.operator import Grant, Operator  # noqa: E402
 from revl.policy import parse_policy  # noqa: E402
 
 needs_runtime = pytest.mark.skipif(
@@ -305,7 +305,11 @@ def test_active_leases_survive_a_snapshot_and_stale_ones_do_not():
 @needs_runtime
 def test_enforced_refusal_end_to_end_and_advisory_warning(_fresh_session):
     server.SESSION.sandbox = ENFORCING
-    server.SESSION.operator = Operator("alice")
+    # alice is operator-authorized to swap anything: this test exercises the
+    # *lease* gate, so she must clear the operator gate first (item 55) and be
+    # refused only by the lease she does not hold (item 61). The initial cold
+    # load is ungated regardless (item 300).
+    server.SESSION.operator = Operator("alice", (Grant(("swap",), ("*",), True),))
     loaded = _call("revl_load", {"source": TWO})
     assert loaded["ok"] is True
     # bob (a different operator) holds UserCache
@@ -317,7 +321,9 @@ def test_enforced_refusal_end_to_end_and_advisory_warning(_fresh_session):
     refused = _call("revl_swap", {"source": _swap_user()})
     assert refused["ok"] is False and refused["swapped"] is False
     assert refused["lease"]["heldBy"] == "bob"
-    # alice may still swap the name she holds herself
+    # alice may still swap the name she holds herself: bob hands the live lease
+    # back (a lease is never silently stolen), then alice claims and swaps it.
+    server.SESSION.leases.release("UserCache", "bob")
     server.SESSION.leases.claim("UserCache", "alice", ttl=600)
     ok = _call("revl_swap", {"source": _swap_user()})
     assert ok["ok"] is True and ok["swapped"] is True
