@@ -1,0 +1,4 @@
+fn h0() -> Int { return match Err(-3.4) { Ok(o328) => match Ok("bgx") { Ok(o359) => o328, Err(e756) => 0 }, Err(e529) => match Err(0.6) { Ok(o625) => -2, Err(e484) => 3 } } }
+pub fn probe() -> Int { return 0 }
+
+test "cross_tier_probe" { assert probe() == 0 }
