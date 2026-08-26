@@ -208,3 +208,79 @@ def test_go_unused_match_arm_payload_still_builds_and_runs():
     assert status == "pass", f"go tier did not pass: {message}"
     # the py reference admits and passes the same program — the tiers agree
     assert RUNNERS["py"](ir)[0] == "pass"
+
+
+# item 313: a match on an Opt/Result CONSTRUCTOR-LITERAL scrutinee
+# (`match Ok(1) { ... }`) lowered to `switch _m := RevlOk[..]{..}.(type)` — an
+# unparenthesized composite literal in the type-switch init clause (Go reads the
+# `{` as the switch body) that is also a concrete struct where `.(type)` needs
+# an interface. The fix binds the scrutinee to an interface-typed temp before
+# the switch. A variable scrutinee already worked (it is an identifier).
+FUZZ_GO_MATCHLIT = str(
+    ROOT / "examples" / "regressions" / "fuzz_go_matchlit_typeswitch.rvl")
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="needs a go toolchain")
+def test_go_match_on_constructor_literal_builds_and_runs():
+    """`fuzz_go_matchlit_typeswitch.rvl` matches on an `Ok(1)` literal. Before
+    item 313 the go emitter put the composite literal straight in the
+    type-switch init clause (`expected '}', found Value`); now it binds an
+    interface-typed temp first, so it builds, runs, and agrees with py."""
+    ir = compile_source(
+        Path(FUZZ_GO_MATCHLIT).read_text(encoding="utf-8"),
+        "fuzz_go_matchlit_typeswitch.rvl")
+    status, message = RUNNERS["go"](ir)
+    if status == "skip":
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go tier did not pass: {message}"
+    assert RUNNERS["py"](ir)[0] == "pass"
+
+
+# item 314: revl admits redundant boolean ops (`false || false`, `x && x`) and
+# the py reference evaluates them, but `go test` runs `go vet`, whose `bools`
+# analyzer rejects identical operands as `redundant or`/`redundant and`. The
+# architect decision is `-vet=off` in the go runner: the cross-tier contract is
+# "the emitter's output runs", not "it passes a go-specific style lint".
+FUZZ_GO_VET_BOOL = str(
+    ROOT / "examples" / "regressions" / "fuzz_go_vet_redundant_bool.rvl")
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="needs a go toolchain")
+def test_go_redundant_boolean_op_runs_under_vet_off():
+    """`fuzz_go_vet_redundant_bool.rvl` returns `(false || false)`. Before item
+    314 `go test` failed it under `go vet` (`redundant or`); the go runner now
+    passes `-vet=off`, so the admitted program runs and agrees with py."""
+    ir = compile_source(
+        Path(FUZZ_GO_VET_BOOL).read_text(encoding="utf-8"),
+        "fuzz_go_vet_redundant_bool.rvl")
+    status, message = RUNNERS["go"](ir)
+    if status == "skip":
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go tier did not pass: {message}"
+    assert RUNNERS["py"](ir)[0] == "pass"
+
+
+# item 320: a bound `let x = effect <non-host call>` whose acquisition returns a
+# VALUE type was always declared `var x *T` by the go bracket codegen, which
+# fails to compile for a plain fn / service-method acquisition. The fix decides
+# pointer-vs-value by the acquisition's actual return type. This is a lifecycle
+# test over live stc-go, so it needs the resolvable go runtime, not just a
+# toolchain.
+FUZZ_GO_LETBIND_VALUE = str(
+    ROOT / "examples" / "regressions" / "fuzz_go_letbind_valuetype.rvl")
+
+
+@needs_cordis_go
+def test_go_value_typed_bracket_acquisition_builds_and_runs():
+    """`fuzz_go_letbind_valuetype.rvl` binds `let handle = effect openHandle()`
+    where `openHandle` returns Int. Before item 320 the go bracket codegen
+    emitted `var handle *int64` (and a `*int64` struct field) — `cannot use
+    openHandle() (int64) as *int64`; now `handle` is declared by its value
+    type, so it loads, serves the value, and reverts cleanly."""
+    ir = compile_source(
+        Path(FUZZ_GO_LETBIND_VALUE).read_text(encoding="utf-8"),
+        "fuzz_go_letbind_valuetype.rvl")
+    status, message = RUNNERS["go"](ir)
+    if status == "skip":
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go tier did not pass: {message}"

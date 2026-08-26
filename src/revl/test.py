@@ -371,7 +371,18 @@ def run_go(ir: dict) -> tuple[str, str]:
             # the module is pinned and cached by the placement runner / the
             # conformance validator; an offline resolve is the honest gate
             env["GOPROXY"] = "off"
-        result = subprocess.run([go, "test", "./..."], cwd=tmp,
+        # item 314: run with `-vet=off`. `go test` invokes `go vet` by
+        # default, whose `bools` analyzer rejects tautological boolean
+        # operands (`a || a`, `a && a`, `false || false`) as "redundant or"/
+        # "redundant and". revl LEGITIMATELY admits redundant boolean
+        # expressions — the py reference evaluates them and every other tier
+        # runs them — so a program admitted by the frontend is failed on go
+        # only because a go-specific STYLE lint fires on machine-generated
+        # code the compiler itself accepts. The cross-tier contract is "the
+        # emitter's output runs", not "it passes go vet's style rules";
+        # `-vet=off` restores that contract without distorting revl's
+        # semantics to satisfy a linter (architect decision, roadmap 314).
+        result = subprocess.run([go, "test", "-vet=off", "./..."], cwd=tmp,
                                 capture_output=True, text=True, timeout=600,
                                 env=env)
         output = (result.stdout + result.stderr).strip()
