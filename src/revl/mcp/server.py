@@ -38,6 +38,7 @@ from . import quarantine as _quarantine
 from . import repair as _repair
 from . import ship as _ship
 from .persist import RestoreError
+from .approval import ApprovalRequired
 from .. import query as Q
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
@@ -441,6 +442,37 @@ def _tool_commit_confirm(arguments: dict) -> dict:
     if result.get("refused"):
         return {"ok": False, **result}
     return {"ok": True, **result}
+
+
+def _approval_required(exc: ApprovalRequired) -> dict:
+    """Shape a class-(c) refusal into the ticket two-step response (item 246).
+    The call/load/swap did NOT fire: the ticket names what a yes would mean, and
+    `revl_approve(hash)` mints the standing approval that lets the identical
+    re-issue fire once."""
+    return {
+        "ok": False,
+        "approvalRequired": True,
+        "note": "a class-(c) crossing (an irreversible emission with no checked "
+                "inverse) needs a human yes — nothing fired. Relay the ticket, "
+                "then call revl_approve with its `hash`; the identical re-issue "
+                "then fires once and consumes the approval.",
+        "ticket": exc.ticket,
+    }
+
+
+def _tool_approve(arguments: dict) -> dict:
+    """Mint a standing approval for an outstanding class-(c) ticket (item 246,
+    step 2 of the two-step). The `hash` must be one the server issued; an unknown
+    hash is refused by the outstanding-ticket table. Gated by the `approve` verb
+    (item 55), so an operator profile scopes who may say yes."""
+    ticket_hash = arguments.get("hash")
+    if not ticket_hash:
+        return _session_error("provide `hash` — the ticket hash from the "
+                              "approvalRequired response")
+    try:
+        return {"ok": True, **SESSION.approve_ticket(ticket_hash)}
+    except SessionError as error:
+        return _session_error(str(error))
 
 
 def _tool_abort(_arguments: dict) -> dict:
@@ -1367,6 +1399,34 @@ TOOLS = [
         "handler": _tool_abort,
     },
     {
+        "name": "revl_approve",
+        "description": "Say YES to an outstanding class-(c) crossing (item 246, "
+                       "the auto-approve policy). When the approval policy is on, "
+                       "a revl_call (or a load/swap whose activation body emits) "
+                       "that reaches an IRREVERSIBLE emission with no checked "
+                       "inverse does not fire: it returns `approvalRequired` with "
+                       "a `ticket`. Relay that ticket to a human, then call this "
+                       "with the ticket's `hash` to mint a standing, single-use, "
+                       "hash-bound approval; the IDENTICAL re-issue then fires "
+                       "once and consumes it. A hash the server never issued is "
+                       "refused (the outstanding-ticket table); a swap or edit "
+                       "that changes the call's reach closure invalidates a "
+                       "standing approval (the candidate hash no longer matches). "
+                       "Gated by the `approve` operator verb (item 55): who may "
+                       "say yes is scoped in the same profile grammar as who may "
+                       "commit. Class (a) (witnessed-revertible) and (b) (deferred) "
+                       "crossings never reach here — they auto-approve.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"hash": {"type": "string",
+                                    "description": "the ticket hash from the "
+                                                   "approvalRequired response"}},
+            "required": ["hash"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_approve,
+    },
+    {
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
                        "a rollback is available, and the trace since the last call.",
@@ -1694,6 +1754,12 @@ def handle(message: dict) -> dict | None:
         else:
             try:
                 payload = handler(arguments)
+            except ApprovalRequired as exc:
+                # item 246: a class-(c) crossing the decision inside Session.call
+                # (or the activation gate in load/swap) refused. This is a result,
+                # not an error — shape the ticket two-step. Caught before the
+                # generic handler so it never reads as an internal fault.
+                payload = _approval_required(exc)
             except Exception as exc:  # a tool failure is a result, not a transport error
                 payload = {"ok": False, "diagnostics": [{
                     "severity": "error", "code": "REVL", "category": "internal",
