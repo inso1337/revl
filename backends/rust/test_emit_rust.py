@@ -2539,3 +2539,245 @@ def test_non_witnessed_non_compensating_program_is_untouched():
     assert "RevlTeardown" not in src
     assert "revl_teardown_begin" not in src
     assert "phase2" not in src
+
+
+# ---------------------------------------------------------------------------
+# item 324 (rust): THE per-tool-call H1 gate — a witnessed fs mutation that
+# fires from a PROVIDE-METHOD body, per request, after activation. Mirrors the
+# py reference tests/test_provide_method_witnessed.py, driven against the REAL
+# cordis-rs crate (`cargo test`).
+#
+# 318 opened this on py: a witnessed effect can now fire from a provide-method
+# body (per tool call), registering its transactional inverse into the
+# enclosing component's activation frame, so the mutation PERSISTS on clean
+# session-end and REVERTS residue-free on abort. This proves the same closed
+# loop on the rust tier: the method-body witnessed effect registers a
+# `transactional` disposer on the component's `RevlTeardown` (via
+# `revl_teardown_of(&self.ctx)`), disposed by cordis-rs's LIFO unload where it
+# reads the settled `committed` bit.
+#
+# THE DISPOSAL-ORDERING HAZARD (318 found it on py) does NOT arise on rust:
+# rust flips `committed` EAGERLY at activation-end, so by the time a per-call
+# method registers its sibling `self.ctx.effect` disposer the commit bit is
+# already settled — no premature-disposal window, no park-for-drain needed.
+# See `_emit_method_witnessed_step` in backends/rust/emit.py for the analysis.
+#
+# The witnessed extern is a rename-with-a-data-witness stand-in (a rename is
+# enough to exercise the runtime path), parameterised by the target path so
+# each per-call invocation mutates a DISTINCT file — the shape of an agent
+# calling one fs tool repeatedly. That distinctness is what makes the abort
+# proof "all calls, not just the last": each file is an independent crossing,
+# and abort must revert every one.
+# ---------------------------------------------------------------------------
+
+_METHOD_WITNESSED_RVL = """
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+
+extern pure fn unstash(w: Stash) -> Unit = @rs {
+    let _ = std::fs::rename(&w.bak, &w.path);
+}
+extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError]
+    undo unstash(result) = @rs {
+    let bak = format!("{}.bak", p);
+    match std::fs::rename(&p, &bak) {
+        Ok(()) => Ok(Stash { path: p.clone(), bak }),
+        Err(e) => Err(FsError { code: e.to_string() }),
+    }
+}
+
+service Ops { emission fn touch(p: Str) }
+
+component Agent provides ops: Ops {
+  provide ops {
+    fn touch(p) {
+      effect stash_path(p)
+    }
+  }
+}
+"""
+
+# The activation label `revl_teardown_begin` keys the abort registry under is
+# `<component>.teardown.phase2` (see `_emit_teardown_begin`). A session-level
+# reject reaches the activation's `RevlTeardown` through it.
+_METHOD_WITNESSED_ABORT_LABEL = "Agent.teardown.phase2"
+
+_METHOD_WITNESSED_HARNESS = '''
+use std::path::Path;
+
+// A fresh temp directory per #[test], so the three per-call artifacts never
+// collide with another test's (the crate runs single-threaded, but names would
+// otherwise repeat across tests).
+fn revl_tmpdir(tag: &str) -> std::path::PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("revl324-{}-{}-{}", tag, std::process::id(), nonce));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+// Three distinct deliverable files, one per simulated tool call.
+fn revl_setup_files(dir: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    for i in 0..3 {
+        let p = dir.join(format!("artifact_{}.txt", i));
+        std::fs::write(&p, format!("deliverable {}", i)).unwrap();
+        paths.push(p.to_string_lossy().into_owned());
+    }
+    paths
+}
+
+// The witnessed rename ran and stuck: original gone, backup present.
+fn revl_mutated(p: &str) -> bool {
+    !Path::new(p).exists() && Path::new(&format!("{}.bak", p)).exists()
+}
+
+// The world is as it started: original present, no backup residue.
+fn revl_pristine(p: &str) -> bool {
+    Path::new(p).exists() && !Path::new(&format!("{}.bak", p)).exists()
+}
+
+fn revl_cleanup(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// 1. per-tool-call witnessed mutation PERSISTS on a clean unload (commit).
+#[test]
+fn per_tool_call_mutations_persist_on_clean_unload() {
+    let dir = revl_tmpdir("persist");
+    let files = revl_setup_files(&dir);
+
+    let root = cordis::Context::new();
+    let fiber = root.plugin(agent(), ());
+    fiber.wait().unwrap();
+    let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
+
+    // each tool call runs the provide-method, registering ONE transactional
+    // inverse into the component's activation frame (per-tool-call H1).
+    for f in &files {
+        ops.touch(f.clone());
+        assert!(revl_mutated(f), "the witnessed mutation did not apply on the call: {f}");
+    }
+
+    fiber.dispose().unwrap();  // clean unload == implicit commit
+
+    // the deliverable persists on EVERY path; nothing was reverted.
+    for f in &files {
+        assert!(revl_mutated(f), "clean unload wrongly reverted a per-call mutation: {f}");
+    }
+    revl_cleanup(&dir);
+}
+
+// 2. per-tool-call witnessed mutation REVERTS on abort, residue-free — and
+// 3. the abort is all-or-nothing across every independent per-call mutation,
+//    not just the last (each file is a distinct crossing on the shared frame).
+#[test]
+fn per_tool_call_mutations_revert_on_abort_every_call() {
+    let dir = revl_tmpdir("revert");
+    let files = revl_setup_files(&dir);
+
+    let root = cordis::Context::new();
+    let fiber = root.plugin(agent(), ());
+    fiber.wait().unwrap();
+    let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
+
+    for f in &files {
+        ops.touch(f.clone());
+        assert!(revl_mutated(f), "mutation did not apply: {f}");
+    }
+
+    // abort the session's work (item 245's reject drives this seam): clear
+    // `committed` so the next teardown REPLAYS every inverse instead of
+    // discharging it.
+    revl_abort("''' + _METHOD_WITNESSED_ABORT_LABEL + '''");
+    fiber.dispose().unwrap();
+
+    // EVERY per-call mutation reverted, and the teardown left no residue: the
+    // residue set is fully enumerable (every artifact path) and empty.
+    for f in &files {
+        assert!(revl_pristine(f), "abort did not revert a per-call mutation: {f}");
+    }
+    revl_cleanup(&dir);
+}
+
+// 4. control: a component that already activated cleanly and is NOT aborted
+//    commits — proves the abort in test 2 is what caused the revert, not an
+//    always-revert bug.
+#[test]
+fn no_abort_commits_the_deliverable() {
+    let dir = revl_tmpdir("control");
+    let files = revl_setup_files(&dir);
+
+    let root = cordis::Context::new();
+    let fiber = root.plugin(agent(), ());
+    fiber.wait().unwrap();
+    let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
+    for f in &files { ops.touch(f.clone()); }
+
+    fiber.dispose().unwrap();  // no revl_abort -> commit
+
+    for f in &files {
+        assert!(revl_mutated(f), "unaborted clean unload must persist: {f}");
+    }
+    revl_cleanup(&dir);
+}
+'''
+
+
+@needs_cargo
+def test_method_witnessed_h1_runs_on_real_cordis_rs(tmp_path):
+    """item 324 runtime proof: a witnessed fs mutation fired from a
+    provide-method PER TOOL CALL persists on a clean unload and reverts,
+    residue-free across every call, on abort — driven against the real
+    cordis-rs crate. Mirrors tests/test_provide_method_witnessed.py."""
+    ir = compile_source(_METHOD_WITNESSED_RVL, "method_witnessed.rvl")
+    src = emit.emit(ir)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\n" + _METHOD_WITNESSED_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_m324"), encoding="utf-8")
+    # each #[test] uses its own temp dir, so parallel threads are safe here, but
+    # keep it single-threaded for parity with the Slice-2b teardown harness.
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_method_witnessed_call_site_emits_transactional_registration():
+    """Emit-only companion (no cargo): a witnessed effect in a PROVIDE-METHOD
+    body compiles to a transactional registration on the component's activation
+    frame — recovered via `revl_teardown_of(&self.ctx)` and keyed off
+    `committed` — NOT a plain always-replaying bracket. And the component gains
+    the `RevlTeardown` accumulator even though its ACTIVATION body has no
+    witnessed effect (the method-body detection must trigger it)."""
+    ir = compile_source(_METHOD_WITNESSED_RVL, "method_witnessed.rvl")
+    src = emit.emit(ir)
+    # the activation built the accumulator despite an empty activation body...
+    assert "revl_teardown_begin(&ctx," in src
+    # ...and the method registers a transactional (committed-gated) disposer on
+    # the recovered frame, fire-and-forget (method sig is non-Result).
+    assert "let _revl_state = revl_teardown_of(&self.ctx);" in src
+    assert 'let _ = self.ctx.effect("Agent.touch.witnessed", move || {' in src
+    assert "if !_revl_state.committed.load" in src
+    assert "let _ = unstash(result);" in src
+    # the out-of-band abort seam is present.
+    assert "fn revl_abort(label: &str) {" in src
+    # and the method effect is NOT the old always-replaying bracket shape.
+    assert "let _ = self.ctx.effect(\"Agent.touch.effect" not in src
+
+
+def test_method_witnessed_does_not_perturb_non_witnessed_methods():
+    """A provide-method with a plain (non-witnessed) `effect` still emits the
+    always-replaying bracket, unchanged by item 324 — the witnessed dispatch is
+    gated on the extern class."""
+    src = emit.emit(compile_source(
+        "extern acquire fn acq() -> Int undo rel() = @rs { 0 }\n"
+        "extern pure fn rel() -> Unit = @rs { }\n"
+        "service S { fn go() }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn go() { effect acq() undo rel() } }\n"
+        "}\n", "plain_method.rvl"))
+    # non-witnessed method effect: the bracket disposer, always-replaying, no
+    # committed gate, no RevlTeardown at all.
+    assert "committed" not in src
+    assert "RevlTeardown" not in src
+    assert "self.ctx.effect(" in src
