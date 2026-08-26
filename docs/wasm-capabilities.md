@@ -148,6 +148,64 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
 
+## Witnessed-effects teardown (item 243 Slice 2b)
+
+The compiled teardown accumulator (`activate_step`/`deactivate`, above) now
+carries THREE entry kinds, per docs/design/teardown-contract.md: `bracket`
+(an ordinary `acquire`, unchanged), `transactional` (a `witnessed` extern's
+declared inverse), and `compensation` (an `emit ... compensate ...`). Two
+qualifications are specific to this tier and do not lift with this slice:
+
+- **Over ACTIVATION-REGISTERED entries only.** The accumulator is fixed at
+  activation (the state-machine row above: method-time effects and
+  method-time compensation are both still hard `EmitError`s). The contract's
+  "mixed-entry LIFO in both phases" therefore reads, on wasm, over the
+  entries a component's top-level body registers — never a provide-method's.
+- **Epoch/fuel is a wasmtime CAPABILITY the first-party driver wires, not a
+  property of the compiled module.** The compiled WAT needs no special code
+  for this — a Phase-2 `compensate` expression is an ordinary `call`, and
+  wasmtime's epoch/fuel interruption is transparent to guest code once a HOST
+  arms it. `backends/wasm/lifecycle.py`'s `drive_teardown` is that host: it
+  drives the module's `deactivate_step` export one entry at a time (the same
+  per-call idiom `activate_step` already uses), arming a fresh epoch deadline
+  around each Phase-2 call. Host IMPORTS a compensation calls into are NOT
+  preemptible this way — wasmtime only checks the deadline at a function-call
+  entry or loop back-edge in GUEST code, so a compensation that blocks
+  entirely inside a `req`/coeffect call is not cut off. This is the
+  substrate's honest ceiling, not a partial implementation of the bound.
+
+**Additive: the scaffold only appears on a component that actually registers
+a `transactional`/`compensation` entry.** A component with no `witnessed`
+extern and no `emit ... compensate ...` step has nothing for a commit/abort
+split to distinguish (every entry is a `bracket`, which replays on commit AND
+abort alike), so it emits `deactivate` in the exact single-pass shape it did
+before this slice — no `$__committed`/`$__dstep` globals, no `committed()`/
+`deactivate_step()` exports, byte-identical output. This mirrors the go/rust
+Slice-2b landings' own gates (go's `_COMP_NEEDS_TEARDOWN`, rust's
+`_body_has_witnessed`/`_body_has_compensate`). New exports, present only when
+the gate is on (in addition to `activate_step`/`deactivate`, whose SIGNATURES
+are unchanged either way, for backward compatibility with an existing host —
+e.g. cordis-wasm's `Runtime.unplug` — that only knows the single-call
+teardown hook):
+
+| export | purpose |
+|---|---|
+| `committed() -> i32` | the abort-vs-commit discriminator: 1 iff `activate_step` ran every segment to completion without trapping |
+| `deactivate_step() -> i32` | processes exactly ONE accumulator entry per call (1 = more remain, 0 = done) — a first-party host driver can catch a trap per entry (continue-and-record) and bound a compensation's epoch/fuel individually; `deactivate` itself is now a thin loop calling this to completion in one host call |
+
+A `revl:teardown` custom section is emitted alongside `revl:isolate`/
+`revl:intercept` (§v2 realms) whenever a component registers at least one
+`transactional`/`compensation` entry: a STATIC, compile-time index (seq,
+kind, `deactivate_step` dispatch position) of those entries, and the
+Phase-1/Phase-2 dispatch-chain split. It is the honest ceiling of a "WAL
+descriptor" on this tier: runtime argument/witness VALUES live in the
+component's own linear memory, and this tier's teardown loop is compiled
+state with zero host bookkeeping (the README's own framing), so there is no
+channel here that durably persists a runtime value without a host choosing
+to add one — this section is the STARTING INDEX such a host would build
+against, not a claim of durability the substrate does not carry.
+`backends/wasm/lifecycle.py`'s `parse_teardown_descriptor` reads it back.
+
 ## Lifecycle tests on the substrate (item 142)
 
 A `lifecycle test` (docs/syntax-2.0.md §7.1) *runs* on the wasm tier when every

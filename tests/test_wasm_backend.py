@@ -246,7 +246,12 @@ def test_called_fn_is_emitted_into_the_component_module(tmp_path):
 def test_activation_steps_declare_their_own_scratch_locals(tmp_path):
     """A delegated expression inside a body segment belongs to `activate_step`,
     not to a method — its scratch slots have to be declared there or the module
-    does not validate."""
+    does not validate. This fixture has no `witnessed`/`compensate` entry (a
+    plain bracket only), so `deactivate` renders the LEGACY single-pass shape
+    (item 243 Slice 2b's scaffold is additive — see
+    test_witnessed_teardown.py for the `deactivate_step` shape a witnessed/
+    compensating component gets instead) and its inverse's own delegated
+    expression's scratch slot belongs there, not to a method."""
     wat = _emitter().emit(compile_source(
         "service Kv { fn set(k: Int, v: Int) -> Int }\n" + _SVC
         + "component C requires kv: Kv provides s: S {\n"
@@ -256,6 +261,7 @@ def test_activation_steps_declare_their_own_scratch_locals(tmp_path):
     ))["C"]
     assert '(func (export "activate_step") (result i32) (local $__revl_tmp i32)' in wat
     assert '(func (export "deactivate") (local $__revl_tmp i32)' in wat
+    assert 'deactivate_step' not in wat
     path = tmp_path / "activation.wat"
     path.write_text(wat, encoding="utf-8")
     # it imports coeffects, so validate by compiling rather than invoking
