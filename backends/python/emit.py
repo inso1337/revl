@@ -1021,6 +1021,34 @@ class _ComponentEmitter:
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
 
+    def _method_witnessed_step(self, out: _Lines, indent: int, step: dict, ext: dict,
+                               where: str, bind: Optional[str]) -> None:
+        """Emit a witnessed effect inside a PROVIDE-METHOD body (item 318): the
+        per-tool-call H1 seam. Run the mutation, and on `Ok` register the
+        extern's DECLARED inverse into the ENCLOSING COMPONENT'S activation
+        frame as a transactional entry carrying the `Ok` witness.
+
+        The activation-body form (`_witnessed_step`) `yield`s the disposer into
+        the body generator's own LIFO stack. A method body has no such
+        generator, and adopting the entry as a sibling `ctx.effect` is unsound
+        (cordis disposes it before the body's `drain`, so a clean unload would
+        observe `_committed` still False and wrongly revert the deliverable —
+        see `Frame.transactional_method`). So this calls the frame directly:
+        `_revl_frame.transactional_method(...)` parks the entry for `drain` to
+        dispose once the commit-vs-abort bit is settled. On `Err` nothing is
+        registered (Ok-conditional): a failed mutation touched nothing, so it
+        schedules no rollback. `_revl_frame` is in scope in every method body
+        (it is the component's activation frame the method closes over)."""
+        self._counter += 1
+        tmp = f"_revl_wit{self._counter}"
+        undo = self._expr(ext["undo"], where)  # e.g. `restore(result)`
+        out.add(indent, f"{tmp} = {self._expr(step.get('acquire'), where)}")
+        out.add(indent, f"if isinstance({tmp}, Ok):")
+        out.add(indent + 1,
+                f"_revl_frame.transactional_method((lambda result: {undo}), {tmp}.value)")
+        if bind is not None:
+            out.add(indent, f"{bind} = {tmp}")
+
     def _timer(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         """A `timer` body step (item 57): a revertible schedule.
 
@@ -1180,20 +1208,30 @@ class _ComponentEmitter:
             out.add(indent, f"{name} = {self._expr(step.get('value'), where)}")
             return
         if kind == "effect":
-            fn = f"_effect_{self._counter}"
-            out.add(indent, f"def {fn}():")
-            out.add(indent + 1, self._expr(step.get("acquire"), where))
-            out.add(indent + 1, f"yield lambda: {self._expr(step.get('undo'), where)}")
-            out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
+            wit = self._witnessed_extern(step.get("acquire"))
+            if wit is not None:
+                self._method_witnessed_step(out, indent, step, wit, where, bind=None)
+            else:
+                fn = f"_effect_{self._counter}"
+                out.add(indent, f"def {fn}():")
+                out.add(indent + 1, self._expr(step.get("acquire"), where))
+                out.add(indent + 1, f"yield lambda: {self._expr(step.get('undo'), where)}")
+                out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
         elif kind == "let-effect":
-            bind = _ident(step.get("bind"), f"{where}: bind")
-            acquire = self._expr(step.get("acquire"), where)
-            undo = self._expr(step.get("undo"), where)
-            out.add(
-                indent,
-                f"{bind} = _revl_frame.acquire({self._label(label)!r}, "
-                f"lambda: {acquire}, lambda {bind}: {undo})",
-            )
+            wit = self._witnessed_extern(step.get("acquire"))
+            if wit is not None:
+                self._method_witnessed_step(
+                    out, indent, step, wit, where,
+                    bind=_ident(step.get("bind"), f"{where}: bind"))
+            else:
+                bind = _ident(step.get("bind"), f"{where}: bind")
+                acquire = self._expr(step.get("acquire"), where)
+                undo = self._expr(step.get("undo"), where)
+                out.add(
+                    indent,
+                    f"{bind} = _revl_frame.acquire({self._label(label)!r}, "
+                    f"lambda: {acquire}, lambda {bind}: {undo})",
+                )
         elif kind == "emit":
             if step.get("compensate") is not None:
                 fn = f"_emit_{self._counter}"

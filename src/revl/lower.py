@@ -4452,28 +4452,25 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                         "`spawn` must be bound to a handle: "
                         f"`let s = effect spawn {mstmt.acquire.component} … undo s.dispose()`",
                     )
-                if mstmt.undo is None:
-                    # a witnessed call parses without a site undo (item 243
-                    # Slice 2), but its transactional registration is only
-                    # wired for the activation body's own accumulator — a
-                    # provide-method body is out of that slice's scope, so
-                    # refuse cleanly instead of lowering a step the runtime
-                    # cannot register (docs/design/243-witnessed-externs.md).
-                    raise RevlError(
-                        filename, mstmt.line,
-                        "a witnessed effect is not yet supported inside a "
-                        "provide-method body",
-                        hint="move the witnessed call to the component "
-                             "activation body, where the teardown accumulator "
-                             "that auto-registers its inverse lives "
-                             "(docs/design/243-witnessed-externs.md)",
-                        code="G4", category="witnessed",
-                    )
-                mbody.append({
-                    "step": "effect",
-                    "acquire": _lower_expr(mstmt.acquire, env, mode="setup"),
-                    "undo": _lower_expr(mstmt.undo, env, mode="undo"),
-                })
+                # item 318 (docs/design/243-witnessed-externs.md): a witnessed
+                # effect is now valid in a provide-method body — THE dominant
+                # H1 gate. An agent's fs mutation fires per tool call from a
+                # provide-method, not the activation body; its declared inverse
+                # auto-registers into the ENCLOSING COMPONENT'S activation frame
+                # as a transactional entry (`Frame.transactional_method`), which
+                # is component-long and whose commit/abort already discharges on
+                # a clean unload / reverts on abort (Slice 2a). A witnessed call
+                # carries no site `undo`; a plain effect still requires one.
+                # `_lower_effect_step` makes exactly that distinction (the same
+                # call the activation body uses): a witnessed acquisition lowers
+                # to a `{"step": "effect", "acquire": ...}` with no `undo` key
+                # (emit's `_method_witnessed_step` keys the transactional
+                # registration off the acquisition's callee), and a plain
+                # missing-undo effect raises the unchanged G4 refusal.
+                acquire = _lower_expr(mstmt.acquire, env, mode="setup")
+                mbody.append(_lower_effect_step(
+                    acquire, mstmt.undo, env, filename, mstmt.line,
+                    bind=None, raw_acquire=mstmt.acquire))
             elif isinstance(mstmt, EmitStmt):
                 mbody.append(_lower_emit_step(mstmt, env))
             elif isinstance(mstmt, AwaitStmt):
