@@ -26,6 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
 
+    doctor = sub.add_parser(
+        "doctor",
+        help="diagnose each backend tier, runtime and dependency (OK/WARN/"
+             "MISSING + version), then smoke-test every available tier")
+    doctor.add_argument("--json", action="store_true",
+                        help="machine-readable report (for an agent)")
+    doctor.add_argument("--no-smoke", action="store_true",
+                        help="skip the per-tier compile+boot smoke test (report only)")
+    doctor.add_argument("--smoke-timeout", type=int, default=None, metavar="SECONDS",
+                        help="per-tier smoke-test timeout (default: 90)")
+
     scaffold = sub.add_parser(
         "scaffold",
         help="generate a typed, holed composition skeleton from a spec (docs/scaffold.md)")
