@@ -2775,6 +2775,14 @@ _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
 _GO_SCALARS = {"Int", "Int32", "Float", "Str", "Bool"}
 
 
+def _v3_has_any(surface) -> bool:
+    """Whether a surface type contains an erased `any` component — a whole-word
+    match so a user type whose name merely embeds the letters (e.g. `Company`)
+    is not mistaken for one. Used to pick the fully concrete operand of an
+    equality so both sides emit the same generic instantiation (item 302)."""
+    return bool(isinstance(surface, str) and re.search(r"\bany\b", surface))
+
+
 def _go_v3_is_interface(surface, types) -> bool:
     """Whether a revl surface type lowers to a Go *interface* on this tier.
 
@@ -2928,8 +2936,6 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         go_op = _V3_GO_BIN_OPS.get(op)
         if go_op is None:
             raise EmitError(f"unsupported v3 binary operator {op!r}")
-        left = _go_v3_expr(node["left"], ctx)
-        right = _go_v3_expr(node["right"], ctx)
         if op in ("==", "===", "!=", "!=="):
             # revl has ONE equality and it is structural (syntax-2.0 §3.4).
             # Go `==` is value equality for comparable structs but a *compile
@@ -2939,9 +2945,34 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             lt = _go_v3_infer_type(node.get("left"), ctx)
             rt = _go_v3_infer_type(node.get("right"), ctx)
             if not (lt in _GO_SCALARS and rt in _GO_SCALARS):
+                # Element-type recovery across the two operands (item 302, the
+                # value-level sibling of 280). revlEq is reflect.DeepEqual,
+                # which is FALSE across two different generic instantiations:
+                # a bare `Err("")` / `None` / `[]` erases to
+                # RevlErr[any, string] / RevlNone[any] / []any, and DeepEqual
+                # against the other side's concrete RevlErr[int64, string] /
+                # RevlNone[string] / []string reports unequal even though the
+                # values match on py. Pin BOTH sides to whichever operand type
+                # is fully concrete (no `any`), so equal values emit as the
+                # identical Go type. A construction/empty-list renderer only
+                # honours an expected pin whose shape matches, so threading the
+                # chosen type into the concrete side (e.g. a `probe()` call) is
+                # a no-op there.
+                exp = None
+                for cand in (lt, rt):
+                    if isinstance(cand, str) and not _v3_has_any(cand):
+                        exp = cand
+                        break
+                left = _go_v3_expr(node["left"], ctx, exp)
+                right = _go_v3_expr(node["right"], ctx, exp)
                 ctx.needs_reflect = True
                 call = f"revlEq({left}, {right})"
                 return call if op in ("==", "===") else f"(!{call})"
+        # Scalar equality and every non-equality operator: render operands
+        # plainly. (Non-scalar equality returned above with element-type
+        # recovery threaded into both sides.)
+        left = _go_v3_expr(node["left"], ctx)
+        right = _go_v3_expr(node["right"], ctx)
         if op in ("+", "-", "*") and node.get("operands") == "Int":
             # Int overflow traps (docs/arithmetic.md). Go has no checked
             # arithmetic in the standard library, so the helpers detect it.
