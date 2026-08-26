@@ -1,0 +1,81 @@
+{
+ "ir_version": 3,
+ "services": {},
+ "components": [
+  {
+   "name": "Crasher",
+   "source": "crashproof.rvl",
+   "config": [],
+   "requires": {},
+   "provides": {},
+   "body": [
+    {
+     "step": "effect",
+     "acquire": {
+      "kind": "fn",
+      "name": "beginRow",
+      "args": []
+     }
+    }
+   ]
+  }
+ ],
+ "manifest": {
+  "components": [
+   {
+    "name": "Crasher",
+    "file": "crashproof.rvl",
+    "inject": [],
+    "provides": []
+   }
+  ],
+  "loadOrder": [
+   "Crasher"
+  ]
+ },
+ "externs": [
+  {
+   "name": "beginRow",
+   "class": "witnessed",
+   "params": [],
+   "returns": "Result[Str, Str]",
+   "bodies": {
+    "wasm": "\n      (i32.store (i32.const 4200) (i32.const 5))\n      (i32.store (i32.const 4204) (i32.const 0x23776f72))\n      (i32.store8 (i32.const 4208) (i32.const 0x31))\n      (i32.store (i32.const 4096) (i32.const 0))\n      (i64.store (i32.const 4104) (i64.extend_i32_u (i32.const 4200)))\n      (i32.const 4096)\n    "
+   },
+   "entry_kind": "transactional",
+   "revertible": true,
+   "ok_conditional": true,
+   "witness": "Str",
+   "capabilities": [
+    "t"
+   ],
+   "undo": {
+    "kind": "call",
+    "callee": {
+     "kind": "var",
+     "name": "deleteRow"
+    },
+    "args": [
+     {
+      "kind": "var",
+      "name": "result"
+     }
+    ]
+   }
+  },
+  {
+   "name": "deleteRow",
+   "class": "pure",
+   "params": [
+    {
+     "name": "id",
+     "type": "Str"
+    }
+   ],
+   "returns": "Unit",
+   "bodies": {
+    "wasm": " "
+   }
+  }
+ ]
+}
