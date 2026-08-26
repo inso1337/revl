@@ -43,6 +43,9 @@ export function emitFixtures(): void {
   emitFixture('fr1_loop.ir.json', 'fr1_loop.ts')
   // item 165: identifiers that are JS/TS reserved words, renamed uniformly
   emitFixture('reserved_words.ir.json', 'reserved_words.ts')
+  // item 279: a reserved-word JSON field on a DYNAMIC (json_parse/Any) value
+  // stays reachable via the raw key (`tc["function"]`), matching the py tier
+  emitFixture('dynamic_reserved_key.ir.json', 'dynamic_reserved_key.ts')
   // item 167: the routed-require scenario for router.test.ts. Generated here at
   // setup (so the test's static import resolves) but deliberately NOT checked in
   // and NOT enumerated as a checked-in fixture pair: it carries no `test`
