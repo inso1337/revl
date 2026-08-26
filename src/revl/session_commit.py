@@ -16,13 +16,14 @@ the program was typed to withhold, and enqueueing with no owner drops the action
 on the floor (no verdict ever comes). The refusal keys off the CALL SITE — a
 declared-but-never-called deferred extern does not poison the build.
 
-    Slice 2 TODO: wire :func:`refuse_deferred_on_ownerless_tier` into each of the
-    five ownerless backends' emit refusal channels
-    (backends/{rust,go,java,wasm,typescript}/emit.py, each through its existing
-    `EmitError` or equivalent). Slice 1 does NOT touch those five emitters; this
-    guard is the ready, tested check they call, so all six backends share one
-    wording instead of inventing six. Until then a `deferred` extern is a py-only
-    construct and the py driver is the only session owner.
+    Slice 2 (landed): :func:`refuse_deferred_on_ownerless_tier` is wired into each
+    of the five ownerless backends' emit refusal channels
+    (backends/{rust,go,java,wasm,typescript}/emit.py, each via a thin
+    `_refuse_deferred_emissions` wrapper that calls this guard from `emit()` and
+    re-raises the canonical diagnostic through that tier's existing `EmitError`).
+    All six backends share this one wording instead of inventing six. A `deferred`
+    extern remains a py-only construct at runtime; the py driver is the only
+    session owner, so a CALL to one on any other tier is refused at emit time.
 """
 
 from __future__ import annotations
