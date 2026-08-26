@@ -143,6 +143,12 @@ public final class RealPlacementRunner {
             String event = events.take();
             if (event.equals(STOP)) {
                 teardown(bindings);
+                // item 322 Slice 2: a graceful stop is a clean unload. Under
+                // REVL_WAL, stamp the WAL's discharge + terminal marker via the
+                // emitted sink so `revl recover` rolls this activation FORWARD
+                // (an abrupt death before this leaves no marker -> roll-back) —
+                // the real-cordis4j sibling of RunOnce.recordCleanUnload.
+                recordCleanUnload(container);
                 break;
             }
             Disposable binding = bindings.remove(event);
@@ -161,6 +167,24 @@ public final class RealPlacementRunner {
         List<Disposable> all = new ArrayList<>(bindings.values());
         for (int i = all.size() - 1; i >= 0; i--) {
             try { all.get(i).dispose(); } catch (Throwable ignored) {}
+        }
+    }
+
+    // item 322 Slice 2: stamp the WAL commit-path proof + terminal marker via the
+    // emitted recording sink, reflectively so this runner still compiles against a
+    // Components emitted WITHOUT --record (no sink present) and no-ops when
+    // REVL_WAL is unset. The real-cordis4j mirror of RunOnce.recordCleanUnload.
+    static void recordCleanUnload(String container) {
+        String wal = System.getenv("REVL_WAL");
+        if (wal == null || wal.isEmpty()) {
+            return;
+        }
+        try {
+            Class<?> comp = Class.forName(container);
+            comp.getMethod("revlRecordDischarge").invoke(null);
+            comp.getMethod("revlRecordActivationComplete").invoke(null);
+        } catch (ReflectiveOperationException absent) {
+            // Components was emitted without --record (no sink): nothing to stamp.
         }
     }
 
