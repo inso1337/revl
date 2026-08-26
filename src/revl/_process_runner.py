@@ -127,7 +127,8 @@ async def run(spec: dict) -> None:
         target = info.get("endpoint") or info["socket"]
         proxy = bridge.proxy_component(key, info["methods"], target, module,
                                        deadline=info.get("deadline"),
-                                       deadlines=info.get("deadlines"))
+                                       deadlines=info.get("deadlines"),
+                                       async_methods=info.get("async_methods"))
         clients[key] = proxy["_client"]
         fiber = root.plugin(proxy)
         await fiber

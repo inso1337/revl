@@ -584,17 +584,38 @@ class _Client:
 class _Proxy:
     """Stands in for the remote provider of one key. Only the declared method
     names forward; everything else raises, so the runtime can introspect it
-    safely."""
+    safely.
 
-    def __init__(self, client: _Client, key: str, methods) -> None:
+    An `async fn` operation must forward as an *awaitable*, not as its resolved
+    value. `_Client.call` is a blocking synchronous round-trip that returns the
+    already-decoded value (e.g. a `str`), so a forwarding provide-method that
+    does `return await cache.get(k)` — the shape an `async fn` consumer emits —
+    would `await` a bare `str` and raise ``'str' object can't be awaited``
+    (roadmap item 331). The proxy therefore wraps every method the service
+    declares `async` in a coroutine that yields the round-trip's value, so the
+    caller's `await` resolves it correctly. A *sync* (`fn`/`emission fn`)
+    operation keeps returning its value directly — a fire-and-forget `emit
+    db.execute(...)` across a seam must not hand back an un-awaited coroutine.
+    `async_methods` is the subset of `methods` the IR marks `async`; placement
+    reads it off the service declaration (`src/revl/placement.py`)."""
+
+    def __init__(self, client: _Client, key: str, methods, async_methods=()) -> None:
         object.__setattr__(self, "_client", client)
         object.__setattr__(self, "_key", key)
         object.__setattr__(self, "_methods", set(methods))
+        object.__setattr__(self, "_async_methods", set(async_methods))
 
     def __getattr__(self, name: str):
         if name in object.__getattribute__(self, "_methods"):
             client = object.__getattribute__(self, "_client")
             key = object.__getattribute__(self, "_key")
+            if name in object.__getattribute__(self, "_async_methods"):
+                async def _forward_async(*args):
+                    # The round-trip is blocking (cordis-py's model); awaiting
+                    # the coroutine performs it and resolves to the value, so a
+                    # chained `await forward(await cross_seam_call())` works.
+                    return client.call(key, name, args)
+                return _forward_async
             return lambda *args: client.call(key, name, args)
         raise AttributeError(name)
 
@@ -619,16 +640,18 @@ def _require_network_contract(key: str, endpoint: Endpoint, deadline) -> None:
 
 
 def proxy_component(key: str, methods, endpoint, module=None,
-                    deadline=None, deadlines=None) -> dict:
+                    deadline=None, deadlines=None, async_methods=None) -> dict:
     """A cordis component that provides `key` via a proxy forwarding to the
     stub at `endpoint` (a UDS path string, or an `Endpoint` — a local UDS or a
     network TCP+mTLS seam). `module` (the emitted module) lets the proxy rebuild
     ADT / Result returns into native case instances. Its `_client` is exposed so
     the driver can `watch()` for peer death and dispose the fiber.
 
-    `deadline` sets the per-operation deadline default (seconds) every forwarded
-    call carries; `deadlines` (``{method: seconds}``) overrides it per named
-    operation. A breach raises `SeamDeadline` in the calling fiber, which the
+    `async_methods` is the subset of `methods` the service declares `async fn`;
+    those forward as awaitables so a chained `await` on the consuming side
+    resolves the cross-seam value (item 331). `deadline` sets the per-operation
+    deadline default (seconds) every forwarded call carries; `deadlines`
+    (``{method: seconds}``) overrides it per named operation. A breach raises `SeamDeadline` in the calling fiber, which the
     runtime unwinds like any other seam failure (A8: revert LIFO, no residue).
     Placement (`src/revl/placement.py`) reads these off the seam spec. A
     **network** seam is refused here unless it carries both an identity and a
@@ -639,7 +662,7 @@ def proxy_component(key: str, methods, endpoint, module=None,
     client = _Client(ep, module, deadline=deadline, deadlines=deadlines)
 
     def apply(ctx, config=None):
-        proxy = _Proxy(client, key, methods)
+        proxy = _Proxy(client, key, methods, async_methods or ())
 
         def body():
             yield lambda: client.close()   # undo: tear the transport down
