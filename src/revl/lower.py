@@ -888,8 +888,12 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
                   | {ext.name for ext in program.externs}),
     })
     for decl in program.fn_decls:
+        # In a multi-file composition `filename` is only the first source
+        # (paths[0]); a fn parsed from a LATER file carries its own `source`, so
+        # its diagnostics must name that file, not paths[0] (roadmap 312).
+        decl_file = decl.source or filename
         if decl.name in seen:
-            raise RevlError(filename, decl.line, f"duplicate function `{decl.name}`")
+            raise RevlError(decl_file, decl.line, f"duplicate function `{decl.name}`")
         seen.add(decl.name)
         # the body sees the *marked* signature: this fn's own type parameters
         # are wildcards inside it (they are universally quantified there), while
@@ -901,7 +905,7 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         type_env: dict[str, str] = {}
         for param, marked in zip(decl.params, marked_params):
             if param.name in scope:
-                raise RevlError(filename, param.line,
+                raise RevlError(decl_file, param.line,
                                 f"duplicate parameter `{param.name}` in fn {decl.name}")
             scope[param.name] = False
             type_env[param.name] = marked
@@ -910,9 +914,9 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
         alias_fns = program.fn_alias_scopes.get(id(decl), {})
         body: list[dict] = []
         for stmt in decl.body:
-            _lower_pure_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types,
+            _lower_pure_stmt(stmt, scope, callables, alias_fns, body, decl_file, type_env, types,
                              expected_return=marked_returns)
-        _check_returns_on_every_path(decl, filename)
+        _check_returns_on_every_path(decl, decl_file)
         # phase-2 async coloring (docs/design/async-extern.md §3): a module
         # `fn` that reaches an async extern — directly or transitively — is no
         # longer refused here; it becomes async-colored by the `_async_callables`
@@ -2993,9 +2997,16 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     seen = set()
     for comp in program.components:
         if comp.name in seen:
-            raise RevlError(program.filename, comp.line, f"duplicate component `{comp.name}`")
+            raise RevlError(comp.source or program.filename, comp.line,
+                            f"duplicate component `{comp.name}`")
         seen.add(comp.name)
-        lowered_comp = _lower_component(comp, services, program.filename,
+        # A multi-file composition merges declarations from several sources into
+        # one Program whose `filename` is only the first argument (paths[0]).
+        # Body diagnostics render through `env.filename`, so a component from a
+        # LATER file must lower under its own `source`. Otherwise its rejection
+        # names the first source with this file's line number (roadmap 312).
+        lowered_comp = _lower_component(comp, services,
+                                        comp.source or program.filename,
                                         component_callables, types, emitting_fns,
                                         emitting_caps, emission_evidence, spawn_reg,
                                         async_colored)
