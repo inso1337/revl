@@ -51,10 +51,55 @@ fault.
 | `ident_tokens(s)` | `Str -> List[Str]` | maximal identifier runs, i.e. `re.findall(r"[A-Za-z_]\w*", s)` (ASCII `\w`) |
 | `split_top(s, sep)` | `(Str, Str) -> List[Str]` | split on single-char `sep` at bracket depth 0 (`[]` and `()`), each part trimmed; `""` → `[]` |
 | `dedent(text)` | `Str -> Str` | **byte-exact** to Python `textwrap.dedent` |
+| `str_newline()` | `-> Str` | the portable newline, a one-char string `U+000A` |
+| `str_tab()` | `-> Str` | a one-char string `U+0009` (horizontal tab) |
+| `str_char(code)` | `Int -> Str` | reverse of `charCodeAt`: a one-char string for `code`; covers `U+0009`/`U+000A` and printable ASCII `U+0020..U+007E`, else `""` |
 
 `is_space` is exported because it is the reusable character predicate the strip
-functions share; `is_word_ch` / `is_alpha_us` / `is_sp_tab` / `nl` /
+functions share; `is_word_ch` / `is_alpha_us` / `is_sp_tab` / `ascii_printable` /
 `common_prefix` / `leading_sp_tab` / `line_is_ws_only` stay private.
+
+## Control characters (item 181)
+
+A plain revl double-quoted string carries **no escapes** and cannot hold a
+control character: `"\n"` is the two chars backslash-n, the lexer ends a
+`"..."` string at a real newline, and a triple-string strips one leading
+newline. So a line-joining text tool that wants `lines.join("\n")` to insert a
+**real** `U+000A` used to hand-roll a per-tier `extern fn newline() = @py {
+return chr(10) }` — reinvented once each in `selfhost/emit_py.rvl`,
+`emit_go.rvl` and `emit_wasm.rvl`, and not tier-portable.
+
+`str_newline` / `str_tab` / `str_char` are that idiom, **once**, in pure revl.
+The mechanism: a **backtick template with no `${...}` interpolation** lowers as
+an ordinary one-char string literal on every tier (py/ts/rs/go/java/wasm), and a
+backtick *can* hold a literal control byte that `"..."` cannot — so the newline
+and the tab are written as their literal byte inside a backtick. `str_char` is
+the reverse of `charCodeAt`: for the printable range it indexes a pure-revl
+`ascii_printable()` table (a `"..."` string holding every printable ASCII char
+except the double quote, which is spliced in from a backtick), and for `9`/`10`
+it returns the backtick helpers, so `str_char(code).charCodeAt(0) == code` and
+`str_char(10) == str_newline()`.
+
+There is no `chr` / `fromCharCode` on the base `Str` surface, so a code point
+**outside** `U+0009`/`U+000A` and printable ASCII `U+0020..U+007E` has no
+pure-revl spelling; `str_char` returns `""` for it. A wider range would need a
+blessed per-tier primitive, which no self-host stage yet requires. The file
+carries the literal newline and tab bytes, so it is pinned `stdlib/str.rvl
+-text` in `.gitattributes` to keep the newline byte from being rewritten to
+CRLF (which would make `str_newline()` two chars). The idiom (and its
+round-trips against `charCodeAt`) is pinned in `tests/test_str_stdlib.py`.
+
+**Carriage return (`U+000D`) is intentionally absent.** The toolchain reads
+source in universal-newline mode (`parse_file` → `open(path)`), so a literal CR
+byte written into source is folded to LF *before the lexer runs* — a lone CR has
+no pure-revl spelling at all, and `str_char(13)` returns `""`. Emitting a real
+CR would need a blessed per-tier `chr` / `fromCharCode` primitive; that is
+deferred until a stage actually needs one rather than faked here.
+
+**Idiom for a one-off control char without the helper:** the same backtick
+template — `` `<newline>` `` for a real newline, or `str_char(code)` for any
+supported code point — is the portable spelling; never re-add a `@py chr(...)`
+extern.
 
 ## `dedent` — byte-exact to `textwrap.dedent`
 
