@@ -214,6 +214,13 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     name = _arg_ref_name(arg_node)
     if name is None:
         return rendered
+    if name in ctx.borrowed_params:
+        # This argument is a borrowed `&str` parameter reaching an OWNED slot (a
+        # `String` callee param, a record field, a constructor payload). An owned
+        # `String` is produced with `.to_string()`, never `.clone()` (which stays
+        # a `&str`). The borrow analysis keeps a borrowed param out of owned
+        # slots, so this is a safety net that materialises rather than miscompiles.
+        return f"{rendered}.to_string()"
     ty = ctx.var_types.get(name)
     if ty is not None:
         if _is_fn_type(ty):
@@ -224,6 +231,23 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     if name in ctx.multi_use:
         return f"{rendered}.clone()"
     return rendered
+
+
+def _borrow_str_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Render an argument bound for a borrowed `&str` callee parameter (item 282).
+
+    The callee only reads the string, so the caller lends a borrow instead of
+    cloning it. A bare borrowed `&str` parameter passed straight through is
+    already a `&str`, so it goes untouched (no needless re-borrow); every other
+    string expression — an owned `String` local, a literal, a call result — is
+    borrowed with `&`, and `&String`/`&&str` both coerce to the `&str` slot.
+    """
+    name = _arg_ref_name(arg_node)
+    if name is not None and name in ctx.borrowed_params:
+        return rendered
+    if isinstance(arg_node, dict) and arg_node.get("kind") in _ATOMIC_KINDS:
+        return f"&{rendered}"
+    return f"&({rendered})"
 
 
 def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
@@ -240,12 +264,212 @@ def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
     name = _arg_ref_name(node)
     if name is None:
         return rendered
+    if name in ctx.borrowed_params:
+        # A borrowed `&str` param materialised into an owned position (a branch
+        # tail typed `Str`) becomes an owned `String` via `.to_string()`, never
+        # `.clone()` (which would keep it a `&str`). The borrow analysis keeps a
+        # borrowed param out of owned positions, so this is a safety net.
+        return f"{rendered}.to_string()"
     ty = ctx.var_types.get(name)
     if ty is not None and str(ty).split("[", 1)[0].strip() in _RUST_COPY_TYPES:
         return rendered
     if name in ctx.multi_use:
         return f"{rendered}.clone()"
     return rendered
+
+
+# `Str` values that a callee only READS lower to a borrowed `&str` parameter
+# instead of an owned `String`, so the call passes a borrow rather than cloning
+# the whole string (item 282). These are the string builtins whose *argument*
+# reads its operand — after the `RevlStrOps`/`RevlStrListOps` traits take `&str`
+# arguments, a `&str` operand coerces into them exactly as a `String` does — so
+# a borrowed param handed to one of these arg slots stays read-only.
+_STR_READONLY_ARG_BUILTINS = frozenset({
+    "concat", "indexOf", "split", "join", "startsWith", "endsWith",
+})
+
+
+def _free_fn_call(node: object, function_names: "frozenset[str] | set") -> tuple:
+    """`(callee_name, arg_nodes)` when `node` is a call to a first-party free
+    function, else `(None, None)`.
+
+    Only free functions declared in this document are borrow-aware: their
+    parameter list is under the emitter's control, so a read-only `Str` param
+    can be lowered to `&str`. Externs (their `@rs` body is hand-written against
+    `String`), constructors, service methods, and closure-valued locals are not,
+    so a call to any of those is treated as a by-value boundary.
+    """
+    if not isinstance(node, dict):
+        return None, None
+    kind = node.get("kind")
+    if kind == "fn":
+        name = node.get("name")
+    elif kind == "call" and isinstance(node.get("callee"), dict):
+        callee = node["callee"]
+        name = callee.get("name") if callee.get("kind") == "var" else None
+    else:
+        return None, None
+    if name in function_names:
+        return name, node.get("args") or []
+    return None, None
+
+
+def _str_param_escapes(body: object, params: "set[str]",
+                       fn_borrow: "dict[str, frozenset]",
+                       function_names: "frozenset[str] | set") -> "set[str]":
+    """The subset of `params` (a function's `Str` parameter names) that a `&str`
+    lowering could NOT represent: they reach a position that needs an owned
+    `String`.
+
+    A bare parameter reference is read-only — safe to borrow — only where its
+    immediate slot proves it: the receiver of a builtin (every `Str` builtin is
+    pure), a `&str` builtin argument, an equality/`+` operand or an interpolation
+    hole (all read by reference), or an argument to a free-fn slot the fixpoint
+    still holds borrowable. Every other slot (a `return` value, a record field, a
+    constructor/ADT payload, a `List` element, a `let` right-hand side, an owned
+    call argument) moves the value, so a parameter reached there escapes and must
+    stay an owned `String`. Unhandled shapes recurse in the escaping position, so
+    the pass only ever borrows a provably read-only parameter.
+    """
+    escaped: set[str] = set()
+
+    def walk(node: object, safe: bool) -> None:
+        if isinstance(node, dict):
+            kind = node.get("kind")
+            if kind in ("var", "name", "req"):
+                ident = node.get("id") or node.get("name")
+                if ident in params and not safe:
+                    escaped.add(ident)
+                return
+            if kind == "builtin":
+                walk(node.get("target"), True)
+                arg_safe = node.get("method") in _STR_READONLY_ARG_BUILTINS
+                for a in node.get("args") or []:
+                    walk(a, arg_safe)
+                return
+            if kind == "len":
+                walk(node.get("target"), True)
+                return
+            if kind == "interp":
+                for _pk, pv in node.get("parts") or []:
+                    walk(pv, True)
+                return
+            if kind == "bin":
+                op = node.get("op")
+                operand_safe = op in ("==", "!=", "+")
+                walk(node.get("left"), operand_safe)
+                walk(node.get("right"), operand_safe)
+                return
+            cname, arg_nodes = _free_fn_call(node, function_names)
+            if cname is not None:
+                borrow = fn_borrow.get(cname, frozenset())
+                for idx, a in enumerate(arg_nodes):
+                    walk(a, idx in borrow)
+                return
+            for value in node.values():
+                walk(value, False)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, safe)
+
+    walk(body, False)
+    return escaped
+
+
+def _functions_use_stdlib(functions: list) -> bool:
+    """True when some function body carries a `builtin`/`len` node — the same
+    stdlib signal `_uses_stdlib` gates the helper traits on, scoped to functions
+    (the only surface the borrow pass reshapes)."""
+    found = False
+
+    def walk(node: object) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            if node.get("kind") in ("builtin", "len"):
+                found = True
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(functions)
+    return found
+
+
+def _compute_str_param_borrows(functions: list) -> "dict[str, frozenset]":
+    """Map each free function to the set of parameter INDICES whose `Str`
+    argument the callee only reads, so the call can pass `&str` (a borrow)
+    instead of cloning the whole string (item 282).
+
+    This is an interprocedural fixpoint: a parameter threaded straight through to
+    another function's parameter is borrowable only when THAT parameter is, and
+    the self-host lexer threads `source` through a dozen scan helpers. Start with
+    every `Str` parameter a candidate, then repeatedly drop any that
+    `_str_param_escapes` finds in an owned position (including a pass-through to a
+    slot that has itself just been dropped). The set only shrinks, so it settles.
+
+    A `pub` function is exempt: its signature is the module's external contract,
+    called by hand-written Rust (the bench/test harness main, an embedder) that
+    expects the owned `Str` lowering (`String`), so its params stay owned. The
+    hot per-token clone item 282 targets lives in the module-internal scan
+    helpers, which a `pub` entry still lends its owned string to by borrow.
+
+    The pass is gated on the module actually using the stdlib (a `builtin`/`len`
+    node in some function): borrowing only reshapes the string-scanning surface,
+    which is exactly the surface the self-hosted `emit_rust.rvl` port leaves OUT,
+    so a stdlib-free module (`fn cat(a, b) = a + b`) still emits byte-identically
+    to that port. A module with no builtin has nothing item 282 speeds up anyway.
+    """
+    if not _functions_use_stdlib(functions):
+        return {fn.get("name"): frozenset() for fn in functions}
+    function_names = frozenset(
+        fn.get("name") for fn in functions if fn.get("name")
+    )
+    borrow: dict[str, frozenset] = {}
+    for fn in functions:
+        name = fn.get("name")
+        if fn.get("public"):
+            borrow[name] = frozenset()
+            continue
+        borrow[name] = frozenset(
+            idx for idx, p in enumerate(fn.get("params") or [])
+            if p.get("type") == "Str"
+        )
+    changed = True
+    while changed:
+        changed = False
+        for fn in functions:
+            name = fn.get("name")
+            candidates = {
+                p.get("name") for idx, p in enumerate(fn.get("params") or [])
+                if idx in borrow[name]
+            }
+            if not candidates:
+                continue
+            escaped = _str_param_escapes(
+                fn.get("body") or [], candidates, borrow, function_names)
+            if escaped:
+                kept = frozenset(
+                    idx for idx in borrow[name]
+                    if (fn.get("params") or [])[idx].get("name") not in escaped
+                )
+                if kept != borrow[name]:
+                    borrow[name] = kept
+                    changed = True
+    return borrow
+
+
+def _render_param_type(borrowed: bool, ftype: object, types: dict) -> str:
+    """The Rust type of a free-function parameter, `&str` when the borrow
+    analysis lowered this read-only `Str` param to a borrow (item 282), else the
+    owned lowering `_rust_type` gives it."""
+    if borrowed:
+        return "&str"
+    return _rust_type(ftype, types, position="param")
 
 
 # A declared function type still has no single Rust lowering — but the choice
@@ -2418,6 +2642,17 @@ class _V3Ctx:
         # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
         # empty everywhere the reuse context is not established.
         self.multi_use: set[str] = set()
+        # Free function name -> set of parameter INDICES lowered to `&str`
+        # (read-only `Str` params, item 282). Computed once from the whole
+        # function list so a call site knows which argument slots take a borrow;
+        # shared by every ctx (function bodies, tests, lifecycle tests).
+        self.fn_borrow: dict[str, frozenset] = _compute_str_param_borrows(
+            functions or [])
+        # Parameters of the function CURRENTLY being emitted that are borrowed
+        # `&str` (a subset of its `Str` params). Set per fn by
+        # `_emit_v3_functions`, empty in every other emit context, so a read of a
+        # borrowed param renders as the `&str` it already is.
+        self.borrowed_params: set[str] = set()
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
@@ -2659,9 +2894,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
     if kind == "fn":
         # component dialect: a free-function call `name(..)`.
         name = _ident(node.get("name"), "function")
+        borrow = ctx.fn_borrow.get(node.get("name"), frozenset())
         args = ", ".join(
-            _by_value_arg(a, _render_expr(a, ctx, rename), ctx)
-            for a in node.get("args") or []
+            _borrow_str_arg(a, _render_expr(a, ctx, rename), ctx) if idx in borrow
+            else _by_value_arg(a, _render_expr(a, ctx, rename), ctx)
+            for idx, a in enumerate(node.get("args") or [])
         )
         return f"{name}({args})"
 
@@ -2769,10 +3006,14 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                 callee = f"({callee})"
             # A free-function / function-value call passes its arguments by value
             # (revl value semantics), so a non-Copy value or `impl Fn` argument
-            # reused after the call would otherwise move (E0382).
+            # reused after the call would otherwise move (E0382). A read-only
+            # `Str` param the callee lowered to `&str` takes a borrow instead of
+            # a clone (item 282), so its whole string is never copied at the call.
+            borrow = ctx.fn_borrow.get(callee_name, frozenset())
             bv_args = ", ".join(
-                _by_value_arg(a, r, ctx)
-                for a, r in zip(node.get("args") or [], arg_exprs)
+                _borrow_str_arg(a, r, ctx) if idx in borrow
+                else _by_value_arg(a, r, ctx)
+                for idx, (a, r) in enumerate(zip(node.get("args") or [], arg_exprs))
             )
             return f"{callee}({bv_args})"
         # component form: `target.method(args)`.
@@ -3144,22 +3385,26 @@ def _stdlib_helper_traits() -> list[str]:
     (docs/stdlib-2.0.md).
     """
     return [
+        # Implemented for `str`, not `String`, so BOTH an owned `String` receiver
+        # (via its deref to `str`) and a borrowed `&str` parameter (item 282)
+        # reach the same read-only surface, and the arguments take `&str` so a
+        # borrowed operand coerces in exactly as `&String` does.
         "trait RevlStrOps {",
         "    fn revl_length(&self) -> i64;",
         "    fn revl_slice(&self, a: i64, b: i64) -> String;",
-        "    fn revl_index_of(&self, needle: &String) -> i64;",
-        "    fn revl_concat(&self, other: &String) -> String;",
-        "    fn revl_split(&self, sep: &String) -> Vec<String>;",
+        "    fn revl_index_of(&self, needle: &str) -> i64;",
+        "    fn revl_concat(&self, other: &str) -> String;",
+        "    fn revl_split(&self, sep: &str) -> Vec<String>;",
         "    fn revl_repeat(&self, n: i64) -> String;",
-        "    fn revl_starts_with(&self, prefix: &String) -> bool;",
-        "    fn revl_ends_with(&self, suffix: &String) -> bool;",
+        "    fn revl_starts_with(&self, prefix: &str) -> bool;",
+        "    fn revl_ends_with(&self, suffix: &str) -> bool;",
         "}",
-        "impl RevlStrOps for String {",
+        "impl RevlStrOps for str {",
         "    fn revl_length(&self) -> i64 { self.chars().count() as i64 }",
         "    fn revl_slice(&self, a: i64, b: i64) -> String {",
         "        self.chars().skip(a.max(0) as usize).take((b - a).max(0) as usize).collect()",
         "    }",
-        "    fn revl_index_of(&self, needle: &String) -> i64 {",
+        "    fn revl_index_of(&self, needle: &str) -> i64 {",
         "        let hay: Vec<char> = self.chars().collect();",
         "        let nee: Vec<char> = needle.chars().collect();",
         "        if nee.is_empty() { return 0; }",
@@ -3169,23 +3414,23 @@ def _stdlib_helper_traits() -> list[str]:
         "        }",
         "        -1",
         "    }",
-        "    fn revl_concat(&self, other: &String) -> String { format!(\"{}{}\", self, other) }",
-        "    fn revl_split(&self, sep: &String) -> Vec<String> {",
+        "    fn revl_concat(&self, other: &str) -> String { format!(\"{}{}\", self, other) }",
+        "    fn revl_split(&self, sep: &str) -> Vec<String> {",
         "        if sep.is_empty() {",
         "            self.chars().map(|c| c.to_string()).collect()",
         "        } else {",
-        "            self.split(sep.as_str()).map(|s| s.to_string()).collect()",
+        "            self.split(sep).map(|s| s.to_string()).collect()",
         "        }",
         "    }",
         "    fn revl_repeat(&self, n: i64) -> String { self.repeat(n.max(0) as usize) }",
-        "    fn revl_starts_with(&self, prefix: &String) -> bool { self.starts_with(prefix.as_str()) }",
-        "    fn revl_ends_with(&self, suffix: &String) -> bool { self.ends_with(suffix.as_str()) }",
+        "    fn revl_starts_with(&self, prefix: &str) -> bool { self.starts_with(prefix) }",
+        "    fn revl_ends_with(&self, suffix: &str) -> bool { self.ends_with(suffix) }",
         "}",
         "trait RevlStrListOps {",
-        "    fn revl_join(&self, sep: &String) -> String;",
+        "    fn revl_join(&self, sep: &str) -> String;",
         "}",
         "impl RevlStrListOps for Vec<String> {",
-        "    fn revl_join(&self, sep: &String) -> String { self.join(sep.as_str()) }",
+        "    fn revl_join(&self, sep: &str) -> String { self.join(sep) }",
         "}",
         "trait RevlListOps<T> {",
         "    fn revl_length(&self) -> i64;",
@@ -3451,10 +3696,19 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
         ctx.multi_use = {n for n, c in counts.items() if c > 1}
+        # A read-only `Str` param lowers to a borrowed `&str` (item 282): the
+        # caller lends the string instead of cloning it. `_render_param_type`
+        # spells the borrow, and `ctx.borrowed_params` tells the body renderer
+        # the param is already a `&str`.
+        borrow = ctx.fn_borrow.get(fn.get("name"), frozenset())
+        param_list = fn.get("params") or []
+        ctx.borrowed_params = {
+            param_list[idx].get("name") for idx in borrow
+        }
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter name')}: "
-            f"{_rust_type(p.get('type'), types, position='param')}"
-            for p in fn.get("params") or []
+            f"{_render_param_type(idx in borrow, p.get('type'), types)}"
+            for idx, p in enumerate(param_list)
         )
         returns = _rust_type(fn.get("returns"), types, position="return")
         visibility = "pub " if fn.get("public") else ""

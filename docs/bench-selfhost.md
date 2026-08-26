@@ -427,6 +427,86 @@ the largest remaining time component (items 276/282). Neither is the accumulator
 copy; item 284 closes that one. Reproduce with
 `python3 tools/profile_selfhost_rust.py` and `python3 tools/bench_selfhost_rust.py`.
 
+### item 282: the source-clone fix (the 97.4% of remaining bytes recovered)
+
+Item 284 left the full-source `String::clone` as 97.4% of the remaining heap
+bytes: `selfhost/lexer.rvl` threads `source` (a ~16.8 KB `String`) as a BY-VALUE
+parameter through a dozen per-token scan helpers (`step`, `scan_word`,
+`scan_digits`, `op_at`, `scan_string`, …), and `backends/rust/emit.py` cloned the
+whole string on every by-value pass — 17,397 clones, 221.7 MB memcpy per pass.
+
+Item 282 stops cloning a `Str` parameter the callee only READS. When a free
+function's `Str` parameter is used read-only — a builtin receiver
+(`source.charAt`/`.slice`/`.length`), a `&str` builtin argument
+(`.concat`/`.indexOf`/…), an equality or `+`/interpolation operand, or threaded
+straight to another such parameter — it now lowers to a borrowed `&str`, and the
+call passes a borrow (`&src`, or the borrowed param straight through) instead of
+`.clone()`. The full string is never copied at a call. The change is the
+calling-convention twin of item 284's move-on-dead-receiver: it converts only the
+provably read-only shape and leans on the Rust borrow checker as the backstop —
+a conversion that aliased or outlived incorrectly would fail to compile, not
+miscompile, so the emitted stages are `cargo`-built to prove they build and the
+run-test suite proves byte-identical behaviour.
+
+Three constraints shape which parameters convert, each the conservative side:
+
+* **`pub` entries stay owned.** A `pub fn` (the lexer's `lex_src`) is the module's
+  external contract — the bench/test harness `main`, an embedder, the component
+  `provide` method call it with an owned `String`. Its signature stays `String`;
+  it owns the source once and LENDS it to the internal helpers by borrow, which is
+  exactly where the per-token clones lived. Only module-internal helpers convert.
+* **Escaping parameters stay owned.** A parameter that reaches an owned position —
+  returned by value, a record field, a constructor payload, an owned call
+  argument — keeps its `String` type and still clones on reuse (`_by_value_arg`).
+  The borrow analysis is an interprocedural fixpoint: a parameter threaded to
+  another function's slot borrows only when THAT slot borrows, so a single
+  owned-position use anywhere in the chain keeps the whole thread owned.
+* **The pass is gated on stdlib use.** Borrowing fires only in a module that uses
+  a string builtin (`_stdlib_helper_traits` is emitted). That is precisely the
+  surface the self-hosted `emit_rust.rvl` port leaves OUT, so a stdlib-free module
+  (`fn cat(a, b) = a + b`) still emits byte-identically to the port, and a module
+  with no builtin has nothing this fix speeds up anyway.
+
+The `RevlStrOps`/`RevlStrListOps` helper traits are now implemented `for str`
+(not `for String`) with `&str` arguments, so BOTH an owned `String` receiver (via
+its deref to `str`) and a borrowed `&str` parameter reach the identical read-only
+surface — the same reason `String::len` is `str::len`.
+
+Same tool, same 27,832-char corpus, same box, back to back:
+
+| measure (whole-corpus pass)             | before (284) | after (282) | change        |
+|-----------------------------------------|-------------:|------------:|---------------|
+| lexer run, release-default              | 27.60 ms     | 23.43 ms    | 1.18x faster  |
+| rust vs CPython (20.55 ms)              | 0.74x (1.33x slower) | 0.88x (1.14x slower) | toward parity |
+| full-source `.clone()` calls            | 17,397       | 0           | eliminated    |
+| bytes copied by full-source clones      | 221.7 MB     | 0 MB        | eliminated    |
+| full-source clone share of heap bytes   | 97.4%        | 0.0%        | eliminated    |
+| total heap allocations / pass           | 289,177      | 253,765     | 12% fewer     |
+| total heap bytes / pass                 | 227.7 MB     | 6.0 MB      | 38x less      |
+
+The 221.7 MB per-call source copy is gone: the lexer threads one borrowed `&str`
+through every scan helper, so `bench_selfhost_rust.py` reports the lexer at 0.88x
+CPython (23.34 ms), up from 0.74x. The byte win is the full 97.4% the profiler
+predicted; the TIME win is smaller because the source clone was only ~1.8% of the
+run (item 283's micro-bench C priced it at ~6 ms of the ~350 ms pre-284 run) — the
+227.7 MB was dominated by one cheap-per-byte `memcpy`, not by allocation count.
+
+**The residual, now the dominant time cost, is the `charAt` front-walk (the
+item-282 secondary, left as remaining).** With the source clone gone, the O(i)
+`charAt`/`charCodeAt` positional index (`.chars().nth(i)`, ~9.6 ms / pass, avg
+depth ~3,600 chars walked per big-string access) is the largest remaining
+component — ~40% of the 23.4 ms run. The real fix is the interprocedural `&[char]`
+view: collect `source` once at the owner and thread an indexable `&[char]` so the
+index is O(1). It is deliberately NOT taken here. It is a second calling-convention
+change on top of this one — a parallel builtin surface for `&[char]` receivers
+(`charAt`/`slice`/`length`/`indexOf` all re-expressed over `&[char]`) threaded
+through the same dozen helpers — and item 277 already showed a naive per-function
+`chars().collect()` REGRESSES (348.8 ms -> 444.9 ms) because the collect becomes
+O(tokens*n). Jamming the view in on top of the borrow change risks correctness and
+balloons every scan signature, so item 282 ships the borrow fix (the 97.4% of
+bytes) and leaves the `charAt` view as the next lever. Reproduce with
+`python3 tools/profile_selfhost_rust.py` and `python3 tools/bench_selfhost_rust.py`.
+
 ### Reading for item 231a
 
 Item 231a asks whether the lexer's residual py-tier overhead (4.9x → 4.4x after

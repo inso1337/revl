@@ -514,6 +514,72 @@ def test_cargo_check_reused_uninferred_string_compiles(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+# item 282 — a read-only `Str` parameter (only ever a builtin receiver, a
+# builtin `&str` argument, an equality/`+` operand, or threaded straight to
+# another such parameter) lowers to a borrowed `&str`, so the call lends the
+# string instead of cloning the whole thing. A param that ESCAPES into an owned
+# position (returned by value, a record field, an owned call argument) stays a
+# `String` and still clones on reuse, and a `pub` entry stays owned so its ABI
+# is the external `Str` contract. The whole shape is gated on the module using
+# the stdlib (`peek`'s `charCodeAt`), the surface the self-host port excludes.
+_BORROW_RVL = """
+pub type Pair = { x: Str, y: Str }
+
+fn peek(s: Str, i: Int) -> Int { return s.charCodeAt(i) }
+fn thread(s: Str, i: Int) -> Int { return peek(s, i) }
+fn pair_up(s: Str) -> Pair { return { x: s, y: s } }
+
+pub fn run(src: Str) -> Int { return thread(src, 0) }
+"""
+
+_BORROW_TEST_MODULE = """
+#[cfg(test)]
+mod revl_item282_tests {
+    use super::*;
+    #[test]
+    fn borrowed_read_only_param_threads_without_a_clone() {
+        // `run` owns the String once and lends it down the &str chain.
+        assert_eq!(run("abc".to_string()), 97);
+        // the escaping param is still owned and cloned into both fields.
+        let p = pair_up("z".to_string());
+        assert_eq!(p.x, "z");
+        assert_eq!(p.y, "z");
+    }
+}
+"""
+
+
+def test_read_only_string_param_lowers_to_borrow_but_owned_still_clones():
+    src = emit.emit(compile_source(_BORROW_RVL))
+    # read-only params (a builtin receiver, and a pass-through to one) borrow.
+    assert "fn peek(s: &str, i: i64) -> i64" in src, src
+    assert "fn thread(s: &str, i: i64) -> i64" in src, src
+    # the borrowed param threads straight through — no clone, no re-borrow.
+    thread_body = src.split("fn thread(")[1].split("\n}")[0]
+    assert "peek(s, i)" in thread_body, thread_body
+    assert "peek(s.clone()" not in thread_body, thread_body
+    assert "peek(&s" not in thread_body, thread_body
+    # a param that escapes into owned record fields stays a String and clones.
+    assert "fn pair_up(s: String) -> Pair" in src, src
+    pair_body = src.split("fn pair_up(")[1].split("\n}")[0]
+    assert "x: s.clone()" in pair_body, pair_body
+    assert "y: s.clone()" in pair_body, pair_body
+    # the `pub` entry keeps the owned `Str` ABI and lends a borrow at the call.
+    assert "pub fn run(src: String) -> i64" in src, src
+    assert "thread(&src, 0i64)" in src.split("pub fn run(")[1], src
+
+
+@needs_cargo
+def test_cargo_test_borrowed_param_builds_and_runs(tmp_path):
+    """item 282 definition-of-done: the borrow lowering cargo-builds AND runs
+    with byte-identical behaviour — `&str` threaded through the helpers, the
+    escaping param still owned."""
+    src = emit.emit(compile_source(_BORROW_RVL))
+    result = _cargo_test(tmp_path, src, _BORROW_TEST_MODULE)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test result: ok" in result.stdout, result.stdout
+
+
 def test_router_emits_per_realm_routing_struct():
     """item 167: a routed require lowers to a per-key router struct that
     re-resolves the live per-realm handle off a strict, realm-scoped
