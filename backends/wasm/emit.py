@@ -4927,7 +4927,10 @@ def _refuse_deferred_emissions(ir: dict) -> None:
     declared-but-never-called deferred extern emits cleanly (call-site keyed)."""
     try:
         from revl.errors import RevlError
-        from revl.session_commit import refuse_deferred_on_ownerless_tier
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
     except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
         import pathlib
         import sys as _sys
@@ -4935,9 +4938,13 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         if src.is_dir() and str(src) not in _sys.path:
             _sys.path.insert(0, str(src))
         from revl.errors import RevlError
-        from revl.session_commit import refuse_deferred_on_ownerless_tier
+        from revl.session_commit import (
+            refuse_approval_on_ownerless_tier,
+            refuse_deferred_on_ownerless_tier,
+        )
     try:
         refuse_deferred_on_ownerless_tier(ir, "wasm")
+        refuse_approval_on_ownerless_tier(ir, "wasm")
     except RevlError as exc:
         raise EmitError(exc.message) from None
 

@@ -217,6 +217,23 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
     if not type_name:
         return
     head, args = parse_type(type_name)
+    if head == "Approval":
+        # item 246, Decision 3, invariant 5 (non-persistence): `Approval[C]` is
+        # produced ONLY by `await approval[C]` and is non-denotable as a written
+        # annotation, so it cannot appear in a snapshot, a handoff, a spawn
+        # config, or any record/signature that would carry it across the session
+        # boundary. A smuggled value fails the session binding at the crossing
+        # (the runtime half); this keeps the honest program honest.
+        raise RevlError(
+            filename, line,
+            f"`{type_name}` cannot be written as a type — an `Approval[C]` is "
+            "produced only by `await approval[C] { ... }` and cannot be stored, "
+            "returned, or persisted",
+            hint="thread the approval to its crossing with `emit … with a` in the "
+                 "same activation body; it may not cross a snapshot, handoff, or "
+                 "spawn boundary (item 246, non-persistence)",
+            code="G4", category="approval",
+        )
     if head == "Async":
         if not in_fn_return:
             raise RevlError(
