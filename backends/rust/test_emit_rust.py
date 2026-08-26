@@ -1050,16 +1050,20 @@ def test_in_place_append_runs_identically_to_the_cloning_form(tmp_path):
 
 @needs_cargo
 def test_deliberately_aliased_self_append_is_not_silently_miscompiled(tmp_path):
-    """(b) The negative case. A raw `let a = out` alias makes `out = out.push(x)`
-    move-then-reuse `out`: it fails to compile TODAY (E0382), cloning form and
-    all, because the backend does not clone a bare binding-to-binding alias. The
-    in-place rewrite keeps it a compile error rather than turning it into a
-    compiling-but-wrong program — the elision never invents a new sound path.
+    """(b) The aliased case. A raw `let a = out` alias then `out = out.push(9)`:
+    the in-place rewrite still fires (`out.push(9i64)`), and it stays sound
+    because the alias binding CLONES (item 278: a `let` whose RHS is a bare
+    binding reused later is a value copy, `let a = out.clone()`). So `a` is an
+    independent buffer, `out` is uniquely owned at the in-place push, and the
+    program compiles AND yields the correct revl value semantics: `a` unchanged
+    at `[1, 2]`, `out` grown to `[1, 2, 9]`, so `[a[0], out[2]]` is `[1, 9]`.
 
-    This is why the rewrite is safe without a bespoke alias analysis: the only
-    way a second *live* owner of the buffer exists is a by-value move, and every
-    move the emitter emits either clones first (`_by_value_arg` and siblings, as
-    in the harness-loop test above) or, like this bare alias, does not build."""
+    Item 284's soundness invariant holds via a stronger route than before: the
+    only way a second *live* owner of the buffer could exist is a by-value move,
+    and every such move the emitter emits clones first (`_by_value_arg`,
+    `_by_value_tail`, and now the `let`-RHS reuse clone), so the in-place receiver
+    is always the sole owner. A `cargo test` run proves the value, not just the
+    build — the strongest form of "not silently miscompiled"."""
     src = emit.emit(compile_source(
         "fn aliased() -> List[Int] {\n"
         "  var out = [1, 2]\n"
@@ -1068,12 +1072,21 @@ def test_deliberately_aliased_self_append_is_not_silently_miscompiled(tmp_path):
         "  return [a[0], out[2]]\n"
         "}\n"
     ))
-    # the rewrite still fires syntactically; correctness rests on rustc rejecting
-    # the moved-then-reused `out`, not on the emitter detecting the alias.
+    # the in-place rewrite fires, and the alias clones so `out` stays owned.
     assert "out.push(9i64);" in src
-    result = _cargo_check(tmp_path, src)
-    assert result.returncode != 0
-    assert "E0382" in result.stderr, result.stderr
+    assert "let a = out.clone();" in src
+    harness = (
+        "#[cfg(test)]\n"
+        "mod revl_item284_alias {\n"
+        "    use super::*;\n"
+        "    #[test]\n"
+        "    fn aliased_appends_without_disturbing_the_copy() {\n"
+        "        assert_eq!(aliased(), vec![1i64, 9i64]);\n"
+        "    }\n"
+        "}\n"
+    )
+    result = _cargo_test(tmp_path, src, harness)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -2173,3 +2186,124 @@ def test_selfhost_stages_emit_to_rust_without_error():
     assert emit.emit(compile_files([str(ROOT / "selfhost" / "lower.rvl")]))
     checker = emit.emit(compile_files([str(ROOT / "selfhost" / "checker.rvl")]))
     assert "ctx_:" in checker                          # 269 reserved-field escape
+
+
+# ---------------------------------------------------------------------------
+# item 278 — parser/checker/lower did not `cargo build` (the emit gaps beyond
+# the item-270 lexer clone). The blockers and their fixes:
+#   * E0072/E0391 — a recursive ADT is infinitely sized; the recursive edge of
+#     each containment cycle gets a `Box` indirection, and a boxed match binding
+#     is unboxed up front so the arm body is unchanged.
+#   * E0382 — more move shapes: a `let`-RHS bare-binding move, a `Vec` consumed
+#     by `.into_iter()` twice, and non-Copy field reuse in more positions.
+#   * E0308 — two structurally-identical records used interchangeably (Rust sees
+#     distinct nominal types); one canonical struct + `type` aliases unify them.
+#   * E0282 — an empty `vec![]` accumulator gets its element type annotated.
+
+# A recursive AST: `Expr` carries a per-case struct (`BinN`) that again contains
+# `Expr`, the exact shape the self-host parser/checker/lower use. Without a `Box`
+# it is infinitely sized (E0072) and its drop-check cycles (E0391).
+_RECURSIVE_ADT_RVL = """
+pub type BinN = { op: Str, l: Expr, r: Expr }
+pub type Expr = Lit(Str) | Bin(BinN)
+
+pub fn mk(op: Str, l: Expr, r: Expr) -> Expr { return Bin({ op: op, l: l, r: r }) }
+
+pub fn render(e: Expr) -> Str {
+  return match e {
+    Lit(v) => v,
+    Bin(b) => render(b.l).concat(b.op).concat(render(b.r)),
+  }
+}
+"""
+
+
+def test_recursive_adt_boxes_the_recursive_edge():
+    """The recursive enum payload is `Box`ed, construction moves it onto the heap
+    with `Box::new`, and the match binding is unboxed (`let b = *b;`) so the arm
+    body reads the payload exactly as an unboxed one would."""
+    src = emit.emit(compile_source(_RECURSIVE_ADT_RVL))
+    assert "Bin(Box<BinN>)," in src                      # boxed enum payload
+    assert "Bin(Box::new(" in src                        # boxed at construction
+    assert "Bin(b) => { let b = *b;" in src              # unboxed at the binding
+    # the non-recursive `Lit(Str)` payload is left unboxed.
+    assert "Lit(String)," in src
+
+
+@needs_cargo
+def test_recursive_adt_cargo_builds(tmp_path):
+    """The E0072/E0391 payoff: a recursive datatype now cargo-builds (before the
+    fix it was infinitely sized and failed drop-check)."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_RECURSIVE_ADT_RVL)))
+    assert result.returncode == 0, result.stderr
+
+
+# Two records with the IDENTICAL field->type shape, used interchangeably: `Bind`
+# is built and flows into a `List[Param]` slot. Rust sees distinct nominal types
+# (E0308) unless they unify to one struct.
+_SAME_SHAPE_RVL = """
+pub type Param = { name: Str, ty: Str }
+pub type Bind = { name: Str, ty: Str }
+pub type Fn2 = { params: List[Param] }
+
+pub fn one() -> Fn2 { let p = { name: "x", ty: "" } return { params: [p] } }
+"""
+
+
+def test_structurally_identical_records_unify_via_type_alias():
+    """The first record of a shape is the canonical struct; a structural twin
+    becomes a `type` alias, so `Bind` and `Param` are one Rust type and a
+    `Vec<Bind>` is admitted where `Vec<Param>` is declared."""
+    src = emit.emit(compile_source(_SAME_SHAPE_RVL))
+    assert "pub struct Param {" in src
+    assert "pub type Bind = Param;" in src
+    assert "pub struct Bind {" not in src
+
+
+@needs_cargo
+def test_structurally_identical_records_cargo_build(tmp_path):
+    """The E0308 payoff: the interchangeable-record program cargo-builds."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_SAME_SHAPE_RVL)))
+    assert result.returncode == 0, result.stderr
+
+
+# A `Vec` iterated twice moves on the first `.into_iter()` and borrows a moved
+# value on the second (E0382); the reused iterable is cloned. The empty-vec
+# accumulator `out` also needs its element type annotated (E0282).
+_ITER_TWICE_RVL = """
+pub fn both(lines: List[Str]) -> List[Str] {
+  var out = []
+  for (a of lines) { out = out.push(a) }
+  for (b of lines) { out = out.push(b) }
+  return out
+}
+"""
+
+
+def test_vec_iterated_twice_clones_and_annotates_empty_accumulator():
+    """A reused `Vec` binding iterated twice is cloned at each loop, and the
+    empty `vec![]` accumulator is annotated with its element type."""
+    src = emit.emit(compile_source(_ITER_TWICE_RVL))
+    assert "for a in lines.clone()" in src               # into_iter-twice clone
+    assert "let mut out: Vec<String> = vec![]" in src    # E0282 annotation
+
+
+@needs_cargo
+def test_vec_iterated_twice_cargo_builds(tmp_path):
+    """The into_iter-twice + empty-accumulator payoff: it cargo-builds."""
+    result = _cargo_check(tmp_path, emit.emit(compile_source(_ITER_TWICE_RVL)))
+    assert result.returncode == 0, result.stderr
+
+
+@needs_cargo
+def test_all_selfhost_stages_cargo_build(tmp_path):
+    """The item-278 definition-of-done: EACH of the lexer/parser/checker/lower
+    self-host stages emits AND `cargo build`s (item 270 got only the lexer; the
+    other three hit the E0072/E0382/E0308/E0282 gaps this item closes). This is
+    the precondition for the item-266 full-pipeline native benchmark."""
+    for stage in ("lexer", "parser", "checker", "lower"):
+        crate = tmp_path / stage
+        crate.mkdir()
+        src = emit.emit(compile_files([str(ROOT / "selfhost" / f"{stage}.rvl")]))
+        result = _cargo_check(crate, src)
+        assert result.returncode == 0, f"{stage} failed:\n{result.stderr}"
