@@ -715,13 +715,6 @@ class Parser:
         self.filename = filename
         self.toks = lex(source, filename)
         self.pos = 0
-        # names of `witnessed`-classified externs seen so far (item 243,
-        # docs/design/243-witnessed-externs.md): `effect_form` reads this to
-        # recognise a witnessed call without a site-spelled `undo` — declared
-        # before use, the same convention every witnessed program already
-        # follows. A witnessed extern named after its use site still hits the
-        # ordinary "effect has no `undo`" refusal.
-        self._witnessed_names: set[str] = set()
 
     # -- token helpers
 
@@ -1009,8 +1002,6 @@ class Parser:
             async_ = True
         self.expect("kw", "fn")
         name = self.expect("ident").value
-        if classification == "witnessed":
-            self._witnessed_names.add(name)
         type_params = self._type_param_list()
         self.expect("(")
         params: list[FnParam] = []
@@ -1521,10 +1512,24 @@ class Parser:
             # a witnessed call's inverse is the extern's own DECLARED `undo`,
             # auto-registered by the teardown accumulator on the `Ok` branch —
             # there is no site-spelled undo, so the grammar admits its omission
-            # here. `self._witnessed_names` is populated by `extern_decl` as
-            # each witnessed extern is parsed (declare-before-use).
-            if isinstance(acquire, ExprCall) and isinstance(acquire.callee, ExprVar) \
-                    and acquire.callee.name in self._witnessed_names:
+            # for a bare-name call. Whether the callee is ACTUALLY a witnessed
+            # extern is not decidable here: `use` imports are resolved in a
+            # later pass (compiler.py's `_ModuleLoader`), one file at a time,
+            # so an imported witnessed extern's classification is unknown at
+            # this point even though a same-file one's is (item 315 — the
+            # per-file `_witnessed_names` set this replaced could see only
+            # same-file `extern` decls, so an imported `write`/`rm` etc. was
+            # hard-refused here before module resolution ever ran). Rather
+            # than duplicate resolution, the parser admits every bare-name
+            # call missing its `undo` and defers the real gate to lower.py's
+            # `_lower_effect_step`, which runs on the MERGED program — after
+            # imports are resolved — and refuses there if the callee turns
+            # out not to be witnessed after all (same message, same G4 code).
+            # Anything that cannot possibly BE an extern call by bare name (a
+            # dotted path, a literal, a binary op, …) is refused immediately,
+            # exactly as before — no import can turn `Pool.open(...)` into a
+            # witnessed call, so there is nothing to defer.
+            if isinstance(acquire, ExprCall) and isinstance(acquire.callee, ExprVar):
                 return acquire, None, line, setup
             head = _describe_expr(acquire)
             raise self.err(
