@@ -60,6 +60,34 @@ The refusal message is the built-in honesty gate, the same shape the
 conformance corpus's three bodyless externs already ride (docs/conformance.md):
 a tier that cannot run the module says so at emit time, never silently.
 
+## Field access on a dynamic value, and reserved-word keys (items 279, 299)
+
+Reading a field off a *dynamic* value — `tc.function` where `tc: Any` came
+straight from `json_parse`, without an intervening typed binding — is a
+**py / ts capability only**. Those two tiers carry a runtime key reader (py's
+`_revl_field(v, name)`, ts's `obj["key"]`), so the access reaches the raw
+runtime key. The statically-typed tiers do not: `Any` erases to Go `any`,
+Java `Object`, Rust `cordis::Value`, none of which has arbitrary members, so a
+dynamic field access emits a *static* field selection the target compiler
+rejects (`type any has no field`, `cannot find symbol`, `no field on type
+Value`); wasm has no dynamic value at all and refuses `json_parse` at emit. The
+supported shape on every tier is to read the value into a typed binding first
+(`let tc: ToolCall = json_parse(s)`), where the field access is a real struct
+field.
+
+Item 279 fixed a **silent** form of this on the ts tier: a JSON key named by a
+host reserved word (`function`) was renamed on the access (`tc.function` ->
+`tc.function_`) while the runtime object kept the raw key, so the ts read was
+`undefined` while py read the raw key and worked — the same admitted program
+diverging silently between tiers. Item 299 audited rust/go/java/wasm for the
+same class and found **none of them reproduce it**: the reserved-word sanitizer
+does still fire on the access (Go/Java/Rust mangle a target-reserved key to
+`<name>_`), but it is moot, because the mangled access is that same static
+selection the compiler rejects — a *loud* build error, never a silent wrong
+value. The silent read was unique to JS, where `obj.function` / `obj["function"]`
+is a live dynamic lookup on any object. No lower/typecheck or emitter change was
+needed; `tests/test_dynamic_reserved_key_cross_tier.py` locks the finding.
+
 ## `Int` fields on the ts tier: bigint, not a throw (item 281)
 
 The ts backend maps revl `Int` to JS `bigint` (`backends/typescript/emit.py`
