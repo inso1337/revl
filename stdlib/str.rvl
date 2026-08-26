@@ -23,7 +23,8 @@
 // Import with a named `use`:
 //
 //     use "stdlib/str.rvl" { trim, lstrip, rstrip, contains, index_of,
-//                            last_index_of, ident_tokens, split_top, dedent }
+//                            last_index_of, ident_tokens, split_top, dedent,
+//                            str_newline, str_char }
 
 // ------------------------------------------------------------ character classes
 // ASCII whitespace, matching Python `str.strip()`'s ASCII set: space (32),
@@ -243,16 +244,70 @@ pub fn split_top(s: Str, sep: Str) -> List[Str] {
   return parts
 }
 
-// A real newline (U+000A) in PURE revl. revl plain double-quoted strings carry
-// NO escapes — `"\n"` is the two chars backslash-n (see selfhost/emit_py.rvl's
-// `newline()` note) — so a real newline cannot be written as `"\n"` and a
-// literal newline is not allowed inside `"..."`. A backtick template CAN hold a
-// literal newline byte, and with no interpolation it lowers as an ordinary
-// one-char string literal on every tier. This keeps `dedent` pure-revl (no
-// `@py` `chr(10)` extern) and tier-portable.
-fn nl() -> Str {
+// --------------------------------------------------------- control characters
+// (item 181) A plain revl double-quoted string carries NO escapes and cannot
+// hold a control char: `"\n"` is the two chars backslash-n, the lexer ends a
+// `"..."` string at a real newline, and a triple-string strips one leading
+// newline. So a line-joining text tool (`lines.join(str_newline())`) used to
+// re-invent a per-tier `extern fn newline() = @py { return chr(10) }` — one
+// each in selfhost/emit_py.rvl, emit_go.rvl and emit_wasm.rvl. These give the
+// newline, the tab, and any printable-ASCII code point ONCE, in PURE revl, on
+// every tier — no new primitive, no per-tier extern.
+//
+// The idiom: a BACKTICK template with no `${...}` interpolation lowers as an
+// ordinary one-char string literal on every tier (py/ts/rs/go/java/wasm), and a
+// backtick CAN hold a literal control byte that a `"..."` string cannot. So the
+// newline and the tab are written as their literal byte inside a backtick.
+// (stdlib/str.rvl is pinned `-text` in .gitattributes so a checkout cannot
+// rewrite the newline byte to CRLF and make it two chars.)
+//
+// CARRIAGE RETURN (U+000D) is deliberately NOT offered: the toolchain reads
+// source in universal-newline mode (`parse_file` -> `open(path)`), so a literal
+// CR byte in source is folded to LF before the lexer sees it — a lone CR has no
+// pure-revl spelling at all. Emitting a real CR would need a blessed per-tier
+// `chr`/`fromCharCode` primitive; no self-host stage yet requires one, so it is
+// left out rather than faked. `str_char(13)` returns "" like other unsupported
+// code points.
+
+// U+000A LINE FEED — the portable newline every line-joining text tool needs.
+pub fn str_newline() -> Str {
   return `
 `
+}
+
+// U+0009 CHARACTER TABULATION (horizontal tab).
+pub fn str_tab() -> Str {
+  return `	`
+}
+
+// Printable ASCII (U+0020..U+007E) laid out in code-point order, so
+// `ascii_printable().charCodeAt(i) == i + 32`. Built in PURE revl: a `"..."`
+// string holds every printable ASCII char EXCEPT the double quote (34, which
+// would close the string), so the quote is spliced in from a backtick. This is
+// the reverse of `charCodeAt` for the printable range, with no `chr` /
+// `fromCharCode` builtin on the base surface.
+fn ascii_printable() -> Str {
+  let head = " !"                                                        // 32,33
+  let tail = "#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~"  // 35..126
+  return head.concat(`"`).concat(tail)
+}
+
+// A single-char string for a code point — the reverse of `Str.charCodeAt`.
+// PURE revl and tier-portable. It covers the control chars U+0009 (tab) and
+// U+000A (newline), and all printable ASCII U+0020..U+007E; for a supported
+// `code`, `str_char(code).charCodeAt(0) == code` and `str_char(10)` equals
+// `str_newline()`. Any other code point (CR, and everything above U+007E) has
+// no pure-revl spelling on the base surface (no `chr` / `fromCharCode`) and
+// returns ""; a wider range would need a blessed per-tier primitive, which no
+// self-host stage yet requires.
+pub fn str_char(code: Int) -> Str {
+  if (code == 9) { return str_tab() }
+  if (code == 10) { return str_newline() }
+  if (code >= 32 && code <= 126) {
+    let t = ascii_printable()
+    return t.slice(code - 32, code - 32 + 1)
+  }
+  return ""
 }
 
 // ------------------------------------------------------------------- dedent
@@ -273,7 +328,7 @@ fn nl() -> Str {
 //      spaces are distinct).
 //   4. strip margin from the start of every line.
 pub fn dedent(text: Str) -> Str {
-  let raw = text.split(nl())
+  let raw = text.split(str_newline())
   // step 1 — normalise whitespace-only lines to empty.
   var lines: List[Str] = []
   for (ln of raw) {
@@ -307,7 +362,7 @@ pub fn dedent(text: Str) -> Str {
       out = out.push(ln)
     }
   }
-  return out.join(nl())
+  return out.join(str_newline())
 }
 
 // A line is "whitespace-only" (in dedent's sense) iff it is non-empty and every
