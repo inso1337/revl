@@ -44,7 +44,6 @@ them, simply *lacks* the input:
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from .why_runtime import EMIT, LOAD, WITHDRAW, read_trace
 

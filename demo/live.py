@@ -48,7 +48,7 @@ for path in (str(ROOT / "src"), str(BACKEND), str(DEMO)):
 import emit as emitter  # noqa: E402  (backends/python/emit.py)
 import runtime as runtime_mod  # noqa: E402  (backends/python/runtime.py)
 
-from hostruntime import HostMeter, bind_runtime, watch  # noqa: E402  (demo/hostruntime.py)
+from hostruntime import HostMeter, bind_runtime  # noqa: E402  (demo/hostruntime.py)
 
 from revl import RevlError, compile_files  # noqa: E402
 

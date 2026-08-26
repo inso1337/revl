@@ -42,6 +42,7 @@ import json
 import re
 import sys
 import textwrap
+from typing import Any, Optional
 
 __all__ = ["emit", "EmitError"]
 

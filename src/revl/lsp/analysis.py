@@ -22,14 +22,12 @@ from ..compiler import compile_source
 from ..diagnostics import classify, explain
 from ..errors import RevlError
 from ..parser import (
-    ComponentDecl,
     ExternDecl,
     FnDecl,
     LetPatternStmt,
     LetStmt,
     Parser,
     Program,
-    ServiceDecl,
     TypeDecl,
 )
 from .document import Position, find_symbol_column, word_at

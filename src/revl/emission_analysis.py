@@ -11,9 +11,18 @@ attributes (never the lowering spine), so this module does not import from
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .parser import Program
 from .typecheck import parse_type, FN_HEAD
 from .why import TraceStep
+
+if TYPE_CHECKING:
+    # `Env` lives in `lower`, which re-exports this module's names, so importing
+    # it at runtime would be circular. Guarded to TYPE_CHECKING: the annotation
+    # resolves for type checkers and ruff without adding a runtime dependency on
+    # the lowering spine (see the module docstring).
+    from .lower import Env
 
 
 def _is_async_fn_type(type_name: str | None) -> bool:

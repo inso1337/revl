@@ -13,7 +13,6 @@ from cordis import Context
 from cordis.fiber import FiberState
 
 import emit
-import runtime as runtime_mod
 from conftest import flush, load_module, ops
 
 _SERVICES = {

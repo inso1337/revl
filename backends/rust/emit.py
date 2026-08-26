@@ -2236,7 +2236,10 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 defs: list[str] = []
                 type_names: dict = {}
                 counter = [0]
-                meta_type = _intercept_json_type(intercept[local], base, defs, type_names, counter)
+                # called for its side effect: it appends the generated struct
+                # defs to `defs` (emitted below). Its return type string is not
+                # needed here, only the literal from `_intercept_json_lit`.
+                _intercept_json_type(intercept[local], base, defs, type_names, counter)
                 meta_lit = _intercept_json_lit(intercept[local], base, defs, type_names, counter)
                 out.extend(defs)
                 inject_parts.append(f".require_with({_string(local)}, {meta_lit})")
@@ -5525,7 +5528,7 @@ def _split_result(rtype: str):
 
 def _result_ok_err(value: str, ok_ty: str, err_ty: str) -> str:
     """Rust expr building a std Result from a canonical `{"$kind","$value"}`."""
-    payload = f'_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
+    payload = '_r.get("$value").cloned().unwrap_or(serde_json::Value::Null)'
     return (f'{{ let _r = {value}.clone(); '
             f'if _r.get("$kind").and_then(|k| k.as_str()) == Some("Ok") {{ '
             f'Ok(serde_json::from_value::<{ok_ty}>({payload}).expect("bridge: decode Ok")) }} '
