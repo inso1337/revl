@@ -159,6 +159,10 @@ def _crossings(index: Composition, members: list[str]) -> dict:
                     "service": fact.get("service"),
                     "label": f"{fact['key']}.{fact['method']}",
                     "compensated": bool(fact["compensated"]),
+                    # a service-op emission fires at the call — class (c) (item
+                    # 245, Decision 2); deferral is an extern-declaration property,
+                    # not spellable on a service method.
+                    "actionClass": "c",
                     "token": f"emit:{name}:{fact['key']}.{fact['method']}",
                 })
             for fact in facts["externs"]:
@@ -171,6 +175,10 @@ def _crossings(index: Composition, members: list[str]) -> dict:
                 externs.append({
                     "component": name, "scope": scope["kind"],
                     "name": fact["name"], "class": fact.get("class"),
+                    # item 245, Decision 2: the (a)/(b)/(c) action class off the
+                    # checked classification. A deferred emission is class (b);
+                    # any other reached emission extern is class (c).
+                    "actionClass": "b" if fact.get("deferred") else "c",
                     "backends": fact.get("backends") or [],
                     # a host extern crossing carries no compile-time compensate
                     # clause; it is bare by construction at this granularity.

@@ -55,6 +55,13 @@ TOOL_VERB = {
     "revl_snapshot": "snapshot",
     "revl_rollback": "undo",
     "revl_undo": "undo",  # item 65: deep history revert — same authority as rollback
+    # item 245: the session commit/abort verbs. `commit` gates who may cross the
+    # session boundary (flush the deferral queue, discharge the witnessed
+    # escrow); enumeration (`revl_commit`) and abort share that authority — an
+    # operator that cannot commit cannot decide the session's verdict.
+    "revl_commit": "commit",
+    "revl_commit_confirm": "commit",
+    "revl_abort": "commit",
 }
 
 # friendly verb aliases the profile author may write (canonical on the right)

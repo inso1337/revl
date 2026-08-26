@@ -36,10 +36,13 @@ from typing import Any, Callable, Optional
 
 __all__ = [
     "Clock", "ConfigError", "ConfigSchema", "FaultProbe", "Frame", "Job", "JobCancelled",
-    "JobHandle", "Map", "Pool", "PoolError", "SpawnHandle", "StateIncompatible",
-    "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "disarm_fault_probe",
+    "JobHandle", "Map", "Pool", "PoolError", "SessionCommitError", "SessionOwner",
+    "SpawnHandle", "StateIncompatible",
+    "TimerHandle", "TransientError", "add_trace", "arm_fault_probe", "clear_session_owner",
+    "disarm_fault_probe",
     "fmt", "live_instances", "plug", "realm_label", "remove_trace", "resolved_config",
-    "retry_idempotent", "schedule_after", "schedule_every", "set_trace", "spawn",
+    "retry_idempotent", "schedule_after", "schedule_every", "session_owner",
+    "set_session_owner", "set_trace", "spawn",
     "trace_observers",
 ]
 
@@ -556,7 +559,8 @@ class _Transactional:
     captured at registration, because whether the activation commits is not yet
     known when the effect runs — it depends on whether a LATER step aborts."""
 
-    __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq")
+    __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq",
+                 "_escrowed")
 
     def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any) -> None:
         self.frame = frame
@@ -569,8 +573,14 @@ class _Transactional:
         # `None` when no WriteAheadLog is attached (a plain run) — see
         # `Frame._wal`/`Frame.transactional`.
         self.seq: Optional[int] = None
+        # item 245: escrowed under a session owner whose verdict is still
+        # pending (a mid-session withdrawal). Held once — neither discharged nor
+        # replayed — until the owner settles the verdict and disposes it.
+        self._escrowed = False
 
     def __call__(self) -> Any:
+        if _hold_for_session(self):
+            return None
         if self.frame._committed:
             # commit: discharge. The mutation stays; drop the inverse + witness
             # so no rollback state survives a committed transaction (GC).
@@ -650,7 +660,8 @@ class _Compensation:
     contract.md names as natural on a cordis tier, where the runtime unwinds
     every disposer in one synchronous stack-position pass."""
 
-    __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq")
+    __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
+                 "_escrowed")
 
     def __init__(self, frame: "Frame", fn: Callable[[], Any]) -> None:
         self.frame = frame
@@ -663,8 +674,12 @@ class _Compensation:
         # under (mirrors `_Transactional.seq`), or `None` when no
         # WriteAheadLog is attached.
         self.seq: Optional[int] = None
+        # item 245: escrowed under a session owner with a pending verdict.
+        self._escrowed = False
 
     def __call__(self) -> Any:
+        if _hold_for_session(self):
+            return None
         if self.frame._committed:
             # commit: discharge. The emission was the deliverable; a
             # best-effort offset on success would be wrong to run.
@@ -692,6 +707,78 @@ class _Compensation:
         except BaseException as error:  # noqa: BLE001 — anticipated, best-effort
             self.failed = True
             self.error = error
+
+
+# ---------------------------------------------------------------------------
+# item 245: the session commit protocol (docs/design/245-session-commit.md)
+# ---------------------------------------------------------------------------
+#
+# A session is one driver lifetime = one WAL. The driver registers a
+# `SessionOwner` around the session (`set_session_owner`), and every `Frame`
+# built while one is registered joins its live-frame registry. The owner holds
+# the three session-scoped structures the commit verb derives its GATE TARGET
+# from — the deferral queue, the discharge escrow, the live-frame registry —
+# never the runtime's per-call current frame (`_FRAME_BY_CTX`).
+#
+# The owner is process-global and single-slot, exactly like `_trace`: one driver
+# runs a session at a time. When NO owner is registered (`_SESSION_OWNER is
+# None`), every `Frame` behaves byte-identically to the pre-245 world — a clean
+# drain discharges at unload (implicit commit), the compatibility clause.
+
+_SESSION_OWNER: "Optional[SessionOwner]" = None
+
+
+def set_session_owner(owner: "SessionOwner") -> None:
+    """Register the session's commit-state owner for the frames built next.
+
+    The driver calls this once at session start, before loading the
+    composition, so each activation `Frame.__init__` joins the owner's registry.
+    Idempotent-ish: replacing an owner mid-session is a caller error, not
+    guarded here (one driver owns one session)."""
+    global _SESSION_OWNER
+    _SESSION_OWNER = owner
+
+
+def clear_session_owner() -> None:
+    """Unregister the session owner (the driver calls this at commit/abort/unload
+    end). Frames built afterwards get the pre-245 implicit-commit semantics."""
+    global _SESSION_OWNER
+    _SESSION_OWNER = None
+
+
+def session_owner() -> "Optional[SessionOwner]":
+    return _SESSION_OWNER
+
+
+def _hold_for_session(entry: Any) -> bool:
+    """Whether a transactional/compensation entry must be HELD now rather than
+    discharged or replayed (item 245's escrow). It holds iff its frame has a
+    session owner whose verdict is still pending AND the frame is not aborting —
+    i.e. this is a MID-SESSION withdrawal (a swap/undo), whose entries wait for
+    the session verdict rather than committing at the withdrawal. A held entry
+    escrows itself once so the owner disposes it when the verdict settles.
+
+    A terminal teardown (the owner's own commit/abort/unload) sets the verdict
+    BEFORE disposing, so nothing holds there — the per-frame `_committed` /
+    `_aborting` bits govern discharge-vs-replay exactly as before. An aborting
+    frame never holds: its inverses replay immediately."""
+    frame = entry.frame
+    owner = frame._owner
+    if owner is None or owner._verdict is not None or frame._aborting:
+        return False
+    # `_holding` is the discriminator between the two ways a frame's inverses
+    # can run with the verdict still pending. It is set ONLY by `drain`'s
+    # mid-session-withdrawal branch (the activation completed and is being torn
+    # down while the session continues), never by a mid-ACTIVATION failure
+    # (the body raised before `drain` — the classic 243 abort, whose inverses
+    # replay immediately). Without this a failed activation under a session
+    # owner would wrongly escrow its inverse instead of reverting.
+    if not frame._holding:
+        return False
+    if not entry._escrowed:
+        entry._escrowed = True
+        owner.escrow(entry)
+    return True
 
 
 class Frame:
@@ -790,6 +877,20 @@ class Frame:
         # (see the state-migration section above). Populated by
         # `_register_resource` while `_body` runs, under `install`'s hook.
         self._resources: list = []
+        # item 245: the session commit-state owner (docs/design/245-session-commit.md),
+        # or None. When set (a driver registered one via `set_session_owner`)
+        # this frame joins the owner's live-frame registry — the commit verb's
+        # gate target — and its transactional/compensation discharge defers to
+        # the session verdict instead of the activation's own clean unload. None
+        # is the compatibility clause: drain discharges at unload, byte-identical
+        # to the pre-245 world.
+        self._owner: "Optional[SessionOwner]" = _SESSION_OWNER
+        if self._owner is not None:
+            self._owner.register_frame(self)
+        # item 245: set by `drain`'s mid-session-withdrawal branch, so the
+        # activation-body inverses that unwind after `drain` escrow themselves
+        # (see `_hold_for_session`). Never set by a mid-activation failure.
+        self._holding = False
         try:
             _FRAME_BY_CTX[ctx] = self  # so a SpawnHandle can find this frame
         except TypeError:  # pragma: no cover — non-weakrefable ctx
@@ -1091,6 +1192,28 @@ class Frame:
             entry.seq = record["seq"]
         return entry
 
+    def enqueue_deferred(self, receiver: str, method: str, args: list,
+                         fire: Callable[[], Any]) -> None:
+        """Enqueue a class-(b) deferred emission onto the session's deferral
+        queue instead of firing it (item 245, docs/design/245-session-commit.md,
+        Decision 3). The host body does NOT run here; it runs exactly once at the
+        session commit's flush, or never (on abort). `fire` is the zero-arg thunk
+        the flush invokes; `receiver`/`method`/`args` are the serializable
+        named-call descriptor for the WAL and the commit manifest.
+
+        Requires a session owner: the deferral queue, the escrow and the commit
+        verb that flushes or drops it all live on the owner (the py driver). A
+        deferred emission reaching a runtime with no owner is the exact failure
+        the five ownerless tiers refuse at emit (Decision 2's tier gate); on py
+        the driver is always the owner, so this refusal is a guard against a
+        misconfigured embedding, never a normal path."""
+        if self._owner is None:
+            raise RuntimeError(
+                "a deferred emission needs a session owner runtime (the deferral "
+                "queue and the commit verb), which this composition has none — "
+                "load it under a driver that registers one (item 245)")
+        self._owner.enqueue(receiver, method, list(args), fire)
+
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
         emitted body, so the runtime runs it first on unload).
@@ -1127,13 +1250,36 @@ class Frame:
         # the mutations revert. A plain unload does not set it, so this is
         # byte-identical to the previous unconditional commit for every
         # existing activation-body-only program.
+        # item 245: a MID-SESSION withdrawal under a session owner whose verdict
+        # is still pending (a swap/undo). This drain does NOT commit: the frame's
+        # undischarged transactional/compensation entries are ESCROWED to await
+        # the session verdict, and no discharge record is written. The
+        # activation-body cordis disposers escrow themselves via `_hold_for_session`
+        # when the fiber unwinds; the method-registered entries are escrowed here.
+        # The frame leaves the live registry (it is being torn down), but its
+        # entries live on in the escrow until the session commits or aborts. The
+        # bracket (adopted) effects still run — releasing a handle is always right.
+        if self._owner is not None and self._owner._verdict is None \
+                and not self._aborting:
+            self._holding = True
+            self._owner.withdraw_frame(self)
+            for entry in self._deferred_transactional:
+                self._owner.escrow(entry)
+                entry._escrowed = True
+            self._deferred_transactional = []
+            return self._dispose_adopted()
+
         if not self._aborting:
             self._committed = True
         wal = self._wal()
         # The discharge record is the COMMIT proof; it must not be written for
         # an aborting teardown, where the inverses are being replayed, not
-        # committed (item 318).
-        if self._committed and wal is not None:
+        # committed (item 318). Under a session owner the consolidated discharge
+        # record is written ONCE by the owner over (escrow + every live frame),
+        # so each frame SUPPRESSES its own — otherwise the same seqs would be
+        # named twice and the one-record-per-session-commit shape (Decision 1)
+        # would not hold.
+        if self._committed and wal is not None and self._owner is None:
             seqs = [entry.seq for entry in self._transactional if entry.seq is not None]
             seqs += [entry.seq for entry in self._compensations if entry.seq is not None]
             if seqs:
@@ -1146,6 +1292,9 @@ class Frame:
         deferred, self._deferred_transactional = self._deferred_transactional, []
         for entry in deferred:
             entry()
+        return self._dispose_adopted()
+
+    def _dispose_adopted(self) -> Any:
         adopted, self._adopted = self._adopted, []
         if not adopted:
             return None
@@ -1157,6 +1306,288 @@ class Frame:
                     await result
 
         return run()
+
+
+# ---------------------------------------------------------------------------
+# item 245: the session owner, the deferral queue, the commit/abort verbs
+# ---------------------------------------------------------------------------
+
+
+class SessionCommitError(RuntimeError):
+    """A session commit could not proceed as asked — most often a stale manifest
+    hash (the queue or the live composition changed since enumeration), which is
+    refused rather than flushing a superset of what the human approved."""
+
+
+def _hash_manifest(target: dict) -> str:
+    """The manifest hash binding the gate target (item 245, Decision 4). Over the
+    canonical JSON of the target-defining state — the deferral queue descriptors,
+    the escrowed/live witnessed seqs, and the live registry's components — so any
+    drift (another enqueue, a swap) recomputes to a different hash and the confirm
+    is refused. Deterministic: sorted keys, no whitespace variance."""
+    payload = json.dumps(target, sort_keys=True, separators=(",", ":"))
+    import hashlib  # noqa: PLC0415 — stdlib, only needed on a commit
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class _Deferred:
+    """One class-(b) descriptor on the deferral queue (item 245, Decision 3).
+    Holds a serializable named-call descriptor for the WAL/manifest and a zero-arg
+    thunk that fires the real host body at flush. The host body runs once, at
+    flush, or never (on abort)."""
+
+    __slots__ = ("receiver", "method", "args", "_fire", "seq", "fired", "error")
+
+    def __init__(self, receiver: str, method: str, args: list,
+                 fire: Callable[[], Any]) -> None:
+        self.receiver = receiver
+        self.method = method
+        self.args = args
+        self._fire = fire
+        self.seq: Optional[int] = None
+        self.fired = False
+        self.error: Optional[BaseException] = None
+
+    def descriptor(self) -> dict:
+        return {"receiver": self.receiver, "method": self.method,
+                "args": list(self.args)}
+
+    def group(self) -> str:
+        return f"{self.receiver}.{self.method}"
+
+    def fire(self) -> None:
+        """Invoke the host body once (flush). Best-effort — a raise is caught by
+        the caller (continue-and-record), never here."""
+        self.fired = True
+        fire, self._fire = self._fire, None
+        if fire is not None:
+            fire()
+
+
+class SessionOwner:
+    """The session's commit-state owner (item 245, docs/design/245-session-commit.md).
+
+    One per driver lifetime. Owns the three session-scoped structures the commit
+    verb derives its GATE TARGET from — never the runtime's per-call current
+    frame (`_FRAME_BY_CTX`):
+
+      * the DEFERRAL QUEUE — a FIFO of class-(b) descriptors, WAL-logged at
+        enqueue, flushed (fired once, in program order) on commit, dropped on
+        abort;
+      * the DISCHARGE ESCROW — already-registered transactional/compensation
+        entries of a mid-session withdrawal (a swap/undo), awaiting the verdict;
+      * the LIVE-FRAME REGISTRY — every activation frame currently live.
+
+    A session with three live components commits all three or none: the verdict
+    is session-scoped, the accumulator is still the activation frame (Decision 1).
+    The driver drives the two-phase commit (`enumerate` then `approve`) and the
+    abort; this class holds the state and the durable WAL bookkeeping.
+    """
+
+    def __init__(self, wal_getter: Optional[Callable[[], Any]] = None) -> None:
+        self._queue: list = []       # _Deferred, FIFO
+        self._escrow: list = []      # _Transactional/_Compensation of withdrawn frames
+        self._registry: list = []    # live Frames, registration order
+        self._wal_getter = wal_getter
+        self._verdict: Optional[str] = None    # None (pending) | "commit" | "abort"
+        self.prompts = {"commit": 0, "perCall": 0, "residue": 0}
+        self.flush_residue: list = []
+
+    def _wal(self) -> Optional[Any]:
+        return self._wal_getter() if self._wal_getter is not None else None
+
+    # -- registry / escrow -------------------------------------------------
+
+    def register_frame(self, frame: "Frame") -> None:
+        if frame not in self._registry:
+            self._registry.append(frame)
+
+    def withdraw_frame(self, frame: "Frame") -> None:
+        try:
+            self._registry.remove(frame)
+        except ValueError:
+            pass
+
+    def escrow(self, entry: Any) -> None:
+        if entry not in self._escrow:
+            self._escrow.append(entry)
+
+    # -- deferral queue ----------------------------------------------------
+
+    def enqueue(self, receiver: str, method: str, args: list,
+                fire: Callable[[], Any]) -> "_Deferred":
+        """Append a class-(b) descriptor and WAL-log it at enqueue (Decision 3).
+        The intent is durable here; the outcome is a later `flushed` record."""
+        descriptor = _Deferred(receiver, method, list(args), fire)
+        self._queue.append(descriptor)
+        wal = self._wal()
+        if wal is not None:
+            record = wal.record_deferred_emission(
+                receiver=receiver, method=method, args=list(args))
+            descriptor.seq = record["seq"]
+        return descriptor
+
+    # -- gate target + manifest (Decision 4) -------------------------------
+
+    def _live_entries(self) -> list:
+        """Every undischarged transactional/compensation entry the commit will
+        discharge — from every live registry frame plus the whole escrow. This is
+        the derivation the design insists on: owner-held state, never a current
+        frame."""
+        entries: list = []
+        for frame in self._registry:
+            entries += frame._transactional
+            entries += frame._compensations
+        entries += self._escrow
+        return entries
+
+    def _witnessed_seqs(self) -> list:
+        """The WAL seqs of every undischarged witnessed/compensation entry — the
+        set the consolidated discharge record names on commit. Empty when no WAL
+        is attached (seq is None); the count for the manifest uses
+        :meth:`_witnessed_count` instead, which is WAL-independent."""
+        return sorted({e.seq for e in self._live_entries() if e.seq is not None})
+
+    def _witnessed_count(self) -> int:
+        return sum(1 for e in self._live_entries()
+                   if not e.discharged and not e.replayed)
+
+    def _target(self) -> dict:
+        """The gate target, hash-bound: (queue, live witnessed count, registry
+        composition). Any drift — another enqueue, another witnessed call, a swap
+        — changes the hash and refuses confirm. Uses a COUNT, not seqs, so the
+        binding holds with or without a WAL attached."""
+        return {
+            "queue": [d.descriptor() for d in self._queue],
+            "witnessed": self._witnessed_count(),
+            "registry": sorted(f.name for f in self._registry),
+        }
+
+    def manifest(self) -> dict:
+        """The commit manifest (Decision 4) — the one schema item 246 freezes
+        against. `summary` is the prompt's one line; everything else is the
+        evidence behind it. The hash binds the gate target."""
+        summary: dict = {}
+        for d in self._queue:
+            summary[d.group()] = summary.get(d.group(), 0) + 1
+        target = self._target()
+        return {
+            "deferred": [dict(d.descriptor(), site=None, group=d.group())
+                         for d in self._queue],
+            "summary": [{"group": g, "count": n}
+                        for g, n in sorted(summary.items())],
+            "fired": [],   # class-(c) crossings are logged at fire; 246 fills this
+            "witnessed": {"count": target["witnessed"]},
+            "residue": {"clean": True, "outstanding": []},
+            "prompts": dict(self.prompts),
+            "hash": _hash_manifest(target),
+        }
+
+    # -- commit (two-step, hash-bound) -------------------------------------
+
+    def approve(self, manifest_hash: str) -> dict:
+        """Confirm the commit against the approved hash (Decision 4). Recomputes
+        the target hash; any drift since enumeration refuses. On match: writes
+        `commit-approved` durably BEFORE the first fire, sets the verdict, and
+        FLUSHES the queue FIFO. Returns a flush report. The caller then unloads
+        the frames (which discharge) and calls `finalize_commit`."""
+        current = _hash_manifest(self._target())
+        if manifest_hash != current:
+            raise SessionCommitError(
+                "stale manifest hash — the deferral queue or the live "
+                "composition changed since enumeration, so the confirm is "
+                "refused. Re-enumerate: what fires must be exactly what was "
+                "approved (item 245, Decision 4)")
+        wal = self._wal()
+        if wal is not None:
+            wal.record_commit_approved(manifest_hash)
+        self._verdict = "commit"
+        self.prompts["commit"] += 1
+        return self._flush()
+
+    def _flush(self) -> dict:
+        """Fire the deferral queue FIFO (program order), the causal order the
+        intents were formed in. Each completed fire appends `flushed`; a raise is
+        continue-and-record (`flush-residue`), so the remaining queue still
+        flushes and the commit still completes."""
+        wal = self._wal()
+        fired, residue = [], []
+        queue, self._queue = self._queue, []
+        for d in queue:
+            try:
+                d.fire()
+                fired.append(d.descriptor())
+                if wal is not None and d.seq is not None:
+                    wal.record_flushed(d.seq)
+            except BaseException as error:  # noqa: BLE001 — best-effort, recorded
+                d.error = error
+                info = {"type": type(error).__name__, "message": str(error)}
+                residue.append({"seq": d.seq, **info})
+                self.flush_residue.append({"seq": d.seq, "error": info})
+                self.prompts["residue"] += 1
+                if wal is not None and d.seq is not None:
+                    wal.record_flush_residue(d.seq, info)
+        return {"fired": fired, "flushResidue": residue}
+
+    def finalize_commit(self) -> list:
+        """Write the ONE consolidated discharge record over every committed
+        transactional/compensation seq (escrow + live frames), after the flush and
+        the frame unload, before `activation-complete` (Decision 1/3). Returns the
+        discharged seqs."""
+        seqs = self._witnessed_seqs()
+        wal = self._wal()
+        if wal is not None and seqs:
+            wal.record_discharge(seqs)
+        return seqs
+
+    # -- abort -------------------------------------------------------------
+
+    def begin_abort(self) -> None:
+        """Mark every live registry frame aborting BEFORE any teardown starts
+        (Decision 5: the `_aborting` bit must be set before a frame's drain, or
+        that drain implicitly commits it), then drop the deferral queue. Zero
+        cost, zero crossings — nothing fired, so nothing to invert or offset."""
+        self._verdict = "abort"
+        for frame in self._registry:
+            frame.abort()
+        # escrowed frames' entries also revert: they were withdrawn but never
+        # committed, so the session abort replays them too. Mark their frames.
+        for entry in self._escrow:
+            entry.frame.abort()
+        self._queue = []   # DROP: no host body runs
+
+    def finalize_abort(self) -> dict:
+        """Replay the escrowed entries (reverse-seq, after the live cascade), then
+        write the `aborted` completion record naming every seq whose inverse
+        actually ran (Decision 5). The absence of `commit-approved` is the
+        verdict; this record only lets recover tell a completed abort from a
+        crashed one."""
+        replayed: list = []
+        # escrow replays reverse-seq, in its own two phases (transactional
+        # inverses, then owed compensations) — the contract's phase rules.
+        escrow = sorted(self._escrow,
+                        key=lambda e: (e.seq if e.seq is not None else 0),
+                        reverse=True)
+        transactional = [e for e in escrow if isinstance(e, _Transactional)]
+        compensations = [e for e in escrow if isinstance(e, _Compensation)]
+        for entry in transactional:
+            entry()   # verdict is settled (abort), so this replays
+            if entry.replayed and entry.seq is not None:
+                replayed.append(entry.seq)
+        for entry in compensations:
+            entry._run_phase2()
+        self._escrow = []
+        # collect the seqs the live frames replayed too (their inverses ran
+        # during the driver's unload)
+        for frame in self._registry:
+            for entry in frame._transactional:
+                if entry.replayed and entry.seq is not None:
+                    replayed.append(entry.seq)
+        replayed = sorted(set(replayed))
+        wal = self._wal()
+        if wal is not None:
+            wal.record_aborted(replayed)
+        return {"replayed": replayed}
 
 
 # ---------------------------------------------------------------------------
