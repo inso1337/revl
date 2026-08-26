@@ -2537,6 +2537,19 @@ class _V3GoCtx:
         self.extern_ret: dict[str, str | None] = {
             ex.get("name"): ex.get("returns") for ex in externs or []
         }
+        # Declared parameter surface types, keyed by fn/extern name — the flow
+        # target for a call argument. Threading these lets a bare `None`, an
+        # untyped empty list, or a `Some(literal)` in argument position pick up
+        # the concrete element type the callee's signature pins (item 280);
+        # without it they erased to `None`/`[]any`/`RevlSome[any]` at the call.
+        self.function_params: dict[str, list] = {
+            fn.get("name"): [p.get("type") for p in fn.get("params") or []]
+            for fn in functions or []
+        }
+        self.extern_params: dict[str, list] = {
+            ex.get("name"): [p.get("type") for p in ex.get("params") or []]
+            for ex in externs or []
+        }
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple, str | None] = {}
@@ -2681,10 +2694,21 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         # `Map.empty()` — the empty literal carries its pin when the author's
         # annotation supplied one (roadmap 76b); otherwise it stays unknown.
         return node.get("expected")
+    if kind == "list":
+        exp = node.get("expected")
+        if isinstance(exp, str) and exp.startswith("List[") and exp.endswith("]"):
+            return exp
+        items = node.get("items") or []
+        if items:
+            el = _go_v3_infer_type(items[0], ctx)
+            return f"List[{el}]" if el else None
+        return None
     if kind == "call":
         callee = node.get("callee") or {}
         if callee.get("kind") == "var":
             nm = callee.get("name")
+            if nm in ("Some", "None", "Ok", "Err"):
+                return _go_v3_infer_ctor(nm, node.get("args") or [], ctx)
             return ctx.function_ret.get(nm) or ctx.extern_ret.get(nm)
         return None
     if kind == "bin":
@@ -2717,8 +2741,24 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         except EmitError:
             return None
     if kind == "adt":
-        return ctx.case_adt.get(node.get("case"))
+        case = node.get("case")
+        if case in ("Some", "None", "Ok", "Err"):
+            return _go_v3_infer_ctor(case, node.get("args") or [], ctx)
+        return ctx.case_adt.get(case)
     return None
+
+
+def _go_v3_infer_ctor(case, arg_nodes, ctx):
+    """Surface type of a built-in Opt/Result construction, when the argument
+    reveals the element type — `Some(7)` -> `Opt[Int]`. None stays unknown
+    (`Opt[any]`) since a bare `None` carries no element (item 280)."""
+    if case in ("Some", "None"):
+        el = _go_v3_infer_type(arg_nodes[0], ctx) if arg_nodes else None
+        return f"Opt[{el or 'any'}]"
+    el = _go_v3_infer_type(arg_nodes[0], ctx) if arg_nodes else None
+    if case == "Ok":
+        return f"Result[{el or 'any'}, any]"
+    return f"Result[any, {el or 'any'}]"
 
 
 _V3_GO_BIN_OPS = {
@@ -2733,6 +2773,28 @@ _V3_GO_ATOMIC = {"var", "name", "lit", "call", "field", "index", "builtin"}
 # error. Everything else (records, lists, ADTs, Opt/Result) goes through
 # revlEq.
 _GO_SCALARS = {"Int", "Int32", "Float", "Str", "Bool"}
+
+
+def _go_v3_is_interface(surface, types) -> bool:
+    """Whether a revl surface type lowers to a Go *interface* on this tier.
+
+    The sealed sum types do: Opt[T] -> RevlOpt (interface), Result[T,E] ->
+    RevlResult (interface), and a declared user variant -> its `is<Name>()`
+    interface. Records, lists, maps and scalars lower to concrete Go types.
+    A type-switch (`x.(type)`) is only legal on an interface, and a value that
+    flows into a match must be stored in its interface type for the switch to
+    both compile and discriminate — item 280.
+    """
+    if not isinstance(surface, str):
+        return False
+    s = surface.strip()
+    if s == "any":  # Go's empty interface — a type-switch on it is legal
+        return True
+    if (s.startswith("Opt[") and s.endswith("]")) or (
+            s.startswith("Result[") and s.endswith("]")):
+        return True
+    spec = types.get(s)
+    return bool(spec) and spec.get("kind") == "variant"
 
 
 def _go_v3_lit(node: dict) -> str:
@@ -2759,8 +2821,14 @@ def _go_v3_lit(node: dict) -> str:
     raise EmitError(f"unsupported v3 literal: {node!r}")
 
 
-def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected):
-    """Render an ADT/Opt/Result construction from a case name + rendered args."""
+def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
+                     arg_nodes=None):
+    """Render an ADT/Opt/Result construction from a case name + rendered args.
+
+    `arg_nodes` are the unrendered argument expressions, used to recover the
+    concrete element type of a built-in `Some`/`Ok`/`Err` when no expected
+    Opt/Result type pins it — so `Some(7)` is `RevlSome[int64]`, not the
+    `RevlSome[any]` that later defeats a type-switch (item 280)."""
     adt = ctx.case_adt.get(case)
     if adt is not None:
         # user variant (monomorphic): `<Variant><Case>{...}`
@@ -2776,7 +2844,15 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected):
     # built-in Opt / Result — need the type arguments from the expected type.
     exp = (expected or "").strip() if isinstance(expected, str) else ""
     if case in ("Some", "None"):
-        inner = exp[4:-1] if exp.startswith("Opt[") and exp.endswith("]") else "any"
+        if exp.startswith("Opt[") and exp.endswith("]"):
+            inner = exp[4:-1]
+        elif case == "Some" and arg_nodes:
+            # No expected Opt type at this site: recover the element type from
+            # the argument so `Some(7)` keeps its `int64` and a later
+            # type-switch on the concrete case still matches (item 280).
+            inner = _go_v3_infer_type(arg_nodes[0], ctx) or "any"
+        else:
+            inner = "any"
         got = _go_v3_type(inner, ctx.types) or "any"
         if case == "None":
             if arg_renders:
@@ -2786,6 +2862,11 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected):
     if case in ("Ok", "Err"):
         if exp.startswith("Result[") and exp.endswith("]"):
             ok, err = _v3_split_generic(exp[7:-1])
+        elif arg_nodes:
+            # Only the present side's type is knowable from the argument; the
+            # other stays `any`. Enough to keep a matched concrete case aligned.
+            got_side = _go_v3_infer_type(arg_nodes[0], ctx) or "any"
+            ok, err = (got_side, "any") if case == "Ok" else ("any", got_side)
         else:
             ok, err = "any", "any"
         got_ok = _go_v3_type(ok, ctx.types) or "any"
@@ -2819,6 +2900,12 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
 
     if kind in ("var", "name"):
         name = node.get("name") or node.get("id")
+        if name == "None":
+            # A bare `None` (returned, annotated, or passed) is the built-in
+            # Opt constructor, not an identifier — it must lower to a typed
+            # RevlNone, picking up the element type from the flow target
+            # (item 280); without this it emitted `None`, an undefined ident.
+            return _go_v3_construct(ctx, "None", [], expected)
         if name in ctx.case_adt and not (node.get("args") is not None):
             # bare nullary variant reference is not expected in the fixtures;
             # constructions arrive as `adt`. Fall through to a plain ident.
@@ -2826,8 +2913,10 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         return _v3_ident(name, "name")
 
     if kind == "adt":
-        args = [_go_v3_expr(a, ctx) for a in node.get("args") or []]
-        return _go_v3_construct(ctx, node["case"], args, expected)
+        arg_nodes = node.get("args") or []
+        args = [_go_v3_expr(a, ctx) for a in arg_nodes]
+        return _go_v3_construct(ctx, node["case"], args, expected,
+                                arg_nodes=arg_nodes)
 
     if kind == "bin":
         op = node.get("op")
@@ -2892,12 +2981,25 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
 
     if kind == "call":
         callee = node.get("callee") or {}
-        arg_renders = [_go_v3_expr(a, ctx) for a in node.get("args") or []]
-        if callee.get("kind") == "var" and (
-            callee.get("name") in ctx.case_adt
-            or callee.get("name") in ("Some", "None", "Ok", "Err")
-        ):
-            return _go_v3_construct(ctx, callee.get("name"), arg_renders, expected)
+        arg_nodes = node.get("args") or []
+        cname = callee.get("name") if callee.get("kind") == "var" else None
+        is_ctor = cname in ctx.case_adt or cname in ("Some", "None", "Ok", "Err")
+        # For an ordinary fn/extern call, flow each declared parameter type into
+        # its argument so a bare `None`, an empty list, or a `Some(literal)` in
+        # argument position lands as the callee's concrete element type, not the
+        # erased default (item 280). Constructor args take their type from the
+        # construction's own expected instead.
+        param_types = None
+        if cname and not is_ctor:
+            param_types = (ctx.function_params.get(cname)
+                           or ctx.extern_params.get(cname))
+        arg_renders = []
+        for i, a in enumerate(arg_nodes):
+            exp = param_types[i] if param_types and i < len(param_types) else None
+            arg_renders.append(_go_v3_expr(a, ctx, exp))
+        if is_ctor:
+            return _go_v3_construct(ctx, cname, arg_renders, expected,
+                                    arg_nodes=arg_nodes)
         callee_src = _go_v3_expr(callee, ctx)
         return f"{callee_src}({', '.join(arg_renders)})"
 
@@ -2943,8 +3045,13 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
 
     if kind == "list":
         elem = None
-        if isinstance(expected, str) and expected.startswith("List[") and expected.endswith("]"):
-            elem = expected[5:-1]
+        # The flow target pins the element type; when the call site gives none,
+        # fall back to the annotation the frontend threaded onto the node
+        # (`let xs: List[T] = []`, roadmap 76b) — the only source for an *empty*
+        # list, which otherwise erased to `[]any` (item 280).
+        pin = expected if isinstance(expected, str) else node.get("expected")
+        if isinstance(pin, str) and pin.startswith("List[") and pin.endswith("]"):
+            elem = pin[5:-1]
         items = node.get("items") or []
         if elem is None and items:
             elem = _go_v3_infer_type(items[0], ctx)
@@ -3238,6 +3345,26 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
                 break
     exp_t = exp_t or "any"
 
+    # A scrutinee whose Go type is concrete (a scalar, record, list, or a
+    # narrowed Opt/variant case struct) cannot back a type-switch — `x.(type)`
+    # is a compile error on a non-interface. The only pattern that can match a
+    # concrete value here is the wildcard, so lower to its body directly rather
+    # than to a switch (item 280).
+    if st is not None and not _go_v3_is_interface(st, ctx.types):
+        wild = next((a for a in arms if a.get("pattern") == "_"), None)
+        if wild is not None:
+            lines = [f"func() {exp_t} {{"]
+            wbind = wild.get("bind")
+            if wbind:
+                ctx.var_types[wbind] = st
+                lines.append(f"\t{_v3_ident(wbind, 'match bind')} := {scrutinee}")
+                lines.append(f"\t_ = {_v3_ident(wbind, 'match bind')}")
+            else:
+                lines.append(f"\t_ = {scrutinee}")
+            lines.append(f"\treturn {_go_v3_expr(wild.get('body'), ctx, expected)}")
+            lines.append("}()")
+            return "\n".join(lines)
+
     # classify the scrutinee's ADT family
     is_opt = isinstance(st, str) and st.startswith("Opt[") and st.endswith("]")
     is_result = isinstance(st, str) and st.startswith("Result[") and st.endswith("]")
@@ -3309,6 +3436,12 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         # function parameter, a loop element) stays well-typed.
         go_t = _go_v3_type(inferred, ctx.types) if inferred else ""
         if go_t in ("int64", "float64"):
+            out.append(f"{pad}var {name} {go_t} = {value}")
+        elif inferred and _go_v3_is_interface(inferred, ctx.types):
+            # An Opt/Result/variant binding must hold its *interface* type, not
+            # the concrete case struct `:=` would infer (e.g. `RevlSome[int64]`)
+            # — otherwise a later `match` type-switch on it is a Go compile
+            # error ("not an interface") and never discriminates (item 280).
             out.append(f"{pad}var {name} {go_t} = {value}")
         else:
             out.append(f"{pad}{name} := {value}")
@@ -4044,6 +4177,15 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     # The total division forms produce a Result value without the source ever
     # spelling `Result[` — their method names put Result in the module too.
     used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
+    # A `Some(literal)` / `None` / `Ok`/`Err` with no `Opt[`/`Result[` spelled
+    # in the IR (element type recovered from the argument, item 280) still
+    # emits the sealed types — scan the rendered body so the matching preamble
+    # is never dropped and the module compiles.
+    body_blob = "\n".join(body)
+    if any(t in body_blob for t in ("RevlOpt[", "RevlSome[", "RevlNone[")):
+        used_opt = True
+    if any(t in body_blob for t in ("RevlResult[", "RevlOk[", "RevlErr[")):
+        used_result = True
 
     imports: list[str] = []
     if tests:

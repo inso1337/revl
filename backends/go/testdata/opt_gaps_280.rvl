@@ -1,0 +1,55 @@
+// Regression fixtures for roadmap item 280: pre-existing go-emitter Opt gaps,
+// reproduced on plain fns. Each fn/test pins one of the four gaps.
+type Sign = Neg | Zero | Pos
+
+// gap 1: a bare `None` — returned, and passed as an argument — must lower to a
+// typed RevlNone, not the undefined identifier `None`.
+fn maybe(flag: Bool) -> Opt[Int] {
+  if (flag) { return Some(5) }
+  return None
+}
+
+fn unwrap_or(o: Opt[Int], fallback: Int) -> Int {
+  return match o { Some(v) => v, None => fallback }
+}
+
+fn from_bare_none() -> Int {
+  return unwrap_or(None, 42)
+}
+
+// gap 2: `Some(literal)` must keep its concrete element type so a later
+// type-switch on the concrete case still discriminates.
+fn describe() -> Int {
+  let o = Some(7)
+  return match o { Some(n) => n, None => 0 }
+}
+
+// gap 3: an annotated empty list infers its element type, not `[]any`.
+fn empty_ints() -> List[Int] {
+  let xs: List[Int] = []
+  return xs
+}
+
+// gap 4: a wildcard match on a concrete-typed (scalar) scrutinee lowers
+// without a type-switch on a non-interface.
+fn wild(n: Int) -> Str {
+  return match n { _ => "wild" }
+}
+
+test "bare None returns and passes as a typed Opt" {
+  assert unwrap_or(maybe(false), 99) == 99
+  assert from_bare_none() == 42
+}
+
+test "Some(literal) keeps its concrete type through a match" {
+  assert unwrap_or(maybe(true), 99) == 5
+  assert describe() == 7
+}
+
+test "an annotated empty list is empty and Int-typed" {
+  assert empty_ints().length == 0
+}
+
+test "a wildcard match on a scalar scrutinee evaluates its arm" {
+  assert wild(3) == "wild"
+}
