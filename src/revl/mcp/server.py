@@ -416,6 +416,42 @@ def _tool_unload(_arguments: dict) -> dict:
         return _session_error(str(error))
 
 
+def _tool_commit(_arguments: dict) -> dict:
+    """Step 1 of the two-step session commit (item 245): enumerate the manifest.
+    The `summary` is the human's one-line prompt; the `hash` binds the gate
+    target. Nothing crosses yet — call revl_commit_confirm with the hash."""
+    try:
+        return {"ok": True, "manifest": SESSION.commit()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
+def _tool_commit_confirm(arguments: dict) -> dict:
+    """Step 2 of the session commit: flush the deferral queue (FIFO), discharge
+    the witnessed escrow, mark it durable. A hash that no longer matches the
+    live gate target is refused with a fresh manifest (a result, not an error)."""
+    manifest_hash = arguments.get("hash")
+    if not manifest_hash:
+        return _session_error("provide `hash` — the manifest hash revl_commit "
+                              "returned, binding exactly what will fire")
+    try:
+        result = SESSION.commit_confirm(manifest_hash)
+    except SessionError as error:
+        return _session_error(str(error))
+    if result.get("refused"):
+        return {"ok": False, **result}
+    return {"ok": True, **result}
+
+
+def _tool_abort(_arguments: dict) -> dict:
+    """Abort the session (item 245): drop the deferral queue (never fired),
+    replay the witnessed inverses, prove a clean world."""
+    try:
+        return {"ok": True, **SESSION.abort()}
+    except SessionError as error:
+        return _session_error(str(error))
+
+
 def _tool_state(_arguments: dict) -> dict:
     return {"ok": True, **SESSION.state(drain=True)}
 
@@ -1282,6 +1318,53 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_unload,
+    },
+    {
+        "name": "revl_commit",
+        "description": "Enumerate the session commit MANIFEST (step 1 of 2, item "
+                       "245). The session split its actions three ways: witnessed "
+                       "mutations ran and revert on abort; DEFERRED emissions were "
+                       "queued and have not crossed; immediate emissions already "
+                       "fired. This returns what a commit WILL cross — `summary` is "
+                       "the one-line prompt ('empty trash: 3 files; send: 1 email'), "
+                       "`deferred` the queue, `witnessed` the count about to "
+                       "discharge — plus a `hash` binding exactly that. Nothing "
+                       "crosses yet; call revl_commit_confirm(hash) to flush.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_commit,
+    },
+    {
+        "name": "revl_commit_confirm",
+        "description": "COMMIT the session (step 2 of 2, item 245): flush the "
+                       "deferral queue in FIFO order (each deferred emission's host "
+                       "body fires once), discharge the witnessed mutations, and "
+                       "mark it durable — record order commit-approved, flushed, "
+                       "discharge, activation-complete. `hash` must be the one "
+                       "revl_commit returned; if the queue or the live composition "
+                       "drifted since, the hash mismatches and the commit is "
+                       "REFUSED with a fresh manifest (ok:false), so what fires is "
+                       "exactly what was approved, never a superset.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"hash": {"type": "string",
+                                    "description": "the manifest hash from revl_commit"}},
+            "required": ["hash"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_commit_confirm,
+    },
+    {
+        "name": "revl_abort",
+        "description": "ABORT the session (item 245): DROP the deferral queue "
+                       "(nothing fired, nothing to offset — exact by construction), "
+                       "replay every witnessed mutation's inverse, and prove a "
+                       "clean world. Immediate emissions already out stay out. The "
+                       "counterpart to revl_commit_confirm; a session using only "
+                       "witnessed and deferred actions aborts residue-free.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        "handler": _tool_abort,
     },
     {
         "name": "revl_state",

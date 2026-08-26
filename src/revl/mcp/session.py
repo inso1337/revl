@@ -100,6 +100,11 @@ class Session:
         self.previous: dict | None = None  # the generation `rollback` restores
         self.config: dict = {}
         self.recorder = None  # replay.Recorder, when loaded with record=True
+        # the session commit-state owner (roadmap item 245): the deferral queue,
+        # the discharge escrow, and the live-frame registry — the gate target the
+        # commit verb derives. A `runtime.SessionOwner`, created at load. None
+        # when nothing is loaded.
+        self._owner = None
         # the admission inputs that produced the live composition — the
         # *sources*, kept so the composition can be snapshotted for
         # re-admission (docs/persistence.md). None when a composition was
@@ -194,7 +199,19 @@ class Session:
         self.recorder = replay_module().Recorder(ir) if record else None
         self._generation = 1
         self._history = []
-        self._run(self._driver._load(ir, self._prepare_module(ir)))
+        # item 245: register the session commit-state owner before the
+        # composition loads, so every activation frame joins its live-frame
+        # registry (the commit verb's gate target). The WAL getter reads the
+        # recorder's log lazily — it is opened during load, after this point.
+        self._owner = runtime_mod.SessionOwner(
+            wal_getter=lambda: self.recorder.wal if self.recorder else None)
+        runtime_mod.set_session_owner(self._owner)
+        try:
+            self._run(self._driver._load(ir, self._prepare_module(ir)))
+        finally:
+            # frames are built during load; stop capturing so a later, unrelated
+            # Frame (a bare test) does not join this session's registry.
+            runtime_mod.clear_session_owner()
         self._record_generation()
         return self.state(drain=True) | ({"recording": True} if record else {})
 
@@ -935,9 +952,97 @@ class Session:
 
     def unload(self) -> dict:
         """Tear down and report the residue checks — R4 from inside the
-        protocol, so an agent can prove its component leaves nothing."""
+        protocol, so an agent can prove its component leaves nothing.
+
+        Under a session owner (item 245), a plain unload is the IMPLICIT
+        terminal commit (the pre-245 "a clean unload IS the commit"): the
+        witnessed mutations discharge and the discharge record is written, unless
+        a frame was marked aborting (an in-process `Frame.abort()`), in which case
+        the inverses replay and no discharge record is written. This preserves
+        every existing witnessed-runtime test. The explicit `commit`/`abort`
+        verbs are the audited, WAL-marked path; unload is the quiet default."""
         driver = self._require()
+        owner = self._owner
+        aborting = owner is not None and any(
+            getattr(f, "_aborting", False) for f in owner._registry)
+        if owner is not None:
+            owner._verdict = "abort" if aborting else "commit"
+            if aborting:
+                owner._queue = []   # DROP: an unload that reverts drops the queue
         self._run(driver._dispose_all(self.ir))
+        if owner is not None and not aborting:
+            owner.finalize_commit()   # the consolidated commit proof
+        report = self._teardown_report(driver)
+        self._reset()
+        return {"unloaded": True, **report}
+
+    # -- the session commit protocol (roadmap item 245) --------------------
+
+    def commit(self) -> dict:
+        """Enumerate the commit manifest — step 1 of the two-step, hash-bound
+        commit (docs/design/245-session-commit.md, Decision 4). Returns the
+        manifest whose `summary` is the human's one-line prompt and whose `hash`
+        binds the gate target (the deferral queue, the discharge escrow, the live
+        registry). Nothing crosses yet; call `commit_confirm(hash)` to flush."""
+        self._require()
+        if self._owner is None:
+            raise SessionError("no session owner is registered — nothing to commit")
+        return self._owner.manifest()
+
+    def commit_confirm(self, manifest_hash: str) -> dict:
+        """Execute the approved commit — step 2 (Decision 3/4). The durable
+        record order is exactly: `commit-approved`, then each `flushed`, then the
+        one `discharge`, then `activation-complete`. If the queue or the live
+        composition drifted since enumeration the recomputed hash mismatches and
+        the confirm is REFUSED with a fresh manifest — what fires is exactly what
+        was approved, never a superset."""
+        driver = self._require()
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to commit")
+        try:
+            flush = owner.approve(manifest_hash)   # commit-approved + flush FIFO
+        except driver.runtime.SessionCommitError as exc:
+            return {"committed": False, "refused": True, "reason": str(exc),
+                    "manifest": owner.manifest()}
+        # dispose the live frames: verdict is 'commit' and none is aborting, so
+        # each discharges (mutation persists, witness GC'd), per-frame discharge
+        # record suppressed — the owner writes the ONE consolidated one next.
+        self._run(driver._dispose_all(self.ir))
+        discharged = owner.finalize_commit()       # one discharge record
+        self._commit_wal(driver)                   # activation-complete + close
+        report = self._teardown_report(driver)
+        prompts = dict(owner.prompts)
+        self._reset()
+        return {"committed": True, "flushed": flush["fired"],
+                "flushResidue": flush["flushResidue"], "discharged": discharged,
+                "prompts": prompts, **report}
+
+    def abort(self) -> dict:
+        """Abort the session (Decision 5): mark every live frame aborting BEFORE
+        any teardown starts, drop the deferral queue (zero cost, zero crossings),
+        replay the witnessed inverses, and write the `aborted` completion record.
+        A session that only ever used classes (a) and (b) aborts to a provably
+        clean world."""
+        driver = self._require()
+        owner = self._owner
+        if owner is None:
+            raise SessionError("no session owner is registered — nothing to abort")
+        dropped = len(owner._queue)
+        owner.begin_abort()                        # mark frames abort, drop queue
+        self._run(driver._dispose_all(self.ir))    # replay inverses
+        result = owner.finalize_abort()            # aborted record
+        self._close_wal()
+        report = self._teardown_report(driver)
+        prompts = dict(owner.prompts)
+        self._reset()
+        return {"aborted": True, "replayed": result["replayed"],
+                "droppedDeferred": dropped, "prompts": prompts, **report}
+
+    # -- teardown plumbing -------------------------------------------------
+
+    def _teardown_report(self, driver) -> dict:
+        """The R4 residue checks after a teardown, and the drained trace."""
         checks = {
             "registry": driver.root.registry.size == 0,
             "provisions": driver.root.reflect.store == {},
@@ -952,8 +1057,25 @@ class Session:
             "disposablesBaseline": driver._baseline_disposables,
         }
         driver.runtime.set_trace(None)
-        events = driver.drain_events()
+        return {"noResidue": all(checks.values()), "checks": checks,
+                "detail": detail, "trace": driver.drain_events()}
+
+    def _commit_wal(self, driver) -> None:
+        """Stamp `activation-complete` and close the session's WAL (the recorder
+        owns it in a Session; the driver's own `_commit_wal` is for `revl run`)."""
+        if self.recorder is not None and self.recorder.wal is not None:
+            names = [c.get("name") for c in (self.ir or {}).get("components") or []]
+            self.recorder.commit_wal(names)
+
+    def _close_wal(self) -> None:
+        if self.recorder is not None and self.recorder.wal is not None:
+            self.recorder.wal.close()
+
+    def _reset(self) -> None:
+        if self._driver is not None:
+            self._driver.runtime.clear_session_owner()
         self._driver = None
+        self._owner = None
         self.ir = None
         self.previous = None
         self.origin = None
@@ -961,13 +1083,6 @@ class Session:
         self.draft = None
         self._generation = 0
         self._history = []
-        return {
-            "unloaded": True,
-            "noResidue": all(checks.values()),
-            "checks": checks,
-            "detail": detail,
-            "trace": events,
-        }
 
     # -- interaction -------------------------------------------------------
 

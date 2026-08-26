@@ -630,6 +630,16 @@ class _ComponentEmitter:
             ext["name"]: ext for ext in (externs or [])
             if ext.get("class") == "witnessed"
         }
+        # item 245 (docs/design/245-session-commit.md, Decision 2): deferred
+        # emission externs by name. A call to one does not fire at the site — it
+        # enqueues a descriptor onto the session's deferral queue and returns
+        # Unit; the session commit flushes it (or an abort drops it). Absent/empty
+        # for every program that declares no `deferred` extern, so their emission
+        # stays byte-identical.
+        self.deferred = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "emission" and ext.get("deferred")
+        }
         self.name = _ident(component.get("name"), "component name")
         self.requires = {
             _ident(local, "requires key"): service
@@ -953,6 +963,11 @@ class _ComponentEmitter:
                 for nested in step.get("else") or []:
                     self._body_step(out, indent + 1, nested, where)
         elif kind == "emit":
+            deferred = self._deferred_extern(step.get("expr"))
+            if deferred is not None:
+                self._deferred_step(out, indent, step, deferred, where)
+                out.add(0)
+                return
             out.add(indent, self._expr(step.get("expr"), where))
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
@@ -982,6 +997,45 @@ class _ComponentEmitter:
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
         out.add(0)
+
+    def _deferred_extern(self, expr: Any) -> Optional[dict]:
+        """The deferred emission extern an `emit` step's expression calls, or
+        None (item 245, docs/design/245-session-commit.md, Decision 2).
+
+        A deferred emission is spelled as a bare `emit <extern>(...)` whose
+        callee renders as an IR `fn` node — the same shape a witnessed call
+        takes — so matching its name against the deferred table is how the
+        emitter tells a class-(b) enqueue from a class-(c) immediate emission.
+        Returns None for every other expression, so non-deferred emissions emit
+        byte-identically to before."""
+        if not self.deferred or not isinstance(expr, dict):
+            return None
+        if expr.get("kind") != "fn":
+            return None
+        return self.deferred.get(expr.get("name"))
+
+    def _deferred_step(self, out: _Lines, indent: int, step: dict, ext: dict,
+                       where: str) -> None:
+        """Emit a deferred emission (item 245): DO NOT invoke the host body.
+        Append the descriptor to the session's deferral queue (and the WAL) and
+        return Unit. The host body runs exactly once, at the session commit's
+        flush, or never (on abort). This single-lowering property — one enqueue,
+        no direct fire — is what makes the commit manifest's enumeration provably
+        exhaustive (Decision 4).
+
+        The queue entry carries a serializable named-call descriptor (receiver,
+        method, captured args — never a closure, 243 rule 4) for the WAL and the
+        manifest, plus a zero-arg thunk that fires the real host body at flush.
+        `_revl_frame.enqueue_deferred` refuses if no session owner is registered:
+        on the py tier the driver is always the owner, and the five ownerless
+        tiers refuse a deferred call at emit (Decision 2's tier gate, Slice 2)."""
+        expr = step.get("expr")
+        method = expr.get("name")
+        args = [self._expr(arg, where) for arg in expr.get("args") or []]
+        fire = self._expr(expr, where)
+        out.add(indent,
+                f"_revl_frame.enqueue_deferred({method!r}, {method!r}, "
+                f"[{', '.join(args)}], lambda: {fire})")
 
     def _witnessed_extern(self, acquire: Any) -> Optional[dict]:
         """The witnessed extern descriptor a step's acquisition calls, or None.
@@ -1233,7 +1287,10 @@ class _ComponentEmitter:
                     f"lambda: {acquire}, lambda {bind}: {undo})",
                 )
         elif kind == "emit":
-            if step.get("compensate") is not None:
+            deferred = self._deferred_extern(step.get("expr"))
+            if deferred is not None:
+                self._deferred_step(out, indent, step, deferred, where)
+            elif step.get("compensate") is not None:
                 fn = f"_emit_{self._counter}"
                 out.add(indent, f"def {fn}():")
                 out.add(indent + 1, self._expr(step.get("expr"), where))

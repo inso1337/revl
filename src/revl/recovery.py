@@ -179,8 +179,18 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     except OSError as error:
         raise RecoveryError(f"cannot read WAL {wal_path}: {error}") from None
 
+    records = wal["records"]
+    approved = next((r for r in records
+                     if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
         return _roll_forward(wal, session=session, snapshot=snapshot)
+    if approved is not None:
+        # item 245, Decision 3, the approved-to-discharged window: a crash after
+        # `commit-approved` and before `activation-complete` is a COMMITTED
+        # session. The durable approval, not the discharge record, is the commit
+        # proof; recover replays no inverse and rolls the missing discharge
+        # forward. This dominates the discharge-set skip for a session-owned WAL.
+        return _roll_forward_window(wal_path, wal, approved)
     return _roll_back(wal, world=world or DictWorld())
 
 
@@ -224,6 +234,126 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
         },
         "guarantee": _guarantee(),
     }
+
+
+def _append_discharge(wal_path: str, seqs: list) -> None:
+    """Roll the missing discharge record forward by APPENDING it (item 245,
+    Decision 3). Appending fires nothing, so it is safe, and it makes a second
+    recover pass read the same verdict with no special-casing. Same fsync'd
+    append discipline the WAL writer uses."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    with open(wal_path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"record": "discharge", "discharged": list(seqs)},
+                                sort_keys=True) + "\n")
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
+
+
+def _roll_forward_window(wal_path: str, wal: dict, approved: dict) -> dict:
+    """A crash inside the approved-to-discharged window (item 245, Decision 3):
+    `commit-approved` is durable but `discharge`/`activation-complete` may not
+    be. The session is COMMITTED. Recover replays NO transactional inverse and
+    re-issues NO compensation; it rolls the missing discharge record forward and
+    reports the flush state per descriptor.
+
+    Two record families carry seqs a commit discharges: the discharge-descriptors
+    (243/247 transactional inverses and compensations) and the deferred-emission
+    descriptors (245 class-(b) queue entries). Every one not already named in a
+    durable discharge record is rolled forward here; a deferred emission with no
+    `flushed` record is reported OWED (its host body may not have fired before
+    the crash — the honest state)."""
+    records = wal["records"]
+    descriptors = [r for r in records if r.get("record") == "discharge-descriptor"]
+    deferred = [r for r in records if r.get("record") == "deferred-emission"]
+    flushed = {r.get("seq") for r in records if r.get("record") == "flushed"}
+    flush_failed = {r.get("seq"): r for r in records
+                    if r.get("record") == "flush-residue"}
+    discharged: set = set()
+    for r in records:
+        if r.get("record") == "discharge":
+            discharged.update(r.get("discharged") or [])
+
+    # roll forward: append a discharge record over every witnessed seq not yet
+    # discharged. (Deferred-emission seqs are the queue, not witnessed mutations;
+    # their commit is the flush, tracked by `flushed`, not the discharge record.)
+    owed_discharge = sorted(d.get("seq") for d in descriptors
+                            if d.get("seq") not in discharged)
+    if owed_discharge:
+        _append_discharge(wal_path, owed_discharge)
+
+    outstanding: list = []
+    fired, owed = [], []
+    for d in deferred:
+        seq = d.get("seq")
+        call = d.get("call") or {}
+        referent = f"{call.get('receiver')}.{call.get('method')}"
+        if seq in flushed:
+            fired.append({"seq": seq, "referent": referent})
+        elif seq in flush_failed:
+            info = flush_failed[seq].get("error") or {}
+            owed.append({"seq": seq, "referent": referent, "outcome": "failed"})
+            outstanding.append(_record(
+                "flush-residue", crossing=_crossing_of_descriptor(d),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": None},
+                error=info or {"type": "flush-failed",
+                               "message": "the host body raised at flush"},
+                attempted_flag=True, outcome="failed", referent=referent,
+                hint="the deferred emission's host body raised at flush "
+                     "(continue-and-record); finish it by hand or re-run with an "
+                     "idempotency key"))
+        else:
+            owed.append({"seq": seq, "referent": referent, "outcome": "not-attempted"})
+            outstanding.append(_record(
+                "flush-residue", crossing=_crossing_of_descriptor(d),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": None},
+                error={"type": "not-attempted",
+                       "message": "approved but no `flushed` record — the host "
+                                  "body may not have fired before the crash"},
+                attempted_flag=False, outcome="not-attempted", referent=referent,
+                hint="the emission was approved but its flush is unconfirmed; v1 "
+                     "recover never auto-fires an owed emission — finish the flush "
+                     "by hand or re-run with the idempotency key (item 309)"))
+
+    clean = not outstanding
+    return {
+        "verdict": "rolled-forward",
+        "decision": ("the WAL carries `commit-approved`: the session was "
+                     "committed (Decision 3's window rule). The durable approval, "
+                     "not the discharge record, is the commit proof — recover "
+                     "replays no witnessed inverse and re-issues no compensation. "
+                     "It rolled the missing discharge record forward and reports "
+                     "each approved deferred emission's flush state."),
+        "hash": approved.get("hash"),
+        "committed": True,
+        "rolledForwardDischarge": owed_discharge,
+        "flushed": fired,
+        "owedFlushes": owed,
+        "residue": {
+            "clean": clean,
+            "outstanding": outstanding,
+            "proof": _window_proof(owed_discharge, fired, owed),
+        },
+        "guarantee": _guarantee(),
+    }
+
+
+def _window_proof(rolled: list, fired: list, owed: list) -> str:
+    if not owed:
+        return (f"committed: {len(rolled)} witnessed mutation(s) rolled forward "
+                f"(discharge appended, none rolled back), {len(fired)} deferred "
+                f"emission(s) confirmed flushed. The world holds only what the "
+                f"approved commit meant to cross.")
+    return (f"committed with {len(owed)} OWED flush(es): the session was approved, "
+            f"but {len(owed)} deferred emission(s) have no `flushed` record — their "
+            f"host bodies may not have fired before the crash. Reported honestly, "
+            f"never auto-fired (v1); {len(fired)} confirmed flushed, "
+            f"{len(rolled)} witnessed mutation(s) rolled forward.")
 
 
 def _record(kind: str, *, crossing: dict, attempted: Optional[dict],
@@ -411,16 +541,31 @@ def _roll_back(wal: dict, *, world: World) -> dict:
                  "cannot be confirmed after a crash — the forward referent is "
                  "still out. Verify it was offset, or carry an idempotency key"))
 
+    # item 245, Decision 3: class-(b) deferred emissions with no `commit-approved`
+    # are DROPPED — never fired, so zero crossings. Reported clean, never residue:
+    # this is the exact-by-construction abort path (dropping is free, nothing
+    # crossed the boundary). An in-process abort that finished writes an
+    # `aborted` completion record; its presence tells a completed abort from a
+    # crashed one, but the absence of `commit-approved` is the verdict either way.
+    deferred = [r for r in wal["records"] if r.get("record") == "deferred-emission"]
+    dropped_deferred = [{"seq": r.get("seq"),
+                         "referent": f"{(r.get('call') or {}).get('receiver')}."
+                                     f"{(r.get('call') or {}).get('method')}"}
+                        for r in deferred]
+    aborted = next((r for r in wal["records"] if r.get("record") == "aborted"), None)
+
     remaining = world.remaining()
     clean = not outstanding
     return {
         "verdict": "rolled-back",
-        "decision": ("the WAL has no `activation-complete` marker: the process "
-                     "died mid-activation. Recovery reconstructed the boundary "
-                     "inverses from their descriptors and ran them newest-first "
-                     "(LIFO), L-Raise style. Transactional inverses with a durable "
-                     "discharge record were skipped (committed, not rolled back); "
-                     "owed compensations were re-attempted best-effort."),
+        "decision": ("the WAL has no `commit-approved` marker: the session "
+                     "aborted (a clean abort or a mid-activation crash). Recovery "
+                     "reconstructed the boundary inverses from their descriptors "
+                     "and ran them newest-first (LIFO), L-Raise style. "
+                     "Transactional inverses with a durable discharge record were "
+                     "skipped (committed, not rolled back); owed compensations "
+                     "were re-attempted best-effort; deferred emissions were "
+                     "dropped, never fired."),
         "committedEffects": len(effects),
         "torn": wal.get("torn", False),
         "ran": ran,
@@ -429,13 +574,15 @@ def _roll_back(wal: dict, *, world: World) -> dict:
         "transactionalRolledBack": transactional_rolled_back,
         "dischargedSkipped": discharged_skipped,
         "compensationsReissued": compensations_reissued,
+        "droppedDeferred": dropped_deferred,
+        "abortCompleted": aborted is not None,
         "residue": {
             "clean": clean,
             "outstanding": outstanding,
             "worldRemaining": remaining,
             "proof": _residue_proof(ran, moot, outstanding, remaining,
                                     discharged_skipped, transactional_rolled_back,
-                                    compensations_reissued),
+                                    compensations_reissued, dropped_deferred),
         },
         "guarantee": _guarantee(),
     }
@@ -443,9 +590,14 @@ def _roll_back(wal: dict, *, world: World) -> dict:
 
 def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                    discharged_skipped: list, transactional_rolled_back: list,
-                   compensations_reissued: list) -> str:
+                   compensations_reissued: list,
+                   dropped_deferred: Optional[list] = None) -> str:
     committed = [d for d in discharged_skipped if d.get("retained")]
     ran_n = len(ran) + len(transactional_rolled_back)
+    dropped_n = len(dropped_deferred or [])
+    dropped_note = (f" {dropped_n} deferred emission(s) dropped, never fired "
+                    f"(exact by construction — nothing crossed)."
+                    if dropped_n else "")
     if not outstanding:
         note = ""
         if committed:
@@ -454,8 +606,8 @@ def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                     f"is never rolled back).")
         return (f"no residue: {ran_n} reconstructed boundary inverse(s) ran and "
                 f"cleared every referent they owed; {len(moot)} in-process "
-                f"inverse(s) were moot (memory gone).{note} The world holds only "
-                f"what was deliberately committed.")
+                f"inverse(s) were moot (memory gone).{note}{dropped_note} The "
+                f"world holds only what was deliberately committed.")
     kinds: dict = {}
     for rec in outstanding:
         kinds[rec["kind"]] = kinds.get(rec["kind"], 0) + 1

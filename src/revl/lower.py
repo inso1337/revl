@@ -1461,6 +1461,102 @@ def _check_extern_undo(expr, decl_name: str, slot: str, types: dict,
               f"{slot} of extern `{decl_name}`")
 
 
+_UNIT_RETURNS = (None, "Unit")
+
+
+def _check_deferred_extern(decl, filename: str) -> None:
+    """The `deferred` checker obligations (docs/design/245-session-commit.md,
+    Decision 2). Every rule keeps class (b) — the deferrable emission — an exact
+    type judgment: the checker can enforce the abort/commit semantics only
+    because these hold at declaration.
+
+    1. `deferred` only on an `emission`. `pure` has nothing to defer; `acquire`
+       and `witnessed` must run mid-session (their return is the resource or the
+       witness).
+    2. A deferred emission returns `Unit`. The call completes before the action
+       fires, so no value can flow back; a non-Unit return would be a lie the
+       program could branch on. This is also the mechanical (b)/(c) boundary: an
+       emission whose response the task needs mid-session cannot type `deferred`.
+    3. `deferred` and `compensate` are mutually exclusive. A compensation offsets
+       a fired emission on abort; a deferred emission's abort drops the queue
+       (nothing fired, nothing to offset), so the pair is dead code.
+    4. `deferred` and `async` are mutually exclusive (v1): there is no response
+       to await.
+    """
+    if decl.classification != "emission":
+        raise RevlError(
+            filename, decl.line,
+            f"`deferred` is only valid on an `emission` extern; `{decl.name}` is "
+            f"`{decl.classification}`",
+            hint="a `pure` extern has nothing to defer, and an `acquire` or "
+                 "`witnessed` extern must run mid-session — its return is the "
+                 "resource or the witness (docs/design/245-session-commit.md)",
+            code="G4", category="deferred")
+    if decl.returns not in _UNIT_RETURNS:
+        raise RevlError(
+            filename, decl.line,
+            f"a `deferred` emission must return `Unit`; `{decl.name}` returns "
+            f"`{decl.returns}`",
+            hint="a deferred emission returns before the world changes, so no "
+                 "value can flow back from it — an emission whose response the "
+                 "task needs mid-session stays an immediate emission (drop "
+                 "`deferred`)",
+            code="G4", category="deferred")
+    if decl.compensate is not None:
+        raise RevlError(
+            filename, decl.line,
+            f"a `deferred` emission cannot declare `compensate`; `{decl.name}` "
+            f"declares both",
+            hint="a compensation offsets a fired emission on abort, but a "
+                 "deferred emission's abort drops the queue — nothing fired, so "
+                 "there is nothing to offset. The pair is dead code by "
+                 "construction (docs/design/245-session-commit.md)",
+            code="G5", category="deferred")
+    if decl.async_:
+        raise RevlError(
+            filename, decl.line,
+            f"a `deferred` emission cannot be `async` (v1); `{decl.name}` is both",
+            hint="a deferred emission returns Unit at the call and fires later at "
+                 "the session commit, so there is no response to await",
+            code="G4", category="deferred")
+
+
+def _check_deferred_not_in_teardown(program, filename: str) -> None:
+    """Rule: deferred emissions are refused in teardown positions — the `undo`
+    and `compensate` slots (docs/design/245-session-commit.md, Decision 2).
+    Teardown runs at or after the verdict; enqueueing into a queue that is
+    already flushing or dropped is unanswerable (the same spirit as 247's "a
+    compensation emits and returns; it does not accumulate")."""
+    from .parser import ExprCall, ExprVar
+
+    deferred = {d.name for d in program.externs if d.deferred}
+    if not deferred:
+        return
+
+    def _scan(expr, decl_name: str, slot: str) -> None:
+        if isinstance(expr, ExprCall):
+            callee = expr.callee
+            if isinstance(callee, ExprVar) and callee.name in deferred:
+                raise RevlError(
+                    filename, callee.line,
+                    f"the `{slot}` slot of extern `{decl_name}` calls deferred "
+                    f"emission `{callee.name}` — deferred emissions are refused "
+                    f"in teardown positions",
+                    hint="teardown runs at or after the session verdict; a "
+                         "deferred emission would enqueue into a queue that is "
+                         "already flushing or dropped, which is unanswerable "
+                         "(docs/design/245-session-commit.md)",
+                    code="G5", category="deferred")
+            for arg in expr.args or []:
+                _scan(arg, decl_name, slot)
+
+    for decl in program.externs:
+        if decl.undo is not None:
+            _scan(decl.undo, decl.name, "undo")
+        if decl.compensate is not None:
+            _scan(decl.compensate, decl.name, "compensate")
+
+
 def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
     """Rule 3 (docs/design/243-witnessed-externs.md): a witnessed extern's
     declared inverse must be classified **non-emission AND non-witnessed**.
@@ -1577,6 +1673,10 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
     # a witnessed inverse is infinite regress. Built before the loop so an
     # inverse may name an extern declared later in the file.
     extern_class = {d.name: d.classification for d in program.externs}
+    # item 245: a deferred emission may not appear in any extern's teardown slot
+    # (a whole-program check, so an `undo`/`compensate` naming a deferred extern
+    # declared later in the file is still caught).
+    _check_deferred_not_in_teardown(program, filename)
     for decl in program.externs:
         if decl.name in seen:
             raise RevlError(filename, decl.line, f"duplicate extern `{decl.name}`")
@@ -1690,6 +1790,13 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                     f"an `async` extern cannot declare `compensate` yet — the "
                     f"compensation seam is synchronous on every tier",
                 )
+        # `deferred` validity (docs/design/245-session-commit.md, Decision 2).
+        # The class of an action is a total function of its checked
+        # classification: nothing at runtime or in the harness can move an
+        # action between classes, so the rules that keep class (b) honest are
+        # enforced here, before the flag reaches the IR.
+        if decl.deferred:
+            _check_deferred_extern(decl, filename)
         bodies: dict[str, str] = {}
         for body in decl.bodies:
             if body.backend in bodies:
@@ -1706,6 +1813,11 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # the service-method spelling at lower.py:2583. Absent means sync;
             # `ir_version` stays 3 (confirmed human decision, §4).
             **({"async": True} if decl.async_ else {}),
+            # additive deferred flag (docs/design/245-session-commit.md,
+            # Decision 2): class (b), the deferrable emission. Absent means the
+            # emission fires at the call (class c). Only an `emission` extern may
+            # carry it (checked above), so no non-emission extern's IR changes.
+            **({"deferred": True} if decl.deferred else {}),
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads

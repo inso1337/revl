@@ -58,6 +58,9 @@ the transition, so the running system keeps serving.
 | `revl_rollback` | no | yes | - |
 | `revl_undo` | no | yes | - |
 | `revl_unload` | no | yes | - |
+| `revl_commit` | yes | no | - |
+| `revl_commit_confirm` | no | yes | `hash` |
+| `revl_abort` | no | yes | - |
 | `revl_state` | yes | no | - |
 | `revl_lease` | no | no | `component` |
 | `revl_snapshot` | yes | no | - |
@@ -208,7 +211,68 @@ verdict / holes / diagnostic, never the whole source.
 
 Tear the composition down and report the residue checks (registry, provisions,
 effects, listeners) - prove a component leaves nothing behind before you commit
-it to disk. No inputs.
+it to disk. No inputs. Under the session commit protocol a plain unload is the
+implicit terminal commit (witnessed mutations discharge); the explicit,
+WAL-marked path is `revl_commit_confirm` / `revl_abort` below.
+
+### The session commit protocol (`revl_commit`, `revl_commit_confirm`, `revl_abort`)
+
+A session is one driver lifetime (from `revl_load` to a commit or abort). Its
+actions split three ways by their checked extern classification, and nothing at
+runtime can move an action between classes
+([245-session-commit.md](design/245-session-commit.md), Decision 2):
+
+- **(a) witnessed-revertible** — an `effect` over a `witnessed` extern (item
+  243). Runs freely mid-session; its declared inverse is registered on the
+  activation frame. On commit it discharges (the mutation persists); on abort it
+  replays (the mutation reverts).
+- **(b) deferrable** — an `emission` extern declared `deferred`
+  (`extern emission deferred fn send(...)`). The call does NOT fire the host
+  body; it ENQUEUES a descriptor on the session's deferral queue and returns
+  Unit. On commit the queue flushes FIFO (each host body fires once); on abort
+  the queue is dropped and nothing fires. Because nothing crossed, the abort is
+  exact by construction. A deferred emission must return Unit, may not declare
+  `compensate` or `async`, and may not appear in a teardown slot (all checked).
+- **(c) immediate** — a plain `emission` extern. Fires at the call. On abort it
+  has already crossed; `compensate` (item 247) may offset it.
+
+The commit is two-step and hash-bound. `revl_commit` derives its gate target
+from OWNER-held state - the deferral queue, the discharge escrow, and the live
+activation-frame registry - never the runtime's per-call current frame, so a
+session with three live components commits all three or none. It returns the
+manifest: `summary` (the one-line prompt, e.g. "empty trash: 3 files; send: 1
+email"), `deferred` (the queue), `witnessed` (the count about to discharge), and
+a `hash` binding exactly that target. `revl_commit_confirm(hash)` recomputes the
+hash; if the queue or the live composition drifted since enumeration (another
+enqueue, a swap) the hashes differ and the confirm is REFUSED with a fresh
+manifest (`ok:false`) - what fires is exactly what was approved, never a
+superset. On approval the durable WAL record order is `commit-approved` (before
+the first fire), then one `flushed` per fired emission, then the one `discharge`
+covering every witnessed seq, then `activation-complete`. `revl_abort` marks
+every live frame aborting before any teardown, drops the queue, replays the
+witnessed inverses, and proves a clean world.
+
+- `revl_commit`: no inputs; returns `{manifest}`.
+- `revl_commit_confirm`: `hash` (from `revl_commit`); returns the flush and
+  residue report, or `ok:false` with a fresh manifest on a stale hash.
+- `revl_abort`: no inputs; returns the replayed seqs and the dropped-deferral
+  count.
+
+Both `revl_commit_confirm` and `revl_abort` (and enumeration) are gated by the
+operator `commit` verb ([operator-capabilities.md](operator-capabilities.md)).
+
+Recovery honors the approved-to-discharged window: a crash after
+`commit-approved` and before `discharge` is a COMMITTED session on `revl
+recover` - it replays no witnessed inverse, rolls the missing discharge forward,
+and reports any approved-but-unflushed emission as owed (never auto-fired). The
+absence of `commit-approved` is the abort verdict, and deferred emissions with
+no approval are reported "dropped, never fired", counted clean.
+
+Slice status: the py runtime, driver, MCP verbs, and recovery are implemented.
+The refuse-at-emit tier gate for `deferred` on the rust/go/java/wasm/typescript
+tiers is owed by Slice 2 (the guard and its canonical diagnostic already live in
+`revl.session_commit.refuse_deferred_on_ownerless_tier`, ready to wire into each
+backend's emit refusal channel).
 
 ### `revl_rollback`
 

@@ -330,8 +330,19 @@ remain open.
 
 ## Commit path (clean unload)
 
-Until item 245 lands the explicit commit UX, a clean successful unload IS the
-commit (implicit). On it, in one LIFO pass:
+Amendment (item 245, [245-session-commit.md](245-session-commit.md)): under a
+registered session owner the commit MOVES from unload time to an explicit
+SESSION commit point, and a mid-session withdrawal's `transactional`/
+`compensation` entries are held in the session's discharge escrow rather than
+discharged at drain. `revl recover` gains a superset skip for the session-owned
+case: a durable `commit-approved` record is the commit proof even before the one
+consolidated `discharge` record lands (the approved-to-discharged window), and a
+new `flush-residue` residue kind reports a deferred emission whose flush the
+crash interrupted. The clause below is the compatibility case - a bare `Frame`
+with no owner keeps exactly this implicit-commit semantics.
+
+Without a session owner (the compatibility clause), a clean successful unload IS
+the commit (implicit). On it, in one LIFO pass:
 
 - every `bracket` inverse RUNS, unchanged: releasing an acquired handle is
   always right, success or abort;
