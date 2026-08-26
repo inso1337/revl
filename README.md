@@ -235,13 +235,16 @@ reachable from the CLI and, where it makes sense, as an MCP tool.
 
 ## Command & MCP-verb reference
 
-Every subcommand wired in `src/revl/__main__.py`, one line each. The full CLI
-index with flags is [docs/guide-humans.md §Tooling](docs/guide-humans.md#tooling).
+Every subcommand wired in `src/revl/__main__.py`, one line each. The complete
+per-command flag reference is [docs/commands-reference.md](docs/commands-reference.md);
+the verb-by-verb MCP reference is [docs/mcp-reference.md](docs/mcp-reference.md).
 
 | command | what it does | docs |
 |---|---|---|
-| `revl compile FILES [-o OUT]` | parse → check → link → IR; `--json-diagnostics` for CI | [backend-ir-v1.md](docs/backend-ir-v1.md) |
-| `revl explain CODE` | what a diagnostic code guarantees and the fix | [why-traces.md](docs/why-traces.md) |
+| `revl compile FILES [-o OUT]` | parse → check → link → IR; `--json-diagnostics` for CI | [commands-reference.md](docs/commands-reference.md#revl-compile) · [backend-ir-v1.md](docs/backend-ir-v1.md) |
+| `revl explain CODE` | what a diagnostic code guarantees and the fix | [commands-reference.md](docs/commands-reference.md#revl-explain) · [why-traces.md](docs/why-traces.md) |
+| `revl doctor` | diagnose each backend tier, runtime and dependency (OK/WARN/MISSING + version), then smoke-test every available tier; `--json`, `--no-smoke` | [commands-reference.md](docs/commands-reference.md#revl-doctor) |
+| `revl scaffold --service NAME` | generate a typed, holed composition skeleton from a spec (`--requires`/`--capabilities`/`--method`/`--emits`, `--json`) | [scaffold.md](docs/scaffold.md) |
 | `revl audit FILES` | composition manifest + G8 boundary surface (`--json`); `--diff PREV.json` is the authority-drift gate (`--accept`/`--accept-all`) | [interchange-format.md](docs/interchange-format.md) · [audit-diff.md](docs/audit-diff.md) |
 | `revl diff PREV CURR` | semantic composition diff: components added/removed/changed, emissions gained/lost, provide/require edges, the PR-review tool for agent-generated compositions | [revl-diff.md](docs/revl-diff.md) |
 | `revl version PREV CURR` | derive the required semver bump from the interface diff against a previous composition | [derived-versioning.md](docs/derived-versioning.md) |
@@ -260,7 +263,7 @@ index with flags is [docs/guide-humans.md §Tooling](docs/guide-humans.md#toolin
 | `revl run FILES` | boot on a Cordis runtime; `--backend {py,ts,rust,java,wasm,go}` all boot live (py in-process, the rest each a separate process), `--once`, `--watch`, `--record`, `--wal`, `--trace`, `--withdraw`, `--placement`, `--plan` | [replay.md](docs/replay.md) · [crash-recovery.md](docs/crash-recovery.md) |
 | `revl recover --wal FILE` | crash recovery: roll a write-ahead log forward or back to a checked verdict + residue proof | [crash-recovery.md](docs/crash-recovery.md) |
 | `revl why COMPONENT --trace FILE` | explain a recorded lifecycle transition's cause chain; `--check` runs the withdraw oracle | [why-runtime.md](docs/why-runtime.md) |
-| `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`, forwarded as-is | [truc.md](docs/truc.md) |
+| `revl truc VERB …` | the component manager namespaced under the compiler, `add`/`rm`/`assemble`/`ship`/`reproduce`, forwarded as-is | [truc.md](docs/truc.md) |
 | `revl quarantine FILES [--service NAME] [--policy POLICY]` | run a candidate's battery inside the wasm sandbox, prove it cannot escape before admission | [quarantine-tier.md](docs/quarantine-tier.md) |
 | `revl canary FILES --candidate FILE --slice REALM` | run both generations at once, successor on one realm slice; promote (`--promote-to`) or revert on evidence | [verified-canary.md](docs/verified-canary.md) |
 | `revl repair --component C [--candidate FILE] [--plan]` | the repair loop: diagnose a fault and re-admit a fix within declared policy bounds | [repair-loop.md](docs/repair-loop.md) |
@@ -289,9 +292,10 @@ composition's causality shows up in Grafana, Datadog, Honeycomb or Jaeger; the
 OTel SDK is the optional `revl[otel]` extra, and `--json` prints the span model
 without it. See [docs/opentelemetry.md](docs/opentelemetry.md).
 
-**MCP verbs** (`revl mcp serve`), the definitive advertised set from
-`src/revl/mcp/server.py` and `query_tools.py`. Full shapes:
-[docs/mcp-bridge.md](docs/mcp-bridge.md), agent workflow:
+**MCP verbs** (`revl mcp serve`), the definitive advertised set (36 verbs) from
+`src/revl/mcp/server.py` and `query_tools.py`. Per-verb inputs and outputs:
+[docs/mcp-reference.md](docs/mcp-reference.md); full shapes:
+[docs/mcp-bridge.md](docs/mcp-bridge.md); agent workflow:
 [docs/guide-ai-agents.md](docs/guide-ai-agents.md).
 
 | verb(s) | what they answer | docs |
