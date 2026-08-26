@@ -306,7 +306,7 @@ class HostBody:
 @dataclass
 class ExternDecl:
     name: str
-    classification: str  # 'pure' | 'acquire' | 'emission'
+    classification: str  # 'pure' | 'acquire' | 'emission' | 'witnessed'
     params: list[FnParam]
     returns: str | None
     undo: object | None
@@ -314,6 +314,12 @@ class ExternDecl:
     bodies: list[HostBody]
     public: bool
     line: int
+    # capability scope of a boundary-crossing extern (docs/design/243-witnessed-externs.md):
+    # `witnessed[fs]` bounds *where* the reversible mutation crosses, exactly as
+    # `emission[db]` bounds an emission. Empty for the unscoped/inapplicable
+    # classifications. Read by the emission analysis (same authority namespace)
+    # and carried onto the IR node so the audit surface names the boundary.
+    capabilities: tuple[str, ...] = ()
     # explicit type-parameter names from an `extern pure fn id[T](...)` list.
     # externs share the fn signature table, so the same machinery covers them.
     type_params: list[str] = field(default_factory=list)
@@ -952,15 +958,39 @@ class Parser:
 
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line
-        if not self.at("kw") or self.peek().value not in ("pure", "acquire", "emission"):
+        # `pure`/`acquire`/`emission` are reserved keywords; `witnessed` (item
+        # 243) is a CONTEXTUAL keyword recognised only in this classification
+        # slot, so the self-hosted lexer's KEYWORDS set needs no sync and no
+        # program that used `witnessed` as an ordinary name is broken.
+        if self.peek().value not in ("pure", "acquire", "emission", "witnessed") \
+                or (not self.at("kw") and not self.at("ident", "witnessed")):
             tok = self.peek()
             raise self.err(
                 line,
-                "unclassified extern — expected `pure`, `acquire`, or `emission` after `extern`",
+                "unclassified extern — expected `pure`, `acquire`, `emission`, or "
+                "`witnessed` after `extern`",
                 hint="classification is mandatory: `pure` has no observable effect, "
-                     "`acquire` must declare `undo`, and `emission` may declare `compensate`",
+                     "`acquire` must declare `undo`, `emission` may declare `compensate`, "
+                     "and `witnessed` is a reversible mutation whose declared `undo` the "
+                     "accumulator auto-registers (docs/design/243-witnessed-externs.md)",
             )
         classification = self.next().value
+        # Capability scope, `witnessed[fs]` (docs/design/243-witnessed-externs.md).
+        # A witnessed mutation is capability-scoped exactly like an emission — the
+        # bracket is revl's parameterisation bracket — and joins the same authority
+        # namespace. Only `witnessed` carries a scope on an extern today; the parse
+        # is refused on the others so the surface stays honest.
+        capabilities: tuple[str, ...] = ()
+        if self.at("["):
+            if classification != "witnessed":
+                raise self.err(
+                    self.peek().line,
+                    f"`{classification}` extern takes no capability scope",
+                    hint="only a `witnessed[caps]` extern is capability-scoped "
+                         "(docs/design/243-witnessed-externs.md); write "
+                         f"`{classification} fn ...` without the bracket",
+                )
+            capabilities = self._capability_list(kind="witnessed")
         # Optional `async` modifier between the classification and `fn`,
         # mirroring where service-op modifiers sit (parser.py:895-906). The
         # classification stays first and mandatory, so the "unclassified
@@ -1005,10 +1035,11 @@ class Parser:
         if not bodies:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
-                          type_params=type_params, async_=async_)
+                          capabilities=capabilities, type_params=type_params, async_=async_)
 
-    def _capability_list(self) -> tuple[str, ...]:
-        """`[a, b]` after `emission` — the boundaries this operation may cross.
+    def _capability_list(self, kind: str = "emission") -> tuple[str, ...]:
+        """`[a, b]` after `emission`/`witnessed` — the boundaries this operation
+        may cross.
 
         Names are wiring names, not types: a requirement/provision key or an
         `emission` extern (docs/capabilities.md). They are not resolved here —
@@ -1025,14 +1056,14 @@ class Parser:
         if not names:
             raise self.err(
                 line,
-                "`emission[]` names no capability, so it forbids every emission",
-                hint="an operation that may not emit is a plain `fn` — drop the "
-                     "`emission` modifier instead (G4)",
+                f"`{kind}[]` names no capability, so it forbids every crossing",
+                hint="an operation that may not cross a boundary is a plain `fn` — "
+                     f"drop the `{kind}` modifier instead (G4)",
             )
         seen: set[str] = set()
         for cap in names:
             if cap in seen:
-                raise self.err(line, f"duplicate capability `{cap}` in `emission[...]`")
+                raise self.err(line, f"duplicate capability `{cap}` in `{kind}[...]`")
             seen.add(cap)
         return tuple(names)
 

@@ -66,9 +66,19 @@ def _calls_in(node, found: set, values: set | None = None,
 
 
 def _emitting_fns(fns: list, externs: list, witness: dict | None = None) -> set:
-    """Names whose call reaches an irreversible host effect: `emission`
-    externs, and functions that reach one transitively. An `acquire` extern
-    is *revertible* (it carries an inverse), so it is deliberately not one.
+    """Names whose call reaches a host boundary crossing: `emission` **and
+    `witnessed`** externs, and functions that reach one transitively.
+
+    An `acquire` extern is revertible by a bracket that the very structure of an
+    `effect` form registers, so it is deliberately not here. A `witnessed`
+    extern is different: its reversibility is realized only when the accumulator
+    actually registers the declared inverse (item 243). Reversibility therefore
+    ties to *registration*, not to the mere presence of a declared inverse — a
+    witnessed call that registers nothing is as irreversible as an emission and
+    must be visible to the item-33 policy gate, not exempted. So a witnessed
+    extern crosses a boundary in the same authority namespace as an emission,
+    carrying a reversibility flag on its IR node rather than forming a separate
+    lattice.
 
     `witness` (optional, filled in place) records *why* each derived name is
     in the set: `witness[caller] = callee`, the edge that put it there. The
@@ -92,6 +102,13 @@ def _emitting_capabilities(fns: list, externs: list,
     derivation come from one traversal, so they cannot disagree."""
     caps: dict[str, set] = {ext["name"]: {ext["name"]}
                             for ext in externs if ext.get("class") == "emission"}
+    # A witnessed extern crosses the same boundary as an emission (item 243): it
+    # seeds the fixed point too, so an unregistered witnessed reach is never
+    # mistaken for revertible. Its capability is the declared scope (`fs`), or
+    # its own name when unscoped — the same "the extern is the boundary" rule.
+    for ext in externs:
+        if ext.get("class") == "witnessed":
+            caps[ext["name"]] = set(ext.get("capabilities") or [ext["name"]])
     calls: dict[str, set] = {}
     passed: dict[str, set] = {}  # first-class callable references per fn body
     for fn in fns:
