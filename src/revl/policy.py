@@ -80,6 +80,45 @@ class Rule:
         return self.selector in realms
 
 
+# the units a `ttl` duration may name — parsed to milliseconds, the unit the
+# ledger's `expiresAt` clock runs in (docs/design/246-auto-approve.md, invariant
+# 3: expiry is checked at the crossing, so the token carries an absolute deadline
+# minted from this).
+_TTL_UNITS = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000}
+
+
+def _parse_ttl(text: str) -> int:
+    """Parse a `ttl` duration (`10m`, `30s`, `1h`, `500ms`) to milliseconds. A
+    bare integer is seconds, matching the human reading of `ttl 30`."""
+    raw = text.strip().lower()
+    for unit in ("ms", "s", "m", "h"):   # ms before s so `500ms` wins over `s`
+        if raw.endswith(unit) and raw[: -len(unit)].strip().isdigit():
+            return int(raw[: -len(unit)].strip()) * _TTL_UNITS[unit]
+    if raw.isdigit():
+        return int(raw) * 1000
+    raise ValueError(
+        f"malformed ttl {text!r} — expected `<n>[ms|s|m|h]` (a bare number is "
+        f"seconds)")
+
+
+@dataclass(frozen=True)
+class ApprovalRule:
+    """A ``capability C requires approval [ttl D]`` rule (item 246, Slice 2).
+
+    The operator-owned floor: a capability whose crossing needs a human `yes`,
+    minted as a typed `Approval[C]` (the language surface) or a per-call ticket
+    (the operator layer). Author code cannot waive it by omission — the rule
+    lives in the boundary policy the operator writes, not the source. `pattern`
+    is a glob over capability tokens (the same tokens `may reach` constrains);
+    `ttl_ms` is the approval's lifetime, defaulted at the crossing when None.
+    """
+    pattern: str
+    ttl_ms: int | None = None
+
+    def covers(self, token: str) -> bool:
+        return fnmatchcase(token, self.pattern)
+
+
 @dataclass(frozen=True)
 class Policy:
     """A parsed boundary policy: rules, the tenants switch, the sandbox."""
@@ -88,12 +127,28 @@ class Policy:
     mcp_allow: tuple[str, ...] | None = None  # the agent-sandbox allow-list
     leases_enforced: bool = False            # `leases enforced` (item 61)
     quarantine_required: bool = False        # `quarantine required` (item 45)
+    approval_rules: tuple[ApprovalRule, ...] = ()  # `requires approval` (246)
     source: str | None = None                # file path, for messages
 
     def is_empty(self) -> bool:
         return not self.rules and not self.tenants_isolated \
             and self.mcp_allow is None and not self.leases_enforced \
-            and not self.quarantine_required
+            and not self.quarantine_required and not self.approval_rules
+
+    def requires_approval(self) -> bool:
+        """Whether this policy names any approval-required capability — the
+        signal that a policy FILE enables the item-246 approval gate (Decision 3:
+        `a policy file that names approval-required capabilities`)."""
+        return bool(self.approval_rules)
+
+    def approval_rule_for(self, token: str) -> ApprovalRule | None:
+        """The first approval rule whose glob covers `token`, or None. The
+        crossing reads this to decide whether it needs an `Approval` and, when it
+        does, the ttl its token carries."""
+        for rule in self.approval_rules:
+            if rule.covers(token):
+                return rule
+        return None
 
 
 # ------------------------------------------------------------------- parsing
@@ -123,6 +178,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
     mcp_allow: tuple[str, ...] | None = None
     leases_enforced = False
     quarantine_required = False
+    approval_rules: list[ApprovalRule] = []
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -130,6 +186,32 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
         low = line.lower()
         if low == "tenants never reach each other":
             tenants = True
+            continue
+        # the approval gate (item 246, Slice 2): `capability <glob> requires
+        # approval [ttl <D>]`. Operator-owned — an author cannot waive it by
+        # omission, so the requirement lives here, not in the source (Decision 3).
+        if "requires approval" in low:
+            head, _, tail = line.partition(" requires approval")
+            parts = head.split()
+            if len(parts) != 2 or parts[0].lower() != "capability":
+                raise PolicyError(source, lineno,
+                                  f"a `requires approval` rule names one "
+                                  f"capability glob: `capability <glob> requires "
+                                  f"approval [ttl <D>]`, got {raw.strip()!r}")
+            ttl_ms = None
+            rest = tail.strip()
+            if rest:
+                ttl_parts = rest.split()
+                if len(ttl_parts) != 2 or ttl_parts[0].lower() != "ttl":
+                    raise PolicyError(source, lineno,
+                                      f"unexpected trailer after `requires "
+                                      f"approval`: {rest!r} — only `ttl <D>` is "
+                                      f"allowed")
+                try:
+                    ttl_ms = _parse_ttl(ttl_parts[1])
+                except ValueError as exc:
+                    raise PolicyError(source, lineno, str(exc))
+            approval_rules.append(ApprovalRule(parts[1], ttl_ms))
             continue
         # the quarantine tier (item 45): require an untrusted candidate to prove
         # itself in the wasm sandbox before it may be admitted to a hosted tier
@@ -174,7 +256,7 @@ def _parse_dsl(text: str, source: str | None) -> Policy:
             raise PolicyError(source, lineno,
                               f"unrecognised policy line: {raw.strip()!r}")
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
-                  quarantine_required, source)
+                  quarantine_required, tuple(approval_rules), source)
 
 
 def _parse_json(text: str, source: str | None) -> Policy:
@@ -211,8 +293,21 @@ def _parse_json(text: str, source: str | None) -> Policy:
     mcp_allow = tuple(mcp["allow"]) if mcp.get("allow") is not None else None
     leases_enforced = bool((doc.get("leases") or {}).get("enforced"))
     quarantine_required = bool((doc.get("quarantine") or {}).get("required"))
+    approval_rules: list[ApprovalRule] = []
+    for entry in doc.get("approvals") or []:
+        cap = entry.get("capability") or entry.get("pattern")
+        if not cap:
+            raise PolicyError(source, 1,
+                              "an approval rule needs a `capability` glob")
+        ttl_ms = None
+        if entry.get("ttl") is not None:
+            try:
+                ttl_ms = _parse_ttl(str(entry["ttl"]))
+            except ValueError as exc:
+                raise PolicyError(source, 1, str(exc))
+        approval_rules.append(ApprovalRule(cap, ttl_ms))
     return Policy(tuple(rules), tenants, mcp_allow, leases_enforced,
-                  quarantine_required, source)
+                  quarantine_required, tuple(approval_rules), source)
 
 
 def parse_policy(text: str, source: str | None = None) -> Policy:
@@ -478,6 +573,81 @@ def _tenant_violation(manifest: dict, a: str, a_realms: frozenset[str],
     why = WhyTrace(kind="cross-tenant-reach", subject=token, shape=SET,
                    steps=steps)
     return Violation("tenant", a, token, message, why)
+
+
+# ------------------------------------------------- item 246: approval admission
+
+def _component_approval_edges(comp: dict) -> set:
+    """The set of `Approval[C']` scopes a component threads — the `with e`
+    capability recorded on each of its `emit` steps by lowering. A crossing to a
+    required capability is covered iff one of these scopes covers it."""
+    scopes: set = set()
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if node.get("step") == "emit" and isinstance(node.get("approval"), dict):
+                cap = node["approval"].get("capability")
+                if cap:
+                    scopes.add(cap)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(comp.get("body") or [])
+    return scopes
+
+
+def approval_admission(policy: Policy, ir: dict) -> list[Violation]:
+    """Refuse admission for a component that reaches a POLICY-approval-required
+    capability with no covering `with` edge (item 246, Slice 2, Decision 3 rule
+    2). Evaluated at admission over the audit graph, the same place the sandbox
+    refuses, before any runtime is touched. Operator-owned: the requirement lives
+    in the policy, so an author cannot waive it by omission.
+
+    v1 is component-scoped (the design's sound coarser fallback): a component
+    reaching required `C` with NO covering edge anywhere is refused; the runtime
+    frame check is the per-crossing defense-in-depth. An unnameable `*` reach is
+    NOT subject to this rule — a `*` crossing can never be approved into and
+    receives only the per-call ticket (Decision 1, the `*` row)."""
+    if not policy.approval_rules:
+        return []
+    from .audit_diff import audit_report  # noqa: PLC0415 — lazy, no cordis
+    audit = audit_report(ir)
+    manifest = audit.get("manifest") or {}
+    violations: list[Violation] = []
+    by_name = {c["name"]: c for c in ir.get("components") or []}
+    for name in _components(audit):
+        comp = by_name.get(name)
+        if comp is None:
+            continue
+        edges = _component_approval_edges(comp)
+        for reach in component_reach(audit, name):
+            token = reach.token
+            if token == UNBOUNDED:
+                continue
+            rule = policy.approval_rule_for(token)
+            if rule is None:
+                continue
+            if any(fnmatchcase(token, scope) or scope == token for scope in edges):
+                continue
+            violations.append(_approval_violation(manifest, name, reach, rule))
+    return violations
+
+
+def _approval_violation(manifest: dict, name: str, reach: Reach,
+                        rule: ApprovalRule) -> Violation:
+    detail = (f"via emission `{reach.via}`" if reach.kind == "emission"
+              else "through host code")
+    message = (f"policy violation: capability `{reach.token}` requires approval, "
+               f"but component `{name}` reaches it {detail} with no `with` "
+               f"approval edge — admission refused (item 246, unreachable-"
+               f"without). Acquire an approval (`let a = await approval"
+               f"[{reach.token}] {{ ... }}`) and thread it (`emit … with a`)")
+    why = WhyTrace(kind="policy-authority", subject=name, shape=CHAIN,
+                   steps=_reach_step(manifest, name, reach))
+    return Violation("approval", name, reach.token, message, why)
 
 
 # ------------------------------------------------------------- enforcement

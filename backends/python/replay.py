@@ -1384,6 +1384,19 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_approval_emission(self, request_id: str, capability: str,
+                                 component: str) -> dict:
+        """Append the ``approval-emission`` record AFTER a typed-approval crossing
+        fires (item 246, Decision 3), naming the same ``requestId`` the spend
+        did. The audit joins the ``approval-consumed`` spend and this emission on
+        ``requestId``: a spend with no matching emission is a visible owed action
+        (crossing unverified), never a silent gap. Consumes no seq — it names a
+        fact about a fire that already happened."""
+        record = {"record": "approval-emission", "requestId": request_id,
+                  "capability": capability, "component": component}
+        self._write(record)
+        return record
+
     def record_commit_approved(self, manifest_hash: str) -> dict:
         """Append the ``commit-approved`` marker (item 245, Decision 4). Its
         presence IS the commit verdict, written BEFORE the first flush fire and
