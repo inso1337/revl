@@ -151,10 +151,26 @@ CORPUS = [
                             # bodies (`effect`/`undo`/`emit` through the `this.sink`
                             # rename; the `Context.EffectScope fx` provider shape, the A8
                             # self-revert `apply` try/catch returning `fx`)
-    "comp_multi_effect.rvl",# a NO-config, MULTI-provision modern component: the no-arg-
-                            # only `<Comp>Plugin` ctor, two provider classes routed in one
-                            # `apply`, an `emit ... compensate` pair (two `fx.track`s), and
-                            # an `effect`/`undo` body in a void observation method
+    # comp_multi_effect.rvl (a NO-config, MULTI-provision modern component: the
+    # no-arg-only `<Comp>Plugin` ctor, two provider classes routed in one
+    # `apply`, an `emit ... compensate` pair, and an `effect`/`undo` body in a
+    # void observation method) is a KNOWN, TRACKED divergence as of item 243
+    # Slice 2b (docs/design/teardown-contract.md): the reference
+    # (backends/java/emit.py) now routes `compensate` and any bracket sharing
+    # its component through the two-phase `RevlFrame` teardown loop instead
+    # of the old unconditional `fx.track(Disposables.of(() -> ..))` shape this
+    # corpus entry's covered-subset note above still describes. Porting
+    # RevlFrame + the witnessed/transactional entry kind into
+    # selfhost/emit_java.rvl is its own item-199 slice, out of Slice 2b's
+    # scope (`backends/java/emit.py` + java coverage, not the self-hosted
+    # mirror). Marked `strict` so the xfail must be removed, not widened, the
+    # day that port lands.
+    pytest.param("comp_multi_effect.rvl", marks=pytest.mark.xfail(
+        reason="selfhost/emit_java.rvl does not yet port the item-243-Slice-2b "
+               "RevlFrame two-phase teardown loop (compensate/bracket-in-same-"
+               "component shape) — see the corpus comment above",
+        strict=True,
+    )),
     # slice 4 (item 235) — REALM placements (isolate/intercept) on the modern path
     "comp_realm_isolate.rvl",  # `isolate <provided-key> in realm("..")`: the modern path
                                # now admits a realm placement (a pure-`return` provider),
