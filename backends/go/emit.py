@@ -927,6 +927,21 @@ _COMP_NEEDS_TIMER = False
 # Per-emit counter for unique timer local names (`_revlTimer1`, `_revlTimer2`).
 _TIMER_COUNTER = 0
 
+# item 243/247 (docs/design/teardown-contract.md): witnessed externs by name,
+# so a component step's acquisition can be recognised as a `transactional`
+# entry and register its DECLARED inverse (not a site-spelled one) into the
+# per-activation frame. Absent/empty for every document that declares no
+# `witnessed` extern, so their emission stays byte-identical. Rebuilt per
+# `emit()` call (mirrors `_V3_TYPES`).
+_WITNESSED_EXTERNS: dict = {}
+# Whether the document needs the `RevlFrame` teardown accumulator preamble
+# (any component uses a witnessed effect or an `emit ... compensate ...`).
+# Flags `_TEARDOWN_PREAMBLE` + the `time`/`os`/`strconv` imports into the
+# module; a document that uses neither stays byte-identical to before.
+_COMP_NEEDS_TEARDOWN = False
+# Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
+_WITNESSED_COUNTER = 0
+
 
 def _comp_builtin(method, recv_surface, target, args):
     """Map a `.length()/.push()/…` stdlib call to a revl* helper (Go)."""
@@ -1511,6 +1526,27 @@ def _emit_component(comp, services, out):
         out.append("\t\tProvide: []stc.Key{%s}," % ", ".join(_key_var(p) for p in provides))
     out.append("\t\tApply: func(ctx *stc.Context) (stc.Inverse, error) {")
 
+    # item 243/247: a component using a witnessed effect or a compensation
+    # needs the per-activation teardown accumulator. `_revlFrame` is created
+    # FIRST, and its Phase-2 drain is registered as the FIRST `ctx.Effect`
+    # call — stc-go's `unwind()` runs registered inverses LIFO (last
+    # registered runs first), so being first-registered makes this the LAST
+    # inverse to run in the unwind, i.e. after every bracket/transactional
+    # inverse and every compensation-enqueue has already run (Phase 1 is
+    # complete by construction before this fires). On a clean commit
+    # `runCompensationPhase` is a no-op (a5a — compensations never ran, so
+    # there is nothing to drain).
+    needs_frame = _body_needs_frame(body)
+    if needs_frame:
+        global _COMP_NEEDS_TEARDOWN
+        _COMP_NEEDS_TEARDOWN = True
+        out.append("\t\t\t_revlFrame := newRevlFrame()")
+        out.append("\t\t\tif err := ctx.Effect(func() stc.Inverse {")
+        out.append("\t\t\t\treturn func() error { _revlFrame.runCompensationPhase(); return nil }")
+        out.append("\t\t\t}); err != nil {")
+        out.append("\t\t\t\treturn nil, err")
+        out.append("\t\t\t}")
+
     env = _Env(binds, reqs, set(), receiver="")
 
     # requires -> Service resolution
@@ -1533,7 +1569,21 @@ def _emit_component(comp, services, out):
     if has_config:
         out.append("\t\t\t_ = cfg")
 
-    out.append("\t\t\treturn nil, nil")
+    if needs_frame:
+        # The activation's OWN returned Inverse is appended to stc-go's
+        # inverses slice AFTER every `ctx.Effect` call the body made (stc-go
+        # appends it once `Apply` returns, from the orchestrator's
+        # `cmdApplied` handling), so it becomes the LAST-registered — hence
+        # the FIRST to run on any later unwind. That is the commit marker:
+        # flipping `committed` here, before any step's own inverse runs,
+        # mirrors the py reference tier's `Frame.drain` (yielded last, so
+        # cordis disposes it first). Reached only if `Apply` runs to
+        # completion — a mid-body failure returns `nil, err` earlier and
+        # this line never executes, so `committed` correctly stays false
+        # (the Go zero value) on an abort.
+        out.append("\t\t\treturn func() error { _revlFrame.commit(); return nil }, nil")
+    else:
+        out.append("\t\t\treturn nil, nil")
     out.append("\t\t},")
     out.append("\t}")
     out.append("}")
@@ -1580,6 +1630,166 @@ def _emit_host_stubs(ir) -> list[str]:
     return out
 
 
+# --------------------------------------------------------------------------
+# witnessed effects + compensation: the three-entry-kind teardown loop
+# (items 243/247, docs/design/teardown-contract.md)
+# --------------------------------------------------------------------------
+
+
+def _witnessed_extern(acquire):
+    """The witnessed extern descriptor a step's acquisition calls, or None.
+
+    A witnessed effect (item 243) is spelled as a component-step call to a
+    `witnessed` extern; the step's acquisition renders as an IR `fn` node
+    (`{"kind": "fn", "name": ..., "args": [...]}`), so matching its name
+    against `_WITNESSED_EXTERNS` is how the emitter tells a transaction from
+    an ordinary bracket. Returns None for every other acquisition, so a
+    non-witnessed effect emits exactly as before (mirrors backends/python/
+    emit.py `_ComponentEmitter._witnessed_extern`)."""
+    if not _WITNESSED_EXTERNS or not isinstance(acquire, dict):
+        return None
+    if acquire.get("kind") != "fn":
+        return None
+    return _WITNESSED_EXTERNS.get(acquire.get("name"))
+
+
+def _body_needs_frame(steps) -> bool:
+    """True iff some step in `steps` (recursing into `if`/`then`/`else`) is a
+    witnessed effect or an `emit ... compensate ...` — i.e. this component's
+    Apply needs the `RevlFrame` teardown accumulator. A component using
+    neither gets no frame and emits byte-identically to before."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect") and _witnessed_extern(step.get("acquire")) is not None:
+            return True
+        if kind == "emit" and step.get("compensate") is not None:
+            return True
+        if kind == "if":
+            if _body_needs_frame(step.get("then")) or _body_needs_frame(step.get("else")):
+                return True
+    return False
+
+
+def _call_descriptor(node) -> tuple[str, str]:
+    """Best-effort static (key, method) naming for a residue record's
+    `crossing`/`attempted` — the WAL discharge-descriptor's `receiver`/
+    `method` (docs/design/teardown-contract.md, "WAL descriptor"), recovered
+    directly from the AST at emit time (unlike the py reference tier's
+    bytecode introspection, the Go emitter has the call site's own node in
+    hand, so this is exact rather than best-effort-by-necessity)."""
+    if not isinstance(node, dict):
+        return ("call", "call")
+    kind = node.get("kind")
+    if kind == "call" and "method" in node:
+        target = node.get("target") or {}
+        key = target.get("name") or target.get("id") or "call"
+        return (str(key), str(node.get("method")))
+    if kind == "fn":
+        name = str(node.get("name") or "call")
+        return (name, name)
+    if kind == "host":
+        fn = str(node.get("fn", "call"))
+        recv, _, meth = fn.partition(".")
+        return (recv or fn, meth or fn)
+    return ("call", "call")
+
+
+def _witnessed_result_types(returns) -> tuple[str, str]:
+    """`Result[W, E]` (a witnessed extern's declared return) -> the Go (W, E)
+    type strings, resolved against the document's declared types — the
+    typed-core mapper (`_go_v3_type`), not the host-world `_go_type`, because
+    a witness is ordinarily a declared record (`Stash`), not a host scalar."""
+    t = str(returns).strip()
+    if not (t.startswith("Result[") and t.endswith("]")):
+        raise EmitError(
+            f"a witnessed extern must return Result[W, E], got {returns!r}")
+    ok, err = _v3_split_generic(t[7:-1])
+    return _go_v3_type(ok, _V3_TYPES), _go_v3_type(err, _V3_TYPES)
+
+
+def _emit_witnessed_step(out, pad, step, ext, env, bind: Optional[str]) -> None:
+    """Emit a witnessed effect (item 243): run the mutation inside the SAME
+    `ctx.Effect` the bracket path uses — `install` performs the forward
+    action and returns the paired inverse, exactly stc-go's own contract —
+    and on the `Ok` branch return a TRANSACTIONAL inverse: it DISCHARGES (a
+    no-op; the mutation is the deliverable and persists) on a clean commit,
+    and REPLAYS the declared inverse against the captured witness on an
+    abort. On `Err` the install returns a nil inverse, so stc-go registers
+    NOTHING (Ok-conditional — a failed mutation touched nothing, so it must
+    schedule no rollback).
+
+    A panicking inverse is caught and recorded as `restore-residue` (243 rule
+    6 — the inverse is fallible by design) rather than propagating: Phase 1
+    must run to completion no matter what one inverse does (docs/design/
+    teardown-contract.md, "continue-and-record, uniform, two severities")."""
+    global _WITNESSED_COUNTER
+    _WITNESSED_COUNTER += 1
+    n = _WITNESSED_COUNTER
+    inner = pad + "\t"
+    inner2 = inner + "\t"
+    inner3 = inner2 + "\t"
+
+    acquire = _expr(step["acquire"], env)
+    ok_t, err_t = _witnessed_result_types(ext.get("returns"))
+    result_t = "RevlResult[%s, %s]" % (ok_t, err_t)
+    ok_t_full = "RevlOk[%s, %s]" % (ok_t, err_t)
+    result_var = "_revlWit%d" % n
+    ok_var = "_revlOk%d" % n
+    isok_var = "_revlIsOk%d" % n
+
+    ext_name = str(ext.get("name"))
+    undo_node = ext.get("undo") or {}
+    undo_callee = undo_node.get("callee") or {}
+    undo_name = str(undo_callee.get("name") or undo_callee.get("id") or "undo")
+    # `result` is the witnessed extern's own binder for the Ok payload passed
+    # to its declared `undo` (docs/design/243-witnessed-externs.md, "Slice 1
+    # as implemented" #1); naming the Go local literally `result` means the
+    # generic name resolver's fallback (an unrecognised identifier renders
+    # unchanged) already resolves the undo expression's `result` reference to
+    # it — no env plumbing needed.
+    undo_expr = _expr(undo_node, env)
+
+    out.append("%svar %s %s" % (pad, result_var, result_t))
+    out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+    out.append("%s%s = %s" % (inner, result_var, acquire))
+    out.append("%sif %s, %s := %s.(%s); %s {" %
+               (inner, ok_var, isok_var, result_var, ok_t_full, isok_var))
+    out.append("%sresult := %s.Value" % (inner2, ok_var))
+    out.append("%s_ = result" % inner2)
+    out.append("%sreturn func() (_revlErr error) {" % inner2)
+    out.append("%sif _revlFrame.committed {" % inner3)
+    out.append("%s\t// item 243 a5a: discharge — the mutation is the" % inner3)
+    out.append("%s\t// deliverable and persists; witness GC'd (out of scope)." % inner3)
+    out.append("%s\treturn nil" % inner3)
+    out.append("%s}" % inner3)
+    out.append("%sdefer func() {" % inner3)
+    out.append("%s\tif r := recover(); r != nil {" % inner3)
+    out.append("%s\t\t_revlFrame.recordResidue(RevlTeardownRecord{" % inner3)
+    out.append("%s\t\t\tKind: %s, CrossingKey: %s, CrossingMethod: %s," %
+               (inner3, _go_string("restore-residue"), _go_string(ext_name), _go_string(undo_name)))
+    out.append("%s\t\t\tAttemptedCall: %s, AttemptedPhase: 1," % (inner3, _go_string(undo_name)))
+    out.append("%s\t\t\tErrorType: %s, ErrorMessage: fmt.Sprint(r)," % (inner3, _go_string("panic")))
+    out.append("%s\t\t\tOutcome: %s, Referent: %s," % (inner3, _go_string("failed"), _go_string(ext_name)))
+    out.append("%s\t\t\tHint: %s + %s + %s," %
+               (inner3, _go_string("the witnessed inverse "), _go_string(undo_name),
+                _go_string(" panicked during abort replay; verify and finish by hand")))
+    out.append("%s\t\t})" % inner3)
+    out.append("%s\t}" % inner3)
+    out.append("%s}()" % inner3)
+    out.append("%s%s" % (inner3, undo_expr))
+    out.append("%sreturn nil" % inner3)
+    out.append("%s}" % inner2)
+    out.append("%s}" % inner)
+    out.append("%sreturn nil" % inner)
+    out.append("%s}); err != nil {" % pad)
+    out.append("%sreturn nil, err" % inner)
+    out.append("%s}" % pad)
+    if bind is not None:
+        out.append("%s%s = %s" % (pad, bind, result_var))
+    global _COMP_NEEDS_TEARDOWN
+    _COMP_NEEDS_TEARDOWN = True
+
+
 def _host_type_of_acquire(acquire):
     if acquire.get("kind") == "host":
         recv = acquire["fn"].split(".")[0]
@@ -1602,57 +1812,87 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
     inner = pad + "\t"
     if s == "let-effect":
         bind = step["bind"]
-        # item 113: use the generic host type learned in _emit_component
-        # (`Map[int64]`, `RevlMap[Msg]`, …), not the bare base name.
-        host = _host_of_bind(bind)
-        env.map_new_value = _BIND_MAP_VALUE.get(bind)
-        acquire = _expr(step["acquire"], env)
-        env.map_new_value = None
-        undo = step.get("undo")
-        out.append("%svar %s *%s" % (pad, _bind_field(bind), host))
-        out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
-        # A block-effect setup (`effect { let k = 1  Map.new() } undo …`)
-        # runs its statements before the acquire, inside the effect closure.
-        for setup_step in step.get("setup") or []:
-            _emit_method_body([setup_step], env, out, indent + 1)
-        out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
-        if undo is not None:
-            out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
+        wit = _witnessed_extern(step.get("acquire"))
+        if wit is not None:
+            # item 243: a witnessed acquisition registers a TRANSACTIONAL
+            # entry (not a bracket) — a dedicated codegen path, since its
+            # result type is the extern's own Result[W, E], not the generic
+            # host/spawn type `_host_of_bind` assumes.
+            _emit_witnessed_step(out, pad, step, wit, env, bind=_bind_field(bind))
         else:
-            out.append("%sreturn nil" % inner)
-        out.append("%s}); err != nil {" % pad)
-        out.append("%sreturn nil, err" % inner)
-        out.append("%s}" % pad)
+            # item 113: use the generic host type learned in _emit_component
+            # (`Map[int64]`, `RevlMap[Msg]`, …), not the bare base name.
+            host = _host_of_bind(bind)
+            env.map_new_value = _BIND_MAP_VALUE.get(bind)
+            acquire = _expr(step["acquire"], env)
+            env.map_new_value = None
+            undo = step.get("undo")
+            out.append("%svar %s *%s" % (pad, _bind_field(bind), host))
+            out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+            # A block-effect setup (`effect { let k = 1  Map.new() } undo …`)
+            # runs its statements before the acquire, inside the effect closure.
+            for setup_step in step.get("setup") or []:
+                _emit_method_body([setup_step], env, out, indent + 1)
+            out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
+            if undo is not None:
+                out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
+            else:
+                out.append("%sreturn nil" % inner)
+            out.append("%s}); err != nil {" % pad)
+            out.append("%sreturn nil, err" % inner)
+            out.append("%s}" % pad)
     elif s == "effect":
-        # bare effect step at component top level
-        acquire = _expr(step["acquire"], env)
-        undo = step.get("undo")
-        out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
-        out.append("%s%s" % (inner, acquire))
-        if undo is not None:
-            out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
+        wit = _witnessed_extern(step.get("acquire"))
+        if wit is not None:
+            _emit_witnessed_step(out, pad, step, wit, env, bind=None)
         else:
-            out.append("%sreturn nil" % inner)
-        out.append("%s}); err != nil {" % pad)
-        out.append("%sreturn nil, err" % inner)
-        out.append("%s}" % pad)
+            # bare effect step at component top level
+            acquire = _expr(step["acquire"], env)
+            undo = step.get("undo")
+            out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
+            out.append("%s%s" % (inner, acquire))
+            if undo is not None:
+                out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
+            else:
+                out.append("%sreturn nil" % inner)
+            out.append("%s}); err != nil {" % pad)
+            out.append("%sreturn nil, err" % inner)
+            out.append("%s}" % pad)
     elif s == "await":
         # cordis-go's Apply runs synchronously; an awaited host call is just a
         # blocking call whose result is discarded (the A1 ordering boundary is
         # the statement position, preserved here).
         out.append("%s%s" % (pad, _expr(step["expr"], env)))
     elif s == "emit":
-        # `emit X compensate Y`: perform the emission, register the
-        # compensation as the effect's inverse so it runs on unwind.
+        # `emit X compensate Y` (item 247, docs/design/teardown-contract.md):
+        # perform the emission; the compensation is a `compensation` entry,
+        # not a bracket. On a clean commit it is DISCHARGED — never run, the
+        # forward emission was the deliverable (a5a). On an abort it does NOT
+        # run inline: it is ENQUEUED onto the frame's Phase-2 queue and runs
+        # only after every bracket/transactional inverse has replayed
+        # (Phase 1 first, in full, no matter what Phase 2 later does) —
+        # `runCompensationPhase` drains the queue, best-effort and bounded,
+        # via the goroutine-abandon pattern (go's per-tier obligation).
         emit_call = _expr(step["expr"], env)
         comp_node = step.get("compensate")
         if comp_node is not None:
+            compensate_call = _expr(comp_node, env)
+            key, method = _call_descriptor(comp_node)
             out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
             out.append("%s%s" % (inner, emit_call))
-            out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(comp_node, env)))
+            out.append("%sreturn func() error {" % inner)
+            out.append("%s\tif _revlFrame.committed {" % inner)
+            out.append("%s\t\treturn nil // item 247 a5a: discharge — never runs" % inner)
+            out.append("%s\t}" % inner)
+            out.append("%s\t_revlFrame.enqueue(%s, %s, func() error { %s; return nil })" %
+                       (inner, _go_string(key), _go_string(method), compensate_call))
+            out.append("%s\treturn nil" % inner)
+            out.append("%s}" % inner)
             out.append("%s}); err != nil {" % pad)
             out.append("%sreturn nil, err" % inner)
             out.append("%s}" % pad)
+            global _COMP_NEEDS_TEARDOWN
+            _COMP_NEEDS_TEARDOWN = True
         else:
             out.append("%s%s" % (pad, emit_call))
     elif s == "timer":
@@ -3675,6 +3915,236 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
     return out
 
 
+# The witnessed/compensation teardown accumulator (items 243/247, docs/
+# design/teardown-contract.md) — the go mirror of backends/python/runtime.py's
+# `Frame`. One `RevlFrame` per activation, created at the top of `Apply`
+# whenever the component uses a witnessed effect or a compensation; a
+# component using neither never allocates one (byte-identical emission).
+#
+# `committed` is written exactly once, synchronously, by the commit-marker
+# inverse (`_revlFrame.commit()`, returned as Apply's own outer Inverse — see
+# `_emit_component`) before any other registered inverse in this activation's
+# stack runs; every later read (from the SAME unwind, the SAME goroutine) is
+# therefore ordered after that write by plain program order, with no data
+# race and no lock needed on the field itself.
+#
+# Phase 2 (`runCompensationPhase`) is registered as the FIRST `ctx.Effect`
+# call, so on stc-go's LIFO unwind it is the LAST inverse to run in this
+# activation's stack — after every bracket/transactional inverse and every
+# compensation's Phase-1 enqueue have already happened, i.e. Phase 1 always
+# completes in full before Phase 2 starts (docs/design/teardown-contract.md,
+# "why two phases", reason 1).
+_TEARDOWN_PREAMBLE = '''// ---- witnessed/compensation teardown accumulator (items 243/247, docs/design/teardown-contract.md) ----
+
+// RevlTeardownRecord is one entry of the merged residue schema (docs/design/
+// teardown-contract.md, "the merged residue schema"): a Phase-1 inverse that
+// failed (`bracket-fault` / `restore-residue`) or a Phase-2 compensation that
+// failed, timed out, or was never attempted (`compensation-residue`).
+type RevlTeardownRecord struct {
+	Kind           string // "restore-residue" | "bracket-fault" | "compensation-residue"
+	CrossingKey    string
+	CrossingMethod string
+	AttemptedCall  string
+	AttemptedPhase int    // 1 or 2
+	ErrorType      string // e.g. "panic" | "deadline-expired" | "per-call-timeout"
+	ErrorMessage   string
+	Outcome        string // "failed" | "unknown" | "not-attempted"
+	Referent       string // what is still out in the world
+	Hint           string // recovery hint for the operator
+}
+
+// revlCompEntry is one queued Phase-2 compensation: the offsetting call,
+// captured at registration (`emit X compensate Y`), never re-read at
+// teardown (docs/design/teardown-contract.md, "no data hazard").
+type revlCompEntry struct {
+	key    string
+	method string
+	run    func() error
+}
+
+// RevlFrame is one component activation's teardown accumulator: the
+// commit-vs-abort bit, the Phase-2 compensation queue, and the surfaced
+// residue. Bracket inverses need none of this — they stay plain `ctx.Effect`
+// disposers, unchanged.
+type RevlFrame struct {
+	committed bool // see the package-level note above: single-writer, no lock
+	mu        sync.Mutex
+	pending   []revlCompEntry
+	residue   []RevlTeardownRecord
+}
+
+func newRevlFrame() *RevlFrame {
+	return &RevlFrame{}
+}
+
+// commit flips the discriminator a clean unload reads (item 243 decision 1,
+// the go mirror of `Frame._committed`/`Frame.drain`): every transactional
+// entry and every compensation observes `committed == true` from here on,
+// meaning discharge instead of replay/run.
+func (f *RevlFrame) commit() {
+	f.committed = true
+}
+
+// enqueue defers one compensation to Phase 2 (item 247): called from a
+// compensation's inverse when the activation is aborting, never on a commit
+// (the commit branch returns before reaching this). Entries queue in the
+// order stc-go's unwind visits them, which is already reverse-registration
+// (LIFO) order — "LIFO within itself" (docs/design/teardown-contract.md)
+// falls out for free from the enqueue order, no re-sorting needed.
+func (f *RevlFrame) enqueue(key, method string, run func() error) {
+	f.mu.Lock()
+	f.pending = append(f.pending, revlCompEntry{key: key, method: method, run: run})
+	f.mu.Unlock()
+}
+
+func (f *RevlFrame) recordResidue(rec RevlTeardownRecord) {
+	f.mu.Lock()
+	f.residue = append(f.residue, rec)
+	f.mu.Unlock()
+}
+
+// Residue is a snapshot of the merged residue records this activation's
+// abort teardown surfaced (docs/design/teardown-contract.md, "surface
+// (residue)"). Empty on a clean commit or when nothing failed.
+func (f *RevlFrame) Residue() []RevlTeardownRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]RevlTeardownRecord, len(f.residue))
+	copy(out, f.residue)
+	return out
+}
+
+// revlNoCompensationBound is the "0 means no bound" sentinel: a Duration long
+// enough that a timer armed with it never meaningfully fires (~292 years),
+// so `runOneCompensation`'s select always resolves via the real call instead.
+const revlNoCompensationBound = time.Duration(1<<63 - 1)
+
+// revlEnvDurationMS reads a `REVL_*_MS` env var once per call (docs/design/
+// teardown-contract.md, "Budget values… read once at activation"; reading it
+// per Phase-2 run is equivalent for a value that a process never mutates
+// mid-run, and keeps the accumulator free of package-level init ordering).
+// Unset or unparsable falls back to `defaultMS`; `"0"` returns 0, the
+// caller's "no bound" signal.
+func revlEnvDurationMS(name string, defaultMS int64) time.Duration {
+	v, ok := os.LookupEnv(name)
+	if !ok || v == "" {
+		return time.Duration(defaultMS) * time.Millisecond
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return time.Duration(defaultMS) * time.Millisecond
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+// runCompensationPhase is Phase 2 of the two-phase abort (docs/design/
+// teardown-contract.md): best-effort, bounded, and it never runs on a clean
+// commit (a5a — discharge, the queue is simply never drained). Every queued
+// compensation not yet started when the budget expires is recorded
+// `compensation-residue` with `error: deadline-expired`, `attempted: false` —
+// every skip is recorded, nothing silently dropped.
+func (f *RevlFrame) runCompensationPhase() {
+	if f.committed {
+		return
+	}
+	f.mu.Lock()
+	pending := f.pending
+	f.pending = nil
+	f.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+
+	budgetMS := revlEnvDurationMS("REVL_COMPENSATION_BUDGET_MS", 5000)
+	perCallMS := revlEnvDurationMS("REVL_COMPENSATION_PER_CALL_MS", 1000)
+	hasDeadline := budgetMS != 0
+	var deadline time.Time
+	if hasDeadline {
+		deadline = time.Now().Add(budgetMS)
+	}
+
+	for _, entry := range pending {
+		if hasDeadline && !time.Now().Before(deadline) {
+			f.recordResidue(RevlTeardownRecord{
+				Kind: "compensation-residue", CrossingKey: entry.key, CrossingMethod: entry.method,
+				ErrorType: "deadline-expired",
+				ErrorMessage: "the phase-2 compensation budget (REVL_COMPENSATION_BUDGET_MS) expired " +
+					"before this compensation started",
+				Outcome: "not-attempted", AttemptedPhase: 2, Referent: entry.key,
+				Hint: "the phase-2 budget expired before " + entry.key + "." + entry.method +
+					" ran; verify and finish by hand",
+			})
+			continue
+		}
+		bound := revlNoCompensationBound
+		if perCallMS != 0 {
+			bound = perCallMS
+		}
+		if hasDeadline {
+			if remaining := time.Until(deadline); remaining < bound {
+				bound = remaining
+			}
+		}
+		f.runOneCompensation(entry, bound)
+	}
+}
+
+// runOneCompensation runs one Phase-2 compensation with go's normative
+// in-call preemption: abandon-the-wait (docs/design/teardown-contract.md,
+// per-tier table). The call runs in its own goroutine; the runtime waits up
+// to `bound` and, on timeout, stops waiting and moves on to the next
+// compensation — the call keeps running DETACHED, recorded `outcome:
+// unknown` (the emission may still land after this abort completed).
+//
+// The goroutine MUST recover its own panic and route it over the channel
+// (go's per-tier obligation, docs/design/teardown-contract.md, "Per-tier
+// loop obligations"): an unrecovered panic in a detached goroutine kills the
+// whole process, turning a best-effort phase into a crash. And abandonment
+// relaxes seriality — once one compensation is abandoned and the next one
+// starts, both may be running concurrently; "LIFO within itself" pins the
+// START order of Phase-2 compensations only, never mutual exclusion.
+func (f *RevlFrame) runOneCompensation(entry revlCompEntry, bound time.Duration) {
+	done := make(chan error, 1) // buffered: an abandoned goroutine's send never blocks
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		done <- entry.run()
+	}()
+
+	if bound < 0 {
+		bound = 0
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			f.recordResidue(RevlTeardownRecord{
+				Kind: "compensation-residue", CrossingKey: entry.key, CrossingMethod: entry.method,
+				ErrorType: "compensation-failed", ErrorMessage: err.Error(),
+				Outcome: "failed", AttemptedCall: entry.method, AttemptedPhase: 2, Referent: entry.key,
+				Hint: "the compensation " + entry.key + "." + entry.method +
+					" failed; verify and finish by hand",
+			})
+		}
+	case <-timer.C:
+		// abandon-the-wait: the call keeps running detached (its own
+		// panic-guard already contains whatever it does).
+		f.recordResidue(RevlTeardownRecord{
+			Kind: "compensation-residue", CrossingKey: entry.key, CrossingMethod: entry.method,
+			ErrorType:    "per-call-timeout",
+			ErrorMessage: "compensation exceeded its per-call bound (REVL_COMPENSATION_PER_CALL_MS); abandoned in flight",
+			Outcome:      "unknown", AttemptedCall: entry.method, AttemptedPhase: 2, Referent: entry.key,
+			Hint: "the compensation " + entry.key + "." + entry.method +
+				" was abandoned in flight; it may still land — verify by hand",
+		})
+	}
+}
+'''
+
 # The clock coeffect + timer scheduler (item 57), the go mirror of
 # backends/python/runtime.py's Clock/TimerHandle — deterministic tick-for-tick.
 # Time advances only when RevlClockAdvance is called; a firing is a step in the
@@ -4450,8 +4920,18 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
+    global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    # item 243/247: witnessed externs by name, for this document's component
+    # steps (see `_witnessed_extern`); empty for a document with none, so
+    # every existing v1/v2 golden emits exactly as before.
+    _WITNESSED_EXTERNS = {
+        ext["name"]: ext for ext in (ir.get("externs") or [])
+        if ext.get("class") == "witnessed"
+    }
+    _COMP_NEEDS_TEARDOWN = False
+    _WITNESSED_COUNTER = 0
     # item 102: a lifecycle test's `advance` step drives the clock coeffect
     # (RevlClockAdvance / RevlClockReset), which lives in the timer preamble.
     # The timer components in scope normally flag it, but an `advance` alone is
@@ -4489,6 +4969,20 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         # the declared typed-core types come first, so the component impls and
         # lifecycle tests below reference already-declared structs/interfaces.
         body.extend(_emit_v3_go_types(_V3_TYPES))
+    # Top-level `extern` declarations reachable from a live component's body
+    # (item 243: a `witnessed[caps] fn ... undo ...`, plus whatever `pure`
+    # extern its declared undo calls). `_emit_v3_go` already renders extern
+    # bodies for the pure typed-core path; this document instead carries a
+    # component AND a lifecycle test (or, for a compensation-only v1/v2
+    # document, no top-level externs at all — this block is then a no-op),
+    # so it stays on THIS path (see the ir_version-3 routing above) and would
+    # otherwise never see its extern bodies emitted at all. Additive and
+    # gated on `externs` being non-empty: a v1/v2 document never declares
+    # one (confirmed byte-identical for every existing golden).
+    externs = ir.get("externs") or []
+    extern_ctx = _V3GoCtx(_V3_TYPES, ir.get("functions") or [], externs)
+    if externs:
+        body.extend(_emit_v3_go_externs(externs, extern_ctx))
     body.extend(_emit_services(ir.get("services", {})))
     _emit_keys(ir, body)
     _emit_realm_helper(ir, body)
@@ -4497,6 +4991,16 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     _emit_load_helpers(ir, body)
     _emit_spawn_support(ir, body)
     _emit_stc_lifecycle_tests(ir, body)
+
+    # An extern's Result-typed return (every witnessed extern's declared
+    # shape) needs the sealed-interface preamble; scanning the rendered body
+    # (mirrors `_emit_v3_go`'s own `used_result` detection) catches it
+    # wherever it appears — the extern's own signature or a component step's
+    # `RevlOk[...]` type assertion (`_emit_witnessed_step`) — without having
+    # to enumerate every producing site by hand.
+    body_blob = "\n".join(body)
+    needs_result_preamble = any(
+        t in body_blob for t in ("RevlResult[", "RevlOk[", "RevlErr["))
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -4515,6 +5019,14 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     if _COMP_NEEDS_STDLIB:
         out.append('\t"strings"')
         out.append('\t"unicode/utf8"')
+    if _COMP_NEEDS_TEARDOWN:
+        # `runCompensationPhase`'s budget/deadline (`time` — already imported
+        # above when `has_lifecycle`, so guarded to keep Go's single-import
+        # rule), the two `REVL_COMPENSATION_*_MS` env reads (`os`, `strconv`).
+        if not has_lifecycle:
+            out.append('\t"time"')
+        out.append('\t"os"')
+        out.append('\t"strconv"')
     out.append("")
     out.append('\tstc "github.com/0xdenny218/stc-go"')
     out.append(")")
@@ -4532,6 +5044,10 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         out.append(_V3_MAP_PREAMBLE)
     if _COMP_NEEDS_PARSE_INT:
         out.append(_V3_PARSE_INT_HELPER)
+    if needs_result_preamble:
+        out.append(_V3_RESULT_PREAMBLE)
+    if _COMP_NEEDS_TEARDOWN:
+        out.append(_TEARDOWN_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
 
