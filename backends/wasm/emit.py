@@ -199,10 +199,23 @@ class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, ir_version: int = IR_VERSION,
                  types: dict | None = None, functions: list | None = None,
                  externs: list | None = None, is_template: bool = False,
-                 spawn_targets: dict | None = None) -> None:
+                 spawn_targets: dict | None = None, record: bool = False) -> None:
         self.ir = component
         self.services = services
         self.ir_version = ir_version
+        # item 322 Slice 2: durable-WAL record mode. OFF by default and gated at
+        # every emission site it touches, so a non-recording component (every
+        # existing golden) is byte-identical. When on, each witnessed
+        # TRANSACTIONAL registration frames its discharge-descriptor's runtime
+        # values out through the `coeffect:revl:wal.record` host import, which
+        # the driver drains into the durable host WAL.
+        self.record = record
+        # per-component 0-based WAL sequence for witnessed transactional
+        # registrations, in registration order (the seq recover keys off).
+        self._record_seq = 0
+        # set once the component actually emits a record framing call, so
+        # `_module` pulls the record import + a linear memory in only then.
+        self._needs_record_import = False
         self.name = _ident(component.get("name"), "component name")
         # A spawn target is a *template* (docs/design-v2-instances.md): a runtime
         # instance, never a static composition member. It alone may carry a
@@ -985,12 +998,21 @@ class _ComponentEmitter:
         # literals too — the undo is not reachable from `body` itself (it
         # lives on the extern's own declaration), so it is planned here,
         # before `_collect_string_literals` runs.
+        # item 322 Slice 2: the record channel's receiver/method names — read
+        # off each witnessed transactional extern's own declaration, never
+        # spelled in the body — pooled so `_str_ptr` can name them when a
+        # framing call hands them to the host. Empty when record mode is off, so
+        # a non-recording component pools exactly what it pooled before.
+        record_strings: list[str] = []
         for step in body:
             if step.get("step") in ("let-effect", "effect"):
                 wit = self._witnessed_extern(step.get("acquire"))
                 if wit is not None and wit.get("undo") is not None:
                     self._register_witnessed_calls(wit["undo"])
                     roots.append(wit["undo"])
+                    if self.record:
+                        record_strings.append(_ident(wit.get("name"), "record receiver"))
+                        record_strings.append(self._wal_undo_name(wit))
             elif step.get("step") == "provide":
                 # item 324: a witnessed effect inside a PROVIDE-METHOD body
                 # (the per-tool-call H1 position) contributes its declared
@@ -1006,7 +1028,18 @@ class _ComponentEmitter:
                         if wit is not None and wit.get("undo") is not None:
                             self._register_witnessed_calls(wit["undo"])
                             roots.append(wit["undo"])
-        self.v3._collect_string_literals(roots)
+        self.v3._collect_string_literals(roots, extra=record_strings)
+
+    @staticmethod
+    def _wal_undo_name(ext: dict) -> str:
+        """The declared inverse's call name — the discharge-descriptor's
+        `method` (the go tier's `undo_name`, backends/go/emit.py). A witnessed
+        extern's `undo` is a top-level call whose callee names the re-issuable
+        inverse; recover replays exactly this named call."""
+        undo = ext.get("undo") or {}
+        callee = undo.get("callee") or {}
+        return _ident(callee.get("name") or callee.get("id") or "undo",
+                      "record method")
 
     # -- component -----------------------------------------------------------
 
@@ -1172,11 +1205,39 @@ class _ComponentEmitter:
         # capabilities.md); the payload sits one `_SLOT` past the cell start.
         payload_addr = f"(i32.add (local.get ${tmp}) (i32.const {_SLOT}))"
         payload_load = self.v3._slot_load(payload_addr, witness_ty)
+        # item 322 Slice 2: at REGISTRATION (this Ok branch is exactly the
+        # moment the witnessed mutation committed its forward effect and parked
+        # its inverse), record mode frames the discharge-descriptor's runtime
+        # values out to the host. This is the wasm mirror of the go tier's
+        # `revlRecordTransactional` call site (backends/go/emit.py): there the
+        # emitted code opens REVL_WAL and fsyncs; here the sandbox has no file,
+        # so the module hands (seq, receiver, method, witness) to the
+        # `coeffect:revl:wal.record` host import and the driver drains+fsyncs it.
+        # The witness crosses as a Str pointer the host reads back through the
+        # canonical `[u32 len][bytes]` layout; a non-Str witness is refused in
+        # record mode rather than silently narrowed.
+        record_call = ""
+        if self.record:
+            if witness_ty != "Str":
+                raise EmitError(
+                    f"{where}: the wasm durable-WAL record channel (item 322 "
+                    f"Slice 2) marshals a Str witness, but this witnessed extern's "
+                    f"witness is {witness_ty!r} — declare a Str-witnessed inverse "
+                    f"or emit without --record")
+            seq = self._record_seq
+            self._record_seq += 1
+            self._needs_record_import = True
+            receiver_ptr = self.v3._str_ptr(_ident(ext.get("name"), "record receiver"))
+            method_ptr = self.v3._str_ptr(self._wal_undo_name(ext))
+            record_call = (
+                f"\n      (call $revl_wal_record (i32.const {seq}) "
+                f"{receiver_ptr} {method_ptr} (global.get {wit_val_glob}))")
         lines.append(
             f"(if (i32.eq (i32.load (local.get ${tmp})) (i32.const {ok_tag}))\n"
             f"      (then\n"
             f"      (global.set {wit_val_glob} {payload_load})\n"
-            f"      (global.set {wit_flag_glob} (i32.const 1))))"
+            f"      (global.set {wit_flag_glob} (i32.const 1))"
+            f"{record_call}))"
         )
         if bind is not None:
             glob = f"$g_{bind}"
@@ -1500,7 +1561,12 @@ class _ComponentEmitter:
                         # item 324: the runtime accumulator allocates a cell per
                         # per-tool-call witnessed mutation, so it always needs
                         # linear memory even if nothing else in the module does.
-                        or bool(self.method_witnessed_externs))
+                        or bool(self.method_witnessed_externs)
+                        # item 322 Slice 2: the record channel passes the
+                        # receiver/method names as pointers into the pooled data,
+                        # so the module needs a memory to export even if its own
+                        # body reaches for none. Gated on an actual framing call.
+                        or self._needs_record_import)
         # the checked-arithmetic and named-division helpers are *not* memory:
         # `x + 1` traps on overflow through `$int_add` in a component that
         # never touches linear memory, so they get their own gate. (Before
@@ -1573,6 +1639,16 @@ class _ComponentEmitter:
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{self._import_module(key)}" "{op}" (func $req_{key}_{op}{sig}{result}))')
+        if self._needs_record_import:
+            # item 322 Slice 2: the durable-WAL framing channel. `record` takes
+            # (seq, receiver_ptr, method_ptr, witness_ptr) — the runtime values
+            # of one witnessed transactional discharge-descriptor — and the host
+            # binds it (via `Runtime.host_provide("revl:wal", …)`) to a function
+            # that reads the three Str pointers back and drains a JSONL record to
+            # the durable host WAL. Emitted ONLY in record mode, so a normal
+            # module's import section is byte-identical.
+            lines.append('  (import "coeffect:revl:wal" "record" '
+                         '(func $revl_wal_record (param i32 i32 i32 i32)))')
         if self.uses_job:
             # the job id is an interned compile-time *tag*, not an Int value:
             # it stays i32, which is what the runtime's host op declares
@@ -2268,8 +2344,14 @@ class _V3Emitter:
         }
         return name
 
-    def _collect_string_literals(self, roots: list | None = None) -> None:
+    def _collect_string_literals(self, roots: list | None = None,
+                                 extra: list | None = None) -> None:
         """Pool every string constant reachable from `roots` into data.
+
+        `extra` seeds additional literals that no node in `roots` carries — the
+        item 322 record channel's receiver/method names, which are read off the
+        witnessed extern's declaration (not spelled anywhere in the body), so
+        `_str_ptr` can name their pooled offset when it frames a descriptor.
 
         `roots` defaults to this module's function bodies PLUS its `test`
         bodies — the tests are lowered later (as exported `revl_test_*`
@@ -2312,6 +2394,8 @@ class _V3Emitter:
                      + [t.get("body") or [] for t in self.tests])
         for root in roots:
             walk(root)
+        for value in extra or []:
+            seen.setdefault(value, None)
         offset = 0
         for value in seen:
             raw = value.encode("utf-8")
@@ -4682,7 +4766,7 @@ class _V3Emitter:
         return "\n".join(lines) + "\n"
 
 
-def _emit_v1(ir: dict) -> dict[str, str]:
+def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
     """Lower a v1/v2 component document to WAT modules, one per component.
 
     v2 components carry ``isolate``/``intercept``; they are lowered to
@@ -4701,13 +4785,13 @@ def _emit_v1(ir: dict) -> dict[str, str]:
         emitter = _ComponentEmitter(
             component, services, ir_version=version,
             types=ir.get("types"), functions=ir.get("functions"),
-            externs=ir.get("externs"))
+            externs=ir.get("externs"), record=record)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
     return out
 
-def _emit_v3(ir: dict) -> dict[str, str]:
+def _emit_v3(ir: dict, record: bool = False) -> dict[str, str]:
     """Lower an IR v3 document.
 
     Components (when present) use the v1 component lowering; types and pure
@@ -4745,7 +4829,7 @@ def _emit_v3(ir: dict) -> dict[str, str]:
                                     types=types, functions=functions,
                                     externs=externs,
                                     is_template=component.get("name") in templates,
-                                    spawn_targets=spawn_targets)
+                                    spawn_targets=spawn_targets, record=record)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
@@ -4858,8 +4942,20 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
-def emit(ir: dict) -> dict[str, str]:
-    """Lower one IR document to WAT modules (v1 components, v3 types/fns)."""
+def emit(ir: dict, record: bool = False) -> dict[str, str]:
+    """Lower one IR document to WAT modules (v1 components, v3 types/fns).
+
+    ``record`` (item 322 Slice 2, the wasm durable-WAL channel) is OFF by
+    default and gated everywhere it touches emission, so every existing golden
+    emits BYTE-IDENTICALLY; only a module emitted with ``record=True`` carries
+    the WAL record import (`coeffect:revl:wal.record`) and, at each witnessed
+    TRANSACTIONAL registration, the framing call that hands the host the
+    discharge-descriptor's runtime values. The wasm sandbox has no direct
+    filesystem, so — unlike the go tier, whose emitted code opens ``REVL_WAL``
+    and fsyncs directly — the module FRAMES its records out through that host
+    import and the driver (:mod:`revl.run_wasm`) DRAINS them into the durable
+    host WAL. See ``backends/wasm/scenarios/crashproof``.
+    """
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
@@ -4870,9 +4966,9 @@ def emit(ir: dict) -> dict[str, str]:
     _refuse_lifecycle_tests(ir.get("tests") or [])
     version = ir.get("ir_version")
     if version == 1 or version == 2:
-        return _emit_v1(ir)
+        return _emit_v1(ir, record=record)
     if version == 3:
-        return _emit_v3(ir)
+        return _emit_v3(ir, record=record)
     raise EmitError(f"unsupported ir_version {version!r} (expected 1, 2, or 3)")
 
 
@@ -4881,10 +4977,12 @@ if __name__ == "__main__":
     import pathlib
     import sys
 
-    ir_path, out_dir = sys.argv[1], pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else ".")
+    args = [a for a in sys.argv[1:] if a != "--record"]
+    record = "--record" in sys.argv[1:]
+    ir_path, out_dir = args[0], pathlib.Path(args[1] if len(args) > 1 else ".")
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(ir_path, encoding="utf-8") as handle:
-        modules = emit(json.load(handle))
+        modules = emit(json.load(handle), record=record)
     for name, wat in modules.items():
         (out_dir / f"{name}.wat").write_text(wat, encoding="utf-8")
         print(f"wrote {out_dir / (name + '.wat')}")
