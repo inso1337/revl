@@ -715,6 +715,13 @@ class Parser:
         self.filename = filename
         self.toks = lex(source, filename)
         self.pos = 0
+        # names of `witnessed`-classified externs seen so far (item 243,
+        # docs/design/243-witnessed-externs.md): `effect_form` reads this to
+        # recognise a witnessed call without a site-spelled `undo` — declared
+        # before use, the same convention every witnessed program already
+        # follows. A witnessed extern named after its use site still hits the
+        # ordinary "effect has no `undo`" refusal.
+        self._witnessed_names: set[str] = set()
 
     # -- token helpers
 
@@ -1002,6 +1009,8 @@ class Parser:
             async_ = True
         self.expect("kw", "fn")
         name = self.expect("ident").value
+        if classification == "witnessed":
+            self._witnessed_names.add(name)
         type_params = self._type_param_list()
         self.expect("(")
         params: list[FnParam] = []
@@ -1508,6 +1517,15 @@ class Parser:
         else:
             acquire = self.pure_expr()
         if not self.at("kw", "undo"):
+            # witnessed-inverse externs (item 243, docs/design/243-witnessed-externs.md):
+            # a witnessed call's inverse is the extern's own DECLARED `undo`,
+            # auto-registered by the teardown accumulator on the `Ok` branch —
+            # there is no site-spelled undo, so the grammar admits its omission
+            # here. `self._witnessed_names` is populated by `extern_decl` as
+            # each witnessed extern is parsed (declare-before-use).
+            if isinstance(acquire, ExprCall) and isinstance(acquire.callee, ExprVar) \
+                    and acquire.callee.name in self._witnessed_names:
+                return acquire, None, line, setup
             head = _describe_expr(acquire)
             raise self.err(
                 line,
