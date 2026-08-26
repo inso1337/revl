@@ -1,0 +1,25 @@
+service Sessions {
+  fn get(sid: Str) -> Opt[Str]
+  fn put(sid: Str, user: Str)
+  fn drop_session(sid: Str)
+}
+
+component SessionStore provides sessions: Sessions {
+  config { ttl: Int = 300 }
+
+  let store = effect Map.new() undo store.drop()
+
+  provide sessions {
+    fn get(sid) = store.get(sid)
+
+    fn put(sid, user) {
+      effect store.insert(sid, user)
+      undo   store.remove(sid)
+    }
+
+    fn drop_session(sid) {
+      effect store.remove(sid)
+      undo   store.insert(sid, "__dropped__")
+    }
+  }
+}

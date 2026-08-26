@@ -1,0 +1,17 @@
+service Metrics {
+  fn read(name: Str) -> Opt[Str]
+  fn bump(name: Str, v: Str)
+}
+
+component Metrics provides metrics: Metrics {
+  let store = effect Map.new() undo store.drop()
+
+  provide metrics {
+    fn read(name) = store.get(name)
+
+    fn bump(name, v) {
+      effect store.insert(name, v)
+      undo   store.remove(name)
+    }
+  }
+}

@@ -1,0 +1,150 @@
+{"spec": "01-kv-provider", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 12.04, "cost": 0.0031146, "output_tokens": 626}
+{"spec": "01-kv-provider", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003115, "tokens_to_green": 626}
+{"spec": "01-kv-provider", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 12.6, "cost": 0.000623036, "output_tokens": 665}
+{"spec": "01-kv-provider", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000623, "tokens_to_green": 665}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 13.64, "cost": 0.0036827099999999996, "output_tokens": 829}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003683, "tokens_to_green": 829}
+{"spec": "02-pg-pool", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 10.96, "cost": 0.00308067, "output_tokens": 581}
+{"spec": "02-pg-pool", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003081, "tokens_to_green": 581}
+{"spec": "02-pg-pool", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 143.33, "cost": 0.009655666, "output_tokens": 8698}
+{"spec": "02-pg-pool", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.009656, "tokens_to_green": 8698}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:15: `emit` on a call to `execute`, which is not declared `emission`\n  only calls to `emission` service operations cross the boundary; drop the `emit` marker (G4)", "duration_s": 154.45, "cost": 0.010529668, "output_tokens": 9412}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 32.87, "cost": 0.0019359820000000002, "output_tokens": 2079}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.012466, "tokens_to_green": 11491}
+{"spec": "03-user-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 8.93, "cost": 0.00049416, "output_tokens": 448}
+{"spec": "03-user-cache", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000494, "tokens_to_green": 448}
+{"spec": "03-user-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 35.47, "cost": 0.001838832, "output_tokens": 1977}
+{"spec": "03-user-cache", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001839, "tokens_to_green": 1977}
+{"spec": "03-user-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 56.27, "cost": 0.002115608, "output_tokens": 2306}
+{"spec": "03-user-cache", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002116, "tokens_to_green": 2306}
+{"spec": "04-migrator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 25.76, "cost": 0.0015820950000000002, "output_tokens": 1717}
+{"spec": "04-migrator", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001582, "tokens_to_green": 1717}
+{"spec": "04-migrator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 59.59, "cost": 0.0031346969999999997, "output_tokens": 3485}
+{"spec": "04-migrator", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.003135, "tokens_to_green": 3485}
+{"spec": "04-migrator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 47.35, "cost": 0.002798993, "output_tokens": 3110}
+{"spec": "04-migrator", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002799, "tokens_to_green": 3110}
+{"spec": "05-rate-limiter", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 13.66, "cost": 0.0007477650000000001, "output_tokens": 764}
+{"spec": "05-rate-limiter", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000748, "tokens_to_green": 764}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 22.66, "cost": 0.0008822670000000001, "output_tokens": 902}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000882, "tokens_to_green": 902}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 22.22, "cost": 0.0012251629999999998, "output_tokens": 1307}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001225, "tokens_to_green": 1307}
+{"spec": "06-audit-logger", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 20.02, "cost": 0.0011692800000000002, "output_tokens": 1242}
+{"spec": "06-audit-logger", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001169, "tokens_to_green": 1242}
+{"spec": "06-audit-logger", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 44.88, "cost": 0.0023216240000000004, "output_tokens": 2490}
+{"spec": "06-audit-logger", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002322, "tokens_to_green": 2490}
+{"spec": "06-audit-logger", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 42.14, "cost": 0.002270468, "output_tokens": 2502}
+{"spec": "06-audit-logger", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.00227, "tokens_to_green": 2502}
+{"spec": "07-session-store", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 19.48, "cost": 0.0011484, "output_tokens": 1211}
+{"spec": "07-session-store", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001148, "tokens_to_green": 1211}
+{"spec": "07-session-store", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 36.9, "cost": 0.001868412, "output_tokens": 2022}
+{"spec": "07-session-store", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001868, "tokens_to_green": 2022}
+{"spec": "07-session-store", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 78.47, "cost": 0.004242091, "output_tokens": 4687}
+{"spec": "07-session-store", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.004242, "tokens_to_green": 4687}
+{"spec": "08-feature-flags", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 9.23, "cost": 0.00049938, "output_tokens": 482}
+{"spec": "08-feature-flags", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000499, "tokens_to_green": 482}
+{"spec": "08-feature-flags", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 12.91, "cost": 0.000753942, "output_tokens": 758}
+{"spec": "08-feature-flags", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000754, "tokens_to_green": 758}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 47.38, "cost": 0.002669015, "output_tokens": 2850}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002669, "tokens_to_green": 2850}
+{"spec": "09-warmup-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 24.72, "cost": 0.00145029, "output_tokens": 1541}
+{"spec": "09-warmup-cache", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.00145, "tokens_to_green": 1541}
+{"spec": "09-warmup-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 32.28, "cost": 0.0019136519999999998, "output_tokens": 2057}
+{"spec": "09-warmup-cache", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001914, "tokens_to_green": 2057}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 37.45, "cost": 0.002163458, "output_tokens": 2355}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002163, "tokens_to_green": 2355}
+{"spec": "10-metrics", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 10.17, "cost": 0.0005206950000000001, "output_tokens": 505}
+{"spec": "10-metrics", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000521, "tokens_to_green": 505}
+{"spec": "10-metrics", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 16.32, "cost": 0.0008022270000000001, "output_tokens": 812}
+{"spec": "10-metrics", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000802, "tokens_to_green": 812}
+{"spec": "10-metrics", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 17.93, "cost": 0.000945023, "output_tokens": 987}
+{"spec": "10-metrics", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000945, "tokens_to_green": 987}
+{"spec": "11-outbox", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 12.04, "cost": 0.000616395, "output_tokens": 606}
+{"spec": "11-outbox", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000616, "tokens_to_green": 606}
+{"spec": "11-outbox", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 19.09, "cost": 0.001064097, "output_tokens": 1104}
+{"spec": "11-outbox", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001064, "tokens_to_green": 1104}
+{"spec": "11-outbox", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 30.5, "cost": 0.001663643, "output_tokens": 1804}
+{"spec": "11-outbox", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001664, "tokens_to_green": 1804}
+{"spec": "12-replicator", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 22.93, "cost": 0.0011605799999999998, "output_tokens": 1225}
+{"spec": "12-replicator", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001161, "tokens_to_green": 1225}
+{"spec": "12-replicator", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 77.43, "cost": 0.004335732000000001, "output_tokens": 4858}
+{"spec": "12-replicator", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.004336, "tokens_to_green": 4858}
+{"spec": "12-replicator", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 35.46, "cost": 0.001913768, "output_tokens": 2085}
+{"spec": "12-replicator", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001914, "tokens_to_green": 2085}
+{"spec": "13-provider-consumer-pair", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 19.83, "cost": 0.001106205, "output_tokens": 1160}
+{"spec": "13-provider-consumer-pair", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001106, "tokens_to_green": 1160}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 42.16, "cost": 0.0026118269999999997, "output_tokens": 2874}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002612, "tokens_to_green": 2874}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 56.28, "cost": 0.0029738629999999998, "output_tokens": 3301}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002974, "tokens_to_green": 3301}
+{"spec": "14-health-check", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 23.29, "cost": 0.00127107, "output_tokens": 1356}
+{"spec": "14-health-check", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001271, "tokens_to_green": 1356}
+{"spec": "14-health-check", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 68.87, "cost": 0.004427314, "output_tokens": 4749}
+{"spec": "14-health-check", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.004427, "tokens_to_green": 4749}
+{"spec": "14-health-check", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 95.5, "cost": 0.005399655, "output_tokens": 5968}
+{"spec": "14-health-check", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.0054, "tokens_to_green": 5968}
+{"spec": "15-search-index", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 16.84, "cost": 0.0008512950000000001, "output_tokens": 864}
+{"spec": "15-search-index", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000851, "tokens_to_green": 864}
+{"spec": "15-search-index", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 44.97, "cost": 0.002466653, "output_tokens": 2580}
+{"spec": "15-search-index", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002467, "tokens_to_green": 2580}
+{"spec": "15-search-index", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 139.94, "cost": 0.007897686000000001, "output_tokens": 8850}
+{"spec": "15-search-index", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.007898, "tokens_to_green": 8850}
+{"spec": "16-notifier", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 14.58, "cost": 0.0007616849999999999, "output_tokens": 774}
+{"spec": "16-notifier", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000762, "tokens_to_green": 774}
+{"spec": "16-notifier", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 8.88, "cost": 0.000444657, "output_tokens": 393}
+{"spec": "16-notifier", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000445, "tokens_to_green": 393}
+{"spec": "16-notifier", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 42.6, "cost": 0.001212983, "output_tokens": 1287}
+{"spec": "16-notifier", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001213, "tokens_to_green": 1287}
+{"spec": "17-billing-ledger", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 16.16, "cost": 0.000987885, "output_tokens": 1026}
+{"spec": "17-billing-ledger", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000988, "tokens_to_green": 1026}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 74.21, "cost": 0.004027317000000001, "output_tokens": 4503}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.004027, "tokens_to_green": 4503}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 181.8, "cost": 0.0142854, "output_tokens": 11889}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.014285, "tokens_to_green": 11889}
+{"spec": "18-config-echo", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 8.55, "cost": 0.00048198, "output_tokens": 450}
+{"spec": "18-config-echo", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000482, "tokens_to_green": 450}
+{"spec": "18-config-echo", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 9.42, "cost": 0.0005225220000000001, "output_tokens": 480}
+{"spec": "18-config-echo", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000523, "tokens_to_green": 480}
+{"spec": "18-config-echo", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 6.43, "cost": 0.000331238, "output_tokens": 271}
+{"spec": "18-config-echo", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000331, "tokens_to_green": 271}
+{"spec": "19-lock-manager", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 11.86, "cost": 0.000574635, "output_tokens": 567}
+{"spec": "19-lock-manager", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000575, "tokens_to_green": 567}
+{"spec": "19-lock-manager", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 37.47, "cost": 0.0022072769999999997, "output_tokens": 2427}
+{"spec": "19-lock-manager", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002207, "tokens_to_green": 2427}
+{"spec": "19-lock-manager", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 38.73, "cost": 0.002057753, "output_tokens": 2266}
+{"spec": "19-lock-manager", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002058, "tokens_to_green": 2266}
+{"spec": "20-work-queue", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 10.3, "cost": 0.00054723, "output_tokens": 536}
+{"spec": "20-work-queue", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000547, "tokens_to_green": 536}
+{"spec": "20-work-queue", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 13.2, "cost": 0.0007208820000000001, "output_tokens": 719}
+{"spec": "20-work-queue", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000721, "tokens_to_green": 719}
+{"spec": "20-work-queue", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 20.72, "cost": 0.0011368580000000001, "output_tokens": 1208}
+{"spec": "20-work-queue", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001137, "tokens_to_green": 1208}
+{"spec": "21-two-stage-boot", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 13.35, "cost": 0.0007782150000000001, "output_tokens": 778}
+{"spec": "21-two-stage-boot", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.000778, "tokens_to_green": 778}
+{"spec": "21-two-stage-boot", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 42.89, "cost": 0.001165017, "output_tokens": 1206}
+{"spec": "21-two-stage-boot", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001165, "tokens_to_green": 1206}
+{"spec": "21-two-stage-boot", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 23.64, "cost": 0.001317383, "output_tokens": 1392}
+{"spec": "21-two-stage-boot", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001317, "tokens_to_green": 1392}
+{"spec": "22-cascade", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 58.26, "cost": 0.004030275, "output_tokens": 4501}
+{"spec": "22-cascade", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.00403, "tokens_to_green": 4501}
+{"spec": "22-cascade", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 180.84, "cost": 0.009397189, "output_tokens": 10552}
+{"spec": "22-cascade", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.009397, "tokens_to_green": 10552}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "22-cascade.rvl:24: `emit` on a call to `execute`, which is not declared `emission`\n  only calls to `emission` service operations cross the boundary; drop the `emit` marker (G4)", "duration_s": 186.02, "cost": 0.011261483000000001, "output_tokens": 12746}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 21.77, "cost": 0.0007767070000000001, "output_tokens": 615}
+{"spec": "22-cascade", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.012038, "tokens_to_green": 13361}
+{"spec": "23-dedupe-store", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 38.93, "cost": 0.001474215, "output_tokens": 1600}
+{"spec": "23-dedupe-store", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001474, "tokens_to_green": 1600}
+{"spec": "23-dedupe-store", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 56.12, "cost": 0.0024413069999999998, "output_tokens": 2695}
+{"spec": "23-dedupe-store", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002441, "tokens_to_green": 2695}
+{"spec": "23-dedupe-store", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 42.54, "cost": 0.0014696329999999997, "output_tokens": 1589}
+{"spec": "23-dedupe-store", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.00147, "tokens_to_green": 1589}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "24-normalizing-cache.rvl:10: no builtin method `take` on `Str` \u2014 the stdlib surface is charAt, charCodeAt, checked_div_euclid, checked_div_floor, checked_div_trunc, checked_mod, concat, div_euclid, div_floor, div_trunc, endsWith, has, indexOf, is_alnum, is_alpha, is_digit, is_space, join, keys, length, lookup, mod, push, remove, repeat, set, size, slice, split, startsWith, to_int, to_int32, to_str (docs/stdlib-2.0.md)\n  records carry data, not methods; call functions as `f(x)` (G6)", "duration_s": 42.19, "cost": 0.001517715, "output_tokens": 1629}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 37.58, "cost": 0.001200078, "output_tokens": 984}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.002718, "tokens_to_green": 2613}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 1, "ok": false, "error": "24-normalizing-cache.rvl:5: unknown service `Cache` in `provides` of NormCache", "duration_s": 55.98, "cost": 0.000891837, "output_tokens": 893}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "deepseek-v4-pro", "attempt": 2, "ok": true, "error": null, "duration_s": 23.61, "cost": 0.000305486, "output_tokens": 204}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "deepseek-v4-pro", "summary": true, "green_at": 2, "cost_total": 0.001197, "tokens_to_green": 1097}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 65.72, "cost": 0.002123003, "output_tokens": 2319}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.002123, "tokens_to_green": 2319}
+{"spec": "25-checksum-log", "variant": "v1", "model": "deepseek-v4-pro", "attempt": 1, "ok": true, "error": null, "duration_s": 62.52, "cost": 0.001315005, "output_tokens": 1391}
+{"spec": "25-checksum-log", "variant": "v1", "model": "deepseek-v4-pro", "summary": true, "green_at": 1, "cost_total": 0.001315, "tokens_to_green": 1391}

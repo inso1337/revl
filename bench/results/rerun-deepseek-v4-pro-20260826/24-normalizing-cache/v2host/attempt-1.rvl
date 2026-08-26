@@ -1,0 +1,21 @@
+service Cache {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+fn normalize(key: Str) -> Str {
+  return key.slice(0, 8)
+}
+
+component NormCache provides cache: Cache {
+  let store = effect Map.new() undo store.drop()
+
+  provide cache {
+    fn get(key: Str) = store.get(normalize(key))
+
+    fn put(key: Str, value: Str) {
+      effect store.insert(normalize(key), value)
+      undo   store.remove(normalize(key))
+    }
+  }
+}

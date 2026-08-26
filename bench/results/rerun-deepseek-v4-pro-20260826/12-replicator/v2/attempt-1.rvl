@@ -1,0 +1,39 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Sync {
+  emission fn write(sql: Str)
+}
+
+fn quoteSql(s: Str) -> Str {
+  var out = "'"
+  var i = 0
+  while (i < s.length()) {
+    if (s.charAt(i) == "'") {
+      out = out.concat("''")
+    } else {
+      out = out.concat(s.charAt(i))
+    }
+    i += 1
+  }
+  out = out.concat("'")
+  return out
+}
+
+fn deleteSql(sql: Str) -> Str {
+  return `DELETE FROM replica_sync_log WHERE stmt = ${quoteSql(sql)}`
+}
+
+component Replicator requires primary: Database, replica: Database provides sync: Sync {
+  provide sync {
+    fn write(sql: Str) {
+      emit primary.execute(sql)
+      emit replica.execute(sql)
+           compensate replica.execute(deleteSql(sql))
+    }
+  }
+}
