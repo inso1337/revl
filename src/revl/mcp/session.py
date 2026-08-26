@@ -179,6 +179,25 @@ class Session:
         # single-use. Persists across swaps (the candidate-hash check invalidates a
         # stale entry, so no revocation bookkeeping exists to forget).
         self._ledger: list = []
+        # item 246, Slice 2/3: granted typed `Approval[C]` entries (the language
+        # surface, `await approval` / `with`). Distinct from `_ledger` (the
+        # operator-layer ticket path): each carries a single `capability`, its
+        # component, the reach-closure `candidateHash`, the `session`, an
+        # `expiresAt` from the policy ttl, and the single-use `consumed` bit. The
+        # runtime frame check (`Frame.approval_crossing`) reads these off the
+        # SessionOwner, which the load below seeds from here.
+        self._approval_grants: list = []
+        # a stable identity for THIS session, bound onto every typed approval so a
+        # token minted here is refused in a later session over the same workspace
+        # and WAL (invariant 5, cross-session replay).
+        import uuid  # noqa: PLC0415 — stdlib
+        self._session_id = uuid.uuid4().hex
+        # where the typed-approval WAL is written (item 246: recording makes the
+        # consume-before-fire spend durable). The MCP session opens a WAL only for
+        # a typed-approval composition; None picks a per-session temp path. Set by
+        # the operator/test before load to control the location.
+        self._wal_path: str | None = None
+        self._clock_ms = None   # injectable ms clock (invariant 3); None = wall
 
     # -- plumbing ----------------------------------------------------------
 
@@ -213,11 +232,23 @@ class Session:
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
         self._enforce_sandbox(ir)
+        # item 246, Slice 2: the policy-owned `requires approval` gate. A component
+        # reaching an approval-required capability with no `with` edge is refused
+        # at admission, before any runtime is touched (the same place the sandbox
+        # refuses). Operator-owned — an author cannot waive it by omission.
+        self._enforce_approval_admission(ir)
         # item 246: an enabled approval policy REQUIRES recording — without a WAL
         # there is no durable ticket spend and no answer to "which human decision
         # authorized this crossing"; a policy whose approvals evaporate is worse
-        # than none. Refuse, don't degrade (Decision 2).
-        if self.approval_policy is not None and not record:
+        # than none. Refuse, don't degrade (Decision 2). A policy FILE that names
+        # an approval-required capability enables the gate the same way as the
+        # operator `--approval-policy` flag (Decision 3), so it too requires a WAL.
+        policy_requires_approval = (
+            self.sandbox is not None
+            and getattr(self.sandbox, "requires_approval", None) is not None
+            and self.sandbox.requires_approval())
+        if (self.approval_policy is not None or policy_requires_approval
+                or _ir_has_approval_edges(ir)) and not record:
             raise SessionError(
                 "the approval policy requires recording — load with `record: "
                 "true`. Without a WAL there is no durable approval spend and no "
@@ -245,6 +276,12 @@ class Session:
         # recorder's log lazily — it is opened during load, after this point.
         self._owner = runtime_mod.SessionOwner(
             wal_getter=lambda: self.recorder.wal if self.recorder else None)
+        # item 246, Slice 3: seed the SessionOwner with the typed-approval state
+        # BEFORE the activation body runs, so a `with a` crossing in the activation
+        # body checks and consumes its token against the live ledger (the runtime
+        # frame check). No-op unless the program uses the surface, so a session
+        # without typed approvals is byte-identical.
+        self._configure_owner_approvals(ir)
         runtime_mod.set_session_owner(self._owner)
         try:
             self._run(self._driver._load(ir, self._prepare_module(ir)))
@@ -254,6 +291,119 @@ class Session:
             runtime_mod.clear_session_owner()
         self._record_generation()
         return self.state(drain=True) | ({"recording": True} if record else {})
+
+    def _typed_approval_active(self, ir: dict) -> bool:
+        """Whether the typed-approval frame check enforces for this composition
+        (item 246, Slice 3). True when the program uses the `with a` surface, when
+        an extern declared `requires approval`, or when the bound boundary policy
+        names an approval-required capability. False = the frame check is a
+        passthrough and load is byte-identical."""
+        if self.sandbox is not None and getattr(self.sandbox,
+                                                "requires_approval", None) \
+                and self.sandbox.requires_approval():
+            return True
+        for ext in ir.get("externs") or []:
+            if ext.get("requires_approval"):
+                return True
+        return _ir_has_approval_edges(ir)
+
+    def _approval_candidate_hashes(self, ir: dict) -> dict:
+        """Per-component reach-closure candidate hash for the runtime frame check
+        (invariant 4). Reuses the Slice-1 `ClassMap.candidate_hash` over each
+        component's activation reach closure; a swap that changes any semantic
+        entry in the closure changes the hash, invalidating standing tokens."""
+        from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+        cm = ClassMap(ir)
+        out: dict = {}
+        for comp in ir.get("components") or []:
+            name = comp["name"]
+            sid = f"{name}:activation"
+            reach = cm._reach.get(sid)
+            closure = (reach["closureComponents"] if reach is not None
+                       else {name})
+            out[name] = cm.candidate_hash(closure)
+        return out
+
+    def _configure_owner_approvals(self, ir: dict) -> None:
+        """Push the session's typed-approval state onto the SessionOwner so the
+        runtime frame check can enforce it (item 246, Slice 3)."""
+        owner = self._owner
+        if owner is None or not self._typed_approval_active(ir):
+            return
+        owner.approval_enforced = True
+        owner.session_id = self._session_id
+        owner.approval_candidates = self._approval_candidate_hashes(ir)
+        owner.now_ms = self._now_ms   # the same injectable clock (invariant 3)
+        for grant in self._approval_grants:
+            owner.grant_approval(grant)
+        # item 246, Decision 3: make the consume-before-fire spend durable. The
+        # MCP session otherwise leaves the WAL closed (only `revl run --wal`
+        # opens it); a typed-approval composition needs it open BEFORE the
+        # activation body's crossing, so the `approval-consumed`/`approval-emission`
+        # pair is written and the audit can join them on `requestId`.
+        if self.recorder is not None and self.recorder.wal is None:
+            import tempfile  # noqa: PLC0415
+            path = self._wal_path or (
+                tempfile.gettempdir() + f"/revl-approval-{self._session_id}.wal")
+            self.recorder.open_wal(path, self._generation)
+
+    def grant_language_approval(self, capability: str, component: str,
+                                fields: dict | None = None,
+                                ttl_ms: int | None = None,
+                                candidate_hash: str | None = None) -> dict:
+        """Mint a typed `Approval[C]` grant — the language-surface analogue of
+        `approve_ticket` (item 246, Decision 3). Binds the capability, the
+        component, the live reach-closure candidate hash, the session, and an
+        `expiresAt` from the policy ttl (or the rule's default). Single-use; the
+        runtime frame check consumes it at the crossing. A `approval-granted` WAL
+        record makes it durable."""
+        candidate = candidate_hash
+        if candidate is None and self._class_map is not None:
+            candidate = self._class_map.candidate_hash({component})
+        elif candidate is None and self._owner is not None:
+            candidate = self._owner.approval_candidates.get(component)
+        rule = (self.sandbox.approval_rule_for(capability)
+                if self.sandbox is not None
+                and getattr(self.sandbox, "approval_rule_for", None) else None)
+        if ttl_ms is None and rule is not None:
+            ttl_ms = rule.ttl_ms
+        now = self._now_ms()
+        request_id = "appr:" + str(len(self._approval_grants) + 1) + ":" + capability
+        entry = {
+            "requestId": request_id,
+            "capability": capability,
+            "component": component,
+            "candidateHash": candidate,
+            "session": self._session_id,
+            "fields": dict(fields or {}),
+            "grantedAt": now,
+            "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
+            "consumed": False,
+        }
+        self._approval_grants.append(entry)
+        if self._owner is not None:
+            self._owner.grant_approval(entry)
+            wal = self._approval_wal()
+            if wal is not None:
+                wal.record_approval_granted({
+                    "requestId": request_id, "capability": capability,
+                    "component": component, "candidateHash": candidate,
+                    "session": self._session_id, "fields": entry["fields"]})
+        return dict(entry)
+
+    def _enforce_approval_admission(self, ir: dict) -> None:
+        """item 246, Slice 2: refuse admission for a component reaching a
+        policy-approval-required capability with no covering `with` edge. Set
+        operations over the audit graph, so nothing boots on a breach (the same
+        no-runtime admission the sandbox uses). No-op unless the bound policy
+        names an approval-required capability."""
+        if self.sandbox is None \
+                or getattr(self.sandbox, "approval_rules", None) in (None, ()):
+            return
+        from ..policy import approval_admission, first_error  # noqa: PLC0415
+        error = first_error(approval_admission(self.sandbox, ir))
+        if error is not None:
+            raise SessionError(str(error).split("\n")[0])
 
     def _enforce_sandbox(self, ir: dict) -> None:
         """The agent-sandbox invariant (roadmap item 33). When a `sandbox`
@@ -1225,8 +1375,20 @@ class Session:
                 continue  # candidate-invalidates: the closure changed under it
             if entry["component"] != ticket["component"]:
                 continue  # non-replayable: minted for another component
+            exp = entry.get("expiresAt")
+            if exp is not None and self._now_ms() > exp:
+                continue  # expiring: checked at the crossing, not at mint (inv. 3)
             return entry
         return None
+
+    def _now_ms(self) -> int:
+        """The session clock in ms (item 246, invariant 3). Injectable so expiry
+        is testable without sleeping; defaults to the wall clock."""
+        clock = getattr(self, "_clock_ms", None)
+        if clock is not None:
+            return clock()
+        import time  # noqa: PLC0415
+        return int(time.time() * 1000)
 
     def _consume_approval(self, entry: dict) -> None:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
@@ -1299,6 +1461,20 @@ class Session:
             self._count_posture("c")
             raise ApprovalRequired(ticket)
 
+    def _ticket_ttl_ms(self, ticket: dict) -> int | None:
+        """The tightest ttl a bound policy imposes on this ticket's capabilities,
+        or None (item 246, Slice 2). A ticket covering several capabilities is
+        bounded by the shortest of their `requires approval ttl` rules."""
+        if self.sandbox is None \
+                or getattr(self.sandbox, "approval_rule_for", None) is None:
+            return None
+        ttls = []
+        for cap in ticket.get("capabilities") or []:
+            rule = self.sandbox.approval_rule_for(cap)
+            if rule is not None and rule.ttl_ms is not None:
+                ttls.append(rule.ttl_ms)
+        return min(ttls) if ttls else None
+
     def approve_ticket(self, ticket_hash: str) -> dict:
         """Mint a standing approval bound to an outstanding ticket (Decision 2/3).
         Refuses a hash the server never issued (the outstanding-ticket table) — an
@@ -1313,7 +1489,11 @@ class Session:
                 f"it (or the generation changed and the outstanding-ticket table "
                 f"was replaced). Re-issue the call to get a fresh ticket, then "
                 f"approve that (item 246, the outstanding-ticket table)")
-        import time  # noqa: PLC0415
+        now = self._now_ms()
+        # item 246, Slice 2: the ttl from the policy rule covering this ticket's
+        # capabilities. The tightest (min) ttl over the covered required
+        # capabilities bounds the token; None = session-end at the latest.
+        ttl_ms = self._ticket_ttl_ms(ticket)
         entry = {
             "requestId": ticket["hash"],
             "hash": ticket["hash"],
@@ -1323,9 +1503,10 @@ class Session:
             "method": ticket.get("method"),
             "argsDigest": ticket.get("argsDigest"),
             "kind": ticket.get("kind"),
-            "fields": {},           # the human's evidence (Slice 3 fills this)
-            "grantedAt": time.time(),
-            "expiresAt": None,      # session-end at the latest (Slice 2 adds ttl)
+            "session": self._session_id,   # invariant 5: session-bound
+            "fields": {},           # the human's evidence (the language path fills)
+            "grantedAt": now,
+            "expiresAt": (now + ttl_ms) if ttl_ms is not None else None,
             "consumed": False,
         }
         self._ledger.append(entry)
@@ -1487,6 +1668,21 @@ class Session:
                if self.approval_policy is not None else {}),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+
+def _ir_has_approval_edges(ir: dict) -> bool:
+    """Whether any emit step in the IR carries a `with a` approval edge (item
+    246). Cheap structural walk over the lowered body, used to switch the runtime
+    frame check on only for programs that use the surface (byte-identity else)."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("step") == "emit" and node.get("approval") is not None:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+    return walk(ir.get("components") or [])
 
 
 def _plain(value):

@@ -80,6 +80,7 @@ from .parser import (
     Interp,
     InterceptStmt,
     IsolateStmt,
+    LetApprovalStmt,
     LetEffect,
     LetPatternStmt,
     LetStmt,
@@ -152,6 +153,55 @@ _BUILTIN_METHODS = {
 # the ONE sanctioned overlap (docs/stdlib-2.0.md §Map) — dispatch by receiver
 # kind is what makes it safe.
 _check_method_namespace_disjoint(_BUILTIN_METHODS, "_BUILTIN_METHODS")
+
+
+# item 246: a reserved key on the `types` table (like FNS_KEY/CASES_KEY) carrying
+# the declaration-owned approval facts so `_lower_emit_step` can consult them
+# without a signature change to `_lower_component`. `{"required": {cap, ...},
+# "externs": {name: entry}}`.
+APPROVAL_KEY = "__approval__"
+
+
+def _approval_index(externs: list) -> dict:
+    """The declaration-owned approval facts (item 246). `required` is the set of
+    capability tokens whose crossing needs a covering `with e` edge — a host
+    emission extern contributes its NAME (the token the G8 audit and the boundary
+    policy already use for it). `externs` indexes the lowered entries so a single
+    emit's crossed capabilities can be resolved at the crossing site."""
+    by_name = {e["name"]: e for e in externs}
+    required = {e["name"] for e in externs if e.get("requires_approval")}
+    return {"required": required, "externs": by_name}
+
+
+def _approval_covers(scope: str, token: str) -> bool:
+    """Whether an `Approval[scope]` covers a crossing of capability `token`:
+    `token` is within `scope`'s reach. Exact match, or a glob scope
+    (`prod.*`) matching the token (Decision 3, `C within C'`'s scope)."""
+    from fnmatch import fnmatchcase  # noqa: PLC0415 — stdlib, only on a crossing
+    return scope == token or fnmatchcase(token, scope)
+
+
+def _emit_crossed_caps(node: dict, env: "Env") -> list:
+    """The capability token(s) a single `emit <call>` crosses. A req-target
+    service emission contributes the method's `emission[...]` scope (or `*` when
+    bare); a direct host emission extern contributes its name (or its declared
+    scope). The same tokens the G8 boundary surface names, resolved for ONE
+    crossing so the approval obligation is per-crossing, not per-method."""
+    kind = node.get("kind")
+    target = node.get("target")
+    if kind == "call" and isinstance(target, dict) and target.get("kind") == "req":
+        service = env.requires.get(target.get("name"))
+        svc = env.services.get(service) if service else None
+        spec = svc.methods.get(node.get("method")) if svc is not None else None
+        caps = getattr(spec, "capabilities", None) if spec is not None else None
+        return list(caps) if caps else ["*"]
+    # a direct host-extern emission call: `{"kind": "fn", "name": <extern>}`.
+    if kind == "fn":
+        index = (env.types.get(APPROVAL_KEY) or {}).get("externs") or {}
+        entry = index.get(node.get("name"))
+        if entry is not None and entry.get("class") == "emission":
+            return list(entry.get("capabilities") or [node.get("name")])
+    return []
 
 
 # Integer division and modulo are undefined at zero, and every tier says so
@@ -1734,6 +1784,19 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                 f"emission extern `{decl.name}` cannot declare `undo`",
                 hint="emissions are one-way boundary crossings; use `compensate` for a best-effort cleanup",
             )
+        # item 246: `requires approval` gates a boundary CROSSING, and only an
+        # `emission` extern crosses irreversibly. A witnessed extern is already
+        # reversible (class a, auto-approved), a pure/acquire one crosses nothing,
+        # so the clause is meaningless there — reject the claim, don't drop it.
+        if decl.requires_approval and decl.classification != "emission":
+            raise RevlError(
+                filename, decl.line,
+                f"`{decl.classification}` extern `{decl.name}` cannot declare "
+                f"`requires approval`",
+                hint="only an `emission` extern crosses irreversibly; a witnessed "
+                     "extern is already revertible and a pure/acquire one crosses "
+                     "no boundary, so there is nothing to gate (item 246)",
+            )
         # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
         # witnessed mutation is a transaction, not a bracket: its declared `undo`
         # is auto-registered by the accumulator and replays on abort only. The
@@ -1853,6 +1916,11 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # emission fires at the call (class c). Only an `emission` extern may
             # carry it (checked above), so no non-emission extern's IR changes.
             **({"deferred": True} if decl.deferred else {}),
+            # item 246: the declaration-owned `requires approval` floor. Absent
+            # unless the author wrote it, so every existing extern's IR is
+            # byte-identical. A crossing reaching this extern needs a covering
+            # `with e` edge or lowering refuses (Decision 3).
+            **({"requires_approval": True} if decl.requires_approval else {}),
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads
@@ -3181,6 +3249,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     types[CASES_KEY] = _case_table(types)
     fns = _lower_fns(program, program.filename, types)
     externs = _lower_externs(program, program.filename, types)
+    # item 246: the declaration-owned approval facts, stashed on the type table so
+    # `_lower_emit_step`'s per-crossing obligation can read them with no signature
+    # change. Empty `required` set unless an extern declared `requires approval`,
+    # so a program with none is byte-identical.
+    types[APPROVAL_KEY] = _approval_index(externs)
     # witnessed externs are refused outside effect position (item 243 rule 1):
     # a fn/test body has no teardown accumulator, so the auto-registered inverse
     # would be dropped and the mutation would be silently irreversible.
@@ -4335,6 +4408,10 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                     hint="thread every piece of live state through the one hand-off type "
                          "(a record or Map), docs/state-handoff.md",
                 )
+            # item 246, invariant 5 (non-persistence): a hand-off crosses the
+            # session boundary, so an `Approval[C]` may not be its shape. The
+            # general type well-formedness rule refuses it (with `Async` etc.).
+            check_type_wellformed(filename, stmt.line, stmt.state_type)
             handoff = {"key": stmt.key, "type": stmt.state_type}
             continue
         if isinstance(stmt, RouteStmt):
@@ -4534,6 +4611,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             })
         elif isinstance(stmt, IfStmt):
             body.append(_lower_component_if(stmt, env, callables or set()))
+        elif isinstance(stmt, LetApprovalStmt):
+            body.append(_lower_let_approval(stmt, env))
         elif isinstance(stmt, EmitStmt):
             body.append(_lower_emit_step(stmt, env))
         elif isinstance(stmt, TimerStmt):
@@ -5027,6 +5106,20 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
 
 # ---------------------------------------------------------------- expressions
 
+def _lower_let_approval(stmt: LetApprovalStmt, env: Env) -> dict:
+    """`let a = await approval[C] { fields }` -> the `approval` body step (item
+    246). Binds `a` at type `Approval[C]` and lowers the field expressions (the
+    human's evidence). The suspension itself is the runtime's job; the checker's
+    is to make `a` an unforgeable `Approval[C]` and to record C and the fields."""
+    request = stmt.request
+    fields = [[name, _lower_expr(fexpr, env, mode="pure")]
+              for name, fexpr in request.fields]
+    safe = env.bind_local(stmt.bind, stmt.line)
+    env.type_env[safe] = f"Approval[{request.capability}]"
+    return {"step": "approval", "bind": safe, "capability": request.capability,
+            "fields": fields}
+
+
 def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     node = _lower_expr(stmt.expr, env, mode="emit")
     if not _is_emission_call(node, env):
@@ -5039,7 +5132,61 @@ def _lower_emit_step(stmt: EmitStmt, env: Env) -> dict:
     if stmt.compensate is not None:
         # compensation is teardown-position: emissions are permitted bare (A5)
         step["compensate"] = _lower_expr(stmt.compensate, env, mode="undo")
+    _lower_emit_approval(stmt, node, step, env)
     return step
+
+
+def _approval_scope_of(expr_type: str | None) -> str | None:
+    """The capability scope `C` of a value typed `Approval[C]`, or None when the
+    type is not an approval. `Approval[payment]` -> `"payment"`."""
+    if not isinstance(expr_type, str):
+        return None
+    head, args = parse_type(expr_type)
+    if head == "Approval" and len(args) == 1:
+        return args[0]
+    return None
+
+
+def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> None:
+    """Thread the `with e` edge onto the emit step and enforce the checker
+    obligation (item 246, Decision 3). Two halves:
+
+      * if the emit carries `with e`, `e` must type `Approval[C']`; the edge
+        (`{"capability": C'}`) is recorded so the runtime frame check and the
+        admission walk can read what the crossing was approved for;
+      * every capability this crossing crosses that is DECLARATION-approval-
+        required (an extern that declared `requires approval`) must be covered by
+        that edge, else lowering refuses — the declaration-owned floor that holds
+        with no policy file. Policy-owned requirements are the same shape, checked
+        at admission over the recorded edge (the policy is not known here)."""
+    crossed = _emit_crossed_caps(node, env)
+    edge_scope = None
+    if stmt.approval is not None:
+        appr_node = _lower_expr(stmt.approval, env, mode="pure")
+        appr_type = infer_ir(appr_node, env.type_env, env.types, env.services)
+        edge_scope = _approval_scope_of(appr_type)
+        if edge_scope is None:
+            raise RevlError(
+                env.filename, stmt.line,
+                f"`with` on `emit` expects an `Approval[C]` value, but the "
+                f"expression has type {appr_type or 'unknown'}",
+                hint="thread the value produced by `await approval[C] { ... }` "
+                     "(or an `Approval[C]` parameter) — nothing else produces an "
+                     "approval (item 246)")
+        step["approval"] = {"capability": edge_scope, "expr": appr_node}
+    required = (env.types.get(APPROVAL_KEY) or {}).get("required") or set()
+    for token in crossed:
+        if token not in required:
+            continue
+        if edge_scope is None or not _approval_covers(edge_scope, token):
+            raise RevlError(
+                env.filename, stmt.line,
+                f"crossing capability `{token}` requires approval, but this "
+                f"`emit` carries no covering `with` edge",
+                hint=f"acquire an approval — `let a = await approval[{token}] "
+                     f"{{ ... }}` — and thread it: `emit … with a` (item 246, "
+                     f"Decision 3, unreachable-without)",
+                code="G4", category="approval")
 
 
 def _lower_timer_step(stmt: TimerStmt, env: Env) -> dict:
