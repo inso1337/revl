@@ -264,6 +264,16 @@ class _ComponentEmitter:
         # the value engine: the *same* renderer the v3 `fn` tier uses
         self.v3 = _V3Emitter(types or {}, functions or [], externs or [], [])
         self.externs = {ext.get("name"): ext for ext in (externs or [])}
+        # item 243 Slice 2b (docs/design/teardown-contract.md): witnessed
+        # externs by name, so an acquisition step can be recognised as a
+        # TRANSACTIONAL effect and register the extern's own DECLARED undo
+        # (never a site-spelled one) into the accumulator. Absent/empty for
+        # every program with no witnessed extern, so their emission is
+        # unaffected by this table's existence.
+        self.witnessed = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "witnessed"
+        }
         self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
         self.needed_fns: list[str] = []   # top-level fns this component calls
         self.needed_externs: list[str] = []  # @wasm externs this component calls
@@ -310,6 +320,57 @@ class _ComponentEmitter:
             payload = _wat_string(json.dumps(self.intercept, sort_keys=True))
             lines.append(f'  (@custom "revl:intercept" "{payload}")')
         return lines
+
+    def _teardown_section(self, abort_chain: list[dict[str, Any]],
+                          phase1_count: int) -> list[str]:
+        """The `revl:teardown` custom section (item 243 Slice 2b): a STATIC,
+        compile-time index of every activation-registered `transactional`/
+        `compensation` entry, by registration seq, KIND, and DISPATCH
+        position (its index in `abort_chain`, i.e. the `$__dstep` value
+        `deactivate_step` sees it at on an abort) — a first-party host driver
+        needs the dispatch position, not just the seq, to tell a Phase-1
+        `transactional` trap (`restore-residue`) from a Phase-1 `bracket`
+        trap (`bracket-fault`, contract-grade) apart at the SAME call site,
+        since brackets carry no seq of their own here (see below).
+
+        This is the honest ceiling of a "WAL descriptor" on this tier, stated
+        plainly rather than faked: the contract's full descriptor (docs/design/
+        teardown-contract.md "WAL descriptor") captures runtime ARGUMENT/
+        WITNESS VALUES at registration, durable enough for `revl recover` to
+        re-issue after a crash. Those values live in this component's own
+        linear memory at runtime; the wasm tier's teardown accumulator is
+        compiled state with "zero host bookkeeping" (backends/wasm/README.md),
+        not a host-tracked object graph, so there is no channel here that
+        durably persists a runtime value without a host choosing to add one.
+        What compile time DOES know — which entries exist, their seq, kind and
+        dispatch position — is exactly what a host wanting to build a real WAL
+        on this tier needs as its starting index; this section is that index,
+        not a claim of durability this tier does not carry. Absent for every
+        component with no transactional/compensation entry, so its emission is
+        unaffected by this section's existence.
+        """
+        descriptors = [
+            {"seq": entry["index"], "entry": entry["kind"], "dispatch": k}
+            for k, entry in enumerate(abort_chain)
+            if entry["kind"] in ("transactional", "compensation")
+        ]
+        if not descriptors:
+            return []
+        # phase1Count/phase2Count locate the `deactivate_step` dispatch split
+        # a first-party host driver needs to arm epoch/fuel around ONLY the
+        # Phase-2 (compensation) calls — the K-order is always [bracket +
+        # transactional, LIFO][compensation, LIFO]. `phase1Count` is passed
+        # in (the caller already knows it from building `abort_chain`);
+        # `phase2Count` is the remainder.
+        phase2_count = len(abort_chain) - phase1_count
+        doc = {
+            "record": "discharge-descriptor",
+            "entries": descriptors,
+            "phase1Count": phase1_count,
+            "phase2Count": phase2_count,
+        }
+        payload = _wat_string(json.dumps(doc, sort_keys=True))
+        return [f'  (@custom "revl:teardown" "{payload}")']
 
     # -- service boundary widths ---------------------------------------------
 
@@ -858,6 +919,43 @@ class _ComponentEmitter:
         for inner in sorted(self._called_names(self.fn_by_name[name].get("body"), set())):
             self._need_fn(inner)
 
+    def _witnessed_extern(self, acquire: Any) -> dict | None:
+        """The witnessed extern descriptor a step's acquisition calls, or None
+        (item 243 Slice 2b). A witnessed effect is spelled as an effect-position
+        call to a `witnessed` extern; a component step call renders as an IR
+        `fn` node, so matching its name against the witnessed table is how the
+        emitter tells a transaction from an ordinary bracket — the exact test
+        the python reference tier uses (backends/python/emit.py), so both
+        tiers recognise the same programs. Absent/no-match for every other
+        acquisition, so non-witnessed effects emit byte-identically to before."""
+        if not self.witnessed or not isinstance(acquire, dict):
+            return None
+        if acquire.get("kind") != "fn":
+            return None
+        return self.witnessed.get(acquire.get("name"))
+
+    def _register_witnessed_calls(self, expr: Any) -> None:
+        """Plan every top-level `fn`/@wasm-extern this witnessed extern's
+        DECLARED `undo` reaches, exactly as `_to_v3`'s `kind == "fn"` branch
+        does for an ordinary body call — the undo lives on the extern
+        declaration, not in this component's own body, so `_plan`'s body walk
+        never finds it on its own; every witnessed acquisition site calls this
+        before anything renders."""
+        for name in sorted(self._called_names(expr, set())):
+            if name in self.fn_by_name:
+                self._need_fn(name)
+            elif name in self.externs:
+                ext = self.externs[name]
+                if _extern_wasm_body(ext) is None:
+                    available = ", ".join(sorted((ext.get("bodies") or {}))) or "none"
+                    raise EmitError(
+                        f"{self.name}: a witnessed extern's `undo` calls "
+                        f"`{name}`, which has no @wasm body — not portable to "
+                        f"this backend (available: {available})"
+                    )
+                if name not in self.needed_externs:
+                    self.needed_externs.append(name)
+
     def _plan(self) -> None:
         """Compute the call closure and pool the string literals it can reach.
 
@@ -869,6 +967,18 @@ class _ComponentEmitter:
             self._need_fn(name)
         roots: list[Any] = [body]
         roots.extend(self.fn_by_name[name].get("body") for name in self.needed_fns)
+        # item 243 Slice 2b: every witnessed extern this body actually
+        # acquires contributes its declared `undo`'s call closure and string
+        # literals too — the undo is not reachable from `body` itself (it
+        # lives on the extern's own declaration), so it is planned here,
+        # before `_collect_string_literals` runs.
+        for step in body:
+            if step.get("step") not in ("let-effect", "effect"):
+                continue
+            wit = self._witnessed_extern(step.get("acquire"))
+            if wit is not None and wit.get("undo") is not None:
+                self._register_witnessed_calls(wit["undo"])
+                roots.append(wit["undo"])
         self.v3._collect_string_literals(roots)
 
     # -- component -----------------------------------------------------------
@@ -879,13 +989,35 @@ class _ComponentEmitter:
         self._open_function()
         scope: dict[str, str] = {}
         segments: list[str] = []          # activate_step bodies, in order
-        inverses: list[tuple[int, str]] = []  # (segment index completed, wat)
+        # item 243 Slice 2b (docs/design/teardown-contract.md): one LIFO
+        # entry per registered inverse/compensation, tagged with its kind —
+        # "bracket" (acquire, replays on commit AND abort), "transactional"
+        # (witnessed, abort-only replay + commit discharge, Ok-conditional —
+        # over ACTIVATION-REGISTERED entries only; the wasm accumulator is
+        # fixed at activation, so there is no method-time half to cover here)
+        # or "compensation" (abort-only, Phase 2, best-effort). `_module`
+        # reads this single list to build the two-phase `deactivate` — there
+        # is no second list, matching the contract's "one LIFO disposer
+        # stack" (243 Slice 2a decision 2, carried to this tier).
+        entries: list[dict[str, Any]] = []
         provide_funcs: list[str] = []
 
         for step in self.ir.get("body") or []:
             kind = step.get("step")
             if kind in ("let-effect", "effect"):
                 seg = []
+                wit = self._witnessed_extern(step.get("acquire"))
+                if wit is not None:
+                    index = len(segments) + 1
+                    bind = (_ident(step.get("bind"), f"{where}: bind")
+                            if kind == "let-effect" else None)
+                    wit_lines, entry_wat = self._witnessed_effect_step(
+                        index, step["acquire"], wit, scope, where, bind)
+                    seg.extend(wit_lines)
+                    entries.append({"index": index, "kind": "transactional",
+                                    "wat": entry_wat})
+                    segments.append("\n      ".join(seg))
+                    continue
                 if kind == "let-effect":
                     bind = _ident(step.get("bind"), f"{where}: bind")
                     glob = f"$g_{bind}"
@@ -903,13 +1035,15 @@ class _ComponentEmitter:
                 else:
                     seg.append(self._statement(step["acquire"], scope, where))
                 index = len(segments) + 1
-                inverses.append((index, self._statement(step["undo"], scope, where)))
+                entries.append({"index": index, "kind": "bracket",
+                                "wat": self._statement(step["undo"], scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "emit":
                 seg = [self._statement(step["expr"], scope, where)]
                 index = len(segments) + 1
                 if step.get("compensate") is not None:
-                    inverses.append((index, self._statement(step["compensate"], scope, where)))
+                    entries.append({"index": index, "kind": "compensation",
+                                    "wat": self._statement(step["compensate"], scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "await":
                 # A1 on the substrate: the segment launches an async host op;
@@ -954,7 +1088,93 @@ class _ComponentEmitter:
             self.activation_locals.append(self.v3._tmp)
             # deeper scratch pointers minted by nested allocations in a segment
             self.activation_locals.extend(sorted(self.v3._tmp_extra))
-        return self._module(segments, inverses, provide_funcs)
+        return self._module(segments, entries, provide_funcs)
+
+    def _witnessed_effect_step(self, index: int, acquire: Any, ext: dict,
+                               scope: dict[str, str], where: str,
+                               bind: str | None) -> tuple[list[str], str]:
+        """Emit a witnessed effect (item 243 Slice 2b) for one activation step:
+        run the mutation, and on `Ok` register the extern's DECLARED inverse as
+        a TRANSACTIONAL entry carrying the `Ok` witness. On `Err` nothing
+        registers (Ok-conditional, 243 rule 3/Slice-1 note 1). Returns the
+        segment's own lines and the (already Ok-flag-guarded) inverse WAT
+        `_module` folds into Phase 1 of the two-phase `deactivate`.
+
+        Unlike a bracket, whose undo is site-spelled and always registers when
+        its step ran, a witnessed inverse is the EXTERN'S OWN declared `undo`
+        (never a site-spelled one — the accumulator owns it), and registration
+        depends on a value only known at runtime (which branch of the Result
+        the mutation returned). Two globals per entry carry what a bracket
+        needs no extra storage for: `$g_wit_val_<n>` holds the Ok payload (the
+        witness) across the activate_step/deactivate call boundary (a wasm
+        local does not survive between exported-function calls — only a
+        global does, the same reason an ordinary `let` binding uses one), and
+        `$g_wit_flag_<n>` records whether Ok was actually returned, since a
+        step that ran is not the same as a mutation that registered one.
+        """
+        result_value = self._lower(acquire, scope, {}, where)
+        if _wasm_ty(result_value.ty) != "i32":
+            raise EmitError(
+                f"{where}: a witnessed extern's Result is not a linear-memory "
+                f"value on this tier — {result_value.ty!r} was not expected"
+            )
+        witness_ty = ext.get("witness")
+        witness_wty = _wasm_ty(witness_ty)
+        ok_tag = self.v3._tag_of(result_value.ty, "Ok")
+
+        # a scratch local: it only needs to survive within THIS activate_step
+        # call (the tag check + payload extraction happen right here), unlike
+        # the witness/flag globals below, which must survive to `deactivate`,
+        # a later, separate exported-function call.
+        tmp = f"__revl_wit{index}"
+        self.extra_locals.add(tmp)
+
+        wit_val_glob = f"$g_wit_val_{index}"
+        wit_flag_glob = f"$g_wit_flag_{index}"
+        self.globals.append((wit_val_glob, witness_wty))
+        self.globals.append((wit_flag_glob, "i32"))
+
+        lines = [f"(local.set ${tmp} {result_value.wat})"]
+        # tagged-cell layout: `[u32 tag][pad][slot payload]` (docs/wasm-
+        # capabilities.md); the payload sits one `_SLOT` past the cell start.
+        payload_addr = f"(i32.add (local.get ${tmp}) (i32.const {_SLOT}))"
+        payload_load = self.v3._slot_load(payload_addr, witness_ty)
+        lines.append(
+            f"(if (i32.eq (i32.load (local.get ${tmp})) (i32.const {ok_tag}))\n"
+            f"      (then\n"
+            f"      (global.set {wit_val_glob} {payload_load})\n"
+            f"      (global.set {wit_flag_glob} (i32.const 1))))"
+        )
+        if bind is not None:
+            glob = f"$g_{bind}"
+            self.globals.append((glob, "i32"))
+            lines.append(f"(global.set {glob} (local.get ${tmp}))")
+            scope[bind] = f"(global.get {glob})"
+
+        # The declared `undo` is planned in `_plan` (call closure + string
+        # literals); it is a top-level pure expression (docs/design/243-
+        # witnessed-externs.md "Slice 1 as implemented" note 1), so its only
+        # free name is `result` — the Ok witness this entry captured, never
+        # the calling component's own scope. `ext["undo"]` is already in the
+        # v3/pure-fn dialect (`_lower_pure_expr` on the frontend), so it is
+        # rendered directly through the value engine, bypassing `_to_v3`.
+        undo_scope = _Scope({"result": f"(global.get {wit_val_glob})"},
+                            {"result": witness_ty})
+        undo_value = self.v3._expr(ext["undo"], undo_scope, where)
+        undo_wat = (undo_value.wat if _is_unit_type(undo_value.ty)
+                   else f"(drop {undo_value.wat})")
+        # discharge (commit) drops this reference by simply never reading it
+        # again — this tier's teardown accumulator is compiled state, not a
+        # host-tracked object graph, so there is nothing further to release;
+        # the witness global goes out of scope with the rest of the instance
+        # when the fiber is unplugged (witness GC, stated honestly: no
+        # separate free is needed or possible on this tier).
+        guarded_undo = (
+            f"(if (i32.eq (global.get {wit_flag_glob}) (i32.const 1))\n"
+            f"      (then\n"
+            f"      {undo_wat}))"
+        )
+        return lines, guarded_undo
 
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
         key = _ident(step.get("name"), f"{where}: provide key")
@@ -1090,7 +1310,7 @@ class _ComponentEmitter:
             raise EmitError(f"{where}: provision {key!r} is missing method {sorted(missing)[0]!r}")
         return funcs
 
-    def _module(self, segments: list[str], inverses: list[tuple[int, str]], provide_funcs: list[str]) -> str:
+    def _module(self, segments: list[str], entries: list[dict[str, Any]], provide_funcs: list[str]) -> str:
         # the activation function's local widths come from the engine's
         # per-function record, and `_emit_function` below resets it — so render
         # the declarations before the `fn`s are emitted, not after
@@ -1105,7 +1325,7 @@ class _ComponentEmitter:
                        for name in self.needed_externs]
         fn_defs = extern_defs + fn_defs
         rendered = "\n".join(provide_funcs + fn_defs + segments
-                             + [wat for _index, wat in inverses])
+                             + [entry["wat"] for entry in entries])
         # linear memory is pulled in only when something actually reaches for
         # it, so a scalar-only component emits no memory at all
         needs_memory = (self.boundary_uses_memory
@@ -1117,10 +1337,52 @@ class _ComponentEmitter:
         # an `$int_div_floor` that was never defined.)
         needs_arith = any(token in rendered for token in _ARITH_TOKENS)
 
+        # the two `deactivate_step` dispatch chains (docs/design/teardown-
+        # contract.md): computed here, once, so both the `revl:teardown`
+        # custom section (which needs each entry's DISPATCH position, not
+        # just its registration seq) and the two-phase `deactivate_step` body
+        # further down read the exact same K-ordering.
+        #
+        # Committed: only `bracket` entries replay (LIFO) — release still
+        # happens on a clean unload. `transactional`/`compensation` entries
+        # DISCHARGE: they are simply absent from this chain, so a clean
+        # commit never even reaches for their inverse (witness GC — there is
+        # nothing further to free on this tier; the witness globals go out of
+        # scope with the rest of the instance when the fiber is unplugged).
+        #
+        # Aborted: Phase 1 is `bracket` + `transactional` entries LIFO, in
+        # their ORIGINAL INTERLEAVED registration order (never grouped by
+        # kind — the contract's "LIFO over the whole stack"); Phase 2 is
+        # `compensation` entries LIFO, strictly after every Phase-1 entry.
+        # `transactional`'s own wat is already guarded by its Ok-registration
+        # flag (`_witnessed_effect_step`), so an entry whose mutation actually
+        # returned `Err` is a correctly-skipped no-op here, not a residue.
+        commit_chain = [entry for entry in reversed(entries) if entry["kind"] == "bracket"]
+        phase1 = [entry for entry in reversed(entries) if entry["kind"] in ("bracket", "transactional")]
+        phase2 = [entry for entry in reversed(entries) if entry["kind"] == "compensation"]
+        abort_chain = phase1 + phase2
+        # Additive gate (item 243 Slice 2b): a program with no `witnessed`
+        # extern and no `emit ... compensate ...` step has nothing for the
+        # commit/abort split to distinguish — every entry is a `bracket`, and
+        # a bracket replays on commit AND abort alike, so `commit_chain` and
+        # `abort_chain`'s Phase-1 half are the same LIFO list either way. The
+        # new scaffold ($__committed/$__dstep globals, `committed()`,
+        # `deactivate_step()`) is therefore emitted ONLY when this component
+        # actually registers a `transactional`/`compensation` entry; every
+        # other component's `deactivate` renders EXACTLY as it did before
+        # this slice (the single flat LIFO pass), matching the additive
+        # discipline the go/rust Slice-2b landings already established
+        # (go's `_COMP_NEEDS_TEARDOWN`, rust's `_body_has_witnessed`/
+        # `_body_has_compensate`) — a program that never uses the feature
+        # never sees a byte of it in its emitted output.
+        needs_teardown_scaffold = any(
+            entry["kind"] in ("transactional", "compensation") for entry in entries)
+
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
                  "(module"]
         lines.extend(self._realm_sections())
+        lines.extend(self._teardown_section(abort_chain, len(phase1)))
         for (key, op), (param_wtys, result_wty) in sorted(self.imports.items()):
             # the coeffect ABI is one width per declared param/return: an `Int`
             # is an i64 *value*, a Str/List/record/variant/Opt/Result is an i32
@@ -1164,6 +1426,22 @@ class _ComponentEmitter:
                 lines.append(f'  (data (i32.const {offset}) "{_wat_bytes(data)}")')
             lines.append(f"  (global $__hp (mut i32) (i32.const {self.v3.heap_start}))")
         lines.append("  (global $__step (mut i32) (i32.const 0))")
+        if needs_teardown_scaffold:
+            # item 243 Slice 2b (docs/design/teardown-contract.md): the
+            # abort-vs-commit discriminator. The py reference tier reads "did
+            # `drain` run" (backends/python/runtime.py, `Frame._committed`);
+            # this tier's analogue is "did the body run to every segment" —
+            # `activate_step` flips it the moment the LAST segment completes
+            # without trapping (below), which a mid-activation trap never
+            # reaches, so an abort leaves it 0 exactly like an unreached
+            # `drain` does on py.
+            lines.append("  (global $__committed (mut i32) (i32.const 0))")
+            # the `deactivate_step` dispatch cursor (mirrors `$__step`'s role
+            # for `activate_step`): one entry processed per call, so a
+            # first-party host driver can catch a trap per entry and bound a
+            # compensation's epoch/fuel individually (see `deactivate_step`
+            # below).
+            lines.append("  (global $__dstep (mut i32) (i32.const 0))")
         for glob, glob_ty in self.globals:
             zero = "i64.const 0" if glob_ty == "i64" else "i32.const 0"
             lines.append(f"  (global {glob} (mut {glob_ty}) ({zero}))")
@@ -1177,21 +1455,121 @@ class _ComponentEmitter:
             lines.append("      (then")
             lines.append(f"      {seg}")
             lines.append(f"      (global.set $__step (i32.const {i + 1}))")
+            if more == 0 and needs_teardown_scaffold:
+                # the body ran to its last segment without trapping — a clean
+                # unload, an implicit commit until item 245's explicit commit
+                # UX lands (docs/design/teardown-contract.md "Commit path").
+                # A mid-activation trap never reaches this line, so an abort
+                # leaves `$__committed` at its default 0. Gated: nothing
+                # reads `$__committed` unless this component actually
+                # registers a transactional/compensation entry (see
+                # `needs_teardown_scaffold`, above).
+                lines.append("      (global.set $__committed (i32.const 1))")
             lines.append(f"      (return (i32.const {more}))))")
+        if total == 0 and needs_teardown_scaffold:
+            # an empty body has nothing to complete, so it is trivially a
+            # clean commit the first time `activate_step` is called.
+            lines.append("    (global.set $__committed (i32.const 1))")
         lines.append("    (i32.const 0))")
 
-        # deactivate: the accumulator — completed steps' inverses, LIFO
-        lines.append(f'  (func (export "deactivate"){activation_decls}')
-        if inverses:
-            for index, wat in reversed(inverses):
-                lines.append(f"    (if (i32.ge_s (global.get $__step) (i32.const {index}))")
-                lines.append("      (then")
-                lines.append(f"      {wat}))")
-        else:
-            lines.append("    nop")
-        lines.append("  )")
+        if not needs_teardown_scaffold:
+            # the legacy single-pass accumulator, byte-identical to every
+            # emission before this slice: no witnessed/compensation entry
+            # means every entry is a `bracket`, and a bracket replays on
+            # commit and abort alike, so there is nothing for a commit/abort
+            # split (or a `committed()` export, which nothing here would ever
+            # need to call) to distinguish.
+            lines.append(f'  (func (export "deactivate"){activation_decls}')
+            if entries:
+                for entry in reversed(entries):
+                    lines.append(f"    (if (i32.ge_s (global.get $__step) (i32.const {entry['index']}))")
+                    lines.append("      (then")
+                    lines.append(f"      {entry['wat']}))")
+            else:
+                lines.append("    nop")
+            lines.append("  )")
+            lines.extend(provide_funcs)
+            return self._tail(lines, needs_memory, needs_arith, rendered, fn_defs)
+
+        # committed: lets a first-party host driver read the commit/abort
+        # discriminator directly, rather than re-deriving it from `$__step`
+        # against the segment count it would otherwise have to track itself.
+        lines.append('  (func (export "committed") (result i32) (global.get $__committed))')
+
+        # deactivate_step / deactivate: the two-phase accumulator (docs/
+        # design/teardown-contract.md). One LIFO stack, three entry kinds
+        # (bracket/transactional/compensation); `deactivate_step` processes
+        # exactly one entry per call — the same per-call idiom `activate_step`
+        # already uses — so a first-party host driver can: (a) catch a trap
+        # per entry and continue to the next (Phase-1 "continue-and-record",
+        # as far as core wasm's no-exceptions model allows: a trap still
+        # aborts whatever is LEFT of the CURRENT entry's own call, but not the
+        # entries before or after it, unlike the old single-pass `deactivate`
+        # where one trap silently dropped everything downstream); and (b) arm
+        # a wasmtime epoch deadline or fuel budget around exactly one
+        # compensation call at a time (the per-tier bound table: "wasm: guest
+        # code yes [preemption]" — a real capability once a host arms it,
+        # which is what this per-entry export makes possible; host IMPORTS in
+        # flight are still not preemptible, stated honestly, since an epoch/
+        # fuel check only fires in guest code). `commit_chain`/`abort_chain`
+        # are computed once, above, next to `_teardown_section`.
+
+        def _dispatch(items: list[dict[str, Any]]) -> list[str]:
+            out: list[str] = []
+            total_items = len(items)
+            for k, entry in enumerate(items):
+                more = 1 if k + 1 < total_items else 0
+                out.append(f"      (if (i32.eq (global.get $__dstep) (i32.const {k}))")
+                out.append("        (then")
+                # advance the cursor BEFORE running the entry: core wasm has
+                # no catch, so a trap inside `entry['wat']` aborts this call
+                # with `$__dstep` already past this slot. That is what makes
+                # a first-party host driver's per-call retry land on the NEXT
+                # entry rather than re-attempting the one that just failed —
+                # continue-and-record (docs/design/teardown-contract.md),
+                # achieved by the caller, one call per entry, never by this
+                # function looping past its own trap.
+                out.append(f"        (global.set $__dstep (i32.const {k + 1}))")
+                out.append(f"        (if (i32.ge_s (global.get $__step) (i32.const {entry['index']}))")
+                out.append("          (then")
+                out.append(f"          {entry['wat']}))")
+                out.append(f"        (return (i32.const {more}))))")
+            return out
+
+        lines.append(f'  (func $deactivate_step (export "deactivate_step") (result i32){activation_decls}')
+        lines.append("    (if (global.get $__committed)")
+        lines.append("      (then")
+        lines.extend(_dispatch(commit_chain))
+        lines.append("    ))")
+        lines.append("    (if (i32.eqz (global.get $__committed))")
+        lines.append("      (then")
+        lines.extend(_dispatch(abort_chain))
+        lines.append("    ))")
+        lines.append("    (i32.const 0))")
+
+        # deactivate: the legacy single-call teardown hook (unchanged export
+        # name/signature, so an existing host — e.g. cordis-wasm's
+        # `Runtime.unplug` — keeps working with no changes of its own): drive
+        # `deactivate_step` to completion in one call. A trap from any entry
+        # still aborts the rest of THIS call (core wasm has no catch/continue
+        # across an internal `call`), exactly the substrate's pre-existing
+        # all-or-nothing limitation — restated here, not newly introduced by
+        # the phase split — so a host that wants genuine continue-and-record
+        # or per-compensation epoch/fuel bounding should drive
+        # `deactivate_step` itself instead of calling this export.
+        lines.append('  (func (export "deactivate")')
+        lines.append("    (loop $__teardown")
+        lines.append("      (if (call $deactivate_step) (then (br $__teardown)))))")
 
         lines.extend(provide_funcs)
+        return self._tail(lines, needs_memory, needs_arith, rendered, fn_defs)
+
+    def _tail(self, lines: list[str], needs_memory: bool, needs_arith: bool,
+             rendered: str, fn_defs: list[str]) -> str:
+        """The helper preamble + closing paren every module shares, regardless
+        of which `deactivate`/`deactivate_step` shape `_module` built above —
+        factored out so the gated (no witnessed/compensation entry) early
+        return and the normal path render this identically."""
         if needs_memory:
             lines.extend(self.v3._helper_funcs())
             # `$f64_to_str` is emitted only when a Float is actually rendered,
