@@ -173,7 +173,7 @@
       "returns": "Str",
       "bodies": {
         "py": " import json; return json.dumps(v) ",
-        "ts": " return JSON.stringify(v) "
+        "ts": "\n    // `Int` maps to JS `bigint` (TYPE_MAP), which `JSON.stringify` refuses\n    // (\"Do not know how to serialize a BigInt\"). A replacer parks each bigint\n    // behind a quoted sentinel carrying its exact decimal digits, then the\n    // quotes are stripped so those digits land as a BARE JSON number - full\n    // i64 precision (a plain Number() cast would lose it past 2^53), matching\n    // the py tier `json.dumps`. With no bigint present the fast path returns\n    // the builtin result unchanged.\n    const marks: string[] = [];\n    const wire = JSON.stringify(v, (_k, x) => typeof x === \"bigint\" ? \"@@revlBigInt:\" + (marks.push(x.toString()) - 1) + \"@@\" : x);\n    return marks.length === 0 ? wire : wire.replace(/\"@@revlBigInt:(\\d+)@@\"/g, (_m, i) => marks[Number(i)]);\n  "
       }
     }
   ]
