@@ -1,0 +1,30 @@
+// Roadmap item 279: a JSON field named by a host reserved word (`function`)
+// must stay reachable on a DYNAMIC (`json_parse` / `Any`) value.
+//
+// The reserved-word sanitizer (item 165's append-`_`) is correct for
+// revl-declared bindings — revl controls both the declaration and every use.
+// A dynamic value carries the RAW key the JSON data has, so renaming the ACCESS
+// (`tc.function` -> `tc.function_`) read `undefined` while the runtime object
+// still held `function`. The py tier reads the raw key and worked, so the same
+// admitted program diverged between tiers (a compiles-implies-runs violation of
+// the tier-portability form).
+//
+// This is the lighthouse workload's model-provider adapter, distilled: parse an
+// OpenAI-compatible tool call whose entry carries a `function` key.
+pub extern pure fn json_parse(s: Str) -> Any
+  = @py { import json; return json.loads(s) }
+  = @ts { return JSON.parse(s) }
+
+// Dotted member access on a dynamic value: `tc.function.name`.
+fn tool_fn_name(s: Str) -> Str {
+  let tc: Any = json_parse(s)
+  return tc.function.name
+}
+
+// The documented escape hatch — a STRING index on a dynamic value:
+// `tc["function"].name`. It must reach the raw key, not compile to
+// `tc[Number("function")]` (`tc[NaN]`, the List-index path).
+fn tool_fn_name_idx(s: Str) -> Str {
+  let tc: Any = json_parse(s)
+  return tc["function"].name
+}

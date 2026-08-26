@@ -239,6 +239,37 @@ def _string(value: str) -> str:
     return json.dumps(value)
 
 
+def _prop_key(name: object, role: str) -> str:
+    """A record PROPERTY KEY as it appears in an object literal or interface.
+
+    A JS reserved word is emitted as its RAW quoted key (`"function":`), NOT
+    the `_mangle`d bare identifier (`function_:`), so the key a revl-declared
+    record carries at runtime is the SAME string a dynamic JSON value carries
+    (item 279). `_mangle` is right for bindings — where revl controls both the
+    declaration and every use — but a record field also has to match runtime
+    data that a `json_parse` produced with the unrenamed key, so the two
+    representations must agree on the raw word. A non-reserved, valid-identifier
+    name stays a bare key, so no existing program changes its output."""
+    if isinstance(name, str) and name in JS_RESERVED:
+        return _string(name)
+    return _ident(name, role)
+
+
+def _member(target: str, name: object, role: str, *, optional: bool = False) -> str:
+    """Read property `name` off `target`.
+
+    A JS reserved word is reached through a bracket access with the raw key
+    (`obj["function"]`), the counterpart to `_prop_key`: it targets the same
+    unrenamed key, so it reaches both a revl-declared record and a dynamic
+    JSON value whose runtime key is the raw word (item 279). Bare dot access
+    is kept for every ordinary field, so no existing program changes."""
+    if isinstance(name, str) and name in JS_RESERVED:
+        bracket = f"?.[{_string(name)}]" if optional else f"[{_string(name)}]"
+        return f"{target}{bracket}"
+    dot = "?." if optional else "."
+    return f"{target}{dot}{_ident(name, role)}"
+
+
 def _literal(value: object) -> str:
     if value is None:
         return "null"
@@ -467,7 +498,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
 
     if kind == "record":
         fields = ", ".join(
-            f"{_ident(k, 'record field')}: {_expr(v, ctx)}"
+            f"{_prop_key(k, 'record field')}: {_expr(v, ctx)}"
             for k, v in node.get("fields") or []
         )
         return "{" + fields + "}"
@@ -477,7 +508,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # then let the updated fields override it — a fresh object either way
         base = _expr(node.get("base"), ctx)
         overrides = ", ".join(
-            f"{_ident(k, 'record field')}: {_expr(v, ctx)}"
+            f"{_prop_key(k, 'record field')}: {_expr(v, ctx)}"
             for k, v in node.get("updates") or []
         )
         return "{ ..." + base + (f", {overrides}" if overrides else "") + " }"
@@ -696,16 +727,25 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"{target}.{_ident(node.get('name'), 'field')}"
+        return _member(target, node.get("name"), "field")
 
     if kind == "index":
         target_node = node.get("target")
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
+        # A STRING-literal index is a property read on a dynamic/host value
+        # (`tc["function"]`), not a List index — the checker only admits it on
+        # an `Any`/host receiver, never on a `List`. Coercing it through
+        # `Number(...)` (the List path) produced `tc[Number("function")]`
+        # (`tc[NaN]`, always undefined). Emit the raw key straight (item 279).
+        index_node = node["index"]
+        if isinstance(index_node, dict) and index_node.get("kind") == "lit" \
+                and isinstance(index_node.get("value"), str):
+            return f"{target}[{_string(index_node['value'])}]"
         # The index is an `Int` (bigint) and JS indexes with a `number`; TS
         # refuses a bigint index outright ("cannot be used as an index type").
-        return f"{target}[{_int_as_number(node['index'], ctx)}]"
+        return f"{target}[{_int_as_number(index_node, ctx)}]"
 
     if kind == "len":
         # `xs.length` in field position (lower.py emits `len` rather than
@@ -818,7 +858,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         target = _expr(target_node, ctx)
         if not (isinstance(target_node, dict) and target_node.get("kind") in _V3_ATOMIC_KINDS):
             target = f"({target})"
-        return f"{target}?.{_ident(node.get('name'), 'optional field')}"
+        return _member(target, node.get("name"), "optional field", optional=True)
 
     if kind == "optcall":
         target_node = node.get("target")
@@ -2216,7 +2256,7 @@ def _emit_ts_types(types: dict) -> list[str]:
         if spec.get("kind") == "record":
             lines.append(f"export interface {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
-                lines.append(f"  {_ident(field, 'record field')}: {_ts_v3_type(ftype)}")
+                lines.append(f"  {_prop_key(field, 'record field')}: {_ts_v3_type(ftype)}")
             lines.append("}")
         else:
             cases = spec.get("cases") or []
