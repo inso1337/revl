@@ -146,6 +146,11 @@ CORPUS = [
                          #   provide struct, and the `_revl_load` typed construction
     "config_effect.rvl", # config + effectful: config capture in an effect body
                          #   (`self.config.banner.clone()`) + `__revl_provide_config`
+    # item 217 — the v1 front-door: a components-ONLY document lowers to
+    # `ir_version 1` (not v3), so it exercises the versioned `_module_header`
+    # (version-1 banner + the SHORT `#![allow(dead_code, unused_variables)]`);
+    # the covered service/comp body is byte-identical to the v3 path.
+    "v1_components.rvl",
 ]
 
 
