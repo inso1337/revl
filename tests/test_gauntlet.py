@@ -136,7 +136,13 @@ def test_a_candidate_that_fails_admission_is_graded_not_thrown():
     assert d["verdict"] == "rejected"
     admission = d["proved"]["admission"]
     assert admission["status"] == "refused"
-    assert admission["diagnostics"][0]["code"] == "T1"
+    diagnostic = admission["diagnostics"][0]
+    assert diagnostic["code"] == "T1"
+    # the structured verdict carries the exact fix end-to-end through the
+    # gauntlet, not just the guarantee — an agent needs no second verb (item 286)
+    from revl.diagnostics import FIXES
+
+    assert diagnostic["fix"] == FIXES["T1"]
     # downstream sections did not run, and no scratch session was booted
     assert d["tested"]["lifecycle"]["status"] == "not-run"
     assert d["claimed"]["boundary"]["status"] == "not-run"
