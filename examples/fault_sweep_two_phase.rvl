@@ -1,0 +1,37 @@
+// A composition for the cross-tier fault sweep (`revl test --backend all
+// --sweep`, roadmap item 125): a provider and a consumer whose activation has
+// a *witnessed / compensating* teardown, so the sweep exercises the two-phase
+// abort — a fault after the compensating emission runs the `compensate`
+// (phase two), then the accumulated inverses (phase one), newest-first.
+//
+// The sweep injects a `fail` after every top-level step of every component and
+// asserts the revert left nothing behind, on every runtime whose toolchain is
+// present, and that the runtimes agree. See docs/fault-tests.md §10.
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component PgDatabase provides db: Database {
+  config { url: Str = "postgres://localhost/app" }
+
+  let pool = effect Pool.open(config.url, 4) undo pool.close()
+
+  provide db {
+    fn query(sql)   = pool.query(sql)
+    fn execute(sql) = pool.execute(sql)
+  }
+}
+
+component Migrator requires db: Database {
+  // phase one: an inverse-carrying acquisition (the advisory lock)
+  let lock = effect db.query("SELECT pg_advisory_lock(42)")
+             undo   db.query("SELECT pg_advisory_unlock(42)")
+
+  // a compensating emission: on abort the `compensate` runs (phase two),
+  // then `lock`'s undo (phase one). Compensation is not inversion (§6.1) —
+  // the emission stands; the sweep reports it, always.
+  emit db.execute("INSERT INTO migration_log VALUES (42)")
+       compensate db.execute("DELETE FROM migration_log WHERE id = 42")
+}
