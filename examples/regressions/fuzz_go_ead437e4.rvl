@@ -1,0 +1,6 @@
+type Adt0 = C0_0 | C0_1(Str) | C0_2(Str)
+fn use_Adt0() -> Int { let s = C0_0
+  return match s { C0_0 => 0, C0_1(_v) => 1, C0_2(_v) => 2 } }
+pub fn probe() -> Int { return 0 }
+
+test "cross_tier_probe" { assert probe() == 0 }

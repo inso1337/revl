@@ -1,0 +1,6 @@
+fn h0(p0: Bool, p1: List[Int]) -> Str { return (("" + "") + ("fdkl" + "mbb")) }
+fn h1(p0: List[Bool], p1: Opt[Float]) -> List[Str] { return [("" + "xrl"), h0(true, [])] }
+fn h2(p0: Int, p1: Str) -> Float { return ((-1.6 / 3.3) - 5.8) }
+pub fn probe() -> Float { return 0.0 }
+
+test "cross_tier_probe" { assert probe() == 0.0 }
