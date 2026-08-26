@@ -162,16 +162,16 @@ NATIVE_CORPUS = (
 #   rust: the seven component/service documents the rust native emitter covers
 #         (slice 3 + slice 4: the bridge, required services, effectful methods, config).
 #
-# "services_body.rvl" is deliberately OUT as of item 247 (docs/design/
-# teardown-contract.md): the reference py emitter's activation-body
-# `emit ... compensate ...` now registers through `Frame.compensation` (a
+# "services_body.rvl" is back IN as of item 317 (was dropped by item 247,
+# docs/design/teardown-contract.md): the reference py emitter's activation-body
+# `emit ... compensate ...` registers through `Frame.compensation` (a
 # first-class, two-phase-abort-aware COMPENSATION entry) instead of a bare
-# `yield lambda: ...` disposer, but the native selfhost emitter this test
-# drives (`compile_to`) still emits the old bare-lambda form — see
-# tests/test_selfhost_emit_py.py's matching exclusion for the full rationale.
-# Dropped rather than silently xfail'd; a companion selfhost slice restores it.
+# `yield lambda: ...` disposer. Item 317 ported the SAME change into the native
+# selfhost emitter this test drives (`compile_to`), so `compile_to` and the
+# reference are byte-identical on this fixture again — see
+# tests/test_selfhost_emit_py.py's matching note for the full rationale.
 PY_COMPONENT_DOCS = [
-    "services_basic.rvl", "services_config.rvl",
+    "services_basic.rvl", "services_body.rvl", "services_config.rvl",
     "services_methods.rvl", "services_method_effects.rvl", "services_timers.rvl",
     "externs.rvl",
 ]
