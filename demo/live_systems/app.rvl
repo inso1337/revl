@@ -1,0 +1,35 @@
+// Live-systems demo composition (E3 exit test).
+//
+// A transport-safe service pair: MemCache PROVIDES `cache` (async, value-typed,
+// so it can cross a process seam), Api REQUIRES `cache` and provides `api`.
+// Being transport-safe is exactly what lets `revl swap` re-host MemCache in a
+// fresh process on another tier without the seam blinking (docs/swap.md,
+// docs/interop-bridge.md §4). Every mutation sits in an `effect ... undo ...`
+// form so teardown and rollback are DERIVED, never written by hand.
+
+service Cache {
+  async fn get(k: Str) -> Opt[Str]
+  async fn put(k: Str, v: Str)
+}
+
+service ApiSvc {
+  async fn hit(k: Str) -> Opt[Str]
+}
+
+component MemCache provides cache: Cache {
+  let m = effect Map.new() undo m.drop()
+
+  provide cache {
+    async fn get(k) = m.get(k)
+    async fn put(k, v) {
+      effect m.insert(k, v)
+      undo   m.remove(k)
+    }
+  }
+}
+
+component Api requires cache: Cache provides api: ApiSvc {
+  provide api {
+    async fn hit(k) = cache.get(k)
+  }
+}

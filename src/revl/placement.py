@@ -1452,11 +1452,19 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
                 report_network_latency()
             swap_repl()
         else:
-            if net_seams and _wait_for(lambda: len(up) == len(children), 60):
+            # stdin is not a tty: it may be carrying a swap SCRIPT (one
+            # `swap <component> --to <backend>` / `:keys` / `:q` per line),
+            # which is how the live-migration demo is driven as a scripted
+            # exit test (docs/swap.md "Scripted (non-interactive) swaps").
+            # Wait for every process to come up first so a scripted swap can
+            # re-point a live consumer, then drive the SAME swap REPL off
+            # stdin. EOF — a closed pipe, `< /dev/null`, or the last line —
+            # tears the placement down, the same stdin-closed contract as
+            # single-process `revl run`.
+            _wait_for(lambda: len(up) == len(children), 60)
+            if net_seams:
                 report_network_latency()
-            print("(placement up; Ctrl-C to tear down)", flush=True)
-            for proc, _ in list(children.values()):
-                proc.wait()
+            swap_repl()
     except KeyboardInterrupt:
         pass
     finally:
