@@ -23,6 +23,10 @@ the WAL descriptor. 243 Slice 2a proved the seam on the py reference tier
 Slice-2b agent builds the remaining five tiers' loops from this document
 without reopening a decision.
 
+Sequencing note: 243's slice plan gated the rust part of Slice 2 behind item
+278. Item 278 is landed, so rust Slice 2b proceeds alongside the other four
+tiers; nothing waits on it any more.
+
 What this doc does NOT own, with pointers:
 
 - the `witnessed` surface, classification, and checker rules: 243;
@@ -113,6 +117,16 @@ queue in a post-unwind hook. Either way the observable contract is: all
 Phase-1 inverses complete before any compensation starts, and each phase is
 LIFO within itself.
 
+The phase rule is scoped PER ACTIVATION. The stack is per-activation ("one
+LIFO disposer stack per activation", above), so "all Phase-1 inverses
+complete before any compensation starts" binds within one activation's
+teardown, not across the process. In a cascading abort, a dependent
+activation's Phase 2 may run before a provider activation's Phase 1 has
+started: each activation tears down its own stack in its own two phases, in
+whatever activation order the runtime unwinds the cascade. There is no
+global phase barrier across activations and none is intended; a tier that
+adds one is diverging, not being safe.
+
 ### Why two phases (the three load-bearing reasons)
 
 1. **A best-effort failure must never interrupt proof recovery.** Interleaved
@@ -184,13 +198,65 @@ Per-tier in-call preemption, normative for Slice 2b:
 | python | none | a sync host call cannot be safely interrupted (signals are main-thread-only and unsafe mid C call); between-compensation check only |
 | typescript | none | single-threaded event loop; nothing runs to observe a deadline during a sync call |
 | go | abandon-the-wait | run the call in a goroutine, select on a timer; on timeout stop waiting and proceed. The call keeps running detached: record `outcome: unknown` |
-| rust | none | no safe cross-thread cancellation of arbitrary sync code; between-compensation check only |
+| rust | none | compensation closures are not guaranteed `Send`, so the runtime cannot hand one to a helper thread to wait on with a timeout; between-compensation check only |
 | java | interruptible blocking points only | `Thread.interrupt` preempts interruptible IO/waits; arbitrary sync code is not preemptible (`Thread.stop` is forbidden) |
 | wasm | guest code yes, host imports no | the first-party runtime may bound guest execution via its epoch/fuel interruption; a host import call in flight is not preemptible |
 
+Per-tier loop obligations, normative for Slice 2b (these complete the table;
+each is a sentence the tier's loop is built against, not a new decision):
+
+- **go.** The guarded goroutine MUST `defer recover()` and route the
+  recovered panic (or the call's error) over the result channel. An
+  unrecovered panic in a detached goroutine kills the whole process, which
+  turns a best-effort phase into a crash; the guard is what keeps "may fail"
+  meaning a residue record. And abandonment relaxes seriality: after the
+  loop abandons one compensation and starts the next, the abandoned call is
+  still running, so two compensations may run CONCURRENTLY. "LIFO within
+  itself" pins the START order of Phase-2 compensations only, not mutual
+  exclusion; a compensation author on go cannot assume the previous
+  compensation has finished.
+- **java.** `Thread.interrupt` preempts only interruptible blocking points;
+  arbitrary sync code ignores it. The loop runs each compensation as a task
+  and bounds it with `Future.get(timeout)` + `cancel(true)`. When the
+  interrupt is honored, the cut-off is a true in-call preemption. When it is
+  NOT honored, that pattern is an ABANDONMENT: the task thread keeps running
+  detached after `cancel(true)`, exactly go's shape, and the record carries
+  `outcome: unknown`. So java may abandon go-style, and whenever it does,
+  go's concurrency caveat applies on java too (start order pinned, mutual
+  exclusion not).
+- **rust.** The "none" needs its real reason, because "no cancellation of
+  arbitrary sync code" also describes go (go never cancels the call either;
+  it abandons the wait). The distinguishing reason is that compensation
+  closures are not guaranteed `Send`: the runtime cannot move one onto a
+  helper thread to run or wait on it under a timer at all, so even the
+  abandon-the-wait shape is unavailable. Between-compensation check only.
+- **wasm.** Two qualifications. First, the wasm accumulator is fixed at
+  ACTIVATION TIME; a method-time compensation is a hard `EmitError` on this
+  tier today. Exit test 3's "mixed-entry LIFO in both phases" therefore
+  reads, on wasm, over activation-registered entries only; the method-time
+  half of the contract is not owed until that restriction lifts (its own
+  item, not Slice 2b). Second, the table's "guest code yes" is a wasmtime
+  CAPABILITY, not an existing feature: the first-party runtime has no
+  epoch/fuel wiring today. Slice 2b must WIRE it first-party (an epoch
+  deadline or fuel meter armed around guest execution in Phase 2) before
+  claiming guest-code preemption; until that wiring lands, wasm is in
+  practice a between-compensation-check-only tier.
+
 Budget values (Phase-2 total and per-call) are host configuration with
 tier-uniform defaults; the contract fixes the check points and the residue
-records, not the numbers.
+records, not the numbers. The config SURFACE is pinned now, so six tiers do
+not invent six plumbings: two environment variables in the existing `REVL_*`
+convention, read once at activation, identical spelling on every tier:
+
+- `REVL_COMPENSATION_BUDGET_MS`: the Phase-2 total budget, milliseconds;
+- `REVL_COMPENSATION_PER_CALL_MS`: the per-call bound, milliseconds.
+
+Provisional defaults, standing until the first Slice-2b landing proposes the
+final numbers and this doc pins them (open question 1): budget 5000 ms,
+per-call 1000 ms. Unset means the default; `0` means no bound (the
+between-compensation check still runs and records nothing expired). The
+names and the read-at-activation rule are fixed here; only the two numbers
+remain open.
 
 ## Commit path (clean unload)
 
@@ -411,16 +477,29 @@ six-tier loop depends on it.
      exact inversion of the old a5 assertion.
 2. **Per-backend golden + adapter sweep, sequenced.** `pytest tests/` does
    NOT run the per-backend golden tests, so a green root suite proves nothing
-   here. The respec must explicitly sweep `backends/*/golden` and the TCK
-   adapters (`tck/adapters/`), and it is SEQUENCED with the py tier: land the
-   a5a/a5b spec change together with the py runtime flip and the py
-   golden/adapter update first, then flip each remaining tier against the new
-   assertion. At no point are the five non-py backends built against the old
+   here. The respec must explicitly sweep `backends/*/golden`, the TCK
+   adapters (`tck/adapters/`), AND the executed per-tier scenario suites,
+   because that is where old-a5 behavior actually lives and executes: the go
+   scenarios under `go test` (backends/go/scenarios), the typescript suite
+   under `npm test` (backends/typescript), and the java scenario runner
+   (backends/java/scenarios). Two facts about the adapter directory so
+   nobody sweeps a phantom: there is exactly one adapter,
+   `tck/adapters/py_adapter.py`; the other tiers exercise the spec through
+   their own scenario harnesses above, not through per-tier adapters. And
+   a5b needs a NEW fixture: the current adapter's a5 case only disposes a
+   cleanly activated component; it has no abort-AFTER-the-compensated-emit
+   path, and a5b's observable (proof inverses before the first compensation
+   on abort) cannot be asserted without one. The sweep is SEQUENCED with the
+   py tier: land the a5a/a5b spec change together with the py runtime flip
+   and the py golden/adapter update first, then flip each remaining tier
+   against the new assertion. At no point are the five non-py backends built against the old
    a5; a tier that has not flipped yet is a pinned divergence in tck/spec.py
    (the existing `Divergence` mechanism), not a silently red or silently
    stale golden.
 3. **Loop conformance per tier.** Each tier's Slice-2b landing demonstrates,
-   against this doc: mixed-entry LIFO in both phases, continue-and-record on
+   against this doc: mixed-entry LIFO in both phases (on wasm, over
+   activation-registered entries only; see the per-tier obligations under
+   the bound rule), continue-and-record on
    a Phase-1 failure (both severities), discharge of transactional and
    compensation entries on clean unload (bracket still runs), the
    between-compensation deadline check with skipped-not-silent records, the
@@ -432,10 +511,11 @@ six-tier loop depends on it.
 
 ## Open questions (left deliberately)
 
-1. **Phase-2 budget defaults.** The check points and records are fixed here;
-   the default budget and per-call bound values (and their host-config
-   surface) are an implementation decision for the first Slice-2b landing to
-   propose and this doc to then pin.
+1. **Phase-2 budget defaults.** The check points, the records, and the
+   config surface are fixed here (`REVL_COMPENSATION_BUDGET_MS` /
+   `REVL_COMPENSATION_PER_CALL_MS`, with provisional defaults 5000/1000 ms,
+   see the bound section); only the final NUMBERS are open, for the first
+   Slice-2b landing to propose and this doc to then pin.
 2. **`bracket-fault` escalation surface.** This doc fixes the record and its
    contract-grade severity; whether a bracket-fault should ALSO mark the
    session/fiber in a way distinct from 246's prompt (e.g. refusing further
