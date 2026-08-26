@@ -181,6 +181,64 @@ cannot run.
    emitter, run its tier's goldens — the frontend suite alone does **not** cover
    every per-backend golden.
 
+## The pre-merge gate
+
+> **Run `make pre-merge` before a change reaches `main`.** This is the required
+> gate, and it is the one that catches the per-backend drift `pytest tests/`
+> alone misses.
+
+The pre-commit contract above is necessary but not sufficient, and the gap is
+load-bearing: **the per-backend suites run OUTSIDE `pytest tests/`** (they are
+their own CI jobs — `backend-python`, `backend-typescript`,
+`backend-{go,rust,wasm,java}` — because each needs its own toolchain). So a
+change that is green under `pytest tests/`, which is what a wave agent
+self-verifies against, can still red CI on a per-backend suite and go unnoticed.
+That is not hypothetical: on 2026-08-26 `main` stayed **red for ~2h across ~19
+pushes** because item 247's A5 respec left a stale `backends/python`
+semantics test and a ts fixture went uncommitted — both green under `tests/`,
+both red on the per-backend CI jobs (roadmap item 327; see the
+`revl-wave-backend-golden-gap` note).
+
+`make pre-merge` (script: [`tools/pre_merge.sh`](tools/pre_merge.sh)) closes that
+gap by mirroring the **fast half** of every per-backend CI job in one local
+command, in order, reporting each step:
+
+| step | what it runs |
+|---|---|
+| frontend | `pytest tests/ -q` (includes `test_conformance_validate.py`) |
+| backend-python | `cd backends/python && .venv/bin/pytest -q` — the suite item 247 left stale |
+| backend-go | `pytest backends/go/test_emit_go.py -q` |
+| backend-rust | `pytest backends/rust/test_emit_rust.py` (emit/golden tests) |
+| backend-wasm | `pytest backends/wasm/test_v3_emit.py backends/wasm/test_canonical_abi.py` |
+| backend-java | `pytest backends/java/test_emit_java.py` (emit/golden tests) |
+| conformance matrix | `tools/conformance.py --check-readme` |
+| site wheel | `tools/check_site_wheel.py` |
+| lint | `ruff check` (pinned `ruff==0.16.4` via `uvx` if not on `PATH`) |
+
+Two properties make it trustworthy rather than theatre:
+
+- **It is the fast half on purpose, not a full CI replica.** The
+  toolchain-*executing* tests (cargo build, javac + a cordis4j clone, wasmtime,
+  `tsc`/`vitest`) stay CI's job — they are slow, networked, and SIGKILL on the
+  shared dev box. The rust/wasm/java emit suites are run with the heavy compilers
+  hidden from `PATH`, so their `which(<tool>)`-gated tests **skip loudly** and
+  only the emit/golden half runs — which is the half that catches a stale golden
+  or a respec'd emitter, the exact item-327 drift class. The typescript suite
+  needs `node_modules` and is not in the fast gate at all; run it yourself when
+  you touch that tier (`cd backends/typescript && npm ci && npx vitest run`).
+- **Nothing is a silent skip.** Every step is either *ran* (and must pass) or
+  *skipped* with the reason printed (`SKIPPED (no backends/python/.venv — run sh
+  backends/python/setup.sh)`), because a silent gap is precisely what let CI stay
+  red. The target exits non-zero if any step that ran failed; a skip does not
+  make it pass green quietly — it tells you what CI will still check that you did
+  not. On a fully-provisioned checkout nothing skips.
+
+If you touched an emitter or a per-backend suite, `make pre-merge` is the
+difference between "green on my machine" and "green on `main`". Run it before you
+fast-forward `main` (step 4 of the branch model above). It is not a substitute
+for the orchestrator's post-merge `gh run list --branch main` check — it shrinks
+the window that check has to catch, it does not remove the check.
+
 ### Two invariants that will fail your change if you break them
 
 **Byte-identical v1 goldens.** The v1 IR is frozen and emitted v1 output is
