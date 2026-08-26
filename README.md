@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="revl, the agent-first programming language" width="820">
+<img src="assets/banner.svg" alt="revl: revertible effects as a type system" width="820">
 
 <p>
   <a href="https://github.com/inso1337/revl/actions/workflows/ci.yml"><img src="https://github.com/inso1337/revl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -13,7 +13,7 @@
 
 <p>
   <b><a href="#quickstart">Quickstart</a></b> ·
-  <a href="#how-it-works">How it works</a> ·
+  <a href="#what-makes-it-different">What makes it different</a> ·
   <a href="docs/README.md">Documentation</a> ·
   <a href="DESIGN.md">Design</a> ·
   <a href="docs/vision.md">Vision</a> ·
@@ -24,17 +24,25 @@
 
 ---
 
-A research language for **spatiotemporal composability**: components that can be
-loaded, unloaded, and hot-swapped in a running system, where "unloading leaves
-no residue" and "dependencies stay coherent" are **compile-time guarantees**,
-not runtime discipline.
+revl is a research language for software that changes while it runs. Components
+load, unload, and hot-swap inside a live system, and the properties that make
+that survivable are checked at compile time: unloading leaves no residue,
+dependencies stay coherent, nothing reaches state it never declared. The core
+move is small and strict. Every mutation is written beside its inverse, and a
+mutation with no inverse, one that crosses the system boundary, must carry an
+`emit` marker at the call site. Irreversibility is legal; invisible
+irreversibility is not.
 
-revl is the language-level realization of the paradigm formalized in
-[*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper)
-and implemented as a library by [Cordis](https://github.com/cordiverse/cordis).
-The one-line pitch: **Cordis has revertible effects as a discipline; revl makes
-them a type system** — the jump C++ RAII made to become Rust's ownership. What
-this is *for*, and the honest scope of the claim, is [docs/vision.md](docs/vision.md).
+The paradigm comes from [Cordis](https://github.com/cordiverse/cordis) and the
+paper it implements, [*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper).
+The paper proves strong theorems about revertible effects, but each one rests
+on hypotheses a library can only ask programmers to respect. revl moves those
+hypotheses into the checker. C++ had RAII as a discipline and Rust made it a
+type system; Cordis has revertible effects as a discipline and revl makes them
+a language. The borrow checker governs lexical resource scope. revl's checker
+governs dynamic component scope: what may enter a running system, what it may
+touch while there, and what must be true when it leaves. What this project
+claims, and what it deliberately does not, is [docs/vision.md](docs/vision.md).
 
 ```revl
 service Database {
@@ -60,10 +68,16 @@ component UserCache requires db: Database provides cache: Cache {
 }
 ```
 
-Undeclared access will not compile. A mutation without an inverse (or an
-explicit `emit` admission of irreversibility) will not compile. Dependency
-cycles and provision conflicts are rejected at link time. Teardown cannot
-register effects, by construction.
+Read that as a contract the compiler enforces. Drop the `undo` and it will not
+compile. Call `db.execute` without the `emit` marker and it will not compile.
+Reach for a service the component never required and it will not compile.
+Declare `put` as a plain `fn` while its body emits and it will not compile: a
+service declaration is an upper bound on what its providers may do. Teardown is
+derived, LIFO over exactly the effects that ran, and an `undo` body has no way
+to register new effects because the grammar gives it nowhere to put one. Link
+time rejects dependency cycles and two providers of one key. The eight
+guarantees, each anchored to the theorem hypothesis it discharges, are the
+table in [DESIGN.md](DESIGN.md).
 
 ## Quickstart
 
@@ -72,94 +86,120 @@ uv venv && uv pip install -e ".[test]" && .venv/bin/pytest tests/
 ```
 
 ```bash
-python -m revl compile examples/user_cache.rvl   # source → checked IR → emitted component
-python -m revl audit    examples/user_cache.rvl   # the G8 boundary surface
+python -m revl compile examples/user_cache.rvl   # source -> checked IR -> emitted component
+python -m revl audit    examples/user_cache.rvl   # everything that can cross the boundary
 python -m revl mcp serve                          # the compiler as an agent admission gate
+make demo                                         # a live hot-swap, migration and rollback
 ```
 
-Then read the [agent guide](docs/guide-ai-agents.md), or `make demo` for a live
-cross-tier hot-swap.
+The language reference is [docs/syntax-2.0.md](docs/syntax-2.0.md); if the
+component author is a model, start with the
+[agent guide](docs/guide-ai-agents.md) instead.
 
-## How it works
+## What makes it different
+
+### The undo is checked, not hoped for
+
+Undo logic is the classic write-only code path: written once, wrong quietly,
+exercised at the worst possible moment. revl refuses the quiet part. Code
+outside `effect` forms is pure, so the accumulator provably holds every
+mutation, and the emission marker keeps the two kinds of change, revertible and
+not, distinct in the types. When a component deactivates, the runtime replays
+inverses in reverse order and the environment is exactly what it was before
+activation. That property is what the whole language is shaped around.
+
+### One front end, six live runtimes
 
 <div align="center">
 
-<img src="assets/architecture.svg" alt="one checked front-end, six hardened runtimes" width="880">
+<img src="assets/architecture.svg" alt="one checked front-end, one IR, six runtimes, an MCP admission gate" width="880">
 
 </div>
 
-One front-end parses, checks, and links `.rvl` source into a single IR,
-enforcing guarantees **G1–G8** before any code is emitted. Six emitters lower
-that one IR to six runtimes, and the same compiler runs behind an MCP server, so
-an AI agent proposing a component talks to the *admission gate*, not the
-filesystem. Full design, the checked-guarantees table, and why raw native
-codegen is a non-goal: [DESIGN.md](DESIGN.md).
+One front end parses, checks, and links `.rvl` into a single IR. Six emitters
+lower that IR to six hardened Cordis runtimes: cordis-py (reference), cordis
+(TypeScript), cordis-rs (Rust), cordis4j (Java), cordis-go (Go), and the
+first-party cordis-wasm sandbox. This is not six ports of a demo. Components
+built for different runtimes compose in one running system across process
+boundaries, a Python component consuming a service a Rust component provides
+([docs/interop-bridge.md](docs/interop-bridge.md)). And the claim that all six
+tiers agree is measured, not asserted: every construct is emitted through every
+backend and the output is handed to that tier's real compiler, `tsc`, `cargo
+check`, `javac`, `wasmtime`. The construct-by-tier matrix lives in
+[docs/conformance.md](docs/conformance.md), regenerated by `make matrix` and
+gated in CI.
 
-- **Type-safe and null-safe.** Bidirectional checking, sound where declared.
-  There is no `null`; absence is `Opt[T]`, and `T` never silently flows back
-  out. The unchecked remainder (host objects, the extern boundary) is
-  enumerated on the G8 audit surface, not implied.
-- **Agent-native.** `revl mcp serve` exposes the compiler as an MCP server:
-  `revl_check` / `revl_admit` instead of filesystem access, rejections as
-  structured diagnostics, and tool safety hints (`readOnlyHint` /
-  `destructiveHint`) *derived from the method body* — a tool cannot call itself
-  harmless when it emits. [docs/mcp-bridge.md](docs/mcp-bridge.md).
-- **Six tiers, one language.** cordis-py (reference), cordis (TypeScript), the
-  cordis-wasm substrate, cordis-rs (Rust), cordis4j (Java), and cordis-go (Go).
-  Components built for *different* runtimes compose in one running system across
-  process boundaries. [docs/interop-bridge.md](docs/interop-bridge.md).
-- **Self-hosting.** revl compiles itself: `selfhost/compile.rvl` runs a
-  revl-native pipeline whose output is byte-identical to the reference compiler,
-  with no reference in the chain. Two independent implementations of one
-  grammar, each a check on the other. [docs/selfhost-findings.md](docs/selfhost-findings.md).
+### The compiler is the agent's interface
 
-**The toolchain is the developer surface.** Because the author is increasingly
-an agent, the compiler exposes far more than *compile / don't compile*:
-`revl plan` (what a hot-swap would do), `revl query` (who emits to X? what
-breaks if I withdraw C?), `revl why` (the derivation behind a rejection),
-`revl test` with `fault`/`lifecycle` blocks, `revl swap`/`apply` for live
-migration with derived rollback, and `revl recover` for crash recovery from a
-write-ahead log. The complete per-command reference is
-[docs/commands-reference.md](docs/commands-reference.md); the MCP verbs are
-[docs/mcp-reference.md](docs/mcp-reference.md).
+If components are increasingly written by AI agents, the question that matters
+is whether a generated component is safe to deploy into a system that is
+already running. revl's answer is to make the compiler the admission gate.
+`revl mcp serve` gives an agent `revl_check` and `revl_admit` instead of
+filesystem access: drafts are held server-side, edited by delta, and nothing
+lands until the same checker that guards human commits says yes. A rejected
+candidate cannot deploy, and every rejection carries the guarantee it violated
+plus the rewrite that fixes it. Tool safety annotations are derived from the
+method body rather than asserted by an author, so a tool cannot call itself
+read-only when it emits. In-memory admission runs a median 0.165 ms per
+candidate, fast enough to sit inside a generation loop.
+[docs/mcp-bridge.md](docs/mcp-bridge.md) has the shapes;
+[docs/guide-ai-agents.md](docs/guide-ai-agents.md) has the workflow.
 
-## Conformance
+### Tooling that operates a running system
 
-The claim that all six tiers agree is not asserted, it is **measured**:
-`tools/conformance.py` emits every language construct through all six backends,
-`--validate` hands each tier's output to that tier's *real* compiler (`tsc`,
-`cargo check`, `javac`, `wasmtime`, a scope walk for Python), and CI gates the
-result against drift. Today every host tier conforms with **zero real emit
-gaps**; the only refusals are deliberate tier limits (the i32-only wasm
-substrate, one Java arrow-type case). In-memory admission round-trip
-(compile + gate) runs a median **0.165 ms** per candidate component.
+Because the compiler knows every effect and its inverse, it can answer
+questions no ordinary toolchain can. `revl swap` migrates a live component to
+another runtime tier, re-pointing every consumer across the cutover and ending
+with a proof the old provider left nothing behind
+([docs/swap.md](docs/swap.md)). `revl plan` shows the exact delta a hot-swap
+would produce and `revl apply` executes it with a derived rollback, so a
+mid-plan failure unwinds by inverses instead of by hand
+([docs/plan.md](docs/plan.md), [docs/apply.md](docs/apply.md)). `revl why`
+prints the derivation behind a rejection or a runtime transition
+([docs/why-traces.md](docs/why-traces.md)). And since the effect accumulator
+is an ordered list of actions paired with their undos, it persists as a
+write-ahead log: `revl recover` walks it after a `kill -9` and reports, per
+effect, what is moot, what compensates, and what must be undone
+([docs/crash-recovery.md](docs/crash-recovery.md)).
 
-The full construct-by-tier matrix, including the revl self-host column, lives in
-**[docs/conformance.md](docs/conformance.md)** (regenerated by `make matrix`,
-gated in CI).
+### It compiles itself, and disagreement is a bug report
+
+`selfhost/compile.rvl` is the revl compiler written in revl. Its output is
+byte-identical to the reference compiler with no reference stage in the chain,
+which makes self-hosting more than a stunt: two independent implementations of
+one grammar run every input, and any divergence is a real defect in one of
+them. The defects this differential oracle has already caught are written up in
+[docs/selfhost-findings.md](docs/selfhost-findings.md).
+
+The supporting cast is what you would expect from a checked language, done
+plainly: bidirectional type checking, no `null` (absence is `Opt[T]` and never
+silently unwraps), exhaustive `match`, and an extern boundary that must
+classify itself as `pure`, `acquire`, or `emission` before it compiles, so
+`revl audit` can enumerate everything a component could ever do to the world.
 
 ## Documentation
 
 The full index is **[docs/README.md](docs/README.md)**. Start here:
 
-- **[DESIGN.md](DESIGN.md)** — the guarantees and the checked table · **[docs/vision.md](docs/vision.md)** — what this is *for*
-- **[docs/syntax-2.0.md](docs/syntax-2.0.md)** — the full language reference · **[docs/stdlib-2.0.md](docs/stdlib-2.0.md)** — the specified stdlib
-- **[docs/guide-ai-agents.md](docs/guide-ai-agents.md)** — the agent-facing guide · **[docs/mcp-bridge.md](docs/mcp-bridge.md)** — the compiler as an MCP server
-- **[docs/conformance.md](docs/conformance.md)** — every construct against every tier · **[docs/crash-recovery.md](docs/crash-recovery.md)** — WAL roll-forward/back
-- **[docs/v2.0-roadmap.md](docs/v2.0-roadmap.md)** — what is done and what is in flight · **[CONTRIBUTING.md](CONTRIBUTING.md)** — the workflow and the pre-commit contract
+- **[DESIGN.md](DESIGN.md)** for the guarantees and the checked table, **[docs/vision.md](docs/vision.md)** for what this is for and the honest scope of the claims
+- **[docs/syntax-2.0.md](docs/syntax-2.0.md)** the language reference, **[docs/stdlib-2.0.md](docs/stdlib-2.0.md)** the stdlib surface
+- **[docs/guide-ai-agents.md](docs/guide-ai-agents.md)** the agent workflow, **[docs/mcp-reference.md](docs/mcp-reference.md)** every MCP verb, **[docs/commands-reference.md](docs/commands-reference.md)** every subcommand
+- **[docs/conformance.md](docs/conformance.md)** every construct against every tier, **[docs/crash-recovery.md](docs/crash-recovery.md)** the WAL and what honestly survives a crash
+- **[docs/v2.0-roadmap.md](docs/v2.0-roadmap.md)** what is done and what is in flight, **[CONTRIBUTING.md](CONTRIBUTING.md)** the workflow and the pre-commit contract
 
 ## Acknowledgments
 
-revl is the language-level realization of [Cordis](https://github.com/cordiverse/cordis)
-and the paradigm of its [paper](https://github.com/cordiverse/paper); it exists
-because the runtime targets it lowers to do. With gratitude to the ecosystems it
-stands on: [cordis-py](https://github.com/geohotstan/cordis-py),
+revl is the language-level realization of
+[Cordis](https://github.com/cordiverse/cordis) and the paradigm of its
+[paper](https://github.com/cordiverse/paper); it exists because the runtimes it
+lowers to do. With gratitude to
+[cordis-py](https://github.com/geohotstan/cordis-py),
 [Cordis](https://github.com/cordiverse/cordis) (TypeScript),
 [cordis-rs](https://github.com/dshbox/cordis-rs),
 [cordis4j](https://github.com/1na-ko/cordis4j),
 [cordis-wasm](https://github.com/inso1337/cordis-wasm), and
-[stc-go](https://github.com/0xdenny218/stc-go), and to the toolchains that build
-and validate every tier ([pytest](https://github.com/pytest-dev/pytest),
+[stc-go](https://github.com/0xdenny218/stc-go), and to the toolchains that
+build and validate every tier ([pytest](https://github.com/pytest-dev/pytest),
 [TypeScript](https://github.com/microsoft/TypeScript),
 [Wasmtime](https://github.com/bytecodealliance/wasmtime),
 [Serde](https://github.com/serde-rs/serde), and more).
