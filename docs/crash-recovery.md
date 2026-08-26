@@ -129,12 +129,33 @@ the write-ahead discipline). Three record shapes:
 
 // 3. terminal marker — present iff activation finished cleanly
 {"record": "activation-complete", "generation": 7, "components": ["PgDatabase","UserCache"]}
+
+// 4. discharge-descriptor — a witnessed (`transactional`) inverse or a
+//    `compensation`, as a re-issuable NAMED CALL (items 243 / 247)
+{"record": "discharge-descriptor", "seq": 5, "entry": "transactional",
+ "call": {"receiver": "db", "method": "delete", "args": ["row#1"]},
+ "origin": {"key": "db", "method": "insert", "args": ["row#1"], "site": "svc.rvl:9"},
+ "witness": {"row": "row#1"}, "idempotency": null}
+
+// 5. discharge record — the commit-path proof, durable before success is
+//    reported; recover SKIPS every seq named here (a committed transaction is
+//    never rolled back)
+{"record": "discharge", "discharged": [5]}
 ```
 
 The `activation-complete` marker's **presence or absence is the entire
 roll-forward/roll-back decision**. A genuine `kill -9` can leave a half-written
 final line; `WriteAheadLog.read` tolerates it, reports `torn: true`, and recovers
 anyway — handling that crash is the whole point.
+
+Record shapes 4 and 5 carry the witnessed-effects teardown across a crash. On
+roll-back, recover runs the boundary inverses in two phases: transactional
+inverses reverse-seq (skipping any seq with a durable `discharge` record — a
+COMMITTED mutation is retained, not rolled back), then owed compensations
+best-effort as a further crossing that records, never clears, its referent (so a
+re-issued compensation is honest RESIDUE, never falsely CLEAN). The descriptor
+schema, the discharged-seq skip, and the merged residue records are specified in
+`docs/design/teardown-contract.md` (WAL descriptor + the owned py-tier migration).
 
 Wire it up with `revl run … --wal FILE` (implies `--record`). The log is opened
 before activation; each effect is appended as it commits; a clean activation
