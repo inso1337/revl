@@ -196,6 +196,51 @@ def _body_multi_use(body: object, counts: dict[str, int]) -> None:
             _body_multi_use(item, counts)
 
 
+def _by_value_field_clone(arg_node: object, rendered: str,
+                          ctx: "_V3Ctx") -> str | None:
+    """`f"{rendered}.clone()"` when the by-value argument is a non-Copy field
+    read `base.field` whose `base` is used more than once in the body, else
+    `None` (let the caller handle it).
+
+    revl field access is a value READ (a copy), never a move-out of the owning
+    struct: `is_bad(c.e)` then `IfN {{ cond: c.e, .. }}` reads `c.e` twice, and
+    `return c` still needs the whole `c`. Rust would MOVE the non-Copy field out
+    of `c` on the first by-value use, stranding every later use of `c`/`c.e`
+    (E0382). So a non-Copy field read is cloned exactly when its base binding is
+    reused — the same body-level reuse signal `_by_value_arg` uses for a bare
+    name. A single-use base (`relabel`'s `n.at`, `n` read once) stays a move,
+    byte-identical to before; a Copy field (`p.y: Int`) never clones; and an
+    un-inferable base/field type is left untouched (conservative: no needless
+    clone, so a fixture the emitter cannot type stays byte-identical)."""
+    if not isinstance(arg_node, dict) or arg_node.get("kind") != "field":
+        return None
+    # Walk a (possibly nested) field chain `root.f1.f2..` down to its root
+    # binding: `ck.ctx_.caps` partially moves `ck`, so the root's reuse is what
+    # decides the clone, and the field type is resolved along the chain.
+    chain: list[str] = []
+    cur = arg_node
+    while isinstance(cur, dict) and cur.get("kind") == "field":
+        chain.append(cur.get("name"))
+        cur = cur.get("target")
+    if not (isinstance(cur, dict) and cur.get("kind") in ("var", "name", "req")):
+        return None  # a root that is itself an index/call is not a plain reuse
+    root = cur.get("id") or cur.get("name")
+    if root is None or root not in ctx.multi_use:
+        return None
+    ty = ctx.var_types.get(root)
+    for field in reversed(chain):
+        ty = (ctx.record_field_types(ty).get(field)
+              if isinstance(ty, str) else None)
+    # A known-Copy field (`p.y: Int`) never needs a clone; a known non-Copy
+    # field, or one whose type the emitter cannot resolve (a loop/match binding
+    # root), is cloned — the root is reused, so moving the field out would strand
+    # the later use (E0382). An un-inferable Copy field is the only false clone
+    # this admits, and cloning a Copy value is sound, just redundant.
+    if isinstance(ty, str) and ty.split("[", 1)[0].strip() in _RUST_COPY_TYPES:
+        return None
+    return f"{rendered}.clone()"
+
+
 def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     """Wrap a by-value free-function argument so the call cannot consume a value
     the caller still needs (E0382). revl passes values, not moves, so a non-Copy
@@ -211,6 +256,9 @@ def _by_value_arg(arg_node: object, rendered: str, ctx: "_V3Ctx") -> str:
     untouched. That keeps a lone move byte-identical to before and clones only
     the reused shape that would otherwise fail to build.
     """
+    field_clone = _by_value_field_clone(arg_node, rendered, ctx)
+    if field_clone is not None:
+        return field_clone
     name = _arg_ref_name(arg_node)
     if name is None:
         return rendered
@@ -278,6 +326,21 @@ def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
     return rendered
 
 
+def _by_value_reuse(node: object, rendered: str, ctx: "_V3Ctx") -> str:
+    """Clone a value used by-value in a position that moves ONLY on reuse -- a
+    `match` scrutinee, a list element, a builtin/host method argument, a `for`
+    iterable. Unlike `_by_value_arg` (a free-fn/service argument, always passed
+    by value, so a known non-Copy is cloned even when used once), these positions
+    consume the value in place, so a single use can stay a move (byte-identical
+    to before) and only a REUSED binding must clone: a bare non-Copy name read
+    again in the body, or a non-Copy field whose base is reused. `_body_multi_use`
+    is the reuse signal; a Copy value and a fresh temporary go through untouched."""
+    field_clone = _by_value_field_clone(node, rendered, ctx)
+    if field_clone is not None:
+        return field_clone
+    return _by_value_tail(node, rendered, ctx)
+
+
 # `Str` values that a callee only READS lower to a borrowed `&str` parameter
 # instead of an owned `String`, so the call passes a borrow rather than cloning
 # the whole string (item 282). These are the string builtins whose *argument*
@@ -286,6 +349,14 @@ def _by_value_tail(node: object, rendered: str, ctx: "_V3Ctx") -> str:
 # a borrowed param handed to one of these arg slots stays read-only.
 _STR_READONLY_ARG_BUILTINS = frozenset({
     "concat", "indexOf", "split", "join", "startsWith", "endsWith",
+})
+
+# Builtins whose `_v3_builtin` lowering takes its argument BY REFERENCE (`&arg`),
+# so the argument is never moved and needs no reuse clone: the read-only string
+# ops above plus the Map key probes (`lookup`/`has`/`remove` all borrow `&key`).
+# Every other builtin (`push`, `set`, ...) MOVES its non-Copy argument in.
+_BORROW_ARG_BUILTINS = _STR_READONLY_ARG_BUILTINS | frozenset({
+    "lookup", "has", "remove",
 })
 
 
@@ -2551,6 +2622,129 @@ def _v3_is_str(node: object, ctx: "_V3Ctx") -> bool:
     return False
 
 
+def _list_element_type(surface: object) -> str | None:
+    """The element surface type of a `List[T]` surface type, else None."""
+    if isinstance(surface, str):
+        m = re.match(r"^List\[(.+)\]$", surface)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _v3_is_empty_list(node: object) -> bool:
+    return (isinstance(node, dict) and node.get("kind") == "list"
+            and not node.get("items"))
+
+
+def _v3_empty_vec_elem_types(body: object, ctx: "_V3Ctx") -> dict:
+    """Map each local bound to an EMPTY list literal (`let out = []`) to its
+    element surface type, when the body makes it knowable.
+
+    An empty `vec![]` gives Rust no element type, and the accumulator idiom
+    (`let mut out = []` then `out = out.push(x)` / `out = res`) reaches its type
+    only through later statements, so rustc reports `type annotations needed`
+    (E0282). This pre-pass recovers the element type from the pushes into the
+    binding and from aliasing assignments, so the `let` can be annotated
+    `Vec<T>`. It is conservative -- an un-inferable binding is simply left
+    unannotated (byte-identical to before) -- and runs on a scratch `var_types`
+    so it never perturbs the real emission."""
+    empties: set = set()
+
+    def collect(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("step") in ("let", "assign") and _v3_is_empty_list(node.get("value")):
+                empties.add(node.get("name"))
+            for v in node.values():
+                collect(v)
+        elif isinstance(node, list):
+            for v in node:
+                collect(v)
+
+    collect(body)
+    if not empties:
+        return {}
+
+    saved = ctx.var_types
+    scratch = dict(saved)
+    ctx.var_types = scratch
+    try:
+        # Forward-infer every `let`/`assign` type (params seed `scratch`), twice
+        # so a value referring to an earlier-typed local resolves; this types the
+        # indexed elements / call results that later feed a push.
+        def forward(node: object) -> None:
+            if isinstance(node, dict):
+                if node.get("step") in ("let", "assign"):
+                    t = _v3_infer_type(node.get("value"), ctx)
+                    if t is not None:
+                        scratch[node.get("name")] = t
+                elif node.get("step") == "for":
+                    # `for x in xs` types the loop binding as the element of the
+                    # iterable, so a push of `x` types the accumulator.
+                    it = _list_element_type(_v3_infer_type(node.get("iterable"), ctx))
+                    if it is not None:
+                        scratch[node.get("bind")] = it
+                for v in node.values():
+                    forward(v)
+            elif isinstance(node, list):
+                for v in node:
+                    forward(v)
+
+        forward(body)
+        forward(body)
+
+        elem: dict = {n: None for n in empties}
+
+        def value_elem(val: object) -> str | None:
+            """The element surface type a value would give an empty-vec binding."""
+            if _v3_is_empty_list(val):
+                return None
+            if isinstance(val, dict):
+                if val.get("kind") == "list" and val.get("items"):
+                    return _v3_infer_type(val["items"][0], ctx)
+                if val.get("kind") == "builtin" and val.get("method") in ("push", "concat", "slice"):
+                    tgt = val.get("target")
+                    if val.get("method") == "push" and val.get("args"):
+                        t = _v3_infer_type(val["args"][0], ctx)
+                        if t is not None:
+                            return t
+                    if isinstance(tgt, dict) and tgt.get("kind") == "var" and tgt.get("name") in elem:
+                        return elem[tgt.get("name")]
+                if val.get("kind") in ("var", "name", "req"):
+                    nm = val.get("id") or val.get("name")
+                    if nm in elem and elem[nm] is not None:
+                        return elem[nm]
+                    return _list_element_type(scratch.get(nm))
+            return None
+
+        def contributions(node: object, acc: list) -> None:
+            if isinstance(node, dict):
+                if node.get("kind") == "builtin" and node.get("method") == "push":
+                    tgt = node.get("target")
+                    if isinstance(tgt, dict) and tgt.get("kind") == "var" \
+                            and tgt.get("name") in elem and node.get("args"):
+                        acc.append((tgt.get("name"), _v3_infer_type(node["args"][0], ctx)))
+                if node.get("step") in ("let", "assign") and node.get("name") in elem:
+                    acc.append((node.get("name"), value_elem(node.get("value"))))
+                for v in node.values():
+                    contributions(v, acc)
+            elif isinstance(node, list):
+                for v in node:
+                    contributions(v, acc)
+
+        changed = True
+        while changed:
+            changed = False
+            acc: list = []
+            contributions(body, acc)
+            for name, t in acc:
+                if isinstance(t, str) and elem.get(name) is None:
+                    elem[name] = t
+                    changed = True
+        return {n: t for n, t in elem.items() if isinstance(t, str)}
+    finally:
+        ctx.var_types = saved
+
+
 def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
     """The surface type of an expression when it is knowable, else None.
 
@@ -2565,6 +2759,15 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
         kind = node.get("kind")
         if kind in ("name", "var", "req"):
             return ctx.var_types.get(node.get("id") or node.get("name"))
+        if kind == "lit":
+            # A bare `Int`/`Bool` literal is a Copy scalar, so typing it keeps a
+            # reused loop counter (`var i = 0` pushed each iteration) from being
+            # needlessly `.clone()`d. `bool` is checked first (it subclasses int).
+            value = node.get("value")
+            if isinstance(value, bool):
+                return "Bool"
+            if isinstance(value, int):
+                return "Int"
         if kind == "adt":
             return ctx.case_adt.get(node.get("case"))
         if kind == "fn":
@@ -2579,6 +2782,36 @@ def _v3_infer_type(node: object, ctx: "_V3Ctx") -> str | None:
                     return ctx.fn_returns.get(cn)
         if kind == "list":
             return "List"
+        if kind == "index":
+            base_ty = _v3_infer_type(node.get("target"), ctx)
+            if isinstance(base_ty, str):
+                inner = _list_element_type(base_ty)
+                if inner is not None:
+                    return inner
+        if kind == "field":
+            base_ty = _v3_infer_type(node.get("target"), ctx)
+            if isinstance(base_ty, str):
+                ft = ctx.record_field_types(base_ty).get(node.get("name"))
+                if isinstance(ft, str):
+                    return ft
+        if kind == "record":
+            # Only when the field-set names EXACTLY ONE record; a field-set
+            # several records share (`{e, i}` -> `PR`/`AtExpr`) is ambiguous, so
+            # this must not guess a type and clobber a binding's more specific
+            # existing type. `record_by_fields` is already `None` for a shared
+            # field-set, so it is the unambiguous-only signal.
+            key = tuple(sorted(k for k, _ in node.get("fields") or []))
+            return ctx.record_by_fields.get(key)
+        if kind == "match":
+            # Every arm yields the same type, so the first arm body the emitter
+            # can type names the `match`'s type. This lets a `let x = match ..`
+            # bound value (e.g. a lookup-with-default) carry a type, so a later
+            # by-value use of it -- including one consumed inside a loop -- clones
+            # under the known-non-Copy rule instead of moving (E0382).
+            for arm in node.get("arms") or []:
+                arm_ty = _v3_infer_type(arm.get("body"), ctx)
+                if isinstance(arm_ty, str):
+                    return arm_ty
     if _v3_is_str(node, ctx):
         return "Str"
     if _v3_is_float(node):
@@ -2642,6 +2875,10 @@ class _V3Ctx:
         # clone (see `_by_value_arg`); reset per fn by `_emit_v3_functions`,
         # empty everywhere the reuse context is not established.
         self.multi_use: set[str] = set()
+        # Local name -> element surface type for a binding introduced as an empty
+        # `vec![]` (E0282 annotation); reset per fn by `_emit_v3_functions`, empty
+        # in every other emit context (no empty-vec annotation needed there).
+        self.vec_elems: dict = {}
         # Free function name -> set of parameter INDICES lowered to `&str`
         # (read-only `Str` params, item 282). Computed once from the whole
         # function list so a call site knows which argument slots take a borrow;
@@ -2656,6 +2893,11 @@ class _V3Ctx:
         self.case_adt: dict[str, str | None] = {}
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple[str, ...], str | None] = {}
+        # Recursive-ADT edges that carry a `Box` indirection (E0072), keyed by
+        # RAW `(enum, case)` / `(record, field)` — the same keys
+        # `_recursive_boxed_edges` and `_emit_v3_types` use, so construction Box-
+        # wraps exactly the edges the declaration boxed.
+        self.boxed_cases, self.boxed_fields = _recursive_boxed_edges(self.types)
         for name, spec in self.types.items():
             _ident(name, "type name")
             if spec.get("kind") == "record":
@@ -2670,6 +2912,19 @@ class _V3Ctx:
                         self.case_adt[cname] = None
                     else:
                         self.case_adt[cname] = name
+
+    def field_is_boxed(self, type_ident: str, field: str) -> bool:
+        """Whether the record whose EMITTED name is `type_ident` carries `field`
+        behind a `Box` (a recursive struct-field edge, E0072). `boxed_fields` is
+        keyed by the raw type name, so map the mangled ident back; empty in the
+        common case (recursion is broken at an enum payload, needing no boxed
+        field), so this is a cheap no-op then."""
+        if not self.boxed_fields:
+            return False
+        for raw in self.types:
+            if _ident(raw, "type name") == type_ident:
+                return (raw, field) in self.boxed_fields
+        return False
 
     def _records_with_fields(self, key: tuple[str, ...]) -> list[str]:
         """Every declared record whose field-set is EXACTLY `key`, sorted for a
@@ -2765,7 +3020,12 @@ class _V3Ctx:
                 return f"{adt}::{name}"
             if len(args) != 1:
                 raise EmitError(f"`{name}` takes exactly one payload argument")
-            return f"{adt}::{name}({args[0]})"
+            arg = args[0]
+            if (adt, name) in self.boxed_cases:
+                # recursive payload -> the variant holds `Box<Payload>` (E0072);
+                # move the constructed payload onto the heap to match.
+                arg = f"Box::new({arg})"
+            return f"{adt}::{name}({arg})"
         if name == "None":
             if args:
                 raise EmitError("`None` takes no arguments")
@@ -2906,8 +3166,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
         # Result -> native `Ok(..)`/`Err(..)`. Reuses the constructor logic
         # the call/var paths already use.
+        adt_args = node.get("args") or []
         return ctx.constructor(
-            node["case"], [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+            node["case"],
+            [_by_value_arg(a, _render_expr(a, ctx, rename), ctx) for a in adt_args]
         )
 
     if kind == "bin":
@@ -2972,35 +3234,47 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # what selects the form.
         if "callee" in node:
             callee_node = node.get("callee") or {}
-            arg_exprs = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
+            arg_nodes = node.get("args") or []
+            arg_exprs = [_render_expr(a, ctx, rename) for a in arg_nodes]
             args = ", ".join(arg_exprs)
+            # A method/host call MOVES each by-value argument into the callee, so
+            # a reused non-Copy argument (`amb.push(cn)` then `ct.remove(&cn)`,
+            # `surf.insert(e.parent, ..)` then a later `e.parent`) is cloned under
+            # the reuse rule; a borrowed key (`get`/`remove`) keeps its `&`.
+            reuse_args = [
+                _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, arg_exprs)
+            ]
             if callee_node.get("kind") == "field":
                 target_node = callee_node.get("target") or {}
                 method = callee_node.get("name")
                 if target_node.get("kind") == "var" and target_node.get("name") in _V3_HOST_ROOTS:
-                    hargs = arg_exprs
-                    if target_node["name"] == "Map" and method in ("get", "remove") and hargs:
+                    hargs = list(reuse_args)
+                    if target_node["name"] == "Map" and method in ("get", "remove") and arg_exprs:
                         # FR-4: the host Map borrows its key, so the caller keeps
                         # owning it (read-then-write on one key compiles).
-                        hargs = [f"&{hargs[0]}", *hargs[1:]]
+                        hargs = [f"&{arg_exprs[0]}", *reuse_args[1:]]
                     return f"{target_node['name']}::{_mname(method)}({', '.join(hargs)})"
                 target = _render_expr(target_node, ctx, rename)
                 if target_node.get("kind") not in _ATOMIC_KINDS:
                     target = f"({target})"
+                margs = reuse_args
                 if (target_node.get("kind") == "var"
                         and method in ("get", "remove")
                         and str(ctx.var_types.get(target_node.get("name") or "") or "")
                             .startswith("Map[")):
                     # FR-4: same borrow for a host-Map binding read through a
                     # 2.0-style callee (`store.get(k)` in a pure fn body).
-                    arg_exprs = [f"&{arg_exprs[0]}", *arg_exprs[1:]] if arg_exprs else []
-                    args = ", ".join(arg_exprs)
-                return f"{target}.{_ident(method, 'method')}({args})"
+                    margs = ([f"&{arg_exprs[0]}", *reuse_args[1:]] if arg_exprs else [])
+                return f"{target}.{_ident(method, 'method')}({', '.join(margs)})"
             callee_name = callee_node.get("name") if callee_node.get("kind") == "var" else None
             if callee_name is not None and (
                 callee_name in ctx.case_adt or callee_name in _V3_BUILTIN_CONSTRUCTORS
             ):
-                return ctx.constructor(callee_name, arg_exprs)
+                # An ADT/Some/Ok payload MOVES its value in (an owned slot like a
+                # record field), so a non-Copy payload is cloned via `_by_value_arg`.
+                return ctx.constructor(callee_name, [
+                    _by_value_arg(a, r, ctx)
+                    for a, r in zip(arg_nodes, arg_exprs)])
             callee = _render_expr(callee_node, ctx, rename)
             if callee_node.get("kind") not in _ATOMIC_KINDS:
                 callee = f"({callee})"
@@ -3033,9 +3307,10 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             args = ", ".join(arg_exprs)
         elif is_host_map:
             # Other host-Map methods (`insert`, ...) are calls on the
-            # first-party generic `Map<V>`, which already carries the right
-            # ownership at its own boundary — no service-call clone.
-            args = ", ".join(arg_exprs)
+            # first-party generic `Map<V>`; the value is MOVED in, so a reused
+            # non-Copy argument still clones under the reuse rule.
+            args = ", ".join(
+                _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, arg_exprs))
         else:
             # A service-method call passes its arguments by value (revl value
             # semantics): the generated trait methods take `String`/records/ADTs
@@ -3101,16 +3376,28 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # (sound: revl values are immutable), leaving Copy scalars and fresh
         # temporaries untouched. A fn-typed field is impossible here — it is an
         # escaping position the type layer already refuses (`_FN_TYPE_REFUSAL`).
+        def _field_value(k, v):
+            rendered = _by_value_arg(
+                v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)
+            if ctx.field_is_boxed(type_name, _ident(k, "record field")):
+                # recursive struct field -> the struct holds `Box<T>` (E0072);
+                # move the field value onto the heap to match.
+                rendered = f"Box::new({rendered})"
+            return rendered
+
         body = ", ".join(
-            f"{_ident(k, 'record field')}: "
-            f"{_by_value_arg(v, _render_expr(v, ctx, rename, field_types.get(k)), ctx)}"
+            f"{_ident(k, 'record field')}: {_field_value(k, v)}"
             for k, v in fields
         )
         return f"{type_name} {{ {body} }}"
 
     if kind == "list":
+        # A list literal MOVES each element into the `Vec`, so a reused non-Copy
+        # element (`vec![root_]` with `root_` read again) must clone; a Copy or
+        # single-use element goes through untouched.
         return ("vec![" + ", ".join(
-            _render_expr(item, ctx, rename) for item in node.get("items") or []) + "]")
+            _by_value_reuse(item, _render_expr(item, ctx, rename), ctx)
+            for item in node.get("items") or []) + "]")
 
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map). rustc infers the map's
@@ -3131,8 +3418,29 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         target = _render_expr(target_node, ctx, rename)
         if target_node.get("kind") not in _ATOMIC_KINDS:
             target = f"({target})"
-        args = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
-        return _v3_builtin(node.get("method"), target, args, node.get("recv"))
+        arg_nodes = node.get("args") or []
+        args = [_render_expr(a, ctx, rename) for a in arg_nodes]
+        # `push`/`set` MOVE their non-Copy argument into the collection, so a
+        # reused value must clone (`stack.revl_push(name)` then `name` again).
+        # The borrow-arg builtins (`concat`/`indexOf`/... and the Map key
+        # probes) take `&arg`, so they never move it and are left untouched.
+        method = node.get("method")
+        if method not in _BORROW_ARG_BUILTINS:
+            args = [
+                _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, args)]
+        elif method == "indexOf" and arg_nodes:
+            # A List `revl_index_of` needle is `&T` (`&String` for `List[Str]`),
+            # not `&str`. Item 282 may have borrowed a read-only `Str` param to
+            # `&str` (safe for the *string* indexOf), but as a List needle that
+            # renders `&&str` (E0308), so a borrowed `&str` arg is materialised to
+            # an owned `String` here (`&s.to_string()` -> `&String`).
+            recv_ty = _v3_infer_type(target_node, ctx)
+            a0 = arg_nodes[0]
+            if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
+                    and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
+                    and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
+                args[0] = f"{args[0]}.to_string()"
+        return _v3_builtin(method, target, args, node.get("recv"))
 
     if kind == "match":
         return _v3_match_expr(node, ctx, rename)
@@ -3485,12 +3793,28 @@ def _v3_interp(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) ->
 
 
 def _v3_match_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None) -> str:
-    scrutinee = _render_expr(node.get("scrutinee"), ctx, rename)
+    scrut_node = node.get("scrutinee")
+    # A `match` consumes its scrutinee (a bound pattern moves the payload out),
+    # so a reused non-Copy scrutinee must be cloned or every later use borrows a
+    # moved value (E0382): `match recv { Var(n) => .. }` then `infer(recv)`. A
+    # single-use scrutinee stays a move, byte-identical to before.
+    scrutinee = _by_value_reuse(
+        scrut_node, _render_expr(scrut_node, ctx, rename), ctx)
     arms = node.get("arms") or []
     lines = [f"match {scrutinee} {{"]
     for arm in arms:
         pattern = ctx.match_pattern(arm)
         body = _render_expr(arm.get("body"), ctx, rename)
+        bind = arm.get("bind")
+        if bind and (ctx.case_adt.get(arm.get("pattern")), arm.get("pattern")) \
+                in ctx.boxed_cases:
+            # The payload of a recursive case is `Box<Payload>` (E0072), so the
+            # bind is a `Box`, not the payload. Unbox it up front (`let b = *b;`)
+            # so the arm body reads the owned payload exactly as an unboxed
+            # binding would -- no per-use deref, and byte-identical to the
+            # non-recursive case (a non-boxed enum grows no such wrapper).
+            b = _ident(bind, "match bind")
+            body = f"{{ let {b} = *{b}; {body} }}"
         lines.append(f"    {pattern} => {body},")
     if not any(arm.get("pattern") == "_" for arm in arms):
         # lower.py has already checked exhaustiveness for known ADTs.
@@ -3582,8 +3906,17 @@ def _v3_self_append_inplace(target_name, recv: str, value_node,
         return None
     if tgt.get("name") != target_name:
         return None
-    args = [_render_expr(a, ctx) for a in value_node.get("args") or []]
-    return _v3_inplace_persistent(value_node.get("method"), recv, args)
+    method = value_node.get("method")
+    arg_nodes = value_node.get("args") or []
+    rendered = [_render_expr(a, ctx) for a in arg_nodes]
+    # `push`/`set` MOVE the appended value(s) into the collection, so a reused
+    # non-Copy value (`amb = amb.push(cn)` with `cn` read again) must clone; the
+    # receiver's own liveness is proven separately by this rewrite. `remove`
+    # borrows its key (`&k`), so it is left untouched.
+    if method in ("push", "set"):
+        rendered = [
+            _by_value_reuse(a, r, ctx) for a, r in zip(arg_nodes, rendered)]
+    return _v3_inplace_persistent(method, recv, rendered)
 
 
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
@@ -3610,11 +3943,26 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
             out.append(f"{pad}{inplace}")
             return
         value = _render_expr(node.get("value"), ctx, expected=expected)
+        # A `let`/`assign` whose RHS is a bare non-Copy binding MOVES it, so a
+        # later read of that binding borrows a moved value (E0382):
+        # `let mut rendered = base;` then `base.concat(..)`. This is the same
+        # reuse shape a branch tail hits, so it clones under the same rule --
+        # bare identifier, reused in the body, not known-Copy -- and a single-use
+        # RHS stays a move (byte-identical to before).
+        value = _by_value_tail(node.get("value"), value, ctx)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         if step == "let":
             keyword = "let mut" if node.get("mutable") else "let"
-            out.append(f"{pad}{keyword} {name} = {value};")
+            annot = ""
+            # An empty `vec![]` gives rustc no element type; when the body's
+            # pushes/aliases make it knowable, annotate so the accumulator idiom
+            # (`let mut out = []; .. out = out.push(x)`) compiles (E0282).
+            if _v3_is_empty_list(node.get("value")):
+                elem = ctx.vec_elems.get(node.get("name"))
+                if isinstance(elem, str):
+                    annot = f": Vec<{_rust_type(elem, ctx.types)}>"
+            out.append(f"{pad}{keyword} {name}{annot} = {value};")
         else:
             out.append(f"{pad}{name} = {value};")
     elif step == "return":
@@ -3639,7 +3987,14 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         out.append(f"{pad}}}")
     elif step == "for":
         bind = _ident(node.get("bind"), "loop binding")
-        out.append(f"{pad}for {bind} in {_render_expr(node['iterable'], ctx)} {{")
+        # `for x in v` consumes `v` via `.into_iter()`; a reused non-Copy Vec
+        # binding iterated twice (`for ln in lines { .. } .. for ln in lines`)
+        # moves on the first loop, so it is cloned when reused (a single-use
+        # iterable stays a move). Cloning the Vec keeps the loop binding owned, so
+        # the body is unchanged -- unlike a `&v` borrow, which would retype `x`.
+        iterable = _by_value_tail(
+            node["iterable"], _render_expr(node["iterable"], ctx), ctx)
+        out.append(f"{pad}for {bind} in {iterable} {{")
         for child in node.get("body") or []:
             _v3_stmt(child, ctx, out, indent + 1, test_mode=test_mode)
         out.append(f"{pad}}}")
@@ -3654,19 +4009,132 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
 
 
 
+def _recursive_boxed_edges(types: dict) -> tuple[set, set]:
+    """Return ``(boxed_cases, boxed_fields)`` — the enum-variant payload edges
+    and record-field edges that must be ``Box``-indirected so a recursive ADT is
+    finite-sized on the Rust tier (E0072), which also breaks the drop-check cycle
+    those recursive types otherwise trigger (E0391).
+
+    revl admits recursive datatypes (a self-host AST `Expr` whose cases carry
+    per-case structs — `BinN`, `IfN`, ... — that again contain `Expr` fields).
+    Rust requires a heap indirection on some edge of every containment *cycle* or
+    the type has infinite size. `Vec`/`Opt`/`Map`/`Box` already ARE indirection,
+    so only a *direct* (bare) user-type field/payload can be recursive; a
+    `List[Expr]` field never is. We break every cycle with the fewest boxes,
+    preferring an ENUM-variant payload edge over a struct field: boxing an enum
+    payload needs no read-site change (`Box<T>` auto-derefs for field access and
+    a field can be moved out of the box), whereas a boxed struct field would
+    force a deref at every read. Keys are the RAW type/member names (exactly as
+    they appear in `types`), so the declaration site, the constructor, and the
+    record literal all agree without threading the mangled idents.
+    """
+    adj: dict[str, list[tuple[str, str, str]]] = {}
+    enum_edges: list[tuple[str, str, str]] = []   # (owner, case, target)
+    field_edges: list[tuple[str, str, str]] = []  # (owner, field, target)
+    for name, spec in types.items():
+        edges: list[tuple[str, str, str]] = []
+        if spec.get("kind") == "record":
+            for field, ftype in (spec.get("fields") or {}).items():
+                # a *bare* user-type name is direct containment; a generic
+                # (`List[..]`/`Opt[..]`/`Map[..]`) is not in `types`, so it is
+                # already indirection and cannot make the type infinite.
+                if isinstance(ftype, str) and ftype in types:
+                    edges.append(("field", field, ftype))
+                    field_edges.append((name, field, ftype))
+        elif spec.get("kind") == "variant":
+            for case in spec.get("cases") or []:
+                payload = case.get("payload")
+                if isinstance(payload, str) and payload in types:
+                    edges.append(("case", case.get("name"), payload))
+                    enum_edges.append((name, case.get("name"), payload))
+        adj[name] = edges
+
+    boxed_cases: set = set()
+    boxed_fields: set = set()
+
+    def reaches(start: str, goal: str) -> bool:
+        """Can `goal` be reached from `start` in the graph with the
+        already-boxed (now-indirected) edges removed?"""
+        seen, stack = set(), [start]
+        while stack:
+            node = stack.pop()
+            for kind, member, target in adj.get(node, []):
+                if kind == "case" and (node, member) in boxed_cases:
+                    continue
+                if kind == "field" and (node, member) in boxed_fields:
+                    continue
+                if target == goal:
+                    return True
+                if target not in seen:
+                    seen.add(target)
+                    stack.append(target)
+        return False
+
+    # Greedy feedback-edge selection. An edge owner->target lies on a cycle iff
+    # `target` can still reach `owner`; box the first such edge, preferring enum
+    # payloads (in declaration order) over struct fields, then repeat until no
+    # cycle remains. Each pass boxes at most one edge, so this terminates.
+    changed = True
+    while changed:
+        changed = False
+        for owner, case, target in enum_edges:
+            if (owner, case) in boxed_cases:
+                continue
+            if reaches(target, owner):
+                boxed_cases.add((owner, case))
+                changed = True
+                break
+        if changed:
+            continue
+        for owner, field, target in field_edges:
+            if (owner, field) in boxed_fields:
+                continue
+            if reaches(target, owner):
+                boxed_fields.add((owner, field))
+                changed = True
+                break
+    return boxed_cases, boxed_fields
+
+
 def _emit_v3_types(types: dict) -> list[str]:
     # PartialEq is not decoration: revl has one equality and it is
     # structural (syntax-2.0 §3.4), so `{a: 1} == {a: 1}` must compile and
     # be true here as it is on python. Without the derive, rustc refuses
     # the comparison outright (E0369) and legal revl fails on this tier.
     out: list[str] = []
-    for name, spec in types.items():
-        name = _ident(name, "type name")
+    boxed_cases, boxed_fields = _recursive_boxed_edges(types)
+    # Two records with the IDENTICAL field->type shape are interchangeable in
+    # revl (structural equality, item 268), so a value of one is admitted where
+    # the other is declared -- `let one = [Bind {..}]` then `ArrowN { params:
+    # one }` with `params: List[ParamN]`. Rust sees `Bind` and `ParamN` as
+    # distinct nominal types (E0308), so the emitter designates ONE canonical
+    # struct per shape (first in declaration order) and lowers its structural
+    # twins to `pub type Twin = Canonical;`. The alias shares the canonical's
+    # constructor, fields, derives and serde form, so every twin is one Rust
+    # type and the two `Vec<_>`s unify. Distinct shapes (the common case, and the
+    # whole checked-in corpus) get no alias, so output stays byte-identical there.
+    canonical: dict[str, str] = {}   # raw record name -> canonical raw name
+    _by_shape: dict[tuple, str] = {}
+    for rn, sp in types.items():
+        if sp.get("kind") == "record":
+            shape = tuple(sorted((sp.get("fields") or {}).items()))
+            canonical[rn] = _by_shape.setdefault(shape, rn)
+    for raw_name, spec in types.items():
+        name = _ident(raw_name, "type name")
         if spec.get("kind") == "record":
+            twin = canonical.get(raw_name)
+            if twin is not None and twin != raw_name:
+                out.append(
+                    f"pub type {name} = {_ident(twin, 'type name')};")
+                out.append("")
+                continue
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
             out.append(f"pub struct {name} {{")
             for field, ftype in (spec.get("fields") or {}).items():
-                out.append(f"    {_ident(field, 'record field')}: {_rust_type(ftype, types)},")
+                rendered = _rust_type(ftype, types)
+                if (raw_name, field) in boxed_fields:
+                    rendered = f"Box<{rendered}>"
+                out.append(f"    {_ident(field, 'record field')}: {rendered},")
             out.append("}")
         elif spec.get("kind") == "variant":
             out.append("#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]")
@@ -3678,7 +4146,10 @@ def _emit_v3_types(types: dict) -> list[str]:
                 if payload is None:
                     out.append(f"    {cname},")
                 else:
-                    out.append(f"    {cname}({_rust_type(payload, types)}),")
+                    rendered = _rust_type(payload, types)
+                    if (raw_name, case.get("name")) in boxed_cases:
+                        rendered = f"Box<{rendered}>"
+                    out.append(f"    {cname}({rendered}),")
             out.append("}")
         else:
             raise EmitError(f"unsupported type kind {spec.get('kind')!r} for {name!r}")
@@ -3696,6 +4167,10 @@ def _emit_v3_functions(functions: list, types: dict, externs: list) -> list[str]
         counts: dict[str, int] = {}
         _body_multi_use(fn.get("body") or [], counts)
         ctx.multi_use = {n for n, c in counts.items() if c > 1}
+        # Element types for this fn's empty-`vec![]` locals, so the `let` can be
+        # annotated `Vec<T>` (E0282). Computed before the body renders and after
+        # `var_types` is seeded with the params it reads.
+        ctx.vec_elems = _v3_empty_vec_elem_types(fn.get("body") or [], ctx)
         # A read-only `Str` param lowers to a borrowed `&str` (item 282): the
         # caller lends the string instead of cloning it. `_render_param_type`
         # spells the borrow, and `ctx.borrowed_params` tells the body renderer
