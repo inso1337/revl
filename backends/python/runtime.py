@@ -1391,6 +1391,15 @@ class SessionOwner:
         self._wal_getter = wal_getter
         self._verdict: Optional[str] = None    # None (pending) | "commit" | "abort"
         self.prompts = {"commit": 0, "perCall": 0, "residue": 0}
+        # item 246 (docs/design/246-auto-approve.md, Decision 6): boundary calls
+        # counted by posture at decision time. `silent` = class (a),
+        # auto-approved on a checked inverse; `atCommit` = class (b), auto-approved
+        # and enumerated at commit; `prompted` = class (c), a ticket surfaced to a
+        # human. Class none is not a boundary call and stays out of all three
+        # (and out of the percent-auto-approved denominator). The auto-approve
+        # policy (Session) increments these; they are 0 for a session with no
+        # policy configured, so the manifest is byte-identical there.
+        self.approvals = {"silent": 0, "atCommit": 0, "prompted": 0}
         self.flush_residue: list = []
 
     def _wal(self) -> Optional[Any]:
@@ -1480,8 +1489,22 @@ class SessionOwner:
             "witnessed": {"count": target["witnessed"]},
             "residue": {"clean": True, "outstanding": []},
             "prompts": dict(self.prompts),
+            # item 246: the posture tally and the headline percent, so the commit
+            # manifest carries the auto-approve metrics beside the prompt counts.
+            "approvals": dict(self.approvals),
+            "percentAutoApproved": self.percent_auto_approved(),
             "hash": _hash_manifest(target),
         }
+
+    def percent_auto_approved(self) -> Optional[float]:
+        """`(silent + atCommit) / (silent + atCommit + prompted)` over calls that
+        reached at least one crossing (item 246, Decision 6). None when no
+        boundary call has been decided, so the ratio never divides by zero."""
+        a = self.approvals
+        denom = a["silent"] + a["atCommit"] + a["prompted"]
+        if denom == 0:
+            return None
+        return round(100.0 * (a["silent"] + a["atCommit"]) / denom, 2)
 
     # -- commit (two-step, hash-bound) -------------------------------------
 

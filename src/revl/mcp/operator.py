@@ -62,6 +62,14 @@ TOOL_VERB = {
     "revl_commit": "commit",
     "revl_commit_confirm": "commit",
     "revl_abort": "commit",
+    # item 246: minting a class-(c) approval is its own scoped authority. `approve`
+    # gates who may say yes to an irreversible crossing, in the same profile
+    # grammar as `commit` — an operator without it cannot launder authority
+    # through the prompt (docs/design/246-auto-approve.md, Decision 4). Its
+    # `_targets` branch resolves the presented ticket hash to the crossing's
+    # component, so a subject-scoped `may approve on payments` grant is usable
+    # while other components are live.
+    "revl_approve": "approve",
 }
 
 # friendly verb aliases the profile author may write (canonical on the right)
@@ -386,8 +394,32 @@ def _targets(verb: str, session, arguments: dict) \
         return _live_targets(candidate)
     if verb == "restore":
         return _snapshot_targets(arguments.get("snapshot"))
+    if verb == "approve":
+        return _approve_targets(session, arguments.get("hash"))
     # unload / edit / snapshot / undo operate on the whole running composition
     return _live_targets(ir)
+
+
+def _approve_targets(session, ticket_hash) \
+        -> list[tuple[str, frozenset[str]]] | None:
+    """A `revl_approve`'s target: the component the presented ticket names,
+    resolved against the session's outstanding-ticket table WITHOUT running
+    anything (the same resolve-without-running pattern `_snapshot_targets` uses
+    for `restore`). An unknown hash is undecidable here — the handler will refuse
+    it by the outstanding-ticket table before minting anything, so gating defers
+    (None) and does not spuriously scope a hash that will never be honoured. A
+    known hash scopes to the crossing component and its realms, so a subject-
+    scoped `may approve on payments` grant is not defeated by other live
+    components (Decision 2's approve branch)."""
+    tickets = getattr(session, "_tickets", None) or {}
+    ticket = tickets.get(ticket_hash)
+    if ticket is None:
+        return None
+    from ..policy import component_realms  # noqa: PLC0415 — read-only reuse
+    name = ticket.get("component")
+    manifest = (session.ir or {}).get("manifest") or {}
+    realms = component_realms(manifest, name) if name else frozenset()
+    return [(name or WHOLE, frozenset({name or WHOLE}) | frozenset(realms))]
 
 
 def _refusal(operator: Operator, verb: str,

@@ -1362,6 +1362,28 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_approval_granted(self, entry: dict) -> dict:
+        """Append the ``approval-granted`` record for a human yes to a class-(c)
+        crossing (item 246, docs/design/246-auto-approve.md, Decision 3). Names
+        the ticket hash, the reach-closure candidate hash, the component, and the
+        fields the human saw, so the audit can answer "which human decision
+        authorized this crossing". Consumes no seq — like ``commit-approved`` it
+        names facts, it is not an effect."""
+        record = {"record": "approval-granted", **entry}
+        self._write(record)
+        return record
+
+    def record_approval_consumed(self, request_id: str) -> dict:
+        """Append the single-use SPEND, durably, BEFORE the extern body runs
+        (item 246, Decision 3: consume-before-fire). A crash between this record
+        and the emission leaves consumed-but-unfired — an owed action that needs a
+        FRESH approval, which is fail-closed: the world saw at most one fire on
+        this yes. The later emission record names the same ``requestId``; the
+        audit joins the spend and the emission on it."""
+        record = {"record": "approval-consumed", "requestId": request_id}
+        self._write(record)
+        return record
+
     def record_commit_approved(self, manifest_hash: str) -> dict:
         """Append the ``commit-approved`` marker (item 245, Decision 4). Its
         presence IS the commit verdict, written BEFORE the first flush fire and

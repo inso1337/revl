@@ -23,6 +23,7 @@ import sys
 from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
+from .approval import ApprovalRequired
 
 
 class SessionError(RuntimeError):
@@ -155,6 +156,29 @@ class Session:
         # `state`. Empty by default, so a single-agent session is unchanged.
         from .leases import LeaseBook  # noqa: PLC0415 — no cordis, additive
         self.leases = LeaseBook()
+        # the auto-approve policy (roadmap item 246, docs/design/246-auto-approve.md).
+        # None = OFF: the decision in `call`/load/swap returns ungated and every
+        # call proceeds — today's behaviour, byte for byte (the item-55 clause).
+        # "auto" enables the second orthogonal gate: class (a) auto-approves
+        # silently, (b) auto-approves and enumerates at commit, (c) prompts per
+        # call via the ticket two-step. Set at serve time
+        # (`revl mcp serve --approval-policy auto`).
+        self.approval_policy = None
+        # the per-generation class map (item 246, Decision 2): rebuilt atomically
+        # at every load/swap so a call decided against a stale map is impossible.
+        # None when nothing is loaded or the policy is off.
+        self._class_map = None
+        # the outstanding-ticket table (Fix 8): every class-(c) ticket the server
+        # issues, keyed by its hash. `revl_approve` refuses a hash not in here —
+        # an approval can only be minted for a question the server actually asked.
+        # Replaced atomically with the class map at swap (a ticket from a previous
+        # generation is gone, not stale).
+        self._tickets: dict = {}
+        # the approval ledger (item 246, Decision 3): granted class-(c) approvals,
+        # each bound to its ticket hash and the reach-closure candidate hash,
+        # single-use. Persists across swaps (the candidate-hash check invalidates a
+        # stale entry, so no revocation bookkeeping exists to forget).
+        self._ledger: list = []
 
     # -- plumbing ----------------------------------------------------------
 
@@ -189,6 +213,22 @@ class Session:
                 f"implementation, so it may never enter a running composition; "
                 f"`revl_check` lists them (docs/holes.md)")
         self._enforce_sandbox(ir)
+        # item 246: an enabled approval policy REQUIRES recording — without a WAL
+        # there is no durable ticket spend and no answer to "which human decision
+        # authorized this crossing"; a policy whose approvals evaporate is worse
+        # than none. Refuse, don't degrade (Decision 2).
+        if self.approval_policy is not None and not record:
+            raise SessionError(
+                "the approval policy requires recording — load with `record: "
+                "true`. Without a WAL there is no durable approval spend and no "
+                "audit join for a class-(c) crossing, so no in-memory approval "
+                "mode ships (item 246, Decision 2, refuse-don't-degrade)")
+        # item 246: the per-generation class map, and the activation gate over it,
+        # BEFORE any runtime is touched — a candidate whose activation body reaches
+        # a class-(c) emission does not boot without approval (Fix 1). Off when no
+        # policy is configured, so nothing below runs and the load is byte-identical.
+        self._class_map = self._build_class_map(ir)
+        self._enforce_activation_gate(ir)
         emit, runtime_mod, Context, FiberState = _backend()
         driver_class = _capturing_driver_class()
         self.config = config or {}
@@ -280,6 +320,15 @@ class Session:
         reconciles the dynamic instance layer the static swap never saw."""
         driver = self._require()
         self._enforce_sandbox(ir)
+        # item 246: classify the candidate and gate its activation reach BEFORE
+        # any teardown — a swap-in whose activation body reaches a class-(c)
+        # emission answers for it with the ticket two-step before it boots, which
+        # is the bypass Fix 1 exists to keep shut (an emission moved from a
+        # provide-method into the activation body must not dodge the prompt). The
+        # new map replaces the live one atomically only once the swap completes,
+        # so a call mid-swap is impossible.
+        new_map = self._build_class_map(ir)
+        self._enforce_activation_gate(ir, class_map=new_map)
         old_ir = self.ir
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
@@ -336,6 +385,12 @@ class Session:
                     f"Dropping it would be residue (docs/state-handoff.md)."
                 ) from None
         self._record_generation()
+        # item 246: the new generation's class map goes live atomically with the
+        # composition, and the outstanding-ticket table is replaced (a ticket
+        # issued against the previous generation is gone, not stale — its hash
+        # gets the unknown-hash refusal and the caller re-issues).
+        self._class_map = new_map
+        self._tickets = {}
         state = self.state(drain=True)
         if migration is not None:
             state["migration"] = migration
@@ -1083,6 +1138,14 @@ class Session:
         self.draft = None
         self._generation = 0
         self._history = []
+        # item 246: the class map, the outstanding-ticket table, and the approval
+        # ledger are session-scoped — a new session starts with none, so a token
+        # minted in one session can never be replayed in a later one over the same
+        # workspace (invariant 5). `approval_policy` is a serve-time binding and is
+        # deliberately NOT reset here.
+        self._class_map = None
+        self._tickets = {}
+        self._ledger = []
 
     # -- interaction -------------------------------------------------------
 
@@ -1102,6 +1165,14 @@ class Session:
         if target is None or not callable(target):
             raise SessionError(f"`{key}.{method}` is not callable on the provided value")
 
+        # item 246: the auto-approve decision, at the single chokepoint every
+        # internal re-invocation passes through — `replay_forward` re-invokes
+        # `self.call(...)`, so a class-(c) replayed step is refused here exactly as
+        # a fresh one (Fix 2, exit test 13). class none/(a)/(b) proceed and are
+        # counted; class (c) consumes a standing approval or raises the ticket.
+        # A no-policy session never enters this (returns immediately).
+        self._approval_decide_call(key, method, args)
+
         async def invoke():
             result = target(*(args or []))
             if hasattr(result, "__await__"):
@@ -1120,6 +1191,175 @@ class Session:
             if self.recorder is not None:
                 self.recorder.activation_origin()
         return {"result": _plain(result), "trace": driver.drain_events()}
+
+    # -- the auto-approve policy (roadmap item 246) ------------------------
+
+    def _build_class_map(self, ir: dict):
+        """The per-generation class map, or None when the policy is off. Derived
+        from the CHECKED effect facts (`query.Composition` + the emission fixed
+        point), activation scopes included — never the advisory schema walk
+        (Decision 2, Fix 10)."""
+        if self.approval_policy is None:
+            return None
+        from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+        return ClassMap(ir)
+
+    def _approval_wal(self):
+        """The session WAL, when recording (an enabled policy requires it). None
+        otherwise — the in-memory ledger still binds, but a policy load without
+        recording is refused up front, so this is None only with the policy off."""
+        return self.recorder.wal if self.recorder is not None else None
+
+    def _find_standing_approval(self, ticket: dict):
+        """The first unconsumed ledger entry that covers this ticket: same ticket
+        hash, same reach-closure candidate hash against the LIVE generation, same
+        component (invariants 2/4/5). A swap that changed the closure recomputes a
+        different candidate hash, so a stale token fails here with no revocation
+        bookkeeping."""
+        for entry in self._ledger:
+            if entry["consumed"]:
+                continue
+            if entry["hash"] != ticket["hash"]:
+                continue
+            if entry["candidateHash"] != ticket["candidateHash"]:
+                continue  # candidate-invalidates: the closure changed under it
+            if entry["component"] != ticket["component"]:
+                continue  # non-replayable: minted for another component
+            return entry
+        return None
+
+    def _consume_approval(self, entry: dict) -> None:
+        """Spend the token durably BEFORE the crossing fires (Decision 3,
+        consume-before-fire). A crash between the spend and the fire leaves
+        consumed-but-unfired: fail-closed, a fresh approval is demanded."""
+        entry["consumed"] = True
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_approval_consumed(entry["requestId"])
+
+    def _count_posture(self, action_class: str | None) -> None:
+        """Count a decided boundary call by posture (Decision 6). Class none is
+        not a boundary call — it stays out of every bucket and the percent
+        denominator."""
+        owner = self._owner
+        if owner is None or action_class is None:
+            return
+        bucket = {"a": "silent", "b": "atCommit", "c": "prompted"}.get(action_class)
+        if bucket is not None:
+            owner.approvals[bucket] += 1
+
+    def _approval_decide_call(self, key: str, method: str, args) -> None:
+        """The per-call decision (Decision 2). Off -> return immediately (byte-
+        identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
+        a standing approval and proceed, else mint a ticket, count the prompt, and
+        raise `ApprovalRequired` (the two-step's refusal)."""
+        if self.approval_policy is None or self._class_map is None:
+            return
+        reach = self._class_map.classify_call(key, method)
+        if reach is None:
+            return  # no crossing (or unresolved) — not a boundary call
+        klass = reach["class"]
+        if klass in (None, "a", "b"):
+            self._count_posture(klass)
+            return
+        # class (c): a standing approval, or a fresh ticket.
+        from .approval import ApprovalRequired  # noqa: PLC0415
+        ticket = self._class_map.build_ticket(reach, args)
+        standing = self._find_standing_approval(ticket)
+        if standing is not None:
+            self._consume_approval(standing)   # durable spend before the fire
+            return
+        self._tickets[ticket["hash"]] = ticket
+        if self._owner is not None:
+            self._owner.prompts["perCall"] += 1
+        self._count_posture("c")
+        raise ApprovalRequired(ticket)
+
+    def _enforce_activation_gate(self, ir: dict, class_map=None) -> None:
+        """The activation gate (Fix 1): under an enabled policy, a candidate whose
+        ACTIVATION reach is class (c) turns the load/swap response itself into the
+        ticket two-step before boot. class (a)/(b) activation reach follows the
+        table (proceed / enqueue, both activation-safe). Raises `ApprovalRequired`
+        naming the activation crossing, unless a standing approval covers it."""
+        cm = class_map if class_map is not None else self._class_map
+        if self.approval_policy is None or cm is None:
+            return
+        from .approval import ApprovalRequired  # noqa: PLC0415
+        for reach in cm.activation_reaches():
+            if reach["class"] != "c":
+                continue
+            ticket = cm.build_ticket(reach)
+            standing = self._find_standing_approval(ticket)
+            if standing is not None:
+                self._consume_approval(standing)
+                continue
+            self._tickets[ticket["hash"]] = ticket
+            if self._owner is not None:
+                self._owner.prompts["perCall"] += 1
+            self._count_posture("c")
+            raise ApprovalRequired(ticket)
+
+    def approve_ticket(self, ticket_hash: str) -> dict:
+        """Mint a standing approval bound to an outstanding ticket (Decision 2/3).
+        Refuses a hash the server never issued (the outstanding-ticket table) — an
+        approval can only be minted for a question the server actually asked. The
+        entry is single-use and bound to the ticket hash, the reach-closure
+        candidate hash, the component, and the session; a `approval-granted` WAL
+        record makes it durable."""
+        ticket = self._tickets.get(ticket_hash)
+        if ticket is None:
+            raise SessionError(
+                f"unknown ticket hash {ticket_hash!r} — the server never issued "
+                f"it (or the generation changed and the outstanding-ticket table "
+                f"was replaced). Re-issue the call to get a fresh ticket, then "
+                f"approve that (item 246, the outstanding-ticket table)")
+        import time  # noqa: PLC0415
+        entry = {
+            "requestId": ticket["hash"],
+            "hash": ticket["hash"],
+            "candidateHash": ticket["candidateHash"],
+            "component": ticket["component"],
+            "key": ticket.get("key"),
+            "method": ticket.get("method"),
+            "argsDigest": ticket.get("argsDigest"),
+            "kind": ticket.get("kind"),
+            "fields": {},           # the human's evidence (Slice 3 fills this)
+            "grantedAt": time.time(),
+            "expiresAt": None,      # session-end at the latest (Slice 2 adds ttl)
+            "consumed": False,
+        }
+        self._ledger.append(entry)
+        wal = self._approval_wal()
+        if wal is not None:
+            wal.record_approval_granted({
+                "requestId": entry["requestId"], "hash": entry["hash"],
+                "candidateHash": entry["candidateHash"],
+                "component": entry["component"], "kind": entry["kind"]})
+        return {"approved": True, "hash": ticket["hash"],
+                "component": ticket["component"], "key": ticket.get("key"),
+                "method": ticket.get("method"), "kind": ticket.get("kind"),
+                "candidateHash": ticket["candidateHash"]}
+
+    def approval_metrics(self) -> dict | None:
+        """The auto-approve headline numbers for `session.state()` (Decision 6):
+        the posture tally, percent auto-approved-with-proof, prompts-per-session,
+        and the outstanding class-(c) tickets. None when no policy is configured,
+        so `state()` stays byte-identical off-policy."""
+        if self.approval_policy is None:
+            return None
+        owner = self._owner
+        approvals = dict(owner.approvals) if owner is not None \
+            else {"silent": 0, "atCommit": 0, "prompted": 0}
+        prompts = dict(owner.prompts) if owner is not None else {}
+        percent = owner.percent_auto_approved() if owner is not None else None
+        return {
+            "policy": self.approval_policy,
+            "approvals": approvals,
+            "percentAutoApproved": percent,
+            "promptsPerSession": sum(prompts.values()) if prompts else 0,
+            "prompts": prompts,
+            "outstandingTickets": sorted(self._tickets),
+        }
 
     # -- backwards replay (docs/replay.md) ---------------------------------
 
@@ -1205,6 +1445,13 @@ class Session:
             try:
                 outcome["result"] = self.call(item["key"], item["method"],
                                               item["args"])["result"]
+            except ApprovalRequired as exc:
+                # item 246, exit test 13: a replayed class-(c) crossing is refused
+                # at the same chokepoint a fresh call hits (the decision lives in
+                # `Session.call`, which `replay_forward` re-invokes), so the ticket
+                # surfaces here too — the replay is not a bypass.
+                outcome["approvalRequired"] = True
+                outcome["ticket"] = exc.ticket
             except Exception as exc:  # noqa: BLE001 — a failed replay is a result
                 outcome["error"] = f"{type(exc).__name__}: {exc}"
             replayed.append(outcome)
@@ -1234,6 +1481,10 @@ class Session:
             # active component leases (item 61): holder, component, expiry — the
             # multi-agent workspace, visible before anyone acts.
             "leases": self.leases.document(),
+            # item 246: the auto-approve metrics, present only when a policy is
+            # configured (off-policy `state()` is byte-identical).
+            **({"approval": self.approval_metrics()}
+               if self.approval_policy is not None else {}),
             **({"trace": driver.drain_events()} if drain else {}),
         }
 
