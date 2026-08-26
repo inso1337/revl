@@ -128,6 +128,77 @@ def test_emit_with_compensate_keeps_the_compensation():
     assert "send(0" in out, "compensation dropped — G7 residue on the java tier"
 
 
+def test_compensate_routes_through_revl_frame_two_phase_loop():
+    """item 243 Slice 2b / 247: an `emit ... compensate` no longer joins the
+    raw `fx.track(Disposables.of(...))` stack (the OLD placeholder that fired
+    on every teardown, TCK a5 pre-respec). It routes through
+    `RevlFrame.compensation`, which enqueues for Phase 2 instead of running
+    inline (docs/design/teardown-contract.md)."""
+    src = (
+        "service Bus { emission fn send(n: Int) -> Int }\n"
+        "service S { fn f(x: Int) -> Int }\n"
+        "component C requires bus: Bus provides s: S {\n"
+        "  emit bus.send(1) compensate bus.send(0)\n"
+        "  provide s { fn f(x) = x }\n"
+        "}\n"
+    )
+    out = emit.emit(compile_source(src))
+    assert "private static final class RevlFrame" in out
+    assert 'frame.compensation("send", "send", () -> bus.send(0L))' in out
+    assert "frame.commit();" in out
+    assert "frame.runPhase2();" in out
+    # the raw unconditional-replay shape must be gone for this entry
+    assert "Disposables.of(() -> bus.send(0L))" not in out
+
+
+def test_bracket_only_component_has_no_revl_frame():
+    """A component using ONLY plain `acquire`/`undo` brackets — no witnessed
+    extern, no `compensate` — must keep emitting exactly as before this
+    slice: no RevlFrame, plain `Disposables.of(...)` teardown. Byte-identical
+    precedent (docs/design/243-witnessed-externs.md 'Slice 1 as implemented'
+    #3: 'every non-witnessed program emits byte for byte as before'),
+    extended here to compensation."""
+    src = (
+        "service KV { fn count() -> Int  emission fn put(key: Str, value: Str) }\n"
+        "component MemKV provides kv: KV {\n"
+        "  let store = effect Map.new() undo store.drop()\n"
+        "  provide kv {\n"
+        "    fn count() = store.size()\n"
+        "    fn put(key, value) {\n"
+        "      effect store.insert(key, value)\n"
+        "      undo   store.remove(key)\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    out = emit.emit(compile_source(src))
+    assert "RevlFrame" not in out
+    assert "Disposables.of(() -> store.drop())" in out
+
+
+def test_witnessed_effect_routes_through_revl_frame_transactional():
+    """item 243: a witnessed effect in effect position registers the
+    extern's DECLARED inverse as a `transactional` entry (Ok-conditional),
+    not a bracket — the accumulator owns the undo, no site-spelled one."""
+    src = (
+        "type Stash = { path: Str }\n"
+        "type FsError = { code: Str }\n"
+        "extern pure fn unstash(w: Stash) -> Unit = @java { return; } = @py { return }\n"
+        "extern witnessed[fs] fn stash() -> Result[Stash, FsError] undo unstash(result)"
+        " = @java { return new RevlResult.Ok<>(new Stash(\"p\")); }"
+        " = @py { return Ok({'path': 'p'}) }\n"
+        "component C {\n"
+        "  effect stash()\n"
+        "}\n"
+    )
+    out = emit.emit(compile_source(src))
+    assert "private static final class RevlFrame" in out
+    assert "instanceof RevlResult.Ok<?, ?>" in out
+    assert 'frame.transactional("stash", "unstash", () -> unstash(result))' in out
+    # no site-spelled bracket registration for the witnessed call
+    assert "frame.bracket(" not in out
+
+
 def test_version_gate_accepts_ir_1_2_3():
     v1 = {
         "ir_version": 1,
@@ -711,6 +782,222 @@ def test_java_runs_runtime_scenarios_on_stub_runtime(tmp_path):
     )
     assert run.returncode == 0, run.stderr + run.stdout
     assert "SCENARIOS_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_two_phase_abort_and_bracket_fault_continue_stub_runtime(tmp_path):
+    """docs/design/teardown-contract.md, exit test 3 (loop conformance),
+    proven at RUNTIME against the stub EffectScope: two brackets and one
+    compensation register on a component whose SECOND (later-registered,
+    thus LIFO-first-to-dispose) bracket's undo THROWS.
+
+    Asserts, in one run: (1) continue-and-record — the fault does not stop
+    the earlier bracket's undo from running; (2) the original activation
+    failure ('boom') is what propagates, not the bracket fault; (3) a5b —
+    every Phase-1 entry (both bracket undos) completes before the Phase-2
+    compensation fires at all."""
+    ir = compile_source(
+        """
+        service Probe { fn mark(m: Str) -> Int
+          fn boomUndo()
+          emission fn send(m: Str) -> Int }
+        component C requires probe: Probe {
+          effect probe.mark("acquire-a")
+            undo probe.mark("undo-a")
+          effect probe.mark("acquire-b")
+            undo probe.boomUndo()
+          emit probe.send("emit") compensate probe.send("compensate")
+          fail "boom"
+        }
+        """
+    )
+    out = _javac_compile(tmp_path, emit.emit(ir))
+    runner = tmp_path / "FaultProbe.java"
+    runner.write_text(
+        "import io.cordis4j.core.Context;\n"
+        "import io.cordis4j.core.ServiceKey;\n"
+        "public final class FaultProbe {\n"
+        "    private static final java.util.List<String> LOG = new java.util.ArrayList<>();\n"
+        "    static final class Rec implements revl.Components.Probe {\n"
+        "        public long mark(String m) { LOG.add(m); return 0L; }\n"
+        "        public void boomUndo() {\n"
+        "            LOG.add(\"boomUndo-attempted\");\n"
+        "            throw new RuntimeException(\"undo-b exploded\");\n"
+        "        }\n"
+        "        public long send(String m) { LOG.add(m); return 0L; }\n"
+        "    }\n"
+        "    public static void main(String[] args) throws Exception {\n"
+        "        Context ctx = new Context();\n"
+        "        ctx.provide(ServiceKey.of(revl.Components.Probe.class), new Rec());\n"
+        "        boolean threw = false;\n"
+        "        try {\n"
+        "            new revl.Components.CPlugin().apply(ctx);\n"
+        "        } catch (RuntimeException e) {\n"
+        "            threw = \"boom\".equals(e.getMessage());\n"
+        "        }\n"
+        "        var want = java.util.List.of(\"acquire-a\", \"acquire-b\", \"emit\",\n"
+        "                \"boomUndo-attempted\", \"undo-a\", \"compensate\");\n"
+        "        if (!threw || !LOG.equals(want)) {\n"
+        "            System.err.println(\"FAIL threw=\" + threw + \" LOG=\" + LOG + \" want=\" + want);\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        System.out.println(\"TWO_PHASE_ABORT_OK\");\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    compile_runner = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_runner.returncode == 0, compile_runner.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "FaultProbe"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "TWO_PHASE_ABORT_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_compensation_discharges_on_clean_unload_stub_runtime(tmp_path):
+    """TCK a5a (docs/design/teardown-contract.md exit test 1): a clean,
+    successful unload DISCHARGES an activation-time compensation — it never
+    runs. The forward emission is the deliverable; best-effort cleanup on
+    success is wrong (247 decision 1)."""
+    ir = compile_source(
+        """
+        service Bus { emission fn send(n: Int) -> Int }
+        component C requires bus: Bus {
+          emit bus.send(1) compensate bus.send(0)
+        }
+        """
+    )
+    out = _javac_compile(tmp_path, emit.emit(ir))
+    runner = tmp_path / "CommitProbe.java"
+    runner.write_text(
+        "import io.cordis4j.core.Context;\n"
+        "import io.cordis4j.core.Disposable;\n"
+        "import io.cordis4j.core.ServiceKey;\n"
+        "public final class CommitProbe {\n"
+        "    private static final java.util.List<String> LOG = new java.util.ArrayList<>();\n"
+        "    static final class Rec implements revl.Components.Bus {\n"
+        "        public long send(long n) { LOG.add(\"send:\" + n); return 0L; }\n"
+        "    }\n"
+        "    public static void main(String[] args) throws Exception {\n"
+        "        Context ctx = new Context();\n"
+        "        ctx.provide(ServiceKey.of(revl.Components.Bus.class), new Rec());\n"
+        "        Disposable comp = new revl.Components.CPlugin().apply(ctx);\n"
+        "        comp.dispose();\n"
+        "        if (!LOG.equals(java.util.List.of(\"send:1\"))) {\n"
+        "            System.err.println(\"FAIL LOG=\" + LOG + \" want=[send:1]\");\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        System.out.println(\"COMMIT_DISCHARGE_OK\");\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    compile_runner = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_runner.returncode == 0, compile_runner.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "CommitProbe"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "COMMIT_DISCHARGE_OK" in run.stdout
+
+
+@pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
+def test_java_witnessed_persists_on_commit_reverts_on_abort_stub_runtime(tmp_path):
+    """item 243, proven at runtime: a witnessed effect's declared inverse is
+    DISCHARGED on a clean commit (the mutation persists) and REPLAYED on a
+    mid-activation abort (the mutation reverts) — the load-bearing
+    distinction from a bracket, which would replay on both paths."""
+    ir = compile_source(
+        "type Stash = { path: Str }\n"
+        "type FsError = { code: Str }\n"
+        "extern pure fn unstash(w: Stash) -> Unit = @java {\n"
+        "    revl.TransactLog.LOG.add(\"undo:\" + w.path);\n"
+        "    return;\n"
+        "} = @py { return }\n"
+        "extern witnessed[fs] fn stash() -> Result[Stash, FsError] undo unstash(result) = @java {\n"
+        "    revl.TransactLog.LOG.add(\"do\");\n"
+        "    return new RevlResult.Ok<>(new Stash(\"p\"));\n"
+        "} = @py { return Ok({'path': 'p'}) }\n"
+        "component Commits {\n"
+        "  effect stash()\n"
+        "}\n"
+        "component Aborts {\n"
+        "  effect stash()\n"
+        "  fail \"boom\"\n"
+        "}\n"
+    )
+    # Components.java's extern bodies reference revl.TransactLog directly, so
+    # it must compile IN THE SAME PASS as Components.java (not via
+    # `_javac_compile`, which only ever sees the stubs + Components.java).
+    package_dir = tmp_path / "revl"
+    package_dir.mkdir()
+    (package_dir / "Components.java").write_text(emit.emit(ir), encoding="utf-8")
+    (package_dir / "TransactLog.java").write_text(
+        "package revl;\n"
+        "public final class TransactLog {\n"
+        "    public static final java.util.List<String> LOG = new java.util.ArrayList<>();\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    compile_all = subprocess.run(
+        [JAVAC, "--release", "21", "-d", str(out)]
+        + [str(s) for s in STUB_SOURCES]
+        + [str(package_dir / "TransactLog.java"), str(package_dir / "Components.java")],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_all.returncode == 0, compile_all.stderr
+    runner = tmp_path / "WitnessProbe.java"
+    runner.write_text(
+        "import io.cordis4j.core.Context;\n"
+        "public final class WitnessProbe {\n"
+        "    public static void main(String[] args) throws Exception {\n"
+        "        Context commitCtx = new Context();\n"
+        "        var commitHandle = new revl.Components.CommitsPlugin().apply(commitCtx);\n"
+        "        commitHandle.dispose();\n"
+        "        if (!revl.TransactLog.LOG.equals(java.util.List.of(\"do\"))) {\n"
+        "            System.err.println(\"COMMIT FAIL LOG=\" + revl.TransactLog.LOG);\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        revl.TransactLog.LOG.clear();\n"
+        "        Context abortCtx = new Context();\n"
+        "        boolean threw = false;\n"
+        "        try {\n"
+        "            new revl.Components.AbortsPlugin().apply(abortCtx);\n"
+        "        } catch (RuntimeException e) {\n"
+        "            threw = true;\n"
+        "        }\n"
+        "        if (!threw || !revl.TransactLog.LOG.equals(java.util.List.of(\"do\", \"undo:p\"))) {\n"
+        "            System.err.println(\"ABORT FAIL threw=\" + threw + \" LOG=\" + revl.TransactLog.LOG);\n"
+        "            System.exit(1);\n"
+        "        }\n"
+        "        System.out.println(\"WITNESSED_TEARDOWN_OK\");\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    compile_runner = subprocess.run(
+        [JAVAC, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert compile_runner.returncode == 0, compile_runner.stderr
+    run = subprocess.run(
+        [JAVA, "-cp", str(out), "WitnessProbe"],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert run.returncode == 0, run.stderr + run.stdout
+    assert "WITNESSED_TEARDOWN_OK" in run.stdout
 
 
 @pytest.mark.skipif(JAVAC is None or JAVA is None, reason="no working JDK")
