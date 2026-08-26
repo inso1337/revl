@@ -32,10 +32,22 @@ resolution is a separate cordis path, not what these tests exercise).
 import copy
 import importlib.util
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 from revl.compiler import compile_source
+
+# bridge-slice tests (below) drive `replay.WriteAheadLog`/`revl.recovery`
+# directly over a live cordis session, mirroring tests/test_witnessed_wal_recover.py
+# and tests/test_crash_recovery.py's own sys.path bootstrap for `backends/python`.
+_ROOT = Path(__file__).resolve().parents[1]
+_BACKEND = _ROOT / "backends" / "python"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+import replay  # noqa: E402
+from revl.recovery import DictWorld, recover  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # live runtime gate (mirrors tests/test_apply.py / test_crash_recovery.py)
@@ -265,3 +277,111 @@ def test_non_witnessed_program_is_untouched():
     body = emit.emit(ir)
     assert "transactional(" not in body
     assert "_revl_frame.transactional" not in body
+
+
+# ---------------------------------------------------------------------------
+# bridge slice (item 243, "(i.b) runtime wiring"): Frame wired to the WAL/
+# recover foundation (backends/python/replay.py `WriteAheadLog`, src/revl/
+# recovery.py `recover`). The same committed-vs-aborted crash-safety proof
+# tests/test_witnessed_wal_recover.py established directly against the WAL
+# API, now driven through the REAL `Frame.transactional`/`Frame.drain` over a
+# live cordis-py activation.
+# ---------------------------------------------------------------------------
+
+
+def _wal_before_apply(monkeypatch, wal_path: str) -> None:
+    """`Session.load` builds a fresh `replay.Recorder` and instruments the
+    emitted module in one call (`Session._prepare_module`), with no seam
+    in between to open the WAL — and `Recorder._wrap_apply` only attaches a
+    WAL to a component's `Timeline` when `recorder.wal is not None` AT APPLY
+    TIME. So hook `Recorder.instrument`, the step that immediately precedes
+    activation, to open the WAL first."""
+    real_instrument = replay.Recorder.instrument
+
+    def _open_then_instrument(self, *args, **kwargs):
+        self.open_wal(wal_path, generation=1)
+        return real_instrument(self, *args, **kwargs)
+
+    monkeypatch.setattr(replay.Recorder, "instrument", _open_then_instrument)
+
+
+@needs_cordis
+def test_a_committed_transactional_writes_a_durable_discharge_record_at_drain(
+        target, tmp_path, monkeypatch):
+    """The crash-safety proof through the REAL `Frame.drain`: a WAL is
+    attached to a live session, the witnessed effect commits cleanly (a clean
+    `session.unload()`), and `Frame.drain` must write the durable discharge
+    record BEFORE that unload finishes — so a simulated crash right after (no
+    `activation-complete` marker, exactly a `kill -9` between the commit and
+    the marker) still leaves `revl recover` SKIPPING the already-committed
+    mutation instead of wrongly rolling it back."""
+    wal_path = str(tmp_path / "commit.wal")
+    _wal_before_apply(monkeypatch, wal_path)
+
+    session = _session()
+    session.load(_ir(_witnessed_component("StashOk", abort=False)), record=True)
+
+    # the descriptor is durable the instant `Frame.transactional` registers
+    # the entry — well before the activation ever commits (each WAL write is
+    # flushed + fsync'd, so it is already readable here, mid-session)
+    written = replay.WriteAheadLog.read(wal_path)
+    [descriptor] = [r for r in written["records"]
+                    if r.get("record") == "discharge-descriptor"]
+    assert descriptor["entry"] == "transactional"
+    # the named-call inverse: the declared undo's name, recovered from the
+    # registered closure (no lower.py call-site metadata exists yet)
+    assert descriptor["call"]["method"] == "unstash"
+    seq = descriptor["seq"]
+
+    session.unload()                     # clean unload: Frame.drain runs
+    session.recorder.wal.close()         # <-- simulate the crash: no
+                                          #     activation-complete marker
+
+    loaded = replay.WriteAheadLog.read(wal_path)
+    assert loaded["complete"] is False
+    [discharge] = [r for r in loaded["records"] if r.get("record") == "discharge"]
+    assert discharge["discharged"] == [seq]
+
+    report = recover(wal_path)
+    assert report["verdict"] == "rolled-back"
+    # the committed seq is SKIPPED — not replayed — because its discharge
+    # record is durable
+    assert [s["seq"] for s in report["dischargedSkipped"]] == [seq]
+    assert report["transactionalRolledBack"] == []
+    referent = DictWorld().key(descriptor["call"])
+    assert referent in report["residue"]["worldRemaining"]
+    assert report["residue"]["clean"] is True
+    assert "committed transactional" in report["residue"]["proof"]
+
+
+@needs_cordis
+def test_an_aborted_transactional_wal_descriptor_replays_on_recover(
+        target, tmp_path, monkeypatch):
+    """The contrast: the same WAL wiring, but the activation ABORTS
+    mid-body. Registration (inside `Frame.transactional`, on the `Ok`
+    branch) still ran and its descriptor is durable, but `Frame.drain`
+    never runs on an abort — so no discharge record exists for it, and
+    `revl recover` reconstructs and replays the declared inverse."""
+    wal_path = str(tmp_path / "abort.wal")
+    _wal_before_apply(monkeypatch, wal_path)
+
+    session = _session()
+    loaded_report = session.load(
+        _ir(_witnessed_component("StashAbort", abort=True)), record=True)
+    assert loaded_report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
+
+    session.recorder.wal.close()  # <-- simulate the crash: no activation-complete
+
+    loaded = replay.WriteAheadLog.read(wal_path)
+    assert loaded["complete"] is False
+    [descriptor] = [r for r in loaded["records"]
+                    if r.get("record") == "discharge-descriptor"]
+    assert descriptor["entry"] == "transactional"
+    # the abort unwind already replayed the inverse in-process (test 2 above)
+    # but never reached `Frame.drain` — no discharge record was ever written
+    assert not [r for r in loaded["records"] if r.get("record") == "discharge"]
+
+    report = recover(wal_path)
+    assert report["verdict"] == "rolled-back"
+    assert [s["seq"] for s in report["transactionalRolledBack"]] == [descriptor["seq"]]
+    assert report["dischargedSkipped"] == []
