@@ -453,6 +453,68 @@ def _run_compile(args, ir: dict) -> int:
     return 0
 
 
+def _run_scaffold(args) -> int:
+    """`revl scaffold` — a typed, holed skeleton from a spec (docs/scaffold.md).
+
+    The generator is the new work; the rest reuses the same compile and
+    obligation path every other verb shares. Human output writes the `.rvl`
+    (or prints it) and lists the open holes on stderr, exactly as `revl
+    compile` does for a draft; `--json` hands back the skeleton, its
+    obligations, and each hole's fill spec in one document."""
+    from .scaffold import ScaffoldError, build_spec, build_skeleton, scaffold_document
+
+    try:
+        spec = build_spec(
+            service=args.service, provides=args.provides,
+            component=args.component, requires=args.requires,
+            capabilities=args.capabilities, methods=args.method,
+            emits=args.emits, config=args.config, effect=not args.no_effect,
+            resource_type=args.resource)
+    except ScaffoldError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    filename = args.out or f"{spec.component}.rvl"
+
+    if args.json:
+        document = scaffold_document(spec, filename)
+        document["path"] = args.out
+        print(json.dumps(document, indent=2))
+        if args.out:
+            with open(args.out, "w") as handle:
+                handle.write(document["source"])
+        return 0
+
+    source = build_skeleton(spec)
+    if args.out:
+        with open(args.out, "w") as handle:
+            handle.write(source)
+        print(f"wrote {args.out}", file=sys.stderr)
+    else:
+        print(source, end="")
+
+    # The obligations are the point: a scaffold is a draft, so report the holes
+    # the way `revl compile` reports a draft's — on stderr, so a redirected
+    # skeleton stays exactly the skeleton.
+    holes = compile_source_holes(source, filename)
+    if holes:
+        plural = "s" if len(holes) > 1 else ""
+        print(f"{len(holes)} open hole{plural} — a scaffold is a draft: it "
+              f"compiles, admission refuses it until every hole is filled "
+              f"(docs/holes.md)", file=sys.stderr)
+        for rendered in render_holes(holes):
+            print(f"  {rendered}", file=sys.stderr)
+    return 0
+
+
+def compile_source_holes(source: str, filename: str) -> list[dict]:
+    """The open holes in a freshly compiled skeleton, or [] if it somehow has
+    none. The generator only ever emits drafts, so this is the obligation list
+    the human output renders."""
+    from .compiler import compile_source
+    return compile_source(source, filename).get("holes") or []
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -462,6 +524,8 @@ def main(argv: list[str] | None = None) -> int:
         return _truc_main(args.truc_args)
     if args.command == "explain":
         return _run_explain(args)
+    if args.command == "scaffold":
+        return _run_scaffold(args)
     if args.command == "repair":
         return _run_repair(args)
     if args.command == "fmt":
