@@ -9,6 +9,11 @@ import argparse
 
 from ..run import KNOWN_BACKENDS, RUNNABLE_BACKENDS
 
+# The backends `revl bundle` can emit (the emitter package names under
+# backends/). Kept as a literal here so parser assembly stays import-light —
+# it mirrors `revl.bundle.DEFAULT_BACKENDS`, which is the authority.
+BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
@@ -735,6 +740,44 @@ def build_parser() -> argparse.ArgumentParser:
                              "slice; the loop still runs)")
     repair.add_argument("--json", action="store_true",
                         help="print the incident dossier as JSON")
+
+    # `revl bundle <sources...> --out DIR` / `revl verify <bundle>` - the
+    # reproducible production bundle (roadmap item 305, docs/bundle.md). `bundle`
+    # assembles source + IR + lock + per-backend emitted + policy + attestation
+    # + gauntlet (+ optional topology) into one directory; `verify` recompiles it
+    # and proves it rebuilds bit-for-bit, tier by tier.
+    bundle_cmd = sub.add_parser(
+        "bundle",
+        help="assemble a reproducible production bundle: source, IR, lock, "
+             "per-backend emitted artifacts, policy, attestation and gauntlet "
+             "evidence in one .revlbundle directory (item 305, docs/bundle.md)")
+    bundle_cmd.add_argument("files", nargs="+",
+                            help=".rvl sources to bundle (the whole composition)")
+    bundle_cmd.add_argument("--out", required=True, metavar="DIR",
+                            help="the bundle directory to write (e.g. app.revlbundle)")
+    bundle_cmd.add_argument(
+        "--backend", action="append", default=[], metavar="BACKEND",
+        choices=list(BUNDLE_BACKENDS),
+        help="a backend to emit into the bundle; repeatable. Omit to emit every "
+             f"backend ({', '.join(BUNDLE_BACKENDS)}); an emitter that refuses "
+             "this IR is recorded as skipped, not a failure")
+    bundle_cmd.add_argument(
+        "--topology", default=None, metavar="PLACEMENT",
+        help="a placement/topology map (TOML or JSON) to carry in the bundle as "
+             "topology.json; omit for a single-process bundle")
+    bundle_cmd.add_argument("--json", action="store_true",
+                            help="print the bundle path and its runtime-manifest as JSON")
+
+    verify_cmd = sub.add_parser(
+        "verify",
+        help="recompile a .revlbundle and prove it rebuilds bit-for-bit: source "
+             "and IR hashes match, deps are locked, emitted artifacts correspond "
+             "to each backend, capabilities match policy, evidence is present "
+             "(item 305, docs/bundle.md)")
+    verify_cmd.add_argument("bundle", metavar="BUNDLE",
+                            help="a bundle directory written by `revl bundle`")
+    verify_cmd.add_argument("--json", action="store_true",
+                            help="machine-readable tier-by-tier report")
 
     # `revl truc <verb> ...` — a namespaced door onto the standalone `truc`
     # binary (roadmap item 136, slice S2). This is a pure passthrough: the tail
