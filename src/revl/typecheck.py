@@ -1330,17 +1330,27 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
             sig = (types.get(FNS_KEY) or {}).get(name)
             if sig is not None:
                 params = sig["params"]
+                # roadmap item 187: a call may omit trailing defaulted
+                # parameters. `required` is the count of leading parameters
+                # without a default; anything from `required` to `len(params)`
+                # arguments is well-formed. Signatures with no defaults keep
+                # `required == len(params)`, so the check is unchanged for them.
+                required = sig.get("required", len(params))
                 if filename:
-                    if len(expr.args) != len(params):
+                    if not (required <= len(expr.args) <= len(params)):
                         rendered = ", ".join(render_type(p) or "_"
                                              for p in params) or "no arguments"
+                        want = (f"{len(params)}" if required == len(params)
+                                else f"{required} to {len(params)}")
                         raise RevlError(
                             filename, line,
-                            f"`{name}` takes {len(params)} argument(s), "
+                            f"`{name}` takes {want} argument(s), "
                             f"{len(expr.args)} given",
-                            hint=f"`{name}` is declared `({rendered})` — revl has no "
-                                 "default, optional, or variadic parameters, so every "
-                                 "call supplies exactly the declared arity",
+                            hint=f"`{name}` is declared `({rendered})`"
+                                 + ("" if required == len(params) else
+                                    " — trailing parameters with a default may be "
+                                    "omitted, but revl calls are positional so only "
+                                    "trailing arguments can be dropped"),
                             code="T1", category="type-mismatch",
                         )
                 if not sig.get("tparams"):

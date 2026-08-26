@@ -343,6 +343,13 @@ class FnParam:
     name: str
     type: str
     line: int
+    # optional default value (roadmap item 187): `fn f(a: Int, b: Int = 0)`.
+    # A pure expression, evaluated at the call site when the argument is
+    # omitted (call-site resolution — the emitters never see a defaulted
+    # parameter, only a fully-supplied argument list). `None` for a parameter
+    # without a default. Only `fn_decl` parses defaults; extern (`=` opens a
+    # host body) and prop-test (generated inputs) parameter lists do not.
+    default: object | None = None
 
 
 @dataclass
@@ -1893,12 +1900,31 @@ class Parser:
         type_params = self._type_param_list()
         self.expect("(")
         params: list[FnParam] = []
+        seen_default = False
         while not self.at(")"):
             pline = self.peek().line
             pname = self._name()
             self.expect(":")
             ptype = self.type_()
-            params.append(FnParam(pname, ptype, pline))
+            # optional default value (roadmap item 187): `= <pure expr>`. A
+            # `fn` body opens with `{`, never `=`, so the `=` here is
+            # unambiguous. Defaults must be trailing — a required parameter
+            # after a defaulted one has no positional slot a caller could
+            # reach (revl has no keyword arguments).
+            default = None
+            if self.at("="):
+                self.next()
+                default = self.pure_expr()
+                seen_default = True
+            elif seen_default:
+                raise self.err(pline,
+                               f"parameter `{pname}` has no default but follows a "
+                               "defaulted parameter",
+                               hint="once a parameter declares a default, every "
+                                    "parameter after it must too — a required "
+                                    "parameter after a defaulted one has no call "
+                                    "position, since revl calls are positional")
+            params.append(FnParam(pname, ptype, pline, default))
             if self.at(","):
                 self.next()
         self.expect(")")
