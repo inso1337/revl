@@ -270,9 +270,13 @@ no approval are reported "dropped, never fired", counted clean.
 
 Slice status: the py runtime, driver, MCP verbs, and recovery are implemented.
 The refuse-at-emit tier gate for `deferred` on the rust/go/java/wasm/typescript
-tiers is owed by Slice 2 (the guard and its canonical diagnostic already live in
-`revl.session_commit.refuse_deferred_on_ownerless_tier`, ready to wire into each
-backend's emit refusal channel).
+tiers is now wired: each backend's `emit()` calls
+`revl.session_commit.refuse_deferred_on_ownerless_tier` and re-raises the single
+canonical diagnostic through its own `EmitError`, so a CALL to a `deferred`
+extern on any of those five tiers is refused at emit time rather than fired or
+silently dropped. The refusal is call-site keyed: a `deferred` extern that is
+declared but never called still emits cleanly. Targeting the python tier (the
+lone session owner) emits the call normally.
 
 ### `revl_rollback`
 
