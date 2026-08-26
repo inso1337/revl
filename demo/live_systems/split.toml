@@ -1,0 +1,17 @@
+# Split demo/live_systems/app.rvl across two py processes. The `cache` seam is
+# wired between them over a Unix socket: Api (consumer) proxies `cache` to
+# MemCache (provider). `revl swap MemCache --to py` live-migrates the provider
+# into a fresh process across that seam. Both processes are py, so this whole
+# demo runs on the cordis-py runtime alone (roadmap item 23 runs on py).
+#
+#   revl run demo/live_systems/app.rvl --placement demo/live_systems/split.toml
+
+[processes.provider]
+components = ["MemCache"]
+
+[processes.consumer]
+components = ["Api"]
+# probes run in the consumer process; `cache` is proxied to the provider, so
+# each probe crosses the seam `revl swap` re-points. put then get proves the
+# seam answers before the cutover.
+probe = ["cache.put('ada', '42')", "cache.get('ada')"]

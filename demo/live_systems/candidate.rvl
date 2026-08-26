@@ -1,0 +1,46 @@
+// Candidate composition for the `revl plan` / `revl apply` step of the demo.
+//
+// Same MemCache + Api as app.rvl, plus one new consumer, Audit, that requires
+// `api`. Planning this against the running composition yields a one-operation
+// delta (load Audit); applying it lands that change, and its rollback (a
+// dispose that replays Audit's derived inverses) is computed from the same IR
+// the plan was — undo as a theorem, not a runbook (docs/apply.md).
+
+service Cache {
+  async fn get(k: Str) -> Opt[Str]
+  async fn put(k: Str, v: Str)
+}
+
+service ApiSvc {
+  async fn hit(k: Str) -> Opt[Str]
+}
+
+service AuditSvc {
+  async fn seen() -> Int
+}
+
+component MemCache provides cache: Cache {
+  let m = effect Map.new() undo m.drop()
+
+  provide cache {
+    async fn get(k) = m.get(k)
+    async fn put(k, v) {
+      effect m.insert(k, v)
+      undo   m.remove(k)
+    }
+  }
+}
+
+component Api requires cache: Cache provides api: ApiSvc {
+  provide api {
+    async fn hit(k) = cache.get(k)
+  }
+}
+
+component Audit requires api: ApiSvc provides audit: AuditSvc {
+  let log = effect Map.new() undo log.drop()
+
+  provide audit {
+    async fn seen() = 0
+  }
+}

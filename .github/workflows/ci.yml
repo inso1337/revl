@@ -258,3 +258,12 @@ jobs:
       - run: bash ci/placement_smoke.sh
         env:
           REVL_PY: backends/python/.venv/bin/python
+      # v3.0 release gate, exit test E3: the live-systems demo (swap 23 / why 27
+      # / apply 36) runs end to end from this clean checkout as a scripted gate.
+      # `sh backends/python/setup.sh` above installed the cordis-py runtime the
+      # live stages need, so run the scripted demo under it. REVL_DEMO_REQUIRE=1
+      # turns a runtime-absent skip into a failure, so a silently-missing runtime
+      # cannot let the gate pass green (the same contract as the wasm job).
+      - run: backends/python/.venv/bin/python demo/live_systems/run_demo.py
+        env:
+          REVL_DEMO_REQUIRE: "1"
