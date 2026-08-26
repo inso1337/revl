@@ -1,0 +1,66 @@
+{
+ "ir_version": 3,
+ "types": {},
+ "services": {},
+ "externs": [
+  {
+   "name": "begin_row",
+   "class": "witnessed",
+   "params": [],
+   "returns": "Result[Str, Str]",
+   "witness": "Str",
+   "ok_conditional": true,
+   "revertible": true,
+   "entry_kind": "transactional",
+   "bodies": {
+    "java": "\n    return new RevlResult.Ok<>(\"row#1\");\n"
+   },
+   "undo": {
+    "kind": "call",
+    "callee": {
+     "kind": "var",
+     "name": "delete_row"
+    },
+    "args": [
+     {
+      "kind": "var",
+      "name": "result"
+     }
+    ]
+   }
+  },
+  {
+   "name": "delete_row",
+   "class": "pure",
+   "params": [
+    {
+     "name": "id",
+     "type": "Str"
+    }
+   ],
+   "returns": "Unit",
+   "bodies": {
+    "java": "\n    // in-memory inverse: recover models the referent, no host state to touch\n"
+   }
+  }
+ ],
+ "components": [
+  {
+   "name": "Crasher",
+   "source": "crashproof.rvl",
+   "config": [],
+   "requires": {},
+   "provides": {},
+   "body": [
+    {
+     "step": "effect",
+     "acquire": {
+      "kind": "fn",
+      "name": "begin_row",
+      "args": []
+     }
+    }
+   ]
+  }
+ ]
+}
