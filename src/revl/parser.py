@@ -328,6 +328,14 @@ class ExternDecl:
     # (parser.py:42) and `ProvideMethod.async_` (parser.py:186). Validity
     # (emission-only, no compensate) is checked in lower, not the parser.
     async_: bool = False
+    # `deferred` modifier between the classification and `fn` (roadmap item 245,
+    # docs/design/245-session-commit.md, Decision 2). Sits in the same modifier
+    # slot as `async`: `extern emission[mail] deferred fn send(...)`. A deferred
+    # emission does not fire at the call site — it enqueues onto the session's
+    # deferral queue and returns Unit; the session commit flushes it (or an abort
+    # drops it). Validity (emission-only, Unit-returning, no compensate, not
+    # async) is checked in lower, not the parser.
+    deferred: bool = False
 
 
 @dataclass
@@ -996,10 +1004,25 @@ class Parser:
         # classification stays first and mandatory, so the "unclassified
         # extern" diagnostic above is untouched. Validity rules (emission-only,
         # no compensate) are enforced in lower (docs/design/async-extern.md §1).
+        # `async` and `deferred` modifiers, in either order, between the
+        # classification (and its optional capability scope) and `fn`. `async`
+        # is a reserved keyword; `deferred` (item 245) is a CONTEXTUAL keyword
+        # recognised only in this modifier slot, so the lexer's KEYWORDS set
+        # needs no sync and no program that used `deferred` as an ordinary name
+        # is broken (the same discipline `witnessed` uses above). Their pairwise
+        # validity (`deferred` is emission-only and async-exclusive) is enforced
+        # in lower with honest messages, not the parser.
         async_ = False
-        if self.at("kw", "async"):
-            self.next()
-            async_ = True
+        deferred = False
+        while True:
+            if self.at("kw", "async") and not async_:
+                self.next()
+                async_ = True
+            elif self.at("ident", "deferred") and not deferred:
+                self.next()
+                deferred = True
+            else:
+                break
         self.expect("kw", "fn")
         name = self.expect("ident").value
         type_params = self._type_param_list()
@@ -1035,7 +1058,8 @@ class Parser:
         if not bodies:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
-                          capabilities=capabilities, type_params=type_params, async_=async_)
+                          capabilities=capabilities, type_params=type_params, async_=async_,
+                          deferred=deferred)
 
     def _capability_list(self, kind: str = "emission") -> tuple[str, ...]:
         """`[a, b]` after `emission`/`witnessed` — the boundaries this operation
