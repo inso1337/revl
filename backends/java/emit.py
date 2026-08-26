@@ -516,6 +516,10 @@ class _V3Ctx:
         self.types = types or {}
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # item 243/318: witnessed externs by name, so a method/activation body's
+        # effect step can be recognised as a transactional crossing. Empty for
+        # every non-witnessed document, so their emission stays byte-identical.
+        self.witnessed = _witnessed_externs(externs)
         # Every component in the document, keyed by name, so a `spawn`
         # acquisition can resolve its target template's config layout (the
         # plugin-constructor argument order) and provided keys (the services to
@@ -2804,6 +2808,42 @@ def _emit_revl_frame_runtime() -> list[str]:
         "        };",
         "    }",
         "",
+        "    /** `transactionalMethod` (item 318): the per-tool-call H1 seam — a",
+        "     * witnessed fs mutation fired from a PROVIDE-METHOD body (per request),",
+        "     * after activation, whose inverse must outlive the method call and",
+        "     * survive until the component/session commits or aborts. On java this",
+        "     * is BEHAVIOURALLY IDENTICAL to `transactional`, and deliberately so:",
+        "     * the py tier has to PARK a method-registered entry in a separate",
+        "     * `_deferred_transactional` list and dispose it inside `drain`, because",
+        "     * on py `_committed` only flips at TEARDOWN (drain), so a method entry",
+        "     * disposed as an ordinary sibling would observe committed==false on a",
+        "     * clean unload and wrongly revert the deliverable. Java has no such",
+        "     * window: `committed` flips once at ACTIVATION-END (the emitted",
+        "     * apply()'s `frame.commit()` before it returns), strictly before any",
+        "     * provide-method can run and before any teardown, so the disposer this",
+        "     * returns already observes the settled commit bit when the enclosing",
+        "     * component's `fx` disposes it at unload. The ONE soundness rule the",
+        "     * emitter must honour is that this entry is tracked into the COMPONENT",
+        "     * ACTIVATION `fx` (the provider struct's `this.fx`), never a per-call",
+        "     * scope: a per-call scope would dispose it at method-return with",
+        "     * committed==true, discharging it and dropping the undo, so a later",
+        "     * abort could not revert it (residue). */",
+        "    Disposable transactionalMethod(String crossing, String attempted, Runnable undo) {",
+        "        return transactional(crossing, attempted, undo);",
+        "    }",
+        "",
+        "    /** Session-level reject seam (item 318; item 245's explicit commit/abort",
+        "     * UX is the eventual driver). A component that activated cleanly has",
+        "     * already run `commit()`, so a later unload would discharge every",
+        "     * transactional entry and PERSIST its mutation. Calling `abort()` before",
+        "     * teardown flips the discriminator back to false, so the next `fx`",
+        "     * dispose replays every transactional inverse — the activation-body ones",
+        "     * AND the per-tool-call method-registered ones — and the mutations",
+        "     * revert. Idempotent. */",
+        "    void abort() {",
+        "        committed = false;",
+        "    }",
+        "",
         "    /** `compensation` (item 247): abort-only, best-effort, Phase 2. A",
         "     * committed activation DISCHARGES it (never runs). On abort this",
         "     * disposer fires during fx's native Phase-1 walk, interleaved with",
@@ -2905,6 +2945,39 @@ def _emit_revl_frame_runtime() -> list[str]:
         "    }",
         "}",
         "",
+        "// item 318: the per-activation Disposable an emitted frame-bearing apply()",
+        "// returns instead of the bare `fx` EffectScope. It carries the component's",
+        "// `RevlFrame` alongside `fx` so a session-level reject can reach it AFTER a",
+        "// clean activation (mirrors the py tier's ctx->Frame reachability, which",
+        "// item 245's commit/abort UX drives). `dispose()` runs the native Phase-1",
+        "// LIFO walk (`fx.dispose()`) and then drains any Phase-2 compensations the",
+        "// walk enqueued — a no-op on a clean unload (committed => every entry",
+        "// discharges, nothing enqueues) and the abort drain when `abort()` was",
+        "// called first. `abort()` flips the commit discriminator so that dispose",
+        "// reverts rather than persists. Existing callers that only `dispose()` the",
+        "// returned Disposable are unaffected.",
+        "public static final class RevlActivation implements Disposable {",
+        "    private final Context.EffectScope fx;",
+        "    private final RevlFrame frame;",
+        "",
+        "    RevlActivation(Context.EffectScope fx, RevlFrame frame) {",
+        "        this.fx = fx;",
+        "        this.frame = frame;",
+        "    }",
+        "",
+        "    /** Session-level reject: revert this activation's transactional work",
+        "     * (activation-body AND per-tool-call) on the next dispose. */",
+        "    public void abort() {",
+        "        frame.abort();",
+        "    }",
+        "",
+        "    @Override",
+        "    public void dispose() {",
+        "        fx.dispose();",
+        "        frame.runPhase2();",
+        "    }",
+        "}",
+        "",
     ]
 
 
@@ -2990,9 +3063,30 @@ def _method_body_lines(
             else:
                 lines.append(f"return {_expr(stmt['expr'], v3_ctx, rename, env)};")
         elif step == "effect":
-            lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
-            _emit_bracket_track(
-                lines, "", stmt["acquire"], stmt["undo"], v3_ctx, env, frame_expr, rename)
+            wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
+            if wit is not None:
+                # item 318: a per-tool-call witnessed fs mutation. Register the
+                # extern's declared inverse into the COMPONENT activation frame
+                # (this.fx/this.frame), disposed by the component's own unload,
+                # not at method-return — the per-tool-call H1 seam.
+                _emit_witnessed_step(
+                    lines, "", stmt, wit, v3_ctx, env, None, frame_expr,
+                    rename=rename, frame_method=True)
+            else:
+                lines.append(f"{_expr(stmt['acquire'], v3_ctx, rename, env)};")
+                _emit_bracket_track(
+                    lines, "", stmt["acquire"], stmt["undo"], v3_ctx, env, frame_expr, rename)
+        elif step == "let-effect":
+            wit = _witnessed_extern_for(stmt.get("acquire"), v3_ctx.witnessed)
+            if wit is not None:
+                bind = _ident(stmt["bind"], "binding")
+                _emit_witnessed_step(
+                    lines, "", stmt, wit, v3_ctx, env, bind, frame_expr,
+                    rename=rename, frame_method=True)
+            else:
+                raise EmitError(
+                    "a non-witnessed let-effect is not supported inside a method "
+                    "body on the java tier")
         elif step == "emit":
             lines.append(f"{_expr(stmt['expr'], v3_ctx, rename, env)};")
             if stmt.get("compensate") is not None:
@@ -3126,6 +3220,7 @@ def _emit_compensation_track(
 def _emit_witnessed_step(
     out: list[str], pad: str, step: dict, ext: dict,
     v3_ctx: _V3Ctx, env: _Env, bind: str | None, frame_expr: str | None,
+    rename: dict[str, str] | None = None, frame_method: bool = False,
 ) -> None:
     """Emit a witnessed effect (item 243): run the mutation, and on `Ok`
     register the extern's DECLARED inverse as a TRANSACTIONAL entry carrying
@@ -3136,20 +3231,31 @@ def _emit_witnessed_step(
     as implemented' #1). On `Err` nothing is registered — a failed mutation
     touched nothing, so it must not schedule a rollback (Ok-conditional).
     `frame_expr` is always set here (a witnessed acquire always forces
-    `_component_needs_frame`)."""
+    `_component_needs_frame`).
+
+    item 318: when `frame_method` is set the acquisition is inside a
+    PROVIDE-METHOD body (the per-tool-call H1 seam). The entry then routes
+    through `RevlFrame.transactionalMethod` rather than `.transactional`, and
+    the `fx`/`frame` referenced are the provider struct's activation-scope
+    fields (`this.fx`/`this.frame`) — the COMPONENT-long accumulator, so the
+    inverse outlives the method call and is disposed by the component's own
+    unload (commit -> persist, `abort()` -> revert), never at method-return.
+    `rename` maps requires/binds to `this.<name>` in method bodies (mirroring
+    the bracket path); it is `None` in the activation body."""
     assert frame_expr is not None  # invariant: witnessed acquire => needs_frame
     tag = id(step)
     result_var = f"_revl_wit{tag}"
     ok_var = f"_revl_ok{tag}"
     witness_type = _java_v3_type(ext.get("witness"))
-    undo_expr = _expr(ext["undo"], v3_ctx, None, env)
+    undo_expr = _expr(ext["undo"], v3_ctx, rename, env)
     crossing = _string(_call_label(step["acquire"]))
     attempted = _string(_call_label(ext["undo"]))
-    out.append(f"{pad}var {result_var} = {_expr(step['acquire'], v3_ctx, None, env)};")
+    entry = "transactionalMethod" if frame_method else "transactional"
+    out.append(f"{pad}var {result_var} = {_expr(step['acquire'], v3_ctx, rename, env)};")
     out.append(f"{pad}if ({result_var} instanceof RevlResult.Ok<?, ?> {ok_var}) {{")
     out.append(f"{pad}    {witness_type} result = ({witness_type}) {ok_var}.value();")
     out.append(
-        f"{pad}    fx.track({frame_expr}.transactional({crossing}, {attempted}, "
+        f"{pad}    fx.track({frame_expr}.{entry}({crossing}, {attempted}, "
         f"() -> {undo_expr}));"
     )
     out.append(f"{pad}}}")
@@ -3393,7 +3499,14 @@ def _emit_component_modern(
             # every transactional/compensation entry discharges instead of
             # replaying.
             out.append("            frame.commit();")
-        out.append("            return fx;")
+        if needs_frame:
+            # item 318: return the frame-bearing Disposable so a session-level
+            # reject can reach `frame.abort()` after a clean activation, and so
+            # the unload drains Phase-2 compensations (a no-op on commit). A
+            # bracket-only / non-frame component still returns the bare `fx`.
+            out.append("            return new RevlActivation(fx, frame);")
+        else:
+            out.append("            return fx;")
     out.append("        } catch (RuntimeException | Error failure) {")
     out.append("            fx.dispose();")
     if needs_frame:
