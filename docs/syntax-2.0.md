@@ -58,6 +58,17 @@ fn helper() -> Int { ... }                        // default: module-private
   interfaces), components are never exported (composed, not imported).
 - Import cycles between modules are a compile error (distinct from G3, which
   governs runtime component graphs).
+- **Resolution (roadmap 319).** `use` resolves the path relative to the
+  importing file first, and that always wins — a genuine local file is never
+  shadowed. Only when nothing sits there does the compiler fall back to a
+  search path, tried in order: each directory on `REVL_IMPORT_PATH` (like
+  `PYTHONPATH` — entries joined by the OS path separator), then the revl
+  stdlib's install location (a source checkout's `<repo>/stdlib`, or the copy
+  packaged into the wheel). That fallback is what lets `use "stdlib/fs.rvl"`
+  resolve for a module anywhere — not only ones that live inside the revl
+  checkout — without vendoring a copy of the stdlib into the consumer's own
+  tree. A path that resolves nowhere in that list is a compile error naming
+  the `use` path and the search path that was tried.
 
 ## 2. Types and data
 
