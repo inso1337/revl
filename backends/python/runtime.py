@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
+import time
 import weakref
 from typing import Any, Callable, Optional
 
@@ -587,6 +589,111 @@ class _Transactional:
         return undo(witness)
 
 
+#: Phase-2 bound config surface (docs/design/teardown-contract.md, "the
+#: bound rule"): two environment variables in the existing `REVL_*`
+#: convention, identical spelling on every tier, read once per activation
+#: (`Frame.__init__`) so a change mid-run cannot move an already-aborting
+#: activation's deadline. Provisional defaults pinned by the contract
+#: (open question 1): budget 5000 ms, per-call 1000 ms.
+_COMPENSATION_BUDGET_ENV = "REVL_COMPENSATION_BUDGET_MS"
+_COMPENSATION_PER_CALL_ENV = "REVL_COMPENSATION_PER_CALL_MS"
+_COMPENSATION_BUDGET_DEFAULT_MS = 5000
+_COMPENSATION_PER_CALL_DEFAULT_MS = 1000
+
+
+def _read_bound_seconds(env_name: str, default_ms: int) -> Optional[float]:
+    """Read one `REVL_*_MS` bound: unset -> the tier-uniform default; `0` ->
+    no bound (`None`, teardown-contract.md: "the between-compensation check
+    still runs and records nothing expired"); an unparsable value -> the
+    default, same as unset (never crash an activation over a malformed
+    host env var). Returns seconds, `time.monotonic`'s unit."""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        ms = default_ms
+    else:
+        try:
+            ms = int(raw)
+        except ValueError:
+            ms = default_ms
+    if ms == 0:
+        return None
+    return ms / 1000.0
+
+
+class _Compensation:
+    """The disposer for one compensation entry (item 247, docs/design/
+    teardown-contract.md 'the three entry kinds, one stack'). Registered at
+    an `emit ... compensate ...` step, it joins the SAME per-activation LIFO
+    disposer stack as bracket and transactional entries — there is no second
+    list (the contract's decision 1: the distinction lives in the entry, not
+    in a separate structure).
+
+    A compensation offsets an EMISSION that already crossed the boundary
+    (mail sent, message published); it cannot be reversed, only offset. Like
+    a transactional entry, a clean COMMIT discharges it — it never runs,
+    because the emission itself is the deliverable and best-effort cleanup
+    on success would be wrong. Unlike a transactional entry, an ABORT does
+    NOT run it inline during the Phase-1 unwind: interleaved with the proof
+    inverses in one pass, a raising compensation could leave a LATER (older)
+    bracket/transactional inverse un-run, which is strictly worse residue
+    (teardown-contract.md, "why two phases", reason 1). So `__call__` — the
+    Phase-1 encounter, invoked by cordis's own LIFO disposal — never invokes
+    `fn`. It only ENQUEUES this entry on the owning frame's
+    `_pending_compensations`, in the exact order cordis's reverse-registration
+    unwind encounters it (already the correct Phase-2 LIFO order — newest
+    compensation first), and returns immediately, a Phase-1 no-op.
+
+    `Frame.install`'s post-unwind hook drains that queue — actually invoking
+    `fn` — only after the WHOLE Phase-1 pass has finished, via
+    `_run_phase2`. This is the "compensation disposer enqueues itself ...
+    and drains the queue in a post-unwind hook" mechanism teardown-
+    contract.md names as natural on a cordis tier, where the runtime unwinds
+    every disposer in one synchronous stack-position pass."""
+
+    __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq")
+
+    def __init__(self, frame: "Frame", fn: Callable[[], Any]) -> None:
+        self.frame = frame
+        self.fn = fn
+        self.discharged = False   # committed: never runs, deliverable persists
+        self.ran = False          # Phase 2: actually invoked (any outcome)
+        self.failed = False       # Phase 2: invoked and raised (continue-and-record)
+        self.error: Optional[BaseException] = None
+        # the WAL discharge-descriptor's `seq` this entry was registered
+        # under (mirrors `_Transactional.seq`), or `None` when no
+        # WriteAheadLog is attached.
+        self.seq: Optional[int] = None
+
+    def __call__(self) -> Any:
+        if self.frame._committed:
+            # commit: discharge. The emission was the deliverable; a
+            # best-effort offset on success would be wrong to run.
+            self.discharged = True
+            self.fn = None
+            return None
+        # abort, Phase-1 encounter: defer to Phase 2 — do not invoke `fn`
+        # here. Enqueueing (rather than running immediately) is what keeps a
+        # failing compensation from ever interrupting proof replay.
+        self.frame._pending_compensations.append(self)
+        return None
+
+    def _run_phase2(self) -> None:
+        """Phase 2 only: actually invoke the compensation. Best-effort — it
+        catches and records rather than raising, so one failed offset never
+        fails the abort and never blocks the remaining ones (teardown-
+        contract.md's continue-and-record rule, `compensation-residue`
+        severity)."""
+        self.ran = True
+        fn, self.fn = self.fn, None
+        if fn is None:  # pragma: no cover — single-flight guard
+            return
+        try:
+            fn()
+        except BaseException as error:  # noqa: BLE001 — anticipated, best-effort
+            self.failed = True
+            self.error = error
+
+
 class Frame:
     """One component activation's effect accumulator.
 
@@ -628,6 +735,32 @@ class Frame:
         # introspection (fault/residue proofs); the disposer reads `_committed`.
         self._transactional: list = []
         self._committed: bool = False
+        # item 247 (docs/design/teardown-contract.md): the compensation
+        # entries this activation registered, in registration order — kept
+        # for introspection, same role as `_transactional` above. The actual
+        # Phase-2 queue is `_pending_compensations`, populated as `_Compensation`
+        # disposers are encountered during an abort's Phase-1 unwind (see
+        # `_Compensation.__call__`) and drained by `_drain_phase2` after
+        # `install`'s `ctx.effect(...)` call re-raises the body's failure.
+        self._compensations: list = []
+        self._pending_compensations: list = []
+        # Phase-2 residue (teardown-contract.md's `compensation-residue`):
+        # one record per compensation that raised or was skipped past the
+        # budget. Best-effort introspection for this activation; the merged
+        # G8 audit surface (246) is a separate, later consumer.
+        self.compensation_residue: list = []
+        # the Phase-2 bound, read ONCE here at activation (teardown-
+        # contract.md's config surface: "read once at activation" so a
+        # change mid-run cannot move an already-aborting activation's
+        # deadline). `_compensation_budget_s` is `None` for "no bound".
+        # `_compensation_per_call_ms` is read for config-surface parity
+        # across tiers but UNUSED here: python has no in-call preemption of
+        # a synchronous host call (teardown-contract.md's per-tier table),
+        # so only the between-compensation check (`_compensation_budget_s`)
+        # is enforceable on this tier.
+        self._compensation_budget_s = _read_bound_seconds(
+            _COMPENSATION_BUDGET_ENV, _COMPENSATION_BUDGET_DEFAULT_MS)
+        self._compensation_per_call_ms = os.environ.get(_COMPENSATION_PER_CALL_ENV)
         # stateful host resources this activation acquires (`Map.new()`, …), in
         # acquisition order — the instance's migratable state for a hot-swap
         # (see the state-migration section above). Populated by
@@ -651,11 +784,79 @@ class Frame:
         this instance's migratable state. The wrapper re-yields every value
         untouched (including `frame.drain` and any probe-tagged disposer), so
         the LIFO/R1 contract and fault-probe instrumentation are unchanged; it
-        only brackets each step with a push/pop of the activation stack."""
+        only brackets each step with a push/pop of the activation stack.
+
+        item 247: this is also the Phase-2 POST-UNWIND HOOK (teardown-
+        contract.md's "the phase split ... by having the compensation disposer
+        enqueue itself when invoked during an abort unwind and draining the
+        queue in a post-unwind hook"). A synchronous mid-body failure runs the
+        WHOLE Phase-1 pass — every bracket/transactional inverse AND every
+        `_Compensation.__call__` Phase-1 encounter (which only enqueues, never
+        invokes) — inside cordis's own `_fail_setup`, before it re-raises out
+        of `self.ctx.effect(...)`. So catching here is exactly "after Phase 1
+        has fully completed": `_drain_phase2` now runs every enqueued
+        compensation, best-effort, before the original failure propagates.
+        Known limitation, honestly not hidden: an ASYNC body's mid-activation
+        failure unwinds through cordis's asynchronous single-flight dispose
+        path instead of this synchronous one, so this hook does not fire for
+        it and any compensations it registered stay enqueued, undrained — py
+        preemption is "none" (teardown-contract.md's per-tier table); the
+        sync activation path this hook covers is the one every existing
+        witnessed/compensate test and the exit-test proof drive."""
         probe = _fault_probe
         if probe is not None and probe.component == self.name:
             body = probe.instrument(body, self)
-        return self.ctx.effect(self._tracked(body), f"{self.name}/body")
+        try:
+            return self.ctx.effect(self._tracked(body), f"{self.name}/body")
+        except BaseException:
+            self._drain_phase2()
+            raise
+
+    def _drain_phase2(self) -> None:
+        """Phase 2 of the abort algorithm (teardown-contract.md): run every
+        compensation `_Compensation.__call__` enqueued during Phase 1, in the
+        order they were enqueued — which is already Phase-2 LIFO (newest
+        compensation first), because Phase 1 itself visited the stack newest-
+        first and every compensation appended itself to
+        `_pending_compensations` in that same encounter order.
+
+        Bounded and best-effort: the deadline (`self._compensation_budget_s`,
+        read once at activation from `REVL_COMPENSATION_BUDGET_MS`, `None`
+        for no bound) is checked BEFORE each compensation — never mid-call,
+        python cannot safely preempt a synchronous host call (teardown-
+        contract.md's per-tier table) — and a failure never stops the
+        remaining ones: continue-and-record, same rule as Phase 1's bracket/
+        transactional failures, `compensation-residue` severity. Every skip
+        or failure is recorded, never silently dropped."""
+        pending, self._pending_compensations = self._pending_compensations, []
+        if not pending:
+            return
+        budget = self._compensation_budget_s
+        deadline = None if budget is None else time.monotonic() + budget
+        for entry in pending:
+            if deadline is not None and time.monotonic() >= deadline:
+                self.compensation_residue.append({
+                    "kind": "compensation-residue",
+                    "seq": entry.seq,
+                    "attemptedFlag": False,
+                    "attempted": None,
+                    "outcome": "not-attempted",
+                    "error": {"type": "deadline-expired",
+                              "message": "phase-2 budget exhausted before "
+                                         "this compensation started"},
+                })
+                continue
+            entry._run_phase2()
+            if entry.failed:
+                self.compensation_residue.append({
+                    "kind": "compensation-residue",
+                    "seq": entry.seq,
+                    "attemptedFlag": True,
+                    "attempted": {"phase": 2},
+                    "outcome": "failed",
+                    "error": {"type": type(entry.error).__name__,
+                              "message": str(entry.error)},
+                })
 
     def _tracked(self, body: Callable) -> Callable:
         """Wrap `body` so `self` is the top activation frame while its code
@@ -765,6 +966,51 @@ class Frame:
             entry.seq = record["seq"]
         return entry
 
+    def compensation(self, fn: Callable[[], Any]) -> "_Compensation":
+        """Register an `emit ... compensate ...` step's offsetting call as a
+        COMPENSATION entry on the SAME per-activation LIFO disposer stack as
+        every bracket and transactional entry (item 247, docs/design/
+        teardown-contract.md). Returns the disposer the emitted body yields
+        into the accumulator, so it unwinds in exact reverse-registration
+        order alongside them.
+
+        Distinct from both `acquire` and `transactional` (:class:`_Compensation`):
+        on a clean committed unload it DISCHARGES — `fn` never runs, because the
+        emission it offsets was already the deliverable. On an abort it does
+        NOT run inline during Phase 1; it runs in PHASE 2, best-effort, only
+        after every bracket/transactional inverse in this activation has
+        completed (`Frame.install`'s post-unwind hook drives `_drain_phase2`).
+        Registration is unconditional — the call site yields this right after
+        the emission, unconditionally on whether the emission itself is
+        checked-fallible, matching the existing `emit ... compensate ...`
+        surface.
+
+        Bridge slice: when a WriteAheadLog is attached, this ALSO writes the
+        WAL discharge-descriptor for the entry at registration time — same
+        mechanism as `transactional` (teardown-contract.md, "WAL descriptor"),
+        `entry="compensation"` — so a crash before this activation's fate is
+        decided still lets `revl recover` reconstruct and re-issue it through
+        recovery.py's dedicated `apply_compensation` path (never the generic
+        `apply_inverse`, whose `_REMOVE` verb match would wrongly pop the
+        forward referent — teardown-contract.md's "WAL descriptor" section).
+        `entry.seq` carries the assigned seq so `drain` can name it in the
+        discharge record on a clean commit; it is `None` when no WAL is
+        active."""
+        entry = _Compensation(self, fn)
+        self._compensations.append(entry)
+        wal = self._wal()
+        if wal is not None:
+            record = wal.record_discharge_descriptor(
+                "compensation",
+                receiver=self.name,
+                method=_named_call_method(fn),
+                args=[],
+                origin={"phase": "activation", "key": self.name},
+                witness=None,
+            )
+            entry.seq = record["seq"]
+        return entry
+
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
         emitted body, so the runtime runs it first on unload).
@@ -786,11 +1032,18 @@ class Frame:
         path"). That is what closes the crash window: a process that commits
         and then dies before its `activation-complete` marker still leaves a
         durable discharge record on disk, so `revl recover` skips the
-        already-committed mutation instead of wrongly rolling it back."""
+        already-committed mutation instead of wrongly rolling it back.
+
+        item 247: every registered `_Compensation` entry discharges the same
+        way (its `__call__` reads the same `_committed` flag) and is owed the
+        same durable discharge record — a compensation is never owed on a
+        clean unload (teardown-contract.md's "Commit path"), so its seq joins
+        the transactional seqs in the one discharge record written here."""
         self._committed = True
         wal = self._wal()
         if wal is not None:
             seqs = [entry.seq for entry in self._transactional if entry.seq is not None]
+            seqs += [entry.seq for entry in self._compensations if entry.seq is not None]
             if seqs:
                 wal.record_discharge(seqs)
         adopted, self._adopted = self._adopted, []

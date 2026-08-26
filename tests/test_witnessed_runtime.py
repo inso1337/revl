@@ -385,3 +385,380 @@ def test_an_aborted_transactional_wal_descriptor_replays_on_recover(
     assert report["verdict"] == "rolled-back"
     assert [s["seq"] for s in report["transactionalRolledBack"]] == [descriptor["seq"]]
     assert report["dischargedSkipped"] == []
+
+
+# ---------------------------------------------------------------------------
+# item 247 (docs/design/teardown-contract.md): compensation is now a
+# first-class COMPENSATION entry on the SAME per-activation LIFO stack as
+# bracket and transactional entries (`Frame.compensation`), not a bare
+# disposer yielded straight into cordis. These tests drive real cordis-py
+# compositions proving the three load-bearing behaviors the contract's
+# two-phase model requires:
+#
+#   * clean commit  -> the compensation is DISCHARGED, never runs (the
+#                       emission was the deliverable)
+#   * abort         -> Phase 1 (every bracket/transactional inverse in this
+#                       activation) completes IN FULL before Phase 2 (the
+#                       compensation) starts — proven by an on-disk order log
+#                       both the transactional inverse and the compensation
+#                       append to
+#   * a failing compensation -> continue-and-record (`compensation-residue`);
+#                       the abort still succeeds, it never raises out
+#
+# The externs below are a second toy fixture (not `_EXTERNS` above): the
+# witnessed `stash`/`unstash` pair is reused verbatim for the transactional
+# side of the phase-order proof, plus an emission `note`/compensating
+# `offset` pair that appends to an on-disk order log so registration order
+# ("which ran first") is directly observable, not inferred.
+# ---------------------------------------------------------------------------
+
+_COMP_EXTERNS = (
+    "type Stash = { path: Str, bak: Str }\n"
+    "type FsError = { code: Str }\n"
+    # the transactional inverse: restores the file AND appends 'unstash' to
+    # the order log, so its position relative to the compensation is directly
+    # observable on disk after the abort.
+    "extern pure fn unstash(w: Stash) -> Unit = @py {\n"
+    "    import os\n"
+    "    with open(os.environ['REVL_ORDER_LOG'], 'a', encoding='utf-8') as f:\n"
+    "        f.write('unstash\\n')\n"
+    "    if os.path.exists(w['bak']):\n"
+    "        os.replace(w['bak'], w['path'])\n"
+    "    return\n"
+    "}\n"
+    "extern witnessed[fs] fn stash() -> Result[Stash, FsError]"
+    " undo unstash(result) = @py {\n"
+    "    import os\n"
+    "    path = os.environ['REVL_WIT_TARGET']\n"
+    "    bak = path + '.bak'\n"
+    "    os.replace(path, bak)\n"
+    "    return Ok({'path': path, 'bak': bak})\n"
+    "}\n"
+    # the emission: a bare crossing, no reversal possible.
+    "extern emission fn note(msg: Str) -> Unit = @py {\n"
+    "    return\n"
+    "}\n"
+    # the compensation: a best-effort offset that appends 'compensate:<msg>'
+    # to the same order log.
+    "extern pure fn offset(msg: Str) -> Unit = @py {\n"
+    "    import os\n"
+    "    with open(os.environ['REVL_ORDER_LOG'], 'a', encoding='utf-8') as f:\n"
+    "        f.write('compensate:' + msg + chr(10))\n"
+    "    return\n"
+    "}\n"
+    # the contrast: a compensation that logs, THEN raises — proves a failed
+    # offset still lands as residue and never blocks/fails the abort.
+    "extern pure fn offset_fails(msg: Str) -> Unit = @py {\n"
+    "    import os\n"
+    "    with open(os.environ['REVL_ORDER_LOG'], 'a', encoding='utf-8') as f:\n"
+    "        f.write('compensate:' + msg + chr(10))\n"
+    "    raise RuntimeError('offset boom')\n"
+    "}\n"
+    # the bound-rule fixture: logs, then sleeps long enough that a small
+    # `REVL_COMPENSATION_BUDGET_MS` is provably exhausted by the time the
+    # NEXT (older) compensation in Phase 2 is checked.
+    "extern pure fn offset_slow(msg: Str) -> Unit = @py {\n"
+    "    import os, time\n"
+    "    with open(os.environ['REVL_ORDER_LOG'], 'a', encoding='utf-8') as f:\n"
+    "        f.write('compensate:' + msg + chr(10))\n"
+    "    time.sleep(0.05)\n"
+    "    return\n"
+    "}\n"
+)
+
+_COMP_BASE = compile_source(_COMP_EXTERNS, "compensate.rvl")
+
+
+def _compensated_component(name: str, *, abort: bool, offset_fails: bool = False) -> dict:
+    """A witnessed `stash` (transactional, Phase 1) followed by an
+    `emit ... compensate ...` saga (Phase 2), optionally followed by a `fail`
+    so the activation aborts instead of committing cleanly."""
+    offset_name = "offset_fails" if offset_fails else "offset"
+    body = [
+        {"step": "effect", "acquire": {"kind": "fn", "name": "stash", "args": []}},
+        {"step": "emit",
+         "expr": {"kind": "fn", "name": "note", "args": [{"kind": "lit", "value": "go"}]},
+         "compensate": {"kind": "fn", "name": offset_name, "args": [{"kind": "lit", "value": "go"}]}},
+    ]
+    if abort:
+        body.append({"step": "fail", "message": {"kind": "lit", "value": "boom"}})
+    return {"name": name, "source": "compensate.rvl", "config": [], "requires": {}, "provides": {},
+            "body": body}
+
+
+def _comp_ir(component: dict) -> dict:
+    ir = copy.deepcopy(_COMP_BASE)
+    ir["components"] = [component]
+    return ir
+
+
+@pytest.fixture
+def order_log(tmp_path, monkeypatch):
+    path = tmp_path / "order.log"
+    monkeypatch.setenv("REVL_ORDER_LOG", str(path))
+    return path
+
+
+def _order_lines(path) -> list:
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+# ---------------------------------------------------------------------------
+# 4. compensation + clean unload: DISCHARGED, never runs
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_compensation_discharges_on_clean_commit(target, order_log):
+    session = _session()
+    session.load(_comp_ir(_compensated_component("CompClean", abort=False)))
+
+    frame = _sole_frame(session)
+    assert len(frame._compensations) == 1
+    entry = frame._compensations[0]
+    assert entry.ran is False and entry.discharged is False  # not yet unloaded
+
+    session.unload()  # clean successful unload == implicit commit
+
+    # discharged: the compensation never ran, the order log stays empty
+    assert entry.discharged is True
+    assert entry.ran is False
+    assert entry.fn is None  # dropped, same GC discipline as _Transactional
+    assert _order_lines(order_log) == []
+    assert frame.compensation_residue == []
+
+
+# ---------------------------------------------------------------------------
+# 5. compensation + abort: PHASE 2, strictly after every Phase-1 inverse
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_compensation_runs_in_phase2_after_transactional_on_abort(target, order_log):
+    bak = target + ".bak"
+    session = _session()
+
+    report = session.load(_comp_ir(_compensated_component("CompAbort", abort=True)))
+    assert report["components"] == [{"name": "CompAbort", "state": "FAILED"}]
+
+    # Phase 1 fully reverted the transactional witnessed effect: the file is
+    # back and residue-free, exactly like test_witnessed_reverts_on_abort.
+    assert os.path.exists(target)
+    assert not os.path.exists(bak)
+
+    # the order log is the phase-order proof: the transactional inverse's
+    # 'unstash' line precedes the compensation's 'compensate:go' line —
+    # Phase 1 (bracket/transactional) completed in full before Phase 2
+    # (compensation) started, not interleaved LIFO (the old, pre-247
+    # ordering the TCK A5 case predates).
+    assert _order_lines(order_log) == ["unstash", "compensate:go"]
+
+    frame = _sole_frame(session)
+    [comp] = frame._compensations
+    assert comp.ran is True and comp.failed is False and comp.discharged is False
+    [trans] = frame._transactional
+    assert trans.replayed is True and trans.discharged is False
+    assert frame.compensation_residue == []
+
+
+# ---------------------------------------------------------------------------
+# 6. a FAILING compensation: continue-and-record, the abort still succeeds
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_a_failed_compensation_lands_as_residue_and_abort_still_succeeds(target, order_log):
+    session = _session()
+
+    # must not raise: a failed Phase-2 offset is best-effort, never fails
+    # the abort (teardown-contract.md's continue-and-record rule).
+    report = session.load(_comp_ir(
+        _compensated_component("CompFails", abort=True, offset_fails=True)))
+    assert report["components"] == [{"name": "CompFails", "state": "FAILED"}]
+
+    # Phase 1 still ran to completion, unaffected by the Phase-2 failure that
+    # comes after it.
+    assert os.path.exists(target)
+
+    # the compensation was ATTEMPTED (its log line landed) before it raised —
+    # continue-and-record, not skip-and-hide.
+    assert _order_lines(order_log) == ["unstash", "compensate:go"]
+
+    frame = _sole_frame(session)
+    [comp] = frame._compensations
+    assert comp.ran is True and comp.failed is True
+    assert "offset boom" in str(comp.error)
+
+    [residue] = frame.compensation_residue
+    assert residue["kind"] == "compensation-residue"
+    assert residue["outcome"] == "failed"
+    assert residue["attemptedFlag"] is True
+    assert residue["error"]["type"] == "RuntimeError"
+    assert "offset boom" in residue["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# 7. emit seam (no cordis needed): compensate compiles through
+# `Frame.compensation`, not a bare disposer; non-compensation programs are
+# byte-identical (unaffected by this slice).
+# ---------------------------------------------------------------------------
+
+def test_compensate_call_site_emits_through_frame_compensation():
+    emit = _emit_backend()
+    body = emit.emit(_comp_ir(_compensated_component("CompClean", abort=False)))
+    assert ("yield _revl_frame.compensation(lambda: offset('go'))" in body
+            or "yield _revl_frame.compensation(lambda: offset(\"go\"))" in body)
+    # not a bare disposer: no plain `yield lambda:` for the compensate step
+    # (the witnessed step's own transactional yield is also absent here,
+    # since `stash`'s registration itself is `_revl_frame.transactional`,
+    # never a bare lambda either)
+    assert "yield lambda:" not in body
+
+
+def test_a_program_with_no_compensation_still_emits_byte_identically():
+    """A program with no `compensate` clause must be untouched by this
+    slice: still a bare disposer, never routed through `Frame.compensation`."""
+    emit = _emit_backend()
+    ir = compile_source(
+        "service Bus { emission fn send(msg: Str) -> Int }\n"
+        "component C requires bus: Bus { emit bus.send(\"hi\") }\n",
+        "nocompensate.rvl")
+    body = emit.emit(ir)
+    assert "compensation(" not in body
+    assert "_revl_frame.compensation" not in body
+
+
+# ---------------------------------------------------------------------------
+# 8. bridge slice: the compensation's WAL discharge-descriptor + its seq
+# joining the SAME commit-path discharge record as transactional entries.
+# ---------------------------------------------------------------------------
+
+@needs_cordis
+def test_a_committed_compensation_writes_a_durable_discharge_record_at_drain(
+        target, order_log, tmp_path, monkeypatch):
+    wal_path = str(tmp_path / "comp-commit.wal")
+    _wal_before_apply(monkeypatch, wal_path)
+
+    session = _session()
+    session.load(_comp_ir(_compensated_component("CompWalClean", abort=False)), record=True)
+
+    written = replay.WriteAheadLog.read(wal_path)
+    [descriptor] = [r for r in written["records"]
+                    if r.get("record") == "discharge-descriptor" and r.get("entry") == "compensation"]
+    assert descriptor["call"]["method"] == "offset"
+    seq = descriptor["seq"]
+
+    session.unload()  # clean unload: Frame.drain runs
+    session.recorder.wal.close()
+
+    loaded = replay.WriteAheadLog.read(wal_path)
+    [discharge] = [r for r in loaded["records"] if r.get("record") == "discharge"]
+    assert seq in discharge["discharged"]
+
+
+@needs_cordis
+def test_an_aborted_compensation_wal_descriptor_carries_no_discharge_record(
+        target, order_log, tmp_path, monkeypatch):
+    wal_path = str(tmp_path / "comp-abort.wal")
+    _wal_before_apply(monkeypatch, wal_path)
+
+    session = _session()
+    report = session.load(
+        _comp_ir(_compensated_component("CompWalAbort", abort=True)), record=True)
+    assert report["components"] == [{"name": "CompWalAbort", "state": "FAILED"}]
+
+    session.recorder.wal.close()
+
+    loaded = replay.WriteAheadLog.read(wal_path)
+    [descriptor] = [r for r in loaded["records"]
+                    if r.get("record") == "discharge-descriptor" and r.get("entry") == "compensation"]
+    # the abort already ran the compensation best-effort in-process (test 5
+    # above) but never reached `Frame.drain` — no discharge record for it,
+    # so `revl recover` would still find and re-issue this descriptor
+    # (through recovery.py's dedicated `apply_compensation` path).
+    assert not [r for r in loaded["records"] if r.get("record") == "discharge"]
+    assert descriptor["entry"] == "compensation"
+
+
+# ---------------------------------------------------------------------------
+# 9. the Phase-2 bound rule (docs/design/teardown-contract.md's config
+# surface, `REVL_COMPENSATION_BUDGET_MS`): checked BETWEEN compensations,
+# read once at activation. `0` means unbounded; a small positive value
+# proves a later (older) compensation is skipped, recorded, never silently
+# dropped, once the budget is exhausted by an earlier one.
+# ---------------------------------------------------------------------------
+
+def _two_compensations_component(name: str) -> dict:
+    """Two `emit ... compensate ...` sagas plus a `fail`. Phase 2 is LIFO —
+    newest first — so the SECOND-registered saga's compensation
+    (`offset_slow`, which sleeps 50ms) is checked and runs FIRST; the
+    FIRST-registered saga's compensation (`offset`) is checked SECOND, after
+    `offset_slow` has already blown a small budget."""
+    body = [
+        {"step": "emit",
+         "expr": {"kind": "fn", "name": "note", "args": [{"kind": "lit", "value": "first"}]},
+         "compensate": {"kind": "fn", "name": "offset", "args": [{"kind": "lit", "value": "first"}]}},
+        {"step": "emit",
+         "expr": {"kind": "fn", "name": "note", "args": [{"kind": "lit", "value": "second"}]},
+         "compensate": {"kind": "fn", "name": "offset_slow", "args": [{"kind": "lit", "value": "second"}]}},
+        {"step": "fail", "message": {"kind": "lit", "value": "boom"}},
+    ]
+    return {"name": name, "source": "compensate.rvl", "config": [], "requires": {}, "provides": {},
+            "body": body}
+
+
+@needs_cordis
+def test_a_tiny_budget_skips_and_records_a_later_compensation(order_log, monkeypatch):
+    monkeypatch.setenv("REVL_COMPENSATION_BUDGET_MS", "10")
+    session = _session()
+
+    report = session.load(_comp_ir(_two_compensations_component("TinyBudget")))
+    assert report["components"] == [{"name": "TinyBudget", "state": "FAILED"}]
+
+    # the newer (offset_slow) compensation ran; the older (offset) one was
+    # skipped once its budget check found the deadline already past.
+    assert _order_lines(order_log) == ["compensate:second"]
+
+    frame = _sole_frame(session)
+    first_entry, second_entry = frame._compensations  # registration order
+    assert second_entry.ran is True and second_entry.failed is False
+    assert first_entry.ran is False and first_entry.failed is False
+
+    [residue] = frame.compensation_residue
+    assert residue["kind"] == "compensation-residue"
+    assert residue["outcome"] == "not-attempted"
+    assert residue["attemptedFlag"] is False
+    assert residue["error"]["type"] == "deadline-expired"
+
+
+@needs_cordis
+def test_a_zero_budget_means_unbounded(order_log, monkeypatch):
+    monkeypatch.setenv("REVL_COMPENSATION_BUDGET_MS", "0")
+    session = _session()
+
+    report = session.load(_comp_ir(_two_compensations_component("ZeroBudget")))
+    assert report["components"] == [{"name": "ZeroBudget", "state": "FAILED"}]
+
+    # `0` means no bound: both compensations ran despite the 50ms sleep.
+    assert _order_lines(order_log) == ["compensate:second", "compensate:first"]
+    frame = _sole_frame(session)
+    assert all(entry.ran for entry in frame._compensations)
+    assert frame.compensation_residue == []
+
+
+def test_read_bound_seconds_env_parsing(monkeypatch):
+    """Pure unit coverage of the env-var contract (docs/design/
+    teardown-contract.md's "Budget values"): unset -> default; explicit ms
+    -> seconds; `0` -> unbounded (`None`); unparsable -> default, never a
+    crash over a malformed host env var."""
+    sys.path.insert(0, str(_ROOT / "backends" / "python"))
+    import runtime as runtime_mod
+
+    monkeypatch.delenv("REVL_COMPENSATION_BUDGET_MS", raising=False)
+    assert runtime_mod._read_bound_seconds("REVL_COMPENSATION_BUDGET_MS", 5000) == 5.0
+
+    monkeypatch.setenv("REVL_COMPENSATION_BUDGET_MS", "250")
+    assert runtime_mod._read_bound_seconds("REVL_COMPENSATION_BUDGET_MS", 5000) == 0.25
+
+    monkeypatch.setenv("REVL_COMPENSATION_BUDGET_MS", "0")
+    assert runtime_mod._read_bound_seconds("REVL_COMPENSATION_BUDGET_MS", 5000) is None
+
+    monkeypatch.setenv("REVL_COMPENSATION_BUDGET_MS", "not-a-number")
+    assert runtime_mod._read_bound_seconds("REVL_COMPENSATION_BUDGET_MS", 5000) == 5.0
