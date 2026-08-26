@@ -1,0 +1,76 @@
+// item 318 (go tier), THE per-tool-call H1 gate — the go mirror of
+// tests/test_provide_method_witnessed.py on the py reference tier.
+//
+// 243/244/2b proved a witnessed effect in the component ACTIVATION body (runs
+// once at load). The real agent use case is a fs mutation that fires from a
+// provide-METHOD, PER TOOL CALL (a `session.call` -> a provide-method body),
+// AFTER activation. This scenario proves that closed loop on go, end to end,
+// from real `.rvl` source through the live stc-go runtime:
+//
+//   * a component provides a service whose method does a witnessed fs mutation;
+//   * the method is called PER REQUEST, each call registering a transactional
+//     inverse into the component's activation frame
+//     (`RevlFrame.registerMethodWitnessed`, parked for `commit()` to dispose);
+//   * on a clean component unload the mutations PERSIST (discharged, the
+//     deliverable), residue-free;
+//   * on an ABORT (`RevlFrame.Abort()` — the seam item 245's explicit session
+//     commit/abort UX will drive) every per-call mutation REVERTS, residue-free;
+//   * the residue is ENUMERABLE: the frame's deferred entries account for every
+//     crossing, and the abort surfaces no `restore-residue`.
+//
+// The per-call proof (persist / abort-revert / all-or-nothing) is driven by
+// the hand-written exec_test.go against real files on disk, exactly like the
+// py reference test. The `lifecycle test` below is the smoke path that keeps
+// this document on emit()'s live stc-go component path (a v3 document with
+// top-level types/externs but no lifecycle test routes to the PURE typed-core
+// path, which drops the component); it also proves the empty-frame clean unload
+// leaves no residue.
+
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+
+// The inverse: rename path.bak back to path (idempotent — a no-op if the
+// backup is already gone, so a re-entrant unwind never double-restores).
+extern pure fn unstash(w: Stash) -> Unit = @go {
+	//revl:import os
+	if _, err := os.Stat(w.Bak); err == nil {
+		_ = os.Rename(w.Bak, w.Path)
+	}
+	return
+}
+
+// A per-call witnessed mutation: rename the passed path -> path.bak, returning
+// the paths as its data witness. Taking the path as a PARAMETER is what makes
+// each per-call invocation mutate a distinct file — the shape of an agent
+// calling one fs tool repeatedly.
+extern witnessed[fs] fn stash_path(p: Str) -> Result[Stash, FsError] undo unstash(result) = @go {
+	//revl:import os
+	bak := p + ".bak"
+	if err := os.Rename(p, bak); err != nil {
+		return RevlErr[Stash, FsError]{Value: FsError{Code: err.Error()}}
+	}
+	return RevlOk[Stash, FsError]{Value: Stash{Path: p, Bak: bak}}
+}
+
+// The service method declares the fs capability (`emission fn`), so the
+// per-call witnessed crossing stays visible to a consumer of `Ops`.
+service Ops {
+  emission fn touch(p: Str)
+}
+
+component Agent provides ops: Ops {
+  provide ops {
+    fn touch(p) {
+      effect stash_path(p)
+    }
+  }
+}
+
+// smoke path: a clean load/unload with no tool calls — the frame is created but
+// empty, and unload commits it residue-free. Keeps the document on the stc-go
+// component path (see the header note).
+lifecycle test "clean unload of an un-called agent leaves no residue" {
+  load Agent
+  unload Agent
+  assert no_residue
+}
