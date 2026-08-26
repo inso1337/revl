@@ -1,0 +1,16 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Migrator requires db: Database {
+  effect db.query("SELECT pg_advisory_lock(424242)")
+  undo   db.query("SELECT pg_advisory_unlock(424242)")
+
+  await Job.run("migrations")
+
+  emit db.execute("INSERT INTO migration_log (name) VALUES ('migrations')")
+       compensate db.execute("DELETE FROM migration_log WHERE name = 'migrations'")
+}
