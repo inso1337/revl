@@ -26,6 +26,41 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("code", help="a diagnostic code, e.g. G4 (case-insensitive)")
     exp.add_argument("--json", action="store_true", help="machine-readable output")
 
+    scaffold = sub.add_parser(
+        "scaffold",
+        help="generate a typed, holed composition skeleton from a spec (docs/scaffold.md)")
+    scaffold.add_argument("--service", required=True, metavar="NAME",
+                          help="the service the component provides")
+    scaffold.add_argument("--provides", default=None, metavar="KEY",
+                          help="the provision key (default: the service, lowercased)")
+    scaffold.add_argument("--component", default=None, metavar="NAME",
+                          help="the component name (default: <Service>Provider)")
+    scaffold.add_argument("--requires", action="append", default=[], metavar="KEY[:Service]",
+                          help="an injected dependency; repeatable. A bare KEY defaults "
+                               "its service to KEY capitalized")
+    scaffold.add_argument("--capabilities", action="append", default=[], metavar="CAP",
+                          help="a boundary the component may emit through; repeatable. Only a "
+                               "capability whose boundary is injected (--requires) becomes an "
+                               "emission bound — an un-injected one stays a hole, never a "
+                               "silently widened permission")
+    scaffold.add_argument("--method", action="append", default=[], metavar="'name(p: T) -> R'",
+                          help="a pure service method; repeatable")
+    scaffold.add_argument("--emits", action="append", default=[], metavar="'name(p: T) -> R'",
+                          help="an emission service method, bound to the wired capabilities; "
+                               "repeatable")
+    scaffold.add_argument("--config", action="append", default=[], metavar="name:Type",
+                          help="a component config field; repeatable")
+    scaffold.add_argument("--resource", default=None, metavar="Type",
+                          help="the type of the effect-acquired resource "
+                               "(default: <Service>Resource)")
+    scaffold.add_argument("--no-effect", action="store_true",
+                          help="omit the acquire/undo effect block")
+    scaffold.add_argument("-o", "--out", default=None, metavar="PATH",
+                          help="write the .rvl skeleton here (default: stdout)")
+    scaffold.add_argument("--json", action="store_true",
+                          help="print the skeleton, its obligations, and each hole's fill spec "
+                               "as one JSON document")
+
     audit = sub.add_parser("audit", help="composition manifest + G8 boundary surface")
     audit.add_argument("files", nargs="+")
     audit.add_argument("--json", action="store_true", help="machine-readable output")
