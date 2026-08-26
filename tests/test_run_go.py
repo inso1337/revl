@@ -22,6 +22,7 @@ The same two honesty rules apply as for the other tiers:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,8 +32,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from revl import compile_source  # noqa: E402
 from revl.run import RUNNABLE_BACKENDS  # noqa: E402
 from revl.run_go import go_runtime_reason  # noqa: E402
+from revl.test import RUNNERS  # noqa: E402
 
 # A minimal Int-only provider/consumer pair (no config, no strings, no ADTs) —
 # so the test does not lean on any richer emitter feature, and the two
@@ -176,3 +179,32 @@ def test_run_go_v3_typed_core_places_and_round_trips():
     assert "0 service(s) still provided" in out
     assert "NO-RESIDUE" in out
     assert "[run] DOWN" in out
+
+
+# A wildcard-domain build regression (roadmap item 304, follow-up to 280): a
+# concrete `match` arm that binds a payload the arm body never reads. The pure
+# v3 go emitter wrote `_v := _m.Value` with no following use, so `go build`
+# rejected the emitted test with `declared and not used: _v` — an admitted
+# program the go tier could emit but not build. The fix pins the bound payload
+# (`_ = _v`) so an unused arm payload compiles, matching the component-body
+# match path that already did. This runs `go test` directly (no stc-go), so it
+# gates only on a `go` toolchain being installed, not on the placement runner.
+FUZZ_GO_WILDCARD_PAYLOAD = str(
+    ROOT / "examples" / "regressions" / "fuzz_go_ead437e4.rvl")
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="needs a go toolchain")
+def test_go_unused_match_arm_payload_still_builds_and_runs():
+    """`examples/regressions/fuzz_go_ead437e4.rvl` binds `_v` in two concrete
+    match arms that never read it. Before item 304 the go tier emitted the
+    binds with no use and `go build` failed (`declared and not used: _v`);
+    now it builds, runs, and passes — agreeing with the py reference."""
+    ir = compile_source(
+        Path(FUZZ_GO_WILDCARD_PAYLOAD).read_text(encoding="utf-8"),
+        "fuzz_go_ead437e4.rvl")
+    status, message = RUNNERS["go"](ir)
+    if status == "skip":  # no toolchain the runner can use
+        pytest.skip(f"go: {message}")
+    assert status == "pass", f"go tier did not pass: {message}"
+    # the py reference admits and passes the same program — the tiers agree
+    assert RUNNERS["py"](ir)[0] == "pass"

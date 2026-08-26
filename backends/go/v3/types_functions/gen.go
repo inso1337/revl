@@ -54,12 +54,14 @@ func describe(outcome Outcome) string {
 		switch _m := outcome.(type) {
 		case OutcomeOk:
 			row := _m.Value
+			_ = row
 			return row.name
 		case OutcomeNotFound:
 			_ = _m
 			return "not found"
 		case OutcomeInvalid:
 			why := _m.Value
+			_ = why
 			return why
 		default:
 			_ = _m
@@ -73,6 +75,7 @@ func label(outcome Outcome) string {
 		switch _m := outcome.(type) {
 		case OutcomeOk:
 			row := _m.Value
+			_ = row
 			return row.name
 		default:
 			_ = _m

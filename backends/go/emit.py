@@ -3438,7 +3438,12 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
         lines.append(f"\tcase {case_type}:")
         if bind:
             ctx.var_types[bind] = payload_surface
-            lines.append(f"\t\t{_v3_ident(bind, 'match bind')} := _m.Value")
+            gobind = _v3_ident(bind, "match bind")
+            lines.append(f"\t\t{gobind} := _m.Value")
+            # A payload bound but never read in the arm body is a Go
+            # `declared and not used` build error; pin it so an unused
+            # payload compiles, mirroring the wildcard path above (item 304).
+            lines.append(f"\t\t_ = {gobind}")
         else:
             lines.append("\t\t_ = _m")
         body = _go_v3_expr(arm.get("body"), ctx, expected)
