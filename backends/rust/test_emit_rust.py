@@ -2307,3 +2307,235 @@ def test_all_selfhost_stages_cargo_build(tmp_path):
         src = emit.emit(compile_files([str(ROOT / "selfhost" / f"{stage}.rvl")]))
         result = _cargo_check(crate, src)
         assert result.returncode == 0, f"{stage} failed:\n{result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# item 243 Slice 2b (rust): the witnessed-effects three-entry-kind teardown
+# loop. Design: docs/design/243-witnessed-externs.md,
+# docs/design/teardown-contract.md. This mirrors
+# tests/test_witnessed_runtime.py's three py runtime proofs plus the
+# teardown-contract's a5a/a5b compensation respec, driven against the REAL
+# cordis-rs crate (not a stub) — `cargo test` executes the emitted code.
+#
+# The fixture shares one `REVL_TEST_LOG` static across every `#[test]` fn in
+# the crate, so the harness runs `cargo test` single-threaded
+# (`--test-threads=1`, via `_cargo_test_seq` below) rather than through the
+# suite's usual `_cargo_test` helper — parallel test threads would interleave
+# unrelated activations' log lines.
+# ---------------------------------------------------------------------------
+
+_TEARDOWN_LOOP_RVL = """
+type Stash = { n: Int }
+type FsError = { code: Str }
+
+extern pure fn record_undo(w: Stash) -> Unit = @rs {
+    revl_log(format!("undo({})", w.n));
+}
+extern witnessed[fs] fn stash() -> Result[Stash, FsError] undo record_undo(result) = @rs {
+    revl_log(String::from("stash"));
+    Ok(Stash { n: 1 })
+}
+extern pure fn record_bracket_undo() -> Unit = @rs {
+    revl_log(String::from("bracket_undo"));
+}
+extern acquire fn stash_acq() -> Stash undo record_bracket_undo() = @rs {
+    revl_log(String::from("stash_acq"));
+    Stash { n: 2 }
+}
+extern emission fn log_insert(s: Str) -> Int = @rs { revl_log(format!("insert({})", s)); 0 }
+extern emission fn log_delete(s: Str) -> Int = @rs { revl_log(format!("delete({})", s)); 0 }
+extern emission fn slow_delete(s: Str) -> Int = @rs {
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    revl_log(format!("slow_delete({})", s));
+    0
+}
+
+service Db { fn noop() -> Int
+  emission fn ex(s: Str) -> Int }
+
+component DbImpl provides db: Db {
+  provide db {
+    fn noop() { return 0 }
+    fn ex(s) { emit log_insert(s) compensate log_delete(s) return 0 }
+  }
+}
+
+component StashOk {
+  effect stash()
+}
+component StashAbort {
+  effect stash()
+  fail "boom"
+}
+component AcqComp {
+  let h = effect stash_acq() undo record_bracket_undo()
+}
+component CompOk {
+  emit log_insert("row") compensate log_delete("row")
+}
+component CompAbort {
+  let h = effect stash_acq() undo record_bracket_undo()
+  emit log_insert("row") compensate log_delete("row")
+  fail "boom2"
+}
+component CompBudget {
+  emit log_insert("a") compensate log_delete("a")
+  emit log_insert("b") compensate slow_delete("b")
+  fail "boom3"
+}
+"""
+
+_TEARDOWN_LOOP_HARNESS = """
+static REVL_TEST_LOG: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+fn revl_log(s: String) {
+    REVL_TEST_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().push(s);
+}
+fn revl_log_clear() {
+    REVL_TEST_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().clear();
+}
+fn revl_log_snapshot() -> Vec<String> {
+    REVL_TEST_LOG.get().map(|m| m.lock().unwrap().clone()).unwrap_or_default()
+}
+
+// 1. witnessed + clean unload: the mutation PERSISTS, the inverse is
+// discharged (docs/design/243-witnessed-externs.md's central distinction).
+#[test]
+fn witnessed_persists_on_clean_unload() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(stash_ok(), ());
+    fiber.wait().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["stash".to_string()]);
+    fiber.dispose().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["stash".to_string()], "clean unload wrongly replayed the witnessed inverse");
+}
+
+// 2. witnessed + mid-activation abort: the inverse REPLAYS (A8).
+#[test]
+fn witnessed_reverts_on_abort() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(stash_abort(), ());
+    assert!(fiber.wait().is_err());
+    assert_eq!(revl_log_snapshot(), vec!["stash".to_string(), "undo(1)".to_string()]);
+}
+
+// 3. acquire + clean unload: the bracket STILL reverts (unchanged) — proves
+// the two entry kinds are observably distinct at runtime.
+#[test]
+fn bracket_still_reverts_on_clean_unload() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(acq_comp(), ());
+    fiber.wait().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["stash_acq".to_string()]);
+    fiber.dispose().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["stash_acq".to_string(), "bracket_undo".to_string()]);
+}
+
+// a5a: compensation discharges on clean unload — no DELETE fires, the
+// forward emission (the insert) survives as the deliverable.
+#[test]
+fn compensation_discharges_on_clean_unload() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(comp_ok(), ());
+    fiber.wait().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["insert(row)".to_string()]);
+    fiber.dispose().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["insert(row)".to_string()], "clean unload wrongly fired the compensation");
+}
+
+// a5b: two-phase abort — every Phase-1 (bracket/transactional) inverse
+// completes BEFORE the first Phase-2 compensation, the exact inversion of
+// the old single-interleaved-LIFO placeholder order.
+#[test]
+fn compensation_two_phase_abort_orders_after_bracket() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(comp_abort(), ());
+    assert!(fiber.wait().is_err());
+    assert_eq!(revl_log_snapshot(), vec![
+        "stash_acq".to_string(),
+        "insert(row)".to_string(),
+        "bracket_undo".to_string(),
+        "delete(row)".to_string(),
+    ]);
+}
+
+// method-level compensation (a provide-method's `emit ... compensate`)
+// discharges on clean unload too — proves the `Context::extend`/`metadata`
+// plumbing (`revl_teardown_of`) recovers the SAME activation state a
+// provide-method registers into, not a stale or missing one.
+#[test]
+fn method_level_compensation_discharges_on_clean_unload() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(db_impl(), ());
+    fiber.wait().unwrap();
+    let db = root.require::<Box<dyn Db>>("db").unwrap();
+    db.ex("m".to_string());
+    assert_eq!(revl_log_snapshot(), vec!["insert(m)".to_string()]);
+    fiber.dispose().unwrap();
+    assert_eq!(revl_log_snapshot(), vec!["insert(m)".to_string()], "clean unload wrongly fired the method-level compensation");
+}
+
+// Phase-2 bound: a between-compensation deadline check (rust has no in-call
+// preemption — teardown-contract.md's rust row). `slow_delete` sleeps past
+// the budget, so the compensation queued behind it is skipped, not run.
+#[test]
+fn compensation_budget_skips_after_deadline() {
+    revl_log_clear();
+    std::env::set_var("REVL_COMPENSATION_BUDGET_MS", "10");
+    let root = cordis::Context::new();
+    let fiber = root.plugin(comp_budget(), ());
+    assert!(fiber.wait().is_err());
+    let log = revl_log_snapshot();
+    std::env::remove_var("REVL_COMPENSATION_BUDGET_MS");
+    assert!(log.contains(&"slow_delete(b)".to_string()), "{log:?}");
+    assert!(!log.contains(&"delete(a)".to_string()), "budget did not skip the later compensation: {log:?}");
+}
+"""
+
+
+@needs_cargo
+def test_witnessed_teardown_loop_runs_on_real_cordis_rs(tmp_path):
+    """item 243 Slice 2b, runtime proof: the three-entry-kind teardown loop
+    (bracket unchanged, transactional abort-only replay + commit discharge,
+    compensation two-phase abort + budget bound) driven against the real
+    cordis-rs crate. See `_TEARDOWN_LOOP_HARNESS` for the seven assertions."""
+    ir = compile_source(_TEARDOWN_LOOP_RVL, "teardown_loop.rvl")
+    src = emit.emit(ir)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src + "\n" + _TEARDOWN_LOOP_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    # `REVL_TEST_LOG` is one static shared by every #[test] fn in this crate;
+    # cargo's default parallel test threads would interleave unrelated
+    # activations' log lines, so this one crate runs single-threaded.
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_witnessed_call_site_emits_transactional_registration():
+    """Emit-only companion (no cargo needed): the witnessed call site compiles
+    to a transactional registration keyed off `committed`, not a plain
+    always-replaying bracket disposer."""
+    ir = compile_source(_TEARDOWN_LOOP_RVL, "teardown_loop.rvl")
+    src = emit.emit(ir)
+    assert "let (ctx, _revl_teardown) = revl_teardown_begin(&ctx," in src
+    assert 'if let Ok(ref _revl_witv0) = _revl_wit0 {' in src
+    assert "let _ = unstash" not in src  # sanity: undo is `record_undo`, not a stray name
+    assert "RevlPendingCompensation" in src
+    assert "_revl_state.phase2.lock().unwrap().push(" in src
+
+
+def test_non_witnessed_non_compensating_program_is_untouched():
+    """A program using neither `witnessed` nor `emit ... compensate` must
+    emit byte-identically to before this slice: no `RevlTeardown`, no
+    `revl_teardown_begin`, no phase-2 machinery at all."""
+    src = emit.emit(compile_source(
+        "component C { effect Map.new() undo Map.new() }\n", "plain.rvl"))
+    assert "RevlTeardown" not in src
+    assert "revl_teardown_begin" not in src
+    assert "phase2" not in src
