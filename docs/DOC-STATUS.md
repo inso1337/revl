@@ -48,6 +48,20 @@ Front-door files outside `docs/` were also refreshed this pass: `README.md`
 self-hosting status added; em-dash-free), `site/index.html`, `site/README.md`,
 `assets/banner.svg` / `architecture.svg` / `logo.svg` (em-dash-free).
 
+**Item 303 pass (comprehensive command + MCP reference).** Two new reference
+docs were authored, grounded in the code and verified command-by-command and
+verb-by-verb: `commands-reference.md` (every `revl` subcommand and its flags,
+checked against `src/revl/cli/parser.py` + `revl <cmd> --help`) and
+`mcp-reference.md` (all 36 verbs `revl mcp serve` advertises, checked against
+`src/revl/mcp/server.py` + `query_tools.py`). Both are em-dash-free and carry no
+`revl` fences, so the doc-example gate is untouched. The front door was folded
+to link them and to add the session's new `doctor` (291) and `scaffold` (288)
+commands and truc's `reproduce` (297) verb: `README.md`, `guide-ai-agents.md`
+(MCP table extended with ship/undo/lease/canary/repair/quarantine and the
+`fix`-in-rejection note from item 286), `guide-humans.md`. `docs/truc.md`
+(owned by item 297) and any stdlib-json page (item 281) were left to their
+owners; this pass only links to them.
+
 | doc | status | em-dashes | tier-limit notes |
 |---|---|---|---|
 | apply.md | needs-work | 19 |  |
@@ -65,6 +79,7 @@ self-hosting status added; em-dash-free), `site/index.html`, `site/README.md`,
 | capability-attenuation.md | needs-work | 21 |  |
 | capability-realm-placement.md | needs-work | 11 |  |
 | collections.md | needs-work | 34 | yes |
+| commands-reference.md | current | 0 |  |
 | component-leases.md | needs-work | 24 |  |
 | conformance.md | needs-work | 32 |  |
 | contract-errata.md | needs-work | 90 | yes |
@@ -97,6 +112,7 @@ self-hosting status added; em-dash-free), `site/index.html`, `site/README.md`,
 | interchange-format.md | needs-work | 7 |  |
 | interop-bridge.md | needs-work | 51 |  |
 | mcp-bridge.md | needs-work | 68 |  |
+| mcp-reference.md | current | 0 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 25 |  |
 | network-placement.md | needs-work | 16 |  |
