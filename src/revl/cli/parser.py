@@ -357,7 +357,10 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--sweep", action="store_true",
                       help="fault sweep: inject failure at every step of every "
                            "component and check L-Raise / no-residue / LIFO / "
-                           "siblings at each (py tier; docs/fault-tests.md)")
+                           "siblings at each (py tier). With `--backend all`, "
+                           "sweep every runtime whose toolchain is present and "
+                           "assert they agree — residue-free on every tier "
+                           "(docs/fault-tests.md §10)")
     test.add_argument("--mock-requires", action="store_true",
                       help="run every `lifecycle test` in mock world: each unmet "
                            "`requires` is filled by an auto-generated mock provider "

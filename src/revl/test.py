@@ -759,6 +759,45 @@ def sweep_command(ir: dict) -> int:
     return 0
 
 
+_CROSS_TIER_CAP = int(os.environ.get("REVL_SWEEP_CAP", "0")) or None
+
+
+def cross_tier_sweep_command(ir: dict) -> int:
+    """`revl test --backend all --sweep`: the fault sweep on every tier.
+
+    Inject the same fault at the same step on every runtime whose toolchain is
+    present (py via the real activation interrogation, the compiled/hosted
+    tiers via their `--once` boot -> LIFO teardown -> no-residue proof), assert
+    each is residue-free at every fault point, and assert the tiers AGREE. A
+    tier whose toolchain is absent — or whose `--once` runner cannot yet drive
+    a *faulting* activation to a residue proof — is a loud skip with a reason,
+    never a false green (docs/fault-tests.md §10).
+
+    Heavy compiled tiers pay an emit+build per fault point, so set
+    ``REVL_SWEEP_CAP=N`` to take a representative corpus (first/middle/last step
+    per component); a full CI run leaves it unset and sweeps every step.
+    """
+    from .fault import cross_tier_sweep  # noqa: PLC0415 — lazy: pulls the tier runners
+
+    if not (ir.get("components") or []):
+        print("[sweep-all] no components to sweep")
+        return 0
+    failures, dossier = cross_tier_sweep(ir, cap=_CROSS_TIER_CAP)
+    if failures:
+        counts = dossier["counts"]
+        print(f"[sweep-all] {counts['tiersLeakingResidue']} tier(s) left "
+              f"residue, {counts['disagreements']} cross-tier disagreement(s)",
+              file=sys.stderr)
+        return 1
+    if dossier["counts"]["executed"] == 0:
+        # every tier loud-skipped: a skip is never a pass, but (like the rest
+        # of the cross-tier suite) a toolchain-absent environment exits 0 so a
+        # laptop without runtimes is not a red build.
+        print("[sweep-all] skipped: no tier could execute the sweep "
+              "(see the reasons above)")
+    return 0
+
+
 def mock_requires_command(ir: dict) -> int:
     """`revl test --mock-requires`: run every `lifecycle test` in mock world
     (docs/auto-mocks.md).
@@ -812,9 +851,12 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
         return mock_requires_command(ir)
 
     if sweep:
-        if backend not in ("py", "all"):
-            print(f"[sweep] note: the fault sweep runs on the py reference "
-                  f"tier only, not `{backend}` (docs/fault-tests.md)")
+        if backend == "all":
+            return cross_tier_sweep_command(ir)
+        if backend != "py":
+            print(f"[sweep] note: the single-tier fault sweep runs on the py "
+                  f"reference tier, not `{backend}` — use `--backend all "
+                  f"--sweep` to sweep every runtime (docs/fault-tests.md)")
         return sweep_command(ir)
 
     from .fault import prop_units, roundtrip_units  # noqa: PLC0415 — no cordis to find them
