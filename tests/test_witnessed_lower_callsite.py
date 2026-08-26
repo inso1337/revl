@@ -177,21 +177,61 @@ def test_site_spelled_undo_on_a_witnessed_call_is_refused():
     assert "cannot declare a site `undo`" in str(ei.value)
 
 
-def test_witnessed_in_provide_method_body_is_refused_not_crashed():
-    # out of this slice's scope (activation body only); must refuse cleanly,
-    # not raise trying to lower a step with no undo it wasn't taught to build.
+def _method_body(comp: dict, key: str, method: str) -> list:
+    """The lowered step list of one provide-method, found in the `provide`
+    body step's `methods` list."""
+    for step in comp["body"]:
+        if step.get("step") == "provide" and step.get("name") == key:
+            for m in step["methods"]:
+                if m["name"] == method:
+                    return m["body"]
+    raise AssertionError(f"no method {key}.{method}")
+
+
+def test_witnessed_in_provide_method_body_lowers():
+    # item 318 (THE dominant H1 gate): a witnessed effect fired from a
+    # provide-method body — the shape of a per-tool-call agent fs mutation —
+    # now lowers to the same site-undo-less transactional step the activation
+    # body produces. emit's `_method_witnessed_step` keys the frame
+    # registration off the acquisition's callee, so the IR carries no `undo`.
+    # The service method must declare the fs capability (`emission fn`), so the
+    # witnessed crossing stays visible to a consumer of `Ops`.
+    ir = compile_source(_EXTERNS + (
+        "service Ops { emission fn go() }\n"
+        "component P provides ops: Ops {\n"
+        "  provide ops {\n"
+        "    fn go() {\n"
+        "      effect stash()\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    ), "t.rvl")
+    (comp,) = ir["components"]
+    assert _method_body(comp, "ops", "go") == [
+        {"step": "effect", "acquire": {"kind": "fn", "name": "stash", "args": []}},
+    ]
+
+
+def test_non_witnessed_effect_missing_undo_in_a_method_body_still_refused():
+    # the relaxation is scoped to witnessed externs: a PLAIN effect with no
+    # site undo in a provide-method body is still a G4 refusal (an ordinary
+    # non-pure crossing needs a spelled inverse; only a witnessed extern's
+    # inverse is accumulator-owned).
     with pytest.raises(RevlError) as ei:
         compile_source(_EXTERNS + (
-            "service Ops { fn go() -> Unit }\n"
+            "extern acquire fn grab() -> Stash undo unstash(result) = @py {\n"
+            "    return {'path': '', 'bak': ''}\n"
+            "}\n"
+            "service Ops { emission fn go() }\n"
             "component P provides ops: Ops {\n"
             "  provide ops {\n"
             "    fn go() {\n"
-            "      effect stash()\n"
+            "      effect grab()\n"
             "    }\n"
             "  }\n"
             "}\n"
         ), "t.rvl")
-    assert "not yet supported inside a provide-method body" in str(ei.value)
+    assert "no `undo`" in str(ei.value)
 
 
 def test_bare_witnessed_call_outside_effect_position_still_refused():
