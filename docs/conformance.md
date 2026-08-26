@@ -1,9 +1,57 @@
 # Conformance: every construct against every tier
 
-**Run it:** `python3 tools/conformance.py [--json] [--validate]` · 51 cases ×
-6 emitters. The default sweep needs no toolchain (every emitter is pure
-Python); `--validate` additionally hands each tier's output to that tier's
-real compiler.
+**Run it:** `python3 tools/conformance.py [--json] [--validate] [--markdown]`
+· 59 cases × 6 emitters. The default sweep needs no toolchain (every emitter is
+pure Python); `--validate` additionally hands each tier's output to that tier's
+real compiler; `--markdown` prints the matrix as a table (plus a revl self-host
+column and a live emit-timing readout).
+
+## The generated matrix in the README
+
+The README carries a **generated** conformance + performance matrix between the
+`CONFORMANCE-MATRIX` markers (roadmap item 328, the v3.0 release dashboard). It
+is regenerated in place by `python3 tools/conformance.py --write-readme` (or
+`make matrix`), never hand-edited, and CI fails if the committed block drifts
+from a fresh generation (`--check-readme`, run in the frontend job, mirrored by
+`tests/test_conformance_matrix.py`). The block is emit-only and self-host, both
+pure Python, so it regenerates byte-identically on any machine, which is what
+lets the staleness gate diff it.
+
+Three glyphs carry the same distinction this document draws by hand:
+
+- `ok`: the emitter produced code.
+- `lim`: a **deliberate** tier limit. The emitter raised its own `EmitError`,
+  a named refusal (the wasm i32 boundary, java's lack of anonymous function
+  types) rather than a silent fall-through.
+- **GAP**: a **real** gap, meaning any other exception, i.e. the emitter crashed
+  on a construct it should express. The split is keyed on *how* the refusal was
+  raised, so it is automatable rather than curated. Every tier is gap-free
+  today; a **GAP** cell is the E1 exit-test signal.
+
+Live per-tier emit *timings* are printed by `--markdown` but never embedded: a
+wall-clock number could not survive the staleness diff. The one performance
+figure that is embedded is the committed admission round-trip median from
+`bench/results/admission-latency.md`, which is a deliberately-overwritten
+artifact and therefore stable.
+
+### The revl column: revl conforming to itself
+
+The six tiers are *host* runtimes. The matrix also has a **`revl`** column so it
+shows revl conforming to *itself*, not only to its hosts. Two facts stand for
+the revl-native path:
+
+- **wasm is revl's first-party runtime** (the cordis-wasm substrate). It is one
+  of the six columns, marked first-party in the rendered legend.
+- **the self-host compiler compiling itself.** The `revl` column runs every
+  construct through `selfhost/compile.rvl`'s native pipeline (`admit_src →
+  lower_to_ir → emit_py_src`, no reference compiler in the chain, see
+  [selfhost-compile.md](selfhost-compile.md)) and compares the output to the
+  reference emitter byte-for-byte. `ok` means byte-identical, so revl compiles
+  itself correctly for that construct. `lim` is the documented self-host
+  frontier: the native pipeline runs but is not yet byte-exact, or its own gate
+  declines the construct. `GAP` would be a crash. The frontier is real (the
+  typed component/method body is only partly native yet), so most component and
+  `fn`-body constructs read `lim` while the function/type surface reads `ok`.
 
 `tests/test_cross_tier.py` holds a floor for a handful of constructs known to
 be portable. This walks the *whole* surface and reports what each tier does
