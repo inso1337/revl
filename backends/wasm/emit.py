@@ -274,6 +274,19 @@ class _ComponentEmitter:
             ext["name"]: ext for ext in (externs or [])
             if ext.get("class") == "witnessed"
         }
+        # item 324 (docs/design/243-witnessed-externs.md, the wasm half of item
+        # 318's provide-method witnessed position): the distinct `witnessed`
+        # externs this component's PROVIDE-METHOD bodies acquire per tool call,
+        # in first-seen order. A method-body witnessed effect fires per request,
+        # an unbounded number of times, so — unlike the activation body's
+        # fixed, compile-time-static accumulator — its inverses live in a
+        # RUNTIME accumulator (`$__mw_head`, a linked list in linear memory) and
+        # each entry carries an `undo_id` index into this list so the abort
+        # drain dispatches to the right declared inverse. Empty for every
+        # program with no method-body witnessed effect, so the whole runtime
+        # accumulator (global, `abort`/`mw_live` exports, drain code) is gated
+        # off and such a program emits BYTE-IDENTICALLY to before this slice.
+        self.method_witnessed_externs: list[dict] = []
         self.fn_by_name = {fn.get("name"): fn for fn in (functions or [])}
         self.needed_fns: list[str] = []   # top-level fns this component calls
         self.needed_externs: list[str] = []  # @wasm externs this component calls
@@ -973,12 +986,26 @@ class _ComponentEmitter:
         # lives on the extern's own declaration), so it is planned here,
         # before `_collect_string_literals` runs.
         for step in body:
-            if step.get("step") not in ("let-effect", "effect"):
-                continue
-            wit = self._witnessed_extern(step.get("acquire"))
-            if wit is not None and wit.get("undo") is not None:
-                self._register_witnessed_calls(wit["undo"])
-                roots.append(wit["undo"])
+            if step.get("step") in ("let-effect", "effect"):
+                wit = self._witnessed_extern(step.get("acquire"))
+                if wit is not None and wit.get("undo") is not None:
+                    self._register_witnessed_calls(wit["undo"])
+                    roots.append(wit["undo"])
+            elif step.get("step") == "provide":
+                # item 324: a witnessed effect inside a PROVIDE-METHOD body
+                # (the per-tool-call H1 position) contributes its declared
+                # undo's call closure and string literals too — the undo is not
+                # reachable from `body` walked above, and the drain renders it
+                # in `_module`, so it has to be planned here like the
+                # activation-body one.
+                for method in step.get("methods") or []:
+                    for mstep in method.get("body") or []:
+                        if mstep.get("step") != "effect":
+                            continue
+                        wit = self._witnessed_extern(mstep.get("acquire"))
+                        if wit is not None and wit.get("undo") is not None:
+                            self._register_witnessed_calls(wit["undo"])
+                            roots.append(wit["undo"])
         self.v3._collect_string_literals(roots)
 
     # -- component -----------------------------------------------------------
@@ -1088,6 +1115,12 @@ class _ComponentEmitter:
             self.activation_locals.append(self.v3._tmp)
             # deeper scratch pointers minted by nested allocations in a segment
             self.activation_locals.extend(sorted(self.v3._tmp_extra))
+        if self.method_witnessed_externs:
+            # item 324: `deactivate_step`'s abort drain holds the popped
+            # accumulator cell in this scratch pointer while it replays the
+            # inverse (i32, the default `_local_decl` width). Only present when
+            # the component actually has a method-body witnessed effect.
+            self.activation_locals.append("__mw_dcell")
         return self._module(segments, entries, provide_funcs)
 
     def _witnessed_effect_step(self, index: int, acquire: Any, ext: dict,
@@ -1175,6 +1208,129 @@ class _ComponentEmitter:
             f"      {undo_wat}))"
         )
         return lines, guarded_undo
+
+    def _method_undo_id(self, ext: dict) -> int:
+        """The dispatch index this component assigns the witnessed extern
+        `ext`, registering it (first-seen order) as a method-witnessed drain
+        participant (item 324). One id per distinct extern, so N tool calls to
+        the SAME method share one undo, and two different witnessed methods each
+        get their own — the abort drain reads the id off each runtime cell and
+        replays that extern's declared inverse."""
+        name = ext.get("name")
+        for i, seen in enumerate(self.method_witnessed_externs):
+            if seen.get("name") == name:
+                return i
+        self.method_witnessed_externs.append(ext)
+        return len(self.method_witnessed_externs) - 1
+
+    def _method_witnessed_step(self, mstep: dict, ext: dict,
+                               mscope: dict[str, str], mtypes: dict[str, str | None],
+                               mwhere: str) -> str:
+        """Emit ONE provide-method witnessed effect (item 324 — the wasm half of
+        item 318's H1 gate). Runs the per-call mutation and, on `Ok`, REGISTERS
+        the extern's declared inverse (carrying the runtime Ok witness) into the
+        component's RUNTIME teardown accumulator `$__mw_head`, so the inverse
+        outlives the method call and rides the component activation frame's
+        teardown — discharged (skipped) on a clean unload where the mutation is
+        the deliverable, replayed on abort. On `Err` nothing registers
+        (Ok-conditional, 243 rule 3), exactly like the activation-body path.
+
+        The disposal-ordering discipline (the soundness hazard item 318 found on
+        py, checked here for wasm): the entry is NEVER drained at method return
+        — a per-call disposal would observe `$__committed == 0` while the
+        session is still live and WRONGLY revert the deliverable. It is parked
+        in the linked list and drained ONLY by `deactivate`/`deactivate_step`,
+        gated on `$__committed`, where the commit-vs-abort bit is already
+        settled — the wasm analogue of py's park-for-drain. Consistent with the
+        teardown contract's `activation-registered-only` wasm preemption row:
+        `$__mw_head` is a component-instance global torn down with the instance,
+        drained by the component's own teardown, never by a per-call epoch."""
+        result_value = self._lower(mstep["acquire"], mscope, mtypes, mwhere)
+        if _wasm_ty(result_value.ty) != "i32":
+            raise EmitError(
+                f"{mwhere}: a witnessed extern's Result is not a linear-memory "
+                f"value on this tier — {result_value.ty!r} was not expected"
+            )
+        witness_ty = ext.get("witness")
+        ok_tag = self.v3._tag_of(result_value.ty, "Ok")
+        undo_id = self._method_undo_id(ext)
+        # the undo's own call closure + string literals were planned in `_plan`
+        # (which now walks provide-method bodies too); nothing to plan here.
+
+        # two method-scoped scratch pointers: the Result cell and the freshly
+        # allocated accumulator cell. Both i32 (default `_local_decl` width).
+        self.extra_locals.add("__revl_mw_res")
+        self.extra_locals.add("__revl_mw_cell")
+        self.func_uses_v3 = True  # this body reaches linear memory ($alloc)
+
+        payload_addr = f"(i32.add (local.get $__revl_mw_res) (i32.const {_SLOT}))"
+        payload_load = self.v3._slot_load(payload_addr, witness_ty)
+        witness_store = self.v3._slot_store("(local.get $__revl_mw_cell)",
+                                            payload_load, witness_ty)
+        # cell layout, three 8-byte slots (`$alloc(24)` keeps it 8-aligned):
+        #   +0  witness (the Ok payload, in the uniform 8-byte slot form)
+        #   +8  undo_id (i64) — which declared inverse the drain dispatches to
+        #   +16 next    (i32) — the previous head, so the list is newest-first
+        return (
+            f"(local.set $__revl_mw_res {result_value.wat})\n    "
+            f"(if (i32.eq (i32.load (local.get $__revl_mw_res)) (i32.const {ok_tag}))\n"
+            f"      (then\n"
+            f"      (local.set $__revl_mw_cell (call $alloc (i32.const 24)))\n"
+            f"      {witness_store}\n"
+            f"      (i64.store (i32.add (local.get $__revl_mw_cell) (i32.const 8))"
+            f" (i64.const {undo_id}))\n"
+            f"      (i32.store (i32.add (local.get $__revl_mw_cell) (i32.const 16))"
+            f" (global.get $__mw_head))\n"
+            f"      (global.set $__mw_head (local.get $__revl_mw_cell))\n"
+            f"      (global.set $__mw_count"
+            f" (i32.add (global.get $__mw_count) (i32.const 1)))))"
+        )
+
+    def _method_drain(self, where: str) -> list[str]:
+        """The abort-only Phase-1 drain of the runtime method-witnessed
+        accumulator (item 324), one cell per `deactivate_step` call — the same
+        one-entry-per-call idiom the static chain uses, so a host can bound each
+        replay individually. Pops the newest cell, replays the declared inverse
+        for the extern its `undo_id` names (against the exact Ok witness the cell
+        captured), decrements the live count, and reports more-work; only once
+        `$__mw_head` empties does control fall through to the static abort chain.
+        These cells are the NEWEST inverses (registered after activation, per
+        tool call), so draining them first is the component-level LIFO the
+        contract asks for — method inverses ahead of activation-body ones.
+
+        Never reached on a clean unload: the whole block is emitted inside the
+        `$__committed == 0` branch, so a commit discharges every method entry by
+        simply never walking the list (witness GC on this tier — the cells go
+        out of scope with the instance)."""
+        # Guard on the live COUNT, not on `$__mw_head != 0`: the bump heap can
+        # legitimately hand out address 0 as a cell (a literal-free module's
+        # heap starts at 0), so 0 is a valid list node, not a reliable empty
+        # sentinel. The count is the exact number of parked inverses, so it
+        # drives the "one more to drain" decision unambiguously.
+        out: list[str] = [
+            "      (if (global.get $__mw_count)",
+            "        (then",
+            "        (local.set $__mw_dcell (global.get $__mw_head))",
+            "        (global.set $__mw_head"
+            " (i32.load (i32.add (local.get $__mw_dcell) (i32.const 16))))",
+            "        (global.set $__mw_count"
+            " (i32.sub (global.get $__mw_count) (i32.const 1)))",
+        ]
+        for undo_id, ext in enumerate(self.method_witnessed_externs):
+            witness_ty = ext.get("witness")
+            witness_load = self.v3._slot_load("(local.get $__mw_dcell)", witness_ty)
+            undo_scope = _Scope({"result": witness_load}, {"result": witness_ty})
+            undo_value = self.v3._expr(ext["undo"], undo_scope, where)
+            undo_wat = (undo_value.wat if _is_unit_type(undo_value.ty)
+                        else f"(drop {undo_value.wat})")
+            out.append(
+                f"        (if (i64.eq (i64.load"
+                f" (i32.add (local.get $__mw_dcell) (i32.const 8)))"
+                f" (i64.const {undo_id}))\n"
+                f"          (then\n"
+                f"          {undo_wat}))")
+        out.append("        (return (i32.const 1))))")
+        return out
 
     def _provide(self, step: dict, scope: dict[str, str], where: str) -> list[str]:
         key = _ident(step.get("name"), f"{where}: provide key")
@@ -1279,6 +1435,17 @@ class _ComponentEmitter:
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
                     body_lines.append(f"(local.set ${name} {value.wat})")
+                elif mkind == "effect" and self._witnessed_extern(mstep.get("acquire")) is not None:
+                    # item 324: a WITNESSED effect in a provide-method body is
+                    # the per-tool-call H1 gate — valid, and registers its
+                    # inverse into the component's runtime teardown accumulator
+                    # (`_method_witnessed_step`). A plain (non-witnessed) effect,
+                    # a `let-effect` (spawn/acquire), and method-time compensation
+                    # all stay refused below: this tier admits only the witnessed
+                    # position item 318 opened, nothing more.
+                    ext = self._witnessed_extern(mstep["acquire"])
+                    body_lines.append(
+                        self._method_witnessed_step(mstep, ext, mscope, mtypes, mwhere))
                 elif mkind in ("effect", "let-effect"):
                     raise EmitError(
                         f"{mwhere}: method-time effects are not lowerable — the "
@@ -1329,7 +1496,11 @@ class _ComponentEmitter:
         # linear memory is pulled in only when something actually reaches for
         # it, so a scalar-only component emits no memory at all
         needs_memory = (self.boundary_uses_memory
-                        or (self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS)))
+                        or (self.uses_v3 and any(token in rendered for token in _MEMORY_TOKENS))
+                        # item 324: the runtime accumulator allocates a cell per
+                        # per-tool-call witnessed mutation, so it always needs
+                        # linear memory even if nothing else in the module does.
+                        or bool(self.method_witnessed_externs))
         # the checked-arithmetic and named-division helpers are *not* memory:
         # `x + 1` traps on overflow through `$int_add` in a component that
         # never touches linear memory, so they get their own gate. (Before
@@ -1377,6 +1548,15 @@ class _ComponentEmitter:
         # never sees a byte of it in its emitted output.
         needs_teardown_scaffold = any(
             entry["kind"] in ("transactional", "compensation") for entry in entries)
+        # item 324: a component whose provide methods register per-tool-call
+        # witnessed inverses needs the RUNTIME accumulator (`$__mw_head`), which
+        # rides the same `$__committed` commit/abort discriminator as the static
+        # entries — so it needs the teardown scaffold even when the ACTIVATION
+        # body registered no transactional/compensation entry of its own. Gated
+        # strictly on this component actually having a method-body witnessed
+        # effect: a program without one emits byte-identically to before.
+        needs_method_drain = bool(self.method_witnessed_externs)
+        needs_teardown_scaffold = needs_teardown_scaffold or needs_method_drain
 
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
@@ -1442,6 +1622,16 @@ class _ComponentEmitter:
             # compensation's epoch/fuel individually (see `deactivate_step`
             # below).
             lines.append("  (global $__dstep (mut i32) (i32.const 0))")
+        if needs_method_drain:
+            # item 324: the per-tool-call witnessed accumulator. `$__mw_head` is
+            # the newest-first linked list of method-registered inverse cells (0
+            # == empty); `$__mw_count` is the live count, exported as `mw_live`
+            # so a host can ENUMERATE the outstanding crossings (the wasm tier's
+            # answer to the py WAL discharge descriptors). Both are
+            # component-instance state: they come up empty and are torn down
+            # with the instance, never shared across activations.
+            lines.append("  (global $__mw_head (mut i32) (i32.const 0))")
+            lines.append("  (global $__mw_count (mut i32) (i32.const 0))")
         for glob, glob_ty in self.globals:
             zero = "i64.const 0" if glob_ty == "i64" else "i32.const 0"
             lines.append(f"  (global {glob} (mut {glob_ty}) ({zero}))")
@@ -1496,6 +1686,29 @@ class _ComponentEmitter:
         # against the segment count it would otherwise have to track itself.
         lines.append('  (func (export "committed") (result i32) (global.get $__committed))')
 
+        if needs_method_drain:
+            # item 324: the abort seam (py's `Frame.abort()`) and the
+            # enumeration surface (py's WAL discharge descriptors).
+            #
+            # `abort` flips a component that ALREADY activated cleanly back to
+            # not-committed, so its next `deactivate` reverts the per-tool-call
+            # mutations instead of committing them. Activation sets
+            # `$__committed = 1` on its last segment (a clean load), and every
+            # per-request mutation runs AFTER that; without this seam a later
+            # `deactivate` would always find `$__committed == 1` and discharge
+            # them. A session-level reject (item 245's explicit commit/abort UX
+            # is the eventual driver) calls `abort` first; the same flip also
+            # replays any activation-body transactional entries, so the whole
+            # activation reverts all-or-nothing. Idempotent.
+            lines.append('  (func (export "abort") (global.set $__committed (i32.const 0)))')
+            # `mw_live` is how a host enumerates the outstanding per-tool-call
+            # crossings — one per registered inverse still parked, the wasm
+            # analogue of reading the WAL discharge descriptors. It counts UP as
+            # calls register and back DOWN as the abort drain replays them, so
+            # after a clean abort it reads 0 (no rollback residue) and after a
+            # commit it holds the count of discharged deliverables.
+            lines.append('  (func (export "mw_live") (result i32) (global.get $__mw_count))')
+
         # deactivate_step / deactivate: the two-phase accumulator (docs/
         # design/teardown-contract.md). One LIFO stack, three entry kinds
         # (bracket/transactional/compensation); `deactivate_step` processes
@@ -1543,6 +1756,13 @@ class _ComponentEmitter:
         lines.append("    ))")
         lines.append("    (if (i32.eqz (global.get $__committed))")
         lines.append("      (then")
+        if needs_method_drain:
+            # item 324: drain the RUNTIME method-witnessed accumulator first —
+            # these are the newest inverses (registered per tool call, after
+            # activation), so component-level LIFO replays them ahead of the
+            # static activation-body chain. One cell per call; only when the
+            # list empties does the static `abort_chain` dispatch run.
+            lines.extend(self._method_drain(self.name))
         lines.extend(_dispatch(abort_chain))
         lines.append("    ))")
         lines.append("    (i32.const 0))")
