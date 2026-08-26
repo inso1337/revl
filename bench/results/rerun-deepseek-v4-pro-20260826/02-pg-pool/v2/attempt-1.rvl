@@ -1,0 +1,17 @@
+type Row = { id: Int, name: Str, active: Bool }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component PgDatabase provides db: Database {
+  config { url: Str, pool_size: Int = 10 }
+
+  let pool = effect Pool.open(config.url, config.pool_size) undo pool.close()
+
+  provide db {
+    fn query(sql: Str) -> List[Row] = pool.query(sql)
+    fn execute(sql: Str) -> Int = pool.execute(sql)
+  }
+}

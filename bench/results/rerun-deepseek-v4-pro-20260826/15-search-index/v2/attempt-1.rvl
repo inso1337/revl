@@ -1,0 +1,25 @@
+type Row = { id: Int }
+
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Index {
+  fn lookup(q: Str) -> Opt[Str]
+  emission fn add(id: Str)
+}
+
+component SearchIndex requires db: Database provides index: Index {
+  let store = effect Map.new() undo store.drop()
+
+  provide index {
+    fn lookup(q: Str) -> Opt[Str] = store.get(q)
+
+    fn add(id: Str) {
+      effect store.insert(id, id)
+      undo   store.remove(id)
+      emit db.execute(`INSERT INTO index_journal VALUES (${id})`)
+    }
+  }
+}
