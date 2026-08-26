@@ -25,14 +25,15 @@ def _fresh_block() -> str:
     return conformance.readme_block(conformance.run(), conformance.selfhost_column())
 
 
-def test_readme_block_is_not_stale():
-    """The committed README block must match a fresh generation."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+def test_matrix_block_is_not_stale():
+    """The committed matrix block (in docs/conformance.md) must match a fresh
+    generation. The README carries only a short prose summary and links here."""
+    doc = (ROOT / "docs" / "conformance.md").read_text(encoding="utf-8")
     start, end = conformance.README_START, conformance.README_END
-    assert start in readme and end in readme, "the matrix markers are missing from README"
-    committed = readme[readme.index(start):readme.index(end) + len(end)]
+    assert start in doc and end in doc, "the matrix markers are missing from docs/conformance.md"
+    committed = doc[doc.index(start):doc.index(end) + len(end)]
     assert committed == _fresh_block(), (
-        "README conformance matrix is stale — run "
+        "docs/conformance.md matrix is stale — run "
         "`python3 tools/conformance.py --write-readme` (or `make matrix`) and commit")
 
 

@@ -1,10 +1,10 @@
-# Convenience targets. The conformance matrix in README.md is generated, never
+# Convenience targets. The conformance matrix in docs/conformance.md is generated, never
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
 .PHONY: matrix matrix-check demo
 
-# Regenerate the README conformance + performance matrix in place.
+# Regenerate the docs/conformance.md conformance + performance matrix in place.
 matrix:
 	python3 tools/conformance.py --write-readme
 
