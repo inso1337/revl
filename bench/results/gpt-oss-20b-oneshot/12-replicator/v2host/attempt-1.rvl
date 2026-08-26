@@ -1,0 +1,20 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Sync {
+  emission fn write(sql: Str)
+}
+
+type Row = { id: Int, name: Str, active: Bool }
+
+component Replicator requires primary: Database, replica: Database provides sync: Sync {
+  provide sync {
+    fn write(sql) {
+      emit primary.execute(sql)
+      emit replica.execute(sql)
+        compensate replica.execute(`DELETE FROM ${sql}`)
+    }
+  }
+}

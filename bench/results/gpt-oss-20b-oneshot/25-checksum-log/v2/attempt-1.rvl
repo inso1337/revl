@@ -1,0 +1,24 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Sum {
+  fn digest(s: Str) -> Str
+}
+
+component ChecksumLog requires db: Database provides sum: Sum {
+  emit db.execute(`INSERT INTO service_log VALUES ('checksum log online')`)
+
+  provide sum {
+    fn digest(s: Str) -> Str {
+      let h = 0
+      let i = 0
+      while (i < s.length()) {
+        h += s.charCodeAt(i)
+        i += 1
+      }
+      return `hash${h}`
+    }
+  }
+}
