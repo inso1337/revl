@@ -1338,6 +1338,73 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_deferred_emission(self, *, receiver: str, method: str,
+                                 args: list,
+                                 idempotency: Optional[str] = None) -> dict:
+        """Append the class-(b) deferral-queue descriptor at ENQUEUE (item 245,
+        docs/design/245-session-commit.md, Decision 3). The intent is logged
+        here, at the call site of the deferred emission; the OUTCOME is a later
+        ``flushed`` record written after the host body fires, so the WAL never
+        claims a crossing that has not happened.
+
+        A NAMED-CALL descriptor with captured serializable arguments, never a
+        closure (243 rule 4) — a crashed session's queue must be enumerable from
+        the log alone. Draws from the session's single ``_seq`` counter, so a seq
+        is a position in the session, not a per-kind index."""
+        record = {
+            "record": "deferred-emission",
+            "seq": self._seq,
+            "call": {"receiver": receiver, "method": method, "args": list(args)},
+            "origin": {"key": receiver, "method": method},
+            "idempotency": idempotency,
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def record_commit_approved(self, manifest_hash: str) -> dict:
+        """Append the ``commit-approved`` marker (item 245, Decision 4). Its
+        presence IS the commit verdict, written BEFORE the first flush fire and
+        before the ``discharge`` record, so a crash anywhere in the
+        approved-to-discharged window reads as a COMMITTED session on recover
+        (the window rule, Decision 3). Binds the approved manifest hash: what the
+        human approved is exactly what fires. Consumes no seq — like
+        ``discharge`` it names facts about existing seqs, it is not one."""
+        record = {"record": "commit-approved", "hash": manifest_hash}
+        self._write(record)
+        return record
+
+    def record_flushed(self, seq: int) -> dict:
+        """Append ``{"flushed": seq}`` after one deferred emission's host body
+        has fired (item 245, Decision 3). Write-ahead honesty: the intent was
+        logged at enqueue; the outcome is logged only after the fire, so a crash
+        between the fire and this record leaves that one emission ``outcome:
+        unknown`` for recover, which is the truth. Names the descriptor's own
+        ``seq``; consumes no new one."""
+        record = {"record": "flushed", "seq": seq}
+        self._write(record)
+        return record
+
+    def record_flush_residue(self, seq: int, error: dict) -> dict:
+        """Append ``flush-residue`` for a deferred emission whose host body
+        RAISED at flush (item 245, Decision 3). Continue-and-record, the
+        Phase-1 rule of the teardown contract: the remaining queue still flushes
+        and the commit still completes, with this residue enumerated."""
+        record = {"record": "flush-residue", "seq": seq, "error": error}
+        self._write(record)
+        return record
+
+    def record_aborted(self, replayed: list) -> dict:
+        """Append ``{"record":"aborted","replayed":[seq...]}`` after an
+        in-process abort finishes its replay (item 245, Decision 3). For
+        recover's benefit, not the verdict's: the ABSENCE of ``commit-approved``
+        is the abort verdict. It lets recover tell a COMPLETED abort (redo
+        nothing) from a CRASHED one (finish the replay); a crash before it costs
+        only a redundant idempotent re-run, never a wrong one (243 rule 5)."""
+        record = {"record": "aborted", "replayed": list(replayed)}
+        self._write(record)
+        return record
+
     def record_discharge(self, discharged: list) -> dict:
         """Append the WAL discharge record ``{"discharged": [seq...]}`` — the
         commit-path proof that these seqs' transactional inverses were COMMITTED

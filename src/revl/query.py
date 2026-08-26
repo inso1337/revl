@@ -270,6 +270,9 @@ class Composition:
                 {"kind": "extern", "name": name,
                  "class": (self.externs.get(name) or {}).get("class"),
                  "emission": (self.externs.get(name) or {}).get("class") == "emission",
+                 # item 245: the deferred flag rides the fact so the G8 crossing
+                 # surface can tag class (b) without re-deriving it.
+                 "deferred": bool((self.externs.get(name) or {}).get("deferred")),
                  "backends": sorted((self.externs.get(name) or {}).get("bodies") or {}),
                  "through": sorted(through) or None}
                 for name, through in sorted(host.items())
