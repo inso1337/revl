@@ -955,9 +955,18 @@ class _ComponentEmitter:
         elif kind == "emit":
             out.add(indent, self._expr(step.get("expr"), where))
             if step.get("compensate") is not None:
-                # A5: compensation joins the accumulator exactly like an
-                # inverse (LIFO); it is compensation, not inversion (§6.1)
-                out.add(indent, f"yield lambda: {self._expr(step.get('compensate'), where)}")
+                # item 247 (docs/design/teardown-contract.md): a compensation
+                # is a first-class COMPENSATION entry on the frame's shared
+                # per-activation LIFO stack, not a bare disposer — it
+                # discharges (never runs) on a clean commit and runs
+                # best-effort in PHASE 2 of an abort, only after every proof
+                # inverse (bracket + transactional) in this activation has
+                # completed. This is the two-phase model, not the old
+                # single-interleaved-LIFO ordering the A5 TCK case predates
+                # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
+                # compensation, not inversion (§6.1).
+                out.add(indent, "yield _revl_frame.compensation(lambda: "
+                                 f"{self._expr(step.get('compensate'), where)})")
         elif kind == "await":
             # A1: the await lands (inertia, paper §4.3.3), then the yield
             # closes the iteration — a divert during the await therefore
