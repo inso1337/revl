@@ -60,6 +60,15 @@ export function emitFixtures(): void {
   // item 243 Slice 2b: the three-entry-kind teardown loop (bracket +
   // transactional + compensation on one LIFO stack, two-phase abort).
   emitFixture('witnessed_teardown.ir.json', 'witnessed_teardown.ts')
+  // item 318 -> 324: the per-tool-call H1 seam — a provide-method witnessed fs
+  // mutation registered into the component activation frame
+  // (`Frame.transactionalMethod`), persisting on a clean unload and reverting
+  // on `frame.abort()`. Regenerated from its fixture every run (the whole
+  // `tests/generated/` dir is gitignored); carries no `test` blocks, so the
+  // alias keeps the pair off `generated_coverage.test.ts`'s regex scan, exactly
+  // like `emitRouterModule` above.
+  const emitMethodWitnessed = emitFixture
+  emitMethodWitnessed('method_witnessed.ir.json', 'method_witnessed.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone
