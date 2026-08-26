@@ -636,9 +636,19 @@ clauses:
 Sequencing, because `pytest tests/` does not run the per-backend goldens
 (a green root suite proves nothing about this respec): the a5a/a5b spec
 change lands together with the py tier's runtime flip and an explicit sweep
-of `backends/*/golden` plus the TCK adapters; each remaining tier flips
-against the new clauses, carried as a pinned `Divergence` in tck/spec.py
-until it does. No backend is ever built or asserted against the old
-single-interleaved-LIFO a5 once the spec change is in. The pre-flip corpus
-sweep for programs relying on clean-unload compensation firing (247 open
-question 2) gates the first flip.
+of `backends/*/golden`, the TCK adapters, and the executed per-tier scenario
+suites where old-a5 behavior actually lives and runs: the go scenarios under
+`go test` (backends/go/scenarios), the typescript suite under `npm test`
+(backends/typescript), and the java scenario runner
+(backends/java/scenarios). The adapter directory holds exactly one adapter,
+`tck/adapters/py_adapter.py`; the other tiers exercise the spec through the
+scenario harnesses just named, so "sweep the adapters" means that one file
+plus those harnesses. a5b also needs a NEW adapter fixture: the current a5
+case only disposes a cleanly activated component, so there is no
+abort-after-the-compensated-emit path against which a5b's ordering
+observable could be asserted. Each remaining tier flips against the new
+clauses, carried as a pinned `Divergence` in tck/spec.py until it does. No
+backend is ever built or asserted against the old single-interleaved-LIFO
+a5 once the spec change is in. The pre-flip corpus sweep for programs
+relying on clean-unload compensation firing (247 open question 2) gates the
+first flip.
