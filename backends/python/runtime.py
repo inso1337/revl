@@ -519,6 +519,25 @@ def disarm_fault_probe() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _named_call_method(undo: Callable[[Any], Any]) -> str:
+    """Best-effort inverse name for a WAL discharge-descriptor's `call.method`.
+
+    243's grammar declares `undo` as an ordinary pure-expression call (docs/
+    design/243-witnessed-externs.md, note 1): `_witnessed_step` in emit.py
+    compiles the call site to `lambda result: <declared undo>(...)`, so the
+    lambda's own bytecode references the declared inverse's name as a global
+    lookup — `co_names[0]` recovers it without needing the call-site metadata
+    the (separate, parallel) lower.py enablement slice will eventually thread
+    through. Falls back to the callable's own `__name__` (or a fixed label)
+    for anything that is not a plain generated lambda, e.g. a hand-built test
+    fixture — never raises, this is best-effort naming for the descriptor,
+    not the replay path itself."""
+    code = getattr(undo, "__code__", None)
+    if code is not None and code.co_names:
+        return code.co_names[0]
+    return getattr(undo, "__name__", None) or "undo"
+
+
 class _Transactional:
     """The disposer for one witnessed (transactional) effect (item 243).
 
@@ -535,7 +554,7 @@ class _Transactional:
     captured at registration, because whether the activation commits is not yet
     known when the effect runs — it depends on whether a LATER step aborts."""
 
-    __slots__ = ("frame", "witness", "_undo", "discharged", "replayed")
+    __slots__ = ("frame", "witness", "_undo", "discharged", "replayed", "seq")
 
     def __init__(self, frame: "Frame", undo: Callable[[Any], Any], witness: Any) -> None:
         self.frame = frame
@@ -543,6 +562,11 @@ class _Transactional:
         self.witness = witness
         self.discharged = False   # committed: inverse skipped, mutation persists
         self.replayed = False     # aborted: inverse ran, mutation reverted
+        # the WAL discharge-descriptor's `seq` this entry was registered under
+        # (bridge slice: connects Slice 2a to the WAL/recover foundation), or
+        # `None` when no WriteAheadLog is attached (a plain run) — see
+        # `Frame._wal`/`Frame.transactional`.
+        self.seq: Optional[int] = None
 
     def __call__(self) -> Any:
         if self.frame._committed:
@@ -683,6 +707,26 @@ class Frame:
         self.adopt(self.ctx.effect(_setup, label))
         return holder[0]
 
+    def _wal(self) -> Optional[Any]:
+        """The active `WriteAheadLog` reachable through this frame's `ctx`, or
+        `None` (bridge slice: wires the Slice-2a runtime to the WAL/recover
+        foundation that `backends/python/replay.py`/`src/revl/recovery.py`
+        already implement).
+
+        Under `revl run --record`/`--wal`, `replay.Recorder._wrap_apply` calls
+        the emitted `apply` with a `_RecordingContext` proxy as `ctx`, carrying
+        a `_revl_timeline` attribute set through `object.__setattr__` — a
+        genuine instance attribute, not one routed through the proxy's
+        `__getattr__` — so a plain `getattr` finds it directly, with no
+        threading needed through `emit.py`'s `Frame(_revl_ctx, name)` call
+        site. A plain run's `ctx` is the real cordis context with no such
+        attribute, so this is a no-op there — every WAL write below becomes a
+        no-op too, exactly as an un-recorded run behaved before this slice."""
+        timeline = getattr(self.ctx, "_revl_timeline", None)
+        if timeline is None:
+            return None
+        return getattr(timeline, "_wal", None)
+
     def transactional(self, undo: Callable[[Any], Any], witness: Any) -> "_Transactional":
         """Register a witnessed effect's declared inverse as a TRANSACTIONAL
         entry, carrying its `witness` (item 243). Returns the disposer the
@@ -697,9 +741,28 @@ class Frame:
         witness dropped, because the mutation is the deliverable and must
         persist. Registration itself is unconditional here; the emitted call
         site yields this only on the `Ok` branch (Ok-conditional), so a failed
-        mutation that touched nothing schedules no rollback."""
+        mutation that touched nothing schedules no rollback.
+
+        Bridge slice: when a WriteAheadLog is attached, this ALSO writes the
+        WAL discharge-descriptor for the entry at registration time (docs/
+        design/teardown-contract.md, "WAL descriptor") — durably ahead of
+        whether this activation ever commits, so a crash before commit still
+        lets `revl recover` reconstruct and replay the inverse. `entry.seq`
+        carries the assigned seq so `drain` can name it in the discharge
+        record on a clean commit; it is `None` when no WAL is active."""
         entry = _Transactional(self, undo, witness)
         self._transactional.append(entry)
+        wal = self._wal()
+        if wal is not None:
+            record = wal.record_discharge_descriptor(
+                "transactional",
+                receiver=self.name,
+                method=_named_call_method(undo),
+                args=[witness],
+                origin={"phase": "activation", "key": self.name},
+                witness=witness,
+            )
+            entry.seq = record["seq"]
         return entry
 
     def drain(self) -> Any:
@@ -712,8 +775,24 @@ class Frame:
         disposing anything: `drain` is yielded last so cordis disposes it FIRST
         (LIFO), which means every transactional inverse collected earlier runs
         AFTER this line and observes the commit. An abort never yields `drain`,
-        so this never runs and the transactional inverses replay."""
+        so this never runs and the transactional inverses replay.
+
+        Bridge slice: because `_committed` is now fixed True, every entry
+        already registered in `self._transactional` will discharge (not
+        replay) regardless of whether its own `_Transactional.__call__` has
+        run yet — so the WAL discharge record for all of them can be, and
+        must be, written HERE, before this call returns and success is
+        reported to the caller (docs/design/teardown-contract.md, "Commit
+        path"). That is what closes the crash window: a process that commits
+        and then dies before its `activation-complete` marker still leaves a
+        durable discharge record on disk, so `revl recover` skips the
+        already-committed mutation instead of wrongly rolling it back."""
         self._committed = True
+        wal = self._wal()
+        if wal is not None:
+            seqs = [entry.seq for entry in self._transactional if entry.seq is not None]
+            if seqs:
+                wal.record_discharge(seqs)
         adopted, self._adopted = self._adopted, []
         if not adopted:
             return None
