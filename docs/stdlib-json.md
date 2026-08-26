@@ -50,7 +50,7 @@ each emitter refuses an extern that has no body for its tier):
 | tier | parse | stringify | status |
 |---|---|---|---|
 | py | `json.loads(s)` | `json.dumps(v)` | **executed by tests** (stdlib) |
-| ts | `JSON.parse(s)` | `JSON.stringify(v, replacer)` | emitted by tests; the stringify body wraps `JSON.stringify` in a bigint replacer (see the `Int` note below) |
+| ts | number-preserving recursive descent | `JSON.stringify(v, replacer)` | emitted by tests; parse decodes a JSON integer literal to a JS `bigint` and a float to a `number` (item 311), stringify wraps `JSON.stringify` in a bigint replacer (item 281) — see the `Int` note below |
 | rs | `Value::new(serde_json::from_str(&s))` | `serde_json::to_string(v.downcast())` | **runs** (item 140): `Any` erases to `cordis::Value` (a cloneable `Arc<dyn Any>`); the body boxes a parsed `serde_json::Value` into it and recovers it to re-encode (`serde_json` is already pinned in the emitted crate). A structured document survives `stringify∘parse`; `cargo test` runs the round-trip (backends/rust/scenarios/jsonwire.rvl → golden jsonwire.rs). Reading a parsed value into a typed binding for field access is still the erased-`Value` boundary. |
 | java | — | — | the tier refuses with `extern `json_parse` has no @java body — not portable to this backend`; a provider's Jackson/Gson plugs in here when one is on the `javac` classpath |
 | go | `json.Unmarshal([]byte(s), &v)` | `json.Marshal(v)` | **runs** (item 140): `Any` erases to Go's `any`; the @go body reaches `encoding/json` through a `//revl:import encoding/json` directive the emitter hoists into the module's import block. `go test` runs the round-trip (backends/go/scenarios/emitted/jsonwire/). |
@@ -86,14 +86,40 @@ fr3_json_int.test.ts` (runtime, under vitest) cross-checked against the py tier
 in `tests/test_json_stdlib.py::test_ts_int_serialization_matches_py_tier`,
 covering a small, a negative, and a beyond-2^53 `Int`.
 
-Two residual, out-of-scope notes. (1) `json_parse` on the ts tier uses the
-builtin `JSON.parse`, which decodes JSON numbers to JS `number`, so a JSON
-integer beyond 2^53 loses precision on *parse* (a `JSON.parse` limitation, not a
-`json_stringify` one); the stringify round-trip preserves large ints only for
-values that entered as a `bigint`, not ones recovered through `JSON.parse`.
-(2) The py tier's `json.dumps` inserts insignificant whitespace after `:`/`,`
-by default while `JSON.stringify` is compact; the two are byte-equal after that
-whitespace is normalized, and identical under `json_parse`.
+One residual, out-of-scope note: the py tier's `json.dumps` inserts
+insignificant whitespace after `:`/`,` by default while `JSON.stringify` is
+compact; the two are byte-equal after that whitespace is normalized, and
+identical under `json_parse`.
+
+## Large integers on the ts tier: bigint on *parse* too (item 311)
+
+Item 281 fixed the *stringify* direction; the *parse* direction had the mirror
+gap, found by that same work. The builtin `JSON.parse` decodes every JSON number
+to a JS `number` (f64), so an integer beyond 2^53 recovered *through* parse came
+back rounded on the ts tier (`9007199254740993` → `...992`) while the py tier's
+`json.loads` kept it exact — a silent cross-tier value divergence on the parse
+side. A `JSON.parse` reviver cannot fix it: the reviver is handed the
+already-rounded `number`, so the digits are already gone.
+
+The `@ts` `json_parse` body is therefore a **number-preserving recursive-descent
+parse** rather than the builtin. It decodes a JSON **integer literal** (no `.`,
+no `e`/`E`) to a JS `bigint` — revl `Int`, full i64 precision — and a JSON
+**float** (a literal carrying `.`, `e`, or `E`) to a JS `number` — revl `Float`
+— matching the py tier's `int`/`float` split. Strings (including `\uXXXX`
+escapes and surrogate pairs), arrays, objects, `true`/`false`/`null` decode as
+JSON defines. A parsed `bigint` round-trips straight back to a bare JSON number
+through the item-281 stringify replacer, so `json_stringify(json_parse(s))`
+agrees with the py tier in both directions. Regression:
+`backends/typescript/tests/fr3_json_int.test.ts` (runtime, under vitest) rounds
+a large int, i64 max/min, a negative, a float, and a nested mix through
+`stringify∘parse`, cross-checked against the py tier in
+`tests/test_json_stdlib.py::test_ts_parse_roundtrip_matches_py_tier`.
+
+Reading a parsed value into a typed binding for field access remains the erased
+`Any` boundary (an integer JSON literal landing in a `Float`-typed field is a
+`bigint` where a `number` is expected — the same dynamic-typing seam the py tier
+has), unchanged by this fix; the contract item 311 pins is that a JSON integer
+survives `parse` at full i64 precision, matching py.
 
 ## Crossing to rust and go (item 140)
 

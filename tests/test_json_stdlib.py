@@ -178,6 +178,43 @@ def test_ts_int_serialization_matches_py_tier():
     assert "9223372036854775807" in big  # i64 max, not ...5808000
 
 
+# ------------------------------------------- item 311: ts PARSE == py tier
+
+#: documents whose stringify∘parse round-trip the vitest twin
+#: (fr3_json_int.test.ts) asserts on the ts tier with these SAME strings. The
+#: large-int case is the whole point of item 311: the builtin `JSON.parse`
+#: decodes a JSON integer to a lossy f64, so `9007199254740993` came back as
+#: ...992 on ts while py's `json.loads` kept it exact. The bigint-aware ts
+#: json_parse now decodes it to a JS `bigint`, so the digits survive both tiers.
+_PARSE_ROUNDTRIP = [
+    "9007199254740993",  # 2^53 + 1 — lossy through the old builtin parse
+    "9223372036854775807",  # i64 max
+    "-9223372036854775808",  # i64 min
+    '{"input_tokens":9007199254740993,"output_tokens":9223372036854775807}',
+    "-7",  # negative
+    "2.5",  # a float stays a float (revl Float / JS number)
+    '{"a":[1,2.5,true,null,"x"]}',  # nested: int + float + bool + null + str
+    '{"name":"get_weather","count":2}',  # the ordinary tool-call shape
+]
+
+
+def test_ts_parse_roundtrip_matches_py_tier(consumer_ir):
+    """The py tier's stringify∘parse of each document, compacted, equals the
+    exact string the ts tier produces (asserted in vitest, fr3_json_int.test.ts).
+    Closes the cross-tier claim for the PARSE direction: the bigint-aware ts
+    json_parse recovers a large integer at full i64 precision, matching py."""
+    ns = _exec_python(consumer_ir)
+    for doc in _PARSE_ROUNDTRIP:
+        py_out = ns["roundtrip"](doc)  # json_stringify(json_parse(doc)) on py
+        assert _compact(py_out) == _compact(doc), doc
+
+    # the large-integer digits are preserved on the py reference — the very
+    # value item 311 makes the ts tier preserve too (a lossy parse would have
+    # rounded 2^53 + 1 to ...992)
+    big = ns["roundtrip"]("9007199254740993")
+    assert "9007199254740993" in big
+
+
 # ---------------------------------------------------------------- tier gates
 
 def _emit_with(backend: str, ir: dict):
@@ -192,9 +229,15 @@ def _emit_with(backend: str, ir: dict):
         sys.path.remove(str(ROOT / "backends" / backend))
 
 
-def test_ts_tier_emits_builtin_json(consumer_ir):
+def test_ts_tier_emits_bigint_aware_json(consumer_ir):
     out = _emit_with("typescript", consumer_ir)
-    assert "JSON.parse(s)" in out
+    # item 311: json_parse is a number-preserving recursive-descent parse (NOT
+    # the builtin `JSON.parse`, which decodes every number to a lossy f64) that
+    # decodes a JSON integer literal to a JS `bigint` (revl `Int`) and a float
+    # to a JS `number` (revl `Float`), matching the py tier past 2^53.
+    assert "function json_parse(s: string): any {" in out
+    assert "return float ? Number(tok) : BigInt(tok);" in out
+    assert "JSON.parse(s)" not in out  # the lossy builtin is gone from parse
     # item 281: json_stringify wraps JSON.stringify in a bigint replacer (an
     # `Int` field is JS `bigint`, which the builtin throws on) rather than
     # returning the builtin result bare.
