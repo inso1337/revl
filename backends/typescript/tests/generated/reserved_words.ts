@@ -4,8 +4,8 @@ import type { Context } from 'cordis'
 import { host } from '../../runtime.ts'
 
 export interface Box {
-  class_: string
-  default_: string
+  "class": string
+  "default": string
 }
 
 export function probe(class_: string, new_: string): string {
@@ -14,11 +14,11 @@ export function probe(class_: string, new_: string): string {
 }
 
 export function unbox(b: Box): string {
-    return b.class_
+    return b["class"]
 }
 
 export function make(a: string): Box {
-    return {class_: a, default_: a}
+    return {"class": a, "default": a}
 }
 
 export function go(x: string): string {
