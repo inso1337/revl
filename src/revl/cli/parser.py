@@ -400,6 +400,17 @@ def build_parser() -> argparse.ArgumentParser:
                                 "code, and `leases enforced` refuses a swap that "
                                 "would replace a component another operator leases "
                                 "(item 61). Omit for advisory-only leases")
+    # auto-approve policy (item 246): the second orthogonal gate. `auto` proceeds
+    # silently on class (a) (witnessed-revertible), enumerates class (b) (deferred)
+    # at commit, and prompts per call on class (c) (an irreversible emission with
+    # no checked inverse). Off by default — omit for byte-identical behaviour.
+    mcp_serve.add_argument("--approval-policy", default=None, metavar="MODE",
+                           choices=("auto",),
+                           help="enable the auto-approve policy (item 246): class "
+                                "(a)/(b) crossings auto-approve, class (c) prompts "
+                                "per call via the ticket two-step. Requires "
+                                "`record: true` at load. Omit for no policy "
+                                "(today's behaviour)")
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")

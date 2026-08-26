@@ -142,8 +142,10 @@ def _crossings(index: Composition, members: list[str]) -> dict:
     surface `revl audit` prints, so this can never disagree with it."""
     emissions: list[dict] = []
     externs: list[dict] = []
+    witnessed: list[dict] = []
     seen_emit: set = set()
     seen_host: set = set()
+    seen_witnessed: set = set()
     for name in members:
         for scope_id in index.scopes_of.get(name, []):
             scope = index.scopes[scope_id]
@@ -167,7 +169,23 @@ def _crossings(index: Composition, members: list[str]) -> dict:
                 })
             for fact in facts["externs"]:
                 if not fact.get("emission"):
-                    continue  # non-emission host code is not a boundary crossing
+                    # item 246 (closing the noted gap): a witnessed extern crosses
+                    # the boundary too (item 243), but it is REVERTIBLE by its
+                    # registered inverse — class (a), auto-approved silently. It is
+                    # kept in its OWN bucket, tagged actionClass "a", and never
+                    # folded into the bare/compensated residue totals, which count
+                    # only irreversible crossings. Other non-emission host code
+                    # (pure/acquire) is not a boundary crossing at all.
+                    if fact.get("class") == "witnessed":
+                        mark = (name, fact["name"])
+                        if mark not in seen_witnessed:
+                            seen_witnessed.add(mark)
+                            witnessed.append({
+                                "component": name, "scope": scope["kind"],
+                                "name": fact["name"], "class": "witnessed",
+                                "actionClass": "a", "revertible": True,
+                                "token": f"witnessed:{name}:{fact['name']}"})
+                    continue
                 mark = (name, fact["name"])
                 if mark in seen_host:
                     continue
@@ -187,12 +205,17 @@ def _crossings(index: Composition, members: list[str]) -> dict:
                 })
     emissions.sort(key=lambda e: (e["component"], e["label"]))
     externs.sort(key=lambda e: (e["component"], e["name"]))
+    witnessed.sort(key=lambda e: (e["component"], e["name"]))
     all_cross = emissions + externs
     bare = [c for c in all_cross if not c["compensated"]]
     compensated = [c for c in all_cross if c["compensated"]]
     return {
         "emissions": emissions,
         "externs": externs,
+        # item 246: witnessed (class-(a)) crossings, additive and separate from
+        # the irreversible totals — a reader that wants the auto-approve action
+        # class off the aggregation finds it here, tagged actionClass "a".
+        "witnessed": witnessed,
         "total": len(all_cross),
         "compensatedCount": len(compensated),
         "bareCount": len(bare),
