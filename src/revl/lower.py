@@ -330,6 +330,11 @@ class Env:
         # why-trace support for the above (why.py); None when unavailable,
         # in which case rejections carry no derivation but are unchanged
         self.emission_evidence: "_EmissionEvidence | None" = None
+        # names of `witnessed`-classified externs in scope (item 243, Slice 2,
+        # docs/design/243-witnessed-externs.md): set by `_lower_component` so
+        # an effect-position acquisition calling one of these lowers to the
+        # transactional accumulator entry instead of an ordinary bracket.
+        self.witnessed_externs: set = set()
         # async externs in scope (roadmap item 80): name -> its ExternDecl, so
         # the v1 coloring check can name/locate an async extern a method reaches
         # (docs/design/async-extern.md §3). Set alongside the emitting sets.
@@ -1508,6 +1513,14 @@ def _check_witnessed_inverse(decl, extern_class: dict, filename: str) -> None:
     _walk(decl.undo)
 
 
+def _witnessed_extern_names(program: Program) -> set[str]:
+    """Names of every `witnessed`-classified extern declared in *program*
+    (docs/design/243-witnessed-externs.md). Shared by the effect-position
+    refusal (rule 1) below and the call-site transactional lowering
+    (Slice 2, `_lower_component`)."""
+    return {ext.name for ext in program.externs if ext.classification == "witnessed"}
+
+
 def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -> None:
     """Rule 1 (docs/design/243-witnessed-externs.md): a witnessed extern is
     refused outside effect position — no bare call from a plain `fn`/`test`
@@ -1522,8 +1535,7 @@ def _refuse_witnessed_outside_effect_position(program: Program, filename: str) -
     author's AST where the call site still has a line."""
     from .parser import ExprCall, ExprVar
 
-    witnessed = {ext.name for ext in program.externs
-                 if ext.classification == "witnessed"}
+    witnessed = _witnessed_extern_names(program)
     if not witnessed:
         return
 
@@ -2932,6 +2944,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     # a fn/test body has no teardown accumulator, so the auto-registered inverse
     # would be dropped and the mutation would be silently irreversible.
     _refuse_witnessed_outside_effect_position(program, program.filename)
+    # Slice 2: the set every component's effect-position lowering consults to
+    # tell a witnessed acquisition from an ordinary one (docs/design/243-
+    # witnessed-externs.md). Computed once — every component shares the same
+    # extern table.
+    witnessed_externs = _witnessed_extern_names(program)
     # One fixed point, two consumers: `emitting_caps` is what it computes
     # (docs/capabilities.md), `witness` is why (why.py). Evidence never
     # decides a rejection, it only explains one.
@@ -3009,7 +3026,7 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
                                         comp.source or program.filename,
                                         component_callables, types, emitting_fns,
                                         emitting_caps, emission_evidence, spawn_reg,
-                                        async_colored)
+                                        async_colored, witnessed_externs)
         if comp.source:
             _retarget_holes(lowered_comp, comp.source)
         # async coloring (docs/design/async-extern.md §3, "Component bodies"):
@@ -3922,17 +3939,56 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
             _refuse_leaky_pure_arrow(value, async_colored, decl, filename)
 
 
+def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line: int,
+                       *, bind: str | None) -> dict:
+    """Build the `effect`/`let-effect` IR step for one activation-body
+    acquisition (item 243 Slice 2, docs/design/243-witnessed-externs.md).
+
+    A witnessed acquisition auto-registers its extern's DECLARED inverse as a
+    transactional accumulator entry — there is no site-spelled undo, so the
+    step carries no `"undo"` key at all (the parser already refuses a site
+    `undo` token there; this is the defensive twin, and the checked source of
+    the shape). `backends/python/emit.py._witnessed_extern` recognises this
+    shape by matching the acquisition's callee name against the externs
+    table, not by an IR step field, reads the DECLARED inverse from there,
+    and emits the Ok-conditional transactional registration (Slice 2a). Every
+    other acquisition keeps its ordinary site-spelled undo, lowered exactly
+    as before — this helper changes no IR for a non-witnessed program."""
+    step_kind = "let-effect" if bind is not None else "effect"
+    wit_name = acquire.get("name") if acquire.get("kind") == "fn" else None
+    if wit_name is not None and wit_name in env.witnessed_externs:
+        if undo_expr is not None:
+            raise RevlError(
+                filename, line,
+                f"witnessed extern `{wit_name}` cannot declare a site `undo`",
+                hint="its declared inverse is auto-registered by the teardown "
+                     "accumulator on the `Ok` branch; the accumulator owns "
+                     "the inverse, not the call site "
+                     "(docs/design/243-witnessed-externs.md)",
+                code="G4", category="witnessed",
+            )
+        step = {"step": step_kind, "acquire": acquire}
+    else:
+        undo = _lower_expr(undo_expr, env, mode="undo")
+        step = {"step": step_kind, "acquire": acquire, "undo": undo}
+    if bind is not None:
+        step["bind"] = bind
+    return step
+
+
 def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], filename: str,
                      callables: set | None = None, types: dict | None = None,
                      emitting_fns: set | None = None,
                      emitting_caps: dict | None = None,
                      emission_evidence: "_EmissionEvidence | None" = None,
                      spawn_reg: dict | None = None,
-                     async_colored: set | None = None) -> dict:
+                     async_colored: set | None = None,
+                     witnessed_externs: set | None = None) -> dict:
     env = Env(comp, services, filename, types)
     env.emitting_fns = emitting_fns or set()
     env.emitting_caps = emitting_caps or {}
     env.emission_evidence = emission_evidence
+    env.witnessed_externs = witnessed_externs or set()
     env.async_externs = dict(emission_evidence.async_externs) if emission_evidence else {}
     # the phase-2 async-colored set (async externs + fns that transitively
     # reach one, docs/design/async-extern.md §3): the provide-method admission
@@ -4160,8 +4216,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             acquired_type = infer_ir(acquire, env.type_env, env.types, env.services)
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
-            undo = _lower_expr(stmt.undo, env, mode="undo")
-            step = {"step": "let-effect", "bind": safe, "acquire": acquire, "undo": undo}
+            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
+                                      bind=safe)
             if setup_steps:
                 step["setup"] = setup_steps
             if getattr(stmt, "verified", False):
@@ -4185,8 +4241,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             else:
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")
-            step = {"step": "effect", "acquire": acquire,
-                    "undo": _lower_expr(stmt.undo, env, mode="undo")}
+            step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
+                                      bind=None)
             if setup_steps:
                 step["setup"] = setup_steps
             if getattr(stmt, "verified", False):
@@ -4371,6 +4427,23 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                         filename, mstmt.line,
                         "`spawn` must be bound to a handle: "
                         f"`let s = effect spawn {mstmt.acquire.component} … undo s.dispose()`",
+                    )
+                if mstmt.undo is None:
+                    # a witnessed call parses without a site undo (item 243
+                    # Slice 2), but its transactional registration is only
+                    # wired for the activation body's own accumulator — a
+                    # provide-method body is out of that slice's scope, so
+                    # refuse cleanly instead of lowering a step the runtime
+                    # cannot register (docs/design/243-witnessed-externs.md).
+                    raise RevlError(
+                        filename, mstmt.line,
+                        "a witnessed effect is not yet supported inside a "
+                        "provide-method body",
+                        hint="move the witnessed call to the component "
+                             "activation body, where the teardown accumulator "
+                             "that auto-registers its inverse lives "
+                             "(docs/design/243-witnessed-externs.md)",
+                        code="G4", category="witnessed",
                     )
                 mbody.append({
                     "step": "effect",
