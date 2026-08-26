@@ -154,6 +154,10 @@ def classify(error: RevlError) -> dict:
         record["actual"] = actual
     if code in GUARANTEES:
         record["guarantee"] = GUARANTEES[code]
+    if code in FIXES:
+        # the exact rewrite, beside the guarantee, so an agent gets the fix
+        # without a second `explain` call or parsing the prose hint
+        record["fix"] = FIXES[code]
     # the derivation behind a search-based rejection (why.py): the G4
     # emission chain, the G3 cycle path, the two G2 providers
     why = getattr(error, "why", None)
