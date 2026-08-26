@@ -116,6 +116,47 @@ def _span(line: int, start_char: int, end_char: int) -> dict:
     }
 
 
+# ---------------------------------------------------------------- code actions
+
+def compute_code_actions(text: str, uri: str, lsp_range: dict,
+                         filename: str = "<lsp>.rvl") -> list[dict]:
+    """Quick fixes for the diagnostics that overlap an editor's requested range.
+
+    Each fixable diagnostic (see `fixgen`) becomes an LSP `CodeAction` of kind
+    `quickfix` carrying a `WorkspaceEdit` against this document. A diagnostic
+    with no safe mechanical rewrite yields no action, so the list is only the
+    fixes the engine could verify. Recomputed from the text, matching slice 1's
+    stateless stance — the client's `context.diagnostics` is not required."""
+    from .fixgen import generate_fix
+
+    actions: list[dict] = []
+    for diag in compute_diagnostics(text, filename):
+        if not _ranges_overlap(diag["range"], lsp_range):
+            continue
+        fix = generate_fix(text, diag, filename)
+        if fix is None:
+            continue
+        actions.append({
+            "title": fix.title,
+            "kind": "quickfix",
+            "diagnostics": [diag],
+            "edit": {"changes": {uri: fix.edits}},
+        })
+    return actions
+
+
+def _ranges_overlap(a: dict, b: dict) -> bool:
+    """Whether two LSP ranges intersect, comparing by (line, character).
+
+    Endpoints touch inclusively so an editor's zero-width cursor sitting on
+    either edge of a diagnostic still surfaces its fix: overlap holds unless one
+    range ends strictly before the other begins."""
+    def point(p: dict) -> tuple[int, int]:
+        return (p["line"], p["character"])
+
+    return not (point(a["end"]) < point(b["start"]) or point(b["end"]) < point(a["start"]))
+
+
 # ---------------------------------------------------------------- symbols
 
 @dataclass
