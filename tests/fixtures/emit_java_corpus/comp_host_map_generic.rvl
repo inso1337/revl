@@ -1,0 +1,32 @@
+// A host-Map `let-effect` bind whose VALUE type is itself generic — the
+// item-77 follow-up shape. `comp_host_map.rvl` pins a scalar value
+// (`Map<java.lang.Long>`); this doc pins the nested-generic session-ledger
+// shape `Map[Str, List[Msg]]`, so the host stub is generic per site as
+// `Map<java.util.List<Msg>>` (provider field, ctor parameter, and apply()
+// local declaration all pinned). This is the exact reference/mirror drift
+// that item 275 tracked (the reference emitting `Map<V>` per site while the
+// old mirror left `Map` raw); keeping it in the byte-identity corpus lets the
+// differential oracle catch that shape on every run so the pair cannot
+// silently drift on it again. The trivial `fn` forces ir_version 3.
+fn seed() -> Int {
+  return 0
+}
+
+type Msg = { body: Str }
+
+service Mailbox {
+  fn get(key: Str) -> Opt[List[Msg]]
+  emission fn append(key: Str, value: List[Msg])
+}
+
+component Inbox provides mailbox: Mailbox {
+  let ledger = effect Map.new() undo ledger.drop()
+
+  provide mailbox {
+    fn get(key) = ledger.get(key)
+    fn append(key, value) {
+      effect ledger.insert(key, value)
+      undo   ledger.remove(key)
+    }
+  }
+}
