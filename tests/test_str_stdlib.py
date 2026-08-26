@@ -41,10 +41,19 @@ STDLIB = ROOT / "stdlib" / "str.rvl"
 CONSUMER = """\
 use "stdlib/str.rvl" {
   is_space, trim, lstrip, rstrip, contains, index_of, last_index_of,
-  ident_tokens, split_top, dedent, str_utf8_bytes
+  ident_tokens, split_top, dedent, str_utf8_bytes,
+  str_newline, str_tab, str_char
 }
 
 fn t_str_utf8_bytes(s: Str) -> List[Int] { return str_utf8_bytes(s) }
+fn t_str_newline() -> Str { return str_newline() }
+fn t_str_tab() -> Str { return str_tab() }
+fn t_str_char(code: Int) -> Str { return str_char(code) }
+// code point of a single-char string round-trips through str_char.
+fn t_str_char_code(code: Int) -> Int { return str_char(code).charCodeAt(0) }
+// end-to-end: a line join with the portable newline yields REAL newlines,
+// exactly the line-joining shape item 181 was cut for.
+fn t_join_newline(parts: List[Str]) -> Str { return parts.join(str_newline()) }
 fn t_is_space(c: Str) -> Bool { return is_space(c) }
 fn t_trim(s: Str) -> Str { return trim(s) }
 fn t_lstrip(s: Str) -> Str { return lstrip(s) }
@@ -118,7 +127,7 @@ def test_module_imports_and_is_pure_revl(consumer_ir):
     names = {f["name"] for f in consumer_ir["functions"]}
     for pub in ("is_space", "trim", "lstrip", "rstrip", "contains", "index_of",
                 "last_index_of", "ident_tokens", "split_top", "dedent",
-                "str_utf8_bytes"):
+                "str_utf8_bytes", "str_newline", "str_tab", "str_char"):
         assert pub in names, pub
     assert consumer_ir["ir_version"] == 3
 
@@ -137,6 +146,9 @@ def test_module_file_is_the_documented_surface():
         "pub fn split_top(s: Str, sep: Str) -> List[Str]",
         "pub fn dedent(text: Str) -> Str",
         "pub fn str_utf8_bytes(s: Str) -> List[Int]",
+        "pub fn str_newline() -> Str",
+        "pub fn str_tab() -> Str",
+        "pub fn str_char(code: Int) -> Str",
     ):
         assert sig in text, sig
     # no @py / per-tier extern bodies in CODE — the pure-revl guarantee. (The
@@ -336,6 +348,57 @@ def test_str_utf8_bytes_fuzz_matches_python(ns):
             cps.append(cp)
         s = "".join(chr(c) for c in cps)
         assert ns["t_str_utf8_bytes"](s) == list(s.encode("utf-8")), repr(s)
+
+
+# ------------------------------------------------- control chars (item 181)
+
+def test_str_newline_is_exactly_lf(ns):
+    # the portable newline is a ONE-char string whose only code point is U+000A —
+    # NOT the two-char backslash-n a plain `"\n"` literal would carry.
+    nl = ns["t_str_newline"]()
+    assert nl == "\n"
+    assert len(nl) == 1
+    assert ord(nl[0]) == 10
+
+
+def test_str_tab_exact_code_point(ns):
+    tab = ns["t_str_tab"]()
+    assert tab == "\t" and len(tab) == 1 and ord(tab[0]) == 9
+
+
+@pytest.mark.parametrize("code", [9, 10])
+def test_str_char_control_round_trips(ns, code):
+    ch = ns["t_str_char"](code)
+    assert ch == chr(code)
+    assert ns["t_str_char_code"](code) == code
+
+
+def test_str_char_10_equals_str_newline(ns):
+    assert ns["t_str_char"](10) == ns["t_str_newline"]()
+
+
+@pytest.mark.parametrize("code", list(range(32, 127)))
+def test_str_char_printable_ascii_round_trips(ns, code):
+    # str_char is the reverse of charCodeAt across all printable ASCII:
+    # str_char(code).charCodeAt(0) == code, and equals Python chr(code).
+    assert ns["t_str_char"](code) == chr(code)
+    assert ns["t_str_char_code"](code) == code
+
+
+@pytest.mark.parametrize("code", [0, 1, 8, 11, 12, 13, 31, 127, 128, 0x1F600, -1])
+def test_str_char_unsupported_returns_empty(ns, code):
+    # a code point with no pure-revl spelling (no chr/fromCharCode builtin)
+    # returns "" rather than faulting; documented in docs/stdlib-str.md. CR (13)
+    # is here on purpose: the source reader folds a literal CR byte to LF, so a
+    # real carriage return cannot be authored in pure revl at all.
+    assert ns["t_str_char"](code) == ""
+
+
+def test_join_with_str_newline_produces_real_newlines(ns):
+    # the exact `lines.join("\n")`-wanting-a-real-newline shape from the item.
+    joined = ns["t_join_newline"](["a", "b", "c"])
+    assert joined == "a\nb\nc"
+    assert joined.split("\n") == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------- e2e py run
