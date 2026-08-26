@@ -45,6 +45,7 @@ from .typecheck import (
     _check_method_namespace_disjoint,
 )
 from .parser import (
+    _describe_expr,
     AdvanceStmt,
     AssertStmt,
     AssignStmt,
@@ -3940,7 +3941,7 @@ def _refuse_leaky_pure_arrow(node, async_colored, decl, filename) -> None:
 
 
 def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line: int,
-                       *, bind: str | None) -> dict:
+                       *, bind: str | None, raw_acquire=None) -> dict:
     """Build the `effect`/`let-effect` IR step for one activation-body
     acquisition (item 243 Slice 2, docs/design/243-witnessed-externs.md).
 
@@ -3953,7 +3954,21 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
     table, not by an IR step field, reads the DECLARED inverse from there,
     and emits the Ok-conditional transactional registration (Slice 2a). Every
     other acquisition keeps its ordinary site-spelled undo, lowered exactly
-    as before — this helper changes no IR for a non-witnessed program."""
+    as before — this helper changes no IR for a non-witnessed program.
+
+    Deferred parser gate (item 315): a bare-name call missing its `undo` is
+    admitted by the parser even when the callee's classification is not yet
+    known — `use` imports resolve one file at a time, after parsing, so the
+    parser cannot tell a same-file witnessed call from an IMPORTED one (or
+    from a plain extern that is simply missing its `undo`) at parse time.
+    `env.witnessed_externs` is built from `_witnessed_extern_names` over the
+    MERGED, post-import program (`check_and_lower`), so by the time this runs
+    an imported witnessed extern is indistinguishable from a same-file one —
+    this is where the parser's deferred call is finally decided. If the
+    callee turns out not to be witnessed after all, this raises the exact
+    "effect has no `undo`" refusal (G4) the parser used to raise directly;
+    `raw_acquire` (the original AST expression) is needed only to render that
+    message the same way `_describe_expr` always has."""
     step_kind = "let-effect" if bind is not None else "effect"
     wit_name = acquire.get("name") if acquire.get("kind") == "fn" else None
     if wit_name is not None and wit_name in env.witnessed_externs:
@@ -3968,6 +3983,15 @@ def _lower_effect_step(acquire: dict, undo_expr, env: "Env", filename: str, line
                 code="G4", category="witnessed",
             )
         step = {"step": step_kind, "acquire": acquire}
+    elif undo_expr is None:
+        head = _describe_expr(raw_acquire) if raw_acquire is not None else "the expression"
+        raise RevlError(
+            filename, line,
+            f"effect has no `undo` and {head} is not pure",
+            hint=f"write `effect {head}(...) undo <expr>`, or mark the call "
+                 "`emit` if it deliberately crosses the system boundary (G4)",
+            code="G4", category="witnessed",
+        )
     else:
         undo = _lower_expr(undo_expr, env, mode="undo")
         step = {"step": step_kind, "acquire": acquire, "undo": undo}
@@ -4217,7 +4241,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
             if acquired_type is not None:
                 env.type_env[safe] = acquired_type
             step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
-                                      bind=safe)
+                                      bind=safe, raw_acquire=stmt.acquire)
             if setup_steps:
                 step["setup"] = setup_steps
             if getattr(stmt, "verified", False):
@@ -4242,7 +4266,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 setup_steps = []
                 acquire = _lower_expr(stmt.acquire, env, mode="setup")
             step = _lower_effect_step(acquire, stmt.undo, env, filename, stmt.line,
-                                      bind=None)
+                                      bind=None, raw_acquire=stmt.acquire)
             if setup_steps:
                 step["setup"] = setup_steps
             if getattr(stmt, "verified", False):
