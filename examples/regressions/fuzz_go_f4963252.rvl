@@ -1,0 +1,3 @@
+pub fn probe() -> Result[Float, Str] { return Err("") }
+
+test "cross_tier_probe" { assert probe() == Err("") }
