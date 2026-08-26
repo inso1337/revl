@@ -6,11 +6,34 @@ import os
 from dataclasses import dataclass, field
 
 from . import parser as _ast
+from ._paths import stdlib_root
 from .errors import RevlError
 from .holes import refuse_admission
 from .lower import check_and_lower
 from .parser import ExternDecl, FnDecl, Parser, Program, ServiceDecl, TypeDecl, parse_file
 from .typecheck import format_type, parse_type
+
+
+def _default_search_path() -> list[str]:
+    """The fallback directories a `use` path is tried against when it does
+    not resolve relative to the importing file (roadmap 319).
+
+    `REVL_IMPORT_PATH` (like `PYTHONPATH`: entries joined by `os.pathsep`,
+    tried in the given order) lets a consumer add its own module roots — it
+    is checked first, so it can even point at a stand-in stdlib for testing.
+    The revl stdlib's parent directory is appended last as the standing
+    default, so a bare `use "stdlib/fs.rvl"` resolves for any consumer
+    without vendoring a byte-copy of the stdlib into its own tree: the
+    literal `stdlib/...` the module writes joins onto this parent to reach
+    the real file.
+    """
+    path = []
+    for entry in os.environ.get("REVL_IMPORT_PATH", "").split(os.pathsep):
+        entry = entry.strip()
+        if entry:
+            path.append(entry)
+    path.append(str(stdlib_root().parent))
+    return path
 
 
 @dataclass
@@ -43,9 +66,39 @@ class _ModuleLoader:
         self._cache: dict[str, _LoadedModule] = {}
         self._stack: list[str] = []
         self._sources = sources or {}
+        # roadmap 319: REVL_IMPORT_PATH + the revl stdlib, read fresh per
+        # loader so a test's `monkeypatch.setenv` takes effect.
+        self._search_path = _default_search_path()
 
     def has_source(self, path: str) -> bool:
         return os.path.abspath(path) in self._sources
+
+    def _exists(self, path: str) -> bool:
+        return self.has_source(path) or os.path.exists(path)
+
+    def resolve_use(self, importer_dir: str, importer_path: str, use: _ast.UseDecl) -> str:
+        """Resolve a `use` path to the file it names.
+
+        Relative-to-the-importing-file resolution is primary and unchanged:
+        it is tried first and, if it exists, wins outright — a search-path
+        entry never shadows a genuine local file of the same relative path
+        (roadmap 319). Only when nothing sits there does the search path
+        (REVL_IMPORT_PATH, then the revl stdlib) get a turn, in order.
+        """
+        primary = os.path.join(importer_dir, use.path)
+        if self._exists(primary):
+            return primary
+        for base in self._search_path:
+            candidate = os.path.join(base, use.path)
+            if self._exists(candidate):
+                return candidate
+        hint = "`use` resolves paths relative to the importing file"
+        if self._search_path:
+            searched = ", ".join(self._search_path)
+            hint += (f", then a search path ({searched}) — `{use.path}` was not "
+                     "found relative to the importer or anywhere on that path")
+        raise RevlError(importer_path, use.line,
+                        f"cannot find imported module `{use.path}`", hint=hint)
 
     def load(self, path: str) -> _LoadedModule:
         abs_path = os.path.abspath(path)
@@ -83,14 +136,7 @@ class _ModuleLoader:
 
             self._cache[abs_path] = module
             for use in program.uses:
-                dep_path = os.path.join(module.dir, use.path)
-                # a virtual source stands in for the file it names
-                if not self.has_source(dep_path) and not os.path.exists(dep_path):
-                    raise RevlError(
-                        abs_path, use.line,
-                        f"cannot find imported module `{use.path}`",
-                        hint="`use` resolves paths relative to the importing file",
-                    )
+                dep_path = self.resolve_use(module.dir, abs_path, use)
                 used = self.load(dep_path)
                 if use.names is not None:
                     for name in use.names:
@@ -227,7 +273,7 @@ def compile_files(paths: list[str], manifest: dict | None = None,
     # module-qualified path.
     for module in root_modules:
         for use in module.program.uses:
-            used = loader.load(os.path.join(module.dir, use.path))
+            used = loader.load(loader.resolve_use(module.dir, module.path, use))
             if use.names is not None:
                 for name in use.names:
                     svc = used.services.get(name)
