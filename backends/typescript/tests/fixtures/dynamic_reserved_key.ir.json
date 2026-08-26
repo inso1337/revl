@@ -1,0 +1,123 @@
+{
+  "ir_version": 3,
+  "services": {},
+  "components": [],
+  "manifest": {
+    "components": [],
+    "loadOrder": []
+  },
+  "functions": [
+    {
+      "name": "tool_fn_name",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "tc",
+          "value": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "json_parse"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "s"
+              }
+            ]
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "field",
+            "target": {
+              "kind": "field",
+              "target": {
+                "kind": "var",
+                "name": "tc"
+              },
+              "name": "function"
+            },
+            "name": "name"
+          }
+        }
+      ]
+    },
+    {
+      "name": "tool_fn_name_idx",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Str",
+      "public": false,
+      "body": [
+        {
+          "step": "let",
+          "name": "tc",
+          "value": {
+            "kind": "call",
+            "callee": {
+              "kind": "var",
+              "name": "json_parse"
+            },
+            "args": [
+              {
+                "kind": "var",
+                "name": "s"
+              }
+            ]
+          },
+          "mutable": false
+        },
+        {
+          "step": "return",
+          "expr": {
+            "kind": "field",
+            "target": {
+              "kind": "index",
+              "target": {
+                "kind": "var",
+                "name": "tc"
+              },
+              "index": {
+                "kind": "lit",
+                "value": "function"
+              }
+            },
+            "name": "name"
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "json_parse",
+      "class": "pure",
+      "params": [
+        {
+          "name": "s",
+          "type": "Str"
+        }
+      ],
+      "returns": "Any",
+      "bodies": {
+        "py": " import json; return json.loads(s) ",
+        "ts": " return JSON.parse(s) "
+      }
+    }
+  ]
+}

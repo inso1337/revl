@@ -16,7 +16,9 @@ describe('item 165 — reserved-word identifiers on the TS tier', () => {
 
   it('constructs and reads a record with keyword-named fields', () => {
     const box = make('v')
-    // the property was renamed to `class_` consistently, so the read agrees
+    // item 279: a keyword-named field keeps its RAW key (`{"class": ...}`) and
+    // is read by bracket access (`b["class"]`), so the write and read agree AND
+    // the record has the same key a `json_parse` value would carry
     expect(unbox(box)).toBe('v')
   })
 })
