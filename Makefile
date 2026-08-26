@@ -2,7 +2,17 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check demo
+.PHONY: matrix matrix-check demo pre-merge
+
+# roadmap item 327: the required gate before a change reaches main. Mirrors the
+# FAST half of every per-backend CI job locally (emit/golden suites, the
+# generated-artifact gates, lint) so the drift that `pytest tests/` alone misses
+# — a stale per-backend suite that reds CI unnoticed — is caught before pushing.
+# Steps that need a heavy/absent toolchain skip LOUDLY (never a false green); the
+# target exits non-zero if any step that ran failed. See tools/pre_merge.sh and
+# CONTRIBUTING.md "The pre-merge gate".
+pre-merge:
+	sh tools/pre_merge.sh
 
 # Regenerate the docs/conformance.md conformance + performance matrix in place.
 matrix:
