@@ -198,7 +198,13 @@ Rules that keep this honest:
 - `var` never escapes: lambdas capture its *current value*, not the cell;
   a `var` cannot appear in a record, be returned by reference, or outlive
   its scope. Purity's boundary is the function, exactly like Koka's local
-  state or Rust's non-`mut`-escaping locals.
+  state or Rust's non-`mut`-escaping locals. Capture is therefore strictly
+  **by value**: a closure that *writes* a captured binding (reference capture,
+  a shared mutable cell) is refused, because the value-semantic equality the
+  derived LIFO teardown (G7) and no-residue containment (A8) rest on would not
+  survive it. The decision and the G7/A8 analysis are in
+  [docs/closures.md](closures.md); the executable rejection is
+  `examples/rejections/g6_closure_mutates_capture.rvl`.
 - `for (x of xs)` and `while` — TS syntax verbatim; both total-checked only
   in `verified` contexts (§7), unrestricted elsewhere.
 

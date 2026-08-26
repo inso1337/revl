@@ -365,6 +365,48 @@ def test_arrow_captures_var_by_value_at_creation_time():
     assert ns["captured"]() == 6  # f saw n == 1, not the final 11
 
 
+def test_closure_that_reads_var_then_reassigned_still_by_value():
+    # Item 129 positive: read-capture of a `var` snapshots by value even when the
+    # var is reassigned AFTER the closure is built — the supported, sound form.
+    _, ns = _compile_emit(
+        """
+        fn snapshot_capture() -> Int {
+          var n = 1
+          let f = (x: Int) => x + n
+          n = 100
+          return f(5)
+        }
+        """
+    )
+    assert ns["snapshot_capture"]() == 6  # snapshot of n == 1, not the later 100
+
+
+def test_closure_mutating_captured_var_rejected():
+    # Item 129 rejection: a closure that ASSIGNS to a captured binding is
+    # reference capture (a shared mutable cell), which breaks the value-semantic
+    # equality G7/A8 rest on (docs/closures.md). Refused with an explicit
+    # diagnostic that names the binding and points to §3.5 — not the old
+    # incidental record-literal parse error.
+    with pytest.raises(
+        RevlError,
+        match=r"a closure cannot assign to `n`: captures are by value",
+    ):
+        compile_source(
+            "fn c(s: Int) -> Int { var n = 0  let g = (x: Int) => { n = x  n }  return g(s) }"
+        )
+
+
+def test_closure_compound_assign_to_captured_var_rejected():
+    # The compound form (`n += by`) is reference capture too, and refused.
+    with pytest.raises(
+        RevlError,
+        match=r"a closure cannot assign to `n`: captures are by value",
+    ):
+        compile_source(
+            "fn c() -> Int { var n = 0  let g = () => { n += 1  n }  return g() }"
+        )
+
+
 def test_var_by_value_in_record_literal_accepted():
     # Item 154: a record is a value type, so a bare `var` read in a record-literal
     # field copies the value in — the mutable cell never escapes. This now
