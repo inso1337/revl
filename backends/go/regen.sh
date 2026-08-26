@@ -86,6 +86,20 @@ python3 "$here/emit.py" "$here/scenarios/emitted/records/records.ir.json" record
 python3 "$here/emit.py" "$here/scenarios/emitted/jsonwire/jsonwire.ir.json" jsonwire \
   > "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go"
 
+# --- witnessed-effects three-entry-kind teardown loop (items 243/247 Slice 2b,
+# docs/design/teardown-contract.md) ------------------------------------------
+# witnessed_teardown.ir.json is compiled from scenarios/witnessed_teardown.rvl
+# by the frozen frontend (`revl compile`). A component carrying a bracket, a
+# `witnessed` effect and an `emit ... compensate ...` in the SAME activation
+# proves mixed-entry LIFO and the two-phase abort against the real stc-go
+# runtime; the file is a `*_test.go` (the document carries a `lifecycle
+# test`) whose generated Test RUNS the commit path. exec_test.go (hand-written,
+# not regenerated) drives LoadCAbort directly for the abort path, and
+# panic_guard_test.go exercises the RevlFrame teardown accumulator directly
+# (the goroutine-abandon / panic-guard / concurrency rules).
+python3 "$here/emit.py" "$here/scenarios/emitted/witnessed_teardown/witnessed_teardown.ir.json" witnessedteardown \
+  > "$here/scenarios/emitted/witnessed_teardown/gen_witnessed_teardown_test.go"
+
 # --- ir_version 3 pure/typed-core fixtures (ordinary Go, no stc runtime) ---
 # The v3_tests fixture carries `test` blocks that become real Go tests, so it
 # is emitted straight into a *_test.go file. The other two are libraries the
@@ -110,6 +124,7 @@ if command -v gofmt >/dev/null 2>&1; then
            "$here/scenarios/emitted/advance/gen_advance_test.go" \
            "$here/scenarios/emitted/records/gen_records_test.go" \
            "$here/scenarios/emitted/jsonwire/gen_jsonwire_test.go" \
+           "$here/scenarios/emitted/witnessed_teardown/gen_witnessed_teardown_test.go" \
            "$here/v3/tests/gen_test.go" \
            "$here/v3/types_functions/gen.go" \
            "$here/v3/stdlib/gen.go"

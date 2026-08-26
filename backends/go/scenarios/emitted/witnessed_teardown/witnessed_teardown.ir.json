@@ -1,0 +1,271 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Noop": {
+      "methods": {
+        "ping": {
+          "params": [],
+          "returns": "Str",
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "C",
+      "source": "witnessed_teardown.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "lockOp",
+            "args": []
+          },
+          "undo": {
+            "kind": "fn",
+            "name": "unlockOp",
+            "args": []
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "stash",
+            "args": []
+          }
+        },
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "writeOp",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "insert"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "fn",
+            "name": "writeOp",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "delete"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "CAbort",
+      "source": "witnessed_teardown.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {},
+      "body": [
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "lockOp",
+            "args": []
+          },
+          "undo": {
+            "kind": "fn",
+            "name": "unlockOp",
+            "args": []
+          }
+        },
+        {
+          "step": "effect",
+          "acquire": {
+            "kind": "fn",
+            "name": "stash",
+            "args": []
+          }
+        },
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "writeOp",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "insert"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "fn",
+            "name": "writeOp",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "delete"
+              }
+            ]
+          }
+        },
+        {
+          "step": "fail",
+          "message": {
+            "kind": "lit",
+            "value": "deliberate abort (slice 2b proof)"
+          }
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "C",
+        "file": "witnessed_teardown.rvl",
+        "inject": [],
+        "provides": []
+      },
+      {
+        "name": "CAbort",
+        "file": "witnessed_teardown.rvl",
+        "inject": [],
+        "provides": []
+      }
+    ],
+    "loadOrder": [
+      "C",
+      "CAbort"
+    ]
+  },
+  "types": {
+    "Stash": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "path": "Str",
+        "bak": "Str"
+      }
+    },
+    "FsError": {
+      "params": [],
+      "kind": "record",
+      "fields": {
+        "code": "Str"
+      }
+    }
+  },
+  "externs": [
+    {
+      "name": "lockOp",
+      "class": "acquire",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"lock\")\n\treturn\n"
+      },
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unlockOp"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "unlockOp",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"unlock\")\n\treturn\n"
+      }
+    },
+    {
+      "name": "unstash",
+      "class": "pure",
+      "params": [
+        {
+          "name": "w",
+          "type": "Stash"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"unstash \" + w.Path)\n\treturn\n"
+      }
+    },
+    {
+      "name": "stash",
+      "class": "witnessed",
+      "params": [],
+      "returns": "Result[Stash, FsError]",
+      "bodies": {
+        "go": "\n\thostRecord(\"stash\")\n\treturn RevlOk[Stash, FsError]{Value: Stash{Path: \"artifact\", Bak: \"artifact.bak\"}}\n"
+      },
+      "entry_kind": "transactional",
+      "revertible": true,
+      "ok_conditional": true,
+      "witness": "Stash",
+      "capabilities": [
+        "fs"
+      ],
+      "undo": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "unstash"
+        },
+        "args": [
+          {
+            "kind": "var",
+            "name": "result"
+          }
+        ]
+      }
+    },
+    {
+      "name": "writeOp",
+      "class": "emission",
+      "params": [
+        {
+          "name": "msg",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"write \" + msg)\n\treturn\n"
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "commit path: bracket reverts, witnessed persists, compensation discharges",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "C",
+          "config": {}
+        },
+        {
+          "step": "unload",
+          "component": "C"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}

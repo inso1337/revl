@@ -1,0 +1,75 @@
+// Slice 2b (go tier): the witnessed-effects three-entry-kind teardown loop
+// (items 243/247, docs/design/teardown-contract.md). This scenario carries
+// all three entry kinds in one component so mixed-entry LIFO is exercised:
+// a bracket (`lockOp`/`unlockOp`), a witnessed effect (`stash`/`unstash`),
+// and a compensation (`emit writeOp(...) compensate writeOp(...)`). Every
+// forward/inverse call records through the host trace (`hostRecord`,
+// backends/go/emit.py `_host_runtime`) so a hand-written exec test can
+// assert both WHICH calls ran and their ORDER.
+//
+// `C` never fails — its own `lifecycle test` below proves the COMMIT path:
+// the bracket reverts (unchanged), the witnessed effect DISCHARGES
+// (persists — no `unstash` in the trace), the compensation DISCHARGES
+// (never runs — no `write delete` in the trace).
+//
+// `CAbort` is the same shape but fails mid-body (`fail`). The go
+// lifecycle-test DSL has no "expect this load to fail" assertion, so the
+// ABORT path — Phase 1 (bracket + witnessed revert, LIFO) completing before
+// Phase 2 (compensation) fires, and the compensation actually running on
+// abort — is driven directly against `LoadCAbort` from a hand-written exec
+// test (gen_exec_test.go), exactly like the abort proof in
+// tests/test_witnessed_runtime.py on the py reference tier.
+
+type Stash = { path: Str, bak: Str }
+type FsError = { code: Str }
+
+// go's lifecycle-test emitter needs at least one service to drive through a
+// provision key (`_emit_stc_lifecycle_tests`); this scenario has nothing to
+// provide/require, so a trivial unused service satisfies the check.
+service Noop {
+  fn ping() -> Str
+}
+
+extern acquire fn lockOp() -> Unit undo unlockOp() = @go {
+	hostRecord("lock")
+	return
+}
+
+extern pure fn unlockOp() -> Unit = @go {
+	hostRecord("unlock")
+	return
+}
+
+extern pure fn unstash(w: Stash) -> Unit = @go {
+	hostRecord("unstash " + w.Path)
+	return
+}
+
+extern witnessed[fs] fn stash() -> Result[Stash, FsError] undo unstash(result) = @go {
+	hostRecord("stash")
+	return RevlOk[Stash, FsError]{Value: Stash{Path: "artifact", Bak: "artifact.bak"}}
+}
+
+extern emission fn writeOp(msg: Str) -> Unit = @go {
+	hostRecord("write " + msg)
+	return
+}
+
+component C {
+  effect lockOp() undo unlockOp()
+  effect stash()
+  emit writeOp("insert") compensate writeOp("delete")
+}
+
+component CAbort {
+  effect lockOp() undo unlockOp()
+  effect stash()
+  emit writeOp("insert") compensate writeOp("delete")
+  fail "deliberate abort (slice 2b proof)"
+}
+
+lifecycle test "commit path: bracket reverts, witnessed persists, compensation discharges" {
+  load C
+  unload C
+  assert no_residue
+}
