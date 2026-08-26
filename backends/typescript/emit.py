@@ -931,7 +931,9 @@ def _expr(node: object, ctx: "_Ctx") -> str:
 
 
 def _method_body(steps: list, ctx: "_Ctx", indent: str,
-                 method_is_async: bool = False) -> list[str]:
+                 method_is_async: bool = False, frame_var: Optional[str] = None,
+                 provide_name: Optional[str] = None,
+                 method_name: Optional[str] = None) -> list[str]:
     """Steps inside a provide-method body.
 
     These run while the component is ACTIVE; `effect` steps go through
@@ -939,6 +941,12 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
     `async` service operation (services 2.0 §5) lowers to an `async` method,
     whose body may `await` a host async value or an instance disposal (A1);
     a `sync` method rejects `await`, matching the reference tier.
+
+    item 318: a WITNESSED effect in a method body is the per-tool-call H1 seam —
+    it does NOT go through `ctx.effect` (unsound: disposed before the body's
+    `drain`), but registers into the component's activation `Frame` directly via
+    `_method_witnessed_step`. `frame_var` is that frame (always present when a
+    method body has a witnessed effect, because `_needs_frame` forces it).
     """
     scope = ctx.component_scope
     lines: list[str] = []
@@ -957,6 +965,19 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}return")
             else:
                 lines.append(f"{indent}return {_expr(step['expr'], ctx)}")
+        elif kind in ("effect", "let-effect") \
+                and _witnessed_extern(step.get("acquire"), ctx) is not None:
+            # item 318: a per-tool-call witnessed fs mutation. Registered into
+            # the component activation frame (parked for `drain`), NOT adopted as
+            # a sibling `ctx.effect` — see `_method_witnessed_step` /
+            # `Frame.transactionalMethod`.
+            wit = _witnessed_extern(step.get("acquire"), ctx)
+            ctx._counter[0] += 1
+            site = f"{provide_name or 'provide'}.{method_name or 'method'}#{ctx._counter[0]}"
+            bind = None
+            if kind == "let-effect":
+                bind = scope.bind(step["bind"])
+            _method_witnessed_step(step, wit, ctx, indent, lines, frame_var, bind, site)
         elif kind in ("effect", "let-effect"):
             bind = None
             if kind == "let-effect":
@@ -996,7 +1017,8 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
     return lines
 
 
-def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[str]:
+def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
+                  frame_var: Optional[str] = None) -> list[str]:
     scope = ctx.component_scope
     service_name = step.get("service")
     service = services.get(service_name)
@@ -1040,7 +1062,9 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str) -> list[
         lines.append(f"{indent}{prefix}{name}({sig}) {{")
         lines.extend(_method_body(method.get("body") or [],
                                   ctx.with_scope(body_scope, in_async=method_is_async),
-                                  indent + "  ", method_is_async))
+                                  indent + "  ", method_is_async,
+                                  frame_var, provide_name=service_name,
+                                  method_name=name))
         lines.append(f"{indent}}},")
     return lines
 
@@ -1213,6 +1237,71 @@ def _witnessed_step(step: dict, ext: dict, ctx: "_Ctx", indent: str,
         lines.append(f"{indent}const {bind} = {tmp}")
 
 
+def _method_witnessed_step(step: dict, ext: dict, ctx: "_Ctx", indent: str,
+                           lines: list[str], frame_var: str, bind: Optional[str],
+                           site: str) -> None:
+    """Emit a witnessed effect inside a PROVIDE-METHOD body (item 318): the
+    per-tool-call H1 seam. Run the mutation, and on `Ok` register the extern's
+    DECLARED inverse into the ENCLOSING COMPONENT'S activation frame as a
+    transactional entry carrying the `Ok` witness. Mirrors
+    backends/python/emit.py._method_witnessed_step.
+
+    The activation-body form (`_witnessed_step`) `yield`s the disposer into the
+    body generator's own LIFO stack. A method body has no such generator, and
+    adopting the entry as a sibling `ctx.effect` is unsound on this cordis-style
+    tier (disposed BEFORE the body's `drain`, so a clean unload would observe
+    `committed` still false and wrongly revert the deliverable — see
+    `Frame.transactionalMethod`). So this calls the frame DIRECTLY:
+    `frame.transactionalMethod(...)` parks the entry for `drain` to dispose once
+    the commit-vs-abort bit is settled. On `Err` nothing is registered
+    (Ok-conditional): a failed mutation touched nothing, so it schedules no
+    rollback. `frame_var` is the component's activation `Frame`, in scope in
+    every method body (the method closure captures the `apply`-local)."""
+    ctx._counter[0] += 1
+    n = ctx._counter[0]
+    tmp = f"$revl_wit{n}"
+    acquire = step["acquire"]
+    bound = _bind_call_temps(acquire, ctx, lines, indent, f"{tmp}_acq")
+    if bound is None:  # pragma: no cover — lower.py always emits a `fn` node here
+        raise EmitError(f"witnessed acquisition has an unrecognised shape: {acquire!r}")
+    target_ts, key_str, method, temps = bound
+    call_ts = _replay_call(acquire, target_ts, method, temps)
+    crossing = _crossing_literal(key_str, method, temps, site)
+    lines.append(f"{indent}const {tmp} = {call_ts}")
+    lines.append(f"{indent}if ({tmp}.kind === 'Ok') {{")
+    undo_node = ext["undo"]
+    # 243's Slice-1-as-implemented note 1: `undo` reuses the acquire slot and
+    # binds `result` to the `Ok` payload — a synthetic arrow parameter this
+    # codegen introduces, declared on a CHILD scope (mirrors `_witnessed_step`).
+    undo_method = _call_method_name(undo_node)
+    undo_scope = ctx.component_scope.child()
+    undo_scope.locals.add("result")
+    undo_ts = _expr(undo_node, ctx.with_scope(undo_scope))
+    lines.append(
+        f"{indent}  {frame_var}.transactionalMethod({crossing}, {_string(undo_method)}, "
+        f"(result) => {undo_ts}, {tmp}.value)"
+    )
+    lines.append(f"{indent}}}")
+    if bind is not None:
+        lines.append(f"{indent}const {bind} = {tmp}")
+
+
+def _method_body_needs_frame(steps: list, ctx: "_Ctx") -> bool:
+    """True iff a provide-method body registers a witnessed (transactional)
+    entry (item 318) — the per-tool-call H1 case. Only a WITNESSED effect in a
+    method body needs the `Frame`; an ordinary bracket/`emit ... compensate`
+    inside a method body stays the pre-existing bare `ctx.effect(...)` (routed
+    through the fiber's own accumulator, not the Frame), so this walk deliberately
+    matches ONLY witnessed effects — gating the whole `Frame` apparatus tightly to
+    method-witnessed programs and leaving every other method body byte-identical."""
+    for step in steps or []:
+        kind = step.get("step")
+        if kind in ("let-effect", "effect") \
+                and _witnessed_extern(step.get("acquire"), ctx) is not None:
+            return True
+    return False
+
+
 def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
     """True iff this component's activation body registers at least one
     transactional (witnessed) or compensation entry — the two entry kinds
@@ -1240,6 +1329,16 @@ def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
             if kind == "if":
                 if walk(step.get("then") or []) or walk(step.get("else") or []):
                     return True
+            # item 318: a provide-method body that does a WITNESSED effect
+            # (per-tool-call H1) registers into this activation frame, so the
+            # component needs `Frame` even when its activation body alone would
+            # not. Only witnessed method effects count (see
+            # `_method_body_needs_frame`) — an ordinary method-body bracket does
+            # not, keeping the gate tight.
+            if kind == "provide":
+                for method in step.get("methods") or []:
+                    if _method_body_needs_frame(method.get("body") or [], ctx):
+                        return True
         return False
 
     return walk(component.get("body") or [])
@@ -1386,7 +1485,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # revertible); yielding the wrapper slots it into this body
         # effect's LIFO sequence.
         lines.append(f"{indent}yield ctx.provide({_string(name)}, {{")
-        lines.extend(_provide_impl(step, ctx, services, indent + "  "))
+        lines.extend(_provide_impl(step, ctx, services, indent + "  ", frame_var))
         lines.append(f"{indent}}} satisfies {_ident(step['service'], 'service')})")
     elif kind == "if":
         # An activation guard (A8). Branches hold ordinary body steps, so a
