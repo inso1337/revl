@@ -1,0 +1,239 @@
+// The revl stdlib FS module — witnessed filesystem operations.
+// Roadmap item 244 (the H1 north-star demo), design docs/design/243-witnessed-externs.md
+// + docs/design/teardown-contract.md, module doc docs/witnessed-fs.md.
+//
+// ---------------------------------------------------------------- what this is
+// A catalog of `witnessed[fs]` externs: filesystem MUTATIONS whose declared
+// inverse is auto-registered as a TRANSACTIONAL teardown entry (item 243). On a
+// clean successful unload (an implicit commit) the mutation PERSISTS and the
+// inverse is discharged + its witness GC'd; on an ABORT the inverse replays and
+// the mutation reverts, residue-free. This is what lets an agent's fs ops stop
+// prompting: the effect is revertible by construction, and the residue is
+// exactly enumerable (the WAL discharge descriptors name every crossing).
+//
+// Each op returns `Result[Witness, FsError]` (item 243, "Fallible"): an op that
+// cannot run (missing target, path outside the workspace) returns `Err` and
+// registers NOTHING — a failed mutation touched nothing, so it must schedule no
+// rollback (Ok-conditional registration). The witness is WAL-serializable DATA
+// (paths, flags), never a host handle, so `revl recover` can reconstruct the
+// inverse after a crash (item 243 rule 4).
+//
+// ------------------------------------------------------------- the catalog
+//   write(path, contents) -> preimage witness; undo restore(w)
+//       Snapshots the target's preimage (APFS clonefile CoW if available, a
+//       portable copy otherwise) BEFORE overwriting, or records "created" when
+//       the file did not exist. `restore` puts the preimage back, or deletes
+//       the created file.
+//   rm(path)              -> garbage witness; undo unrm(w)
+//       Renames the target into a session garbage dir (inside the workspace
+//       root). `unrm` renames it back.
+//   move(from, to)        -> (from, to) witness; undo unmove(w)
+//       Renames from -> to. `unmove` renames to -> from.
+//   mkdir(path)           -> path witness; undo rmdir_if_empty(w)
+//       Creates a directory. `rmdir_if_empty` removes it iff still empty.
+//
+// ------------------------------------------------------- workspace confinement
+// Every forward op AND every inverse is confined to one session workspace root
+// (read from `REVL_FS_WORKSPACE`; see backends/python/revl_fs_workspace.py). A
+// target outside the root is refused. The path is realpath'd (symlinks resolved)
+// BEFORE the membership check; the guard covers the inverse path too; and the
+// garbage dir + preimage snapshots live inside the root, so reversal itself
+// cannot escape. Without this guard, item 246 would auto-approve a witnessed fs
+// mutation anywhere the process can reach, invisible to the one commit prompt.
+//
+// --------------------------------------------------------------- honest caveats
+// * Reversal does not undo OBSERVATION. A concurrent process that read the
+//   intermediate state already saw it; reverting the bytes cannot unsee that.
+//   Fine for a private workspace, weaker on a shared tree.
+// * Concurrent-writer races are TOCTOU-BOUNDED, not eliminated. The realpath
+//   check narrows — does not close — the window between the check and the
+//   syscall; a writer racing the same path can still interleave.
+// * Physical confinement (a process that cannot even NAME a path outside the
+//   root) is a wasm-tier property, eventually; this py guard is a runtime
+//   refusal, enforced only as long as the op goes through these bodies.
+// See docs/witnessed-fs.md for the full discussion.
+//
+// ------------------------------------------------------------------ tier status
+// py tier only (the H1 reference). The `@py` bodies + the inverses' `@py`
+// bodies + backends/python/revl_fs_workspace.py are this slice; ts / rs / go /
+// java / wasm bodies are Slice 2b.
+//
+// Import the mutations with a named `use` (the inverses are auto-registered by
+// the accumulator — a consumer never names them):
+//
+//     use "stdlib/fs.rvl" { write, rm, move, mkdir }
+
+// ------------------------------------------------------------------------ types
+// The per-op witnesses. Each is a flat record of WAL-serializable data — no
+// host handles — so it survives to `revl recover` (item 243 rule 4).
+
+// `write`'s preimage witness. `created` is true when the file did not exist
+// before the write (so `restore` deletes it rather than restoring bytes);
+// otherwise `preimage` is the snapshot path to put back.
+pub type WriteWitness = { path: Str, preimage: Str, created: Bool }
+
+// `rm`'s witness: the original path and where the target was parked (inside the
+// session garbage dir).
+pub type RmWitness = { path: Str, garbage: Str }
+
+// `move`'s witness: the resolved source and destination.
+pub type MoveWitness = { from: Str, to: Str }
+
+// `mkdir`'s witness: the created directory.
+pub type MkdirWitness = { path: Str }
+
+// A fallible-op error. `code` is a short machine tag (`EOUTSIDE`, `ENOENT`,
+// `EEXIST`, `EWORKSPACE`), `message` a human sentence, `path` the offending
+// target (realpath'd where known).
+pub type FsError = { code: Str, message: Str, path: Str }
+
+// ----------------------------------------------------------------- the inverses
+// Each inverse is a `pure` extern (host-LOCAL restore/rename, non-emission and
+// non-witnessed — the classification check of item 243 rule 3 forbids a
+// witnessed or emitting inverse). Each is IDEMPOTENT on replay (item 243 rule
+// 5): a second run once the world is already restored is a no-op, so an abort
+// that crashes mid-replay and a subsequent `revl recover` cannot clobber. Each
+// re-runs the workspace-confinement check on its target (confinement must #2).
+
+pub extern pure fn restore(w: WriteWitness) -> Unit = @py {
+    import revl_fs_workspace as _ws
+    # must #2: the inverse path is confined too. A raise here is recorded by
+    # the teardown loop as restore-residue, never a silent write outside root.
+    target = _ws.resolve_within(w["path"])
+    import os
+    if w["created"]:
+        # the file did not exist before the write: undo == delete it.
+        # idempotent — a second replay finds it already gone.
+        if os.path.exists(target):
+            os.remove(target)
+        return
+    # restore the preimage snapshot over the target. os.replace is atomic and
+    # consumes the snapshot (residue-free). idempotent — once the snapshot is
+    # gone (already restored), a second replay is a no-op.
+    if os.path.exists(w["preimage"]):
+        os.replace(w["preimage"], target)
+    return
+}
+
+pub extern pure fn unrm(w: RmWitness) -> Unit = @py {
+    import revl_fs_workspace as _ws
+    target = _ws.resolve_within(w["path"])   # must #2
+    import os
+    # rename the parked file back. idempotent — once moved back (garbage gone),
+    # a second replay is a no-op.
+    if os.path.exists(w["garbage"]):
+        os.replace(w["garbage"], target)
+    return
+}
+
+pub extern pure fn unmove(w: MoveWitness) -> Unit = @py {
+    import revl_fs_workspace as _ws
+    src = _ws.resolve_within(w["from"])      # must #2: BOTH endpoints confined
+    dst = _ws.resolve_within(w["to"])
+    import os
+    # move it back. idempotent — once back (dst gone), a second replay no-ops.
+    if os.path.exists(dst):
+        os.replace(dst, src)
+    return
+}
+
+pub extern pure fn rmdir_if_empty(w: MkdirWitness) -> Unit = @py {
+    import revl_fs_workspace as _ws
+    target = _ws.resolve_within(w["path"])   # must #2
+    import os
+    # remove the created directory iff still empty — never delete a dir the
+    # activation (or a concurrent writer) populated. idempotent + total: a
+    # missing or non-empty dir is left as-is, no raise.
+    try:
+        os.rmdir(target)
+    except OSError:
+        pass
+    return
+}
+
+// ------------------------------------------------------- the witnessed mutations
+// Each returns Result and registers `undo <inverse>(result)` ONLY on Ok. The
+// `result` binder is the Ok payload — the witness — bound by the accumulator
+// (item 243, "Slice 1 as implemented" #1); a consumer never threads it.
+
+// Overwrite (or create) `path` with `contents`, snapshotting the preimage first.
+pub extern witnessed[fs] fn write(path: Str, contents: Str) -> Result[WriteWitness, FsError]
+    undo restore(result) = @py {
+    import revl_fs_workspace as _ws
+    import os
+    try:
+        target = _ws.resolve_within(path)    # must #1: realpath BEFORE the check
+    except _ws.ConfinementError as e:
+        return Err(e.as_error())
+    existed = os.path.exists(target)
+    preimage = ""
+    if existed:
+        if not os.path.isfile(target):
+            return Err({"code": "ENOTFILE",
+                        "message": "write target exists and is not a regular file",
+                        "path": target})
+        # snapshot the preimage INSIDE the root (must #3) before diverging it.
+        preimage = _ws.fresh_sidecar(_ws.preimage_dir(), "pre")
+        _ws.snapshot(target, preimage)
+    else:
+        # require the parent to exist — we create no directories, so the
+        # inverse (delete the created file) leaves zero residue.
+        parent = os.path.dirname(target)
+        if parent and not os.path.isdir(parent):
+            return Err({"code": "ENOENT",
+                        "message": "parent directory does not exist",
+                        "path": target})
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(contents)
+    return Ok({"path": target, "preimage": preimage, "created": not existed})
+}
+
+// Remove `path` by parking it in the session garbage dir (inside the root).
+pub extern witnessed[fs] fn rm(path: Str) -> Result[RmWitness, FsError]
+    undo unrm(result) = @py {
+    import revl_fs_workspace as _ws
+    import os
+    try:
+        target = _ws.resolve_within(path)    # must #1
+    except _ws.ConfinementError as e:
+        return Err(e.as_error())
+    if not os.path.exists(target):
+        # Ok-conditional: an rm on a missing path registers nothing (item 243).
+        return Err({"code": "ENOENT", "message": "no such file", "path": target})
+    parked = _ws.fresh_sidecar(_ws.garbage_dir(), "rm")   # must #3: inside root
+    os.replace(target, parked)
+    return Ok({"path": target, "garbage": parked})
+}
+
+// Rename `from` -> `to` (both confined).
+pub extern witnessed[fs] fn move(src: Str, dst: Str) -> Result[MoveWitness, FsError]
+    undo unmove(result) = @py {
+    import revl_fs_workspace as _ws
+    import os
+    try:
+        real_from = _ws.resolve_within(src)  # must #1, BOTH endpoints
+        real_to = _ws.resolve_within(dst)
+    except _ws.ConfinementError as e:
+        return Err(e.as_error())
+    if not os.path.exists(real_from):
+        return Err({"code": "ENOENT", "message": "no such source", "path": real_from})
+    if os.path.exists(real_to):
+        return Err({"code": "EEXIST", "message": "destination exists", "path": real_to})
+    os.replace(real_from, real_to)
+    return Ok({"from": real_from, "to": real_to})
+}
+
+// Create directory `path`.
+pub extern witnessed[fs] fn mkdir(path: Str) -> Result[MkdirWitness, FsError]
+    undo rmdir_if_empty(result) = @py {
+    import revl_fs_workspace as _ws
+    import os
+    try:
+        target = _ws.resolve_within(path)    # must #1
+    except _ws.ConfinementError as e:
+        return Err(e.as_error())
+    if os.path.exists(target):
+        return Err({"code": "EEXIST", "message": "path already exists", "path": target})
+    os.mkdir(target)
+    return Ok({"path": target})
+}
