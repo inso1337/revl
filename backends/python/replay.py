@@ -1168,6 +1168,39 @@ def _wal_record(step: "Step", component: str, seq: int,
     }
 
 
+def _next_seq(path: str) -> int:
+    """The seq a reopened WAL must resume from: one past the highest seq
+    already on disk, or 0 for a new or empty log.
+
+    A session's WAL owns ONE strictly increasing seq space for its whole
+    lifetime. A ``--watch`` reload reopens the same file in append mode
+    (:meth:`Recorder.open_wal`), so a fresh :class:`WriteAheadLog` that reset
+    ``_seq`` to 0 would collide in seq-space with the records the prior
+    generation already wrote — and recover keys discharge descriptors by seq,
+    so a duplicated seq lets a committed transaction's rollback be replayed or
+    an aborted one's be skipped (item 325). Reopen therefore RESUMES the
+    counter; it never resets over a non-empty log. A torn final record (a real
+    ``kill -9`` can leave one) is skipped, exactly as :meth:`read` tolerates it.
+    """
+    highest = -1
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # a partial final record — the crash itself
+                seq = entry.get("seq")
+                if isinstance(seq, int) and seq > highest:
+                    highest = seq
+    except OSError:
+        return 0  # no log yet: a new session starts its seq space at 0
+    return highest + 1
+
+
 class WriteAheadLog:
     """A durable, append-only log of committed effects and their inverse
     descriptors (roadmap item 47).
@@ -1197,6 +1230,13 @@ class WriteAheadLog:
         directory = os.path.dirname(os.path.abspath(self.path))
         if directory:
             os.makedirs(directory, exist_ok=True)
+        # Resume this session's monotonic seq space from whatever is already on
+        # disk. On the first open the log is new (or empty) and this is 0; on a
+        # --watch reload the same file already carries the prior generation's
+        # records, and resuming here — rather than the constructor's _seq = 0 —
+        # is what keeps a reopened WAL from restarting seq at 0 and colliding
+        # with them (item 325; see _next_seq).
+        self._seq = _next_seq(self.path)
         self._handle = open(self.path, "a", encoding="utf-8")
         if self._handle.tell() == 0:
             self._write({"record": "header", "walVersion": WAL_VERSION,

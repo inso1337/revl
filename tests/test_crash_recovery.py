@@ -88,6 +88,89 @@ def test_the_wal_appends_each_step_as_it_commits(tmp_path):
     wal.close()
 
 
+def _boundary_op(name: str) -> dict:
+    return {"receiver": "fs", "method": "remove", "args": [name]}
+
+
+def test_reopening_a_wal_resumes_the_seq_space_instead_of_resetting_it(tmp_path):
+    """Item 325 regression. A --watch reload builds a FRESH `WriteAheadLog`
+    over the existing file in append mode. The seq counter must RESUME from the
+    log's maximum seq, never restart at 0 — a reset collides in seq-space with
+    the records the prior generation already wrote, and recover keys discharge
+    descriptors by seq. This drives the real reload path (`Recorder.open_wal`
+    again on the same path) and asserts the post-reopen seqs strictly continue
+    the pre-reopen sequence."""
+    path = str(tmp_path / "session.wal")
+    recorder = replay.Recorder({})
+
+    wal1 = recorder.open_wal(path, generation=1)
+    r0 = wal1.record_boundary("C", "a", resource="file:/a",
+                              inverse_op=_boundary_op("/a"))
+    r1 = wal1.record_boundary("C", "b", resource="file:/b",
+                              inverse_op=_boundary_op("/b"))
+    assert [r0["seq"], r1["seq"]] == [0, 1]
+
+    # --watch reload: same path, a brand-new WriteAheadLog instance.
+    wal2 = recorder.open_wal(path, generation=2)
+    assert wal2 is not wal1  # genuinely a fresh instance, not the same object
+    r2 = wal2.record_boundary("C", "c", resource="file:/c",
+                              inverse_op=_boundary_op("/c"))
+    r3 = wal2.record_boundary("C", "d", resource="file:/d",
+                              inverse_op=_boundary_op("/d"))
+    # the whole point: 2 and 3, NOT a reset to 0 and 1.
+    assert [r2["seq"], r3["seq"]] == [2, 3]
+    wal2.close()
+
+    # the durable log carries one strictly increasing, collision-free seq space.
+    seqs = [r["seq"] for r in replay.WriteAheadLog.read(path)["records"]
+            if "seq" in r]
+    assert seqs == [0, 1, 2, 3]
+    assert len(seqs) == len(set(seqs))  # no duplicate seq across the reload
+
+
+def test_a_fresh_empty_wal_still_starts_its_seq_space_at_zero(tmp_path):
+    """The resume must not perturb the ordinary first open: a new (or empty)
+    log begins at seq 0."""
+    path = str(tmp_path / "new.wal")
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    first = wal.record_boundary("C", "a", resource="file:/a",
+                                inverse_op=_boundary_op("/a"))
+    assert first["seq"] == 0
+    wal.close()
+
+
+def test_recover_keys_discharge_across_a_watch_reload_by_distinct_seqs(tmp_path):
+    """Item 325, recover-path regression. A transactional descriptor written
+    before a --watch reload and one written after it must land at DISTINCT seqs,
+    so a discharge record naming the post-reload seq skips exactly that
+    (committed) transaction and leaves the pre-reload (aborted) one to roll
+    back. With the seq-reset bug both descriptors share seq 0 and the discharge
+    becomes ambiguous — recover would skip the aborted rollback or replay the
+    committed one."""
+    path = str(tmp_path / "session.wal")
+    recorder = replay.Recorder({})
+
+    wal1 = recorder.open_wal(path, generation=1)
+    before = wal1.record_discharge_descriptor(
+        "transactional", receiver="ledgerA", method="rollback", args=["A"])
+
+    wal2 = recorder.open_wal(path, generation=2)  # --watch reload
+    after = wal2.record_discharge_descriptor(
+        "transactional", receiver="ledgerB", method="rollback", args=["B"])
+    # only the post-reload transaction committed before the crash.
+    wal2.record_discharge([after["seq"]])
+    wal2.close()
+
+    assert before["seq"] != after["seq"]  # the collision the bug caused
+
+    report = recover(path, world=DictWorld())
+    assert report["verdict"] == "rolled-back"
+    rolled_back = {e["seq"] for e in report["transactionalRolledBack"]}
+    retained = {e["seq"] for e in report["dischargedSkipped"] if e["retained"]}
+    assert rolled_back == {before["seq"]}   # aborted A rolled back
+    assert retained == {after["seq"]}       # committed B retained, not replayed
+
+
 def test_an_emission_is_a_process_crossing_with_no_inverse():
     tl = replay.Timeline("Svc")
     step = tl.record_emission("db", "execute", ("INSERT",), "Database", ("<f>", 3))
