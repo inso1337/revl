@@ -524,6 +524,9 @@ def main(argv: list[str] | None = None) -> int:
         return _truc_main(args.truc_args)
     if args.command == "explain":
         return _run_explain(args)
+    if args.command == "doctor":
+        from .doctor import doctor_command  # noqa: PLC0415 — lazy: no heavy imports
+        return doctor_command(args)
     if args.command == "scaffold":
         return _run_scaffold(args)
     if args.command == "repair":
