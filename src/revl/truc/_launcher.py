@@ -45,6 +45,18 @@ def main(argv: list[str] | None = None) -> int:
 
     args = list(sys.argv[1:] if argv is None else argv)
 
+    # `reproduce` is an out-of-band verifier, not a truc state change: it
+    # recompiles a published component and compares the recomputed hashes
+    # against what was recorded, mutating nothing. It runs frontend-only
+    # (`compile_files` + `registry`/`attest`, no runtime) and lives in Python
+    # for the same reason `revl attest` does: the launcher does what revl
+    # cannot, and hash-comparing a rebuild against a recorded lock/attestation
+    # is that. Intercepted here so `truc reproduce` and `revl truc reproduce`
+    # are one engine (both reach this launcher).
+    if args and args[0] == "reproduce":
+        from .reproduce import run as _reproduce_run  # noqa: PLC0415
+        return _reproduce_run(args[1:])
+
     try:
         ir = compile_files(component_files())
     except RevlError as error:  # truc's own components no longer admit — a bug
