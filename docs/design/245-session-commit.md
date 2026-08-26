@@ -64,19 +64,27 @@ engineering a witness and not by best effort.
   same driver with the trace captured, driving load / swap / call / unload as
   verbs (src/revl/mcp/session.py); operator profiles gate the mutating verbs
   (src/revl/mcp/operator.py, `TOOL_VERB`).
-- **The per-call registration point.** Item 318 (in flight) opens the
+- **The per-call registration point.** Item 318 (landed) opens the
   witnessed position in a provide-method: a per-tool-call witnessed effect
   registers its transactional inverse into the enclosing component's
-  activation `Frame`, which the landed seam already discharges on commit and
-  replays on abort. 318 flagged one fork for this doc: whether per-call
-  effects need a SESSION-scoped accumulator beyond the activation frame.
+  activation `Frame` (`Frame.transactional_method`, parked in
+  `_deferred_transactional` and disposed by `drain` once the verdict bit is
+  settled; `Frame.abort` sets `_aborting` so a settled activation can still
+  revert), which the landed seam discharges on commit and replays on abort.
+  318 flagged one fork for this doc, resolved below: whether per-call
+  effects need a SESSION-scoped accumulator beyond the activation frame
+  (they do not; the activation frame suffices for one-component/one-session
+  H1).
 
 ## Decision 1: the commit boundary (and the 318 fork, resolved)
 
 **A session is one driver lifetime.** Concretely: one `revl run` process, or
 one MCP session from its first `revl_load` to its commit or abort. This is
 already a materialized thing in the tree: it is the scope of the one WAL the
-driver opens, and WAL `seq` is already global across it. The session may span
+driver opens. WAL `seq` is global across it only while exactly one
+`WriteAheadLog` instance lives for the whole session; today's reopen path
+breaks that, and the seq-space section below makes the one-instance rule
+normative. The session may span
 many activations (the initial load, swaps, generation undos); it ends in
 exactly one of COMMIT or ABORT (a crash is an abort whose replay runs in
 `revl recover`).
@@ -132,12 +140,121 @@ queue (Decision 3) and the discharge escrow (above), are not accumulators:
 the queue holds actions that have not happened, the escrow holds entries that
 already exist and merely wait for the verdict.
 
+**The gate target: derived from the owner's registry, never "the current
+frame".** The commit operator commits exactly three things, and it derives
+them from state the session owner already holds, not from any notion of a
+current activation:
+
+1. the deferral queue (Decision 3), driver-owned;
+2. the discharge escrow (above), driver-owned;
+3. every LIVE activation frame in the owner's registry. A frame joins the
+   registry when it registers its session owner (the same hook as the
+   compatibility clause below) and leaves it at withdrawal, handing its
+   undischarged entries to the escrow.
+
+The manifest hash binds the target: `revl_commit` enumerates over a snapshot
+of (queue, escrow, registry), `revl_commit_confirm` recomputes, and any
+drift refuses (Decision 4). The runtime's per-call notion of a current
+activation (`_FRAME_BY_CTX` and the activation stack in
+backends/python/runtime.py) is an attribution convenience and plays no part
+in target derivation: a session with three live components commits all
+three or none.
+
+How the verdict drives the 318 seam, both directions:
+
+- COMMIT: the driver unloads each registry frame WITHOUT calling
+  `Frame.abort()`. `drain` flips `_committed` True, the activation-body
+  `_Transactional` disposers discharge, and the method-registered
+  `_deferred_transactional` entries are disposed by `drain` itself with the
+  bit already settled (the 318 seam: a method entry is not a cordis
+  disposer, precisely so it observes the settled bit).
+- ABORT: the driver calls `Frame.abort()` on EVERY registry frame FIRST,
+  before any teardown starts, then unloads. `abort()` sets `_aborting`;
+  `drain` then leaves `_committed` False and every entry replays. The
+  ordering is normative: for a cleanly activated component `drain` runs on
+  BOTH verdicts, so "did drain run" no longer discriminates (that is what
+  318 added `_aborting` for). Mark-then-teardown is what makes the bit mean
+  the verdict; an unload that reaches any frame's `drain` before its
+  `abort()` has silently committed that frame's entries.
+
+Disambiguation of abort from clean commit, stated at both levels. At
+runtime: a committed frame ends with `_committed` True and its
+transactional entries `discharged`; an aborted frame ends with `_committed`
+False, `_aborting` True, and its entries `replayed` (the `_Transactional`
+flags). At the WAL: a committed session carries `commit-approved` then
+`discharge`; an aborted session carries NEITHER, plus the `aborted`
+completion record when the replay finished in-process (Decision 3). The
+absence of `commit-approved` is the abort verdict; a crashed abort and a
+clean abort differ only in whether `aborted` closed the file.
+
 **Compatibility clause.** The escrow behavior activates only when a session
 owner registers itself with the frame (the driver, in run.py / mcp
 session.py). A bare `Frame` with no owner keeps today's semantics: drain
 discharges at unload, implicit commit. Every existing test and every
 non-session embedding stays green; the teardown contract's "Commit path"
 section gains one amendment sentence pointing here.
+
+## The WAL seq space across the session (normative, Slice 2)
+
+The seq space is the session's spine. Discharge records, `commit-approved`,
+the `aborted` completion record (Decision 3), and recover's skip set all name
+seqs, so what a seq MEANS must be stable for the entire session. The rule:
+
+**One session, one WAL file, one `WriteAheadLog` instance, one counter.**
+`seq` is strictly increasing for the whole session and is never reset while
+the session is open. Every seq-bearing record kind draws from the same
+counter (`effect`, `discharge-descriptor`, and Decision 3's
+`deferred-emission` all consume `WriteAheadLog._seq`): a seq is a position in
+the session, not a per-kind index. Discharge records name explicit seq lists,
+never ranges, and one session WAL may carry several (each ownerless frame's
+drain writes one today; the session commit writes the one covering escrow
+plus live frames); the discharged set is their union, which is how
+recovery.py already reads them (`discharged.update(...)` over every
+`discharge` record). Explicit lists plus append-only are what keep an
+in-flight abort or recover safe: a later record can only add facts about
+later seqs, it can never re-describe a seq a replay is already acting on, and
+no record is ever rewritten out from under a reader.
+
+**What is wrong today, named precisely.** `WriteAheadLog` starts `_seq = 0`
+per INSTANCE (backends/python/replay.py); `open()` opens the file in append
+mode and writes a header only when the file is empty; and `Recorder.open_wal`
+closes any prior WAL and constructs a NEW instance. The `--watch` reload path
+(src/revl/run.py) calls `open_wal` again over the same path, so a mid-session
+reopen silently restarts the seq space at 0 over a file that already carries
+those seqs. Even pre-245 that is a live corner-case bug (watch + `--wal` +
+witnessed): two descriptors share seq 0, and recover's union-then-skip can
+skip an aborted transaction's rollback because a discharge record from the
+other generation named the same number. Under 245 it is fatal, because
+`commit-approved` and the session discharge record refer to seqs across the
+whole session. This is the migration the slice must land, not a refinement it
+may get to.
+
+The migration, in four rules:
+
+1. **Open once, hold for the driver lifetime.** The driver opens the WAL at
+   session start and keeps that one instance until the verdict; nothing calls
+   `open_wal` again while the session is open. A `--watch` generation reload
+   continues the same instance and the same counter; the generation is
+   record-level data (the header and records carry it), never a new WAL.
+2. **A fresh WAL file means a new session.** A harness that wants one is
+   asking for a session boundary: verdict first (commit or abort, Decision
+   1), then the new file. There is no in-place reset.
+3. **Reader hardening.** `revl recover` checks monotonicity while scanning:
+   each seq-bearing record's seq must exceed the previous seq-bearing
+   record's. A regression marks the file seq-corrupt; recover then refuses to
+   interpret discharge seq references over the ambiguous region, and every
+   descriptor whose seq appears more than once is reported as
+   `unreconstructible` residue (the existing kind), never silently replayed
+   and never silently skipped. Guessing which descriptor a discharge covers
+   is exactly the silent failure this rule exists to prevent.
+4. **What recover reads after a mid-session crash: the one file, whole.** The
+   verdict comes from the markers (`activation-complete`, `commit-approved`,
+   `aborted`; Decision 3 and its window rule). The discharged set is the
+   union of discharge records. Undischarged descriptors replay reverse-seq
+   across the WHOLE session, activations interleaved as they registered,
+   which is the escrow's replay order by construction: escrowed entries keep
+   their registration seqs, so reverse-seq over the file and reverse-seq
+   within the escrow agree.
 
 ## Decision 2: the three classes are a type judgment
 
@@ -189,6 +306,39 @@ Checker obligations (new, Slice 1):
   into a queue that is already flushing or dropped is unanswerable. Same
   spirit as 247 decision 3's "a compensation emits and returns; it does not
   accumulate".
+
+**Tier gate: `deferred` is refused at emit on the five ownerless tiers.**
+Class (b)'s lowering needs a session owner at runtime: the deferral queue,
+the escrow, and a commit verb to flush or drop it. Only the py tier has one
+today (the `revl run` / MCP driver). Until a tier grows its own owner
+(Slice 4), its emitter REFUSES any call to a `deferred` extern at emit
+time. This is the wasm tier's existing discipline for a capability the tier
+lacks ("violations are EmitError, never silent degradation",
+backends/wasm/emit.py; a method-time compensation is already a hard
+`EmitError` there), extended to all five ownerless tiers: rust, go, java,
+wasm, typescript, each through its existing `EmitError` (or equivalent
+refusal) channel.
+
+Refusal, not degradation, because both available degradations lie. Firing
+at call time executes an action the program was typed to withhold until
+approval, the worst possible reading of the declaration. Enqueueing with no
+owner drops the action on the floor: no verdict ever comes, so the send the
+program promised (on commit) silently never happens. The refusal keys off
+the call site, the point where the emitter would otherwise have to pick one
+of those lies; a declared-but-never-called deferred extern does not poison
+the build.
+
+The diagnostic, one wording for all five tiers so six backends do not
+invent six messages:
+
+    <component>: `deferred` emission `<key>.<method>` needs a session owner
+    runtime (the deferral queue and the commit verb), which the <tier> tier
+    does not have yet; deferred emissions run on the python tier only.
+    Refusing rather than degrading: firing at call time would break the
+    declaration's promise that nothing crosses before the session commit.
+    Either target the python tier, or drop `deferred` from the extern to
+    make it an immediate emission (class (c): fires mid-session, prompted
+    per 246).
 
 The classification function is exported on the G8 audit surface: each
 crossing record (src/revl/erase_report.py aggregates every reached host
@@ -245,12 +395,53 @@ Durability order: `commit-approved`, then `flushed` records, then
 `discharge`, then `activation-complete`. Each is fsync'd by the existing
 `WriteAheadLog._write` discipline.
 
-**On abort: DROP.** The queue is discarded. No host body runs; no WAL record
-is needed beyond the absence of `commit-approved`/`flushed`. `revl recover`
+**The approved-to-discharged window.** Between `commit-approved` and the
+`discharge` record there is a window in which the session's verdict is
+decided but the per-seq bookkeeping is not durable: inverses are not yet
+discharged, witnesses not yet GC'd, the flush possibly part-done. A crash
+anywhere inside that window is a COMMITTED session. The record ordering is
+what makes the answer unambiguous: `commit-approved` is written before the
+first fire and before `discharge`, so its presence IS the commit point.
+`revl recover` on a WAL that carries `commit-approved`:
+
+- replays NO transactional inverse and re-issues NO compensation from this
+  session, whether or not their seqs appear in a discharge record. The
+  durable approval, not the discharge record, is the session's commit proof;
+  the discharge record is bookkeeping the crash interrupted.
+- rolls that bookkeeping forward: it appends the missing `discharge` record
+  itself, naming every descriptor seq not already discharged. Appending a
+  record fires nothing, so the roll-forward is safe, and it makes a second
+  recover pass read the same verdict with no special-casing.
+- reports the flush state per the crash cases below: each approved
+  descriptor with no `flushed` record is owed.
+
+A WAL with no `commit-approved` is the other verdict: abort semantics,
+undischarged descriptors replay. There is no third state. For an ownerless
+frame (the compatibility clause, no session owner registered) the landed
+rule stands unchanged: drain's discharge record remains the commit proof,
+durable before success is reported (teardown-contract.md, "Commit path").
+This window rule extends the contract's recover reading, it does not
+contradict it: discharged-seq skipping stays true, and `commit-approved`
+adds a superset skip for the session-owned case. It joins the
+teardown-contract.md amendments Slice 2 owes (see the slice plan).
+
+**On abort: DROP.** The queue is discarded. No host body runs; the verdict
+needs no record, because the ABSENCE of `commit-approved` is the abort
+verdict (the window rule above: two states, no third). `revl recover`
 reading a WAL with `deferred-emission` records, no `commit-approved`, and no
 `activation-complete` treats them as dropped: reported in the verdict as
 "n deferred emission(s) dropped, never fired", counted clean (zero
 crossings), never residue. This is the exact-by-construction abort path.
+
+One completion record is still written, for recover's benefit, not the
+verdict's: an in-process abort that finishes its replay appends
+`{"record": "aborted", "replayed": [seq...]}` naming the seqs whose inverses
+actually ran, after the escrow replay completes and before the driver exits.
+It lets recover tell a COMPLETED abort (report clean, redo nothing) from a
+CRASHED one (finish the replay). A crash between the last inverse and the
+`aborted` record costs only a redundant re-run on recover, never a wrong
+one: inverses are idempotent-on-replay (243 rule 5). The record is
+bookkeeping; the missing `commit-approved` remains the verdict.
 
 **The 245/247 boundary, stated.** A dropped deferral and a compensation are
 not two strengths of the same thing; they are on opposite sides of the fire:
@@ -273,7 +464,9 @@ the two from ever stacking.
   `_roll_back` (discharged-seq skipping is already correct because no
   discharge record was written yet).
 - Crash after `commit-approved`, mid-flush: the approval was durable and
-  named the manifest hash. Recover reports each approved descriptor with no
+  named the manifest hash, so the session is COMMITTED (the window rule).
+  Recover replays no inverse and re-issues no compensation, appends the
+  missing `discharge` record, and reports each approved descriptor with no
   `flushed` record as OWED (`flush-residue`, `attemptedFlag: false`,
   `outcome: not-attempted`, hint: finish the flush by hand or re-run with the
   idempotency key), and each `flushed` one as fired. v1 recover never
@@ -342,7 +535,10 @@ prompting are 246's item and are not specified here.
 ## Decision 5: abort
 
 Abort is the landed machinery plus two subtractions. On `:abort` /
-`revl_abort` / driver failure:
+`revl_abort` / driver failure, the driver first marks every registry frame
+with `Frame.abort()` (Decision 1's gate target: the `_aborting` bit must be
+set before any teardown starts, or a frame's `drain` implicitly commits it),
+then:
 
 1. The deferral queue is dropped (Decision 3). Zero cost, zero crossings.
 2. Live activations tear down per the teardown contract, unchanged: Phase-1
@@ -390,13 +586,21 @@ both before/after on a real harness.
   `deferred`, backends untouched, suite stays green. Files: src/revl/parser.py,
   lower.py, emission_analysis.py, erase_report.py, diagnostics.py.
 - **Slice 2: py runtime seam.** The session owner registration on `Frame`
-  (compat clause, Decision 1); drain defers transactional/compensation
-  discharge to the owner; the driver-owned deferral queue and discharge
-  escrow; enqueue lowering for deferred call sites in backends/python/emit.py;
-  WAL record kinds `deferred-emission` / `commit-approved` / `flushed` in
-  replay.py; recover deltas (dropped-clean, approved-owed, `flush-residue`)
-  in src/revl/recovery.py; the teardown-contract.md amendments (commit-path
-  sentence, `flush-residue` kind).
+  (compat clause, Decision 1) and the owner's frame registry (the gate
+  target); drain defers transactional/compensation discharge to the owner;
+  the driver-owned deferral queue and discharge escrow; the WAL seq-space
+  migration (the one-instance rule, the `open_wal` reopen fix, recover's
+  monotonicity check); enqueue lowering for deferred call sites in
+  backends/python/emit.py; WAL record kinds `deferred-emission` /
+  `commit-approved` / `flushed` / `aborted` in replay.py; recover deltas
+  (dropped-clean, approved-owed, `flush-residue`, the window rule's
+  commit-approved-dominates verdict plus its discharge roll-forward,
+  `aborted`-aware abort reporting) in src/revl/recovery.py; the
+  `deferred`-call emit refusal on the five ownerless tiers (Decision 2's
+  tier gate) in backends/{rust,go,java,wasm,typescript}/emit.py; the
+  teardown-contract.md amendments (commit-path sentence, `flush-residue`
+  kind, the recover reading extension: `commit-approved` dominates the
+  discharge set for a session-owned WAL).
 - **Slice 3: the commit surfaces + metrics.** `:commit` / `:abort` and the
   exit prompt in src/revl/run.py; `revl_commit` / `revl_commit_confirm` /
   `revl_abort` in src/revl/mcp/session.py + server.py; the manifest schema
@@ -421,12 +625,22 @@ Exit tests (the conformance gate for Slices 2/3):
 4. Confirm with a stale hash is refused after a post-enumeration enqueue.
 5. Durability order on commit: approved, flushed, discharge,
    activation-complete; `revl recover` on a WAL cut after each prefix gives
-   the Decision 3 verdicts (owed / unknown / skipped-committed).
+   the Decision 3 verdicts (owed / unknown / skipped-committed). In
+   particular, the cut inside the approved-to-discharged window: no inverse
+   replays, the discharge record is rolled forward, a second recover pass is
+   a no-op.
 6. An all-(a)/(b) session reports `prompts == {"commit": 1, ...}` and an
    exact clean abort.
 7. No session owner registered: byte-identical behavior to today (drain
    discharges at unload), the whole existing suite plus the per-backend
    goldens stay green.
+8. Seq-space: a `--watch` reload mid-session with `--wal` continues the same
+   seq counter (no restart at 0); recover on a hand-built seq-regressed WAL
+   reports the ambiguous descriptors `unreconstructible` and replays none of
+   them.
+9. Tier gate: a program calling a `deferred` extern is refused at emit on
+   rust, go, java, wasm, and typescript with the Decision 2 diagnostic; the
+   same program with the extern declared but never called emits cleanly.
 
 ## Open questions (left deliberately)
 
