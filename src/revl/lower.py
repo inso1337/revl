@@ -974,12 +974,47 @@ def _signature_table(program: Program, types: dict | None = None) -> dict:
             program.filename, decl.line)
         tparams = collect_tparams(raw_params + [decl.returns], declared,
                                   explicit=explicit)
+        # default-value expressions (roadmap item 187), aligned with `params`.
+        # `None` for a parameter without a default; the ordering invariant
+        # (defaults are trailing) is enforced in the parser, so `required` is
+        # simply the count of leading non-defaulted parameters. Externs never
+        # carry defaults (`FnParam.default` stays `None` there), so this is a
+        # no-op for the extern half of the table.
+        defaults = [getattr(p, "default", None) for p in decl.params]
+        required = next((i for i, d in enumerate(defaults) if d is not None),
+                        len(defaults))
         sigs[decl.name] = {
             "params": [mark_tparams(t, tparams) for t in raw_params],
             "returns": mark_tparams(decl.returns, tparams),
             "tparams": tparams,
+            "defaults": defaults,
+            "required": required,
         }
     return sigs
+
+
+def _with_default_args(callee_name: str, given: list, types: dict, lower_one):
+    """Append default-value IR for omitted trailing parameters (item 187).
+
+    Call-site resolution: the emitters only ever see a fully-supplied argument
+    list, so no tier needs default-parameter machinery. `given` is the
+    already-lowered actual arguments; `lower_one` lowers one default
+    *expression* AST to IR in the caller's context (a default is a pure
+    expression that closes over nothing, so the caller's scope is immaterial).
+    A signature with no defaults, or a call that supplies every argument,
+    returns `given` unchanged — byte-identical to before item 187."""
+    sig = (types.get(FNS_KEY) or {}).get(callee_name)
+    if not sig:
+        return given
+    defaults = sig.get("defaults") or []
+    if len(given) >= len(defaults):
+        return given
+    out = list(given)
+    for d in defaults[len(given):]:
+        # `d` is non-None here: the arity check admitted this call only because
+        # every omitted trailing parameter carries a default.
+        out.append(lower_one(d))
+    return out
 
 
 def _case_table(types: dict) -> dict:
@@ -2870,6 +2905,19 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
                                       [infer_ast(a, type_env, types, None) for a in expr.args],
                                       lowered_args):
                     _mark_widen(p, a, node)
+                # item 187: fill omitted trailing arguments with each defaulted
+                # parameter's default expression. Lower each default here and
+                # mark the Int->Float widening on it exactly as a written
+                # argument would get, so a `Float = 0` default emits correctly.
+                sig = types.get(FNS_KEY, {}).get(expr.callee.name) or {}
+                defaults = sig.get("defaults") or []
+                for i in range(len(lowered_args), len(params)):
+                    dexpr = defaults[i]
+                    dnode = _lower_pure_expr(dexpr, scope, callables, alias_fns,
+                                             filename, type_env, types)
+                    _mark_widen(params[i], infer_ast(dexpr, type_env, types, None),
+                                dnode)
+                    lowered_args.append(dnode)
                 return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
                         "args": lowered_args}
         return {"kind": "call", "callee": _lower_pure_expr(expr.callee, scope, callables, alias_fns, filename, type_env, types),
@@ -3011,6 +3059,86 @@ def _inject_opt(expected: str | None, actual: str | None, node: dict) -> dict:
     return {"kind": "call", "callee": {"kind": "var", "name": "Some"}, "args": [node]}
 
 
+def _default_expr_callees(expr, out: set) -> None:
+    """Collect the names of every function/constructor *called* inside a
+    default-value expression (item 187 purity check). Only var-headed call
+    callees matter — an effectful operation is always a named extern/fn."""
+    if isinstance(expr, ExprCall):
+        if isinstance(expr.callee, ExprVar):
+            out.add(expr.callee.name)
+        _default_expr_callees(expr.callee, out)
+        for a in expr.args:
+            _default_expr_callees(a, out)
+    elif isinstance(expr, ExprBin):
+        _default_expr_callees(expr.left, out)
+        _default_expr_callees(expr.right, out)
+    elif isinstance(expr, ExprUn):
+        _default_expr_callees(expr.operand, out)
+    elif isinstance(expr, (ExprField, ExprOptField)):
+        _default_expr_callees(expr.target, out)
+    elif isinstance(expr, ExprOptCall):
+        _default_expr_callees(expr.target, out)
+        for a in expr.args:
+            _default_expr_callees(a, out)
+    elif isinstance(expr, ExprIndex):
+        _default_expr_callees(expr.target, out)
+        _default_expr_callees(expr.index, out)
+    elif isinstance(expr, ExprIf):
+        _default_expr_callees(expr.cond, out)
+        _default_expr_callees(expr.then, out)
+        _default_expr_callees(expr.otherwise, out)
+    elif isinstance(expr, ExprRecord):
+        for _, value in expr.fields:
+            _default_expr_callees(value, out)
+    elif isinstance(expr, ExprRecordUpdate):
+        _default_expr_callees(expr.base, out)
+        for _, value in expr.updates:
+            _default_expr_callees(value, out)
+    elif isinstance(expr, ExprList):
+        for item in expr.items:
+            _default_expr_callees(item, out)
+    elif isinstance(expr, Interp):
+        for kind, part in expr.parts:
+            if kind == "expr":
+                _default_expr_callees(part, out)
+
+
+def _validate_default_params(program: Program, types: dict,
+                             emitting_fns: set) -> None:
+    """Decl-site checks for default parameters (item 187): a default is a pure
+    expression that type-checks against its parameter. The ordering invariant
+    (defaults are trailing) is enforced in the parser; here we (a) refuse an
+    effectful default — one that reaches an emission/acquire/witnessed extern
+    or an emitting fn, which would smuggle an effect into an otherwise pure
+    call-site expansion — and (b) type-check the default against the declared
+    parameter type, once, at the declaration rather than at every call."""
+    effectful = {ext.name for ext in program.externs
+                 if ext.classification != "pure"} | set(emitting_fns or ())
+    for decl in program.fn_decls:
+        for p in decl.params:
+            default = getattr(p, "default", None)
+            if default is None:
+                continue
+            reached: set = set()
+            _default_expr_callees(default, reached)
+            bad = sorted(reached & effectful)
+            if bad:
+                raise RevlError(
+                    program.filename, p.line,
+                    f"default for parameter `{p.name}` calls `{bad[0]}`, which "
+                    "is effectful",
+                    hint="a default value must be a pure expression — it is "
+                         "evaluated at the call site whenever the argument is "
+                         "omitted, and an effect there would be invisible in the "
+                         "source",
+                    code="G6", category="purity",
+                )
+            dt = infer_ast(default, {}, types, program.filename)
+            if dt is not None and not compatible(p.type, dt):
+                raise mismatch(program.filename, p.line,
+                               f"default for parameter `{p.name}`", p.type, dt)
+
+
 def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
     (a running manifest, DESIGN §4's runtime-admission gate): ambient services
@@ -3068,6 +3196,11 @@ def check_and_lower(program: Program, ambient: dict | None = None) -> dict:
     emission_evidence = _EmissionEvidence(program)
     emitting_caps = _emitting_capabilities(fns, externs, emission_evidence.witness)
     emitting_fns = set(emitting_caps)
+
+    # item 187: default-parameter values must be pure and well-typed. Checked
+    # here, once the emission fixed point is known, so an effectful default is
+    # refused before any call site expands it.
+    _validate_default_params(program, types, emitting_fns)
 
     # phase-2 async coloring (docs/design/async-extern.md §3): the async twin
     # of the emission fixed point above. Seed = async externs; a module `fn`
@@ -3577,8 +3710,15 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 return {"kind": "call", "callee": {"kind": "var", "name": name},
                         "args": args}
             if name in callables:
+                # item 187: fill omitted trailing arguments with their default
+                # expressions before async coercion, so the module-fn call the
+                # emitters see is fully supplied (no per-tier default handling).
+                filled = _with_default_args(
+                    name, args, env.types,
+                    lambda d: _lower_component_pure_expr(d, env, scope,
+                                                         callables, pure_only))
                 return {"kind": "fn", "name": name,
-                        "args": _coerce_async_args(name, args, env, line)}
+                        "args": _coerce_async_args(name, filled, env, line)}
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
             # the same sliver guard as the var-root path above: a non-var
