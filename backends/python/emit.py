@@ -968,7 +968,7 @@ class _ComponentEmitter:
                 self._deferred_step(out, indent, step, deferred, where)
                 out.add(0)
                 return
-            out.add(indent, self._expr(step.get("expr"), where))
+            out.add(indent, self._emit_fire(step, where))
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
                 # is a first-class COMPENSATION entry on the frame's shared
@@ -982,6 +982,8 @@ class _ComponentEmitter:
                 # compensation, not inversion (§6.1).
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
                                  f"{self._expr(step.get('compensate'), where)})")
+        elif kind == "approval":
+            self._approval_step(out, indent, step, where)
         elif kind == "await":
             # A1: the await lands (inertia, paper §4.3.3), then the yield
             # closes the iteration — a divert during the await therefore
@@ -997,6 +999,34 @@ class _ComponentEmitter:
         else:
             raise EmitError(f"{where}: unknown step {kind!r}")
         out.add(0)
+
+    def _emit_fire(self, step: dict, where: str) -> str:
+        """The Python expression that fires an `emit` step's host body. When the
+        step carries a `with a` approval edge (item 246), the fire is wrapped in
+        `_revl_frame.approval_crossing(a, "C", lambda: <fire>)`: the frame checks
+        and consumes the token durably before the body runs (Decision 3). No edge
+        emits byte-identically to before."""
+        fire = self._expr(step.get("expr"), where)
+        approval = step.get("approval")
+        if approval is None:
+            return fire
+        handle = self._expr(approval.get("expr"), where)
+        cap = approval.get("capability")
+        return (f"_revl_frame.approval_crossing({handle}, {cap!r}, "
+                f"lambda: {fire})")
+
+    def _approval_step(self, out: "_Lines", indent: int, step: dict,
+                       where: str) -> None:
+        """`let a = await approval[C] { fields }` (item 246): resolve the standing
+        `Approval[C]` for this component from the owner ledger and bind the handle
+        `with` threads to the crossing."""
+        cap = step.get("capability")
+        fields = ", ".join(
+            f"{name!r}: {self._expr(value, where)}"
+            for name, value in step.get("fields") or [])
+        out.add(indent,
+                f"{step['bind']} = _revl_frame.request_approval({cap!r}, "
+                f"{{{fields}}})")
 
     def _deferred_extern(self, expr: Any) -> Optional[dict]:
         """The deferred emission extern an `emit` step's expression calls, or
@@ -1293,11 +1323,11 @@ class _ComponentEmitter:
             elif step.get("compensate") is not None:
                 fn = f"_emit_{self._counter}"
                 out.add(indent, f"def {fn}():")
-                out.add(indent + 1, self._expr(step.get("expr"), where))
+                out.add(indent + 1, self._emit_fire(step, where))
                 out.add(indent + 1, f"yield lambda: {self._expr(step.get('compensate'), where)}")
                 out.add(indent, f"_revl_frame.adopt(_revl_ctx.effect({fn}, {self._label(label)!r}))")
             else:
-                out.add(indent, self._expr(step.get("expr"), where))
+                out.add(indent, self._emit_fire(step, where))
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")

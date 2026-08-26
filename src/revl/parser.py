@@ -148,6 +148,11 @@ class EmitStmt:
     expr: object
     line: int
     compensate: object | None = None
+    # item 246, Slice 2: the `with <e>` clause threading an `Approval[C]` value to
+    # the crossing. `e` is a pure expression evaluating to a value of type
+    # `Approval[C']`; the checker (lower._lower_provide) proves `C` is within
+    # `C'`'s scope. None when the crossing carries no approval edge.
+    approval: object | None = None
 
 
 @dataclass
@@ -176,6 +181,29 @@ class SpawnExpr:
 @dataclass
 class AwaitStmt:
     expr: object
+    line: int
+
+
+@dataclass
+class ApprovalExpr:
+    """`await approval[C] { field: expr, ... }` — the only producer of a value of
+    type `Approval[C]` (item 246, Decision 3). It suspends until the operator
+    grants or refuses; the fields are the human's evidence, rendered in the prompt
+    and carried into the ledger and the WAL. `Approval[C]` has no constructor, so
+    an approval cannot be forged in-language."""
+    capability: str          # the capability token C (e.g. "payment")
+    fields: object           # [(name, exprAST), ...] the human's evidence
+    line: int
+
+
+@dataclass
+class LetApprovalStmt:
+    """`let a = await approval[C] { fields }` — bind an `Approval[C]` value in a
+    component activation body (item 246). The suspension is acquisition-shaped,
+    so it lives beside `let x = effect …` rather than in the plain-value stratum
+    the activation body otherwise forbids."""
+    bind: str
+    request: ApprovalExpr
     line: int
 
 
@@ -336,6 +364,12 @@ class ExternDecl:
     # drops it). Validity (emission-only, Unit-returning, no compensate, not
     # async) is checked in lower, not the parser.
     deferred: bool = False
+    # item 246: the declaration-owned `requires approval` clause, for first-party
+    # code that knows its boundary is sensitive: `extern emission[production.payment]
+    # fn charge(...) requires approval`. A crossing that reaches this extern must
+    # carry a covering `with e` edge or admission refuses at lowering, holding even
+    # with no policy file (Decision 3, floor-and-acknowledgment).
+    requires_approval: bool = False
 
 
 @dataclass
@@ -1055,6 +1089,14 @@ class Parser:
         if self.at("kw", "compensate"):
             self.next()
             compensate = self.pure_expr()
+        # item 246: the declaration-owned `requires approval` clause (a contextual
+        # `approval` after the `requires` keyword, so the keyword set is untouched).
+        requires_approval = False
+        if self.at("kw", "requires"):
+            self.next()
+            self.expect("ident", "approval",
+                        what="`approval` after `requires` (item 246)")
+            requires_approval = True
         bodies: list[HostBody] = []
         while self.at("="):
             self.next()
@@ -1065,7 +1107,7 @@ class Parser:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
                           capabilities=capabilities, type_params=type_params, async_=async_,
-                          deferred=deferred)
+                          deferred=deferred, requires_approval=requires_approval)
 
     def _capability_list(self, kind: str = "emission") -> tuple[str, ...]:
         """`[a, b]` after `emission`/`witnessed` — the boundaries this operation
@@ -1096,6 +1138,35 @@ class Parser:
                 raise self.err(line, f"duplicate capability `{cap}` in `{kind}[...]`")
             seen.add(cap)
         return tuple(names)
+
+    def _capability_token(self, what: str = "a capability token") -> str:
+        """One capability token in an `Approval[C]` type or an `await
+        approval[C]` form (item 246). A token names a boundary, not a type, so it
+        is a string literal (`"production.payment"`), a dotted-ident path
+        (`production.payment`), or a bare ident (`payment`) — never `*`, since an
+        unnameable reach can never be approved into (Decision 1, the `*` row)."""
+        tok = self.peek()
+        if tok.kind == "string":
+            self.next()
+            token = tok.value
+        else:
+            parts = [self.expect("ident", what=what).value]
+            while self.at("."):
+                self.next()
+                parts.append(self.expect("ident").value)
+            token = ".".join(parts)
+        if token == "*":
+            # item 246, the `*` row (Decision 1): an unnameable reach can never be
+            # proven reversible, so no approval shape can name it — no
+            # `await approval["*"]`, no `Approval[*]`. A `*` crossing receives only
+            # the per-call ticket, every time.
+            raise self.err(
+                tok.line,
+                "`*` is not an approvable capability — an unnameable reach cannot "
+                "be approved into (item 246, the `*` row)",
+                hint="a bare `emission` reach is class (c) and receives the "
+                     "per-call ticket, not a typed `Approval`")
+        return token
 
     def service(self, commutative: bool = False) -> ServiceDecl:
         line = self.expect("kw", "service").line
@@ -1206,6 +1277,14 @@ class Parser:
         the head that what follows is a type application rather than a variant
         case (a case is a bare name with an optional parenthesised payload, so
         `[` or `?` here is unambiguous)."""
+        # item 246: `Approval[C]` carries a capability TOKEN, not a type — the
+        # bracket argument may be a string literal or a dotted path, which the
+        # ordinary type-application tail (which expects a type) cannot read.
+        if base == "Approval" and self.at("["):
+            self.next()
+            token = self._capability_token()
+            self.expect("]")
+            return self._type_suffix_tail(f"Approval[{token}]")
         if self.at("["):
             self.next()
             inner = [self.type_()]
@@ -1360,6 +1439,31 @@ class Parser:
                     )
                 acquire, undo, line, setup = self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect)
+            # item 246: `let a = await approval[C] { fields }` — an acquisition-
+            # shaped suspension that yields an `Approval[C]`. Allowed in the
+            # activation body exactly where `let x = effect …` is (both bind a
+            # value the plain-value stratum otherwise refuses here).
+            if not mutable and self.at("kw", "await") \
+                    and self.toks[self.pos + 1].kind == "ident" \
+                    and self.toks[self.pos + 1].value == "approval":
+                if in_method:
+                    raise self.err(
+                        tok.line,
+                        "`await approval[C]` is only allowed in a component "
+                        "activation body, not a provide method",
+                        hint="mint the approval in the activation body and thread "
+                             "it to the crossing there; a provide method runs "
+                             "while the component is ACTIVE (item 246)")
+                if declared is not None:
+                    raise self.err(
+                        tok.line,
+                        f"`let {bind}: {declared} = await approval[…]` — the "
+                        f"binding's type is `Approval[C]`, fixed by the "
+                        f"capability, so it cannot be annotated",
+                        hint="drop the annotation; `await approval[C]` already "
+                             "names the capability the value carries")
+                request = self._await_approval_expr()
+                return LetApprovalStmt(bind, request, tok.line)
             if verified_effect:
                 tok2 = self.peek()
                 raise self.err(tok2.line,
@@ -1429,7 +1533,14 @@ class Parser:
             if self.at("kw", "compensate"):
                 self.next()
                 compensate = self.pure_expr()
-            return EmitStmt(expr, tok.line, compensate)
+            # item 246: `emit <call> with <e>` threads an `Approval[C]` to the
+            # crossing. The clause is the explicit dataflow that turns
+            # "unreachable without approval" into a type check (Decision 3).
+            approval = None
+            if self.at("kw", "with"):
+                self.next()
+                approval = self.pure_expr()
+            return EmitStmt(expr, tok.line, compensate, approval)
         if tok.kind == "kw" and tok.value == "await":
             if in_method and not in_async_method:
                 raise self.err(
@@ -2535,6 +2646,27 @@ class Parser:
             self.next()
             return EmitExpr(self._unary(), tok.line)
         return self._postfix()
+
+    def _await_approval_expr(self) -> ApprovalExpr:
+        """`await approval[C] { field: expr, ... }` — parsed only as the RHS of a
+        `let` binding (item 246). Not a general expression: an approval is an
+        acquisition-shaped suspension, bound once and threaded by `with`."""
+        line = self.expect("kw", "await").line
+        self.expect("ident", "approval")
+        self.expect("[")
+        capability = self._capability_token("a capability token in `approval[...]`")
+        self.expect("]")
+        fields: list[tuple[str, object]] = []
+        if self.at("{"):
+            self.next()
+            while not self.at("}"):
+                fname = self._record_key_name()
+                self.expect(":")
+                fields.append((fname, self.pure_expr()))
+                if self.at(","):
+                    self.next()
+            self.expect("}")
+        return ApprovalExpr(capability, fields, line)
 
     def _postfix(self):
         node = self._primary()

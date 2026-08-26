@@ -1214,6 +1214,69 @@ class Frame:
                 "load it under a driver that registers one (item 245)")
         self._owner.enqueue(receiver, method, list(args), fire)
 
+    def request_approval(self, capability: str, fields: dict) -> dict:
+        """`let a = await approval[C] { fields }` at runtime (item 246). Resolve a
+        standing `Approval[C]` for THIS component from the owner ledger and return
+        a handle threaded to the crossing by `with`. Fails closed when the policy
+        is enforced and no valid approval covers it (silence never approves). When
+        the policy is off, or no owner is registered, returns a passthrough handle
+        so a `with a` crossing fires normally (byte-identity)."""
+        owner = self._owner
+        if owner is None or not owner.approval_enforced:
+            return {"capability": capability, "requestId": None,
+                    "passthrough": True}
+        entry = owner.find_approval(capability, self.name)
+        if entry is None:
+            raise ApprovalCrossingRefused(
+                capability,
+                f"no granted, unexpired, unconsumed Approval[{capability}] for "
+                f"component `{self.name}` in this generation and session — a "
+                f"human must grant it via revl_approve (item 246, "
+                f"unreachable-without)")
+        return {"capability": capability, "requestId": entry.get("requestId"),
+                "passthrough": False}
+
+    def approval_crossing(self, handle: Any, capability: str,
+                          fire: Callable[[], Any]) -> Any:
+        """`emit <call> with a` at runtime (item 246, Decision 3). The frame
+        checks the token BEFORE the host body runs and consumes it DURABLY first
+        (consume-before-fire): the `approval-consumed` WAL record is flushed, then
+        the body fires, then the `approval-emission` record names the same
+        `requestId`. A crash between spend and fire leaves consumed-but-unfired —
+        an owed action needing a FRESH approval, fail-closed. When the policy is
+        off (passthrough handle / no owner), the body fires unchanged."""
+        owner = self._owner
+        if owner is None or not owner.approval_enforced \
+                or (isinstance(handle, dict) and handle.get("passthrough")):
+            return fire()
+        # re-resolve at the crossing: the token must still be valid HERE (expiry
+        # is checked at the crossing, not at mint — invariant 3), by requestId
+        # when the handle names one, else by capability+component.
+        rid = handle.get("requestId") if isinstance(handle, dict) else None
+        entry = None
+        if rid is not None:
+            entry = next((e for e in owner.approval_ledger
+                          if e.get("requestId") == rid and not e.get("consumed")),
+                         None)
+            if entry is not None and owner.find_approval(
+                    capability, self.name) is None:
+                entry = None  # named token is stale/expired/wrong-generation
+        if entry is None:
+            entry = owner.find_approval(capability, self.name)
+        if entry is None:
+            raise ApprovalCrossingRefused(
+                capability,
+                f"the Approval[{capability}] threaded here is absent, consumed, "
+                f"expired, or bound to another component/generation/session "
+                f"(item 246, invariants 1/3/4/5)")
+        owner.consume_approval(entry)          # durable spend BEFORE the fire
+        result = fire()                         # the host body crosses now
+        wal = self._wal()
+        if wal is not None:
+            wal.record_approval_emission(entry.get("requestId"), capability,
+                                         self.name)
+        return result
+
     def drain(self) -> Any:
         """Dispose every adopted effect, newest first (yielded last by the
         emitted body, so the runtime runs it first on unload).
@@ -1319,6 +1382,36 @@ class SessionCommitError(RuntimeError):
     refused rather than flushing a superset of what the human approved."""
 
 
+class ApprovalCrossingRefused(RuntimeError):
+    """A typed-approval crossing (`emit … with a`) that no valid `Approval[C]`
+    covers (item 246, invariant 1 runtime half). Raised at the crossing BEFORE
+    the host body runs, so a hand-built IR or a backend bug cannot cross a
+    sensitive boundary silently. Carries the capability and the binding that
+    failed for the why-trace."""
+
+    def __init__(self, capability: str, reason: str) -> None:
+        super().__init__(
+            f"approval crossing refused for capability `{capability}`: {reason}")
+        self.capability = capability
+        self.reason = reason
+
+
+def _default_now_ms() -> int:
+    import time  # noqa: PLC0415 — stdlib
+    return int(time.time() * 1000)
+
+
+def _approval_scope_covers(scope: Optional[str], token: str) -> bool:
+    """Whether an `Approval[scope]` covers a crossing of capability `token`
+    (Decision 3, `C within C'`'s scope). Exact match or a glob scope."""
+    if scope is None:
+        return False
+    if scope == token:
+        return True
+    from fnmatch import fnmatchcase  # noqa: PLC0415 — stdlib, only on a crossing
+    return fnmatchcase(token, scope)
+
+
 def _hash_manifest(target: dict) -> str:
     """The manifest hash binding the gate target (item 245, Decision 4). Over the
     canonical JSON of the target-defining state — the deferral queue descriptors,
@@ -1401,9 +1494,82 @@ class SessionOwner:
         # policy configured, so the manifest is byte-identical there.
         self.approvals = {"silent": 0, "atCommit": 0, "prompted": 0}
         self.flush_residue: list = []
+        # item 246, Decision 3: the typed-approval ledger, owned here beside the
+        # deferral queue and the escrow. Each granted `Approval[C]` is one entry
+        # bound to its capability, component, reach-closure candidate hash,
+        # session, ttl and single-use `consumed` bit. The language-level frame
+        # check (`Frame.approval_crossing`) and the operator-layer ticket path
+        # (`Session.approve_ticket`) share THIS ledger — one consent mechanism,
+        # two entry points. Empty and inert unless the approval policy is enabled.
+        self.approval_ledger: list = []
+        # whether the language-level frame check enforces: True only when the
+        # session enabled the approval policy. Off = a `with a` crossing fires
+        # normally (byte-identity — the edge only exists in new programs).
+        self.approval_enforced: bool = False
+        # the live generation's reach-closure candidate hash per component,
+        # pushed by the session at load/swap. The frame check binds a token to it
+        # (invariant 4, candidate-invalidates): a swap changes the hash and every
+        # standing token whose closure moved fails the crossing.
+        self.approval_candidates: dict = {}
+        # the session identity a token is bound to (invariant 5, non-replayable):
+        # a token minted in one session is refused in a later one, even over the
+        # same workspace and WAL. None until the session sets it.
+        self.session_id: Optional[str] = None
+        # an injectable clock (ms since epoch) so expiry (invariant 3) is testable
+        # without sleeping; defaults to the wall clock.
+        self.now_ms: Callable[[], int] = _default_now_ms
 
     def _wal(self) -> Optional[Any]:
         return self._wal_getter() if self._wal_getter is not None else None
+
+    # -- item 246: the typed-approval ledger -------------------------------
+
+    def grant_approval(self, entry: dict) -> None:
+        """Record a granted `Approval[C]` (item 246). Called by the session's
+        `approve_ticket`/`await approval` grant; the frame check reads it back at
+        the crossing. Idempotent on `requestId`."""
+        rid = entry.get("requestId")
+        if any(e.get("requestId") == rid for e in self.approval_ledger):
+            return
+        self.approval_ledger.append(dict(entry))
+
+    def find_approval(self, capability: str, component: str,
+                      candidate_hash: Optional[str] = None) -> Optional[dict]:
+        """The first VALID standing approval covering this crossing (all five
+        bindings, invariants 2-5): unconsumed, unexpired, same capability scope,
+        same component, same reach-closure candidate hash against the live
+        generation, same session. None when nothing covers it — the crossing then
+        fails closed (invariant 1, runtime half)."""
+        want_hash = (candidate_hash if candidate_hash is not None
+                     else self.approval_candidates.get(component))
+        now = self.now_ms()
+        for entry in self.approval_ledger:
+            if entry.get("consumed"):
+                continue
+            if entry.get("component") != component:
+                continue                                   # invariant 5: deputy
+            if not _approval_scope_covers(entry.get("capability"), capability):
+                continue                                   # wrong capability
+            exp = entry.get("expiresAt")
+            if exp is not None and now > exp:
+                continue                                   # invariant 3: expired
+            if want_hash is not None and entry.get("candidateHash") != want_hash:
+                continue                                   # invariant 4: swapped
+            if self.session_id is not None \
+                    and entry.get("session") not in (None, self.session_id):
+                continue                                   # invariant 5: session
+            return entry
+        return None
+
+    def consume_approval(self, entry: dict) -> None:
+        """Spend the token durably BEFORE the crossing fires (Decision 3,
+        consume-before-fire). The `approval-consumed` WAL record is written and
+        flushed here; a crash between it and the fire leaves consumed-but-unfired
+        — fail-closed, a fresh approval is demanded on recover."""
+        entry["consumed"] = True
+        wal = self._wal()
+        if wal is not None:
+            wal.record_approval_consumed(entry.get("requestId"))
 
     # -- registry / escrow -------------------------------------------------
 

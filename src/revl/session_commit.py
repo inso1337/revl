@@ -102,3 +102,57 @@ def refuse_deferred_on_ownerless_tier(ir: dict, tier: str,
     for component, name in _reached_deferred_calls(ir, deferred):
         raise RevlError(filename, 0, _diagnostic(component, name, tier),
                         code="G8", category="deferred")
+
+
+def _reached_approval_crossings(ir: dict) -> list:
+    """Every `emit … with a` crossing, as ``(component,)`` markers — an emit step
+    carrying an `approval` edge (item 246, Slice 3). The exact shape the py
+    emitter's `approval_crossing` lowering keys off."""
+    reached: list = []
+    seen: set = set()
+
+    def _walk(node, component: str) -> None:
+        if isinstance(node, dict):
+            if node.get("step") == "emit" and node.get("approval") is not None:
+                if component not in seen:
+                    seen.add(component)
+                    reached.append(component)
+            if node.get("step") == "approval" and component not in seen:
+                seen.add(component)
+                reached.append(component)
+            for value in node.values():
+                _walk(value, component)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item, component)
+
+    for comp in ir.get("components") or []:
+        _walk(comp, comp.get("name") or "?")
+    return reached
+
+
+def _approval_diagnostic(component: str, tier: str) -> str:
+    """The one wording for all five ownerless tiers (Decision 2's tier gate,
+    Slice 3), so six backends do not invent six messages."""
+    return (
+        f"{component}: a typed approval (`await approval[C]` / `emit … with a`) "
+        f"needs a session owner runtime to route the approval request to and to "
+        f"record the durable consume-before-fire spend, which the {tier} tier "
+        f"does not have yet; typed approvals run on the python tier only. "
+        f"Refusing rather than degrading: firing without the durable spend would "
+        f"break the single-use, consume-before-fire guarantee (item 246, "
+        f"invariant 5). Target the python tier for approval-bound crossings.")
+
+
+def refuse_approval_on_ownerless_tier(ir: dict, tier: str,
+                                      filename: str = "<emit>") -> None:
+    """Refuse a typed-approval crossing on one of the five ownerless tiers (item
+    246, Slice 3's tier gate — the 245 stance). A no-op on py and for any IR that
+    uses no `await approval` / `with` surface. The STATIC obligation (the checker
+    in `_lower_provide`, the non-persistence rule) still holds on every tier; only
+    the runtime suspension + durable spend is py-only, so it is refused at emit."""
+    if tier == "python" or tier == "py":
+        return
+    for component in _reached_approval_crossings(ir):
+        raise RevlError(filename, 0, _approval_diagnostic(component, tier),
+                        code="G8", category="approval")
