@@ -1257,6 +1257,63 @@ class WriteAheadLog:
         self._write(record)
         return record
 
+    def record_discharge_descriptor(
+            self, entry: str, *, receiver: str, method: str, args: list,
+            origin: Optional[dict] = None, witness: Any = None,
+            idempotency: Optional[str] = None) -> dict:
+        """Append the WAL discharge-descriptor for one witnessed (`transactional`)
+        inverse or one `compensation` (docs/design/teardown-contract.md, "WAL
+        descriptor"; owned by the witnessed-wal-recover slice on the py tier).
+
+        This is the record the Slice-2 teardown loop writes at REGISTRATION for
+        an entry whose inverse/offset a fresh process must be able to re-issue
+        after a crash. It is a NAMED-CALL descriptor with captured serializable
+        arguments, never a closure (243 rule 4, 247 decision 5): a closure after
+        a crash is residue, not recovery.
+
+        The named-call field is ``call: {"receiver","method","args"}`` — the same
+        re-issuable shape :meth:`record_boundary` writes and
+        :meth:`revl.recovery.World.key`/``apply_inverse`` already key off. Writer
+        and reader agree on ``receiver`` (the ``call.key`` spelling the contract
+        first drafted is reconciled to ``receiver`` here so no adapter shim is
+        needed). ``seq`` is the registration order on the shared stack; recover
+        replays reverse-seq within a phase and SKIPS any seq named in a durable
+        discharge record (:meth:`record_discharge`).
+        """
+        if entry not in ("transactional", "compensation"):
+            raise ReplayError(
+                f"discharge descriptor entry must be 'transactional' or "
+                f"'compensation', got {entry!r}")
+        record = {
+            "record": "discharge-descriptor",
+            "seq": self._seq,
+            "entry": entry,
+            "call": {"receiver": receiver, "method": method,
+                     "args": list(args)},
+            "origin": origin or {},
+            "witness": witness,          # transactional only; durable data, not a handle
+            "idempotency": idempotency,  # author-supplied key where present (item 309)
+        }
+        self._seq += 1
+        self._write(record)
+        return record
+
+    def record_discharge(self, discharged: list) -> dict:
+        """Append the WAL discharge record ``{"discharged": [seq...]}`` — the
+        commit-path proof that these seqs' transactional inverses were COMMITTED
+        (their mutation is the deliverable) or their compensations were discharged
+        (never owed on a clean unload).
+
+        Load-bearing (teardown-contract.md, "Commit path"): it must be DURABLE
+        before the activation reports success, so that a post-commit crash before
+        the terminal ``activation-complete`` marker still lets ``revl recover``
+        skip the committed inverse instead of replaying a committed transaction's
+        rollback. Writing goes through the same fsync'd append discipline as every
+        other record."""
+        record = {"record": "discharge", "discharged": list(discharged)}
+        self._write(record)
+        return record
+
     def append_timeline(self, timeline: "Timeline") -> list:
         """Write every committed step of one component's accumulator, in order."""
         return [self.append_step(step, timeline.component)

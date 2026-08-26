@@ -75,6 +75,9 @@ class World:
     def apply_inverse(self, op: dict) -> None:  # pragma: no cover — interface
         raise NotImplementedError
 
+    def apply_compensation(self, op: dict) -> None:  # pragma: no cover — interface
+        raise NotImplementedError
+
     def remaining(self) -> list:  # pragma: no cover — interface
         raise NotImplementedError
 
@@ -107,6 +110,22 @@ class DictWorld(World):
             # original referent, which is faithful — compensation is not
             # inversion (paper §6.1).
             self.state[f"compensation:{referent}"] = op
+
+    def apply_compensation(self, op: dict) -> None:
+        """Recover's Phase-2 apply path for a re-issued `compensation`.
+
+        A compensation is a FURTHER crossing that OFFSETS the forward emission,
+        never a removal that INVERTS it (247 decision 4; paper §6.1). So it
+        always RECORDS its effect and NEVER pops the referent — regardless of the
+        verb name. This is the fix the merged contract requires: the generic
+        :meth:`apply_inverse` name-matches ``_REMOVE`` verbs, and several
+        compensation verbs live in that set (``delete``, ``revoke``,
+        ``rollback``, ``compensate``), so routing a compensation through it would
+        POP the forward referent and let recover wrongly report a best-effort
+        offset as CLEAN. Forcing the record-branch here means a re-issued
+        best-effort compensation lands as RESIDUE — the forward referent is still
+        out in the world — never CLEAN."""
+        self.state[f"compensation:{self.key(op)}"] = op
 
     def remaining(self) -> list:
         return sorted(k for k in self.state if not k.startswith("compensation:"))
@@ -207,10 +226,71 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
     }
 
 
+def _record(kind: str, *, crossing: dict, attempted: Optional[dict],
+            error: Optional[dict], attempted_flag: bool, outcome: str,
+            referent: Optional[str], hint: str) -> dict:
+    """One record in the merged residue schema (docs/design/teardown-contract.md,
+    "The merged residue schema"). Minimal and closed: a field a consumer needs
+    that is not here is a change to the contract, not a tier-local addition."""
+    return {
+        "kind": kind,
+        "crossing": crossing,
+        "attempted": attempted or {"call": None, "args": [], "phase": None},
+        "error": error,
+        "attemptedFlag": attempted_flag,
+        "outcome": outcome,
+        "referent": referent,
+        "hint": hint,
+    }
+
+
+def _crossing_of_effect(record: dict) -> dict:
+    """Build the residue `crossing` (the ORIGINAL effect an entry belonged to)
+    from a legacy `effect` WAL record."""
+    origin = record.get("origin") or {}
+    boundary = record.get("boundary") or {}
+    detail = (boundary.get("detail") or {})
+    return {
+        "key": origin.get("key") or detail.get("key") or record.get("component"),
+        "method": origin.get("method") or detail.get("method")
+                  or record.get("label"),
+        "args": list(origin.get("args") or detail.get("args") or []),
+        "site": record.get("site"),
+    }
+
+
+def _crossing_of_descriptor(descriptor: dict) -> dict:
+    """Build the residue `crossing` from a WAL discharge-descriptor's `origin`
+    (the forward crossing the entry reverses/offsets)."""
+    origin = descriptor.get("origin") or {}
+    call = descriptor.get("call") or {}
+    return {
+        "key": origin.get("key") or origin.get("receiver") or call.get("receiver"),
+        "method": origin.get("method") or call.get("method"),
+        "args": list(origin.get("args") or []),
+        "site": origin.get("site"),
+    }
+
+
 def _roll_back(wal: dict, *, world: World) -> dict:
     """Activation did not complete: reconstruct and run boundary inverses LIFO,
-    then state a checked verdict with a residue proof."""
+    then state a checked verdict with a residue proof.
+
+    Two record families are walked. The legacy `effect` records (bare emissions,
+    closure inverses, explicit `record_boundary` acquires) are the original
+    boundary-inverse path. The WAL discharge-descriptors (item 243/247, the
+    witnessed-wal-recover slice) are the transactional-inverse and compensation
+    path: Phase 1 re-issues transactional inverses reverse-seq SKIPPING any seq
+    with a durable discharge record (a COMMITTED transaction is NOT rolled back),
+    Phase 2 re-issues owed compensations through :meth:`World.apply_compensation`
+    (which records, never clears)."""
     effects = [r for r in wal["records"] if r.get("record") == "effect"]
+    descriptors = [r for r in wal["records"]
+                   if r.get("record") == "discharge-descriptor"]
+    discharged: set = set()
+    for r in wal["records"]:
+        if r.get("record") == "discharge":
+            discharged.update(r.get("discharged") or [])
 
     # seed the world with every boundary referent the WAL says was created and
     # outlives the process — this is the external state a crash orphaned.
@@ -221,6 +301,7 @@ def _roll_back(wal: dict, *, world: World) -> dict:
             world.seed(referent, record.get("label"))
             seeded[id(record)] = referent
 
+    outstanding: list = []
     ran, moot, unreconstructible = [], [], []
     # newest-first: an L-Raise teardown runs inverses in reverse commit order
     for record in reversed(effects):
@@ -252,45 +333,140 @@ def _roll_back(wal: dict, *, world: World) -> dict:
                 "reason": inverse.get("reason"),
                 "still_out": referent,
             })
+            outstanding.append(_record(
+                "unreconstructible",
+                crossing=_crossing_of_effect(record),
+                attempted=None,
+                error={"type": "unreconstructible",
+                       "message": inverse.get("reason") or "closure-only inverse"},
+                attempted_flag=False, outcome="not-attempted",
+                referent=referent,
+                hint="declare a reconstructible inverse (extern `acquire … undo …`, "
+                     "a witnessed `undo`, or an emission `compensate`) so a fresh "
+                     "process can re-issue it"))
+
+    # ---- WAL discharge-descriptors: transactional (Phase 1) + compensation (Phase 2)
+    # seed each descriptor's forward referent, keyed the same way the re-issued
+    # call keys off, so a transactional re-issue pops exactly it and a
+    # compensation leaves exactly it out.
+    for d in descriptors:
+        world.seed(world.key(d.get("call") or {}), d.get("entry"))
+
+    transactional = [d for d in descriptors if d.get("entry") == "transactional"]
+    compensations = [d for d in descriptors if d.get("entry") == "compensation"]
+    transactional_rolled_back, discharged_skipped, restore_residue = [], [], []
+    # Phase 1: transactional inverses, reverse-seq, skipping discharged seqs.
+    for d in sorted(transactional, key=lambda x: x.get("seq", 0), reverse=True):
+        call = d.get("call") or {}
+        referent = world.key(call)
+        seq = d.get("seq")
+        if seq in discharged:
+            # COMMITTED before the crash: the mutation is the deliverable and its
+            # discharge record is durable. Do NOT replay the rollback — skip it,
+            # the referent is deliberately retained. THIS is the central safety
+            # claim: a committed transaction is never rolled back on recover.
+            discharged_skipped.append({"seq": seq, "referent": referent,
+                                       "retained": True})
+            continue
+        # ABORTED / undischarged: reconstruct and run the declared inverse.
+        try:
+            world.apply_inverse(call)
+            transactional_rolled_back.append({"seq": seq, "referent": referent,
+                                              "op": call})
+        except Exception as error:  # noqa: BLE001 — 243 rule 6: the inverse is fallible
+            restore_residue.append({"seq": seq, "referent": referent})
+            outstanding.append(_record(
+                "restore-residue",
+                crossing=_crossing_of_descriptor(d),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": 1},
+                error={"type": type(error).__name__, "message": str(error)},
+                attempted_flag=True, outcome="failed", referent=referent,
+                hint="the witnessed inverse failed on re-issue (anticipated, 243 "
+                     "rule 6); check the referent and finish the restore by hand"))
+
+    # Phase 2: owed compensations, reverse-seq, best-effort — RECORD not clear.
+    compensations_reissued = []
+    for d in sorted(compensations, key=lambda x: x.get("seq", 0), reverse=True):
+        call = d.get("call") or {}
+        referent = world.key(call)
+        if d.get("seq") in discharged:
+            # discharged on a clean unload: a compensation is never owed on
+            # success (the forward emission was the deliverable). Skip, no residue.
+            discharged_skipped.append({"seq": d.get("seq"), "referent": referent,
+                                       "retained": False})
+            continue
+        world.apply_compensation(call)   # forced record-branch: never pops
+        compensations_reissued.append({"seq": d.get("seq"), "referent": referent})
+        outstanding.append(_record(
+            "compensation-residue",
+            crossing=_crossing_of_descriptor(d),
+            attempted={"call": call.get("method"),
+                       "args": list(call.get("args") or []), "phase": 2},
+            error={"type": "unconfirmed",
+                   "message": "re-issued best-effort; the emission's landing "
+                              "cannot be confirmed in a fresh process"},
+            attempted_flag=True, outcome="unknown", referent=referent,
+            hint="the compensation was re-attempted best-effort; its landing "
+                 "cannot be confirmed after a crash — the forward referent is "
+                 "still out. Verify it was offset, or carry an idempotency key"))
 
     remaining = world.remaining()
-    clean = not remaining
-    outstanding = unreconstructible
+    clean = not outstanding
     return {
         "verdict": "rolled-back",
         "decision": ("the WAL has no `activation-complete` marker: the process "
                      "died mid-activation. Recovery reconstructed the boundary "
                      "inverses from their descriptors and ran them newest-first "
-                     "(LIFO), L-Raise style."),
+                     "(LIFO), L-Raise style. Transactional inverses with a durable "
+                     "discharge record were skipped (committed, not rolled back); "
+                     "owed compensations were re-attempted best-effort."),
         "committedEffects": len(effects),
         "torn": wal.get("torn", False),
         "ran": ran,
         "moot": moot,
         "unreconstructible": unreconstructible,
+        "transactionalRolledBack": transactional_rolled_back,
+        "dischargedSkipped": discharged_skipped,
+        "compensationsReissued": compensations_reissued,
         "residue": {
             "clean": clean,
             "outstanding": outstanding,
             "worldRemaining": remaining,
-            "proof": _residue_proof(ran, moot, unreconstructible, remaining),
+            "proof": _residue_proof(ran, moot, outstanding, remaining,
+                                    discharged_skipped, transactional_rolled_back,
+                                    compensations_reissued),
         },
         "guarantee": _guarantee(),
     }
 
 
-def _residue_proof(ran: list, moot: list, unreconstructible: list,
-                   remaining: list) -> str:
-    if not remaining and not unreconstructible:
-        return (f"no residue: {len(ran)} reconstructed boundary inverse(s) ran "
-                f"and cleared every durable referent; {len(moot)} in-process "
-                f"inverse(s) were moot (memory gone). The world is back to where "
-                f"it was before activation began.")
-    return (f"RESIDUE: {len(unreconstructible)} boundary inverse(s) were "
-            f"closure-only and could not be reconstructed, so "
-            f"{len(remaining)} durable referent(s) are still out in the world "
-            f"({', '.join(remaining) or 'none named'}). Reported honestly — "
-            f"the WAL never claimed a dead closure ran. Declare a reconstructible "
-            f"inverse (an `extern acquire ... undo ...` / an emission "
-            f"`compensate`) for these to make them recoverable.")
+def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
+                   discharged_skipped: list, transactional_rolled_back: list,
+                   compensations_reissued: list) -> str:
+    committed = [d for d in discharged_skipped if d.get("retained")]
+    ran_n = len(ran) + len(transactional_rolled_back)
+    if not outstanding:
+        note = ""
+        if committed:
+            note = (f" {len(committed)} committed transactional mutation(s) were "
+                    f"retained (discharge record durable — a committed transaction "
+                    f"is never rolled back).")
+        return (f"no residue: {ran_n} reconstructed boundary inverse(s) ran and "
+                f"cleared every referent they owed; {len(moot)} in-process "
+                f"inverse(s) were moot (memory gone).{note} The world holds only "
+                f"what was deliberately committed.")
+    kinds: dict = {}
+    for rec in outstanding:
+        kinds[rec["kind"]] = kinds.get(rec["kind"], 0) + 1
+    breakdown = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
+    return (f"RESIDUE: {len(outstanding)} outstanding record(s) ({breakdown}); "
+            f"{len(remaining)} referent(s) still out in the world "
+            f"({', '.join(remaining) or 'none named'}). "
+            f"{len(compensations_reissued)} compensation(s) were re-attempted "
+            f"best-effort and cannot be confirmed. Reported honestly — the WAL "
+            f"never claimed a dead closure ran, and a re-issued compensation is "
+            f"an offset that records, never an inversion that clears.")
 
 
 def _guarantee() -> str:
@@ -322,6 +498,16 @@ def render(report: dict) -> str:
         for entry in report.get("unreconstructible") or []:
             lines.append(f"  RESIDUE  {entry['label']:<22} closure-only — still out: "
                          f"{entry['still_out']}")
+        for entry in report.get("transactionalRolledBack") or []:
+            lines.append(f"  rolled-back  seq {entry['seq']:<3} transactional inverse "
+                         f"re-issued — {entry['referent']}")
+        for entry in report.get("dischargedSkipped") or []:
+            tag = "retained (committed)" if entry.get("retained") else "discharged"
+            lines.append(f"  skipped   seq {entry['seq']:<3} {tag} — not rolled back: "
+                         f"{entry['referent']}")
+        for entry in report.get("compensationsReissued") or []:
+            lines.append(f"  RESIDUE  compensation seq {entry['seq']:<3} re-attempted "
+                         f"best-effort — still out: {entry['referent']}")
     residue = report["residue"]
     lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
               f"  {residue['proof']}", "", f"guarantee: {report['guarantee']}"]

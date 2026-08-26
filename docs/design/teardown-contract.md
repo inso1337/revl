@@ -94,7 +94,8 @@ teardown(stack, committed, budget):
   for e in reverse(stack) where e.kind == compensation:
       if now() >= deadline:
           residue.add(record(kind=compensation-residue, e,
-                             error=deadline-expired, attempted=false))
+                             error=deadline-expired,      # the reason, in `error`
+                             attempted=false))            # attempted.call is null
           continue                   # record every skipped one; run none of them
       try run_bounded(e.emit, e.args, min(per_call_bound, deadline - now()))
       catch err | timeout:
@@ -253,7 +254,13 @@ not here is a change to THIS doc, not a tier-local addition:
       "args":  [...],
       "phase": 1 | 2
   },
-  "error":     {"type": str, "message": str} | null,   # null iff attempted.call is null
+  "error":     {"type": str, "message": str} | null,   # the failure OR skip reason;
+                                      # carries `deadline-expired`/`unreconstructible`
+                                      # even when attempted.call is null. null only
+                                      # when there is nothing to report (never for a
+                                      # residue record — a record exists because
+                                      # something failed, timed out, was not attempted,
+                                      # or could not be rebuilt)
   "attemptedFlag": bool,              # false: skipped (deadline expired / unreconstructible)
   "outcome":   "failed" | "unknown" | "not-attempted",  # "unknown" only for abandoned in-flight calls
   "referent":  str,                   # what is still out in the world (row id, path, message id)
@@ -296,16 +303,26 @@ that a closure after a crash is residue, not recovery):
 
 ```
 {
+  "record":   "discharge-descriptor",  # the discriminator recovery.py reads;
+                                   # the reader keys records off `record`, so the
+                                   # discharge-descriptor MUST carry it (an earlier
+                                   # draft omitted it and the reader could not
+                                   # distinguish it from a legacy `effect` record)
   "seq":      int,                 # registration order on the shared stack;
                                    # replay order is reverse-seq within phase
   "entry":    "transactional" | "compensation",
   "call":     {                    # what `revl recover` re-issues
-      "key":    str,               # capability / service key
-      "method": str,               # the declared inverse, or the compensation emission
-      "args":   [...]              # serialized; for transactional this includes
+      "receiver": str,             # capability / service key. NAMED `receiver`, not
+                                   # `key`: recovery.py's `World.key`/`apply_inverse`
+                                   # (and `record_boundary`'s reconstructible `op`)
+                                   # already key off `receiver`; writer and reader
+                                   # agree on this one spelling — no adapter shim
+      "method":   str,             # the declared inverse, or the compensation emission
+      "args":     [...]            # serialized; for transactional this includes
                                    # (or is) the witness payload
   },
-  "origin":   {                    # the forward crossing it reverses/offsets
+  "origin":   {                    # the forward crossing it reverses/offsets;
+                                   # audit-facing, keyed by capability `key`
       "key": str, "method": str, "args": [...], "site": str
   },
   "witness":  {...} | null,        # transactional only: durable data (paths,
@@ -315,22 +332,54 @@ that a closure after a crash is residue, not recovery):
 }
 ```
 
-And the discharge record (commit path):
+And the discharge record (commit path), its own `record` discriminator:
 
 ```
-{ "discharged": [seq...] }         # durable before success is reported
+{ "record": "discharge", "discharged": [seq...] }   # durable before success is
+                                   # reported; recover SKIPS every seq named here
 ```
 
 `revl recover` re-issues from the descriptor alone: Phase 1 reconstructs and
 runs boundary inverses reverse-seq (bracket + transactional, skipping
 discharged seqs), then Phase 2 re-issues compensation descriptors against the
-`World` adapter, which already treats a compensation verb as a further
-crossing that records rather than clears its referent (recovery.py,
-`DictWorld`). Reporting is honest, in recovery.py's existing voice: a
+`World` adapter through its DEDICATED `apply_compensation` path (recovery.py):
+that path always records a compensation as a further crossing and never clears
+its referent. The correction the review flagged: the GENERIC `World.apply_inverse`
+(recovery.py, `DictWorld`) name-matches a `_REMOVE` verb set — and several
+compensation verbs live in it (`delete`, `revoke`, `rollback`, `compensate`) —
+so routing a compensation through it would POP the forward referent and report a
+best-effort offset as CLEAN. Phase 2 therefore uses `apply_compensation`, not
+`apply_inverse`. Reporting is honest, in recovery.py's existing voice: a
 rollback that owed a compensation it did not complete is `rolled-back` with
 residue, never clean. Because recover can re-attempt what an abort already
 attempted, inverses must be idempotent-on-replay (243 rule 5) and
 compensations should be idempotent or carry the idempotency key.
+
+### Owned deliverable: the recovery.py/replay.py WAL migration (py tier, landed)
+
+The WAL discharge-descriptor, the discharge record, discharged-seq skipping, the
+dedicated compensation apply path, and the merged residue records above are a
+single OWNED migration on the py reference tier, not something each Slice-2b tier
+re-derives. It is landed by the `agent/witnessed-wal-recover` slice in:
+
+- `backends/python/replay.py` — the writer: `WriteAheadLog.record_discharge_descriptor`
+  (a `transactional` inverse or a `compensation` as a named-call descriptor) and
+  `WriteAheadLog.record_discharge` (`{"record":"discharge","discharged":[seq...]}`);
+- `src/revl/recovery.py` — the reader: `_roll_back` walks the descriptors in two
+  phases (Phase 1 transactional inverses reverse-seq, SKIPPING discharged seqs;
+  Phase 2 owed compensations through `DictWorld.apply_compensation`), and emits
+  the merged residue records (`restore-residue` / `bracket-fault` /
+  `compensation-residue` / `unreconstructible`).
+
+Three defects this migration fixed, each a divergence trap for Slice 2b if left
+unowned: (1) the descriptor needed a `record` discriminator and the `receiver`
+named-call spelling before recovery.py's reader could parse it; (2) the discharge
+record was specified but recover had no discharged-seq skip, so a COMMITTED
+transactional inverse would have been replayed on recover; (3) recover's
+compensation apply used the generic `apply_inverse`, whose `_REMOVE` name-match
+would clear a `revoke`/`delete`-named compensation's referent and report a
+best-effort offset as CLEAN. Slice 2b builds the other five tiers' loops against
+this contract and the landed py reader/writer, and does not reopen these.
 
 ## The `:back` split (separate decision, deferred)
 
