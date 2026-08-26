@@ -17,7 +17,12 @@ from __future__ import annotations
 import sys
 
 from . import protocol
-from .analysis import compute_definition, compute_diagnostics, compute_hover
+from .analysis import (
+    compute_code_actions,
+    compute_definition,
+    compute_diagnostics,
+    compute_hover,
+)
 from .document import Position
 
 SERVER_INFO = {"name": "revl-lsp", "version": "2.0"}
@@ -62,6 +67,8 @@ class LspServer:
             return [protocol.response(request_id, self._hover(params))]
         if method == "textDocument/definition":
             return [protocol.response(request_id, self._definition(params))]
+        if method == "textDocument/codeAction":
+            return [protocol.response(request_id, self._code_action(params))]
 
         if request_id is None:
             return []  # an unknown notification is ignored, per the spec
@@ -74,6 +81,8 @@ class LspServer:
                 "textDocumentSync": 1,
                 "hoverProvider": True,
                 "definitionProvider": True,
+                # quick fixes for the diagnostics fixgen can rewrite (item 287)
+                "codeActionProvider": {"codeActionKinds": ["quickfix"]},
             },
             "serverInfo": SERVER_INFO,
         }
@@ -119,6 +128,14 @@ class LspServer:
         if uri not in self._documents:
             return None
         return compute_definition(self._documents[uri], uri, position, _filename(uri))
+
+    def _code_action(self, params: dict):
+        uri = (params.get("textDocument") or {}).get("uri")
+        if uri not in self._documents:
+            return []
+        lsp_range = params.get("range") or {
+            "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+        return compute_code_actions(self._documents[uri], uri, lsp_range, _filename(uri))
 
 
 def _locate(params: dict) -> tuple[str, Position]:
