@@ -746,8 +746,8 @@ def build_parser() -> argparse.ArgumentParser:
     truc_cmd = sub.add_parser(
         "truc",
         help="the revl component manager — `revl truc <verb>` is the namespaced "
-             "form of the standalone `truc <verb>` (add/rm/assemble/ship); the "
-             "tail is passed through unchanged (docs/truc.md)")
+             "form of the standalone `truc <verb>` (add/rm/assemble/ship/"
+             "reproduce); the tail is passed through unchanged (docs/truc.md)")
     truc_cmd.add_argument("truc_args", nargs=argparse.REMAINDER, metavar="...",
                           help="the truc verb and its arguments, forwarded as-is")
     return parser

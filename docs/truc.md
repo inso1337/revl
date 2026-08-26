@@ -108,6 +108,53 @@ manifest and source hashes.
 $ truc ship
 ```
 
+### `truc reproduce`
+
+Verify. `add` and a pinned `truc.lock` tell you a fetched component's *source*
+is the one that was published. That is not enough. The thing you actually run is
+the *emitted artifact*, and a source whose hash checks out can still fail to
+rebuild into the same manifest, the same policy surface, or the same backend
+output if the toolchain drifted or a recorded artifact was tampered with.
+`truc reproduce` closes that gap. It takes what the registry recorded for a
+component, rebuilds it through revl's own compiler, and compares the recomputed
+hashes against the recorded ones, tier by tier:
+
+```console
+$ truc reproduce user_cache@1.2.0
+truc reproduce user_cache@1.2.0
+
+  source            OK        sha256 b882efdce4fb4930
+  dependency lock   OK        provides={"cache": "Cache"} requires={"db": "Database"}
+  IR                OK        manifest d7d185fde7a4de8d
+  policy surface    OK        emissions=1 capabilities=["*"]
+  backend version   OK        interchange 1.0
+  attestation       OK        authentic; IR matches the signed hash
+  emitted artifact  OK        python 000d0832ef582592
+
+reproduced: user_cache rebuilds bit-for-bit to what was published
+```
+
+Each tier reports one of three outcomes, honestly:
+
+- **OK** means the recomputed value equals the recorded one.
+- **MISMATCH** means they differ, and the line prints both the recorded and the
+  rebuilt hash (or both versions) so you see exactly which artifact diverged.
+  A single divergence is named precisely: `NOT reproduced: user_cache diverged
+  on IR`, not a bare pass/fail.
+- **cannot verify** means nothing was recorded for that tier (no attestation, no
+  recorded emitted artifact, no version), or the toolchain needed to rebuild it
+  is absent. A tier with no recorded evidence cannot be a mismatch, and it never
+  silently reads as OK.
+
+The reproduction reuses truc's existing machinery, not a new hash scheme: the
+source and manifest hashes are the exact bytes `registry.build_index` records,
+the IR document is the item-28 audit surface, and the attestation is verified
+through [`revl attest`](../src/revl/attest.py) (roadmap item 127). `reproduce`
+is a verifier: it recompiles and compares, and it writes nothing. It runs
+frontend-only, so it needs no runtime installed, the same as `assemble`'s gate.
+`revl truc reproduce <component@version>` is the namespaced spelling of the same
+engine.
+
 ### Files and layout
 
 - **`truc.toml`** — the manifest. What your composition is, which petits bouts
