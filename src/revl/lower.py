@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import dataclasses
 import keyword
-from dataclasses import dataclass
 
 from . import holes
 from .errors import RevlError
@@ -55,7 +54,6 @@ from .parser import (
     EffectStmt,
     EmitExpr,
     EmitStmt,
-    ExternDecl,
     FailStmt,
     ExprArrow,
     ExprBin,
@@ -90,7 +88,6 @@ from .parser import (
     Lit,
     Postfix,
     Program,
-    PropTestDecl,
     ProvideStmt,
     RecordPattern,
     ResidueStmt,
@@ -887,7 +884,10 @@ def _lower_fns(program: Program, filename: str, types: dict | None = None) -> li
     # statement-block match arm is lambda-lifted into a synthetic helper fn
     # (`_lift_block_arm`) collected here, then appended to `fns` below. `taken`
     # seeds the fresh-name search so a helper never shadows a user fn/extern.
-    sink = types.setdefault(LIFT_SINK, {
+    # setdefault installs the sink into `types` for the duration of fn-body
+    # lowering (drained below); `_lift_block_arm` reads it back via
+    # `types.get(LIFT_SINK)`, so the return value is not needed here.
+    types.setdefault(LIFT_SINK, {
         "fns": [],
         "n": 0,
         "taken": ({fn.name for fn in program.fn_decls}
@@ -1787,8 +1787,8 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             if decl.compensate is not None:
                 raise RevlError(
                     filename, decl.line,
-                    f"an `async` extern cannot declare `compensate` yet — the "
-                    f"compensation seam is synchronous on every tier",
+                    "an `async` extern cannot declare `compensate` yet — the "
+                    "compensation seam is synchronous on every tier",
                 )
         # `deferred` validity (docs/design/245-session-commit.md, Decision 2).
         # The class of an action is a total function of its checked
@@ -5739,7 +5739,6 @@ def _check_spawn_emission_bounds(components: list[dict], services: dict,
             if len(surface[parent]) != before:
                 changed = True
 
-    lines = spawn_reg.get("lines") or {}
     for comp in components:
         for step in comp.get("body") or []:
             if step.get("step") != "provide":

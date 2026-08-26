@@ -207,7 +207,7 @@ def _load_placement(path: str) -> dict:
     text = Path(path).read_text(encoding="utf-8")
     if path.endswith(".json"):
         return json.loads(text)
-    import tomllib  # noqa: PLC0415; stdlib, py3.11+
+    import tomllib  # noqa: PLC0415  stdlib, py3.11+
 
     return tomllib.loads(text)
 

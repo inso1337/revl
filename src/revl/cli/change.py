@@ -274,8 +274,8 @@ def _print_undo(result: dict, args) -> None:
     print(f"state dropped (provisions withdrawn): "
           f"{', '.join(p['key'] for p in dropped) or '—'}")
     given_up = crossings.get("givenUp") or []
-    print(f"\ninterim boundary crossings that NO undo can un-emit "
-          f"(compensation is not inversion — §6.1):")
+    print("\ninterim boundary crossings that NO undo can un-emit "
+          "(compensation is not inversion — §6.1):")
     for token in crossings.get("crossings") or []:
         mark = "  ! " if token in set(given_up) else "  ~ "
         note = "  (given up going forward, already exercised)" \

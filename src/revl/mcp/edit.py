@@ -59,7 +59,7 @@ from __future__ import annotations
 import copy
 import re
 
-from ..compiler import compile_files, compile_source
+from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
 from . import fillspec

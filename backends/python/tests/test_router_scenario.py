@@ -137,7 +137,6 @@ async def test_all_withdrawn_raises_no_live_worker(trace):
         fibers[name].dispose()
     await flush()
 
-    module = sys.modules.get("router_scenario")
     try:
         worker.call("x")
         assert False, "a fully-withdrawn pool must raise, not route"

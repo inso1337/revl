@@ -37,7 +37,7 @@ pytest.importorskip(
     "cordis", reason="cordis-py runtime not installed (run `sh backends/python/setup.sh`)")
 
 from revl import RevlError, compile_source  # noqa: E402
-from revl.mcp.session import Session, SessionError  # noqa: E402
+from revl.mcp.session import Session  # noqa: E402
 
 
 def _cache(state_type: str = "Map[Str, Str]", *, version: int = 1,

@@ -14,7 +14,6 @@ The workdir holds mods.json: {component_name: wat_source}.
 """
 
 import json
-import os
 import pathlib
 import sys
 

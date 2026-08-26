@@ -2,7 +2,6 @@
 against the cordis-wasm runtime (skips when that project/venv is absent)."""
 
 import importlib.util
-import json
 import shutil
 import subprocess
 import sys

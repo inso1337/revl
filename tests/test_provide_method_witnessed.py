@@ -183,7 +183,7 @@ def test_per_tool_call_mutations_persist_on_clean_unload(files):
 @needs_cordis
 def test_per_tool_call_mutations_revert_on_abort(files):
     session = _session()
-    report = session.load(_ir())
+    session.load(_ir())
 
     frame = _sole_frame(session)
     for path in files:

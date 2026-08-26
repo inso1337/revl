@@ -26,7 +26,6 @@ Two acceptance broadenings, same discipline as 158: previously-rejected shapes
 become accepted, and nothing that already parsed changes shape.
 """
 
-import dataclasses
 import sys
 from pathlib import Path
 
