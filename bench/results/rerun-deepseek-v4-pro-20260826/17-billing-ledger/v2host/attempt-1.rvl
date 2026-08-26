@@ -1,0 +1,30 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Billing {
+  emission fn charge(acct: Str, cents: Str)
+}
+
+type Row = { acct: Str, cents: Str, kind: Str }
+
+fn sql_quote(s: Str) -> Str {
+  let i = s.indexOf("'")
+  if (i == -1) return s
+  return s.slice(0, i).concat("''").concat(sql_quote(s.slice(i + 1, s.length())))
+}
+
+fn negate(s: Str) -> Str {
+  if (s.charAt(0) == "-") return s.slice(1, s.length())
+  return "-".concat(s)
+}
+
+component BillingLedger requires db: Database provides billing: Billing {
+  provide billing {
+    fn charge(acct: Str, cents: Str) {
+      emit db.execute(`INSERT INTO ledger (acct, cents, kind) VALUES ('${sql_quote(acct)}', '${sql_quote(cents)}', 'charge')`)
+           compensate db.execute(`INSERT INTO ledger (acct, cents, kind) VALUES ('${sql_quote(acct)}', '${sql_quote(negate(cents))}', 'reversal')`)
+    }
+  }
+}

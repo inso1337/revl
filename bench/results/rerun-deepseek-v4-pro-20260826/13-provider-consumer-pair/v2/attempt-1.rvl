@@ -1,0 +1,30 @@
+service Kv {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+service Names {
+  fn remember(name: Str)
+  fn recall(name: Str) -> Opt[Str]
+}
+
+component MemKv provides kv: Kv {
+  let store = effect Map.new() undo store.drop()
+
+  provide kv {
+    fn get(key) = store.get(key)
+    fn put(key, value) {
+      effect store.insert(key, value)
+      undo   store.remove(key)
+    }
+  }
+}
+
+component NameBook requires kv: Kv provides names: Names {
+  provide names {
+    fn remember(name) {
+      let _ = kv.put(name, name)
+    }
+    fn recall(name) = kv.get(name)
+  }
+}
