@@ -382,6 +382,51 @@ on a dead receiver in `backends/rust/emit.py`. This is a data-driven finding
 only; item 283 ships no emitter change. Reproduce with
 `python3 tools/profile_selfhost_rust.py`.
 
+### item 284: the clone-elision fix (the ~85% recovered)
+
+Item 284 ships the emitter change item 283 routed. When a persistent-collection
+append is bound straight back to its own receiver, `out = out.push(x)`, the
+pre-image of `out` is overwritten and never read again, so the value-semantics
+copy is dead work. `backends/rust/emit.py` now lowers that one shape to an
+in-place `out.push(x);` (and the Map siblings `m = m.set(k, v)` / `m = m.remove(k)`
+to `m.insert(..)` / `m.remove(..)`), which is O(1) amortised instead of copying
+the whole growing buffer per token.
+
+The rewrite fires only for the self-reassignment `assign` where the target and
+the call receiver name the same bare local. That is the shape it can prove both
+dead (the assignment rebinds the local over its own value) and uniquely owned:
+every persistent method borrows its receiver (`&self` / `self.clone()`), so a
+second live owner of the buffer could only come from a by-value move of `out`,
+and every such move the backend emits already clones first
+(`_by_value_arg`/`_by_value_tail`, record-field and closure captures) or, for a
+bare `let a = out` that then reuses `out`, fails to compile today (E0382). So in
+exactly the cases that compile, `out` is the sole owner and the in-place write
+yields the identical value. `concat` is left alone because it resolves to Str or
+List and its receiver type is not known at the call node.
+
+Same tool, same 27,832-char corpus, same box, back to back:
+
+| measure (whole-corpus pass)             | before (283) | after (284) | change        |
+|-----------------------------------------|-------------:|------------:|---------------|
+| lexer run, release-default              | 351.43 ms    | 28.12 ms    | 12.5x faster  |
+| rust vs CPython (20.55 ms)              | 0.06x (17x slower) | 0.73x (1.37x slower) | roughly linear |
+| `revl_push` clone-append calls          | 4,796        | 0           | eliminated    |
+| `revl_push` elements copied (O(n^2))    | 5,912,806    | 0           | eliminated    |
+| `revl_push` micro-bench (E)             | 320.95 ms    | 0.00 ms     | gone          |
+| total heap allocations / pass           | 12,085,346   | 289,177     | 41.8x fewer   |
+| total heap bytes / pass                 | 1,249.3 MB   | 227.7 MB    | 5.5x less     |
+
+The `bench_selfhost_rust.py` harness agrees on its own timing path: the lexer
+goes from 0.06x to 0.8x CPython (26.7 ms). The O(tokens^2) accumulator copy is
+gone — `revl_push` clone-on-append drops to zero calls and allocations fall 42x,
+so the run is no longer allocation-bound. The residual is exactly what item 283
+predicted would surface next: the full-source `String::clone` threaded to the
+scan helpers is now 97.4% of the remaining heap bytes (item 282's
+interprocedural `&[char]` view), and the O(i) `charAt` front-walk (~9.6 ms) is
+the largest remaining time component (items 276/282). Neither is the accumulator
+copy; item 284 closes that one. Reproduce with
+`python3 tools/profile_selfhost_rust.py` and `python3 tools/bench_selfhost_rust.py`.
+
 ### Reading for item 231a
 
 Item 231a asks whether the lexer's residual py-tier overhead (4.9x → 4.4x after

@@ -3280,6 +3280,67 @@ def _v3_let_pattern(node: dict, ctx: _V3Ctx, out: list[str], indent: int) -> Non
         raise EmitError(f"unsupported let_pattern kind {pattern!r}")
 
 
+# The persistent-collection methods whose 2.0 lowering is a functional
+# clone-then-mutate-then-return: `revl_push` (List) and Map `set`/`remove` each
+# deep-copy the whole receiver, mutate the copy, and hand it back
+# (docs/collections.md). When such a call is bound straight back to its OWN
+# receiver -- `out = out.push(x)` -- the pre-image of `out` is overwritten and
+# can never be read again, so the copy is pure waste. Item 284 rewrites that one
+# shape to an in-place mutation, turning the self-host lexer's O(tokens^2)
+# accumulator append (item 283: ~85% of the rust native gap, 12.1M allocs/pass)
+# into O(1) amortised.
+#
+# Each entry renders the in-place statement from the receiver identifier and the
+# already-rendered argument expressions. Only methods that resolve to a SINGLE
+# receiver type are listed, so no receiver-type disambiguation is needed: `push`
+# is List-only and `set`/`remove` are Map-only, whereas `concat` is defined on
+# both Str and List and is deliberately left out (its receiver type is not known
+# at this node). The in-place value equals the clone-then-return value: a discard
+# of `HashMap::insert`/`remove`'s returned Option is the only difference, and the
+# resulting collection is identical.
+def _v3_inplace_persistent(method: str, recv: str, args: list[str]) -> str | None:
+    if method == "push" and len(args) == 1:
+        return f"{recv}.push({args[0]});"
+    if method == "set" and len(args) == 2:
+        return f"{recv}.insert({args[0]}, {args[1]});"
+    if method == "remove" and len(args) == 1:
+        return f"{recv}.remove(&{args[0]});"
+    return None
+
+
+def _v3_self_append_inplace(target_name, recv: str, value_node,
+                            ctx: "_V3Ctx") -> str | None:
+    """The in-place rewrite of a self-reassigned persistent append, or None.
+
+    Fires only for `<v> = <v>.<persistent>(..)`: the assignment target and the
+    call's receiver must name the SAME local, read as a bare variable. That is
+    the one shape the rewrite can prove both dead and uniquely owned:
+
+    * dead -- the call result rebinds the receiver over its own value, so the
+      pre-image is unreachable after this statement; and
+    * uniquely owned -- every persistent method borrows its receiver
+      (`&self` / `self.clone()`), so a second *live* owner of that buffer could
+      only arise from a by-value move of the receiver. Every such move the
+      backend emits already clones the value first (`_by_value_arg`/
+      `_by_value_tail`, record-field and closure captures), and a bare
+      `let a = out` that then reuses `out` fails to compile today (E0382,
+      moved-then-reused). So in exactly the cases that compile, the receiver is
+      the sole owner and the in-place write yields the identical value.
+
+    Restricted to a bare `var` receiver (what a plain-fn body produces) so no
+    rename-map indirection can make the printed receiver differ from the target.
+    """
+    if not isinstance(value_node, dict) or value_node.get("kind") != "builtin":
+        return None
+    tgt = value_node.get("target")
+    if not isinstance(tgt, dict) or tgt.get("kind") != "var":
+        return None
+    if tgt.get("name") != target_name:
+        return None
+    args = [_render_expr(a, ctx) for a in value_node.get("args") or []]
+    return _v3_inplace_persistent(value_node.get("method"), recv, args)
+
+
 def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode: bool = False) -> None:
     pad = "    " * indent
     step = node.get("step")
@@ -3291,6 +3352,18 @@ def _v3_stmt(node: dict, ctx: _V3Ctx, out: list[str], indent: int, *, test_mode:
         # over a typed local) is target-type context for a record-literal RHS
         # whose field-set is not unique (item 268).
         expected = ctx.var_types.get(node.get("name"))
+        # item 284: a self-reassigned persistent append (`out = out.push(x)`)
+        # lowers to an in-place mutation. Only an `assign` qualifies -- a `let`
+        # introduces a NEW binding, so its RHS receiver is a different value that
+        # stays live. The receiver type is unchanged, so `var_types` still holds.
+        inplace = (_v3_self_append_inplace(node.get("name"), name,
+                                           node.get("value"), ctx)
+                   if step == "assign" else None)
+        if inplace is not None:
+            if inferred is not None:
+                ctx.var_types[node.get("name")] = inferred
+            out.append(f"{pad}{inplace}")
+            return
         value = _render_expr(node.get("value"), ctx, expected=expected)
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred

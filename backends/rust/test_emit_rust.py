@@ -447,6 +447,17 @@ def _cargo_check(tmp_path: Path, src: str, *extra: str) -> subprocess.CompletedP
     return _cargo("check", tmp_path, *extra)
 
 
+def _cargo_test(tmp_path: Path, src: str, harness: str) -> subprocess.CompletedProcess:
+    """Emit `src`, append a hand-written `#[test]` module, and `cargo test` it.
+
+    Unlike `_cargo_check`, this executes the emitted code, so it proves runtime
+    behaviour, not just that the crate type-checks."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src + "\n" + harness, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    return _cargo("test", tmp_path)
+
+
 @needs_cargo
 def test_cargo_check_compiles_against_cordis_rs(tmp_path):
     result = _cargo_check(tmp_path, emit.emit(_ir("user_cache")))
@@ -862,12 +873,141 @@ def test_cargo_check_harness_loop_shape_config_push_and_callbacks(tmp_path):
         "  }\n"
         "}\n"
     ))
-    # (b): the persistent push rebind survives — current was cloned for the
-    # by-value `complete(..)` consume, so the rebind still owns it.
+    # (b): the persistent push rebind is an in-place mutation (item 284) — the
+    # self-reassigned `current = current.push(out)` overwrites its own value, so
+    # cloning the whole accumulator per iteration is pure waste. `current` was
+    # cloned for the by-value `complete(..)` consume, so it uniquely owns its
+    # buffer at the rebind and the in-place `push` is sound; `_cargo_check` is
+    # the borrow-checker proof of that ownership.
     assert "complete(current.clone())" in src
-    assert "current = current.revl_push(out)" in src
+    assert "current.push(out);" in src
+    assert "current = current.revl_push(out)" not in src
     result = _cargo_check(tmp_path, src)
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Roadmap item 284 — elide the persistent-collection clone-on-append when the
+# receiver is a dead, uniquely-owned self-reassignment (`out = out.push(x)`).
+# Item 283 measured that lowering (`let _v = self.clone(); _v.push(item); _v`)
+# driven once per token as ~85% of the rust self-host gap: an O(tokens^2)
+# deep copy. The rewrite turns it into an in-place `out.push(x);`.
+
+
+def test_self_reassigned_push_emits_in_place():
+    """The canonical safe case rewrites to an in-place `push`, dropping the
+    per-iteration `revl_push` clone entirely."""
+    src = emit.emit(compile_source(
+        "fn build(n: Int) -> List[Int] {\n"
+        "  var out = []\n"
+        "  var i = 0\n"
+        "  while (i < n) { out = out.push(i) i = i + 1 }\n"
+        "  return out\n"
+        "}\n"
+    ))
+    assert "out.push(i);" in src
+    assert "out.revl_push(i)" not in src
+
+
+def test_self_reassigned_map_set_and_remove_emit_in_place():
+    """The Map siblings share the clone-then-return shape and rewrite the same
+    way: `m = m.set(k, v)` -> `m.insert(..)`, `m = m.remove(k)` -> `m.remove(..)`."""
+    src = emit.emit(compile_source(
+        "fn mbuild() -> Map[Str, Int] {\n"
+        "  var m: Map[Str, Int] = Map.empty()\n"
+        "  m = m.set(\"a\", 1)\n"
+        "  m = m.remove(\"a\")\n"
+        "  return m\n"
+        "}\n"
+    ))
+    assert 'm.insert(String::from("a"), 1i64);' in src
+    assert 'm.remove(&String::from("a"));' in src
+
+
+def test_let_binding_of_persistent_append_is_not_rewritten():
+    """A `let` introduces a NEW binding whose RHS receiver stays live, so it is
+    NOT the dead-receiver shape and keeps the cloning `revl_push`. Only the
+    self-reassignment `assign` is elided."""
+    src = emit.emit(compile_source(
+        "fn build(n: Int) -> List[Int] {\n"
+        "  var out = []\n"
+        "  var i = 0\n"
+        "  while (i < n) { let t = out.push(i) out = t i = i + 1 }\n"
+        "  return out\n"
+        "}\n"
+    ))
+    assert "out.revl_push(i)" in src
+
+
+@needs_cargo
+def test_in_place_append_runs_identically_to_the_cloning_form(tmp_path):
+    """(a) The strongest proof: two revl functions differing only in whether the
+    append is a self-reassignment. `build_inplace` is rewritten to `out.push(i)`;
+    `build_cloning` binds the append to a fresh `let` first, so it keeps the
+    cloning `revl_push`. A `cargo test` proves both yield the identical sequence,
+    so the optimisation is behaviour-preserving on real output."""
+    src = emit.emit(compile_source(
+        "fn build_inplace(n: Int) -> List[Int] {\n"
+        "  var out = []\n"
+        "  var i = 0\n"
+        "  while (i < n) { out = out.push(i) i = i + 1 }\n"
+        "  return out\n"
+        "}\n"
+        "fn build_cloning(n: Int) -> List[Int] {\n"
+        "  var out = []\n"
+        "  var i = 0\n"
+        "  while (i < n) { let t = out.push(i) out = t i = i + 1 }\n"
+        "  return out\n"
+        "}\n"
+    ))
+    # the two forms diverge exactly at the append lowering
+    assert "out.push(i);" in src
+    assert "out.revl_push(i)" in src
+    harness = (
+        "#[cfg(test)]\n"
+        "mod revl_item284 {\n"
+        "    use super::*;\n"
+        "    #[test]\n"
+        "    fn inplace_matches_cloning_and_expected_sequence() {\n"
+        "        for n in [0i64, 1, 2, 50, 1000] {\n"
+        "            let got = build_inplace(n);\n"
+        "            assert_eq!(got, build_cloning(n));\n"
+        "            let expect: Vec<i64> = (0..n).collect();\n"
+        "            assert_eq!(got, expect);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    result = _cargo_test(tmp_path, src, harness)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@needs_cargo
+def test_deliberately_aliased_self_append_is_not_silently_miscompiled(tmp_path):
+    """(b) The negative case. A raw `let a = out` alias makes `out = out.push(x)`
+    move-then-reuse `out`: it fails to compile TODAY (E0382), cloning form and
+    all, because the backend does not clone a bare binding-to-binding alias. The
+    in-place rewrite keeps it a compile error rather than turning it into a
+    compiling-but-wrong program — the elision never invents a new sound path.
+
+    This is why the rewrite is safe without a bespoke alias analysis: the only
+    way a second *live* owner of the buffer exists is a by-value move, and every
+    move the emitter emits either clones first (`_by_value_arg` and siblings, as
+    in the harness-loop test above) or, like this bare alias, does not build."""
+    src = emit.emit(compile_source(
+        "fn aliased() -> List[Int] {\n"
+        "  var out = [1, 2]\n"
+        "  let a = out\n"
+        "  out = out.push(9)\n"
+        "  return [a[0], out[2]]\n"
+        "}\n"
+    ))
+    # the rewrite still fires syntactically; correctness rests on rustc rejecting
+    # the moved-then-reused `out`, not on the emitter detecting the alias.
+    assert "out.push(9i64);" in src
+    result = _cargo_check(tmp_path, src)
+    assert result.returncode != 0
+    assert "E0382" in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------
