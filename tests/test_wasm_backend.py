@@ -305,6 +305,60 @@ def test_boundary_refusals_say_why_not_unknown_kind():
             assert "unknown expression kind" not in str(error)
 
 
+# ---------------------------------------------------------------------------
+# item 301: the emit-refusal has to recurse into ADT variant PAYLOADS, list
+# elements, record fields and match-arm/result widths — not just declared
+# boundary types. A `Float` in any of those value positions has no wasm value
+# representation on this tier (`_wasm_ty` would call it i32 while the value is
+# an `f64.const`), so it must be REFUSED at emit, never lowered to a module
+# that then fails wasm validation ("a wasm target never silently degrades",
+# docs/wasm-capabilities.md). Found by the item-292 fuzzer.
+# ---------------------------------------------------------------------------
+
+def test_float_in_value_positions_is_refused_not_mis_emitted():
+    emitter = _emitter()
+    # fuzz_wasm_ad4e66e8: a `List[Float]` literal (`[0.0, 0.0, 0.0].length()`).
+    # The element has no slot representation, so refuse at the list element.
+    ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_ad4e66e8.rvl")])
+    with pytest.raises(emitter.EmitError, match="list element: type 'Float' is not lowerable"):
+        emitter.emit(ir)
+    # fuzz_wasm_af371f9d: a match over `Err(-3.4)` — a `Float` variant payload.
+    # Refuse at the constructed payload, not by emitting an f64 into the cell.
+    ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_af371f9d.rvl")])
+    with pytest.raises(emitter.EmitError, match="payload of .*: type 'Float' is not lowerable"):
+        emitter.emit(ir)
+
+
+def test_float_adt_variant_payload_with_match_is_refused():
+    # The roadmap-301 shape verbatim: `type Adt0 = C0_0(Float)` matched over.
+    # The variant carries a Float payload with no representation here — the
+    # emitter must refuse at construction, not emit invalid wasm.
+    emitter = _emitter()
+    source = (
+        "type Adt0 = C0_0(Float)\n"
+        "pub fn probe() -> Int { return match C0_0(1.0) { C0_0(v) => 0 } }\n"
+        'test "t" { assert probe() == 0 }\n'
+    )
+    with pytest.raises(emitter.EmitError, match="payload of 'Adt0' case 'C0_0': type 'Float' is not lowerable"):
+        emitter.emit(compile_source(source))
+
+
+def test_supported_value_shapes_still_emit_no_over_refusal():
+    # The refusal must be exact: int/list/record/variant/str programs that carry
+    # NO Float still lower and never grow a stray f64 in the module.
+    emitter = _emitter()
+    source = (
+        "type Box = Box(Int)\n"
+        "pub fn ints() -> Int { return [1, 2, 3].length() }\n"
+        "pub fn recs() -> Int { return [{ a: 1, b: 2 }, { a: 3, b: 4 }].length() }\n"
+        "pub fn tagged() -> Int { return match Box(7) { Box(v) => v } }\n"
+        "pub fn strs() -> Int { return [\"x\", \"y\"].length() }\n"
+        'test "t" { assert ints() == 3 }\n'
+    )
+    wat = "\n".join(emitter.emit(compile_source(source)).values())
+    assert "f64" not in wat
+
+
 @pytest.mark.skipif(not CORDIS_WASM_PY.exists(), reason="cordis-wasm venv not available")
 def test_demo_runs_on_the_real_substrate():
     result = subprocess.run(

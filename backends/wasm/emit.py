@@ -3451,6 +3451,11 @@ class _V3Emitter:
                 value = self._expr(raw_value, scope, where, ftype)
                 if _is_unit_type(value.ty):
                     raise EmitError(f"{where}: record field {name!r} is void")
+                # The field width has to fit an 8-byte slot: a `Float` field has
+                # no value representation here and would store an `f64.const`
+                # into an i64 slot — invalid wasm. Recurse the emit-refusal into
+                # the constructed field value, as `_check_type` does for a type.
+                self._check_type(value.ty, f"{where}: field {name!r}")
                 field_values.append((name, value))
             lines = [f"(call $alloc (i32.const {_SLOT * len(field_values)}))",
                      f"(local.set ${tmp})"]
@@ -3487,6 +3492,12 @@ class _V3Emitter:
             address = f"(i32.add (local.get ${tmp}) (i32.const {_SLOT}))"
             if payload_node is not None:
                 value = self._expr(payload_node, scope, where, payload_ty)
+                # The payload width has to fit an 8-byte slot: a `Float` payload
+                # (e.g. `Err(-3.4)`) has no value representation here and would
+                # store an `f64.const` into an i64 slot — invalid wasm. Recurse
+                # the emit-refusal into the constructed payload, the same way
+                # `_check_type` does for a declared variant/Opt/Result type.
+                self._check_type(value.ty, f"{where}: payload of {ty!r} case {case!r}")
                 lines.append(self._slot_store(address, value.wat, value.ty))
             else:
                 lines.append(f"(i64.store {address} (i64.const 0))")
@@ -3541,10 +3552,27 @@ class _V3Emitter:
         # and there is no `expected` to fall back on in a component body
         result_ty = expected or self._infer_type(
             arms[0].get("body"), arm_scope(arms[0]), expected)
+        # The match result flows into an `(if (result W))` whose width W is
+        # `_wasm_ty(result_ty)`. A `Float` result has no value representation on
+        # this tier (`_wasm_ty` would say i32 while the arm bodies emit
+        # `f64.const`), so recurse the emit-refusal into the result type the way
+        # `_check_type` does for a declared type — otherwise the module fails
+        # wasm validation instead of being honestly refused.
+        self._check_type(result_ty, f"{where}: match result")
 
         def arm_body(arm: dict) -> str:
             inner = arm_scope(arm)
-            body = self._expr(arm.get("body"), inner, where, result_ty).wat
+            arm_value = self._expr(arm.get("body"), inner, where, result_ty)
+            # An arm whose own width disagrees with the match result width would
+            # emit a value of the wrong wasm type into the `(if (result W))` —
+            # the "match mixing value widths" soundness hole. Refuse it here.
+            if _wasm_ty(arm_value.ty) != _wasm_ty(result_ty):
+                raise EmitError(
+                    f"{where}: match arm has value type {arm_value.ty!r} but the "
+                    f"match result is {result_ty!r}; the widths disagree and this "
+                    f"tier has no representation to bridge them — the arms must "
+                    f"share one lowerable width")
+            body = arm_value.wat
             bind = arm.get("bind")
             if not bind:
                 return body
@@ -3599,6 +3627,12 @@ class _V3Emitter:
     def _list_expr(self, node: dict, scope: _Scope, where: str, expected: str | None) -> _E:
         ty = self._list_type(node, scope, expected)
         elem_ty = _list_elem(ty)
+        # The element width has to be lowerable into an 8-byte slot: a `Float`
+        # element (or a Float-carrying compound) has no value representation
+        # here and would emit an `f64.const` into an i64 slot — invalid wasm.
+        # This is the same refusal `_check_type` applies to a declared type;
+        # a positional literal never carries one, so recurse it here too.
+        self._check_type(elem_ty, f"{where}: list element")
         items = node.get("items") or []
         # A list of allocated elements (records, nested lists, …) needs a
         # deeper scratch per element so an element's construction cannot
