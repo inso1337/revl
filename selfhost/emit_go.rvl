@@ -785,6 +785,10 @@ fn render_match(node: Any, ctx: Ctx, expected: Str) -> Str {
         let bind = value_str(bindn)
         armctx = set_vt(ctx, bind, map_get(ctx.cp, pattern))
         lines = lines.push(line(2, `${v3_ident(bind)} := _m.Value`))
+        // a payload bound but never read in the arm body is a Go
+        // `declared and not used` build error; pin it so an unused
+        // payload compiles (roadmap item 304)
+        lines = lines.push(line(2, `_ = ${v3_ident(bind)}`))
       } else {
         lines = lines.push(line(2, "_ = _m"))
       }
