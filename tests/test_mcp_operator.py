@@ -164,6 +164,39 @@ def test_snapshot_everything_operator_snapshots_but_cannot_mutate():
     assert decide(sess, "revl_unload", {}).allowed is False
 
 
+# --------------------------------------------------- cold load is ungated
+
+
+def test_cold_load_is_ungated_but_swap_and_reload_stay_gated():
+    """Roadmap item 300: the initial cold `revl_load` (nothing live yet,
+    `session.ir is None`) is not a privileged mutation: it only boots a
+    candidate to inspect/gauntlet, so it is ungated even for an operator whose
+    profile carries no `load` grant. Ungating the cold load must NOT open a
+    hole: with a composition live the same operator still cannot swap or reload
+    without the appropriate grant."""
+    alice = parse_profile(PROFILE).get("alice")  # swap/plan/snapshot, no `load`
+    empty = Operator("alice")                    # no grants at all
+
+    # cold: nothing loaded -> load proceeds ungated for either operator.
+    for oper in (alice, empty):
+        cold = decide(_FakeSession(None, oper), "revl_load", {"source": TWO_REALM})
+        assert cold.gated is False and cold.allowed is True
+
+    # but the gate still holds on the state-changing verbs, so no hole opened:
+    live = compile_source(TWO_REALM)
+    # a swap the profile does not cover (tenant_b) is still refused,
+    swap_b = decide(_FakeSession(live, alice), "revl_swap", {"source": _swap_b()})
+    assert swap_b.gated and not swap_b.allowed and "TenantBCache" in swap_b.message
+    # an operator with no grants at all cannot swap or unload anything,
+    assert decide(_FakeSession(live, empty), "revl_swap",
+                  {"source": _swap_a()}).allowed is False
+    assert decide(_FakeSession(live, empty), "revl_unload", {}).allowed is False
+    # and a second `revl_load` against a running composition stays gated
+    # (`load` never replaces/activates a live comp; the handler refuses it too).
+    reload_live = decide(_FakeSession(live, empty), "revl_load", {"source": TWO_REALM})
+    assert reload_live.gated is True and reload_live.allowed is False
+
+
 # -------------------------------------------------- back-compat: no profile
 
 
