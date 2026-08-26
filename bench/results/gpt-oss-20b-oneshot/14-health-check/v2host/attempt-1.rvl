@@ -1,0 +1,6 @@
+component HealthCheck requires db: Database {
+  // Activation: probe the database, await healthcheck job, and log status
+  let _ = effect db.query("SELECT 1") undo db.query("SELECT 0")
+  await Job.run("healthcheck")
+  emit db.execute(`INSERT INTO health_log VALUES ('up')`)
+}

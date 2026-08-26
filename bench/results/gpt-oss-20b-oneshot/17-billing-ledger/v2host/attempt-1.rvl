@@ -1,0 +1,22 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Billing {
+  emission fn charge(acct: Str, cents: Str)
+}
+
+extern pure fn atoi(data: Str) -> Int
+  = @ts { return parseInt(data,10); }
+  = @py { return int(data) }
+
+component BillingLedger requires db: Database provides billing: Billing {
+  provide billing {
+    fn charge(acct: Str, cents: Str) {
+      let amt = atoi(cents)
+      emit db.execute(`INSERT INTO ledger (acct, cents) VALUES ('${acct}', ${amt})`)
+           compensate db.execute(`INSERT INTO ledger (acct, cents) VALUES ('${acct}', ${-amt})`)
+    }
+  }
+}

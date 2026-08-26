@@ -1,0 +1,57 @@
+// Service interfaces
+service Kv {
+  fn get(key: Str) -> Opt[Str]
+  fn put(key: Str, value: Str)
+}
+
+service Audited {
+  emission fn put_audited(key: Str, value: Str)
+}
+
+service Mailer {
+  emission fn send(to: Str, body: Str)
+}
+
+// Host primitives for a Map
+extern acquire fn Map_new() -> Map undo drop(map)
+  = @ts { return new Map(); }
+  = @py { return {}; }
+
+extern pure fn map_get(map: Map, key: Str) -> Opt[Str]
+  = @ts { return map.get(key); }
+  = @py { return map.get(key); }
+
+extern pure fn map_insert(map: Map, key: Str, value: Str)
+  = @ts { map.set(key,value); }
+  = @py { map[key] = value; }
+
+extern pure fn map_remove(map: Map, key: Str)
+  = @ts { map.delete(key); }
+  = @py { delete map[key]; }
+
+extern pure fn drop(map: Map)
+  = @ts { /* no-op */ }
+  = @py { /* no-op */ }
+
+// Component that provides a Map-backed Kv
+component MemKv provides kv: Kv {
+  let store = effect Map_new() undo drop(store)
+
+  provide kv {
+    fn get(key) = map_get(store, key)
+    fn put(key, value) {
+      effect map_insert(store, key, value)
+      undo   map_remove(store, key)
+    }
+  }
+}
+
+// Component that audits writes to Kv and sends mail
+component Auditor requires kv: Kv, mail: Mailer provides audited: Audited {
+  provide audited {
+    emission fn put_audited(key, value) {
+      effect kv.put(key, value)
+      emit mail.send(`audit: wrote ${key}`)
+    }
+  }
+}

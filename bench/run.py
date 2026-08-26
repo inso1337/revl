@@ -8,6 +8,10 @@ Runners:
   cline  — drives the `cline` CLI non-interactively (real model calls; uses
            whatever provider/model cline is configured with, override with
            --model/--provider). Costs real money.
+  local  — posts directly to an OpenAI-compatible /chat/completions endpoint
+           (LM Studio, ollama's OpenAI shim, etc) via stdlib urllib. Free,
+           override with --model/--base-url (default openai/gpt-oss-20b @
+           http://localhost:1234/v1).
   mock   — no model; attempt 1 is deliberately broken (exercises the retry
            loop), attempt 2 is a minimal valid file. Validates the pipeline.
 
@@ -15,6 +19,7 @@ Usage:
   python3 bench/run.py --runner mock                       # pipeline check
   python3 bench/run.py --runner cline --specs 3 --variants v2   # pilot
   python3 bench/run.py --runner cline                      # full matrix
+  python3 bench/run.py --runner local --specs 3 --variants v2   # local pilot
 """
 
 import argparse
@@ -24,6 +29,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -75,6 +82,9 @@ def load_variant_prompt(variant: str) -> str:
 
 
 def extract_code(reply: str) -> str:
+    # strip a <think>...</think> reasoning preamble (gpt-oss and similar local
+    # models emit this ahead of the actual answer) before looking for fences.
+    reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.DOTALL | re.IGNORECASE)
     blocks = re.findall(r"```[a-zA-Z]*\n(.*?)```", reply, re.DOTALL)
     return blocks[-1].strip() + "\n" if blocks else reply.strip() + "\n"
 
@@ -147,6 +157,66 @@ def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
     }
 
 
+def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int):
+    """OpenAI-compatible chat-completions runner for a local server (LM Studio,
+    ollama's OpenAI shim, etc). Mirrors run_cline's call/return shape but posts
+    directly to `{base_url}/chat/completions` with stdlib urllib — no new
+    dependency, no cost, no cline process to spawn."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0,
+        "max_tokens": 4096,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:400].decode("utf-8", "replace")
+        raise RuntimeError(f"local runner: HTTP {exc.code} from {url}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"local runner: cannot reach {url}: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"local runner: timed out after {timeout}s: {exc}") from exc
+
+    if status != 200:
+        raise RuntimeError(f"local runner: HTTP {status} from {url}: {raw[:400]!r}")
+
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"local runner: unparseable JSON from {url}: {exc}") from exc
+
+    try:
+        text = parsed["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(
+            f"local runner: unexpected response shape from {url}: {exc}; "
+            f"body={str(parsed)[:400]}"
+        ) from exc
+    if not text or not text.strip():
+        raise RuntimeError(f"local runner: empty completion content from {url}")
+
+    usage = parsed.get("usage") or {}
+    return {
+        "text": text,
+        "cost": 0.0,
+        "output_tokens": usage.get("completion_tokens"),
+        "model": parsed.get("model") or model,
+        "provider": "local",
+    }
+
+
 def _output_tokens(usage: dict):
     """Model completion (output) tokens from a cline usage block, across the
     key names cline has used. Returns None when none is present, so a run
@@ -214,6 +284,8 @@ def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
     try:
         if args.runner == "mock":
             reply = run_mock_raw_ts(spec)
+        elif args.runner == "local":
+            reply = run_local(system, task, args.model, args.base_url, args.timeout)
         else:
             reply = run_cline(system, task, args.model, args.provider,
                               args.timeout, args.inline_system)
@@ -239,12 +311,17 @@ def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--runner", choices=["cline", "mock"], required=True)
+    ap.add_argument("--runner", choices=["cline", "mock", "local"], required=True)
     ap.add_argument("--variants", default="v1,v2,v2host")
     ap.add_argument("--specs", default="all",
                     help="'all', a count (first N), or comma-separated ids")
-    ap.add_argument("--model", default=None, help="cline -m override")
+    ap.add_argument("--model", default=None,
+                    help="cline -m override, or the model id for --runner local "
+                         "(default openai/gpt-oss-20b)")
     ap.add_argument("--provider", default=None, help="cline -P override")
+    ap.add_argument("--base-url", default="http://localhost:1234/v1",
+                    help="--runner local: OpenAI-compatible base URL "
+                         "(no trailing /chat/completions)")
     ap.add_argument("--max-iters", type=int, default=3)
     ap.add_argument("--timeout", type=int, default=240, help="per-call seconds")
     ap.add_argument("--inline-system", action="store_true",
@@ -257,6 +334,9 @@ def main():
                     help="mount/unmount cycles for the raw-ts residue probe "
                          f"(default {DEFAULT_CYCLES}); only used by the raw-ts variant")
     args = ap.parse_args()
+
+    if args.runner == "local" and args.model is None:
+        args.model = "openai/gpt-oss-20b"
 
     if args.compiler_root:
         global COMPILER_ROOT
@@ -310,6 +390,8 @@ def main():
                 try:
                     if args.runner == "mock":
                         reply = run_mock(system, prompt, spec, attempt)
+                    elif args.runner == "local":
+                        reply = run_local(system, prompt, args.model, args.base_url, args.timeout)
                     else:
                         reply = run_cline(system, prompt, args.model, args.provider,
                                           args.timeout, args.inline_system)

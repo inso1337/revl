@@ -1,0 +1,16 @@
+service Mailer {
+  emission fn send(to: Str, body: Str)
+}
+
+service Notify {
+  emission fn ping(user: Str)
+}
+
+component Notifier requires mail: Mailer provides notify: Notify {
+  provide notify {
+    fn ping(user) {
+      emit mail.send(`Hello ${user}`, `Hi ${user}, this is your notification!`)
+           compensate mail.send("ops", `Retraction: ping to ${user} was undone`)
+    }
+  }
+}

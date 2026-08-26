@@ -1,0 +1,17 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component Migrator requires db: Database {
+  // Acquire advisory lock, release on undo
+  effect db.query(`SELECT pg_advisory_lock(12345)`) 
+    undo db.query(`SELECT pg_advisory_unlock(12345)`)
+
+  // Run migrations
+  await Job.run("migrations")
+
+  // Log migration, compensate on rollback
+  emit db.execute(`INSERT INTO migration_log VALUES (now())`)
+    compensate db.execute(`DELETE FROM migration_log WHERE time = now()`)
+}

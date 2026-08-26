@@ -1,0 +1,27 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component TransferSaga requires ledger: Database {
+  // Example parameters for the transfer saga
+  let from = 1
+  let to   = 2
+  let amount = 100
+  let lockId = 42
+
+  // Acquire advisory lock, undone by unlock
+  let _ = effect ledger.query(`SELECT pg_advisory_lock(${lockId})`)
+    undo ledger.query(`SELECT pg_advisory_unlock(${lockId})`)
+
+  // Emit debit insert, compensated by reversing credit
+  emit ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${from}, -${amount})`)
+    compensate ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${from}, ${amount})`)
+
+  // Emit credit insert, compensated by reversing debit
+  emit ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${to}, ${amount})`)
+    compensate ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${to}, -${amount})`)
+
+  // Settlement boundary
+  await Job.run("settle")
+}

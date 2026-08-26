@@ -1,0 +1,31 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+service Transfer {
+  fn transfer(src: Int, dst: Int, amt: Int) -> Unit
+}
+
+component TransferSaga requires ledger: Database provides transfer: Transfer {
+  config { }
+
+  provide transfer {
+    fn transfer(src, dst, amt) = {
+      // Acquire advisory lock
+      let _lock = effect ledger.query(`SELECT pg_advisory_lock(${src},${dst})`)
+        undo ledger.query(`SELECT pg_advisory_unlock(${src},${dst})`)
+
+      // Debit source account
+      let _ = ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${src}, -${amt})`)
+        compensate ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${src}, ${amt})`)
+
+      // Credit destination account
+      let _ = ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${dst}, ${amt})`)
+        compensate ledger.execute(`INSERT INTO accounts (id, balance) VALUES (${dst}, -${amt})`)
+
+      // Settlement boundary
+      await Job.run("settle")
+    }
+  }
+}

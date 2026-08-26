@@ -1,0 +1,11 @@
+service Database {
+  fn query(sql: Str) -> List[Row]
+  emission fn execute(sql: Str) -> Int
+}
+
+component LogRotator requires db: Database {
+  config { keep: Int = 7 }
+
+  emit db.execute(`INSERT INTO rotation_log VALUES (${config.keep})`)
+  compensate db.execute(`DELETE FROM rotation_log WHERE value = ${config.keep}`)
+}

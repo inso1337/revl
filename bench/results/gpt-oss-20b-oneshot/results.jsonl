@@ -1,0 +1,180 @@
+{"spec": "01-kv-provider", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 18.19, "cost": 0.0, "output_tokens": 174}
+{"spec": "01-kv-provider", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 174}
+{"spec": "01-kv-provider", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 23.56, "cost": 0.0, "output_tokens": 182}
+{"spec": "01-kv-provider", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 182}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 45.89, "cost": 0.0, "output_tokens": 412}
+{"spec": "01-kv-provider", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 412}
+{"spec": "02-pg-pool", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:14: `db` is not a declared requirement of PgDatabase\n  component PgDatabase requires <nothing> \u2014 add `requires db: <Service>`?", "duration_s": 36.45, "cost": 0.0, "output_tokens": 510}
+{"spec": "02-pg-pool", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 510}
+{"spec": "02-pg-pool", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:9: `url` is not a declared requirement of PgDatabase\n  component PgDatabase requires <nothing> \u2014 add `requires url: <Service>`?", "duration_s": 55.81, "cost": 0.0, "output_tokens": 1019}
+{"spec": "02-pg-pool", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 1019}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "02-pg-pool.rvl:8: expected (, found '.'", "duration_s": 60.17, "cost": 0.0, "output_tokens": 1061}
+{"spec": "02-pg-pool", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 1061}
+{"spec": "03-user-cache", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.72, "cost": 0.0, "output_tokens": 254}
+{"spec": "03-user-cache", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 254}
+{"spec": "03-user-cache", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 25.97, "cost": 0.0, "output_tokens": 338}
+{"spec": "03-user-cache", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 338}
+{"spec": "03-user-cache", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 53.72, "cost": 0.0, "output_tokens": 829}
+{"spec": "03-user-cache", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 829}
+{"spec": "04-migrator", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "04-migrator.rvl:7: call to emission `db.execute` must be marked `emit` (G4)\n  an emission crosses the system boundary and cannot be reverted; `emit` makes that visible at the call site", "duration_s": 24.2, "cost": 0.0, "output_tokens": 289}
+{"spec": "04-migrator", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 289}
+{"spec": "04-migrator", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 24.57, "cost": 0.0, "output_tokens": 254}
+{"spec": "04-migrator", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 254}
+{"spec": "04-migrator", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 33.47, "cost": 0.0, "output_tokens": 389}
+{"spec": "04-migrator", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 389}
+{"spec": "05-rate-limiter", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 18.93, "cost": 0.0, "output_tokens": 207}
+{"spec": "05-rate-limiter", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 207}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.49, "cost": 0.0, "output_tokens": 193}
+{"spec": "05-rate-limiter", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 193}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 25.31, "cost": 0.0, "output_tokens": 221}
+{"spec": "05-rate-limiter", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 221}
+{"spec": "06-audit-logger", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 19.43, "cost": 0.0, "output_tokens": 187}
+{"spec": "06-audit-logger", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 187}
+{"spec": "06-audit-logger", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 28.7, "cost": 0.0, "output_tokens": 333}
+{"spec": "06-audit-logger", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 333}
+{"spec": "06-audit-logger", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 27.93, "cost": 0.0, "output_tokens": 258}
+{"spec": "06-audit-logger", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 258}
+{"spec": "07-session-store", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 34.9, "cost": 0.0, "output_tokens": 481}
+{"spec": "07-session-store", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 481}
+{"spec": "07-session-store", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 35.04, "cost": 0.0, "output_tokens": 410}
+{"spec": "07-session-store", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 410}
+{"spec": "07-session-store", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 43.73, "cost": 0.0, "output_tokens": 533}
+{"spec": "07-session-store", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 533}
+{"spec": "08-feature-flags", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.24, "cost": 0.0, "output_tokens": 212}
+{"spec": "08-feature-flags", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 212}
+{"spec": "08-feature-flags", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 16.68, "cost": 0.0, "output_tokens": 161}
+{"spec": "08-feature-flags", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 161}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 18.53, "cost": 0.0, "output_tokens": 166}
+{"spec": "08-feature-flags", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 166}
+{"spec": "09-warmup-cache", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 19.62, "cost": 0.0, "output_tokens": 282}
+{"spec": "09-warmup-cache", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 282}
+{"spec": "09-warmup-cache", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 32.86, "cost": 0.0, "output_tokens": 600}
+{"spec": "09-warmup-cache", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 600}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 50.81, "cost": 0.0, "output_tokens": 972}
+{"spec": "09-warmup-cache", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 972}
+{"spec": "10-metrics", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 14.29, "cost": 0.0, "output_tokens": 167}
+{"spec": "10-metrics", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 167}
+{"spec": "10-metrics", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 28.47, "cost": 0.0, "output_tokens": 499}
+{"spec": "10-metrics", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 499}
+{"spec": "10-metrics", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "10-metrics.rvl:2: expected fn, found ';'", "duration_s": 23.98, "cost": 0.0, "output_tokens": 323}
+{"spec": "10-metrics", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 323}
+{"spec": "11-outbox", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 26.61, "cost": 0.0, "output_tokens": 498}
+{"spec": "11-outbox", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 498}
+{"spec": "11-outbox", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "11-outbox.rvl:8: expected ident, found 'emit'\n  `emit` is a reserved keyword \u2014 it cannot name a field, variable, parameter, or method; pick another name", "duration_s": 25.24, "cost": 0.0, "output_tokens": 432}
+{"spec": "11-outbox", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 432}
+{"spec": "11-outbox", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 26.8, "cost": 0.0, "output_tokens": 410}
+{"spec": "11-outbox", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 410}
+{"spec": "12-replicator", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 18.19, "cost": 0.0, "output_tokens": 300}
+{"spec": "12-replicator", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 300}
+{"spec": "12-replicator", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.55, "cost": 0.0, "output_tokens": 328}
+{"spec": "12-replicator", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 328}
+{"spec": "12-replicator", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 49.78, "cost": 0.0, "output_tokens": 1002}
+{"spec": "12-replicator", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 1002}
+{"spec": "13-provider-consumer-pair", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 40.52, "cost": 0.0, "output_tokens": 872}
+{"spec": "13-provider-consumer-pair", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 872}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 19.67, "cost": 0.0, "output_tokens": 283}
+{"spec": "13-provider-consumer-pair", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 283}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "13-provider-consumer-pair.rvl:16: effect has no `undo` and `store.insert` is not pure\n  write `effect `store.insert`(...) undo <expr>`, or mark the call `emit` if it deliberately crosses the system boundary (G4)", "duration_s": 37.37, "cost": 0.0, "output_tokens": 698}
+{"spec": "13-provider-consumer-pair", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 698}
+{"spec": "14-health-check", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 16.91, "cost": 0.0, "output_tokens": 252}
+{"spec": "14-health-check", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 252}
+{"spec": "14-health-check", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 19.29, "cost": 0.0, "output_tokens": 295}
+{"spec": "14-health-check", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 295}
+{"spec": "14-health-check", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "14-health-check.rvl:1: unknown service `Database` in `requires` of HealthCheck", "duration_s": 22.32, "cost": 0.0, "output_tokens": 313}
+{"spec": "14-health-check", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 313}
+{"spec": "15-search-index", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 17.35, "cost": 0.0, "output_tokens": 269}
+{"spec": "15-search-index", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 269}
+{"spec": "15-search-index", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 26.09, "cost": 0.0, "output_tokens": 488}
+{"spec": "15-search-index", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 488}
+{"spec": "15-search-index", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "15-search-index.rvl:23: `if` guards are only allowed in a component activation body\n  provide-method bodies run while the component is ACTIVE; use a pure `if` expression in the method value instead (G6)", "duration_s": 30.24, "cost": 0.0, "output_tokens": 501}
+{"spec": "15-search-index", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 501}
+{"spec": "16-notifier", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 25.0, "cost": 0.0, "output_tokens": 491}
+{"spec": "16-notifier", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 491}
+{"spec": "16-notifier", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 15.43, "cost": 0.0, "output_tokens": 180}
+{"spec": "16-notifier", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 180}
+{"spec": "16-notifier", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "16-notifier.rvl:9: expected :, found '{'", "duration_s": 32.07, "cost": 0.0, "output_tokens": 560}
+{"spec": "16-notifier", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 560}
+{"spec": "17-billing-ledger", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 14.74, "cost": 0.0, "output_tokens": 232}
+{"spec": "17-billing-ledger", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 232}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.7, "cost": 0.0, "output_tokens": 317}
+{"spec": "17-billing-ledger", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 317}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 37.65, "cost": 0.0, "output_tokens": 692}
+{"spec": "17-billing-ledger", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 692}
+{"spec": "18-config-echo", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 14.49, "cost": 0.0, "output_tokens": 197}
+{"spec": "18-config-echo", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 197}
+{"spec": "18-config-echo", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.87, "cost": 0.0, "output_tokens": 319}
+{"spec": "18-config-echo", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 319}
+{"spec": "18-config-echo", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 26.44, "cost": 0.0, "output_tokens": 406}
+{"spec": "18-config-echo", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 406}
+{"spec": "19-lock-manager", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "19-lock-manager.rvl:12: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'undo'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 17.8, "cost": 0.0, "output_tokens": 286}
+{"spec": "19-lock-manager", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 286}
+{"spec": "19-lock-manager", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 25.06, "cost": 0.0, "output_tokens": 451}
+{"spec": "19-lock-manager", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 451}
+{"spec": "19-lock-manager", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 24.96, "cost": 0.0, "output_tokens": 379}
+{"spec": "19-lock-manager", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 379}
+{"spec": "20-work-queue", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 16.48, "cost": 0.0, "output_tokens": 240}
+{"spec": "20-work-queue", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 240}
+{"spec": "20-work-queue", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 15.57, "cost": 0.0, "output_tokens": 205}
+{"spec": "20-work-queue", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 205}
+{"spec": "20-work-queue", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 18.12, "cost": 0.0, "output_tokens": 193}
+{"spec": "20-work-queue", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 193}
+{"spec": "21-two-stage-boot", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "21-two-stage-boot.rvl:9: name `_` is already bound in TwoStageBoot", "duration_s": 14.7, "cost": 0.0, "output_tokens": 213}
+{"spec": "21-two-stage-boot", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 213}
+{"spec": "21-two-stage-boot", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 24.87, "cost": 0.0, "output_tokens": 412}
+{"spec": "21-two-stage-boot", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 412}
+{"spec": "21-two-stage-boot", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 22.73, "cost": 0.0, "output_tokens": 319}
+{"spec": "21-two-stage-boot", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 319}
+{"spec": "22-cascade", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 23.07, "cost": 0.0, "output_tokens": 405}
+{"spec": "22-cascade", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 405}
+{"spec": "22-cascade", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "22-cascade.rvl:22: `emit` on a call to `execute`, which is not declared `emission`\n  only calls to `emission` service operations cross the boundary; drop the `emit` marker (G4)", "duration_s": 48.66, "cost": 0.0, "output_tokens": 1045}
+{"spec": "22-cascade", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 1045}
+{"spec": "22-cascade", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "22-cascade.rvl:33: expected fn, found 'emission'\n  provider methods are plain `fn` \u2014 emission-ness is inherited from the service declaration (G4 upper bound); write `fn <name>(...)`", "duration_s": 55.72, "cost": 0.0, "output_tokens": 1107}
+{"spec": "22-cascade", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 1107}
+{"spec": "23-dedupe-store", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 17.48, "cost": 0.0, "output_tokens": 247}
+{"spec": "23-dedupe-store", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 247}
+{"spec": "23-dedupe-store", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 26.14, "cost": 0.0, "output_tokens": 445}
+{"spec": "23-dedupe-store", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 445}
+{"spec": "23-dedupe-store", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 31.38, "cost": 0.0, "output_tokens": 490}
+{"spec": "23-dedupe-store", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 490}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "24-normalizing-cache.rvl:11: expected an expression, found 'let'", "duration_s": 25.77, "cost": 0.0, "output_tokens": 480}
+{"spec": "24-normalizing-cache", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 480}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "24-normalizing-cache.rvl:10: expected an expression, found 'let'", "duration_s": 22.08, "cost": 0.0, "output_tokens": 331}
+{"spec": "24-normalizing-cache", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 331}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "24-normalizing-cache.rvl:5: expected (, found '.'", "duration_s": 31.33, "cost": 0.0, "output_tokens": 498}
+{"spec": "24-normalizing-cache", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 498}
+{"spec": "25-checksum-log", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 29.41, "cost": 0.0, "output_tokens": 554}
+{"spec": "25-checksum-log", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 554}
+{"spec": "25-checksum-log", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "25-checksum-log.rvl:17: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'while'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 46.68, "cost": 0.0, "output_tokens": 929}
+{"spec": "25-checksum-log", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 929}
+{"spec": "25-checksum-log", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 21.97, "cost": 0.0, "output_tokens": 268}
+{"spec": "25-checksum-log", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 268}
+{"spec": "26-log-rotator", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 17.61, "cost": 0.0, "output_tokens": 264}
+{"spec": "26-log-rotator", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 264}
+{"spec": "26-log-rotator", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 20.08, "cost": 0.0, "output_tokens": 286}
+{"spec": "26-log-rotator", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 286}
+{"spec": "26-log-rotator", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "26-log-rotator.rvl:6: expected :, found '{'", "duration_s": 27.81, "cost": 0.0, "output_tokens": 426}
+{"spec": "26-log-rotator", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 426}
+{"spec": "27-inventory", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 24.62, "cost": 0.0, "output_tokens": 440}
+{"spec": "27-inventory", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 440}
+{"spec": "27-inventory", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 36.96, "cost": 0.0, "output_tokens": 709}
+{"spec": "27-inventory", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 709}
+{"spec": "27-inventory", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "27-inventory.rvl:24: expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `return`), found 'store'\n  revl bodies contain only effect forms \u2014 plain expressions have no effect to record (G6)", "duration_s": 36.07, "cost": 0.0, "output_tokens": 605}
+{"spec": "27-inventory", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 605}
+{"spec": "28-greeter", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 14.22, "cost": 0.0, "output_tokens": 178}
+{"spec": "28-greeter", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 178}
+{"spec": "28-greeter", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 16.68, "cost": 0.0, "output_tokens": 192}
+{"spec": "28-greeter", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 192}
+{"spec": "28-greeter", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 19.25, "cost": 0.0, "output_tokens": 196}
+{"spec": "28-greeter", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 196}
+{"spec": "29-mesh", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "29-mesh.rvl:19: expected an expression, found 'let'", "duration_s": 36.35, "cost": 0.0, "output_tokens": 722}
+{"spec": "29-mesh", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 722}
+{"spec": "29-mesh", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 43.88, "cost": 0.0, "output_tokens": 858}
+{"spec": "29-mesh", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 858}
+{"spec": "29-mesh", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "29-mesh.rvl:52: expected fn, found 'emission'\n  provider methods are plain `fn` \u2014 emission-ness is inherited from the service declaration (G4 upper bound); write `fn <name>(...)`", "duration_s": 70.59, "cost": 0.0, "output_tokens": 1424}
+{"spec": "29-mesh", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 1424}
+{"spec": "30-saga-transfer", "variant": "v1", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": true, "error": null, "duration_s": 33.21, "cost": 0.0, "output_tokens": 609}
+{"spec": "30-saga-transfer", "variant": "v1", "model": "openai/gpt-oss-20b", "summary": true, "green_at": 1, "cost_total": 0.0, "tokens_to_green": 609}
+{"spec": "30-saga-transfer", "variant": "v2", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "30-saga-transfer.rvl:16: expected ident, found 'let'\n  `let` is a reserved keyword \u2014 it cannot name a field, variable, parameter, or method; pick another name", "duration_s": 31.96, "cost": 0.0, "output_tokens": 554}
+{"spec": "30-saga-transfer", "variant": "v2", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 554}
+{"spec": "30-saga-transfer", "variant": "v2host", "model": "openai/gpt-oss-20b", "attempt": 1, "ok": false, "error": "30-saga-transfer.rvl:8: `let from = \u2026` binds a plain value, which a component activation body has no use for\n  an activation body records effects: write `let from = effect \u2026 undo \u2026`, or move the computation into a `fn` (G6)", "duration_s": 42.95, "cost": 0.0, "output_tokens": 751}
+{"spec": "30-saga-transfer", "variant": "v2host", "model": "openai/gpt-oss-20b", "summary": true, "green_at": null, "cost_total": 0.0, "tokens_to_green": 751}
