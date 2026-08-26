@@ -848,6 +848,14 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
     requires = {p: merged(pc.get("components") or [], "requires") for p, pc in processes.items()}
     owner = {key: p for p, keys in provides.items() for key in keys}
     methods = {name: list((svc.get("methods") or {}).keys()) for name, svc in (ir.get("services") or {}).items()}
+    # `async fn` operations must forward across a seam as awaitables, so a
+    # chained async provide (`async fn hit(k) = cache.get(k)`) that emits
+    # `await cache.get(k)` resolves the cross-seam value instead of awaiting a
+    # bare str (item 331). Read the async subset off the service declaration.
+    async_methods = {
+        name: [m for m, spec in (svc.get("methods") or {}).items() if spec.get("async")]
+        for name, svc in (ir.get("services") or {}).items()
+    }
     key_service: dict[str, str] = {}
     for comp in components.values():
         key_service.update(comp.get("provides") or {})
@@ -1083,6 +1091,7 @@ def run_placement(files, placement_path: str, once: bool = False) -> int:
             if host is None and key not in remote_specs:
                 return abort(f"key {key!r} required by {pname!r} is provided by no process")
             entry = {"methods": methods.get(service, []), "service": service,
+                     "async_methods": async_methods.get(service, []),
                      "deadline": p_deadline}
             if key in remote_specs:
                 # a remote seam (item 151): the provider is a *separate*
