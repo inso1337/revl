@@ -1,0 +1,44 @@
+// Regression (roadmap item 320): a bound `let x = effect <non-host call>` whose
+// acquisition returns a VALUE type must be declared by that value type, not as
+// `*T`. Before the fix the go bracket codegen always emitted a bound
+// acquisition local (and its provide-impl struct field) as `var x *T`, so a
+// non-host acquisition returning a value — a plain fn or service-method call —
+// failed to compile (`cannot use openHandle() (int64) as *int64`).
+//
+// Here `openHandle` is an `extern acquire fn ... -> Int`: the acquisition is a
+// plain fn call kind, NOT a host object or a spawn handle, so `handle` binds
+// the returned Int by VALUE. The provide method reads it back, and the
+// lifecycle test proves the whole thing loads, serves the value, and reverts.
+
+service Probe {
+  fn ping() -> Int
+}
+
+extern pure fn closeHandle(h: Int) -> Unit
+  = @py { return None }
+  = @go {
+	return
+    }
+
+extern acquire fn openHandle() -> Int undo closeHandle(result)
+  = @py { return 7 }
+  = @go {
+	return 7
+    }
+
+component ValueBracket provides probe: Probe {
+  // `handle` binds a VALUE (Int), not a host pointer — item 320.
+  let handle = effect openHandle() undo closeHandle(handle)
+
+  provide probe {
+    fn ping() = handle
+  }
+}
+
+lifecycle test "value-typed bracket acquisition loads, serves, and reverts" {
+  load ValueBracket
+  let v = call probe.ping()
+  assert v == 7
+  unload ValueBracket
+  assert no_residue
+}

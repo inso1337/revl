@@ -1205,7 +1205,7 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
     if has_config:
         out.append("\tcfg %sConfig" % _camel(comp_name))
     for b in binds:
-        out.append("\t%s *%s" % (_bind_field(b), _host_of_bind(b)))
+        out.append("\t%s %s%s" % (_bind_field(b), _bind_star(b), _host_of_bind(b)))
     for r in reqs:
         out.append("\t%s %s" % (_req_field(r), _camel(_service_of_req(r, services, reqs_map=None))))
     out.append("}")
@@ -1363,10 +1363,51 @@ def _emit_effect_step(step, env: _Env, out, indent):
 
 _BIND_HOST = {}  # bind name -> host type (populated per component)
 _BIND_MAP_VALUE = {}  # Map bind name -> Go value type (item 113)
+_BIND_IS_PTR = {}  # bind name -> whether the local/field is a pointer (item 320)
+_FN_RET: dict = {}  # fn/extern name -> declared return type (item 320)
 
 
 def _host_of_bind(bind):
     return _BIND_HOST.get(bind, "any")
+
+
+def _bind_is_ptr(bind) -> bool:
+    # item 320: host objects and spawn handles are live pointer resources
+    # (`*T`); a value-typed acquisition (plain fn / service-method call) is a
+    # plain value. Default True keeps host/spawn binds — the only kinds emitted
+    # before item 320 — byte-identical.
+    return _BIND_IS_PTR.get(bind, True)
+
+
+def _bind_star(bind) -> str:
+    return "*" if _bind_is_ptr(bind) else ""
+
+
+def _acquire_value_go_type(acquire, services, requires) -> str:
+    """Go VALUE type of a non-host/non-spawn `let-effect` acquisition (item
+    320). Resolves a service-method call's declared return; falls back to
+    `any`, which still holds any value result (so it compiles) when the
+    return type cannot be resolved statically."""
+    if not isinstance(acquire, dict):
+        return "any"
+    if acquire.get("kind") == "call" and "method" in acquire:
+        target = acquire.get("target") or {}
+        if target.get("kind") == "req":
+            svc_name = (requires or {}).get(target.get("name"))
+            svc = (services or {}).get(svc_name or "", {}) or {}
+            method = (svc.get("methods") or {}).get(acquire.get("method"), {}) or {}
+            rt = method.get("returns")
+            if rt:
+                return _go_type(rt) or "any"
+    # A plain fn / extern acquisition (`kind == "fn"`, or a `call` with a
+    # callee name): resolve the declared return type from the document's
+    # fn/extern registry (item 320).
+    name = acquire.get("name") or ((acquire.get("callee") or {}).get("name"))
+    if name and name in _FN_RET:
+        rt = _FN_RET.get(name)
+        if rt:
+            return _go_type(rt) or "any"
+    return "any"
 
 
 # --------------------------------------------------------------------------
@@ -1502,7 +1543,7 @@ def _default_lit(value, t):
 
 
 def _emit_component(comp, services, out):
-    global _BIND_HOST, _REQ_SERVICE, _BIND_MAP_VALUE
+    global _BIND_HOST, _REQ_SERVICE, _BIND_MAP_VALUE, _BIND_IS_PTR
     name = comp["name"]
     cname = _camel(name)
     requires = comp.get("requires", {}) or {}
@@ -1513,18 +1554,33 @@ def _emit_component(comp, services, out):
     _REQ_SERVICE = dict(requires)
     _BIND_HOST = {}
     _BIND_MAP_VALUE = {}
+    _BIND_IS_PTR = {}
     for step in body:
         if step.get("step") == "let-effect":
             bind = step["bind"]
-            host = _host_type_of_acquire(step["acquire"])
-            # item 113 (FR-4): the host Map is generic over its value type. Pin
-            # `V` from the component's `insert` sites so every reference type
-            # (field, local, acquisition) instantiates `Map[V]` consistently.
-            if (step["acquire"].get("kind") == "host"
-                    and step["acquire"].get("fn") == "Map.new"):
-                gv = _infer_map_value_go_type(comp, services, bind)
-                _BIND_MAP_VALUE[bind] = gv
-                host = "%s[%s]" % (host, gv)
+            acquire = step["acquire"]
+            akind = acquire.get("kind")
+            # item 320: only a `host` object or a `spawn` handle is a live
+            # pointer resource. Any OTHER acquisition — a plain fn or a
+            # service-method call — binds the call's VALUE result, so declare
+            # it by the acquisition's actual return type, NOT as `*T`. Before
+            # this every bound acquisition was emitted `var x *T`, which does
+            # not compile when the acquisition returns a value type (e.g.
+            # `let lock = effect db.query(..)` where `query` returns
+            # `List[Row]`: `var lock *any` cannot hold `[]Row`).
+            if akind in ("host", "spawn"):
+                host = _host_type_of_acquire(acquire)
+                # item 113 (FR-4): the host Map is generic over its value type.
+                # Pin `V` from the component's `insert` sites so every reference
+                # type (field, local, acquisition) instantiates `Map[V]`.
+                if acquire.get("kind") == "host" and acquire.get("fn") == "Map.new":
+                    gv = _infer_map_value_go_type(comp, services, bind)
+                    _BIND_MAP_VALUE[bind] = gv
+                    host = "%s[%s]" % (host, gv)
+                _BIND_IS_PTR[bind] = True
+            else:
+                host = _acquire_value_go_type(acquire, services, requires)
+                _BIND_IS_PTR[bind] = False
             _BIND_HOST[bind] = host
 
     binds = [s["bind"] for s in body if s.get("step") == "let-effect"]
@@ -1949,7 +2005,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             acquire = _expr(step["acquire"], env)
             env.map_new_value = None
             undo = step.get("undo")
-            out.append("%svar %s *%s" % (pad, _bind_field(bind), host))
+            out.append("%svar %s %s%s" % (pad, _bind_field(bind), _bind_star(bind), host))
             out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
             # A block-effect setup (`effect { let k = 1  Map.new() } undo …`)
             # runs its statements before the acquire, inside the effect closure.
@@ -3772,7 +3828,23 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
         res_ok, res_err = _v3_split_generic(st[7:-1])
 
     lines = [f"func() {exp_t} {{"]
-    lines.append(f"\tswitch _m := {scrutinee}.(type) {{")
+    # item 313: a scrutinee that is not a bare identifier — an Opt/Result
+    # CONSTRUCTOR LITERAL such as `match Ok(1) { .. }` — renders to a composite
+    # literal (`RevlOk[int64, any]{Value: 1}`). Placed straight into the
+    # type-switch init clause that is invalid Go twice over: the `{` of the
+    # composite is read as the switch body (`expected '}', found Value`), and
+    # `.(type)` requires an interface but the composite is a concrete case
+    # struct. Bind it to an interface-typed temp first so the switch both
+    # parses and can discriminate; an identifier scrutinee keeps the inline
+    # form byte-for-byte (a variable is already interface-typed).
+    scrut_kind = scrut_node.get("kind") if isinstance(scrut_node, dict) else None
+    if scrut_kind in ("var", "name"):
+        switch_operand = scrutinee
+    else:
+        iface_t = (_go_v3_type(st, ctx.types) if st else "") or "any"
+        lines.append(f"\tvar _s {iface_t} = {scrutinee}")
+        switch_operand = "_s"
+    lines.append(f"\tswitch _m := {switch_operand}.(type) {{")
     has_wild = False
     for arm in arms:
         pattern = arm.get("pattern")
@@ -5224,7 +5296,7 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
-    global _COMP_NEEDS_METHOD_WITNESSED
+    global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     # item 243/247: witnessed externs by name, for this document's component
@@ -5234,6 +5306,17 @@ def emit(ir: dict, package: str = "emitted", package_name: str | None = None) ->
         ext["name"]: ext for ext in (ir.get("externs") or [])
         if ext.get("class") == "witnessed"
     }
+    # item 320: declared return types of every top-level fn and extern, so a
+    # value-typed `let x = effect <fn call>` bracket acquisition can be
+    # declared by its ACTUAL return type instead of `*T`. Empty for a document
+    # with no such acquisition, so existing goldens are untouched.
+    _FN_RET = {}
+    for _fn in (ir.get("functions") or []):
+        if _fn.get("name"):
+            _FN_RET[_fn["name"]] = _fn.get("returns")
+    for _ext in (ir.get("externs") or []):
+        if _ext.get("name"):
+            _FN_RET[_ext["name"]] = _ext.get("returns")
     _COMP_NEEDS_TEARDOWN = False
     _COMP_NEEDS_METHOD_WITNESSED = False
     _WITNESSED_COUNTER = 0

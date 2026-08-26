@@ -111,6 +111,37 @@ name. This is the Go analog of the Rust backend's `_revl_realm` fix.
 - **Out of scope** (rejected with a clear `EmitError`): ir_version 3 pure
   functions/records/variants/match.
 
+## Tier-fidelity fixes (fuzzer-found, E5 exit test)
+
+Three GO-tier defects where the frontend admitted a program the py reference ran
+but the go tier could not build (or vet rejected). Each carries a regression
+fixture under `examples/regressions/` and a test in `tests/test_run_go.py`.
+
+- **313 — `match` on an Opt/Result CONSTRUCTOR LITERAL.** `match Ok(1) { ... }`
+  lowered to `switch _m := RevlOk[..]{..}.(type)`: an unparenthesized composite
+  literal in the type-switch init clause (Go reads the `{` as the switch body —
+  `expected '}', found Value`), and `.(type)` on a concrete struct rather than an
+  interface. `_go_v3_match` now binds a non-identifier scrutinee to an
+  interface-typed temp (`var _s RevlResult[...] = ...`) before the switch; an
+  identifier scrutinee keeps the inline form byte-for-byte. Fixture:
+  `fuzz_go_matchlit_typeswitch.rvl`.
+- **320 — a value-typed bracket acquisition.** A bound `let x = effect <call>`
+  was always declared `var x *T` (and an `x *T` provide-impl struct field),
+  which only holds for a live pointer resource. A plain fn or service-method
+  acquisition returns a VALUE, so `*T` failed to compile. The pointer-vs-value
+  decision now follows the acquisition kind (`_bind_is_ptr`): only `host` and
+  `spawn` are pointers (unchanged, byte-identical); any other acquisition binds
+  a value declared by its resolved return type (`_acquire_value_go_type`).
+  Fixture: `fuzz_go_letbind_valuetype.rvl`.
+- **314 — `go vet` rejects redundant boolean ops (decision: `-vet=off`).** revl
+  legitimately admits `a || a` / `a && a` / `false || false` and the py
+  reference evaluates them, but `go test` runs `go vet`, whose `bools` analyzer
+  flags identical operands as `redundant or`/`redundant and`. This is a style
+  lint that does not apply to machine-generated code the compiler itself
+  accepts, not a codegen bug, so the go runner in `src/revl/test.py` runs with
+  `-vet=off` rather than distorting revl's semantics to match a go-specific
+  linter. Fixture: `fuzz_go_vet_redundant_bool.rvl`.
+
 ## Verify
 
 ```bash
