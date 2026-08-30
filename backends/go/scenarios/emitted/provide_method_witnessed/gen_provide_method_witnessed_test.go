@@ -254,6 +254,32 @@ func (f *RevlFrame) registerMethodWitnessed(run func() error) {
 	f.mu.Unlock()
 }
 
+// registerMethodCompensation parks one provide-method `emit ... compensate ...`
+// offset (the item-247 method-body remainder): the compensation analog of
+// registerMethodWitnessed, and the method-body analog of the activation-body
+// `emit ... compensate ...` (item 247). A method body runs AFTER activation, so
+// the offset must outlive the method call and is owed ONLY on an abort, never on
+// a clean commit (the emission it offsets was the deliverable). It is NOT a
+// stc-go disposer (see commit() for the disposal-ordering hazard); commit()
+// disposes the parked closure once the commit-vs-abort bit is settled. On a
+// COMMIT the closure discharges (never runs). On an ABORT it hands the offset to
+// `enqueue`, so runCompensationPhase (registered first, hence run LAST on the
+// unwind) fires it in Phase 2 — after every bracket/transactional/method-
+// witnessed inverse in this activation has completed, guarded and residue-
+// collected. `key`/`method` are the offsetting call's descriptor for the WAL and
+// residue, captured here at registration (the "no data hazard" rule).
+func (f *RevlFrame) registerMethodCompensation(key, method string, run func() error) {
+	f.mu.Lock()
+	f.deferred = append(f.deferred, func() error {
+		if f.committed {
+			return nil // discharge — the emission was the deliverable
+		}
+		f.enqueue(key, method, run) // abort: defer to Phase 2
+		return nil
+	})
+	f.mu.Unlock()
+}
+
 // commit flips the discriminator a clean unload reads (item 243 decision 1,
 // the go mirror of `Frame._committed`/`Frame.drain`): every transactional
 // entry and every compensation observes `committed == true` from here on,
