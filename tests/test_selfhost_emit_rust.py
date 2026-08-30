@@ -153,6 +153,10 @@ CORPUS = [
     # (version-1 banner + the SHORT `#![allow(dead_code, unused_variables)]`);
     # the covered service/comp body is byte-identical to the v3 path.
     "v1_components.rvl",
+    # item 383 / 391 (self-host port) — the `.reduce` transform desugars to the
+    # `list_reduce` free call; the rust tier lowers its `(A, T) -> A` param to
+    # `impl Fn(i64, i64) -> i64` (the monomorphisable param position) + the arrow
+    "transforms.rvl",
 ]
 
 

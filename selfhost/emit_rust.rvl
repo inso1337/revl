@@ -429,6 +429,80 @@ fn rust_type_t(tv: Any, tnames: Map[Str, Str]) -> Str {
 // types in scope (the in-file tests and any function-only document).
 fn rust_type(tv: Any) -> Str { return rust_type_t(tv, Map.empty()) }
 
+// item 383 (self-host port): a declared function type `(P, ..) -> R` lowers to
+// `impl Fn(P, ..) -> R` in the `param`/`return` positions of a free `fn`/`extern`
+// (rustc monomorphises it, exactly as a hand-written Rust signature would). This
+// mirrors the reference's position-aware `_rust_type`/`_rust_fn_type`: only those
+// positions are monomorphisable, so ESCAPING function types (a struct field, an
+// `ADT`/`List`/`Opt`/`Map` element, a service-method signature) still have no
+// constructible lowering and stay the out-of-subset `<<DEFER-fn-type>>` marker
+// `rust_type_t` returns. `.map`/`.filter`/`.reduce` reach this through their
+// `list_map`/`list_filter`/`list_reduce` free-function parameters.
+//
+// `_split_fn_type`: the leading parenthesised group is the (comma-separated)
+// parameters; the type after the matching `->` is the return.
+fn split_fn_params(name: Str) -> List[Str] {
+  var depth = 0
+  var i = 0
+  while (i < name.length()) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") {
+        depth = depth - 1
+        if (depth == 0) {
+          let inner = strip_spaces(name.slice(1, i))
+          if (inner == "") { return [] }
+          return split_generic(inner)
+        }
+      }
+    }
+    i = i + 1
+  }
+  return []
+}
+fn split_fn_ret(name: Str) -> Str {
+  var depth = 0
+  var i = 0
+  while (i < name.length()) {
+    let ch = name.charAt(i)
+    if (ch == "[" || ch == "(") { depth = depth + 1 }
+    else {
+      if (ch == "]" || ch == ")") {
+        depth = depth - 1
+        if (depth == 0) {
+          let rest = strip_spaces(name.slice(i + 1, name.length()))
+          if (rest.startsWith("->")) { return strip_spaces(rest.slice(2, rest.length())) }
+          return ""
+        }
+      }
+    }
+    i = i + 1
+  }
+  return ""
+}
+// `_erase_async`: an `Async[T]` fn-type return has no async-fn machinery on the
+// rust tier, so it erases to its concrete `T` (item 92/94) — `(Str) -> Async[Str]`
+// lowers `impl Fn(String) -> String`, not `impl Fn(String) -> Value`.
+fn erase_async_ret(ret: Str) -> Str {
+  let r = strip_spaces(ret)
+  if (r.startsWith("Async[") && r.endsWith("]")) {
+    return strip_spaces(r.slice(6, r.length() - 1))
+  }
+  return ret
+}
+// `_rust_type` at a `param`/`return` position: a function type lowers to
+// `impl Fn(..)`; everything else takes the ordinary owned lowering.
+fn rust_type_pos(tv: Any, tnames: Map[Str, Str]) -> Str {
+  let name = value_str(tv)
+  if (is_fn_type(name)) {
+    var ps = []
+    for (p of split_fn_params(name)) { ps = ps.push(rust_type_t(p, tnames)) }
+    return `impl Fn(${ps.join(", ")}) -> ${rust_type_t(erase_async_ret(split_fn_ret(name)), tnames)}`
+  }
+  return rust_type_t(tv, tnames)
+}
+
 // `_rust_v3_lit`: a v3 literal. Strings are owned `String` (revl `Str`).
 fn rust_v3_lit(node: Any) -> Str {
   let v = value_field(node, "value")
@@ -934,9 +1008,9 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
     let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, rn: Map.empty() }
     var ps = []
     for (p of params) {
-      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_t(value_field(p, "type"), tables.tn)}`)
+      ps = ps.push(`${mangle(value_str(value_field(p, "name")))}: ${rust_type_pos(value_field(p, "type"), tables.tn)}`)
     }
-    let returns = rust_type_t(value_field(fnode, "returns"), tables.tn)
+    let returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
     var vis = ""
     if (value_bool(value_field(fnode, "public"))) { vis = "pub " }
     out = out.push(`${vis}fn ${name}(${ps.join(", ")}) -> ${returns} {`)

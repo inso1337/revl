@@ -1286,12 +1286,25 @@ fn emit_function(fnode: Any, strs: Map[Str, Str], rectypes: Any) -> Str {
   for (p of params) {
     let pname = value_str(value_field(p, "name"))
     let ptype = value_str(value_field(p, "type"))
-    if (ptype != "Unit") { sig = sig.push(`(param $p_${pname} ${wty(ptype)})`) }
+    // item 383 (self-host port): a declared function type `(P, ..) -> R` has no
+    // representation on the wasm tier — the emitted module is wasm MVP with no
+    // closures and no function references, so a function value cannot be a param
+    // or result (the reference's `_check_type`, which RAISES). A pure emitter fn
+    // cannot `fail`, so the refusal surfaces as a loud out-of-subset
+    // `<<DEFER-fn-type>>` marker. `.map`/`.filter`/`.reduce` reach here through
+    // their `list_map`/`list_filter`/`list_reduce` function-value parameters.
+    if (ptype != "Unit") {
+      let pw = ptype.startsWith("(") ? "<<DEFER-fn-type>>" : wty(ptype)
+      sig = sig.push(`(param $p_${pname} ${pw})`)
+    }
     slots = slots.set(pname, `(local.get $p_${pname})`)
     types = types.set(pname, ptype)
   }
   let return_ty = value_str(value_field(fnode, "returns"))
-  if (return_ty != "Unit" && return_ty != "") { sig = sig.push(`(result ${wty(return_ty)})`) }
+  if (return_ty != "Unit" && return_ty != "") {
+    let rw = return_ty.startsWith("(") ? "<<DEFER-fn-type>>" : wty(return_ty)
+    sig = sig.push(`(result ${rw})`)
+  }
 
   let body = value_list(value_field(fnode, "body"))
   var raw = []
