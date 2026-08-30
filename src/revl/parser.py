@@ -669,6 +669,22 @@ class ResidueStmt:
 
 
 @dataclass
+class AbortStmt:
+    """`abort` — drive the enclosing session frame's 245 abort (roadmap item
+    377). Marks every live activation frame aborting, replays the witnessed
+    inverses (LIFO), and drops the deferral queue, exactly as
+    `revl.mcp.session.Session.abort` does (docs/design/245-session-commit.md).
+
+    This is what makes H1's flagship proof expressible in-language: perform
+    witnessed mutations, `abort`, then `assert no_residue` — the witnessed
+    effects revert and the workspace is left byte-identical to before, with no
+    host Python in the loop (F-H1.7). Like a session abort it tears the live
+    composition down, so it names the end of the driven composition."""
+
+    line: int
+
+
+@dataclass
 class AdvanceStmt:
     """`advance <n><unit>` — drive the clock coeffect (item 57) forward inside a
     `lifecycle test`. The clock never moves on its own, so this is the only way
@@ -2112,6 +2128,14 @@ class Parser:
         nxt_ok = nxt.kind == "ident" or (tok.value == "advance" and nxt.kind == "int")
         if tok.kind == "ident" and tok.value in self._LIFECYCLE_STMT_WORDS and nxt_ok:
             word = tok.value
+        elif tok.kind == "ident" and tok.value == "abort" and nxt.kind in (
+                "}", ";", "kw", "ident"):
+            # `abort` (item 377) takes no operand, so it is a bare statement: it
+            # is the lifecycle word only when it stands alone (next token ends
+            # the body or begins another statement), never when it heads an
+            # expression (`abort.foo()`, `abort(x)`, `abort + 1`) that merely
+            # uses the name — those keep working.
+            word = "abort"
         elif tok.kind == "kw" and tok.value == "assert" and nxt.kind == "ident" and nxt.value == "no_residue":
             word = "assert no_residue"
         if word is None:
@@ -2159,6 +2183,9 @@ class Parser:
             self.next()
             ms = self._advance_duration_ms()
             return AdvanceStmt(ms, tok.line)
+        if tok.kind == "ident" and tok.value == "abort":
+            self.next()
+            return AbortStmt(tok.line)
         if tok.kind == "kw" and tok.value == "assert":
             self.next()
             nxt = self.peek()
@@ -2184,7 +2211,7 @@ class Parser:
             tok.line,
             f"expected a lifecycle statement, found {tok.value!r}",
             hint="a lifecycle test body is `load` / `unload` / `call` / `let … = call …` / "
-                 "`advance` / `assert` (syntax-2.0 §7.1)",
+                 "`advance` / `abort` / `assert` (syntax-2.0 §7.1)",
         )
 
     def _advance_duration_ms(self) -> int:
