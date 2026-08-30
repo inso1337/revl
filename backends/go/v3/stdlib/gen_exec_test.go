@@ -65,7 +65,7 @@ func TestV3Interp(t *testing.T) {
 
 func TestV3Opt(t *testing.T) {
 	// optfield reads through a value and short-circuits on None.
-	some := optName(RevlSome[Row]{Value: Row{id: 1, name: "ada"}})
+	some := optName(RevlSome[Row]{Value: Row{Id: 1, Name: "ada"}})
 	if s, ok := some.(RevlSome[string]); !ok || s.Value != "ada" {
 		t.Fatalf("optName(Some) = %#v", some)
 	}

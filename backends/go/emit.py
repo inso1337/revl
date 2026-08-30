@@ -142,12 +142,13 @@ _V3_TYPES: dict = {}
 #     interop bridge, one module), and
 #   * emit()'s live stc-go path when the document declares types alongside a
 #     live component (a v3 provide method taking/returning a record — item 139).
-# Record struct fields are emitted EXPORTED + json-tagged (the go mirror of the
-# rust tier's serde derives) so record values also survive the bridge's
-# plain-JSON wire encoding in the placement case; the tags are inert but
-# harmless in the bridge-less live case. The pure typed tier (`_emit_v3_go`,
-# a separate _V3GoCtx renderer) keeps unexported fields byte-for-byte with the
-# frozen fixtures and does not read this flag. v1/v2 documents leave it False.
+# Record struct fields are emitted EXPORTED + json-tagged on EVERY v3 path now
+# (item 390) — see `_v3_field_ident` / `_emit_v3_go_types`. This flag no longer
+# gates the field export/tag (that was the `{}` json_stringify defect: the pure
+# typed tier left fields unexported, so `encoding/json` dropped them). It still
+# gates the component/method-body lowerings below (record literals, field
+# access, ADT construction/match resolve against `_V3_TYPES` only in placement /
+# live-typed mode). v1/v2 documents leave it False.
 _V3_TYPED_COMPONENTS = False
 
 
@@ -541,14 +542,17 @@ def _expr(node, env: _Env, expected=None) -> str:
 
 
 def _v3_field_ident(field: str) -> str:
-    """Record struct field name in the current mode. Placement mode exports
-    the field (with a json tag) so the bridge's plain-JSON wire encoding
-    round-trips record values — the go mirror of the rust tier's serde
-    derives; the pure tier keeps the source spelling byte-for-byte with the
-    frozen fixtures."""
-    if _V3_TYPED_COMPONENTS:
-        return _camel(field)
-    return _v3_ident(field, "record field")
+    """Record struct field name in Go: EXPORTED (UpperCamel) on every path
+    (item 390). `encoding/json` only marshals exported fields, so an unexported
+    field made `json_stringify(record)` return `{}` on the go tier while py/ts
+    emitted the real object; exporting the field (paired with a `json:"<revl>"`
+    tag in `_emit_v3_go_types` that preserves the source field name in the wire
+    bytes) makes records byte-identical across tiers. The exported spelling is
+    used at EVERY site — struct declaration, literal construction, and field
+    read/write — so record round-trips stay consistent. Capitalizing also
+    sidesteps the `_v3_ident` reserved-word mangling: no Go keyword is
+    UpperCamel, so `_camel` never collides with one."""
+    return _camel(field)
 
 
 def _v3_record_type_for_fields(fields) -> str:
@@ -4209,15 +4213,25 @@ def _emit_v3_go_types(types: dict) -> list[str]:
         gname = _v3_ident(name, "type name")
         if spec.get("kind") == "record":
             out.append(f"type {gname} struct {{")
+            # Exported + json-tagged on EVERY path (item 390): `encoding/json`
+            # ignores unexported fields, so a record must expose exported Go
+            # fields to marshal at all, and the `json:"<revl-name>"` tag pins the
+            # wire key to the source field name so json_stringify(record) is
+            # byte-identical to py/ts. (Formerly only the placement/bridge path
+            # tagged these; the pure tier left them unexported, which is the `{}`
+            # defect this fixes.) Guard against two source fields colliding onto
+            # one exported Go identifier — that would silently drop a field.
+            seen: dict[str, str] = {}
             for field, ftype in (spec.get("fields") or {}).items():
-                if _V3_TYPED_COMPONENTS:
-                    # Exported + json-tagged: the go mirror of the rust tier's
-                    # serde derives — the bridge's plain-JSON wire encoding
-                    # round-trips record values (proxy/stub args and replies).
-                    out.append(f"\t{_v3_field_ident(field)} {_go_v3_type(ftype, types)}"
-                               f" `json:\"{field}\"`")
-                else:
-                    out.append(f"\t{_v3_field_ident(field)} {_go_v3_type(ftype, types)}")
+                gfield = _v3_field_ident(field)
+                if gfield in seen:
+                    raise EmitError(
+                        f"record {name!r}: fields {seen[gfield]!r} and {field!r} "
+                        f"both lower to the exported Go field {gfield!r}; rename "
+                        "one so record fields stay distinct on the go tier")
+                seen[gfield] = field
+                out.append(f"\t{gfield} {_go_v3_type(ftype, types)}"
+                           f" `json:\"{field}\"`")
             out.append("}")
             out.append("")
         elif spec.get("kind") == "variant":

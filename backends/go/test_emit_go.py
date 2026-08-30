@@ -245,8 +245,9 @@ def test_v3_stdlib_emit_shapes():
     # Opt/Result as generic sealed interfaces
     _has(src, "type RevlOpt[T any] interface { isRevlOpt() }")
     _has(src, "type RevlResult[T any, E any] interface { isRevlResult() }")
-    # optfield/optcall -> revlOptMap over the payload
-    _has(src, "revlOptMap(row, func(_x Row) string { return _x.name })")
+    # optfield/optcall -> revlOptMap over the payload; the record field is
+    # exported (item 390: json_stringify(record) needs exported struct fields)
+    _has(src, "revlOptMap(row, func(_x Row) string { return _x.Name })")
     _has(src, "revlOptMap(s, func(_x string) int64 { return revlStrCharCodeAt(_x, 0) })")
     # stdlib builtins dispatch Str vs List
     _has(src, "revlStrLen(s)")
