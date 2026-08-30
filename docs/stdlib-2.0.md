@@ -369,6 +369,132 @@ accumulator on go and wasm — the wasm helper is the one that needs care,
 since `Int.MIN`'s magnitude is 2^63 and every larger magnitude must be
 `None`).
 
+## Crypto primitives — `stdlib/crypto.rvl` (item 272)
+
+Three independent components in the lighthouse workload hand-rolled the **same**
+crypto inside `@py`/`@ts` extern bodies within one wave — a constant-time
+compare (a token gate), an HMAC-SHA256 encrypt-then-MAC (a settings store), and
+two HMAC webhook-signature schemes (inbound verification). Three witnesses, all
+security-load-bearing, none sharing code. `stdlib/crypto.rvl` is that kit,
+**once** — a classified PRIMITIVE set (the item-244 pattern), deliberately not a
+framework. It ships the four irreducible operations those sites re-derived and
+stops there; a call site composes them (encrypt-then-MAC is `hmac_sha256` over
+the ciphertext plus a `ct_equal` on verify) exactly as before, now over one
+audited implementation instead of three.
+
+`use "stdlib/crypto.rvl" { sha256, hmac_sha256, ct_equal, random_token }` — the
+file lives in the repo as `stdlib/crypto.rvl`.
+
+| fn | signature | class | semantics |
+|---|---|---|---|
+| `sha256(data)` | `Str -> Str` | `pure` | lower-case hex SHA-256 of the UTF-8 bytes of `data` (64 chars) |
+| `hmac_sha256(key, data)` | `(Str, Str) -> Str` | `pure` | hex HMAC-SHA256 (RFC 2104) with `key` over `data`, both UTF-8 |
+| `ct_equal(a, b)` | `(Str, Str) -> Bool` | `pure` | constant-time equality — full-width, no early exit |
+| `random_token(n)` | `Int -> Str` | **`emission`** | `n` cryptographic random bytes as `2n` hex chars |
+
+**py + ts are the exit bar** (item 272). `sha256`/`hmac_sha256`/`ct_equal` ship
+a self-contained pure-JS SHA-256 on the ts tier (no host import, exactly as
+`stdlib/json.rvl` ships a pure-JS parser); `random_token` draws from
+`globalThis.crypto.getRandomValues` (a synchronous WHATWG global). Both tiers
+hash the identical UTF-8 encoding, so the hex digests agree across py and ts.
+The rust/go/java/wasm bodies are a documented follow-up.
+
+### Why `random_token` is `emission`, not `pure`
+
+The other three are `pure`: a hash, a MAC, and a compare are total functions of
+their inputs with no observable effect and no entropy. An **entropy draw is
+not** — two calls with the same argument return different values, the defining
+non-property of a pure function. Its classification is a design decision with
+the same rigor item 244 spent on its clonefile-preimage choice:
+
+- **Not `acquire`-with-a-trivial-undo.** `acquire` models a resource you hold
+  and must release; its `undo` replays on *clean unload and abort* alike. A
+  token draw holds nothing — no handle, no lease. The only `undo` one could
+  write is a no-op, and a no-op undo is a lie in the shape of a contract: it
+  tells the teardown accumulator the effect was cleanly reverted when nothing
+  was, and pays for a disposer on every draw.
+- **Not `witnessed`.** 244 earned `witnessed` for an fs write because a preimage
+  *snapshot* makes the inverse real. There is no preimage of an unpredictable
+  draw, and no inverse can un-observe a minted secret — so `witnessed` is
+  unearnable here.
+- **`emission` is the honest reading.** A draw reads external entropy (the host
+  CSPRNG), advancing non-recoverable state and producing a fresh secret: a
+  non-revertible boundary crossing. It is also the correct *policy* reading —
+  token minting is security-load-bearing and should be visible to the item-33
+  policy gate / audit (`caps(extern emission fn e) = { e }`), which a `pure` or
+  fake-`acquire` draw would hide.
+
+A `fn`, `test`, or provider that draws a token therefore carries the
+`random_token` capability outward, honestly.
+
+### Examples
+
+`sha256` — a content-addressing fingerprint (the `@py` body is inlined so the
+block is a complete, compilable program; real code writes the `use` above):
+
+```revl
+// stdlib/crypto.rvl ships this as `pub extern pure fn sha256`; the @py body is
+// inlined so this doc block is a complete, compilable program. In real code you
+// write `use "stdlib/crypto.rvl" { sha256 }` instead of the extern declaration.
+pub extern pure fn sha256(data: Str) -> Str = @py {
+    import hashlib
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+}
+
+// content-addressing: a stable fingerprint of a blob
+pub fn fingerprint(blob: Str) -> Str { return sha256(blob) }
+```
+
+`hmac_sha256` — the webhook-signature site, once:
+
+```revl
+pub extern pure fn hmac_sha256(key: Str, data: Str) -> Str = @py {
+    import hashlib, hmac
+    return hmac.new(key.encode("utf-8"), data.encode("utf-8"), hashlib.sha256).hexdigest()
+}
+
+// the webhook-signature site, once: sign a request body with the shared secret
+pub fn webhook_signature(secret: Str, body: Str) -> Str {
+  return hmac_sha256(secret, body)
+}
+```
+
+`ct_equal` — verify an inbound webhook without a timing side channel (never
+`==` on a secret-derived value):
+
+```revl
+pub extern pure fn ct_equal(a: Str, b: Str) -> Bool = @py {
+    import hmac
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+}
+pub extern pure fn hmac_sha256(key: Str, data: Str) -> Str = @py {
+    import hashlib, hmac
+    return hmac.new(key.encode("utf-8"), data.encode("utf-8"), hashlib.sha256).hexdigest()
+}
+
+// verify an inbound webhook without a timing side channel: recompute and
+// constant-time compare, never `==` on a secret-derived value
+pub fn webhook_ok(secret: Str, body: Str, sig: Str) -> Bool {
+  return ct_equal(hmac_sha256(secret, body), sig)
+}
+```
+
+`random_token` — mint a session id; the `emission` classification is visible in
+the declaration:
+
+```revl
+// `random_token` is `emission`, not `pure`: an entropy draw reads the host
+// CSPRNG and cannot be taken back, so a `fn` that mints a token carries the
+// `random_token` capability outward (visible to the policy gate / audit).
+pub extern emission fn random_token(n: Int) -> Str = @py {
+    import secrets
+    return secrets.token_hex(n)
+}
+
+// mint a 32-hex-char session id (16 random bytes)
+pub fn new_session_id() -> Str { return random_token(16) }
+```
+
 ## Versioning
 
 Integer division and modulo are specified in **docs/arithmetic.md**, including
