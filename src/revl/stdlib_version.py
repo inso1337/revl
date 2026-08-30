@@ -134,14 +134,27 @@ def _relation(found: str, expected: str) -> str:
 
 
 def resolve_loaded_stdlib_dir() -> Path:
-    """The stdlib directory the import resolver would load ``stdlib/*.rvl`` from.
+    """The stdlib directory a drift check should read, following how the import
+    resolver picks up a vendored stdlib.
 
-    Mirrors ``compiler._default_search_path``: an entry on ``REVL_IMPORT_PATH``
-    that carries a ``stdlib/version.rvl`` wins (this is how a consumer points the
-    compiler at a vendored stdlib), else the compiler's own bundled stdlib. This
-    is what lets ``revl doctor`` detect drift against the copy a real compile
-    would actually resolve, not just the bundled one.
+    Mirrors ``compiler._default_search_path``: a ``stdlib/`` under an entry on
+    ``REVL_IMPORT_PATH`` is how a consumer points the compiler at a vendored
+    stdlib. Two shapes matter, and both are drift the harness cares about:
+
+    * a vendored ``stdlib/`` that **carries** ``version.rvl`` — its stamp is read
+      and compared directly (post-item-389 copy, drifted or in sync);
+    * a vendored ``stdlib/`` that has ``.rvl`` modules but **no** ``version.rvl``
+      — the item-104 case: a copy taken before the stamp existed. A real compile
+      would split (its stale ``value.rvl`` loads from here while
+      ``stdlib/version.rvl`` falls through to the bundled stamp), so this must be
+      surfaced as unstamped drift, not silently reported OK against the bundled
+      tree.
+
+    A stamped vendored root wins outright; otherwise the first vendored root
+    that holds any ``.rvl`` module is returned so the missing stamp is caught;
+    otherwise the compiler's own bundled stdlib.
     """
+    fallback: Path | None = None
     for entry in os.environ.get("REVL_IMPORT_PATH", "").split(os.pathsep):
         entry = entry.strip()
         if not entry:
@@ -149,4 +162,15 @@ def resolve_loaded_stdlib_dir() -> Path:
         candidate = Path(entry) / "stdlib"
         if (candidate / VERSION_MODULE).exists():
             return candidate
-    return stdlib_root()
+        if fallback is None and candidate.is_dir() and _has_rvl_module(candidate):
+            fallback = candidate
+    return fallback if fallback is not None else stdlib_root()
+
+
+def _has_rvl_module(directory: Path) -> bool:
+    """True when a directory holds at least one ``.rvl`` file — i.e. it looks
+    like a real (possibly partial) vendored stdlib rather than an empty dir."""
+    try:
+        return any(directory.glob("*.rvl"))
+    except OSError:
+        return False
