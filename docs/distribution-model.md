@@ -195,6 +195,37 @@ new subsystem.
 | **Circuit-breaking** | the quarantine tier, a suspect candidate proves itself in the wasm sandbox before it is admitted | Built (v1: `revl_quarantine`, swap admission hook) |
 | **Registry / multi-resolution** | `revl_resolve`, find an admission-compatible provider instead of hand-wiring | Built (`revl_resolve` MCP verb + CLI) |
 
+### Known limitation (v3): emitted-body routing is py/ts/rust only
+
+Multi-realm routing works as a normal emitted component on three of the six
+tiers. Item 161 realized it in the py driver, and item 167 landed the
+emitted-body form on **py, ts, and rust**: a `Router` compiled to those tiers
+fans out on its own, with per-realm handle resolution, a liveness-checking
+selector, and re-resolve-on-call failover.
+
+**go, java, and wasm cannot route as an emitted component yet, and the block
+is upstream of revl's emitter, not in it (item 173).** The emitters for these
+three are byte-identical to the routing-capable ones; what is missing is a
+runtime primitive the emitter cannot synthesize:
+
+- **go** (stc-go): no strict, single-realm, liveness-checked read. `Dispose()`
+  is async, so a stale worker value keeps resolving, and realm resolution
+  walks the parent chain to the root where the Router provides the key (G2), so
+  a withdrawn worker's read falls back to the Router instead of dropping out.
+  It needs a strict single-realm liveness-checked read exposed by stc-go
+  (upstream fork plus PR).
+- **java**: no real cordis4j runtime in-repo (the stub's `isolate` returns
+  `this`, and `get` has no liveness or realm resolution). It needs a real
+  cordis4j and a JRE to verify.
+- **wasm**: the substrate has no realm registry or reactive liveness. Realms
+  are advisory on this tier.
+
+So today: reach for a routed pool on py, ts, or rust. On go, java, or wasm,
+run the Router from the py driver rather than as an emitted body. This is a
+runtime gap, tracked as item 173, and it coordinates with the runtime-ownership
+split (go and java are upstream, wasm is revl's first-party runtime). The
+routing model itself is unchanged; see `docs/router.md` for the shape.
+
 ---
 
 ## 7. The payoff
