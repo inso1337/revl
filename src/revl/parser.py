@@ -370,6 +370,17 @@ class ExternDecl:
     # carry a covering `with e` edge or admission refuses at lowering, holding even
     # with no policy file (Decision 3, floor-and-acknowledgment).
     requires_approval: bool = False
+    # item 373: the reach clause `emission(confined: <param>)`, sibling to the
+    # `[caps]` capability scope. Where `[caps]` names the boundary TOKEN the
+    # crossing joins, `reach` names what the crossing is BOUNDED to — the
+    # confinement a reviewer needs to see. `None` is a bare emission (no reach,
+    # "unconfined"), which keeps the IR byte-identical. Otherwise a
+    # `(kind, target)` pair: `kind` is `"confined"` (the only reach kind today)
+    # and `target` names the PARAMETER carrying the confinement region. Only an
+    # `emission` extern may carry it, and the target must name a real parameter
+    # (both checked in lower) — so a weakened reach (confined -> unconfined) is a
+    # reviewable diff, not a buried host-body comment.
+    reach: tuple[str, str] | None = None
 
 
 @dataclass
@@ -1065,6 +1076,16 @@ class Parser:
                          "bracket",
                 )
             capabilities = self._capability_list(kind=classification)
+        # Optional reach clause `(confined: <param>)` (item 373), a sibling of
+        # the `[caps]` scope above. It sits right after the classification (and
+        # its optional bracket) and before the `async`/`deferred` modifiers.
+        # `(` is not otherwise legal here — the next token is `async`/`deferred`
+        # /`fn` — so the peek is unambiguous. Structural parse only; the
+        # "emission-only" and "target names a parameter" rules are enforced in
+        # lower, next to the sibling classification checks, with honest messages.
+        reach: tuple[str, str] | None = None
+        if self.at("("):
+            reach = self._reach_clause()
         # Optional `async` modifier between the classification and `fn`,
         # mirroring where service-op modifiers sit (parser.py:895-906). The
         # classification stays first and mandatory, so the "unclassified
@@ -1133,7 +1154,28 @@ class Parser:
             raise self.err(line, f"extern `{name}` must declare at least one `@backend {{ ... }}` body")
         return ExternDecl(name, classification, params, returns, undo, compensate, bodies, public, line,
                           capabilities=capabilities, type_params=type_params, async_=async_,
-                          deferred=deferred, requires_approval=requires_approval)
+                          deferred=deferred, requires_approval=requires_approval, reach=reach)
+
+    def _reach_clause(self) -> tuple[str, str]:
+        """`(confined: <param>)` after an emission classification — item 373.
+
+        The reach clause names what an emission crossing is BOUNDED to. `confined`
+        is a CONTEXTUAL keyword recognised only in this slot (the discipline
+        `witnessed`/`deferred` use), so the lexer's KEYWORDS set needs no sync and
+        no program that used `confined` as an ordinary name is broken. The target
+        is a bare ident naming the parameter that carries the confinement region;
+        it is not resolved here (params are parsed just below) — lower checks it
+        against the actual parameter list. `confined` is the only reach kind for
+        now; the shape leaves room for more (the returned kind is carried through).
+        """
+        self.expect("(")
+        kind = self.expect("ident", "confined",
+                           what="`confined` — the reach kind (item 373)").value
+        self.expect(":", what="`:` after the reach kind")
+        target = self.expect("ident", what="the parameter the crossing is "
+                                            "confined to").value
+        self.expect(")")
+        return (kind, target)
 
     def _capability_list(self, kind: str = "emission") -> tuple[str, ...]:
         """`[a, b]` after `emission`/`witnessed` — the boundaries this operation

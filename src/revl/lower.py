@@ -1807,6 +1807,42 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
                      "extern is already revertible and a pure/acquire one crosses "
                      "no boundary, so there is nothing to gate (item 246)",
             )
+        # item 373: the reach clause `emission(confined: <param>)` names what an
+        # irreversible crossing is BOUNDED to, so `revl audit` can show the one
+        # property a reviewer needs (the confinement) and `audit --diff` can flag
+        # a weakening. Two rules, enforced here next to the sibling classification
+        # checks:
+        #   (1) reach is emission-only — a witnessed extern is already reversible,
+        #       a pure/acquire one crosses no boundary, so "confined to" is
+        #       meaningless there; reject the claim rather than drop it.
+        #   (2) the confinement TARGET must name a real PARAMETER, not a literal
+        #       the host body picks. This is the partial check that makes the
+        #       otherwise trust-me reach honest-by-review: a host body that
+        #       ignores the parameter and confines to a baked-in fallback is now a
+        #       reviewable lie, and a reach naming a non-parameter fails to compile.
+        if decl.reach is not None:
+            reach_kind, reach_target = decl.reach
+            if decl.classification != "emission":
+                raise RevlError(
+                    filename, decl.line,
+                    f"`{decl.classification}` extern `{decl.name}` cannot declare a "
+                    f"`({reach_kind}: ...)` reach clause",
+                    hint="only an `emission` crosses irreversibly, so only an emission "
+                         "is worth bounding; a witnessed extern is already revertible and "
+                         "a pure/acquire one crosses no boundary (item 373)",
+                )
+            param_names = {p.name for p in decl.params}
+            if reach_target not in param_names:
+                params_list = ", ".join(sorted(param_names)) or "(none)"
+                raise RevlError(
+                    filename, decl.line,
+                    f"emission `{decl.name}` is `confined: {reach_target}`, but "
+                    f"`{reach_target}` is not one of its parameters ({params_list})",
+                    hint="the confinement target must name a PARAMETER — the region an "
+                         "emission is bounded to has to be caller-supplied data the host "
+                         "body cannot swap for a literal, or the reach claim is "
+                         "unreviewable (item 373)",
+                )
         # witnessed-inverse externs (docs/design/243-witnessed-externs.md). A
         # witnessed mutation is a transaction, not a bracket: its declared `undo`
         # is auto-registered by the accumulator and replays on abort only. The
@@ -1931,6 +1967,12 @@ def _lower_externs(program: Program, filename: str, types: dict) -> list:
             # byte-identical. A crossing reaching this extern needs a covering
             # `with e` edge or lowering refuses (Decision 3).
             **({"requires_approval": True} if decl.requires_approval else {}),
+            # item 373: the reach clause, recorded as `{"kind", "target"}`. Absent
+            # unless the author wrote it, so every existing extern's IR is
+            # byte-identical (a bare emission is "unconfined" = no key). `revl
+            # audit` prints it and `audit --diff` reads it to flag a weakening.
+            **({"reach": {"kind": decl.reach[0], "target": decl.reach[1]}}
+               if decl.reach is not None else {}),
         }
         if decl.classification == "witnessed":
             # The witnessed descriptor the Slice-2 runtime teardown loop reads
