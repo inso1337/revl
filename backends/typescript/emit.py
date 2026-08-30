@@ -1010,11 +1010,41 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             lines.append(f"{indent}}})")
         elif kind == "emit":
             if step.get("compensate") is not None:
-                # v1/A5: the compensation joins the fiber's accumulator
-                lines.append(f"{indent}ctx.effect(() => {{")
-                lines.append(f"{indent}  {_expr(step['expr'], ctx)}")
-                lines.append(f"{indent}  return () => {_expr(step['compensate'], ctx)}")
-                lines.append(f"{indent}}})")
+                # item 247 (method-body compensate remainder): a method-body `emit ... compensate ...` is a first-
+                # class COMPENSATION on the component's activation frame (the
+                # method-body analog of item 247's activation-body site), NOT a
+                # bare `ctx.effect(() => { ...; return () => <offset> })` bracket.
+                # A bare bracket is disposed by cordis BEFORE the body `drain`, so
+                # it fires the offset on a CLEAN unload (destroying the
+                # deliverable), interleaves with proof inverses, and is unguarded.
+                # `frame.compensationMethod` makes it abort-only: discharged on a
+                # commit, drained in Phase 2 after every proof inverse, guarded
+                # and residue-collected. Fire the emission first, then register —
+                # mirrors the activation-body site and py's `_method_step`. Args
+                # are bound to temps HERE, at registration (the "no data hazard"
+                # reason for the phase split).
+                lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+                ctx._counter[0] += 1
+                n = ctx._counter[0]
+                site = f"{provide_name or 'provide'}.{method_name or 'method'}#{n}"
+                comp_node = step["compensate"]
+                bound_call = _bind_call_temps(comp_node, ctx, lines, indent, f"$revl_comp{n}")
+                if bound_call is not None:
+                    target_ts, key_str, method, temps = bound_call
+                    run_ts = _replay_call(comp_node, target_ts, method, temps)
+                    crossing = _crossing_literal(key_str, method, temps, site)
+                    args_list = f"[{', '.join(temps)}]"
+                else:
+                    snap = f"$revl_comp{n}"
+                    lines.append(f"{indent}const {snap} = {_expr(comp_node, ctx)}")
+                    run_ts = snap
+                    crossing = _crossing_literal(provide_name or "provide", "compensate", [], site)
+                    args_list = "[]"
+                lines.append(
+                    f"{indent}{frame_var}.compensationMethod({crossing}, "
+                    f"{_string(method if bound_call is not None else 'compensate')}, "
+                    f"{args_list}, () => {run_ts})"
+                )
             else:
                 lines.append(f"{indent}{_expr(step['expr'], ctx)}")
         elif kind == "await":
@@ -1304,16 +1334,21 @@ def _method_witnessed_step(step: dict, ext: dict, ctx: "_Ctx", indent: str,
 
 def _method_body_needs_frame(steps: list, ctx: "_Ctx") -> bool:
     """True iff a provide-method body registers a witnessed (transactional)
-    entry (item 318) — the per-tool-call H1 case. Only a WITNESSED effect in a
-    method body needs the `Frame`; an ordinary bracket/`emit ... compensate`
-    inside a method body stays the pre-existing bare `ctx.effect(...)` (routed
-    through the fiber's own accumulator, not the Frame), so this walk deliberately
-    matches ONLY witnessed effects — gating the whole `Frame` apparatus tightly to
-    method-witnessed programs and leaving every other method body byte-identical."""
+    entry (item 318) OR a compensation (item 247 (method-body compensate remainder)) — the per-tool-call cases that
+    need the component's activation `Frame`. A WITNESSED effect parks a
+    transactional inverse (`transactionalMethod`); a method-body
+    `emit ... compensate ...` parks a compensation (`compensationMethod`) — both
+    must ride the frame's commit/abort discipline, NOT a bare `ctx.effect(...)`
+    bracket (which cordis disposes before the body `drain`, firing the offset on
+    a CLEAN unload — the item-247 soundness bug left on the method-body site).
+    An ordinary method-body bracket still stays the pre-existing bare
+    `ctx.effect(...)`, so the gate stays tight."""
     for step in steps or []:
         kind = step.get("step")
         if kind in ("let-effect", "effect") \
                 and _witnessed_extern(step.get("acquire"), ctx) is not None:
+            return True
+        if kind == "emit" and step.get("compensate") is not None:
             return True
     return False
 
