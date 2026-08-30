@@ -461,14 +461,38 @@ def _approval_required(exc: ApprovalRequired) -> dict:
 
 
 def _tool_approve(arguments: dict) -> dict:
-    """Mint a standing approval for an outstanding class-(c) ticket (item 246,
-    step 2 of the two-step). The `hash` must be one the server issued; an unknown
-    hash is refused by the outstanding-ticket table. Gated by the `approve` verb
-    (item 55), so an operator profile scopes who may say yes."""
+    """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
+    one verb:
+
+      * SINGLE-USE, EXACT-HASH (Slice 1): `hash` alone mints a single-use
+        approval bound to that one ticket; the identical re-issue fires once and
+        consumes it. An unknown hash is refused by the outstanding-ticket table.
+      * SESSION-SCOPED STANDING GRANT (item 344, fork b): a `capability` and/or a
+        `uses`/`ttlMs` bound mints a grant keyed by the capability's semantic
+        identity that per-call class-(c) crossings consume against — taking the
+        shell-escape shape (n repeat crossings) from n prompts to one mint. The
+        grant may be named from an outstanding ticket (`hash` + `uses`/`ttlMs`)
+        or proactively against a `capability`.
+
+    Gated by the `approve` verb (item 55), so an operator profile scopes who may
+    say yes."""
     ticket_hash = arguments.get("hash")
+    capability = arguments.get("capability")
+    uses = arguments.get("uses")
+    ttl_ms = arguments.get("ttlMs")
+    # item 344: any of `capability`/`uses`/`ttlMs` selects the standing-grant
+    # path; a bare `hash` keeps the Slice-1 single-use behaviour byte-for-byte.
+    if capability is not None or uses is not None or ttl_ms is not None:
+        try:
+            return {"ok": True, **SESSION.mint_standing_grant(
+                ticket_hash=ticket_hash, capability=capability,
+                uses=uses, ttl_ms=ttl_ms)}
+        except SessionError as error:
+            return _session_error(str(error))
     if not ticket_hash:
         return _session_error("provide `hash` — the ticket hash from the "
-                              "approvalRequired response")
+                              "approvalRequired response — or a `capability` "
+                              "(+ `uses`/`ttlMs`) to mint a standing grant")
     try:
         return {"ok": True, **SESSION.approve_ticket(ticket_hash)}
     except SessionError as error:
@@ -1412,16 +1436,38 @@ TOOLS = [
                        "refused (the outstanding-ticket table); a swap or edit "
                        "that changes the call's reach closure invalidates a "
                        "standing approval (the candidate hash no longer matches). "
+                       "For a REPEAT-shaped session (n class-(c) calls to the same "
+                       "capability, e.g. a shell escape), pass `capability` and/or "
+                       "`uses`/`ttlMs` INSTEAD of a bare hash to mint a SESSION-"
+                       "SCOPED STANDING GRANT (item 344): one mint the n calls then "
+                       "auto-approve against, decrementing `uses` and checked "
+                       "against the TTL — n prompts become one. Name the grant from "
+                       "an outstanding ticket (`hash` + `uses`/`ttlMs`) or "
+                       "proactively (`capability` + `uses`/`ttlMs`). "
                        "Gated by the `approve` operator verb (item 55): who may "
                        "say yes is scoped in the same profile grammar as who may "
                        "commit. Class (a) (witnessed-revertible) and (b) (deferred) "
                        "crossings never reach here — they auto-approve.",
         "inputSchema": {
             "type": "object",
-            "properties": {"hash": {"type": "string",
-                                    "description": "the ticket hash from the "
-                                                   "approvalRequired response"}},
-            "required": ["hash"],
+            "properties": {
+                "hash": {"type": "string",
+                         "description": "the ticket hash from the "
+                                        "approvalRequired response (single-use "
+                                        "approval, or the seed for a standing "
+                                        "grant when uses/ttlMs is also given)"},
+                "capability": {"type": "string",
+                               "description": "item 344: the capability to mint a "
+                                              "standing grant for (proactive, or "
+                                              "to disambiguate a multi-capability "
+                                              "ticket)"},
+                "uses": {"type": "integer", "minimum": 1,
+                         "description": "item 344: how many class-(c) crossings "
+                                        "the standing grant may auto-approve"},
+                "ttlMs": {"type": "integer", "minimum": 1,
+                          "description": "item 344: how long (ms) the standing "
+                                         "grant stays live; checked at the "
+                                         "crossing against the session clock"}},
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_approve,
