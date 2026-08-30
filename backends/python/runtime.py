@@ -630,6 +630,31 @@ def _read_bound_seconds(env_name: str, default_ms: int) -> Optional[float]:
     return ms / 1000.0
 
 
+def _residue_record(entry: "_Compensation", *, outcome: str,
+                    attempted_flag: bool, attempted: Optional[dict],
+                    error: dict) -> dict:
+    """One `compensation-residue` fact (item 247 gap 2, design Decision 2).
+
+    A best-effort offset that raised (`failed`) or never got to run under the
+    Phase-2 budget (`not-attempted`) is residue: a crossing whose compensation
+    was OWED but did not land. Every such record carries `state: "unresolved"`
+    — the third audit state joining `bare`/`compensated` — and NAMES the
+    crossing it was offsetting (`component`, `method`, WAL `seq`), so the audit
+    surface (`revl.query`/`revl.erase_report`) and the 246 session-boundary
+    report can enumerate it rather than let an in-memory list silently grow."""
+    return {
+        "kind": "compensation-residue",
+        "state": "unresolved",
+        "component": entry.component,
+        "method": entry.method,
+        "seq": entry.seq,
+        "attemptedFlag": attempted_flag,
+        "attempted": attempted,
+        "outcome": outcome,
+        "error": error,
+    }
+
+
 class _Compensation:
     """The disposer for one compensation entry (item 247, docs/design/
     teardown-contract.md 'the three entry kinds, one stack'). Registered at
@@ -661,15 +686,23 @@ class _Compensation:
     every disposer in one synchronous stack-position pass."""
 
     __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
-                 "_escrowed")
+                 "_escrowed", "component", "method")
 
-    def __init__(self, frame: "Frame", fn: Callable[[], Any]) -> None:
+    def __init__(self, frame: "Frame", fn: Callable[[], Any],
+                 method: Optional[str] = None) -> None:
         self.frame = frame
         self.fn = fn
         self.discharged = False   # committed: never runs, deliverable persists
         self.ran = False          # Phase 2: actually invoked (any outcome)
         self.failed = False       # Phase 2: invoked and raised (continue-and-record)
         self.error: Optional[BaseException] = None
+        # item 247 gap 2: the offset emission's identity, so a residue record
+        # NAMES the crossing it was offsetting on the audit surface (design
+        # Decision 2: "the record names the original emission it was offsetting").
+        # `component` is the activation the compensation belongs to; `method` is
+        # the offsetting call the emitter wrote (from `_named_call_method`).
+        self.component: Optional[str] = frame.name
+        self.method: Optional[str] = method
         # the WAL discharge-descriptor's `seq` this entry was registered
         # under (mirrors `_Transactional.seq`), or `None` when no
         # WriteAheadLog is attached.
@@ -976,28 +1009,20 @@ class Frame:
         deadline = None if budget is None else time.monotonic() + budget
         for entry in pending:
             if deadline is not None and time.monotonic() >= deadline:
-                self.compensation_residue.append({
-                    "kind": "compensation-residue",
-                    "seq": entry.seq,
-                    "attemptedFlag": False,
-                    "attempted": None,
-                    "outcome": "not-attempted",
-                    "error": {"type": "deadline-expired",
-                              "message": "phase-2 budget exhausted before "
-                                         "this compensation started"},
-                })
+                self.compensation_residue.append(_residue_record(
+                    entry, outcome="not-attempted", attempted_flag=False,
+                    attempted=None,
+                    error={"type": "deadline-expired",
+                           "message": "phase-2 budget exhausted before "
+                                      "this compensation started"}))
                 continue
             entry._run_phase2()
             if entry.failed:
-                self.compensation_residue.append({
-                    "kind": "compensation-residue",
-                    "seq": entry.seq,
-                    "attemptedFlag": True,
-                    "attempted": {"phase": 2},
-                    "outcome": "failed",
-                    "error": {"type": type(entry.error).__name__,
-                              "message": str(entry.error)},
-                })
+                self.compensation_residue.append(_residue_record(
+                    entry, outcome="failed", attempted_flag=True,
+                    attempted={"phase": 2},
+                    error={"type": type(entry.error).__name__,
+                           "message": str(entry.error)}))
 
     def _tracked(self, body: Callable) -> Callable:
         """Wrap `body` so `self` is the top activation frame while its code
@@ -1193,7 +1218,7 @@ class Frame:
         `entry.seq` carries the assigned seq so `drain` can name it in the
         discharge record on a clean commit; it is `None` when no WAL is
         active."""
-        entry = _Compensation(self, fn)
+        entry = _Compensation(self, fn, method=_named_call_method(fn))
         self._compensations.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -1256,7 +1281,7 @@ class Frame:
         timeline = getattr(self.ctx, "_revl_timeline", None)
         if timeline is not None:
             _step, fn = timeline.record_yield(fn, f"{self.name}/compensate")
-        entry = _Compensation(self, fn)
+        entry = _Compensation(self, fn, method=method_name)
         self._compensations.append(entry)
         self._deferred_compensations.append(entry)
         wal = self._wal()
@@ -1623,6 +1648,13 @@ class SessionOwner:
         # policy configured, so the manifest is byte-identical there.
         self.approvals = {"silent": 0, "atCommit": 0, "prompted": 0}
         self.flush_residue: list = []
+        # item 247 gap 2: the compensation residue from ESCROWED entries — the
+        # entries of a mid-session-withdrawn frame whose Phase-2 offset runs in
+        # `finalize_abort`, after the frame has already left `_registry`. A live
+        # frame's residue stays on `frame.compensation_residue` and is merged with
+        # this by `collect_compensation_residue` at the session boundary; without
+        # this, an escrowed offset's failure was run but never recorded (dropped).
+        self.compensation_residue: list = []
         # item 246, Decision 3: the typed-approval ledger, owned here beside the
         # deferral queue and the escrow. Each granted `Approval[C]` is one entry
         # bound to its capability, component, reach-closure candidate hash,
@@ -1753,8 +1785,14 @@ class SessionOwner:
         return sorted({e.seq for e in self._live_entries() if e.seq is not None})
 
     def _witnessed_count(self) -> int:
+        # `_live_entries` mixes `_Transactional` (has `.replayed`) and
+        # `_Compensation` (item 247: has no `.replayed` — a compensation offsets,
+        # it never replays an inverse). Read `replayed` defensively so a live
+        # compensation entry counts toward the commit gate target (it discharges
+        # at commit, joining the discharge record) instead of crashing the
+        # manifest — the two-step commit of a session holding a compensation.
         return sum(1 for e in self._live_entries()
-                   if not e.discharged and not e.replayed)
+                   if not e.discharged and not getattr(e, "replayed", False))
 
     def _target(self) -> dict:
         """The gate target, hash-bound: (queue, live witnessed count, registry
@@ -1894,6 +1932,15 @@ class SessionOwner:
                 replayed.append(entry.seq)
         for entry in compensations:
             entry._run_phase2()
+            # item 247 gap 2: an escrowed offset that raised is residue too —
+            # record it (previously run-and-dropped), same shape and severity as
+            # the live-frame Phase-2 residue, so the session boundary sees it.
+            if entry.failed:
+                self.compensation_residue.append(_residue_record(
+                    entry, outcome="failed", attempted_flag=True,
+                    attempted={"phase": 2},
+                    error={"type": type(entry.error).__name__,
+                           "message": str(entry.error)}))
         self._escrow = []
         # collect the seqs the live frames replayed too (their inverses ran
         # during the driver's unload)
@@ -1906,6 +1953,33 @@ class SessionOwner:
         if wal is not None:
             wal.record_aborted(replayed)
         return {"replayed": replayed}
+
+    # -- compensation residue (item 247 gap 2) -----------------------------
+
+    def collect_compensation_residue(self) -> list:
+        """Every `unresolved` compensation-residue fact this session produced —
+        the merge of each live registry frame's `compensation_residue` and the
+        escrow residue this owner captured in `finalize_abort` (item 247 gap 2,
+        design Decision 2). This is the owner-held enumeration the 246 session
+        boundary reads: a session that ends with an offset it could not land
+        surfaces it here, never a silently growing in-memory list.
+
+        Deduplicated by identity, so a frame that appears in both the registry
+        and (transiently) elsewhere is not double-counted."""
+        records: list = []
+        seen: set = set()
+        for frame in self._registry:
+            for rec in getattr(frame, "compensation_residue", ()):  # noqa: B009
+                key = id(rec)
+                if key not in seen:
+                    seen.add(key)
+                    records.append(rec)
+        for rec in self.compensation_residue:
+            key = id(rec)
+            if key not in seen:
+                seen.add(key)
+                records.append(rec)
+        return records
 
 
 # ---------------------------------------------------------------------------
