@@ -270,7 +270,12 @@ def test_host_objects_are_real_java_runtime_classes():
     src = emit.emit(_ir("user_cache"))
     assert "UnsupportedOperationException" not in src
     # FR-4: the host Map is generic over its value type (learned per site).
-    assert "private final java.util.HashMap<String, V> values = new java.util.HashMap<>();" in src
+    # item 397: the backing map is a thread-safe ConcurrentHashMap.
+    assert ("private final java.util.concurrent.ConcurrentHashMap<String, V> values =" in src
+            and "new java.util.concurrent.ConcurrentHashMap<>();" in src)
+    # the atomic compare-and-set verb (item 397).
+    assert "public boolean insert_if_absent(String key, V value)" in src
+    assert "return values.putIfAbsent(key, value) == null;" in src
     # `new` is a Java reserved word — the constructor must be renamed.
     assert "public static <V> Map<V> create()" in src
     assert "static Map new()" not in src
@@ -1467,7 +1472,7 @@ def test_ledger_shape_carries_the_map_value_type():
     the historical hardcoding is gone."""
     src = emit.emit(compile_source(LEDGER_SRC))
     assert "public static final class Map<V>" in src
-    assert "private final java.util.HashMap<String, V> values" in src
+    assert "private final java.util.concurrent.ConcurrentHashMap<String, V> values" in src
     assert "public void insert(String key, V value)" in src
     assert "public java.util.Optional<V> get(String key)" in src
     assert "public static <V> Map<V> create()" in src
