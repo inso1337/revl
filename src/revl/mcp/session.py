@@ -120,6 +120,15 @@ def replay_module():
     return replay
 
 
+def _activation_error():
+    """The `run.ActivationError` type, imported lazily (importing `run` pulls
+    cordis). Used by `load`/`swap` to catch a deferred activation that did not
+    complete and convert it into a `SessionError` (roadmap item 372)."""
+    from ..run import ActivationError  # noqa: PLC0415 — lazy: run imports cordis
+
+    return ActivationError
+
+
 def _capturing_driver_class():
     """`run._Driver`, with its trace captured instead of printed."""
     from ..run import _Driver  # noqa: PLC0415 — lazy: importing run pulls cordis
@@ -368,6 +377,18 @@ class Session:
         runtime_mod.set_session_owner(self._owner)
         try:
             self._run(self._driver._load(ir, self._prepare_module(ir)))
+        except _activation_error() as exc:
+            # item 372: a component's deferred activation did not complete —
+            # "loaded" would be a lie. Tear the half-loaded composition down and
+            # report not-loaded, surfacing the loud, named diagnostic instead of
+            # leaving a fiber listed ACTIVE with no provision in ROOT.
+            runtime_mod.clear_session_owner()
+            try:
+                self._run(self._driver._dispose_all(ir))
+            except Exception:  # noqa: BLE001 — best-effort teardown of a partial load
+                pass
+            self._reset()
+            raise SessionError(str(exc)) from exc
         finally:
             # frames are built during load; stop capturing so a later, unrelated
             # Frame (a bare test) does not join this session's registry.
@@ -583,7 +604,20 @@ class Session:
         self.origin = origin
         self.draft = None  # a new generation makes any uncommitted edit stale
         self._generation += 1
-        self._run(driver._load(ir, self._prepare_module(ir)))
+        try:
+            self._run(driver._load(ir, self._prepare_module(ir)))
+        except _activation_error() as exc:
+            # item 372: the successor's activation did not complete — roll the
+            # whole swap back to the predecessor (which activated cleanly) so the
+            # running system keeps serving, and surface the loud diagnostic
+            # rather than leaving a half-loaded generation reporting loaded.
+            self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
+                             handoff_pre)
+            self._record_generation()
+            raise SessionError(
+                f"swap rejected: {exc}. The running composition is untouched "
+                f"(rolled back to the previous generation)."
+            ) from None
         migration = None
         handoff = None
         if pre:
@@ -2090,7 +2124,11 @@ class Session:
                 for name, fiber in driver.fibers.items()
             ],
             "loadOrder": manifest.get("loadOrder") or [],
-            "providedKeys": sorted(driver._namespace()),
+            # item 372: the provided-key report derives from ROOT itself, so a
+            # key is listed loaded IFF it actually has a live provider. A fiber
+            # left ACTIVE by a cancelled deferred activation, with no provision
+            # in ROOT, can never be reported as providing its key here.
+            "providedKeys": sorted(driver.resolved_keys()),
             "canRollback": self.previous is not None,
             "recording": self.recorder is not None,
             "generation": self._generation,

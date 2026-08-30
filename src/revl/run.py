@@ -46,6 +46,35 @@ from . import why_runtime
 
 KNOWN_BACKENDS = ("py", "ts", "rust", "java", "wasm", "go")
 
+
+class ActivationError(RuntimeError):
+    """A component's activation did not complete — "loaded" would be a lie
+    (roadmap item 372).
+
+    `ctx.plugin()` defers the component apply to the event loop via a `_LazyTask`
+    whose first statement is `await asyncio.sleep(0)`. On an offloaded/closing-
+    loop path (item 115's synchronous-`@py`-body `http_post` pins the single
+    loop, so dispatch is offloaded to a thread running `asyncio.run` with a
+    main-side timeout) the per-turn loop can close underneath that deferred
+    activation and SILENTLY cancel it — and because `str(CancelledError)` is the
+    empty string there is no diagnostic. The plugin is then left listed as
+    LOADED while `ROOT.get(key)` stays `None` forever.
+
+    The driver refuses that: a key that did not finish activating is never
+    counted loaded, and a cancelled/failed activation is surfaced LOUDLY through
+    this typed error naming the component and the unresolved key(s) — never a
+    silent empty string.
+    """
+
+    def __init__(self, component: str, keys, reason: str) -> None:
+        self.component = component
+        self.keys = list(keys)
+        self.reason = reason
+        keys_txt = ", ".join(self.keys) if self.keys else "(no provided keys)"
+        super().__init__(
+            f"activation of {component!r} did not complete "
+            f"[{keys_txt}]: {reason}")
+
 # fiber states that count as "settled" — a lifecycle transition has come to
 # rest, so it is worth one causal-trace record. UNLOADING/LOADING are
 # in-flight and never recorded on their own.
@@ -537,13 +566,10 @@ class _Driver:
                 self.root, getattr(module, name), self.config.get(name, {}))
             self.fibers[name] = fiber
             await self._flush()
-            if fiber.state == self.FiberState.LOADING:  # an async (`await`) body in flight
-                try:
-                    await asyncio.wait_for(asyncio.shield(fiber), 2)
-                except asyncio.TimeoutError:
-                    self._log("note", name, "still LOADING after 2s")
-            if fiber.state == self.FiberState.PENDING:
-                self._log("note", name, f"PENDING — unmet requirement ({requires})")
+            # roadmap item 372: DRIVE the deferred activation to completion and
+            # refuse to count the key loaded unless its provision actually
+            # landed — "loaded means loaded". Loud on cancel/failure.
+            await self._drive_activation(name, comp, fiber, requires)
             if self.tracing:
                 # a component comes up because its providers were already up
                 # (load order is providers-first); a component with no
@@ -554,6 +580,88 @@ class _Driver:
                              f"PENDING -> {self.FiberState(fiber.state).name}",
                              load_causes.get(name, why_runtime.cause_boot()))
         await self._flush()
+
+    async def _drive_activation(self, name: str, comp: dict, fiber,
+                                requires: str) -> None:
+        """Drive one component's deferred activation to completion, LOUDLY
+        (roadmap item 372).
+
+        `ctx.plugin()` schedules the apply on the event loop as a `_LazyTask`;
+        the fiber can report ACTIVE while its `provide` has not yet run, and a
+        closing/offloaded loop can cancel the deferred activation with an empty-
+        string `CancelledError` and no diagnostic. This:
+
+        1. drives the `_LazyTask`/activation body to settlement (`fiber.await_`
+           re-raises the fiber's own activation error instead of swallowing it),
+           then pumps the loop until the provisions actually resolve;
+        2. converts a cancelled/failed activation into a typed, named
+           :class:`ActivationError` — never a silent empty string;
+        3. enforces the FIBERS/ROOT invariant: an ACTIVE fiber whose provision
+           never landed in ROOT is the false-loaded contradiction, refused here.
+
+        A component whose requirements are genuinely unmet stays PENDING — it
+        provides nothing and is reported, not counted loaded, and never raised.
+        """
+        provided = list((comp.get("provides") or {}).keys())
+        try:
+            await self._settle(fiber, provided)
+        except asyncio.CancelledError as exc:
+            # the offloaded/closing loop cancelled the deferred activation.
+            # `str(CancelledError)` is empty — name it instead of losing it.
+            raise ActivationError(
+                name, provided,
+                "the event loop closed or the activation was cancelled before "
+                "it completed") from exc
+        except ActivationError:
+            raise
+        except BaseException as exc:  # a real activation failure — surface it
+            raise ActivationError(
+                name, provided,
+                f"activation raised {type(exc).__name__}: {exc}") from exc
+        if fiber.state == self.FiberState.PENDING:
+            # legitimately not up yet: its injected requirement has no provider.
+            # It publishes nothing, so there is no false-loaded key to guard.
+            self._log("note", name, f"PENDING — unmet requirement ({requires})")
+            return
+        missing = [key for key in provided if self.root.get(key) is None]
+        if missing:
+            raise ActivationError(
+                name, missing,
+                "activation settled without publishing its provision(s) into "
+                "ROOT — 'loaded' would be a lie for "
+                f"{', '.join(missing)}")
+
+    async def _settle(self, fiber, provided: list) -> None:
+        """Drive a fiber's deferred activation to a settled state.
+
+        `fiber.await_()` waits the fiber's `inertia` (its `_LazyTask` reload) to
+        `None` and re-raises any `_error` the activation recorded. A provision
+        published by a *synchronous* body is already in ROOT once that returns;
+        an *asynchronous* body publishes from a detached effect task, so pump a
+        bounded number of loop turns until the keys resolve. The bound is a
+        safety net, not a timeout: a well-behaved body resolves in the first
+        turn (or zero, for a sync body), and one that never resolves falls
+        through to the loud FIBERS/ROOT consistency check in the caller rather
+        than being silently counted loaded."""
+        await fiber.await_()
+        if not provided:
+            return
+        for _ in range(1000):
+            if all(self.root.get(key) is not None for key in provided):
+                return
+            await asyncio.sleep(0)
+
+    def resolved_keys(self) -> set:
+        """The keys this composition actually provides — those with a live
+        provider in ROOT (roadmap item 372).
+
+        The FIBERS/ROOT consistency surface: a key appears here IFF
+        ``root.get(key)`` resolves, so a fiber that reports ACTIVE while its
+        deferred activation never published its provision can never be reported
+        as providing that key. `state()`'s `providedKeys` derives from this, so
+        "listed loaded but ROOT is None" is unreachable through the report."""
+        return {key for key in _key_to_service(self.ir)
+                if self.root.get(key) is not None}
 
     def _install_router(self, name: str, comp: dict) -> None:
         """Realize a router component's ``routes`` IR: for each routed key, build
