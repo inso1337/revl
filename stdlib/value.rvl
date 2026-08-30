@@ -78,6 +78,27 @@ pub extern pure fn value_is_null(v: Value) -> Bool =
   @py { return v is None }
   = @ts { return v === null || v === undefined; }
 
+// ------------------------------------------------------- shape discrimination
+// The is-object / is-list / is-scalar trio (roadmap item 379). A tolerant JSON
+// walk begins by asking the SHAPE of an erased value before it binds anything —
+// the harness's tolerant decoders all open with `isinstance(d, dict)`, which
+// was inexpressible in-language until now. These are the total, in-language
+// spelling of that guard: pure revl over `value_kind`, so they inherit every
+// tier that carries `value_kind` (py + ts today) with no per-tier body, and a
+// non-matching or null receiver simply reads back `false` rather than faulting.
+// Pair `value_is_object` with the total `value_opt` (lookup) / `value_has`
+// (has) pair below to read a field only once the shape is known to carry one.
+//   * `value_is_object` — a record (a JSON object).
+//   * `value_is_list`   — a list (a JSON array).
+//   * `value_is_scalar` — a leaf: str, int, float, or bool. NULL is none of the
+//     three (it answers all three `false`); test it with `value_is_null`.
+pub fn value_is_object(v: Value) -> Bool { return value_kind(v) == "record" }
+pub fn value_is_list(v: Value) -> Bool { return value_kind(v) == "list" }
+pub fn value_is_scalar(v: Value) -> Bool {
+  let k = value_kind(v)
+  return k == "str" || k == "int" || k == "float" || k == "bool"
+}
+
 // ---------------------------------------------------------------- record access
 // A record field as a `Value`. Total: a missing key or a non-record receiver
 // yields a null `Value`, so a chain `value_field(value_field(n, "a"), "b")`
