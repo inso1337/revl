@@ -4255,6 +4255,18 @@ class _V3Emitter:
 
     def _field_expr(self, node: dict, scope: _Scope, where: str) -> _E:
         target_ty = self._infer_type(node.get("target"), scope)
+        # Component positions intentionally spell `.length` as a `field` node,
+        # not a `len` node (lower.py: `len` is produced only in fn bodies). A
+        # `Str`/`Bytes`/`List` `.length` reaching here as a field is the same
+        # property-form length as `_len_expr` handles, so route it through the
+        # identical code-point path — otherwise a multibyte `Str` literal errors
+        # (no record fields) or would fold to its UTF-8 byte count (item 104).
+        # Gated on a sized type so a record whose field is literally named
+        # `length` still reads its slot below.
+        if node.get("name") == "length" and (
+            target_ty in ("Str", "Bytes") or _is_list_type(target_ty)
+        ):
+            return self._len_expr(node, scope, where)
         fields = self._record_fields(target_ty)
         if fields is None:
             raise EmitError(f"{where}: field access on non-record type {target_ty!r}")
