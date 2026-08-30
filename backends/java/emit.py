@@ -2081,7 +2081,13 @@ def _emit_map_runtime() -> list[str]:
         "// The value type is generic — each site's `Map.create()` pins `V`",
         "// (FR-4: `Map[Str, List[Msg]]` and friends, not just String).",
         "public static final class Map<V> {",
-        "    private final java.util.HashMap<String, V> values = new java.util.HashMap<>();",
+        "    // item 397: a ConcurrentHashMap, not a bare HashMap. The tier's",
+        "    // placement runner serves each bridge connection on its own thread,",
+        "    // so the former unsynchronized HashMap was not memory-safe under",
+        "    // concurrent put; migrating the backing class makes insert/remove/get",
+        "    // thread-safe AND gives insert_if_absent an atomic putIfAbsent.",
+        "    private final java.util.concurrent.ConcurrentHashMap<String, V> values =",
+        "        new java.util.concurrent.ConcurrentHashMap<>();",
         "    private Map() {}",
         "    // revl `Map.new()` — renamed: `new` is a Java reserved word.",
         "    public static <V> Map<V> create() {",
@@ -2092,6 +2098,15 @@ def _emit_map_runtime() -> list[str]:
         "    }",
         "    public void insert(String key, V value) {",
         "        values.put(key, value);",
+        "    }",
+        "    // The atomic compare-and-set (item 397): ConcurrentHashMap.putIfAbsent",
+        "    // is a single atomic operation over the test AND the insert. It returns",
+        "    // the previous value (null when absent), so a null return means this",
+        "    // call inserted. Under N concurrent callers, exactly one sees null.",
+        "    // (ConcurrentHashMap forbids null values; revl host inserts never pass",
+        "    // null, and `get` already wraps absence in Optional.)",
+        "    public boolean insert_if_absent(String key, V value) {",
+        "        return values.putIfAbsent(key, value) == null;",
         "    }",
         "    public void remove(String key) {",
         "        values.remove(key);",
@@ -2484,6 +2499,16 @@ def _map_value_expr_type(node: object, var_types: dict, env: _Env,
 # writer (`insert_if_absent`, item 397) pin a concrete V instead of the Str
 # default (item 402).
 _MAP_VALUE_WRITERS = ("insert", "insert_if_absent")
+
+# item 397: the compare-and-set host verb whose bound result is a `boolean` and
+# whose site-spelled undo is registered only when the CAS actually inserted.
+_MAP_CAS_VERBS = ("insert_if_absent",)
+
+
+def _is_map_cas(acquire) -> bool:
+    """Whether a lowered acquisition node is a result-guarded map CAS."""
+    return (isinstance(acquire, dict) and acquire.get("kind") == "call"
+            and acquire.get("method") in _MAP_CAS_VERBS)
 
 
 def _map_expr_inserts(node: object, bind: str, var_types: dict, env: _Env,
@@ -3332,6 +3357,25 @@ def _method_body_lines(
                 _emit_witnessed_step(
                     lines, "", stmt, wit, v3_ctx, env, bind, frame_expr,
                     rename=rename, frame_method=True)
+            elif _is_map_cas(stmt.get("acquire")):
+                # item 397: a method-body host CAS. Bind the atomic `boolean`
+                # result and register the site-spelled undo guarded on it — a
+                # `false` CAS's inverse is the identity, so teardown never
+                # removes the winner's entry. It rides the same per-activation
+                # accumulator (`fx`/`frame`) as a bare method-body effect.
+                bind = _ident(stmt["bind"], "binding")
+                acquire_expr = _expr(stmt["acquire"], v3_ctx, rename, env)
+                lines.append(f"boolean {bind} = {acquire_expr};")
+                undo_expr = _expr(stmt["undo"], v3_ctx, rename, env)
+                guarded = f"() -> {{ if ({bind}) {{ {undo_expr}; }} }}"
+                if frame_expr is None:
+                    lines.append(f"fx.track(Disposables.of({guarded}));")
+                else:
+                    crossing = _string(_call_label(stmt["acquire"]))
+                    attempted = _string(_call_label(stmt["undo"]))
+                    lines.append(
+                        f"fx.track({frame_expr}.bracket({crossing}, {attempted}, "
+                        f"{guarded}));")
             else:
                 raise EmitError(
                     "a non-witnessed let-effect is not supported inside a method "
