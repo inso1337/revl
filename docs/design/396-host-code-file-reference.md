@@ -869,3 +869,74 @@ refused at compile by the same tier-gate pattern the config coeffect proved
 out. And cross-tier twins drift by review on every mechanism here, including
 the status quo: the design reduces copies and surfaces dependencies; it does
 not pretend to verify opaque host code, on any tier, in any form.
+
+## Re-review corrections: must-fix before implementing option B
+
+A second adversarial review of the redesigned option B (sha 5422a18) confirmed
+the lazy-thunk, content-hash, sys.path-append, ts-resolution, and tier-downgrade
+fixes each hold against the cited code, but returned SOUND-IF-FIXED, not SOUND.
+The following must land in the doc (and the implementation) before B is built.
+Option A was re-verified clean and remains the recommended first build.
+
+1. sys.modules staleness across driver generations (severity: the item-380
+   class B exists to kill). The py driver re-emits in one process
+   (`self.generation += 1`, run.py:563; replace/admission at run.py:1050-1063).
+   Gen N's thunk imports `src.host.engine`, populating sys.modules process-wide.
+   After an edit + replug, gen N+1's plug-time hash check passes against the NEW
+   file, but the thunk's `from src.host.engine import ...` returns the STALE
+   gen-N module from sys.modules: new code verified, old code runs, nothing
+   raises. FIX: at plug of a ref-carrying IR, evict from sys.modules every dotted
+   name derived from a ref (and parent packages only importable via the appended
+   root), or refuse when sys.modules holds a module whose `__file__` hash
+   mismatches the IR. Add a replug exit test (edit ref'd file, replug in the same
+   process, first call must run the new code).
+
+2. Plug-time find-spec executes parent `__init__.py` (host code at load, the
+   point B forbids). `importlib.util.find_spec("src.host.engine")` imports and
+   executes `src/__init__.py` and `src/host/__init__.py` at plug. FIX: use a
+   parent-execution-free spec walk (`importlib.machinery.PathFinder.find_spec`
+   recursively, feeding each level the parent spec's `submodule_search_locations`,
+   never importing); state the residual (a parent `__init__` that mutates
+   `__path__` at runtime can diverge). Extend the sentinel exit test so a parent
+   package `__init__.py` sets a sentinel that must stay UNSET through plug (the
+   current test only sentinels the leaf module, so it cannot see this hole).
+
+3. Soften the coroutine claims. "The silent un-awaited-coroutine case is
+   impossible by construction" is an overclaim: `inspect.iscoroutinefunction` is
+   a function-object check, so a plain `def` returning a coroutine (a sync
+   wrapper, a callable class with `async def __call__`) still flows an un-awaited
+   coroutine, and the declared-async hard refusal FALSELY refuses legitimate
+   awaitable callables (an `lru_cache`-wrapped async fn, a callable instance).
+   FIX: downgrade to "the plain `async def` shape is caught"; drop or soften the
+   declared-async refusal (its failure was already loud); optionally close the
+   sync direction with a value-level `inspect.isawaitable(result)` check in the
+   sync thunk, noting it makes a ref stricter than an inline body for an extern
+   that intentionally returns an awaitable handle. The ts
+   `constructor.name === "AsyncFunction"` check has the identical evasion; state
+   it.
+
+4. Root-scope the moved no-extern check, in so many words. `check_no_extern` is
+   deliberately root-program-scoped (admit_profile.py:82-87: a pre-granted `use`d
+   module may declare externs under a no-extern profile). `_ModuleLoader.load`
+   (compiler.py:106-157) loads roots and imported deps through the same recursive
+   path. FIX: state that BOTH the moved refusal AND the resolution/read/stat skip
+   are ROOT-module-scoped, imported modules' body files resolve normally, and the
+   compiler.py:402 backstop stays root-scoped. Without this an implementer
+   following the doc literally ships a regression on trusted imported externs.
+
+Honesty and completeness edits (land in the same pass): the hash pin is one file
+deep, so `engine.py`'s own `import helpers` is unhashed/unjailed/invisible to
+`revl audit` and the appended root grants NEW importability of every project
+module to every host body and stdlib thunk (append only prevents SHADOWING of
+already-importable names); a plug-to-first-call TOCTOU window remains (import
+machinery cannot be atomic); bundle stage 4 must pick how root-relative body/ref
+files reconcile with `revl bundle`'s flat basename layout (verify recompiles the
+bundled source, bundle.py:23-31, so a root-relative body file is unreachable from
+a flat-copied .rvl unless fed through the in-memory `sources` map); other exec
+drivers (test.py, fault.py, placement) get neither the appended root nor the hash
+check, so a ref program under `revl test` fails with a loud first-call
+ImportError (acceptable, state it); and `revl audit` derives its backends line
+from `bodies` keys (__main__.py:420-421), so a ref-only extern prints backends
+"none" while emitting fine. Also refresh the drifted Background line cites
+(`_lower_externs` at lower.py:2014, `"bodies": bodies` at :2281, the duplicate
+`@backend` refusal at :2271-2275).
