@@ -165,8 +165,8 @@ func revlListIndexOf[T comparable](xs []T, x T) int64 {
 }
 
 type Row struct {
-	id   int64
-	name string
+	Id   int64  `json:"id"`
+	Name string `json:"name"`
 }
 
 func strLen(s string) int64 {
@@ -214,7 +214,7 @@ func greetN(name string, n int64) string {
 }
 
 func optName(row RevlOpt[Row]) RevlOpt[string] {
-	return revlOptMap(row, func(_x Row) string { return _x.name })
+	return revlOptMap(row, func(_x Row) string { return _x.Name })
 }
 
 func optCode(s RevlOpt[string]) RevlOpt[int64] {

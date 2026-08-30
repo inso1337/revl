@@ -41,10 +41,11 @@ Covered subset (what emits byte-identical):
     ``fmt.Sprintf``.
 
 Covered typed-core (item 209, byte-identical): user ``type`` decls
-(``_emit_v3_go_types`` — a record as a Go ``struct`` with unexported
-source-spelled fields, a variant as a sealed interface + case structs), record
-literals and field access, ADT construction (nullary + payload), and ``match``
-over user variants as a Go type-switch IIFE, plus user type names in ``go_type``.
+(``_emit_v3_go_types`` — a record as a Go ``struct`` with EXPORTED,
+``json:"<source>"``-tagged fields (item 390), a variant as a sealed interface +
+case structs), record literals and field access, ADT construction (nullary +
+payload), and ``match`` over user variants as a Go type-switch IIFE, plus user
+type names in ``go_type``.
 
 Deliberately OUT (excluded from the corpus, deferred to Go Path B slice 3+):
 the go LIVE-COMPONENT world (v1/v2 stc-go runtime — a component routes there,
