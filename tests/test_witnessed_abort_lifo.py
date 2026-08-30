@@ -192,3 +192,80 @@ def test_deep_overlapping_write_chain_reverts_to_pre_session(workspace):
 
     assert (workspace / "a.txt").read_text(encoding="utf-8") == "V0"
     assert result["noResidue"], f"abort left residue: {result['checks']}"
+
+
+# ===========================================================================
+# 243 §2's "mixed-entry LIFO" claim, TESTED not asserted: a `transactional`
+# (witnessed) disposer joins the SAME LIFO disposer stack as every bracket
+# (`acquire`) inverse, so on abort they unwind in ONE reverse-registration
+# order across both kinds. This exercises the activation-body path (which was
+# already correct — cordis unwinds its disposer stack LIFO); it is the
+# regression guard proving the item 369 deferred-drain fix preserved it.
+#
+# Each inverse (the witnessed `undo logmark`, the acquire `undo logmark`)
+# appends its label to a shared log, so the log's contents ARE the observed
+# teardown order.
+# ===========================================================================
+
+_MIXED_LOG_ENV = "REVL_369_MIXED_LOG"
+
+_MIXED_EXTERNS = """
+type Mark = { label: Str }
+extern pure fn logmark(w: Mark) -> Unit = @py {
+    import os
+    with open(os.environ[\"REVL_369_MIXED_LOG\"], \"a\", encoding=\"utf-8\") as fh:
+        fh.write(w[\"label\"] + \"\\n\")
+    return
+}
+extern witnessed[fs] fn wmark(label: Str) -> Result[Mark, Mark]
+    undo logmark(result) = @py {
+    return Ok({\"label\": label})
+}
+extern acquire fn amark(label: Str) -> Mark undo logmark(result) = @py {
+    return {\"label\": label}
+}
+"""
+_MIXED_BASE = compile_source(_MIXED_EXTERNS, "mixed_lifo.rvl")
+
+
+def _wmark_step(label: str) -> dict:
+    return {"step": "effect",
+            "acquire": {"kind": "fn", "name": "wmark",
+                        "args": [{"kind": "lit", "value": label}]}}
+
+
+def _amark_step(label: str, bind: str) -> dict:
+    return {"step": "let-effect", "bind": bind,
+            "acquire": {"kind": "fn", "name": "amark",
+                        "args": [{"kind": "lit", "value": label}]},
+            "undo": {"kind": "fn", "name": "logmark",
+                     "args": [{"kind": "name", "id": bind}]}}
+
+
+@needs_cordis
+def test_mixed_bracket_and_transactional_unwind_in_one_lifo_stack(tmp_path, monkeypatch):
+    log = tmp_path / "teardown-order.log"
+    monkeypatch.setenv(_MIXED_LOG_ENV, str(log))
+
+    # interleave acquire (bracket) and witnessed (transactional) in the
+    # activation body, then `fail` so activation aborts mid-body and every
+    # inverse replays.
+    body = [
+        _amark_step("a1", "h1"),
+        _wmark_step("w2"),
+        _amark_step("a3", "h3"),
+        _wmark_step("w4"),
+        {"step": "fail", "message": {"kind": "lit", "value": "boom"}},
+    ]
+    component = {"name": "Mix", "source": "mixed_lifo.rvl", "config": [],
+                 "requires": {}, "provides": {}, "body": body}
+    ir = copy.deepcopy(_MIXED_BASE)
+    ir["components"] = [component]
+
+    session = _session()
+    session.load(ir)   # aborts mid-body; the load surfaces the failure
+    session.unload()
+
+    order = log.read_text(encoding="utf-8").split() if log.exists() else []
+    assert order == ["w4", "a3", "w2", "a1"], \
+        "mixed bracket/transactional teardown was not one LIFO stack (243 §2)"
