@@ -1,0 +1,8 @@
+// REJECTED — Python's capitalised `False` is not a revl boolean (item 384).
+//
+// expected error:
+//   use `false`, not `False`
+
+fn f() -> Bool {
+  return False
+}

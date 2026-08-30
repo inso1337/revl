@@ -81,6 +81,14 @@ REJECTIONS = {
     # lexes as an undeclared identifier (or produces a cryptic parse error) is
     # redirected to its revl spelling instead of the misleading generic G1.
     "foreign_word_operator_and.rvl": "use `&&`",
+    "foreign_word_operator_or.rvl": "use `||`",
+    "foreign_word_operator_not.rvl": "use the prefix `!`",
+    "foreign_bool_true.rvl": "use `true`, not `True`",
+    "foreign_bool_false.rvl": "use `false`, not `False`",
+    "foreign_const.rvl": "revl has no `const`",
+    "foreign_len_builtin.rvl": "revl has no `len(...)`",
+    "foreign_print_builtin.rvl": "revl has no `print`",
+    "foreign_throw.rvl": "revl has no `throw`",
     "a1_await_in_method.rvl": "`await` is only allowed in a component body",
     # roadmap item 80: a sync provide method that reaches an `async` extern is
     # refused with the twin of the emission-propagation diagnostic (async-

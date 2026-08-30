@@ -111,6 +111,65 @@ from .parser import (
 
 IR_VERSION = 1
 
+# item 384: foreign-construct redirect table (name-resolver half).
+#
+# A large share of first-try authorship failures used a known-foreign idiom
+# that LEXES as an ordinary identifier — `and`/`or`/`not`, `True`/`False`,
+# `const`, `len(...)`, `print`, `throw` — and so fell through to the generic
+# G1 "`X` is not declared … declare it with `let`/`var`". That message
+# ACTIVELY MISLEADS: it tells the author to declare a variable when the real
+# fix is a different construct. This table implements syntax-2.0 §0/§10's
+# exclusion-diagnostic philosophy (already done for `null`/`class`/`switch`/
+# `let`-reassign) for the identifier-shaped holes: when an undeclared name is
+# a known foreign idiom, the resolver names the idiom and the revl spelling
+# instead of emitting G1.
+#
+# PRECISION: the redirect fires ONLY on an *undeclared* name. None of these
+# is a revl keyword, so an author who genuinely binds one (`let and = …`,
+# `fn len(...) { … }`) shadows the entry and never sees the redirect — the
+# resolver reaches this table only after `scope`/`callables` lookup has
+# already missed. So no valid revl program changes behaviour; only the
+# message on an already-failing program does. Each value is (message, hint).
+_FOREIGN_NAME_REDIRECTS = {
+    "and": ("`and` is not a revl operator",
+            "use `&&` for boolean conjunction (syntax-2.0 §3.2)"),
+    "or": ("`or` is not a revl operator",
+           "use `||` for boolean disjunction (syntax-2.0 §3.2)"),
+    "not": ("`not` is not a revl operator",
+            "use the prefix `!` for boolean negation (syntax-2.0 §3.2)"),
+    "True": ("revl booleans are lowercase",
+             "use `true`, not `True` (syntax-2.0 §3.2)"),
+    "False": ("revl booleans are lowercase",
+              "use `false`, not `False` (syntax-2.0 §3.2)"),
+    "const": ("revl has no `const`",
+              "use `let` (single-assignment) or `var` (mutable) (syntax-2.0 §3.5)"),
+    "len": ("revl has no `len(...)`",
+            "a list's length is `xs.length()` (docs/stdlib-2.0.md)"),
+    "print": ("revl has no `print`",
+              "pure code has no I/O — emit output through a service effect "
+              "(syntax-2.0 §4)"),
+    "throw": ("revl has no `throw`",
+              "a pure function returns a `Result`; a component activation body "
+              "signals failure with `fail` (syntax-2.0 §3.3, §4b.5)"),
+    "def": ("revl has no `def`",
+            "a function is declared with `fn` (syntax-2.0 §3.1)"),
+    "lambda": ("revl has no `lambda`",
+               "an anonymous function is an arrow `x => …` (syntax-2.0 §3.2)"),
+    "elif": ("revl has no `elif`",
+             "chain with `else if` (syntax-2.0 §3.2)"),
+}
+
+
+def _reject_foreign_name(name, filename, line):
+    """If `name` is a known foreign idiom that lexes as an identifier, raise
+    the specific redirect instead of the generic, misleading G1 (item 384).
+    Returns None (and the caller falls through to G1) for any other name."""
+    hit = _FOREIGN_NAME_REDIRECTS.get(name)
+    if hit is not None:
+        message, hint = hit
+        raise RevlError(filename, line, message, hint=hint)
+
+
 # finding 6: the specified stdlib surface (docs/stdlib-2.0.md). Method calls
 # on values must name one of these (arity-checked); everything else is a
 # compile error — never a verbatim pass-through to whatever the host object
@@ -2589,6 +2648,7 @@ def _lower_pure_stmt(stmt, scope: dict, callables: set, alias_fns: dict, body: l
         _lower_let_pattern_stmt(stmt, scope, callables, alias_fns, body, filename, type_env, types)
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
+            _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line, f"`{stmt.name}` is not declared in this function",
                             hint="declare it with `let` (single-assignment) or `var` (mutable)")
         if not scope[stmt.name]:
@@ -3003,6 +3063,7 @@ def _lower_pure_expr(expr, scope: dict, callables: set, alias_fns: dict, filenam
         return {"kind": "lit", "value": _str_literal_value(expr.value)}
     if isinstance(expr, ExprVar):
         if expr.name not in scope and expr.name not in callables:
+            _reject_foreign_name(expr.name, filename, expr.line)  # item 384
             raise RevlError(filename, expr.line, f"`{expr.name}` is not declared in this function",
                             hint="declare it with `let`/`var` or add it as a parameter (G1)")
         return {"kind": "var", "name": expr.name}
@@ -3973,6 +4034,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 hint=f"component {env.component.name} requires {declared} — "
                      f"add `requires {name}: <Service>`?",
             )
+        _reject_foreign_name(name, filename, line)  # item 384
         raise RevlError(filename, line,
                         f"`{name}` is not declared in this component effect block",
                         hint="declare it with `let` in the effect block, or use a "
@@ -4282,6 +4344,7 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
         out.append({"step": "let", "name": safe, "value": value})
     elif isinstance(stmt, AssignStmt):
         if stmt.name not in scope:
+            _reject_foreign_name(stmt.name, filename, stmt.line)  # item 384
             raise RevlError(filename, stmt.line,
                             f"`{stmt.name}` is not declared in this effect block",
                             hint="declare it with `let`/`var` first (G1)")
@@ -5453,6 +5516,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                               "mutable": bool(mstmt.mutable)})
             elif isinstance(mstmt, AssignStmt):
                 if mstmt.name not in method_locals:
+                    _reject_foreign_name(mstmt.name, filename, mstmt.line)  # item 384
                     raise RevlError(filename, mstmt.line,
                                     f"`{mstmt.name}` is not declared in `{method.name}`",
                                     hint="declare it with `let` (single-assignment) or "

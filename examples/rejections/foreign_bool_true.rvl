@@ -1,0 +1,10 @@
+// REJECTED — Python's capitalised `True` is not a revl boolean (item 384).
+// revl booleans are the lowercase keywords `true`/`false`; `True` lexes as an
+// undeclared identifier and used to hit the misleading G1.
+//
+// expected error:
+//   use `true`, not `True`
+
+fn f() -> Bool {
+  return True
+}
