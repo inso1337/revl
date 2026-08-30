@@ -2139,6 +2139,33 @@ def _emit_externs(externs: list) -> "_Lines":
     if any(ext.get("config") for ext in externs):
         out.add(0, "_REVL_EXTERN_CONFIG = {}")
         out.add(0)
+        # item 395 (Fable review): FAIL-LOUD config lookup. The old
+        # `_REVL_EXTERN_CONFIG.get(name) or {}` fallback handed a config extern an
+        # empty dict whenever plug-time configuration was never installed — a
+        # module imported OUTSIDE the run.py driver silently got `{}`, so a body
+        # reading `_revl_config["provider"]` failed LATE with a bare KeyError that
+        # never named the extern or the real cause. This helper RAISES at the
+        # extern call, naming the extern, when a REQUIRED (non-defaulted) field is
+        # absent. A defaults-only extern (empty `required`) still resolves to its
+        # defaults when unconfigured, so it keeps working driver-free.
+        out.add(0, "def _revl_extern_config(_name, _required, _defaults):")
+        out.add(1, "_cfg = _REVL_EXTERN_CONFIG.get(_name)")
+        out.add(1, "if _cfg is None:")
+        out.add(2, "if _required:")
+        out.add(3, "raise RuntimeError(")
+        out.add(4, "\"config extern `\" + _name + \"` called before plug-time \"")
+        out.add(4, "\"configuration was installed (required config: \" +")
+        out.add(4, "\", \".join(_required) + \"); configure it through the run \"")
+        out.add(4, "\"driver's config seam\")")
+        out.add(2, "return dict(_defaults)")
+        out.add(1, "_missing = [_f for _f in _required if _f not in _cfg]")
+        out.add(1, "if _missing:")
+        out.add(2, "raise RuntimeError(")
+        out.add(3, "\"config extern `\" + _name + \"` called before plug-time \"")
+        out.add(3, "\"configuration was installed (missing required config: \" +")
+        out.add(3, "\", \".join(_missing) + \")\")")
+        out.add(1, "return {**_defaults, **_cfg}")
+        out.add(0)
     for ext in externs:
         name = _ident(ext["name"], "extern name")
         params = ", ".join(_ident(p["name"], "extern parameter name") for p in ext["params"])
@@ -2158,12 +2185,22 @@ def _emit_externs(externs: list) -> "_Lines":
         # first local, mirroring how a component method binds it (emit.py:1425,
         # read at emit.py:734). The verbatim @py body then reads typed config
         # (`_revl_config["provider"]`) instead of `os.environ`. The dict is the
-        # composition value the driver resolved once at plug; a bare import with
-        # no driver falls back to an empty dict, and required-ness is enforced at
-        # the driver preflight, not here. Emitted only for a config extern, so a
+        # composition value the driver resolved once at plug.
+        #
+        # item 395 (Fable review): resolve through the FAIL-LOUD helper, passing
+        # the REQUIRED (non-defaulted) field names and the resolved defaults from
+        # the schema. When plug-time configuration was never installed and a
+        # required field is absent, the helper RAISES at the extern call naming
+        # the extern — no more silent `{}`. A defaults-only extern still resolves
+        # to its defaults driver-free. Emitted only for a config extern, so a
         # no-config extern's `def`/body is byte-identical.
-        if ext.get("config"):
-            out.add(1, f"_revl_config = _REVL_EXTERN_CONFIG.get({name!r}) or {{}}")
+        cfg_schema = ext.get("config")
+        if cfg_schema:
+            required = [f["name"] for f in cfg_schema if f.get("default") is None]
+            defaults = {f["name"]: f["default"] for f in cfg_schema
+                        if f.get("default") is not None}
+            out.add(1, f"_revl_config = _revl_extern_config("
+                       f"{name!r}, {required!r}, {defaults!r})")
         body = textwrap.dedent(bodies["py"].strip("\n"))
         if body:
             for line in body.splitlines() or [""]:
