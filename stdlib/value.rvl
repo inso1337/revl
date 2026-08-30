@@ -50,7 +50,8 @@
 // ---------------------------------------------------------------- shape tag
 // The dynamic discriminant: "record" | "list" | "str" | "int" | "float" |
 // "bool" | "null". Total — every host value answers exactly one tag.
-pub extern pure fn value_kind(v: Value) -> Str = @py {
+pub extern pure fn value_kind(v: Value) -> Str =
+  @py {
     if isinstance(v, dict): return "record"
     if isinstance(v, (list, tuple)): return "list"
     if isinstance(v, bool): return "bool"
@@ -58,32 +59,88 @@ pub extern pure fn value_kind(v: Value) -> Str = @py {
     if isinstance(v, float): return "float"
     if isinstance(v, str): return "str"
     return "null"
-}
+  }
+  = @ts {
+    // The ts value model (json.rvl): a revl Int is a JS `bigint`, a Float a JS
+    // `number`, a record a plain object, a list a JS array. `null`/`undefined`
+    // are both the null tag. Array is checked before the generic object tag.
+    if (v === null || v === undefined) return "null";
+    if (Array.isArray(v)) return "list";
+    if (typeof v === "boolean") return "bool";
+    if (typeof v === "bigint") return "int";
+    if (typeof v === "number") return "float";
+    if (typeof v === "string") return "str";
+    if (typeof v === "object") return "record";
+    return "null";
+  }
 
-pub extern pure fn value_is_null(v: Value) -> Bool = @py { return v is None }
+pub extern pure fn value_is_null(v: Value) -> Bool =
+  @py { return v is None }
+  = @ts { return v === null || v === undefined; }
 
 // ---------------------------------------------------------------- record access
 // A record field as a `Value`. Total: a missing key or a non-record receiver
 // yields a null `Value`, so a chain `value_field(value_field(n, "a"), "b")`
 // never faults on a shape that lacks the path.
-pub extern pure fn value_field(v: Value, name: Str) -> Value = @py {
+pub extern pure fn value_field(v: Value, name: Str) -> Value =
+  @py {
     return v.get(name) if isinstance(v, dict) else None
-}
+  }
+  = @ts {
+    if (v !== null && typeof v === "object" && !Array.isArray(v) && (name in v)) {
+      return (v as Record<string, unknown>)[name];
+    }
+    return null;
+  }
 
 // The same lookup as an `Opt`: `None` for a missing key, a null value, or a
 // non-record receiver; otherwise `Some(child)`. Use it where "absent" and
 // "present-but-null" must be told apart, or to supply a non-default fallback
 // with `??`.
-pub extern pure fn value_opt(v: Value, name: Str) -> Opt[Value] = @py {
+pub extern pure fn value_opt(v: Value, name: Str) -> Opt[Value] =
+  @py {
     if isinstance(v, dict):
         return v.get(name)
     return None
+  }
+  = @ts {
+    // Opt is `value | undefined` on the ts tier (json.rvl); an absent key,
+    // a present-null value, and a non-record receiver all read back as the
+    // Opt's `None` (`undefined`), matching the @py `v.get(name)`.
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      const r = (v as Record<string, unknown>)[name];
+      return (r === null || r === undefined) ? undefined : r;
+    }
+    return undefined;
+  }
+
+// The `dict.get(k, default)` analog (roadmap item 368): read a field if present,
+// else the CALLER's default — the total field read that is the missing sibling
+// of item 362's total parse. `value_field` already reads with a fixed null-Value
+// default and `value_str`/`value_int` exit with a fixed typed default; this is
+// the read whose fallback the caller chooses (`value_field_or(o, "url", cfg_url)`
+// rather than only `""`). Total: an absent key, a present-null value, or a
+// non-record receiver yields `default`, NEVER a raise — on py AND ts identically,
+// because it is PURE revl over `value_opt` (no new primitive): a typed field read
+// `o.url` on a parsed body lacking `url` faults (a KeyError on py, a silent
+// `undefined` on ts); this reads it back tolerantly in-language, so a partial or
+// optional-field wire body no longer needs a classified tolerant-read extern.
+pub fn value_field_or(v: Value, name: Str, default: Value) -> Value {
+    return value_opt(v, name) ?? default
 }
 
 // Whether a record carries a key with a non-null value.
-pub extern pure fn value_has(v: Value, name: Str) -> Bool = @py {
+pub extern pure fn value_has(v: Value, name: Str) -> Bool =
+  @py {
     return isinstance(v, dict) and v.get(name) is not None
-}
+  }
+  = @ts {
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+      const r = (v as Record<string, unknown>)[name];
+      return r !== null && r !== undefined;
+    }
+    return false;
+  }
 
 // A record's field NAMES, in the host dict's INSERTION order — the order the
 // document was built/parsed in, which for the backend-IR records `services` /
@@ -99,52 +156,83 @@ pub extern pure fn value_has(v: Value, name: Str) -> Bool = @py {
 // host dict — Python dicts preserve insertion order, so keys come back in the
 // order they were inserted (NOT sorted; a caller that wants a canonical order
 // sorts the result itself).
-pub extern pure fn value_keys(v: Value) -> List[Str] = @py {
+pub extern pure fn value_keys(v: Value) -> List[Str] =
+  @py {
     return list(v.keys()) if isinstance(v, dict) else []
-}
+  }
+  = @ts {
+    return (v !== null && typeof v === "object" && !Array.isArray(v))
+      ? Object.keys(v) : [];
+  }
 
 // ---------------------------------------------------------------- list access
 // The elements of a list, each a `Value`. Total: a non-list receiver yields `[]`.
-pub extern pure fn value_list(v: Value) -> List[Value] = @py {
+pub extern pure fn value_list(v: Value) -> List[Value] =
+  @py {
     return list(v) if isinstance(v, (list, tuple)) else []
-}
+  }
+  = @ts {
+    return Array.isArray(v) ? [...v] : [];
+  }
 
 // One list element by index as a `Value`. Total: an out-of-range index or a
 // non-list receiver yields a null `Value`.
-pub extern pure fn value_at(v: Value, i: Int) -> Value = @py {
+pub extern pure fn value_at(v: Value, i: Int) -> Value =
+  @py {
     if isinstance(v, (list, tuple)) and 0 <= i < len(v):
         return v[i]
     return None
-}
+  }
+  = @ts {
+    // `i` is a revl Int == JS bigint; the array index must be a number.
+    const idx = Number(i);
+    return (Array.isArray(v) && idx >= 0 && idx < v.length) ? v[idx] : null;
+  }
 
 // The children of a container — a record's values or a list's elements, `[]`
 // for a scalar. The generic recursion driver: a whole-document walk that
 // terminates at leaves (this is `child_nodes` in selfhost/emit_py.rvl).
-pub extern pure fn value_children(v: Value) -> List[Value] = @py {
+pub extern pure fn value_children(v: Value) -> List[Value] =
+  @py {
     if isinstance(v, dict):
         return list(v.values())
     if isinstance(v, (list, tuple)):
         return list(v)
     return []
-}
+  }
+  = @ts {
+    if (Array.isArray(v)) return [...v];
+    if (v !== null && typeof v === "object") return Object.values(v);
+    return [];
+  }
 
 // The number of elements (list), fields (record), or characters (str); `0` for
 // a scalar or null. Total.
-pub extern pure fn value_len(v: Value) -> Int = @py {
+pub extern pure fn value_len(v: Value) -> Int =
+  @py {
     if isinstance(v, (list, tuple, dict, str)):
         return len(v)
     return 0
-}
+  }
+  = @ts {
+    // returns a revl Int == JS bigint
+    if (typeof v === "string" || Array.isArray(v)) return BigInt(v.length);
+    if (v !== null && typeof v === "object") return BigInt(Object.keys(v).length);
+    return 0n;
+  }
 
 // ---------------------------------------------------------------- scalar exits
 // The checked exits back to concrete types. Each coerces its own shape and
 // returns a typed default on any mismatch — never a crash.
-pub extern pure fn value_str(v: Value) -> Str = @py {
-    return v if isinstance(v, str) else ""
-}
-pub extern pure fn value_int(v: Value) -> Int = @py {
-    return v if isinstance(v, int) and not isinstance(v, bool) else 0
-}
-pub extern pure fn value_bool(v: Value) -> Bool = @py {
-    return v if isinstance(v, bool) else False
-}
+pub extern pure fn value_str(v: Value) -> Str =
+  @py { return v if isinstance(v, str) else "" }
+  = @ts { return typeof v === "string" ? v : ""; }
+pub extern pure fn value_int(v: Value) -> Int =
+  @py { return v if isinstance(v, int) and not isinstance(v, bool) else 0 }
+  = @ts {
+    // a revl Int is a JS bigint (json.rvl); a bool is never one, so no guard
+    return typeof v === "bigint" ? v : 0n;
+  }
+pub extern pure fn value_bool(v: Value) -> Bool =
+  @py { return v if isinstance(v, bool) else False }
+  = @ts { return typeof v === "boolean" ? v : false; }
