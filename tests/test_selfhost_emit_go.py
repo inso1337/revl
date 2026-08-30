@@ -82,6 +82,11 @@ CORPUS = [
     "lists.rvl",     # list literal, index, the sync arrow, Map-typed passthru
     "records.rvl",   # user record `type`s -> structs, record literals, field access
     "variants.rvl",  # user variant `type`s -> sealed ifaces, ADT construction, match
+    # item 383 / 391 (self-host port) — the `.reduce` transform desugars to the
+    # `list_reduce` free call; the go tier lowers the `(A, T) -> A` function-value
+    # param and the two-parameter arrow argument (reduce threads an accumulator
+    # with no intermediate list, so its body needs no `.push`)
+    "transforms.rvl",
 ]
 
 

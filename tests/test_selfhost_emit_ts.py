@@ -161,6 +161,9 @@ CORPUS = [
                               # (compensation -> Frame two-phase teardown, item 323)
     "v2_isolate_only.rvl",    # isolate ONLY (no trivial v3 `fn`) -> ir_version 2 (closes item 234's flag)
     "v2_intercept_only.rvl",  # intercept ONLY (no trivial v3 `fn`) -> ir_version 2, dict-form inject
+    # item 383 / 391 (self-host port) — `.map`/`.filter`/`.reduce` desugar to the
+    # `list_*` free calls; the ts tier lowers the function-value params + arrows
+    "transforms.rvl",
 ]
 
 def _load_reference_emit():
